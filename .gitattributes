@@ -1,0 +1,3 @@
+# Force LF line endings for shell scripts and env files
+*.sh text eol=lf
+.env* text eol=lf

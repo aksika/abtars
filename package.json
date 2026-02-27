@@ -1,0 +1,30 @@
+{
+  "name": "agentbridge",
+  "version": "0.1.0",
+  "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "node --import tsx src/main.ts",
+    "start": "node dist/main.js",
+    "test": "vitest --run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@andresaya/edge-tts": "^1.8.0",
+    "better-sqlite3": "^12.6.2",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.0",
+    "fast-check": "^3.23.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

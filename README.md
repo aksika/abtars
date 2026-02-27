@@ -1,0 +1,184 @@
+# AgentBridge
+
+A standalone Node.js agent that bridges Telegram to [Kiro](https://kiro.dev) CLI. Send messages to your Telegram bot, and Kiro does the coding work in your workspace.
+
+Supports two transport modes:
+- **tmux** (default, recommended) — runs kiro-cli in a tmux session, communicates via `send-keys` / `capture-pane`
+- **ACP** (experimental) — communicates via Agent Client Protocol (JSON-RPC 2.0 over stdio)
+
+No web server, no exposed ports, no webhooks. Outbound-only traffic to Telegram's API + local communication with kiro-cli.
+
+```
+Telegram User ──► Telegram Bot API ──► Bridge ──► tmux session (kiro-cli)
+                                         │              │
+                                         ◄── responses ◄┘
+```
+
+## Prerequisites
+
+- **Node.js 22+**
+- **tmux** installed (`apt install tmux` or `brew install tmux`)
+- **Kiro CLI** installed and in your PATH — verify: `kiro-cli --version`
+- **A Telegram Bot** — created via [@BotFather](https://t.me/BotFather)
+- **Your Telegram User ID** — get it from [@userinfobot](https://t.me/userinfobot)
+
+## Quick Start
+
+### 1. Clone and install
+
+```bash
+git clone <repo-url>
+cd agentbridge
+npm install
+```
+
+### 2. Create a Telegram bot
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram
+2. Send `/newbot` and follow the prompts
+3. Copy the bot token (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+
+### 3. Get your Telegram user ID
+
+1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
+2. It replies with your numeric user ID (e.g. `987654321`)
+
+### 4. Configure
+
+```bash
+mkdir -p ~/.agentbridge
+cp .env.example ~/.agentbridge/.env
+```
+
+Edit `~/.agentbridge/.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+ALLOWED_USER_IDS=987654321
+KIRO_TRANSPORT=tmux
+WORKING_DIR=/path/to/your/project
+TRUST_MODE=true
+```
+
+### 5. Start the tmux session
+
+```bash
+chmod +x scripts/tmux-session.sh
+./scripts/tmux-session.sh
+```
+
+This starts kiro-cli inside a tmux session named `kiro-bridge`. You can attach to it anytime with `tmux attach -t kiro-bridge`.
+
+### 6. Start the bridge
+
+```bash
+npm run build
+npm start
+```
+
+Or in dev mode (no build step):
+
+```bash
+npm run dev
+```
+
+## Usage
+
+Message your bot on Telegram:
+
+- **Any text** — forwarded to Kiro as a prompt
+- **`/new`** or **`/reset`** — start a fresh Kiro session
+- **`/status`** — check transport connection status
+
+## Transport Modes
+
+### tmux (default)
+
+Kiro CLI runs inside a persistent tmux session. The bridge sends your messages via `tmux send-keys` and reads Kiro's responses via `tmux capture-pane`.
+
+Pros: works today, battle-tested, survives disconnects
+Cons: output parsing is heuristic-based, no structured permission handling
+
+```env
+KIRO_TRANSPORT=tmux
+TMUX_SESSION=kiro-bridge
+TMUX_CAPTURE_DELAY_SEC=3
+TMUX_MAX_WAIT_SEC=300
+```
+
+### ACP (experimental)
+
+Communicates with `kiro-cli acp` via JSON-RPC 2.0 over stdio. Structured protocol with typed messages.
+
+Pros: real-time streaming, structured permission requests, clean API
+Cons: ACP protocol is young — currently has deserialization issues
+
+```env
+KIRO_TRANSPORT=acp
+KIRO_CLI_PATH=kiro-cli
+```
+
+## Configuration Reference
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TELEGRAM_BOT_TOKEN` | yes | — | Bot token from @BotFather |
+| `ALLOWED_USER_IDS` | yes | — | Comma-separated Telegram user IDs |
+| `KIRO_TRANSPORT` | no | `tmux` | Transport: `tmux` or `acp` |
+| `KIRO_CLI_PATH` | no | `kiro-cli` | Path to kiro-cli binary |
+| `WORKING_DIR` | no | `.` | Directory where Kiro operates |
+| `TMUX_SESSION` | no | `kiro-bridge` | tmux session name (tmux transport) |
+| `TMUX_CAPTURE_DELAY_SEC` | no | `3` | Seconds before first output capture |
+| `TMUX_MAX_WAIT_SEC` | no | `300` | Max seconds to wait for Kiro response |
+| `TRUST_MODE` | no | `false` | Auto-approve Kiro actions |
+| `PERMISSION_TIMEOUT_MS` | no | `60000` | Permission prompt timeout (acp only) |
+| `LOG_LEVEL` | no | `low` | Logging: `off`, `low`, `debug` |
+
+All configuration is read from `~/.agentbridge/.env`. Logs are written to `~/.agentbridge/bridge.log`.
+
+## Security
+
+- Fail-closed: empty user whitelist = refuses to start
+- Silent rejection: unauthorized users get no response
+- Zero network surface: no HTTP server, no webhooks, no exposed ports
+- No API keys in code: all secrets in `.env`
+- No MCP: uses local communication only
+
+## Development
+
+```bash
+npm test              # Run tests
+npm run test:watch    # Watch mode
+npx tsc --noEmit      # Type-check
+npm run build         # Build
+```
+
+## Project Structure
+
+```
+src/
+├── main.ts                          # Entry point — transport selection + wiring
+├── types/
+│   ├── index.ts                     # Re-exports
+│   ├── config.ts                    # Config type with transport settings
+│   ├── session.ts, acp.ts, permission.ts, telegram.ts
+└── components/
+    ├── kiro-transport.ts            # IKiroTransport interface
+    ├── tmux-client.ts               # tmux transport implementation
+    ├── acp-client.ts                # ACP JSON-RPC client
+    ├── acp-transport.ts             # ACP transport adapter
+    ├── config.ts                    # .env loading and validation
+    ├── security-gate.ts             # User ID whitelist
+    ├── telegram-api.ts              # Telegram Bot API wrapper
+    ├── telegram-poller.ts           # Long-poll loop
+    ├── response-formatter.ts        # Response chunking
+    ├── jsonrpc.ts                   # JSON-RPC utilities (acp)
+    ├── session-manager.ts           # Session mapping (acp)
+    └── permission-handler.ts        # Permission flow (acp)
+scripts/
+    └── tmux-session.sh              # Start kiro-cli in tmux
+```
+
+## License
+
+MIT

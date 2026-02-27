@@ -1,0 +1,25 @@
+# Reference project — read only
+openclaw/
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment secrets
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kiro specs (local dev artifacts)
+.kiro/
