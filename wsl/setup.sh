@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")/agentbridge"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 AB_HOME="$HOME/.agentbridge"
 
 echo "📦 Setting up agentbridge..."
@@ -51,5 +51,5 @@ echo "✅ Tests passed"
 echo ""
 echo "Next steps:"
 echo "  1. Edit ~/.agentbridge/.env with your bot token and user ID"
-echo "  2. ./agentbridge/scripts/tmux-session.sh"
+echo "  2. ./scripts/tmux-session.sh"
 echo "  3. ./wsl/run.sh"
