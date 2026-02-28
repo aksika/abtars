@@ -27,7 +27,7 @@ export type CompactedMemory = {
 
 /** A persisted session row restored from SQLite. */
 export type StoredSession = {
-  telegramChatId: number;
+  channelKey: string;
   acpSessionId: string;
   /** Unix timestamp in milliseconds */
   createdAt: number;

@@ -20,7 +20,7 @@ function makeConfig(tmpDir: string, overrides: Partial<MemoryConfig> = {}): Memo
 
 function makeSession(overrides: Partial<SessionState> = {}): SessionState {
   return {
-    telegramChatId: 100,
+    channelKey: "telegram:100",
     acpSessionId: "sess-001",
     isProcessing: false,
     pendingRequestId: null,
@@ -51,22 +51,22 @@ describe("MemoryManager — session CRUD", () => {
   });
 
   it("persistSession inserts a session row", async () => {
-    const session = makeSession({ telegramChatId: 42, acpSessionId: "abc-123" });
+    const session = makeSession({ channelKey: "telegram:42", acpSessionId: "abc-123" });
     manager.persistSession(session);
 
     const restored = manager.restoreSessions(999_999_999);
     expect(restored).toHaveLength(1);
-    expect(restored[0]!.telegramChatId).toBe(42);
+    expect(restored[0]!.channelKey).toBe("telegram:42");
     expect(restored[0]!.acpSessionId).toBe("abc-123");
     expect(restored[0]!.createdAt).toBe(session.createdAt);
     expect(restored[0]!.lastActivityAt).toBe(session.lastActivityAt);
   });
 
   it("touchSession updates lastActivityAt", async () => {
-    const session = makeSession({ telegramChatId: 10, acpSessionId: "s1", lastActivityAt: 1000 });
+    const session = makeSession({ channelKey: "telegram:10", acpSessionId: "s1", lastActivityAt: 1000 });
     manager.persistSession(session);
 
-    manager.touchSession(10, "s1");
+    manager.touchSession("telegram:10", "s1");
 
     const restored = manager.restoreSessions(999_999_999);
     expect(restored).toHaveLength(1);
@@ -75,10 +75,10 @@ describe("MemoryManager — session CRUD", () => {
   });
 
   it("deactivateSession sets is_active to 0", async () => {
-    const session = makeSession({ telegramChatId: 20, acpSessionId: "s2" });
+    const session = makeSession({ channelKey: "telegram:20", acpSessionId: "s2" });
     manager.persistSession(session);
 
-    manager.deactivateSession(20, "s2");
+    manager.deactivateSession("telegram:20", "s2");
 
     // Deactivated session should not appear in restoreSessions
     const restored = manager.restoreSessions(999_999_999);
@@ -90,34 +90,34 @@ describe("MemoryManager — session CRUD", () => {
 
     // Recent active session
     manager.persistSession(
-      makeSession({ telegramChatId: 1, acpSessionId: "recent", lastActivityAt: now - 1000 }),
+      makeSession({ channelKey: "telegram:1", acpSessionId: "recent", lastActivityAt: now - 1000 }),
     );
     // Old active session (beyond threshold)
     manager.persistSession(
-      makeSession({ telegramChatId: 2, acpSessionId: "old", lastActivityAt: now - 100_000 }),
+      makeSession({ channelKey: "telegram:2", acpSessionId: "old", lastActivityAt: now - 100_000 }),
     );
     // Recent but deactivated session
     manager.persistSession(
-      makeSession({ telegramChatId: 3, acpSessionId: "inactive", lastActivityAt: now - 1000 }),
+      makeSession({ channelKey: "telegram:3", acpSessionId: "inactive", lastActivityAt: now - 1000 }),
     );
-    manager.deactivateSession(3, "inactive");
+    manager.deactivateSession("telegram:3", "inactive");
 
     // Threshold of 50_000ms — only the recent active session qualifies
     const restored = manager.restoreSessions(50_000);
     expect(restored).toHaveLength(1);
-    expect(restored[0]!.telegramChatId).toBe(1);
+    expect(restored[0]!.channelKey).toBe("telegram:1");
     expect(restored[0]!.acpSessionId).toBe("recent");
   });
 
   it("restoreSessions excludes inactive sessions", async () => {
-    manager.persistSession(makeSession({ telegramChatId: 5, acpSessionId: "a1" }));
-    manager.persistSession(makeSession({ telegramChatId: 6, acpSessionId: "a2" }));
+    manager.persistSession(makeSession({ channelKey: "telegram:5", acpSessionId: "a1" }));
+    manager.persistSession(makeSession({ channelKey: "telegram:6", acpSessionId: "a2" }));
 
-    manager.deactivateSession(5, "a1");
+    manager.deactivateSession("telegram:5", "a1");
 
     const restored = manager.restoreSessions(999_999_999);
     expect(restored).toHaveLength(1);
-    expect(restored[0]!.telegramChatId).toBe(6);
+    expect(restored[0]!.channelKey).toBe("telegram:6");
   });
 
   it("all methods are no-ops when memoryEnabled is false", async () => {
@@ -126,8 +126,8 @@ describe("MemoryManager — session CRUD", () => {
 
     // These should all return without error
     disabledManager.persistSession(makeSession());
-    disabledManager.touchSession(1, "s1");
-    disabledManager.deactivateSession(1, "s1");
+    disabledManager.touchSession("telegram:1", "s1");
+    disabledManager.deactivateSession("telegram:1", "s1");
     const restored = disabledManager.restoreSessions(999_999_999);
     expect(restored).toEqual([]);
 
@@ -140,8 +140,8 @@ describe("MemoryManager — session CRUD", () => {
 
     // These should not throw
     manager.persistSession(makeSession());
-    manager.touchSession(1, "s1");
-    manager.deactivateSession(1, "s1");
+    manager.touchSession("telegram:1", "s1");
+    manager.deactivateSession("telegram:1", "s1");
     const restored = manager.restoreSessions(999_999_999);
     expect(restored).toEqual([]);
   });
@@ -149,14 +149,14 @@ describe("MemoryManager — session CRUD", () => {
   it("persistSession upserts on duplicate key", async () => {
     const now = Date.now();
     const session1 = makeSession({
-      telegramChatId: 50,
+      channelKey: "telegram:50",
       acpSessionId: "dup",
       lastActivityAt: now - 5000,
     });
     manager.persistSession(session1);
 
     const session2 = makeSession({
-      telegramChatId: 50,
+      channelKey: "telegram:50",
       acpSessionId: "dup",
       lastActivityAt: now - 1000,
     });

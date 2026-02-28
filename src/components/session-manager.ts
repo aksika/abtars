@@ -3,11 +3,11 @@ import type { AcpClient } from "./acp-client.js";
 import type { MemoryManager } from "./memory-manager.js";
 
 /**
- * Maps Telegram chat IDs to ACP sessions. Handles creation,
- * reset, and crash recovery of sessions.
+ * Maps platform-prefixed session keys (e.g. "telegram:123", "discord:456")
+ * to ACP sessions. Handles creation, reset, and crash recovery of sessions.
  */
 export class SessionManager {
-  private sessions = new Map<number, SessionState>();
+  private sessions = new Map<string, SessionState>();
   private readonly acpClient: AcpClient;
   private readonly workingDir: string;
   private readonly memory: MemoryManager | null;
@@ -18,42 +18,42 @@ export class SessionManager {
     this.memory = memory ?? null;
   }
 
-  /** Get existing session or create a new one for this chat. */
-  async getOrCreateSession(chatId: number): Promise<SessionState> {
-    const existing = this.sessions.get(chatId);
+  /** Get existing session or create a new one for this session key. */
+  async getOrCreateSession(sessionKey: string): Promise<SessionState> {
+    const existing = this.sessions.get(sessionKey);
     if (existing) {
       existing.lastActivityAt = Date.now();
-      this.memory?.touchSession(chatId, existing.acpSessionId);
+      this.memory?.touchSession(sessionKey, existing.acpSessionId);
       return existing;
     }
-    return this.createSession(chatId);
+    return this.createSession(sessionKey);
   }
 
   /** Destroy current session and create a fresh one. */
-  async resetSession(chatId: number): Promise<SessionState> {
-    const existing = this.sessions.get(chatId);
+  async resetSession(sessionKey: string): Promise<SessionState> {
+    const existing = this.sessions.get(sessionKey);
     if (existing) {
-      this.memory?.deactivateSession(chatId, existing.acpSessionId);
+      this.memory?.deactivateSession(sessionKey, existing.acpSessionId);
       try {
         await this.acpClient.cancelSession(existing.acpSessionId);
       } catch {
         // Session may already be dead — that's fine
       }
     }
-    this.sessions.delete(chatId);
-    return this.createSession(chatId);
+    this.sessions.delete(sessionKey);
+    return this.createSession(sessionKey);
   }
 
   /** Alias for resetSession — handles /new command. */
-  async handleNewCommand(chatId: number): Promise<SessionState> {
-    return this.resetSession(chatId);
+  async handleNewCommand(sessionKey: string): Promise<SessionState> {
+    return this.resetSession(sessionKey);
   }
 
   /** Recreate session after a crash. Returns a notification message. */
-  async handleCrash(chatId: number): Promise<string> {
-    this.sessions.delete(chatId);
+  async handleCrash(sessionKey: string): Promise<string> {
+    this.sessions.delete(sessionKey);
     try {
-      await this.createSession(chatId);
+      await this.createSession(sessionKey);
       return "⚠️ Session was interrupted. A new session has been created automatically.";
     } catch {
       return "❌ Failed to recreate session after crash. Please try again.";
@@ -61,26 +61,26 @@ export class SessionManager {
   }
 
   /** Check if a session is currently processing a prompt. */
-  isSessionBusy(chatId: number): boolean {
-    return this.sessions.get(chatId)?.isProcessing ?? false;
+  isSessionBusy(sessionKey: string): boolean {
+    return this.sessions.get(sessionKey)?.isProcessing ?? false;
   }
 
   /** Mark session as processing or idle. */
-  setProcessing(chatId: number, processing: boolean): void {
-    const session = this.sessions.get(chatId);
+  setProcessing(sessionKey: string, processing: boolean): void {
+    const session = this.sessions.get(sessionKey);
     if (session) {
       session.isProcessing = processing;
       session.lastActivityAt = Date.now();
     }
   }
 
-  /** Get session state for a chat (if exists). */
-  getSession(chatId: number): SessionState | undefined {
-    return this.sessions.get(chatId);
+  /** Get session state for a session key (if exists). */
+  getSession(sessionKey: string): SessionState | undefined {
+    return this.sessions.get(sessionKey);
   }
 
-  /** Get all active chat IDs. */
-  getActiveChatIds(): number[] {
+  /** Get all active session keys. */
+  getActiveSessionKeys(): string[] {
     return [...this.sessions.keys()];
   }
 
@@ -93,19 +93,19 @@ export class SessionManager {
     let restored = 0;
 
     for (const s of stored) {
-      if (this.sessions.has(s.telegramChatId)) continue;
+      if (this.sessions.has(s.channelKey)) continue;
 
       try {
         const acpSessionId = await this.acpClient.createSession(this.workingDir);
         const session: SessionState = {
-          telegramChatId: s.telegramChatId,
+          channelKey: s.channelKey,
           acpSessionId,
           isProcessing: false,
           pendingRequestId: null,
           createdAt: s.createdAt,
           lastActivityAt: s.lastActivityAt,
         };
-        this.sessions.set(s.telegramChatId, session);
+        this.sessions.set(s.channelKey, session);
         this.memory.persistSession(session);
         restored++;
       } catch {
@@ -116,18 +116,18 @@ export class SessionManager {
     return restored;
   }
 
-  private async createSession(chatId: number): Promise<SessionState> {
+  private async createSession(sessionKey: string): Promise<SessionState> {
     const acpSessionId = await this.acpClient.createSession(this.workingDir);
     const now = Date.now();
     const session: SessionState = {
-      telegramChatId: chatId,
+      channelKey: sessionKey,
       acpSessionId,
       isProcessing: false,
       pendingRequestId: null,
       createdAt: now,
       lastActivityAt: now,
     };
-    this.sessions.set(chatId, session);
+    this.sessions.set(sessionKey, session);
     this.memory?.persistSession(session);
     return session;
   }

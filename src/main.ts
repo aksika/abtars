@@ -10,8 +10,13 @@ import { synthesizeSpeech, type TtsConfig } from "./components/tts.js";
 import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
+import { DiscordApi } from "./components/discord-api.js";
+import { DiscordPoller } from "./components/discord-poller.js";
+import { DiscordSecurityGate } from "./components/discord-security-gate.js";
+import { ChannelAdapter } from "./components/channel-adapter.js";
+import { B2BRouter } from "./components/b2b-router.js";
 import type { IKiroTransport } from "./components/kiro-transport.js";
-import type { TelegramUpdate } from "./types/index.js";
+import type { TelegramUpdate, DiscordInboundMessage } from "./types/index.js";
 
 async function main(): Promise<void> {
   const config = await loadAndValidateConfig();
@@ -72,7 +77,7 @@ async function main(): Promise<void> {
     logInfo("main", `🔊 TTS enabled (Edge TTS / ${ttsConfig.voice})`);
   }
 
-  const busyChats = new Set<number>();
+  const busyChats = new Set<string>();
 
   // Group conversation history buffer — keyed by "chatId:threadId"
   const GROUP_HISTORY_LIMIT = 50;
@@ -240,8 +245,10 @@ async function main(): Promise<void> {
       return;
     }
 
+    const sessionKey = `telegram:${chatId}`;
+
     if (text === "/new" || text === "/reset") {
-      await transport.resetSession(chatId);
+      await transport.resetSession(sessionKey);
       if (isGroup) groupHistory.delete(historyKey(chatId, threadId));
       await telegramApi.sendMessage(chatId, "🔄 New session started.", { message_thread_id: threadId });
       logInfo("main", "Session reset");
@@ -257,7 +264,7 @@ async function main(): Promise<void> {
 
     if (text === "/stop" || text === "/cancel") {
       await transport.sendInterrupt();
-      busyChats.delete(chatId); // Unblock the chat
+      busyChats.delete(sessionKey); // Unblock the chat
       await telegramApi.sendMessage(chatId, "🛑 Ctrl+C sent to Kiro.", { message_thread_id: threadId });
       logInfo("main", "Ctrl+C interrupt sent");
       return;
@@ -295,7 +302,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (busyChats.has(chatId)) {
+    if (busyChats.has(sessionKey)) {
       await telegramApi.sendMessage(chatId, "⏳ Previous request still in progress...", { message_thread_id: threadId });
       return;
     }
@@ -309,11 +316,11 @@ async function main(): Promise<void> {
           content: text,
           timestamp: Date.now(),
           chatId,
-          sessionId: String(chatId),
+          sessionId: sessionKey,
         });
       }
 
-      busyChats.add(chatId);
+      busyChats.add(sessionKey);
       logInfo("main", `← ${isVoiceNote ? "🎤 " : ""}"${text.slice(0, 60)}"`);
 
       // In groups, prepend buffered conversation context
@@ -328,7 +335,7 @@ async function main(): Promise<void> {
 
       // Send prompt to Kiro, then react with 👀 (shows after message is forwarded)
       // TODO: Wire memory.assembleContext() when we have a direct LLM integration
-      const responsePromise = transport.sendPrompt(chatId, prompt);
+      const responsePromise = transport.sendPrompt(sessionKey, prompt);
 
       // React + typing start right after sendPrompt kicks off (message is in tmux now)
       if (!isVoiceNote) await react(chatId, messageId, "👀");
@@ -363,7 +370,7 @@ async function main(): Promise<void> {
           content: response,
           timestamp: Date.now(),
           chatId,
-          sessionId: String(chatId),
+          sessionId: sessionKey,
         });
       }
 
@@ -395,17 +402,137 @@ async function main(): Promise<void> {
       await telegramApi.sendMessage(chatId, "❌ Something went wrong. Try /reset to start fresh.", { message_thread_id: threadId });
     } finally {
       clearInterval(typingInterval);
-      busyChats.delete(chatId);
+      busyChats.delete(sessionKey);
     }
   }
 
-  const poller = new TelegramPoller(telegramApi, config.pollTimeoutS, handleUpdate);
-  poller.start();
-  logInfo("main", "📡 Polling started");
+  const telegramPoller = new TelegramPoller(telegramApi, config.pollTimeoutS, handleUpdate);
+  try {
+    telegramPoller.start();
+    logInfo("main", "📡 Telegram polling started");
+  } catch (err) {
+    logError("main", "Telegram failed to start — continuing with Discord only", err);
+  }
+
+  // --- Discord wiring (conditional) ---
+  let discordPoller: DiscordPoller | null = null;
+
+  if (config.discordEnabled) {
+    const discordApi = new DiscordApi(config.discordBotToken!);
+    const discordSecurityGate = new DiscordSecurityGate(
+      config.discordAllowedUserIds!,
+      config.discordAllowedChannelIds!,
+    );
+    const channelAdapter = new ChannelAdapter();
+
+    let b2bRouter: B2BRouter | null = null;
+    if (config.discordB2bEnabled) {
+      b2bRouter = new B2BRouter({
+        discordApi,
+        b2bChannelId: config.discordB2bChannelId!,
+        peerBotId: config.discordB2bPeerBotId!,
+        rateLimitMs: config.discordB2bRateLimitMs,
+        onPrompt: (sessionKey, text) => transport.sendPrompt(sessionKey, text),
+      });
+      logInfo("main", `🤝 B2B router enabled (channel=${config.discordB2bChannelId})`);
+    }
+
+    const handleDiscordMessage = async (message: DiscordInboundMessage): Promise<void> => {
+      logDebug("main", `Discord message from ${message.authorUsername} in ${message.channelId}`);
+
+      // B2B channel messages go to B2BRouter
+      if (b2bRouter && message.channelId === config.discordB2bChannelId) {
+        await b2bRouter.handleMessage(message);
+        return;
+      }
+
+      // Security gate — validate user + channel
+      if (!discordSecurityGate.authorize(message.authorId, message.channelId)) {
+        logDebug("main", `Discord: unauthorized user=${message.authorId} channel=${message.channelId}`);
+        return;
+      }
+
+      const bridgeMsg = channelAdapter.fromDiscord(message);
+      const sessionKey = channelAdapter.sessionKey("discord", message.channelId);
+      const text = bridgeMsg.text.trim();
+
+      if (!text) return;
+
+      // Command handling
+      if (text === "/new" || text === "/reset") {
+        await transport.resetSession(sessionKey);
+        await discordApi.sendMessage(message.channelId, "🔄 New session started.");
+        logInfo("main", `Discord session reset for ${sessionKey}`);
+        return;
+      }
+
+      if (text === "/status") {
+        const status = transport.isReady ? "✅ Connected" : "❌ Disconnected";
+        const mode = config.kiroTransport.toUpperCase();
+        await discordApi.sendMessage(message.channelId, `${status} (${mode} transport)`);
+        return;
+      }
+
+      if (text === "/b2b-reset") {
+        if (config.discordB2bEnabled) {
+          const b2bSessionKey = `b2b:${config.discordB2bChannelId}`;
+          await transport.resetSession(b2bSessionKey);
+          await discordApi.sendMessage(message.channelId, "🔄 B2B session reset.");
+          logInfo("main", `B2B session reset by user ${message.authorId}`);
+        } else {
+          await discordApi.sendMessage(message.channelId, "B2B is not enabled.");
+        }
+        return;
+      }
+
+      // Busy check
+      if (busyChats.has(sessionKey)) {
+        await discordApi.sendMessage(message.channelId, "⏳ Previous request still in progress...");
+        return;
+      }
+
+      try {
+        busyChats.add(sessionKey);
+        logInfo("main", `← Discord: "${text.slice(0, 60)}"`);
+
+        const response = await transport.sendPrompt(sessionKey, text);
+
+        if (!response || !response.trim()) {
+          logWarn("main", "Empty response from transport (Discord)");
+          await discordApi.sendMessage(message.channelId, "🤷 Kiro returned an empty response. Try again or /reset.");
+          return;
+        }
+
+        const chunks = formatter.chunkForPlatform(response, "discord");
+        logDebug("main", `Discord: sending ${chunks.length} chunk(s)`);
+        for (const chunk of chunks) {
+          if (chunk.trim()) {
+            await discordApi.sendMessage(message.channelId, chunk);
+          }
+        }
+        logInfo("main", `→ Discord: sent ${chunks.length} chunk(s) to ${message.channelId}`);
+      } catch (err) {
+        logError("main", `Discord error for channel ${message.channelId}`, err);
+        await discordApi.sendMessage(message.channelId, "❌ Something went wrong. Try /reset to start fresh.").catch(() => {});
+      } finally {
+        busyChats.delete(sessionKey);
+      }
+    }
+
+    discordPoller = new DiscordPoller(discordApi, handleDiscordMessage);
+    try {
+      await discordPoller.start();
+      logInfo("main", "📡 Discord polling started");
+    } catch (err) {
+      logError("main", "Discord failed to start — continuing with Telegram only", err);
+      discordPoller = null;
+    }
+  }
 
   function shutdown(): void {
     logInfo("main", "🛑 Shutting down...");
-    poller.stop();
+    telegramPoller.stop();
+    if (discordPoller) discordPoller.stop();
     transport.destroy();
     memory?.close();
     process.exit(0);

@@ -92,7 +92,7 @@ export class MemoryManager {
            VALUES (?, ?, 1, ?, ?)`,
         )
         .run(
-          session.telegramChatId,
+          session.channelKey,
           session.acpSessionId,
           session.createdAt,
           session.lastActivityAt,
@@ -103,7 +103,7 @@ export class MemoryManager {
   }
 
   /** Update lastActivityAt for a session. */
-  touchSession(chatId: number, sessionId: string): void {
+  touchSession(channelKey: string, sessionId: string): void {
     if (!this.config.memoryEnabled || !this.db) return;
 
     try {
@@ -111,14 +111,14 @@ export class MemoryManager {
         .prepare(
           `UPDATE sessions SET last_activity_at = ? WHERE telegram_chat_id = ? AND acp_session_id = ?`,
         )
-        .run(Date.now(), chatId, sessionId);
+        .run(Date.now(), channelKey, sessionId);
     } catch (err) {
       logError(TAG, "Failed to touch session", err);
     }
   }
 
   /** Mark a session as inactive. */
-  deactivateSession(chatId: number, sessionId: string): void {
+  deactivateSession(channelKey: string, sessionId: string): void {
     if (!this.config.memoryEnabled || !this.db) return;
 
     try {
@@ -126,7 +126,7 @@ export class MemoryManager {
         .prepare(
           `UPDATE sessions SET is_active = 0 WHERE telegram_chat_id = ? AND acp_session_id = ?`,
         )
-        .run(chatId, sessionId);
+        .run(channelKey, sessionId);
     } catch (err) {
       logError(TAG, "Failed to deactivate session", err);
     }
@@ -152,7 +152,7 @@ export class MemoryManager {
       }>;
 
       return rows.map((row) => ({
-        telegramChatId: row.telegram_chat_id,
+        channelKey: String(row.telegram_chat_id),
         acpSessionId: row.acp_session_id,
         createdAt: row.created_at,
         lastActivityAt: row.last_activity_at,

@@ -115,7 +115,7 @@ describe("Memory system — end-to-end smoke test", () => {
 
     // 7. Session persistence round-trip
     mm.persistSession({
-      telegramChatId: chatId,
+      channelKey: `telegram:${chatId}`,
       acpSessionId: sess1,
       isProcessing: false,
       pendingRequestId: null,
@@ -124,7 +124,7 @@ describe("Memory system — end-to-end smoke test", () => {
     });
     const restored = mm.restoreSessions(999_999_999);
     expect(restored.length).toBeGreaterThanOrEqual(1);
-    expect(restored.find((s) => s.telegramChatId === chatId)).toBeDefined();
+    expect(restored.find((s) => s.channelKey === `telegram:${chatId}`)).toBeDefined();
 
     // 8. Close and reinitialize — verify data survives
     mm.close();

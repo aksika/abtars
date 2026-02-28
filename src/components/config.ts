@@ -9,6 +9,34 @@ import type { LogLevel } from "./logger.js";
 export const AGENT_BRIDGE_HOME = resolve(homedir(), ".agentbridge");
 
 const BOT_TOKEN_REGEX = /^\d+:[A-Za-z0-9_-]+$/;
+const SNOWFLAKE_REGEX = /^\d{17,20}$/;
+
+/**
+ * Validate that a string is a valid Discord snowflake ID (17–20 digits).
+ */
+export function isValidSnowflake(value: string): boolean {
+  return SNOWFLAKE_REGEX.test(value);
+}
+
+/**
+ * Parse a comma-separated string of Discord snowflake IDs into a Set.
+ * Trims whitespace and ignores empty segments.
+ * Throws if any non-empty segment is not a valid snowflake.
+ */
+function parseSnowflakeList(raw: string, envVarName: string): Set<string> {
+  const ids = new Set<string>();
+  for (const segment of raw.split(",")) {
+    const trimmed = segment.trim();
+    if (trimmed === "") continue;
+    if (!isValidSnowflake(trimmed)) {
+      throw new Error(
+        `${envVarName} contains invalid Discord snowflake ID "${trimmed}" — expected 17–20 digits`,
+      );
+    }
+    ids.add(trimmed);
+  }
+  return ids;
+}
 
 /**
  * Parse a comma-separated string of user IDs into a Set of numbers.
@@ -162,6 +190,71 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const ttsEnabled = parseBooleanEnv("TTS_ENABLED", CONFIG_DEFAULTS.ttsEnabled);
   const ttsVoice = process.env["TTS_VOICE"] || CONFIG_DEFAULTS.ttsVoice;
 
+  // --- DISCORD_BOT_TOKEN (optional — Discord disabled if absent) ---
+  const discordBotToken = process.env["DISCORD_BOT_TOKEN"]?.trim() || undefined;
+  const discordEnabled = !!discordBotToken;
+
+  let discordAllowedUserIds: Set<string> | undefined;
+  let discordAllowedChannelIds: Set<string> | undefined;
+
+  if (discordEnabled) {
+    // --- DISCORD_ALLOWED_USER_IDS (required when Discord enabled) ---
+    const rawDiscordUserIds = process.env["DISCORD_ALLOWED_USER_IDS"] ?? "";
+    discordAllowedUserIds = parseSnowflakeList(rawDiscordUserIds, "DISCORD_ALLOWED_USER_IDS");
+    if (discordAllowedUserIds.size === 0) {
+      throw new Error(
+        "DISCORD_ALLOWED_USER_IDS is required and must contain at least one valid Discord snowflake ID when DISCORD_BOT_TOKEN is set",
+      );
+    }
+
+    // --- DISCORD_ALLOWED_CHANNEL_IDS (required when Discord enabled) ---
+    const rawDiscordChannelIds = process.env["DISCORD_ALLOWED_CHANNEL_IDS"] ?? "";
+    discordAllowedChannelIds = parseSnowflakeList(rawDiscordChannelIds, "DISCORD_ALLOWED_CHANNEL_IDS");
+    if (discordAllowedChannelIds.size === 0) {
+      throw new Error(
+        "DISCORD_ALLOWED_CHANNEL_IDS is required and must contain at least one valid Discord snowflake ID when DISCORD_BOT_TOKEN is set",
+      );
+    }
+  }
+
+  // --- DISCORD_B2B_CHANNEL_ID (optional) ---
+  const rawB2bChannelId = process.env["DISCORD_B2B_CHANNEL_ID"]?.trim() || undefined;
+  let discordB2bChannelId: string | undefined;
+  if (rawB2bChannelId) {
+    if (!isValidSnowflake(rawB2bChannelId)) {
+      throw new Error(
+        `DISCORD_B2B_CHANNEL_ID "${rawB2bChannelId}" is not a valid Discord snowflake ID — expected 17–20 digits`,
+      );
+    }
+    discordB2bChannelId = rawB2bChannelId;
+  }
+
+  // --- DISCORD_B2B_PEER_BOT_ID (required when B2B channel is set) ---
+  const rawPeerBotId = process.env["DISCORD_B2B_PEER_BOT_ID"]?.trim() || undefined;
+  let discordB2bPeerBotId: string | undefined;
+  if (rawPeerBotId) {
+    if (!isValidSnowflake(rawPeerBotId)) {
+      throw new Error(
+        `DISCORD_B2B_PEER_BOT_ID "${rawPeerBotId}" is not a valid Discord snowflake ID — expected 17–20 digits`,
+      );
+    }
+    discordB2bPeerBotId = rawPeerBotId;
+  }
+
+  if (discordB2bChannelId && !discordB2bPeerBotId) {
+    throw new Error(
+      "DISCORD_B2B_PEER_BOT_ID is required when DISCORD_B2B_CHANNEL_ID is set",
+    );
+  }
+
+  const discordB2bEnabled = !!discordB2bChannelId;
+
+  // --- DISCORD_B2B_RATE_LIMIT_MS (optional, default 5000) ---
+  const discordB2bRateLimitMs = parseNumberEnv(
+    "DISCORD_B2B_RATE_LIMIT_MS",
+    CONFIG_DEFAULTS.discordB2bRateLimitMs,
+  );
+
   return {
     telegramBotToken: token,
     allowedUserIds,
@@ -180,6 +273,14 @@ export async function loadAndValidateConfig(): Promise<Config> {
     sttModel,
     ttsEnabled,
     ttsVoice,
+    discordBotToken,
+    discordAllowedUserIds,
+    discordAllowedChannelIds,
+    discordB2bChannelId,
+    discordB2bPeerBotId,
+    discordB2bRateLimitMs,
+    discordEnabled,
+    discordB2bEnabled,
   };
 }
 

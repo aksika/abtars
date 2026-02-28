@@ -11,10 +11,10 @@ export interface IKiroTransport {
    * For ACP: sends session/prompt and collects streaming chunks.
    * For tmux: sends via send-keys and polls capture-pane for output.
    */
-  sendPrompt(chatId: number, message: string): Promise<string>;
+  sendPrompt(sessionKey: string, message: string): Promise<string>;
 
   /** Reset/recreate the session for a given chat. */
-  resetSession(chatId: number): Promise<void>;
+  resetSession(sessionKey: string): Promise<void>;
 
   /** Send Ctrl+C interrupt to the running Kiro CLI process. */
   sendInterrupt(): Promise<void>;

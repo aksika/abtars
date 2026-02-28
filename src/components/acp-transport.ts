@@ -11,7 +11,7 @@ export class AcpTransport implements IKiroTransport {
   private readonly acpClient: AcpClient;
   private readonly formatter: ResponseFormatter;
   private readonly workingDir: string;
-  private sessions = new Map<number, string>(); // chatId → acpSessionId
+  private sessions = new Map<string, string>(); // sessionKey → acpSessionId
 
   constructor(cliPath: string, workingDir: string) {
     this.acpClient = new AcpClient(cliPath, workingDir);
@@ -41,16 +41,16 @@ export class AcpTransport implements IKiroTransport {
     return this.acpClient.isReady;
   }
 
-  async sendPrompt(chatId: number, message: string): Promise<string> {
-    const sessionId = await this.getOrCreateSession(chatId);
+  async sendPrompt(sessionKey: string, message: string): Promise<string> {
+    const sessionId = await this.getOrCreateSession(sessionKey);
     await this.acpClient.sendPrompt(sessionId, message);
 
     const chunks = this.formatter.flush(sessionId);
     return chunks.join("\n") || "(no response)";
   }
 
-  async resetSession(chatId: number): Promise<void> {
-    const sessionId = this.sessions.get(chatId);
+  async resetSession(sessionKey: string): Promise<void> {
+    const sessionId = this.sessions.get(sessionKey);
     if (sessionId) {
       try {
         await this.acpClient.cancelSession(sessionId);
@@ -58,7 +58,7 @@ export class AcpTransport implements IKiroTransport {
         // Session may already be dead
       }
     }
-    this.sessions.delete(chatId);
+    this.sessions.delete(sessionKey);
   }
 
   async sendInterrupt(): Promise<void> {
@@ -74,12 +74,12 @@ export class AcpTransport implements IKiroTransport {
     return this.acpClient;
   }
 
-  private async getOrCreateSession(chatId: number): Promise<string> {
-    const existing = this.sessions.get(chatId);
+  private async getOrCreateSession(sessionKey: string): Promise<string> {
+    const existing = this.sessions.get(sessionKey);
     if (existing) return existing;
 
     const sessionId = await this.acpClient.createSession(this.workingDir);
-    this.sessions.set(chatId, sessionId);
+    this.sessions.set(sessionKey, sessionId);
     return sessionId;
   }
 }

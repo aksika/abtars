@@ -44,7 +44,7 @@ export class TmuxClient implements IKiroTransport {
     return this.ready && this.sessionExists();
   }
 
-  async sendPrompt(_chatId: number, message: string): Promise<string> {
+  async sendPrompt(_sessionKey: string, message: string): Promise<string> {
     if (!this.isReady) {
       throw new Error("tmux session not available");
     }
@@ -84,7 +84,7 @@ export class TmuxClient implements IKiroTransport {
     return "⚠️ Kiro is having trouble responding. Try again or /reset.";
   }
 
-  async resetSession(_chatId: number): Promise<void> {
+  async resetSession(_sessionKey: string): Promise<void> {
     if (!this.sessionExists()) return;
     this.exec(`tmux send-keys -t ${this.sessionName} C-c`);
     await sleep(1000);

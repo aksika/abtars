@@ -9,6 +9,11 @@ vi.mock("node:fs/promises", () => ({
   constants: { F_OK: 0, X_OK: 1 },
 }));
 
+// Mock dotenv so the real ~/.agentbridge/.env doesn't override test env vars
+vi.mock("dotenv", () => ({
+  config: vi.fn(),
+}));
+
 /** Set up a valid env baseline; individual tests override specific vars. */
 function setValidEnv() {
   process.env["TELEGRAM_BOT_TOKEN"] = "123456:ABC-DEF_ghi";
@@ -18,6 +23,22 @@ function setValidEnv() {
   delete process.env["TRUST_MODE"];
   delete process.env["PERMISSION_TIMEOUT_MS"];
   delete process.env["POLL_TIMEOUT_S"];
+  delete process.env["KIRO_TRANSPORT"];
+  delete process.env["TMUX_SESSION"];
+  delete process.env["TMUX_CAPTURE_DELAY_SEC"];
+  delete process.env["TMUX_MAX_WAIT_SEC"];
+  delete process.env["LOG_LEVEL"];
+  delete process.env["GROQ_API_KEY"];
+  delete process.env["STT_ENABLED"];
+  delete process.env["STT_MODEL"];
+  delete process.env["TTS_ENABLED"];
+  delete process.env["TTS_VOICE"];
+  delete process.env["DISCORD_BOT_TOKEN"];
+  delete process.env["DISCORD_ALLOWED_USER_IDS"];
+  delete process.env["DISCORD_ALLOWED_CHANNEL_IDS"];
+  delete process.env["DISCORD_B2B_CHANNEL_ID"];
+  delete process.env["DISCORD_B2B_PEER_BOT_ID"];
+  delete process.env["DISCORD_B2B_RATE_LIMIT_MS"];
 }
 
 describe("loadAndValidateConfig", () => {

@@ -35,3 +35,9 @@ export type {
   SearchOptions,
   AssembledContext,
 } from "./memory.js";
+
+export type {
+  Platform,
+  BridgeMessage,
+  DiscordInboundMessage,
+} from "./discord.js";

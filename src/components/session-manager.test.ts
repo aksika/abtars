@@ -41,13 +41,13 @@ describe("SessionManager + MemoryManager integration", () => {
 
   it("getOrCreateSession persists session to memory", async () => {
     const session = await sm.getOrCreateSession(42);
-    expect(session.telegramChatId).toBe(42);
+    expect(session.channelKey).toBe(42);
     expect(session.acpSessionId).toBe("acp-sess-1");
 
     // Session should be in SQLite
     const restored = memory.restoreSessions(999_999_999);
     expect(restored).toHaveLength(1);
-    expect(restored[0]!.telegramChatId).toBe(42);
+    expect(restored[0]!.channelKey).toBe(42);
     expect(restored[0]!.acpSessionId).toBe("acp-sess-1");
   });
 
@@ -96,7 +96,7 @@ describe("SessionManager + MemoryManager integration", () => {
   it("restoreFromMemory skips stale sessions", async () => {
     // Persist a session with old lastActivityAt
     memory.persistSession({
-      telegramChatId: 300,
+      channelKey: "telegram:300",
       acpSessionId: "old-sess",
       isProcessing: false,
       pendingRequestId: null,
@@ -114,7 +114,7 @@ describe("SessionManager + MemoryManager integration", () => {
   it("works without memory (null memory)", async () => {
     const smNoMem = new SessionManager(acpClient, "/tmp/work");
     const session = await smNoMem.getOrCreateSession(50);
-    expect(session.telegramChatId).toBe(50);
+    expect(session.channelKey).toBe(50);
 
     await smNoMem.resetSession(50);
     const count = await smNoMem.restoreFromMemory();
@@ -131,7 +131,7 @@ describe("SessionManager + MemoryManager integration", () => {
 
     const restored = memory.restoreSessions(999_999_999);
     // Should have the new session persisted
-    const match = restored.find((s) => s.telegramChatId === 60);
+    const match = restored.find((s) => s.channelKey === 60);
     expect(match).toBeDefined();
   });
 });

@@ -17,6 +17,7 @@
   "dependencies": {
     "@andresaya/edge-tts": "^1.8.0",
     "better-sqlite3": "^12.6.2",
+    "discord.js": "^14.25.1",
     "dotenv": "^16.4.7"
   },
   "devDependencies": {
