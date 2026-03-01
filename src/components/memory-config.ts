@@ -19,6 +19,14 @@ export type MemoryConfig = {
     recalled: number;
     working: number;
   };
+  /** Number of recent messages kept in full detail in the working memory tier. */
+  rollingBufferSize: number;
+  /** Maximum token size per ingestion chunk. */
+  ingestChunkMaxTokens: number;
+  /** Embedding model name for hot-swap detection. */
+  embeddingModel: string;
+  /** Relevance threshold for topic-based forgetting. */
+  forgetThreshold: number;
 };
 
 const TAG = "memory-config";
@@ -40,6 +48,10 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
     recalled: 600,
     working: 2000,
   },
+  rollingBufferSize: 20,
+  ingestChunkMaxTokens: 512,
+  embeddingModel: "Xenova/all-MiniLM-L6-v2",
+  forgetThreshold: 0.8,
 };
 
 /**
@@ -115,6 +127,20 @@ export function loadMemoryConfig(): MemoryConfig {
     ),
   };
 
+  const rollingBufferSize = parseNumberEnvSafe(
+    "MEMORY_ROLLING_BUFFER_SIZE",
+    MEMORY_CONFIG_DEFAULTS.rollingBufferSize,
+  );
+
+  const ingestChunkMaxTokens = parseNumberEnvSafe(
+    "MEMORY_INGEST_CHUNK_MAX_TOKENS",
+    MEMORY_CONFIG_DEFAULTS.ingestChunkMaxTokens,
+  );
+
+  const embeddingModel = process.env["MEMORY_EMBEDDING_MODEL"] || MEMORY_CONFIG_DEFAULTS.embeddingModel;
+
+  const forgetThreshold = parseNumberEnvSafe("MEMORY_FORGET_THRESHOLD", MEMORY_CONFIG_DEFAULTS.forgetThreshold);
+
   return {
     memoryEnabled,
     memoryDir,
@@ -126,5 +152,9 @@ export function loadMemoryConfig(): MemoryConfig {
     compactOnReset,
     autoCompactThreshold,
     contextBudget,
+    rollingBufferSize,
+    ingestChunkMaxTokens,
+    embeddingModel,
+    forgetThreshold,
   };
 }

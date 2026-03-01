@@ -69,5 +69,53 @@ export type AssembledContext = {
     working: number;
     input: number;
     total: number;
+    /** Tokens used by the rolling summary within the working memory tier. */
+    rollingSummary: number;
   };
+};
+
+/** Source descriptor for the ingestion pipeline (Phase 2). */
+export type IngestionSource = {
+  type: "youtube" | "pdf" | "text" | "markdown";
+  /** URL or file path identifying the source. */
+  identifier: string;
+};
+
+/** Result of an ingestion operation (Phase 2). */
+export type IngestionResult = {
+  sourceType: string;
+  identifier: string;
+  chunkCount: number;
+  timestamp: number;
+};
+
+/** A previously ingested document record (Phase 2). */
+export type IngestedDocument = {
+  id: number;
+  sourceType: string;
+  identifier: string;
+  chunkCount: number;
+  ingestedAt: number;
+  chatId: number;
+};
+
+/** A reflection meta-summary (Phase 2). */
+export type Reflection = {
+  channelKey: string;
+  /** Date string in YYYY-MM-DD format. */
+  date: string;
+  /** Markdown prose content of the reflection. */
+  content: string;
+  /** One-line summary preview. */
+  preview: string;
+  /** Path to the stored markdown file. */
+  filePath: string;
+};
+
+/** Result of a forget/cascade-delete operation (Phase 2). */
+export type ForgetResult = {
+  messagesRemoved: number;
+  embeddingsRemoved: number;
+  compactionsRemoved: number;
+  transcriptEntriesRemoved: number;
 };

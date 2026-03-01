@@ -98,15 +98,10 @@ describe("Memory system — end-to-end smoke test", () => {
       systemPrompt: "You are a helpful assistant.",
       workingMemory,
     });
-    expect(ctx.text).toContain("[SYSTEM]");
-    expect(ctx.text).toContain("[INPUT]");
-    expect(ctx.text).toContain("What did we discuss about quantum?");
-    expect(ctx.usage.soul).toBeGreaterThan(0);
-    expect(ctx.usage.input).toBeGreaterThan(0);
-    expect(ctx.usage.total).toBe(
-      ctx.usage.soul + ctx.usage.scratchpad + ctx.usage.recalled +
-      ctx.usage.working + ctx.usage.input,
-    );
+    expect(typeof ctx).toBe("string");
+    expect(ctx).toContain("[SYSTEM]");
+    expect(ctx).toContain("[INPUT]");
+    expect(ctx).toContain("What did we discuss about quantum?");
 
     // 6. Scratchpad round-trip
     mm.writeScratchpad(chatId, "# TODO\n- Review quantum notes");
@@ -180,7 +175,8 @@ describe("Memory system — end-to-end smoke test", () => {
     }));
 
     const mockLlm = async () => "Auto-compacted summary of session.";
-    await mm.checkAutoCompact({ chatId: 10, sessionId: "s1", llmCall: mockLlm });
+    mm.setLlmCall(mockLlm);
+    await mm.checkAutoCompact({ chatId: 10, sessionId: "s1" });
 
     // Daily compaction file should exist
     const dailyDir = join(tmpDir, "memory", "daily", "10");

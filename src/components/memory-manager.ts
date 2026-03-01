@@ -11,6 +11,8 @@ import { TranscriptParser } from "./transcript-parser.js";
 import { CompactionEngine } from "./compaction-engine.js";
 import { SleepCycleRunner } from "./sleep-cycle-runner.js";
 import { ContextAssembler } from "./context-assembler.js";
+import { IngestionPipeline } from "./ingestion-pipeline.js";
+import { ReflectionEngine } from "./reflection-engine.js";
 import type {
   MessageRecord,
   SessionState,
@@ -18,9 +20,13 @@ import type {
   SearchResult,
   SearchOptions,
   CompactedMemory,
-  AssembledContext,
+  IngestionSource,
+  IngestionResult,
+  IngestedDocument,
+  Reflection,
+  ForgetResult,
 } from "../types/index.js";
-import { logError, logInfo, logWarn } from "./logger.js";
+import { logDebug, logError, logInfo, logWarn } from "./logger.js";
 
 const TAG = "memory-manager";
 
@@ -40,9 +46,22 @@ export class MemoryManager {
   private transcriptWriter: TranscriptWriter | null = null;
   private transcriptParser: TranscriptParser | null = null;
   private writeCounter: number = 0;
+  private llmCall: ((prompt: string, content: string) => Promise<string>) | null = null;
+  private ingestionPipeline: IngestionPipeline | null = null;
+  private reflectionEngine: ReflectionEngine | null = null;
 
   constructor(config: MemoryConfig) {
     this.config = config;
+  }
+
+  /** Register the LLM callback. Called once from main.ts after transport is ready. */
+  setLlmCall(llmCall: (prompt: string, content: string) => Promise<string>): void {
+    this.llmCall = llmCall;
+  }
+
+  /** Get the stored LLM callback, or null if not set. */
+  getLlmCall(): ((prompt: string, content: string) => Promise<string>) | null {
+    return this.llmCall;
   }
 
   /** Initialize database, create directories, and set up sub-components. */
@@ -66,6 +85,15 @@ export class MemoryManager {
         if (this.embeddingProvider.isReady) {
           this.vectorIndex = new VectorIndex(this.db, this.embeddingProvider);
           logInfo(TAG, "Vector search enabled");
+
+          // Initialize ingestion pipeline when vector search is available
+          this.ingestionPipeline = new IngestionPipeline(
+            this.db,
+            this.embeddingProvider,
+            this.vectorIndex,
+            this.config,
+          );
+          logInfo(TAG, "Ingestion pipeline enabled");
         } else {
           logWarn(TAG, "Embedding model not available — vector search disabled");
           this.embeddingProvider = null;
@@ -73,6 +101,18 @@ export class MemoryManager {
       }
 
       logInfo(TAG, "Memory manager initialized");
+
+      // Initialize reflection engine (doesn't require vector search)
+      if (this.db) {
+        const compactionEngine = new CompactionEngine(
+          this.db,
+          this.transcriptParser!,
+          this.memoryIndex!,
+          this.config,
+        );
+        this.reflectionEngine = new ReflectionEngine(this.db, compactionEngine, this.config);
+        logInfo(TAG, "Reflection engine enabled");
+      }
 
       // Run disk budget enforcement on startup
       this.enforceDiskBudget();
@@ -393,6 +433,57 @@ export class MemoryManager {
     }
   }
 
+  /** Ingest an external document via the IngestionPipeline. */
+  async ingestDocument(source: IngestionSource, chatId: number): Promise<IngestionResult> {
+    if (!this.ingestionPipeline) {
+      throw new Error("Ingestion pipeline is not available — vector search must be enabled.");
+    }
+    return this.ingestionPipeline.ingest(source, chatId);
+  }
+
+  /** List previously ingested documents, optionally filtered by chatId. */
+  listIngestedDocuments(chatId?: number): IngestedDocument[] {
+    if (!this.ingestionPipeline) {
+      return [];
+    }
+    return this.ingestionPipeline.listIngested(chatId);
+  }
+
+  /** Generate a reflection for the given channel over a time window. */
+  async reflect(channelKey: string, windowDays?: number): Promise<Reflection> {
+    if (!this.reflectionEngine) {
+      throw new Error("Reflection engine is not available.");
+    }
+    if (!this.llmCall) {
+      throw new Error("LLM is not available. Cannot generate reflection.");
+    }
+    return this.reflectionEngine.reflect({
+      channelKey,
+      llmCall: this.llmCall,
+      windowDays,
+    });
+  }
+
+  /** List available reflections for a channel. */
+  listReflections(channelKey: string): Array<{ date: string; preview: string }> {
+    if (!this.reflectionEngine) {
+      return [];
+    }
+    return this.reflectionEngine.listReflections(channelKey);
+  }
+
+  /**
+   * Re-embed all stored content with the current embedding model.
+   * Delegates to EmbeddingProvider.reembed() and passes through the onProgress callback.
+   */
+  async reembed(onProgress: (processed: number, total: number) => void): Promise<void> {
+    if (!this.embeddingProvider || !this.db) {
+      throw new Error("Embedding provider is not available — vector search must be enabled.");
+    }
+    return this.embeddingProvider.reembed({ db: this.db, onProgress });
+  }
+
+
   /**
    * Enforce the configured disk budget by deleting the oldest transcript files
    * when total usage exceeds the limit. Also removes corresponding index entries.
@@ -508,9 +599,13 @@ export class MemoryManager {
   async checkAutoCompact(params: {
     chatId: number;
     sessionId: string;
-    llmCall: (prompt: string, content: string) => Promise<string>;
   }): Promise<void> {
     if (!this.config.memoryEnabled || !this.transcriptParser) return;
+
+    if (!this.llmCall) {
+      logDebug(TAG, `Skipping auto-compaction for chat ${params.chatId}: LlmCall not available`);
+      return;
+    }
 
     try {
       const transcriptPath = join(
@@ -549,10 +644,10 @@ export class MemoryManager {
       await engine.compact({
         chatId: params.chatId,
         sessionId: params.sessionId,
-        llmCall: params.llmCall,
+        llmCall: this.llmCall,
       });
     } catch (err) {
-      logError(TAG, "Auto-compact check failed", err);
+      logError(TAG, `Auto-compact failed for chat ${params.chatId} session ${params.sessionId} — preserving original messages`, err);
     }
   }
 
@@ -617,54 +712,356 @@ export class MemoryManager {
    * No-op when memoryEnabled is false. Never throws.
    */
   async runConsolidation(params: {
-    chatId: number;
-    llmCall: (prompt: string, content: string) => Promise<string>;
-  }): Promise<void> {
-    if (!this.config.memoryEnabled || !this.db || !this.transcriptParser || !this.memoryIndex) {
-      return;
+      chatId: number;
+    }): Promise<void> {
+      if (!this.config.memoryEnabled || !this.db || !this.transcriptParser || !this.memoryIndex) {
+        return;
+      }
+
+      if (!this.llmCall) {
+        logDebug(TAG, `Skipping consolidation for chat ${params.chatId}: LlmCall not available`);
+        return;
+      }
+
+      try {
+        const engine = new CompactionEngine(
+          this.db,
+          this.transcriptParser,
+          this.memoryIndex,
+          this.config,
+        );
+        const runner = new SleepCycleRunner(engine, this.config);
+
+        await runner.runPendingConsolidations({
+          chatId: params.chatId,
+          llmCall: this.llmCall,
+        });
+      } catch (err) {
+        logError(TAG, `Failed to run consolidation for chat ${params.chatId} — preserving unconsolidated messages`, err);
+      }
     }
 
-    try {
-      const engine = new CompactionEngine(
-        this.db,
-        this.transcriptParser,
-        this.memoryIndex,
-        this.config,
-      );
-      const runner = new SleepCycleRunner(engine, this.config);
-
-      await runner.runPendingConsolidations(params);
-    } catch (err) {
-      logError(TAG, `Failed to run consolidation for chat ${params.chatId}`, err);
-    }
-  }
 
   /**
-   * Assemble the full context for an LLM call.
-   * Creates a ContextAssembler and delegates to assembler.assemble().
-   * Returns a default empty AssembledContext on error or when memoryEnabled is false.
+   * Build assembled context for a user message. Called by transport before sending to LLM.
+   * Delegates to ContextAssembler.assemble() with all five tiers
+   * (soul/core facts, scratchpad, recalled memories, working memory, new input).
+   * Falls back to raw userInput if assembly fails, logging a warning.
+   * Returns the assembled context text as a string.
    */
   async assembleContext(params: {
     chatId: number;
     userInput: string;
     systemPrompt: string;
-    workingMemory: MessageRecord[];
-  }): Promise<AssembledContext> {
-    const emptyContext: AssembledContext = {
-      text: "",
-      usage: { soul: 0, scratchpad: 0, recalled: 0, working: 0, input: 0, total: 0 },
-    };
-
-    if (!this.config.memoryEnabled) return emptyContext;
+    workingMemory?: MessageRecord[];
+  }): Promise<string> {
+    if (!this.config.memoryEnabled) return params.userInput;
 
     try {
       const assembler = new ContextAssembler(this, this.config);
-      return await assembler.assemble(params);
+      const result = await assembler.assemble({
+        chatId: params.chatId,
+        userInput: params.userInput,
+        systemPrompt: params.systemPrompt,
+        workingMemory: params.workingMemory ?? [],
+      });
+      return result.text;
     } catch (err) {
-      logError(TAG, `Failed to assemble context for chat ${params.chatId}`, err);
-      return emptyContext;
+      logWarn(TAG, `Context assembly failed for chat ${params.chatId}, falling back to raw user input: ${err instanceof Error ? err.message : String(err)}`);
+      return params.userInput;
     }
   }
+
+
+
+  /**
+   * Cascade deletion through all storage layers for the given message IDs.
+   *
+   * Deletes from: embeddings table, FTS5 index (via trigger on messages delete),
+   * messages table, compactions table + .md files on disk, and transcript JSONL files.
+   *
+   * Uses a transaction for the SQLite operations. File I/O errors are logged
+   * but do not abort the operation — partial cleanup is acceptable.
+   *
+   * Returns a ForgetResult with counts from each layer.
+   */
+  private cascadeDelete(messageIds: number[], chatId: number): ForgetResult {
+    const result: ForgetResult = {
+      messagesRemoved: 0,
+      embeddingsRemoved: 0,
+      compactionsRemoved: 0,
+      transcriptEntriesRemoved: 0,
+    };
+
+    if (!this.db || messageIds.length === 0) return result;
+
+    try {
+      // 1. Query messages to get session IDs and timestamps before deleting
+      //    (needed for transcript cleanup and compaction lookup)
+      const placeholders = messageIds.map(() => "?").join(",");
+      const messageRows = this.db
+        .prepare(
+          `SELECT id, chat_id, session_id, timestamp, content FROM messages WHERE id IN (${placeholders})`,
+        )
+        .all(...messageIds) as Array<{
+        id: number;
+        chat_id: number;
+        session_id: string;
+        timestamp: number;
+        content: string;
+      }>;
+
+      if (messageRows.length === 0) return result;
+
+      // Collect unique session IDs and a set of (timestamp, content) for transcript matching
+      const sessionIds = new Set<string>();
+      const messageSignatures = new Set<string>();
+      for (const row of messageRows) {
+        sessionIds.add(row.session_id);
+        messageSignatures.add(`${row.timestamp}:${row.content}`);
+      }
+
+      // 2. Delete from embeddings table
+      const embeddingsResult = this.db
+        .prepare(`DELETE FROM embeddings WHERE message_id IN (${placeholders})`)
+        .run(...messageIds);
+      result.embeddingsRemoved = embeddingsResult.changes;
+
+      // 3. Delete from messages table (the AFTER DELETE trigger on messages
+      //    automatically removes corresponding rows from messages_fts)
+      const messagesResult = this.db
+        .prepare(`DELETE FROM messages WHERE id IN (${placeholders})`)
+        .run(...messageIds);
+      result.messagesRemoved = messagesResult.changes;
+
+      // 4. Delete related compactions and their .md files on disk
+      const sessionPlaceholders = Array.from(sessionIds)
+        .map(() => "?")
+        .join(",");
+      const compactionRows = this.db
+        .prepare(
+          `SELECT id, file_path FROM compactions WHERE chat_id = ? AND source_session_id IN (${sessionPlaceholders})`,
+        )
+        .all(chatId, ...sessionIds) as Array<{ id: number; file_path: string }>;
+
+      if (compactionRows.length > 0) {
+        const compactionIds = compactionRows.map((r) => r.id);
+        const compactionPlaceholders = compactionIds.map(() => "?").join(",");
+        const compactionsResult = this.db
+          .prepare(`DELETE FROM compactions WHERE id IN (${compactionPlaceholders})`)
+          .run(...compactionIds);
+        result.compactionsRemoved = compactionsResult.changes;
+
+        // Delete .md files on disk
+        for (const row of compactionRows) {
+          try {
+            if (existsSync(row.file_path)) {
+              unlinkSync(row.file_path);
+            }
+          } catch (fileErr) {
+            logWarn(
+              TAG,
+              `Failed to delete compaction file ${row.file_path}: ${fileErr instanceof Error ? fileErr.message : String(fileErr)}`,
+            );
+          }
+        }
+      }
+
+      // 5. Remove matching entries from transcript JSONL files
+      if (this.transcriptWriter && this.transcriptParser) {
+        for (const sessionId of sessionIds) {
+          try {
+            const transcriptPath = this.transcriptWriter.getPath(chatId, sessionId);
+            if (!existsSync(transcriptPath)) continue;
+
+            const allRecords = this.transcriptParser.parse(transcriptPath);
+            const filtered = allRecords.filter(
+              (r) => !messageSignatures.has(`${r.timestamp}:${r.content}`),
+            );
+            const removed = allRecords.length - filtered.length;
+
+            if (removed > 0) {
+              // Rewrite the file with remaining records
+              const newContent = filtered.map((r) => JSON.stringify(r)).join("\n") + (filtered.length > 0 ? "\n" : "");
+              writeFileSync(transcriptPath, newContent);
+              result.transcriptEntriesRemoved += removed;
+            }
+          } catch (transcriptErr) {
+            logWarn(
+              TAG,
+              `Failed to clean transcript for session ${sessionId}: ${transcriptErr instanceof Error ? transcriptErr.message : String(transcriptErr)}`,
+            );
+          }
+        }
+      }
+
+      logInfo(
+        TAG,
+        `Cascade delete for chat ${chatId}: ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions, ${result.transcriptEntriesRemoved} transcript entries`,
+      );
+    } catch (err) {
+      logError(TAG, `Cascade delete failed for chat ${chatId}`, err);
+    }
+
+    return result;
+  }
+
+  /**
+   * Forget all memories semantically related to a topic.
+   * Uses hybrid search to find related messages above the relevance threshold,
+   * then cascade deletes them from all storage layers.
+   */
+  async forgetTopic(chatId: number, topic: string, threshold?: number): Promise<ForgetResult> {
+    const emptyResult: ForgetResult = {
+      messagesRemoved: 0,
+      embeddingsRemoved: 0,
+      compactionsRemoved: 0,
+      transcriptEntriesRemoved: 0,
+    };
+
+    if (!this.db) return emptyResult;
+
+    try {
+      const effectiveThreshold = threshold ?? this.config.forgetThreshold;
+
+      // Use hybrid search to find semantically related messages
+      const searchResults = await this.hybridSearch(topic, { chatId, limit: 100 });
+
+      // Filter results above the relevance threshold
+      const relevant = searchResults.filter((r) => r.score >= effectiveThreshold);
+
+      if (relevant.length === 0) {
+        logInfo(TAG, `forgetTopic: no messages above threshold ${effectiveThreshold} for topic "${topic}" in chat ${chatId}`);
+        return emptyResult;
+      }
+
+      // Look up message IDs from the messages table using chatId + sessionId + timestamp + role
+      const messageIds: number[] = [];
+      for (const r of relevant) {
+        const row = this.db
+          .prepare(
+            "SELECT id FROM messages WHERE chat_id = ? AND session_id = ? AND timestamp = ? AND role = ?",
+          )
+          .get(r.record.chatId, r.record.sessionId, r.record.timestamp, r.record.role) as
+          | { id: number }
+          | undefined;
+        if (row) {
+          messageIds.push(row.id);
+        }
+      }
+
+      if (messageIds.length === 0) {
+        logInfo(TAG, `forgetTopic: no message IDs resolved for topic "${topic}" in chat ${chatId}`);
+        return emptyResult;
+      }
+
+      const result = this.cascadeDelete(messageIds, chatId);
+
+      if (result.compactionsRemoved > 0) {
+        logInfo(
+          TAG,
+          `forgetTopic: ${result.compactionsRemoved} compactions removed for topic "${topic}". ` +
+            `Full compaction regeneration excluding forgotten content is not yet implemented.`,
+        );
+      }
+
+      logInfo(TAG, `forgetTopic: removed ${result.messagesRemoved} messages for topic "${topic}" in chat ${chatId}`);
+      return result;
+    } catch (err) {
+      logError(TAG, `forgetTopic failed for chat ${chatId}, topic "${topic}"`, err);
+      return emptyResult;
+    }
+  }
+
+  /**
+   * Forget all memories within a date range.
+   * Finds messages by timestamp range and cascade deletes them.
+   */
+  forgetRange(chatId: number, startDate: Date, endDate: Date): ForgetResult {
+    const emptyResult: ForgetResult = {
+      messagesRemoved: 0,
+      embeddingsRemoved: 0,
+      compactionsRemoved: 0,
+      transcriptEntriesRemoved: 0,
+    };
+
+    if (!this.db) return emptyResult;
+
+    try {
+      const startMs = startDate.getTime();
+      const endMs = endDate.getTime();
+
+      const rows = this.db
+        .prepare("SELECT id FROM messages WHERE chat_id = ? AND timestamp >= ? AND timestamp <= ?")
+        .all(chatId, startMs, endMs) as Array<{ id: number }>;
+
+      if (rows.length === 0) {
+        logInfo(TAG, `forgetRange: no messages found in range ${startDate.toISOString()} – ${endDate.toISOString()} for chat ${chatId}`);
+        return emptyResult;
+      }
+
+      const messageIds = rows.map((r) => r.id);
+      const result = this.cascadeDelete(messageIds, chatId);
+
+      if (result.compactionsRemoved > 0) {
+        logInfo(
+          TAG,
+          `forgetRange: ${result.compactionsRemoved} compactions removed for date range. ` +
+            `Full compaction regeneration excluding forgotten content is not yet implemented.`,
+        );
+      }
+
+      logInfo(TAG, `forgetRange: removed ${result.messagesRemoved} messages in range for chat ${chatId}`);
+      return result;
+    } catch (err) {
+      logError(TAG, `forgetRange failed for chat ${chatId}`, err);
+      return emptyResult;
+    }
+  }
+
+  /**
+   * Forget all memories for a specific session.
+   * Finds messages by session ID and cascade deletes them.
+   */
+  forgetSession(chatId: number, sessionId: string): ForgetResult {
+    const emptyResult: ForgetResult = {
+      messagesRemoved: 0,
+      embeddingsRemoved: 0,
+      compactionsRemoved: 0,
+      transcriptEntriesRemoved: 0,
+    };
+
+    if (!this.db) return emptyResult;
+
+    try {
+      const rows = this.db
+        .prepare("SELECT id FROM messages WHERE chat_id = ? AND session_id = ?")
+        .all(chatId, sessionId) as Array<{ id: number }>;
+
+      if (rows.length === 0) {
+        logInfo(TAG, `forgetSession: no messages found for session ${sessionId} in chat ${chatId}`);
+        return emptyResult;
+      }
+
+      const messageIds = rows.map((r) => r.id);
+      const result = this.cascadeDelete(messageIds, chatId);
+
+      if (result.compactionsRemoved > 0) {
+        logInfo(
+          TAG,
+          `forgetSession: ${result.compactionsRemoved} compactions removed for session ${sessionId}. ` +
+            `Full compaction regeneration excluding forgotten content is not yet implemented.`,
+        );
+      }
+
+      logInfo(TAG, `forgetSession: removed ${result.messagesRemoved} messages for session ${sessionId} in chat ${chatId}`);
+      return result;
+    } catch (err) {
+      logError(TAG, `forgetSession failed for chat ${chatId}, session ${sessionId}`, err);
+      return emptyResult;
+    }
+  }
+
 
   /** Close the database connection. */
   close(): void {

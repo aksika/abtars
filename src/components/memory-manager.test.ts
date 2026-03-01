@@ -522,8 +522,8 @@ describe("MemoryManager — checkAutoCompact", () => {
       makeRecord({ content: "hi", chatId: 1, sessionId: "s1", timestamp: 1000 }),
     );
 
-    const mockLlm = async (_prompt: string, _content: string) => "summary";
-    await manager.checkAutoCompact({ chatId: 1, sessionId: "s1", llmCall: mockLlm });
+    manager.setLlmCall(async (_prompt: string, _content: string) => "summary");
+    await manager.checkAutoCompact({ chatId: 1, sessionId: "s1" });
 
     // No daily compaction file should exist
     const dailyDir = join(tmpDir, "memory", "daily", "1");
@@ -538,8 +538,8 @@ describe("MemoryManager — checkAutoCompact", () => {
       makeRecord({ content: longContent, chatId: 10, sessionId: "s1", timestamp: 1000 }),
     );
 
-    const mockLlm = async (_prompt: string, _content: string) => "compacted summary";
-    await manager.checkAutoCompact({ chatId: 10, sessionId: "s1", llmCall: mockLlm });
+    manager.setLlmCall(async (_prompt: string, _content: string) => "compacted summary");
+    await manager.checkAutoCompact({ chatId: 10, sessionId: "s1" });
 
     // A daily compaction file should have been created
     const dailyDir = join(tmpDir, "memory", "daily", "10");
@@ -561,8 +561,8 @@ describe("MemoryManager — checkAutoCompact", () => {
     );
     await disabledManager.initialize();
 
-    const mockLlm = async (_prompt: string, _content: string) => "summary";
-    await disabledManager.checkAutoCompact({ chatId: 1, sessionId: "s1", llmCall: mockLlm });
+    disabledManager.setLlmCall(async (_prompt: string, _content: string) => "summary");
+    await disabledManager.checkAutoCompact({ chatId: 1, sessionId: "s1" });
 
     // No daily compaction file should exist
     const dailyDir = join(tmpDir, "memory", "daily", "1");
@@ -577,13 +577,13 @@ describe("MemoryManager — checkAutoCompact", () => {
       makeRecord({ content: longContent, chatId: 20, sessionId: "s1", timestamp: 1000 }),
     );
 
-    const failingLlm = async (_prompt: string, _content: string): Promise<string> => {
+    manager.setLlmCall(async (_prompt: string, _content: string): Promise<string> => {
       throw new Error("LLM unavailable");
-    };
+    });
 
-    // Should not throw
+    // Should not throw — error is logged and original messages are preserved
     await expect(
-      manager.checkAutoCompact({ chatId: 20, sessionId: "s1", llmCall: failingLlm }),
+      manager.checkAutoCompact({ chatId: 20, sessionId: "s1" }),
     ).resolves.toBeUndefined();
 
     // No compaction should have been created
@@ -596,12 +596,28 @@ describe("MemoryManager — checkAutoCompact", () => {
   });
 
   it("does nothing when transcript file does not exist", async () => {
-    const mockLlm = async (_prompt: string, _content: string) => "summary";
+    manager.setLlmCall(async (_prompt: string, _content: string) => "summary");
 
     // Call with a chatId/sessionId that has no transcript file
     await expect(
-      manager.checkAutoCompact({ chatId: 999, sessionId: "nonexistent", llmCall: mockLlm }),
+      manager.checkAutoCompact({ chatId: 999, sessionId: "nonexistent" }),
     ).resolves.toBeUndefined();
+  });
+
+  it("skips auto-compaction silently when llmCall is null", async () => {
+    const longContent = "c".repeat(250);
+    manager.recordMessage(
+      makeRecord({ content: longContent, chatId: 30, sessionId: "s1", timestamp: 1000 }),
+    );
+
+    // Do NOT call setLlmCall — llmCall remains null
+    await expect(
+      manager.checkAutoCompact({ chatId: 30, sessionId: "s1" }),
+    ).resolves.toBeUndefined();
+
+    // No compaction should have been created
+    const dailyDir = join(tmpDir, "memory", "daily", "30");
+    expect(existsSync(dailyDir)).toBe(false);
   });
 });
 
@@ -755,7 +771,7 @@ describe("MemoryManager — assembleContext", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns assembled context with usage breakdown", async () => {
+  it("returns assembled context text as a string", async () => {
     const workingMemory: MessageRecord[] = [
       makeRecord({ role: "user", content: "Hello there", timestamp: 1000 }),
       makeRecord({ role: "assistant", content: "Hi! How can I help?", timestamp: 1001 }),
@@ -768,25 +784,14 @@ describe("MemoryManager — assembleContext", () => {
       workingMemory,
     });
 
-    expect(result.text).toBeTruthy();
-    expect(result.text).toContain("You are a helpful assistant.");
-    expect(result.text).toContain("What is the weather?");
-    expect(result.text).toContain("Hello there");
-
-    // Usage breakdown should have all tiers
-    expect(result.usage.soul).toBeGreaterThan(0);
-    expect(result.usage.working).toBeGreaterThan(0);
-    expect(result.usage.input).toBeGreaterThan(0);
-    expect(result.usage.total).toBe(
-      result.usage.soul +
-        result.usage.scratchpad +
-        result.usage.recalled +
-        result.usage.working +
-        result.usage.input,
-    );
+    expect(typeof result).toBe("string");
+    expect(result).toBeTruthy();
+    expect(result).toContain("You are a helpful assistant.");
+    expect(result).toContain("What is the weather?");
+    expect(result).toContain("Hello there");
   });
 
-  it("returns empty context when memoryEnabled is false", async () => {
+  it("returns raw userInput when memoryEnabled is false", async () => {
     const disabled = new MemoryManager(makeConfig(tmpDir, { memoryEnabled: false }));
     await disabled.initialize();
 
@@ -794,11 +799,9 @@ describe("MemoryManager — assembleContext", () => {
       chatId: 1,
       userInput: "test",
       systemPrompt: "system",
-      workingMemory: [],
     });
 
-    expect(result.text).toBe("");
-    expect(result.usage.total).toBe(0);
+    expect(result).toBe("test");
 
     disabled.close();
   });

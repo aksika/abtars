@@ -97,6 +97,14 @@ async function main(): Promise<void> {
   await transport.initialize();
   logInfo("main", "✅ Transport ready");
 
+  // Wire LLM callback into memory so compaction and context assembly can use the LLM
+  if (memory) {
+    memory.setLlmCall(async (prompt: string, content: string) => {
+      return transport.sendPrompt("system:memory", `${prompt}\n\n${content}`);
+    });
+    logInfo("main", "🧠 Memory LLM callback registered");
+  }
+
   // STT config
   const sttConfig: SttConfig | null = config.sttEnabled
     ? { provider: "groq", apiKey: config.groqApiKey, model: config.sttModel }
@@ -286,10 +294,25 @@ async function main(): Promise<void> {
       }
 
       if (text === "/compact") {
-        const msg = memory
-          ? "📦 Compaction is not yet wired to an LLM. Coming soon."
-          : "🧠 Memory is disabled.";
-        await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
+        if (!memory) {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+          return;
+        }
+        const llm = memory.getLlmCall();
+        if (!llm) {
+          await telegramApi.sendMessage(chatId, "⚠️ LLM is not available. Cannot run compaction.", { message_thread_id: threadId });
+          return;
+        }
+        try {
+          const result = await memory.compactSession({ chatId, sessionId: sessionKey, llmCall: llm });
+          const msg = result
+            ? `📦 Compaction complete:\n\n${result.summary}`
+            : "📦 Nothing to compact — no messages found for this session.";
+          await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
+        } catch (err) {
+          logError("main", "Compaction failed", err);
+          await telegramApi.sendMessage(chatId, "❌ Compaction failed. Check logs for details.", { message_thread_id: threadId });
+        }
         return;
       }
 
@@ -315,6 +338,200 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (text === "/ingest list") {
+        if (!memory) {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+          return;
+        }
+        try {
+          const docs = memory.listIngestedDocuments(chatId);
+          if (docs.length === 0) {
+            await telegramApi.sendMessage(chatId, "📄 No ingested documents yet.", { message_thread_id: threadId });
+          } else {
+            const lines = docs.map((d) => {
+              const date = new Date(d.ingestedAt).toISOString().slice(0, 10);
+              return `• [${d.sourceType}] ${d.identifier} — ${d.chunkCount} chunks (${date})`;
+            });
+            await telegramApi.sendMessage(chatId, `📄 Ingested documents:\n\n${lines.join("\n")}`, { message_thread_id: threadId });
+          }
+        } catch (err) {
+          logError("main", "Failed to list ingested documents", err);
+          await telegramApi.sendMessage(chatId, "❌ Failed to list ingested documents.", { message_thread_id: threadId });
+        }
+        return;
+      }
+
+      if (text.startsWith("/ingest ")) {
+        if (!memory) {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+          return;
+        }
+        const arg = text.slice("/ingest ".length).trim();
+        if (!arg) {
+          await telegramApi.sendMessage(chatId, "Usage: /ingest <url_or_path> or /ingest list", { message_thread_id: threadId });
+          return;
+        }
+        // Auto-detect source type
+        let sourceType: "youtube" | "pdf" | "text" | "markdown";
+        if (arg.startsWith("http") && (arg.includes("youtube.com") || arg.includes("youtu.be"))) {
+          sourceType = "youtube";
+        } else if (arg.endsWith(".pdf")) {
+          sourceType = "pdf";
+        } else if (arg.endsWith(".md")) {
+          sourceType = "markdown";
+        } else {
+          sourceType = "text";
+        }
+        try {
+          await telegramApi.sendMessage(chatId, `📥 Ingesting ${sourceType} source: ${arg}...`, { message_thread_id: threadId });
+          const result = await memory.ingestDocument({ type: sourceType, identifier: arg }, chatId);
+          await telegramApi.sendMessage(chatId, `✅ Ingested ${result.chunkCount} chunks from [${result.sourceType}] ${result.identifier}`, { message_thread_id: threadId });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logError("main", "Ingestion failed", err);
+          await telegramApi.sendMessage(chatId, `❌ Ingestion failed: ${errMsg}`, { message_thread_id: threadId });
+        }
+        return;
+      }
+
+      if (text === "/reflect list") {
+        if (!memory) {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+          return;
+        }
+        try {
+          const channelKey = String(chatId);
+          const reflections = memory.listReflections(channelKey);
+          if (reflections.length === 0) {
+            await telegramApi.sendMessage(chatId, "🪞 No reflections yet.", { message_thread_id: threadId });
+          } else {
+            const lines = reflections.map((r) => `• ${r.date} — ${r.preview}`);
+            await telegramApi.sendMessage(chatId, `🪞 Reflections:\n\n${lines.join("\n")}`, { message_thread_id: threadId });
+          }
+        } catch (err) {
+          logError("main", "Failed to list reflections", err);
+          await telegramApi.sendMessage(chatId, "❌ Failed to list reflections.", { message_thread_id: threadId });
+        }
+        return;
+      }
+
+      if (text === "/reflect" || text.startsWith("/reflect ")) {
+        if (!memory) {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+          return;
+        }
+        try {
+          const channelKey = String(chatId);
+          const arg = text.slice("/reflect".length).trim();
+          const windowDays = arg ? parseInt(arg, 10) : undefined;
+          if (arg && (isNaN(windowDays!) || windowDays! <= 0)) {
+            await telegramApi.sendMessage(chatId, "Usage: /reflect [days] or /reflect list", { message_thread_id: threadId });
+            return;
+          }
+          await telegramApi.sendMessage(chatId, "🪞 Generating reflection...", { message_thread_id: threadId });
+          const reflection = await memory.reflect(channelKey, windowDays);
+          await telegramApi.sendMessage(chatId, `🪞 Reflection (${reflection.date}):\n\n${reflection.content}`, { message_thread_id: threadId });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logError("main", "Reflection failed", err);
+          await telegramApi.sendMessage(chatId, `❌ Reflection failed: ${errMsg}`, { message_thread_id: threadId });
+        }
+        return;
+      }
+
+      if (text === "/reembed") {
+        if (!memory) {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+          return;
+        }
+        try {
+          await telegramApi.sendMessage(chatId, "🔄 Re-embedding all stored content with current model...", { message_thread_id: threadId });
+          let lastReported = 0;
+          await memory.reembed((processed, total) => {
+            if (total === 0) return;
+            const pct = Math.floor((processed / total) * 100);
+            if (pct >= lastReported + 25 || processed === total) {
+              lastReported = pct;
+              telegramApi.sendMessage(chatId, `🔄 Re-embedding: ${processed}/${total} (${pct}%)`, { message_thread_id: threadId }).catch(() => {});
+            }
+          });
+          await telegramApi.sendMessage(chatId, "✅ Re-embedding complete.", { message_thread_id: threadId });
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logError("main", "Re-embedding failed", err);
+          await telegramApi.sendMessage(chatId, `❌ Re-embedding failed: ${errMsg}`, { message_thread_id: threadId });
+        }
+        return;
+      }
+
+      if (text.startsWith("/forget ")) {
+        if (!memory) {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+          return;
+        }
+        const args = text.slice("/forget ".length).trim();
+
+        if (args.startsWith("topic ")) {
+          const topic = args.slice("topic ".length).trim();
+          if (!topic) {
+            await telegramApi.sendMessage(chatId, "Usage: /forget topic <topic>", { message_thread_id: threadId });
+            return;
+          }
+          try {
+            const result = await memory.forgetTopic(chatId, topic);
+            await telegramApi.sendMessage(chatId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions related to "${topic}".`, { message_thread_id: threadId });
+          } catch (err) {
+            logError("main", "Forget topic failed", err);
+            await telegramApi.sendMessage(chatId, "❌ Forget failed.", { message_thread_id: threadId });
+          }
+          return;
+        }
+
+        if (args.startsWith("range ")) {
+          const rangeParts = args.slice("range ".length).trim().split(/\s+/);
+          if (rangeParts.length < 2) {
+            await telegramApi.sendMessage(chatId, "Usage: /forget range <start-date> <end-date> (YYYY-MM-DD)", { message_thread_id: threadId });
+            return;
+          }
+          const startDate = new Date(rangeParts[0]!);
+          const endDate = new Date(rangeParts[1]!);
+          if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+            await telegramApi.sendMessage(chatId, "❌ Invalid date format. Use YYYY-MM-DD.", { message_thread_id: threadId });
+            return;
+          }
+          // Set endDate to end of day
+          endDate.setHours(23, 59, 59, 999);
+          try {
+            const result = memory.forgetRange(chatId, startDate, endDate);
+            await telegramApi.sendMessage(chatId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions in date range.`, { message_thread_id: threadId });
+          } catch (err) {
+            logError("main", "Forget range failed", err);
+            await telegramApi.sendMessage(chatId, "❌ Forget failed.", { message_thread_id: threadId });
+          }
+          return;
+        }
+
+        if (args.startsWith("session ")) {
+          const sessionId = args.slice("session ".length).trim();
+          if (!sessionId) {
+            await telegramApi.sendMessage(chatId, "Usage: /forget session <session-id>", { message_thread_id: threadId });
+            return;
+          }
+          try {
+            const result = memory.forgetSession(chatId, sessionId);
+            await telegramApi.sendMessage(chatId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions for session.`, { message_thread_id: threadId });
+          } catch (err) {
+            logError("main", "Forget session failed", err);
+            await telegramApi.sendMessage(chatId, "❌ Forget failed.", { message_thread_id: threadId });
+          }
+          return;
+        }
+
+        // Unknown subcommand
+        await telegramApi.sendMessage(chatId, "Usage: /forget topic <topic> | /forget range <start> <end> | /forget session <id>", { message_thread_id: threadId });
+        return;
+      }
+
       if (busyChats.has(sessionKey)) {
         await telegramApi.sendMessage(chatId, "⏳ Previous request still in progress...", { message_thread_id: threadId });
         return;
@@ -337,6 +554,10 @@ async function main(): Promise<void> {
             prompt = context + text;
             logDebug("main", `Prepended group context to prompt`);
           }
+        }
+
+        if (memory) {
+          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "" });
         }
 
         const responsePromise = transport.sendPrompt(sessionKey, prompt);
@@ -496,6 +717,203 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (text === "/ingest list") {
+        if (!memory) {
+          await discordApi.sendMessage(message.channelId, "🧠 Memory is disabled.");
+          return;
+        }
+        const chatId = parseInt(message.channelId, 10) || 0;
+        try {
+          const docs = memory.listIngestedDocuments(chatId);
+          if (docs.length === 0) {
+            await discordApi.sendMessage(message.channelId, "📄 No ingested documents yet.");
+          } else {
+            const lines = docs.map((d) => {
+              const date = new Date(d.ingestedAt).toISOString().slice(0, 10);
+              return `• [${d.sourceType}] ${d.identifier} — ${d.chunkCount} chunks (${date})`;
+            });
+            await discordApi.sendMessage(message.channelId, `📄 Ingested documents:\n\n${lines.join("\n")}`);
+          }
+        } catch (err) {
+          logError("main", "Failed to list ingested documents (Discord)", err);
+          await discordApi.sendMessage(message.channelId, "❌ Failed to list ingested documents.");
+        }
+        return;
+      }
+
+      if (text.startsWith("/ingest ")) {
+        if (!memory) {
+          await discordApi.sendMessage(message.channelId, "🧠 Memory is disabled.");
+          return;
+        }
+        const arg = text.slice("/ingest ".length).trim();
+        if (!arg) {
+          await discordApi.sendMessage(message.channelId, "Usage: /ingest <url_or_path> or /ingest list");
+          return;
+        }
+        const chatId = parseInt(message.channelId, 10) || 0;
+        // Auto-detect source type
+        let sourceType: "youtube" | "pdf" | "text" | "markdown";
+        if (arg.startsWith("http") && (arg.includes("youtube.com") || arg.includes("youtu.be"))) {
+          sourceType = "youtube";
+        } else if (arg.endsWith(".pdf")) {
+          sourceType = "pdf";
+        } else if (arg.endsWith(".md")) {
+          sourceType = "markdown";
+        } else {
+          sourceType = "text";
+        }
+        try {
+          await discordApi.sendMessage(message.channelId, `📥 Ingesting ${sourceType} source: ${arg}...`);
+          const result = await memory.ingestDocument({ type: sourceType, identifier: arg }, chatId);
+          await discordApi.sendMessage(message.channelId, `✅ Ingested ${result.chunkCount} chunks from [${result.sourceType}] ${result.identifier}`);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logError("main", "Ingestion failed (Discord)", err);
+          await discordApi.sendMessage(message.channelId, `❌ Ingestion failed: ${errMsg}`);
+        }
+        return;
+      }
+
+      if (text === "/reflect list") {
+        if (!memory) {
+          await discordApi.sendMessage(message.channelId, "🧠 Memory is disabled.");
+          return;
+        }
+        try {
+          const channelKey = message.channelId;
+          const reflections = memory.listReflections(channelKey);
+          if (reflections.length === 0) {
+            await discordApi.sendMessage(message.channelId, "🪞 No reflections yet.");
+          } else {
+            const lines = reflections.map((r) => `• ${r.date} — ${r.preview}`);
+            await discordApi.sendMessage(message.channelId, `🪞 Reflections:\n\n${lines.join("\n")}`);
+          }
+        } catch (err) {
+          logError("main", "Failed to list reflections (Discord)", err);
+          await discordApi.sendMessage(message.channelId, "❌ Failed to list reflections.");
+        }
+        return;
+      }
+
+      if (text === "/reflect" || text.startsWith("/reflect ")) {
+        if (!memory) {
+          await discordApi.sendMessage(message.channelId, "🧠 Memory is disabled.");
+          return;
+        }
+        try {
+          const channelKey = message.channelId;
+          const arg = text.slice("/reflect".length).trim();
+          const windowDays = arg ? parseInt(arg, 10) : undefined;
+          if (arg && (isNaN(windowDays!) || windowDays! <= 0)) {
+            await discordApi.sendMessage(message.channelId, "Usage: /reflect [days] or /reflect list");
+            return;
+          }
+          await discordApi.sendMessage(message.channelId, "🪞 Generating reflection...");
+          const reflection = await memory.reflect(channelKey, windowDays);
+          await discordApi.sendMessage(message.channelId, `🪞 Reflection (${reflection.date}):\n\n${reflection.content}`);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logError("main", "Reflection failed (Discord)", err);
+          await discordApi.sendMessage(message.channelId, `❌ Reflection failed: ${errMsg}`);
+        }
+        return;
+      }
+
+      if (text === "/reembed") {
+        if (!memory) {
+          await discordApi.sendMessage(message.channelId, "🧠 Memory is disabled.");
+          return;
+        }
+        try {
+          await discordApi.sendMessage(message.channelId, "🔄 Re-embedding all stored content with current model...");
+          let lastReported = 0;
+          await memory.reembed((processed, total) => {
+            if (total === 0) return;
+            const pct = Math.floor((processed / total) * 100);
+            if (pct >= lastReported + 25 || processed === total) {
+              lastReported = pct;
+              discordApi.sendMessage(message.channelId, `🔄 Re-embedding: ${processed}/${total} (${pct}%)`).catch(() => {});
+            }
+          });
+          await discordApi.sendMessage(message.channelId, "✅ Re-embedding complete.");
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logError("main", "Re-embedding failed (Discord)", err);
+          await discordApi.sendMessage(message.channelId, `❌ Re-embedding failed: ${errMsg}`);
+        }
+        return;
+      }
+
+      if (text.startsWith("/forget ")) {
+        if (!memory) {
+          await discordApi.sendMessage(message.channelId, "🧠 Memory is disabled.");
+          return;
+        }
+        const chatId = parseInt(message.channelId, 10) || 0;
+        const args = text.slice("/forget ".length).trim();
+
+        if (args.startsWith("topic ")) {
+          const topic = args.slice("topic ".length).trim();
+          if (!topic) {
+            await discordApi.sendMessage(message.channelId, "Usage: /forget topic <topic>");
+            return;
+          }
+          try {
+            const result = await memory.forgetTopic(chatId, topic);
+            await discordApi.sendMessage(message.channelId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions related to "${topic}".`);
+          } catch (err) {
+            logError("main", "Forget topic failed (Discord)", err);
+            await discordApi.sendMessage(message.channelId, "❌ Forget failed.");
+          }
+          return;
+        }
+
+        if (args.startsWith("range ")) {
+          const rangeParts = args.slice("range ".length).trim().split(/\s+/);
+          if (rangeParts.length < 2) {
+            await discordApi.sendMessage(message.channelId, "Usage: /forget range <start-date> <end-date> (YYYY-MM-DD)");
+            return;
+          }
+          const startDate = new Date(rangeParts[0]!);
+          const endDate = new Date(rangeParts[1]!);
+          if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+            await discordApi.sendMessage(message.channelId, "❌ Invalid date format. Use YYYY-MM-DD.");
+            return;
+          }
+          // Set endDate to end of day
+          endDate.setHours(23, 59, 59, 999);
+          try {
+            const result = memory.forgetRange(chatId, startDate, endDate);
+            await discordApi.sendMessage(message.channelId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions in date range.`);
+          } catch (err) {
+            logError("main", "Forget range failed (Discord)", err);
+            await discordApi.sendMessage(message.channelId, "❌ Forget failed.");
+          }
+          return;
+        }
+
+        if (args.startsWith("session ")) {
+          const sessionId = args.slice("session ".length).trim();
+          if (!sessionId) {
+            await discordApi.sendMessage(message.channelId, "Usage: /forget session <session-id>");
+            return;
+          }
+          try {
+            const result = memory.forgetSession(chatId, sessionId);
+            await discordApi.sendMessage(message.channelId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions for session.`);
+          } catch (err) {
+            logError("main", "Forget session failed (Discord)", err);
+            await discordApi.sendMessage(message.channelId, "❌ Forget failed.");
+          }
+          return;
+        }
+
+        // Unknown subcommand
+        await discordApi.sendMessage(message.channelId, "Usage: /forget topic <topic> | /forget range <start> <end> | /forget session <id>");
+        return;
+      }
+
       if (busyChats.has(sessionKey)) {
         await discordApi.sendMessage(message.channelId, "⏳ Previous request still in progress...");
         return;
@@ -511,6 +929,11 @@ async function main(): Promise<void> {
         if (context) {
           prompt = context + prompt;
           logDebug("main", `Discord: prepended conversation context to prompt`);
+        }
+
+        if (memory) {
+          const chatId = parseInt(message.channelId, 10) || 0;
+          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "" });
         }
 
         const response = await transport.sendPrompt(sessionKey, prompt);

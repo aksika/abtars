@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { TranscriptWriter } from "./transcript-writer.js";
 import { TranscriptParser } from "./transcript-parser.js";
 import { MemoryManager } from "./memory-manager.js";
+import { ContextAssembler } from "./context-assembler.js";
 import { MEMORY_CONFIG_DEFAULTS, type MemoryConfig } from "./memory-config.js";
 import { initializeDatabase } from "./memory-db.js";
 import { MemoryIndex } from "./memory-index.js";
@@ -460,7 +461,9 @@ describe("Property 26: Context assembly respects token budgets", () => {
             // Write some content to scratchpad
             mm.writeScratchpad(1, "A".repeat(2000));
 
-            const result = await mm.assembleContext({
+            // Use ContextAssembler directly to verify per-tier budget enforcement
+            const assembler = new ContextAssembler(mm, config);
+            const result = await assembler.assemble({
               chatId: 1,
               userInput: "test input",
               systemPrompt: "B".repeat(500),

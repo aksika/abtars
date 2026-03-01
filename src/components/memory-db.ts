@@ -67,7 +67,8 @@ export function initializeDatabase(dbPath: string): Database.Database {
     CREATE TABLE IF NOT EXISTS embeddings (
       content_hash TEXT PRIMARY KEY,
       message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
-      vector BLOB NOT NULL
+      vector BLOB NOT NULL,
+      model_version TEXT DEFAULT 'Xenova/all-MiniLM-L6-v2'
     );
 
     -- Compaction summaries (all tiers)
@@ -82,7 +83,26 @@ export function initializeDatabase(dbPath: string): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_compactions_chat_tier_ts
       ON compactions(chat_id, tier, timestamp DESC);
+
+    -- Ingested documents metadata (Phase 2)
+    CREATE TABLE IF NOT EXISTS ingested_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id INTEGER NOT NULL,
+      source_type TEXT NOT NULL,
+      identifier TEXT NOT NULL,
+      chunk_count INTEGER NOT NULL,
+      ingested_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ingested_docs_chat
+      ON ingested_documents(chat_id);
   `);
+
+  // Migration: add model_version column to embeddings table for existing databases
+  try {
+    db.exec(`ALTER TABLE embeddings ADD COLUMN model_version TEXT DEFAULT 'Xenova/all-MiniLM-L6-v2'`);
+  } catch (_) {
+    // Column already exists — safe to ignore
+  }
 
   logInfo(TAG, `Database initialized at ${dbPath}`);
   return db;

@@ -55,10 +55,10 @@ export class VectorIndex {
       // or insert if not already cached
       this.db
         .prepare(
-          `INSERT OR REPLACE INTO embeddings (content_hash, message_id, vector)
-           VALUES (?, ?, ?)`,
+          `INSERT OR REPLACE INTO embeddings (content_hash, message_id, vector, model_version)
+           VALUES (?, ?, ?, ?)`,
         )
-        .run(contentHash, messageId, buffer);
+        .run(contentHash, messageId, buffer, this.embeddingProvider.modelVersion);
     } catch (err) {
       logError(TAG, `Failed to index embedding for message ${messageId}`, err);
     }
@@ -75,7 +75,10 @@ export class VectorIndex {
       const queryVector = await this.embeddingProvider.embed(query, this.db);
       const limit = opts?.limit ?? 10;
 
-      // Load all embeddings, optionally filtered by chatId via JOIN with messages
+      // Load embeddings matching the current model version,
+      // optionally filtered by chatId via JOIN with messages.
+      // Only same-model embeddings are compared so cosine similarity is meaningful.
+      const currentModel = this.embeddingProvider.modelVersion;
       let sql: string;
       const params: (number | string)[] = [];
 
@@ -83,10 +86,13 @@ export class VectorIndex {
         sql = `SELECT e.message_id, e.vector
                FROM embeddings e
                JOIN messages m ON m.id = e.message_id
-               WHERE e.message_id IS NOT NULL AND m.chat_id = ?`;
-        params.push(opts.chatId);
+               WHERE e.message_id IS NOT NULL AND m.chat_id = ?
+                 AND e.model_version = ?`;
+        params.push(opts.chatId, currentModel);
       } else {
-        sql = `SELECT message_id, vector FROM embeddings WHERE message_id IS NOT NULL`;
+        sql = `SELECT message_id, vector FROM embeddings
+               WHERE message_id IS NOT NULL AND model_version = ?`;
+        params.push(currentModel);
       }
 
       const rows = this.db.prepare(sql).all(...params) as Array<{

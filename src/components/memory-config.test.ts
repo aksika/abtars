@@ -43,6 +43,7 @@ describe("loadMemoryConfig", () => {
       recalled: 600,
       working: 2000,
     });
+    expect(cfg.rollingBufferSize).toBe(20);
   });
 
   // --- MEMORY_ENABLED ---
@@ -167,5 +168,22 @@ describe("loadMemoryConfig", () => {
     expect(cfg.contextBudget.soul).toBe(500);
     expect(cfg.contextBudget.scratchpad).toBe(300);
     expect(logger.logWarn).toHaveBeenCalledTimes(2);
+  });
+
+  // --- MEMORY_ROLLING_BUFFER_SIZE ---
+
+  it("parses MEMORY_ROLLING_BUFFER_SIZE", () => {
+    process.env["MEMORY_ROLLING_BUFFER_SIZE"] = "50";
+    expect(loadMemoryConfig().rollingBufferSize).toBe(50);
+  });
+
+  it("falls back to default for invalid MEMORY_ROLLING_BUFFER_SIZE", () => {
+    process.env["MEMORY_ROLLING_BUFFER_SIZE"] = "nope";
+    const cfg = loadMemoryConfig();
+    expect(cfg.rollingBufferSize).toBe(20);
+    expect(logger.logWarn).toHaveBeenCalledWith(
+      "memory-config",
+      expect.stringContaining("MEMORY_ROLLING_BUFFER_SIZE"),
+    );
   });
 });

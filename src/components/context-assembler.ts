@@ -17,10 +17,55 @@ import type { AssembledContext, MessageRecord } from "../types/index.js";
 export class ContextAssembler {
   private readonly memoryManager: MemoryManager;
   private readonly config: MemoryConfig;
+  private llmCall: ((prompt: string, content: string) => Promise<string>) | null = null;
+  private rollingSummaries: Map<string, string> = new Map();
 
   constructor(memoryManager: MemoryManager, config: MemoryConfig) {
     this.memoryManager = memoryManager;
     this.config = config;
+  }
+
+  /** Register the LLM callback for rolling summary generation. */
+  setLlmCall(llmCall: (prompt: string, content: string) => Promise<string>): void {
+    this.llmCall = llmCall;
+  }
+
+  /**
+   * Incrementally update the rolling summary when messages fall out of the buffer window.
+   * Uses LlmCall to compress displaced messages into the existing summary.
+   * Returns empty string if LlmCall is unavailable (fallback handled by caller).
+   */
+  async updateRollingSummary(params: {
+    channelKey: string;
+    displacedMessages: MessageRecord[];
+    existingSummary: string;
+  }): Promise<string> {
+    const { channelKey, displacedMessages, existingSummary } = params;
+
+    if (!this.llmCall) {
+      return "";
+    }
+
+    if (displacedMessages.length === 0) {
+      return existingSummary;
+    }
+
+    const formattedMessages = displacedMessages
+      .map((m) => `${m.role}: ${m.content}`)
+      .join("\n");
+
+    const prompt =
+      "You are a conversation summarizer. Incorporate the following new messages into the existing summary. " +
+      "Produce a concise, updated summary that preserves all important information. " +
+      "If the existing summary is empty, create a new summary from the messages.";
+
+    const content = existingSummary
+      ? `Existing summary:\n${existingSummary}\n\nNew messages to incorporate:\n${formattedMessages}`
+      : `Messages to summarize:\n${formattedMessages}`;
+
+    const updatedSummary = await this.llmCall(prompt, content);
+    this.rollingSummaries.set(channelKey, updatedSummary);
+    return updatedSummary;
   }
 
   /** Estimate token count using chars / 4 heuristic. */
@@ -51,7 +96,15 @@ export class ContextAssembler {
     const budget = this.config.contextBudget;
 
     const sections: string[] = [];
-    const usage = { soul: 0, scratchpad: 0, recalled: 0, working: 0, input: 0, total: 0 };
+    const usage = {
+      soul: 0,
+      scratchpad: 0,
+      recalled: 0,
+      working: 0,
+      input: 0,
+      total: 0,
+      rollingSummary: 0,
+    };
 
     // 1. Soul + User Core Facts
     const soulSection = this.buildSoulSection(chatId, systemPrompt, budget.soul);
@@ -74,11 +127,44 @@ export class ContextAssembler {
       usage.recalled = recalledSection.tokens;
     }
 
-    // 4. Working Memory
-    const workingSection = this.buildWorkingMemorySection(workingMemory, budget.working);
+    // 4. Working Memory — with rolling summary for long conversations
+    let rollingSummaryText = "";
+    let recentMessages = workingMemory;
+
+    if (workingMemory.length > this.config.rollingBufferSize) {
+      const bufferSize = this.config.rollingBufferSize;
+      recentMessages = workingMemory.slice(-bufferSize);
+      const displacedMessages = workingMemory.slice(0, -bufferSize);
+      const channelKey = String(chatId);
+
+      // Try to generate/update rolling summary via LLM
+      const existingSummary = this.rollingSummaries.get(channelKey) ?? "";
+      rollingSummaryText = await this.updateRollingSummary({
+        channelKey,
+        displacedMessages,
+        existingSummary,
+      });
+
+      // If updateRollingSummary returned empty (LlmCall unavailable), fall back to
+      // simple truncation — just use the recent messages that fit the budget
+      if (!rollingSummaryText) {
+        rollingSummaryText = "";
+      }
+    } else {
+      // Conversation fits within buffer — use cached summary if available
+      const channelKey = String(chatId);
+      rollingSummaryText = this.rollingSummaries.get(channelKey) ?? "";
+    }
+
+    const workingSection = this.buildWorkingMemorySection(
+      recentMessages,
+      budget.working,
+      rollingSummaryText,
+    );
     if (workingSection.text) {
       sections.push(workingSection.text);
       usage.working = workingSection.tokens;
+      usage.rollingSummary = workingSection.rollingSummaryTokens;
     }
 
     // 5. New Input
@@ -153,41 +239,66 @@ export class ContextAssembler {
   private buildWorkingMemorySection(
     workingMemory: MessageRecord[],
     budget: number,
-  ): { text: string; tokens: number } {
-    if (!workingMemory || workingMemory.length === 0) return { text: "", tokens: 0 };
+    rollingSummary?: string,
+  ): { text: string; tokens: number; rollingSummaryTokens: number } {
+    if (!workingMemory || workingMemory.length === 0) {
+      return { text: "", tokens: 0, rollingSummaryTokens: 0 };
+    }
 
     const header = "[CONVERSATION]\n";
     const maxChars = budget * 4;
-    let totalChars = header.length;
+    let rollingSummaryTokens = 0;
+    let summaryBlock = "";
+
+    // If rolling summary exists, prepend it and count against the working memory budget
+    if (rollingSummary) {
+      summaryBlock = `[ROLLING SUMMARY]\n${rollingSummary}\n\n`;
+      const summaryChars = summaryBlock.length;
+
+      if (summaryChars >= maxChars) {
+        // Summary alone exceeds budget — truncate it and return with no messages
+        const truncated = this.truncateToTokenBudget(summaryBlock, budget);
+        rollingSummaryTokens = this.estimateTokens(truncated);
+        return { text: truncated, tokens: rollingSummaryTokens, rollingSummaryTokens };
+      }
+
+      rollingSummaryTokens = this.estimateTokens(summaryBlock);
+    }
+
+    // Remaining budget after rolling summary
+    const remainingChars = maxChars - summaryBlock.length;
 
     // Format all messages
     const formatted = workingMemory.map(
       (m) => `${m.role}: ${m.content}`,
     );
 
-    // Calculate total size
+    // Calculate total size for messages + header
     const fullSize = formatted.reduce((sum, line) => sum + line.length + 1, 0) + header.length;
 
-    if (fullSize <= maxChars) {
+    if (fullSize <= remainingChars) {
       // Everything fits
-      const raw = header + formatted.join("\n");
-      return { text: raw, tokens: this.estimateTokens(raw) };
+      const raw = summaryBlock + header + formatted.join("\n");
+      return { text: raw, tokens: this.estimateTokens(raw), rollingSummaryTokens };
     }
 
     // Truncate oldest messages first — keep most recent
     const kept: string[] = [];
-    totalChars = header.length;
+    let totalChars = header.length;
 
     for (let i = formatted.length - 1; i >= 0; i--) {
       const line = formatted[i]!;
-      if (totalChars + line.length + 1 > maxChars) break;
+      if (totalChars + line.length + 1 > remainingChars) break;
       kept.unshift(line);
       totalChars += line.length + 1;
     }
 
-    if (kept.length === 0) return { text: "", tokens: 0 };
+    if (kept.length === 0 && !summaryBlock) {
+      return { text: "", tokens: 0, rollingSummaryTokens: 0 };
+    }
 
-    const raw = header + kept.join("\n");
-    return { text: raw, tokens: this.estimateTokens(raw) };
+    const messagePart = kept.length > 0 ? header + kept.join("\n") : "";
+    const raw = summaryBlock ? summaryBlock + messagePart : messagePart;
+    return { text: raw, tokens: this.estimateTokens(raw), rollingSummaryTokens };
   }
 }

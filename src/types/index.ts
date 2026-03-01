@@ -34,6 +34,11 @@ export type {
   VectorSearchResult,
   SearchOptions,
   AssembledContext,
+  IngestionSource,
+  IngestionResult,
+  IngestedDocument,
+  Reflection,
+  ForgetResult,
 } from "./memory.js";
 
 export type {
