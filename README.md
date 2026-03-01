@@ -60,26 +60,43 @@ WORKING_DIR=/path/to/your/project
 TRUST_MODE=true
 ```
 
-### 5. Start the tmux session
+### 5. Deploy and start
 
 ```bash
-chmod +x scripts/tmux-session.sh
-./scripts/tmux-session.sh
+# First time: build + deploy + start tmux session
+chmod +x scripts/deploy.sh
+./scripts/deploy.sh
 ```
-
-This starts kiro-cli inside a tmux session named `kiro-bridge`. You can attach to it anytime with `tmux attach -t kiro-bridge`.
 
 ### 6. Start the bridge
 
+**Option A — Launcher script (from anywhere):**
+
 ```bash
-npm run build
-npm start
+~/.agentbridge/agentbridge.sh                # Discord (default)
+~/.agentbridge/agentbridge.sh --telegram     # Telegram only
+~/.agentbridge/agentbridge.sh --all          # Both platforms
+~/.agentbridge/agentbridge.sh stop           # Stop everything
 ```
 
-Or in dev mode (no build step):
+The launcher handles nvm, starts the tmux/kiro-cli session if needed, and runs the bridge.
+
+**Option B — Manual (from project directory):**
 
 ```bash
-npm run dev
+cd /mnt/c/Users/qakosal/workspace/agent/agentbridge
+
+# 1. Start the tmux session (if not already running)
+./scripts/tmux-session.sh
+
+# 2. Start the bridge
+npm start -- --discord      # or --telegram, --all
+```
+
+Dev mode (no build step):
+
+```bash
+npm run dev -- --telegram
 ```
 
 ## Usage

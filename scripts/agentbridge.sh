@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# agentbridge.sh — One-command launcher for the AgentBridge.
+#
+# Ensures the tmux/kiro-cli session is running, then starts the bridge.
+# Deployed to ~/.agentbridge/ by deploy.sh
+#
+# Usage:
+#   ~/.agentbridge/agentbridge.sh                  # default: --discord
+#   ~/.agentbridge/agentbridge.sh --telegram
+#   ~/.agentbridge/agentbridge.sh --all
+#   ~/.agentbridge/agentbridge.sh stop             # kill bridge + tmux session
+
+set -euo pipefail
+
+AB_HOME="${HOME}/.agentbridge"
+PROJECT_DIR="/mnt/c/Users/qakosal/workspace/agent/agentbridge"
+PLATFORM="${1:---discord}"
+
+# Load env
+if [ -f "$AB_HOME/.env" ]; then
+  set -a; source "$AB_HOME/.env"; set +a
+fi
+
+SESSION="${TMUX_SESSION:-kiro-bridge}"
+
+# --- stop command ---
+if [ "$PLATFORM" = "stop" ]; then
+  echo "🛑 Stopping agentbridge..."
+  # Kill the bridge process if running
+  pkill -f "node.*dist/main.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
+  # Kill tmux session
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+    echo "   tmux session '$SESSION' killed."
+  else
+    echo "   tmux session '$SESSION' not running."
+  fi
+  exit 0
+fi
+
+# --- ensure nvm is loaded ---
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+echo "🚀 AgentBridge launcher"
+echo "   Platform: $PLATFORM"
+echo "   Node:     $(node --version)"
+echo ""
+
+# --- ensure tmux session is running ---
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "✅ tmux session '$SESSION' already running."
+else
+  echo "🔄 Starting tmux session '$SESSION'..."
+  "$PROJECT_DIR/scripts/tmux-session.sh"
+  sleep 2
+fi
+
+# --- start the bridge ---
+echo "🌉 Starting bridge..."
+cd "$PROJECT_DIR"
+exec node dist/main.js "$PLATFORM"

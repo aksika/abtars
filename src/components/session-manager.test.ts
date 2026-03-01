@@ -40,24 +40,24 @@ describe("SessionManager + MemoryManager integration", () => {
   });
 
   it("getOrCreateSession persists session to memory", async () => {
-    const session = await sm.getOrCreateSession(42);
-    expect(session.channelKey).toBe(42);
+    const session = await sm.getOrCreateSession("42");
+    expect(session.channelKey).toBe("42");
     expect(session.acpSessionId).toBe("acp-sess-1");
 
     // Session should be in SQLite
     const restored = memory.restoreSessions(999_999_999);
     expect(restored).toHaveLength(1);
-    expect(restored[0]!.channelKey).toBe(42);
+    expect(restored[0]!.channelKey).toBe("42");
     expect(restored[0]!.acpSessionId).toBe("acp-sess-1");
   });
 
   it("getOrCreateSession touches existing session in memory", async () => {
-    const session = await sm.getOrCreateSession(10);
+    const session = await sm.getOrCreateSession("10");
     const firstActivity = session.lastActivityAt;
 
     // Wait a tick so timestamp differs
     await new Promise((r) => setTimeout(r, 10));
-    await sm.getOrCreateSession(10);
+    await sm.getOrCreateSession("10");
 
     const restored = memory.restoreSessions(999_999_999);
     expect(restored).toHaveLength(1);
@@ -65,8 +65,8 @@ describe("SessionManager + MemoryManager integration", () => {
   });
 
   it("resetSession deactivates session in memory", async () => {
-    await sm.getOrCreateSession(20);
-    await sm.resetSession(20);
+    await sm.getOrCreateSession("20");
+    await sm.resetSession("20");
 
     // Old session should be deactivated, new one should be active
     const restored = memory.restoreSessions(999_999_999);
@@ -77,8 +77,8 @@ describe("SessionManager + MemoryManager integration", () => {
 
   it("restoreFromMemory loads sessions from SQLite", async () => {
     // Create sessions with first SessionManager
-    await sm.getOrCreateSession(100);
-    await sm.getOrCreateSession(200);
+    await sm.getOrCreateSession("100");
+    await sm.getOrCreateSession("200");
 
     // Create a new SessionManager (simulating restart)
     const sm2 = new SessionManager(acpClient, "/tmp/work", memory);
@@ -86,11 +86,11 @@ describe("SessionManager + MemoryManager integration", () => {
 
     expect(count).toBe(2);
     // Both sessions should be accessible
-    expect(sm2.getSession(100)).toBeDefined();
-    expect(sm2.getSession(200)).toBeDefined();
+    expect(sm2.getSession("100")).toBeDefined();
+    expect(sm2.getSession("200")).toBeDefined();
     // They get new ACP session IDs (since ACP backend is fresh)
-    expect(sm2.getSession(100)!.acpSessionId).toBe("acp-sess-3");
-    expect(sm2.getSession(200)!.acpSessionId).toBe("acp-sess-4");
+    expect(sm2.getSession("100")!.acpSessionId).toBe("acp-sess-3");
+    expect(sm2.getSession("200")!.acpSessionId).toBe("acp-sess-4");
   });
 
   it("restoreFromMemory skips stale sessions", async () => {
@@ -113,25 +113,25 @@ describe("SessionManager + MemoryManager integration", () => {
 
   it("works without memory (null memory)", async () => {
     const smNoMem = new SessionManager(acpClient, "/tmp/work");
-    const session = await smNoMem.getOrCreateSession(50);
-    expect(session.channelKey).toBe(50);
+    const session = await smNoMem.getOrCreateSession("50");
+    expect(session.channelKey).toBe("50");
 
-    await smNoMem.resetSession(50);
+    await smNoMem.resetSession("50");
     const count = await smNoMem.restoreFromMemory();
     expect(count).toBe(0);
   });
 
   it("handleCrash creates new session and persists it", async () => {
-    await sm.getOrCreateSession(60);
-    const msg = await sm.handleCrash(60);
+    await sm.getOrCreateSession("60");
+    const msg = await sm.handleCrash("60");
 
     expect(msg).toContain("new session");
-    const session = sm.getSession(60);
+    const session = sm.getSession("60");
     expect(session).toBeDefined();
 
     const restored = memory.restoreSessions(999_999_999);
     // Should have the new session persisted
-    const match = restored.find((s) => s.channelKey === 60);
+    const match = restored.find((s) => s.channelKey === "60");
     expect(match).toBeDefined();
   });
 });

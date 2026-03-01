@@ -1,6 +1,25 @@
 import type Database from "better-sqlite3";
 import type { MessageRecord, SearchResult } from "../types/index.js";
 
+const FTS5_SPECIAL_CHARS = /[",()*^+\-:{}]/g;
+const FTS5_OPERATORS = new Set(["and", "or", "not", "near"]);
+
+/**
+ * Sanitize a raw query string for safe use in an FTS5 MATCH clause.
+ *
+ * Strips FTS5 special characters, removes operator keywords, and wraps
+ * each surviving token in double quotes to force literal matching.
+ * Returns empty string if no valid tokens remain.
+ */
+export function sanitizeFtsQuery(query: string): string {
+  const stripped = query.replace(FTS5_SPECIAL_CHARS, " ");
+  const tokens = stripped
+    .split(/\s+/)
+    .filter((t) => t.length > 0 && !FTS5_OPERATORS.has(t.toLowerCase()));
+  if (tokens.length === 0) return "";
+  return tokens.map((t) => `"${t}"`).join(" ");
+}
+
 /**
  * SQLite FTS5 full-text search index over conversation messages.
  *
@@ -51,8 +70,11 @@ export class MemoryIndex {
   ): SearchResult[] {
     if (!query.trim()) return [];
 
+    const sanitizedQuery = sanitizeFtsQuery(query);
+    if (!sanitizedQuery) return [];
+
     const conditions: string[] = ["messages_fts MATCH ?"];
-    const params: (string | number)[] = [query];
+    const params: (string | number)[] = [sanitizedQuery];
 
     if (opts?.chatId !== undefined) {
       conditions.push("m.chat_id = ?");

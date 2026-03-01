@@ -39,6 +39,11 @@ echo "📝 Deploying steering files..."
 mkdir -p "$AB_HOME/.kiro/steering"
 cp "$PROJECT_DIR/skills/CHATS.md" "$AB_HOME/.kiro/steering/CHATS.md"
 
+# 4. Deploy launcher script
+echo "🚀 Deploying launcher..."
+cp "$PROJECT_DIR/scripts/agentbridge.sh" "$AB_HOME/agentbridge.sh"
+chmod +x "$AB_HOME/agentbridge.sh"
+
 # 4. Restart tmux session (unless --quick)
 if [ "$QUICK" = false ]; then
   echo "🔄 Restarting tmux session..."
@@ -62,4 +67,6 @@ echo "Next steps:"
 if [ "$QUICK" = true ]; then
   echo "  Restart tmux:  tmux kill-session -t kiro-bridge && ./scripts/tmux-session.sh"
 fi
-echo "  Start bridge:  npm run dev -- --discord  (or --all, --telegram)"
+echo "  Start bridge:  ~/.agentbridge/agentbridge.sh"
+echo "  Start bridge:  ~/.agentbridge/agentbridge.sh --all"
+echo "  Stop bridge:   ~/.agentbridge/agentbridge.sh stop"

@@ -27,7 +27,7 @@ export class DiscordApi {
       ],
     });
 
-    this.client.on("ready", () => {
+    this.client.on("clientReady", () => {
       this.ready = true;
       logInfo(TAG, `Connected as ${this.client.user?.tag ?? "unknown"}`);
     });
@@ -50,11 +50,11 @@ export class DiscordApi {
         reject(err);
       };
       const cleanup = () => {
-        this.client.removeListener("ready", onReady);
+        this.client.removeListener("clientReady", onReady);
         this.client.removeListener("error", onError);
       };
 
-      this.client.once("ready", onReady);
+      this.client.once("clientReady", onReady);
       this.client.once("error", onError);
 
       this.client.login(this.token).catch((err: unknown) => {
