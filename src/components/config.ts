@@ -116,7 +116,11 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- WORKING_DIR (optional, default cwd) ---
-  const workingDir = process.env["WORKING_DIR"] || CONFIG_DEFAULTS.workingDir;
+  let workingDir = process.env["WORKING_DIR"] || CONFIG_DEFAULTS.workingDir;
+  // Expand ~ to home directory (Node doesn't do this automatically)
+  if (workingDir.startsWith("~")) {
+    workingDir = resolve(homedir(), workingDir.slice(1).replace(/^[/\\]/, ""));
+  }
   try {
     const info = await stat(workingDir);
     if (!info.isDirectory()) {
@@ -194,10 +198,19 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const discordBotToken = process.env["DISCORD_BOT_TOKEN"]?.trim() || undefined;
   const discordEnabled = !!discordBotToken;
 
+  let discordAppId: string | undefined;
   let discordAllowedUserIds: Set<string> | undefined;
   let discordAllowedChannelIds: Set<string> | undefined;
 
   if (discordEnabled) {
+    // --- DISCORD_APP_ID (required when Discord enabled) ---
+    const rawAppId = process.env["DISCORD_APP_ID"]?.trim() || undefined;
+    if (!rawAppId || !isValidSnowflake(rawAppId)) {
+      throw new Error(
+        "DISCORD_APP_ID is required and must be a valid Discord snowflake ID (17–20 digits) when DISCORD_BOT_TOKEN is set",
+      );
+    }
+    discordAppId = rawAppId;
     // --- DISCORD_ALLOWED_USER_IDS (required when Discord enabled) ---
     const rawDiscordUserIds = process.env["DISCORD_ALLOWED_USER_IDS"] ?? "";
     discordAllowedUserIds = parseSnowflakeList(rawDiscordUserIds, "DISCORD_ALLOWED_USER_IDS");
@@ -207,13 +220,17 @@ export async function loadAndValidateConfig(): Promise<Config> {
       );
     }
 
-    // --- DISCORD_ALLOWED_CHANNEL_IDS (required when Discord enabled) ---
-    const rawDiscordChannelIds = process.env["DISCORD_ALLOWED_CHANNEL_IDS"] ?? "";
-    discordAllowedChannelIds = parseSnowflakeList(rawDiscordChannelIds, "DISCORD_ALLOWED_CHANNEL_IDS");
-    if (discordAllowedChannelIds.size === 0) {
-      throw new Error(
-        "DISCORD_ALLOWED_CHANNEL_IDS is required and must contain at least one valid Discord snowflake ID when DISCORD_BOT_TOKEN is set",
-      );
+    // --- DISCORD_ALLOWED_CHANNEL_IDS (required when Discord enabled, "*" = all channels) ---
+    const rawDiscordChannelIds = process.env["DISCORD_ALLOWED_CHANNEL_IDS"]?.trim() ?? "";
+    if (rawDiscordChannelIds === "*") {
+      discordAllowedChannelIds = new Set(["*"]);
+    } else {
+      discordAllowedChannelIds = parseSnowflakeList(rawDiscordChannelIds, "DISCORD_ALLOWED_CHANNEL_IDS");
+      if (discordAllowedChannelIds.size === 0) {
+        throw new Error(
+          "DISCORD_ALLOWED_CHANNEL_IDS is required when DISCORD_BOT_TOKEN is set — use \"*\" for all channels or provide comma-separated snowflake IDs",
+        );
+      }
     }
   }
 
@@ -274,6 +291,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
     ttsEnabled,
     ttsVoice,
     discordBotToken,
+    discordAppId,
     discordAllowedUserIds,
     discordAllowedChannelIds,
     discordB2bChannelId,

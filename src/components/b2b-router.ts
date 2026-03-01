@@ -73,19 +73,20 @@ export class B2BRouter {
     logDebug(TAG, `Queuing REQUEST (queue size: ${this.queueSize})`);
 
     const sessionKey = `b2b:${this.b2bChannelId}`;
+    // Reply to the originating channel (thread ID if in a thread, otherwise the B2B channel)
+    const replyChannelId = message.channelId;
 
     this.processingChain = this.processingChain.then(async () => {
       try {
         logDebug(TAG, `Processing REQUEST: ${content.substring(0, 80)}…`);
         const response = await this.onPrompt(sessionKey, content);
-        const outbound = this.formatOutbound("RESPONSE", response);
-        await this.sendToB2B(outbound);
+        await this.sendToB2B(response, replyChannelId);
       } catch (err) {
         const description = err instanceof Error ? err.message : String(err);
         logError(TAG, "Transport error during B2B prompt", err);
         try {
           const statusMsg = this.formatOutbound("STATUS", `error: ${description}`);
-          await this.sendToB2B(statusMsg);
+          await this.sendToB2B(statusMsg, replyChannelId);
         } catch (sendErr) {
           logError(TAG, "Failed to send error status to B2B channel", sendErr);
         }
@@ -115,8 +116,8 @@ export class B2BRouter {
     return `[${tag}] ${content}`;
   }
 
-  /** Send a message to the B2B channel, respecting rate limits. */
-  async sendToB2B(text: string): Promise<void> {
+  /** Send a message to a B2B channel (or thread), respecting rate limits. */
+  async sendToB2B(text: string, targetChannelId?: string): Promise<void> {
     const now = Date.now();
     const elapsed = now - this.lastSendTime;
     if (elapsed < this.rateLimitMs) {
@@ -124,7 +125,8 @@ export class B2BRouter {
       logDebug(TAG, `Rate limiting: waiting ${delay}ms`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
-    await this.discordApi.sendMessage(this.b2bChannelId, text);
+    const channelId = targetChannelId ?? this.b2bChannelId;
+    await this.discordApi.sendMessage(channelId, text);
     this.lastSendTime = Date.now();
   }
 }

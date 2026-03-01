@@ -10,6 +10,7 @@ import { synthesizeSpeech, type TtsConfig } from "./components/tts.js";
 import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
+import { ConversationBuffer } from "./components/conversation-buffer.js";
 import { DiscordApi } from "./components/discord-api.js";
 import { DiscordPoller } from "./components/discord-poller.js";
 import { DiscordSecurityGate } from "./components/discord-security-gate.js";
@@ -18,9 +19,52 @@ import { B2BRouter } from "./components/b2b-router.js";
 import type { IKiroTransport } from "./components/kiro-transport.js";
 import type { TelegramUpdate, DiscordInboundMessage } from "./types/index.js";
 
+/**
+ * Parse --telegram / --discord / --all CLI flags.
+ * No flags → telegram only (default).
+ * --all → every platform.
+ * Individual flags can be combined: --telegram --discord
+ */
+function parsePlatformFlags(): { telegram: boolean; discord: boolean } {
+  const args = process.argv.slice(2);
+  if (args.includes("--all")) return { telegram: true, discord: true };
+  const hasTelegram = args.includes("--telegram");
+  const hasDiscord = args.includes("--discord");
+  if (!hasTelegram && !hasDiscord) return { telegram: true, discord: false };
+  return { telegram: hasTelegram, discord: hasDiscord };
+}
+
+/** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
+function stripDiscordMentions(text: string, botAppId: string): string {
+  return text.replace(new RegExp(`<@!?${botAppId}>`, "g"), "").replace(/\s{2,}/g, " ").trim();
+}
+
+/** Send a platform context announcement to the transport so the LLM knows which platform is active. */
+async function announcePlatform(
+  transport: IKiroTransport,
+  platform: string,
+): Promise<void> {
+  const ts = new Date().toISOString();
+  const msg = `[SYSTEM] Platform: ${platform} | Connected at: ${ts} | Refer to your CHATS.md steering for ${platform}-specific behavior.`;
+  const sessionKey = `system:${platform.toLowerCase()}`;
+  try {
+    await transport.sendPrompt(sessionKey, msg);
+    logInfo("main", `📢 Announced ${platform} platform to transport`);
+  } catch (err) {
+    logWarn("main", `Failed to announce ${platform} platform: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function main(): Promise<void> {
+  const platforms = parsePlatformFlags();
   const config = await loadAndValidateConfig();
   setLogLevel(config.logLevel);
+
+  const enabledList = [
+    platforms.telegram && "telegram",
+    platforms.discord && "discord",
+  ].filter(Boolean).join(", ");
+  logInfo("main", `🚀 Bridge starting (platforms=${enabledList}, log=${config.logLevel})`);
 
   // Initialize memory layer
   const memoryConfig = loadMemoryConfig();
@@ -33,14 +77,12 @@ async function main(): Promise<void> {
     logInfo("main", "🧠 Memory disabled");
   }
 
-  logInfo("main", `🚀 Bridge starting (log=${config.logLevel})`);
-
-  const telegramApi = new TelegramApi(config.telegramBotToken);
-  const securityGate = new SecurityGate(config.allowedUserIds);
   const formatter = new ResponseFormatter();
 
-  let transport: IKiroTransport;
+  // Shared conversation buffer for both platforms
+  const conversationBuffer = new ConversationBuffer(50);
 
+  let transport: IKiroTransport;
   if (config.kiroTransport === "tmux") {
     logInfo("main", `🖥️  tmux transport (session: ${config.tmuxSession})`);
     transport = new TmuxClient(
@@ -52,14 +94,8 @@ async function main(): Promise<void> {
     logInfo("main", "🔌 ACP transport");
     transport = new AcpTransport(config.kiroCLIPath, config.workingDir);
   }
-
   await transport.initialize();
   logInfo("main", "✅ Transport ready");
-
-  // Fetch bot username for @mention detection in groups
-  const botInfo = await telegramApi.getMe();
-  const botUsername = botInfo.username?.toLowerCase() ?? "";
-  logInfo("main", `🤖 Bot: @${botInfo.username}`);
 
   // STT config
   const sttConfig: SttConfig | null = config.sttEnabled
@@ -79,345 +115,305 @@ async function main(): Promise<void> {
 
   const busyChats = new Set<string>();
 
-  // Group conversation history buffer — keyed by "chatId:threadId"
-  const GROUP_HISTORY_LIMIT = 50;
-  type HistoryEntry = { sender: string; text: string; ts: number };
-  const groupHistory = new Map<string, HistoryEntry[]>();
+  // --- Telegram wiring (conditional) ---
+  let telegramPoller: TelegramPoller | null = null;
 
-  function historyKey(chatId: number, threadId?: number): string {
-    return threadId != null ? `${chatId}:${threadId}` : `${chatId}`;
-  }
+  if (platforms.telegram) {
+    const telegramApi = new TelegramApi(config.telegramBotToken);
+    const securityGate = new SecurityGate(config.allowedUserIds);
 
-  function pushHistory(chatId: number, threadId: number | undefined, sender: string, text: string): void {
-    const key = historyKey(chatId, threadId);
-    let entries = groupHistory.get(key);
-    if (!entries) {
-      entries = [];
-      groupHistory.set(key, entries);
-    }
-    entries.push({ sender, text, ts: Date.now() });
-    // Trim to limit
-    while (entries.length > GROUP_HISTORY_LIMIT) entries.shift();
-  }
+    const botInfo = await telegramApi.getMe();
+    const botUsername = botInfo.username?.toLowerCase() ?? "";
+    logInfo("main", `🤖 Telegram bot: @${botInfo.username}`);
 
-  function drainHistory(chatId: number, threadId?: number): string {
-    const key = historyKey(chatId, threadId);
-    const entries = groupHistory.get(key);
-    if (!entries || entries.length === 0) return "";
-    const lines = entries.map((e) => `[${e.sender}]: ${e.text}`);
-    groupHistory.delete(key); // Clear after draining
-    return "--- Recent conversation context ---\n" + lines.join("\n") + "\n--- End context ---\n\n";
-  }
-
-  /** Set an emoji reaction on a message. Pass empty string to remove. Silently ignores failures. */
-  async function react(chatId: number, messageId: number, emoji: string): Promise<void> {
-    try {
-      const reaction = emoji ? [{ type: "emoji" as const, emoji }] : [];
-      await telegramApi.setMessageReaction(chatId, messageId, reaction);
-    } catch (err) {
-      logDebug("main", `React failed (${emoji || "remove"}): ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  async function handleUpdate(update: TelegramUpdate): Promise<void> {
-    logDebug("main", `Update: ${JSON.stringify(update).slice(0, 200)}`);
-
-    if (update.callback_query) {
-      await telegramApi.answerCallbackQuery(update.callback_query.id);
-      return;
-    }
-
-    // Handle emoji reactions on messages
-    if (update.message_reaction) {
-      const reaction = update.message_reaction;
-      const user = reaction.user;
-      if (!user || user.is_bot) return;
-
-      const oldEmojis = new Set(reaction.old_reaction.map((r) => r.emoji));
-      const added = reaction.new_reaction.filter((r) => !oldEmojis.has(r.emoji));
-      if (added.length > 0) {
-        const senderName = user.first_name || user.username || `id:${user.id}`;
-        const emojis = added.map((r) => r.emoji).join("");
-        logInfo("main", `Reaction ${emojis} from ${senderName} on msg ${reaction.message_id}`);
+    const react = async (chatId: number, messageId: number, emoji: string): Promise<void> => {
+      try {
+        const reaction = emoji ? [{ type: "emoji" as const, emoji }] : [];
+        await telegramApi.setMessageReaction(chatId, messageId, reaction);
+      } catch (err) {
+        logDebug("main", `React failed (${emoji || "remove"}): ${err instanceof Error ? err.message : String(err)}`);
       }
-      return;
-    }
+    };
 
-    const message = update.message;
-    if (!message?.from) return;
+    const tgBufferKey = (chatId: number, threadId?: number): string =>
+      threadId != null ? `tg:${chatId}:${threadId}` : `tg:${chatId}`;
 
-    const hasText = Boolean(message.text);
-    const hasVoice = Boolean(message.voice || message.audio);
-    if (!hasText && !hasVoice) return;
+    const handleUpdate = async (update: TelegramUpdate): Promise<void> => {
+      logDebug("main", `Update: ${JSON.stringify(update).slice(0, 200)}`);
 
-    const chatId = message.chat.id;
-    const threadId = message.message_thread_id;
-    const messageId = message.message_id;
-    const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
-    const senderName = message.from.first_name || message.from.username || `id:${message.from.id}`;
+      if (update.callback_query) {
+        await telegramApi.answerCallbackQuery(update.callback_query.id);
+        return;
+      }
 
-    let text = message.text ?? "";
-    let isVoiceNote = false;
-
-    // --- Voice note handling ---
-    if (hasVoice && !hasText) {
-      if (!sttConfig) {
-        if (isGroup) {
-          pushHistory(chatId, threadId, senderName, "[voice note - STT disabled]");
-        } else if (securityGate.authorize(message)) {
-          await telegramApi.sendMessage(chatId, "🎤 Voice notes require STT (set GROQ_API_KEY).", { message_thread_id: threadId });
+      if (update.message_reaction) {
+        const reaction = update.message_reaction;
+        const user = reaction.user;
+        if (!user || user.is_bot) return;
+        const oldEmojis = new Set(reaction.old_reaction.map((r) => r.emoji));
+        const added = reaction.new_reaction.filter((r) => !oldEmojis.has(r.emoji));
+        if (added.length > 0) {
+          const senderName = user.first_name || user.username || `id:${user.id}`;
+          const emojis = added.map((r) => r.emoji).join("");
+          logInfo("main", `Reaction ${emojis} from ${senderName} on msg ${reaction.message_id}`);
         }
         return;
       }
 
-      // Only transcribe for authorized users
-      if (!securityGate.authorize(message)) {
-        if (isGroup) pushHistory(chatId, threadId, senderName, "[voice note]");
-        return;
-      }
+      const message = update.message;
+      if (!message?.from) return;
 
-      try {
-        await react(chatId, messageId, "👀");
-        const voiceFile = message.voice || message.audio;
-        const fileInfo = await telegramApi.getFile(voiceFile!.file_id);
-        if (!fileInfo.file_path) throw new Error("No file_path returned");
-        const audioBuffer = await telegramApi.downloadFile(fileInfo.file_path);
-        const transcript = await transcribeAudio(audioBuffer, "voice.ogg", sttConfig);
+      const hasText = Boolean(message.text);
+      const hasVoice = Boolean(message.voice || message.audio);
+      if (!hasText && !hasVoice) return;
 
-        if (!transcript) {
-          await react(chatId, messageId, "");
+      const chatId = message.chat.id;
+      const threadId = message.message_thread_id;
+      const messageId = message.message_id;
+      const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
+      const senderName = message.from.first_name || message.from.username || `id:${message.from.id}`;
+      const bufKey = tgBufferKey(chatId, threadId);
+
+      let text = message.text ?? "";
+      let isVoiceNote = false;
+
+      // --- Voice note handling ---
+      if (hasVoice && !hasText) {
+        if (!sttConfig) {
           if (isGroup) {
-            pushHistory(chatId, threadId, senderName, "[voice note - empty]");
-          } else {
-            await telegramApi.sendMessage(chatId, "🤷 Couldn't transcribe the voice note.", { message_thread_id: threadId });
+            conversationBuffer.push(bufKey, senderName, "[voice note - STT disabled]");
+          } else if (securityGate.authorize(message)) {
+            await telegramApi.sendMessage(chatId, "🎤 Voice notes require STT (set GROQ_API_KEY).", { message_thread_id: threadId });
           }
           return;
         }
 
-        // In groups: check if transcript mentions the bot
-        if (isGroup) {
-          const mentionRe = new RegExp(`@?${botUsername}\\b`, "i");
-          if (!mentionRe.test(transcript) && !transcript.startsWith("/")) {
+        if (!securityGate.authorize(message)) {
+          if (isGroup) conversationBuffer.push(bufKey, senderName, "[voice note]");
+          return;
+        }
+
+        try {
+          await react(chatId, messageId, "👀");
+          const voiceFile = message.voice || message.audio;
+          const fileInfo = await telegramApi.getFile(voiceFile!.file_id);
+          if (!fileInfo.file_path) throw new Error("No file_path returned");
+          const audioBuffer = await telegramApi.downloadFile(fileInfo.file_path);
+          const transcript = await transcribeAudio(audioBuffer, "voice.ogg", sttConfig);
+
+          if (!transcript) {
             await react(chatId, messageId, "");
-            pushHistory(chatId, threadId, senderName, `[voice] ${transcript}`);
-            logDebug("main", `Buffered voice transcript: "${transcript.slice(0, 60)}"`);
+            if (isGroup) {
+              conversationBuffer.push(bufKey, senderName, "[voice note - empty]");
+            } else {
+              await telegramApi.sendMessage(chatId, "🤷 Couldn't transcribe the voice note.", { message_thread_id: threadId });
+            }
             return;
           }
-          text = transcript.replace(mentionRe, "").trim();
-        } else {
-          text = transcript;
-        }
 
-        isVoiceNote = true;
-        if (!text) { await react(chatId, messageId, ""); return; }
-      } catch (err) {
-        logError("main", "Voice transcription failed", err);
-        await react(chatId, messageId, "");
-        if (!isGroup) {
-          await telegramApi.sendMessage(chatId, "❌ Voice transcription failed.", { message_thread_id: threadId });
-        }
-        return;
-      }
-    }
-
-    // --- Text message group filtering ---
-    if (!isVoiceNote && isGroup) {
-      const mentionRe = new RegExp(`@${botUsername}\\b`, "i");
-      const isMention = mentionRe.test(text);
-      const isCommand = text.startsWith("/");
-
-      if (!isMention && !isCommand) {
-        pushHistory(chatId, threadId, senderName, text);
-        logDebug("main", `Buffered group msg from ${senderName}: "${text.slice(0, 60)}"`);
-        return;
-      }
-
-      if (isMention) {
-        text = text.replace(mentionRe, "").trim();
-        if (!text) return;
-      }
-    }
-
-    // Security gate — only authorized users can trigger responses (voice already checked above)
-    if (!isVoiceNote && !securityGate.authorize(message)) {
-      if (isGroup) pushHistory(chatId, threadId, senderName, text);
-      logWarn("main", `Unauthorized user ${message.from.id}`);
-      return;
-    }
-
-    const sessionKey = `telegram:${chatId}`;
-
-    if (text === "/new" || text === "/reset") {
-      await transport.resetSession(sessionKey);
-      if (isGroup) groupHistory.delete(historyKey(chatId, threadId));
-      await telegramApi.sendMessage(chatId, "🔄 New session started.", { message_thread_id: threadId });
-      logInfo("main", "Session reset");
-      return;
-    }
-
-    if (text === "/status") {
-      const status = transport.isReady ? "✅ Connected" : "❌ Disconnected";
-      const mode = config.kiroTransport.toUpperCase();
-      await telegramApi.sendMessage(chatId, `${status} (${mode} transport)`, { message_thread_id: threadId });
-      return;
-    }
-
-    if (text === "/stop" || text === "/cancel") {
-      await transport.sendInterrupt();
-      busyChats.delete(sessionKey); // Unblock the chat
-      await telegramApi.sendMessage(chatId, "🛑 Ctrl+C sent to Kiro.", { message_thread_id: threadId });
-      logInfo("main", "Ctrl+C interrupt sent");
-      return;
-    }
-
-    if (text === "/compact") {
-      if (memory) {
-        // Compaction requires an LLM call which we don't have a generic interface for yet
-        await telegramApi.sendMessage(chatId, "📦 Compaction is not yet wired to an LLM. Coming soon.", { message_thread_id: threadId });
-      } else {
-        await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
-      }
-      return;
-    }
-
-    if (text === "/facts") {
-      if (memory) {
-        const facts = memory.readUserCoreFacts(chatId);
-        const msg = facts ? `📋 Your facts:\n\n${facts}` : "📋 No facts stored yet.";
-        await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
-      } else {
-        await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
-      }
-      return;
-    }
-
-    if (text === "/scratchpad") {
-      if (memory) {
-        const pad = memory.readScratchpad(chatId);
-        const msg = pad ? `📝 Scratchpad:\n\n${pad}` : "📝 Scratchpad is empty.";
-        await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
-      } else {
-        await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
-      }
-      return;
-    }
-
-    if (busyChats.has(sessionKey)) {
-      await telegramApi.sendMessage(chatId, "⏳ Previous request still in progress...", { message_thread_id: threadId });
-      return;
-    }
-
-    let typingInterval: ReturnType<typeof setInterval> | undefined;
-    try {
-      // Record user message in memory
-      if (memory) {
-        memory.recordMessage({
-          role: "user",
-          content: text,
-          timestamp: Date.now(),
-          chatId,
-          sessionId: sessionKey,
-        });
-      }
-
-      busyChats.add(sessionKey);
-      logInfo("main", `← ${isVoiceNote ? "🎤 " : ""}"${text.slice(0, 60)}"`);
-
-      // In groups, prepend buffered conversation context
-      let prompt = text;
-      if (isGroup) {
-        const context = drainHistory(chatId, threadId);
-        if (context) {
-          prompt = context + text;
-          logDebug("main", `Prepended group context to prompt`);
-        }
-      }
-
-      // Send prompt to Kiro, then react with 👀 (shows after message is forwarded)
-      // TODO: Wire memory.assembleContext() when we have a direct LLM integration
-      const responsePromise = transport.sendPrompt(sessionKey, prompt);
-
-      // React + typing start right after sendPrompt kicks off (message is in tmux now)
-      if (!isVoiceNote) await react(chatId, messageId, "👀");
-      await telegramApi.sendChatAction(chatId, "typing", threadId);
-      typingInterval = setInterval(() => {
-        telegramApi.sendChatAction(chatId, "typing", threadId).catch(() => {});
-      }, 8000);
-
-      const response = await responsePromise;
-      logDebug("main", `Response (${response.length} chars): "${response.slice(0, 120)}"`);
-
-      if (!response || !response.trim()) {
-        logWarn("main", "Empty response from transport");
-        await react(chatId, messageId, "🤷");
-        await telegramApi.sendMessage(chatId, "🤷 Kiro returned an empty response. Try again or /reset.", { message_thread_id: threadId });
-        return;
-      }
-
-      const chunks = formatter.chunkText(response);
-      logDebug("main", `Sending ${chunks.length} chunk(s)`);
-      for (const chunk of chunks) {
-        if (chunk.trim()) {
-          await telegramApi.sendChatAction(chatId, "typing", threadId);
-          await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
-        }
-      }
-
-      // Record assistant response in memory
-      if (memory) {
-        memory.recordMessage({
-          role: "assistant",
-          content: response,
-          timestamp: Date.now(),
-          chatId,
-          sessionId: sessionKey,
-        });
-      }
-
-      // TTS: if inbound was a voice note, also reply with a voice note
-      if (isVoiceNote && ttsConfig) {
-        try {
-          await telegramApi.sendChatAction(chatId, "record_voice", threadId);
-          // Use answer-only (last "> " block) for TTS — skips tool noise
-          const ttsText = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
-            ? (transport as TmuxClient).answerOnly
-            : response;
-          const audio = await synthesizeSpeech(ttsText, ttsConfig);
-          if (audio) {
-            await telegramApi.sendVoice(chatId, audio, { message_thread_id: threadId });
-            logInfo("main", `🔊 Voice reply sent (${audio.length} bytes)`);
+          if (isGroup) {
+            const mentionRe = new RegExp(`@?${botUsername}\\b`, "i");
+            if (!mentionRe.test(transcript) && !transcript.startsWith("/")) {
+              await react(chatId, messageId, "");
+              conversationBuffer.push(bufKey, senderName, `[voice] ${transcript}`);
+              logDebug("main", `Buffered voice transcript: "${transcript.slice(0, 60)}"`);
+              return;
+            }
+            text = transcript.replace(mentionRe, "").trim();
+          } else {
+            text = transcript;
           }
+
+          isVoiceNote = true;
+          if (!text) { await react(chatId, messageId, ""); return; }
         } catch (err) {
-          logWarn("main", `TTS failed: ${err instanceof Error ? err.message : String(err)}`);
-          // Text was already sent, so just log the TTS failure
+          logError("main", "Voice transcription failed", err);
+          await react(chatId, messageId, "");
+          if (!isGroup) {
+            await telegramApi.sendMessage(chatId, "❌ Voice transcription failed.", { message_thread_id: threadId });
+          }
+          return;
         }
       }
 
-      // Remove 👀 reaction — response delivered
-      await react(chatId, messageId, "");
-      logInfo("main", `→ Sent ${chunks.length} chunk(s) to chat ${chatId}`);
-    } catch (err) {
-      logError("main", `Error for chat ${chatId}`, err);
-      await react(chatId, messageId, "");
-      await telegramApi.sendMessage(chatId, "❌ Something went wrong. Try /reset to start fresh.", { message_thread_id: threadId });
-    } finally {
-      clearInterval(typingInterval);
-      busyChats.delete(sessionKey);
-    }
-  }
+      // --- Text message group filtering ---
+      if (!isVoiceNote && isGroup) {
+        const mentionRe = new RegExp(`@${botUsername}\\b`, "i");
+        const isMention = mentionRe.test(text);
+        const isCommand = text.startsWith("/");
 
-  const telegramPoller = new TelegramPoller(telegramApi, config.pollTimeoutS, handleUpdate);
-  try {
-    telegramPoller.start();
-    logInfo("main", "📡 Telegram polling started");
-  } catch (err) {
-    logError("main", "Telegram failed to start — continuing with Discord only", err);
+        if (!isMention && !isCommand) {
+          conversationBuffer.push(bufKey, senderName, text);
+          logDebug("main", `Buffered group msg from ${senderName}: "${text.slice(0, 60)}"`);
+          return;
+        }
+
+        if (isMention) {
+          text = text.replace(mentionRe, "").trim();
+          if (!text) return;
+        }
+      }
+
+      if (!isVoiceNote && !securityGate.authorize(message)) {
+        if (isGroup) conversationBuffer.push(bufKey, senderName, text);
+        logWarn("main", `Unauthorized user ${message.from.id}`);
+        return;
+      }
+
+      const sessionKey = `telegram:${chatId}`;
+
+      if (text === "/new" || text === "/reset") {
+        await transport.resetSession(sessionKey);
+        if (isGroup) conversationBuffer.clear(bufKey);
+        await telegramApi.sendMessage(chatId, "🔄 New session started.", { message_thread_id: threadId });
+        logInfo("main", "Session reset");
+        return;
+      }
+
+      if (text === "/status") {
+        const status = transport.isReady ? "✅ Connected" : "❌ Disconnected";
+        const mode = config.kiroTransport.toUpperCase();
+        await telegramApi.sendMessage(chatId, `${status} (${mode} transport)`, { message_thread_id: threadId });
+        return;
+      }
+
+      if (text === "/stop" || text === "/cancel") {
+        await transport.sendInterrupt();
+        busyChats.delete(sessionKey);
+        await telegramApi.sendMessage(chatId, "🛑 Ctrl+C sent to Kiro.", { message_thread_id: threadId });
+        logInfo("main", "Ctrl+C interrupt sent");
+        return;
+      }
+
+      if (text === "/compact") {
+        const msg = memory
+          ? "📦 Compaction is not yet wired to an LLM. Coming soon."
+          : "🧠 Memory is disabled.";
+        await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
+        return;
+      }
+
+      if (text === "/facts") {
+        if (memory) {
+          const facts = memory.readUserCoreFacts(chatId);
+          const msg = facts ? `📋 Your facts:\n\n${facts}` : "📋 No facts stored yet.";
+          await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
+        } else {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+        }
+        return;
+      }
+
+      if (text === "/scratchpad") {
+        if (memory) {
+          const pad = memory.readScratchpad(chatId);
+          const msg = pad ? `📝 Scratchpad:\n\n${pad}` : "📝 Scratchpad is empty.";
+          await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
+        } else {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+        }
+        return;
+      }
+
+      if (busyChats.has(sessionKey)) {
+        await telegramApi.sendMessage(chatId, "⏳ Previous request still in progress...", { message_thread_id: threadId });
+        return;
+      }
+
+      let typingInterval: ReturnType<typeof setInterval> | undefined;
+      try {
+        if (memory) {
+          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
+        }
+
+        busyChats.add(sessionKey);
+        logInfo("main", `← ${isVoiceNote ? "🎤 " : ""}"${text.slice(0, 60)}"`);
+
+        // Prepend buffered conversation context
+        let prompt = text;
+        if (isGroup) {
+          const context = conversationBuffer.drain(bufKey);
+          if (context) {
+            prompt = context + text;
+            logDebug("main", `Prepended group context to prompt`);
+          }
+        }
+
+        const responsePromise = transport.sendPrompt(sessionKey, prompt);
+
+        if (!isVoiceNote) await react(chatId, messageId, "👀");
+        await telegramApi.sendChatAction(chatId, "typing", threadId);
+        typingInterval = setInterval(() => {
+          telegramApi.sendChatAction(chatId, "typing", threadId).catch(() => {});
+        }, 8000);
+
+        const response = await responsePromise;
+        logDebug("main", `Response (${response.length} chars): "${response.slice(0, 120)}"`);
+
+        if (!response || !response.trim()) {
+          logWarn("main", "Empty response from transport");
+          await react(chatId, messageId, "🤷");
+          await telegramApi.sendMessage(chatId, "🤷 Kiro returned an empty response. Try again or /reset.", { message_thread_id: threadId });
+          return;
+        }
+
+        const chunks = formatter.chunkText(response);
+        logDebug("main", `Sending ${chunks.length} chunk(s)`);
+        for (const chunk of chunks) {
+          if (chunk.trim()) {
+            await telegramApi.sendChatAction(chatId, "typing", threadId);
+            await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
+          }
+        }
+
+        if (memory) {
+          memory.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), chatId, sessionId: sessionKey });
+        }
+
+        if (isVoiceNote && ttsConfig) {
+          try {
+            await telegramApi.sendChatAction(chatId, "record_voice", threadId);
+            const ttsText = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
+              ? (transport as TmuxClient).answerOnly
+              : response;
+            const audio = await synthesizeSpeech(ttsText, ttsConfig);
+            if (audio) {
+              await telegramApi.sendVoice(chatId, audio, { message_thread_id: threadId });
+              logInfo("main", `🔊 Voice reply sent (${audio.length} bytes)`);
+            }
+          } catch (err) {
+            logWarn("main", `TTS failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        await react(chatId, messageId, "");
+        logInfo("main", `→ Sent ${chunks.length} chunk(s) to chat ${chatId}`);
+      } catch (err) {
+        logError("main", `Error for chat ${chatId}`, err);
+        await react(chatId, messageId, "");
+        await telegramApi.sendMessage(chatId, "❌ Something went wrong. Try /reset to start fresh.", { message_thread_id: threadId });
+      } finally {
+        clearInterval(typingInterval);
+        busyChats.delete(sessionKey);
+      }
+    };
+
+    telegramPoller = new TelegramPoller(telegramApi, config.pollTimeoutS, handleUpdate);
+    try {
+      telegramPoller.start();
+      logInfo("main", "📡 Telegram polling started");
+      announcePlatform(transport, "TELEGRAM").catch(() => {});
+    } catch (err) {
+      logError("main", "Telegram failed to start", err);
+    }
+  } else {
+    logInfo("main", "📡 Telegram disabled (no --telegram flag)");
   }
 
   // --- Discord wiring (conditional) ---
   let discordPoller: DiscordPoller | null = null;
 
-  if (config.discordEnabled) {
+  if (platforms.discord && config.discordEnabled) {
     const discordApi = new DiscordApi(config.discordBotToken!);
     const discordSecurityGate = new DiscordSecurityGate(
       config.discordAllowedUserIds!,
@@ -440,27 +436,42 @@ async function main(): Promise<void> {
     const handleDiscordMessage = async (message: DiscordInboundMessage): Promise<void> => {
       logDebug("main", `Discord message from ${message.authorUsername} in ${message.channelId}`);
 
-      // B2B channel messages go to B2BRouter
-      if (b2bRouter && message.channelId === config.discordB2bChannelId) {
-        await b2bRouter.handleMessage(message);
-        return;
-      }
+      const effectiveChannelId = message.parentChannelId ?? message.channelId;
 
-      // Security gate — validate user + channel
-      if (!discordSecurityGate.authorize(message.authorId, message.channelId)) {
-        logDebug("main", `Discord: unauthorized user=${message.authorId} channel=${message.channelId}`);
+      // Security gate
+      if (!discordSecurityGate.authorize(message.authorId, effectiveChannelId)) {
+        logDebug("main", `Discord: unauthorized user=${message.authorId} channel=${effectiveChannelId}`);
         return;
       }
 
       const bridgeMsg = channelAdapter.fromDiscord(message);
       const sessionKey = channelAdapter.sessionKey("discord", message.channelId);
-      const text = bridgeMsg.text.trim();
+      const bufKey = `discord:${message.channelId}`;
+      const rawText = bridgeMsg.text.trim();
 
+      if (!rawText) return;
+
+      // Pass all messages through — Kiro (the LLM) decides whether to respond
+      // based on the DISCORD_SKILL.md steering file. The bridge only handles
+      // security (allowed users/channels) and transport.
+      // Strip Kiro's own mention tag before forwarding so the model sees clean text.
+      let text = stripDiscordMentions(rawText, config.discordAppId!);
       if (!text) return;
+
+      // Include sender context so Kiro knows who's talking
+      const senderPrefix = `[${message.authorUsername}${message.authorIsBot ? " (bot)" : ""}] in #${message.channelName ?? "unknown"}: `;
+
+      // B2B routing — peer bot messages in the B2B channel go through the B2B router
+      if (b2bRouter && message.authorIsBot && effectiveChannelId === config.discordB2bChannelId) {
+        const cleanedMessage = { ...message, content: text };
+        await b2bRouter.handleMessage(cleanedMessage);
+        return;
+      }
 
       // Command handling
       if (text === "/new" || text === "/reset") {
         await transport.resetSession(sessionKey);
+        conversationBuffer.clear(bufKey);
         await discordApi.sendMessage(message.channelId, "🔄 New session started.");
         logInfo("main", `Discord session reset for ${sessionKey}`);
         return;
@@ -485,7 +496,6 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Busy check
       if (busyChats.has(sessionKey)) {
         await discordApi.sendMessage(message.channelId, "⏳ Previous request still in progress...");
         return;
@@ -495,11 +505,25 @@ async function main(): Promise<void> {
         busyChats.add(sessionKey);
         logInfo("main", `← Discord: "${text.slice(0, 60)}"`);
 
-        const response = await transport.sendPrompt(sessionKey, text);
+        // Build prompt with sender context
+        let prompt = senderPrefix + text;
+        const context = conversationBuffer.drain(bufKey);
+        if (context) {
+          prompt = context + prompt;
+          logDebug("main", `Discord: prepended conversation context to prompt`);
+        }
+
+        const response = await transport.sendPrompt(sessionKey, prompt);
 
         if (!response || !response.trim()) {
           logWarn("main", "Empty response from transport (Discord)");
           await discordApi.sendMessage(message.channelId, "🤷 Kiro returned an empty response. Try again or /reset.");
+          return;
+        }
+
+        // LLM opted out of responding (per CHATS.md steering)
+        if (response.trim() === "<NO_REPLY>") {
+          logDebug("main", "Discord: LLM returned <NO_REPLY>, skipping");
           return;
         }
 
@@ -517,21 +541,26 @@ async function main(): Promise<void> {
       } finally {
         busyChats.delete(sessionKey);
       }
-    }
+    };
 
-    discordPoller = new DiscordPoller(discordApi, handleDiscordMessage);
+    discordPoller = new DiscordPoller(discordApi, config.discordAppId!, handleDiscordMessage);
     try {
       await discordPoller.start();
       logInfo("main", "📡 Discord polling started");
+      announcePlatform(transport, "DISCORD").catch(() => {});
     } catch (err) {
-      logError("main", "Discord failed to start — continuing with Telegram only", err);
+      logError("main", "Discord failed to start", err);
       discordPoller = null;
     }
+  } else if (platforms.discord) {
+    logWarn("main", "Discord flag set but DISCORD_BOT_TOKEN not configured — skipping");
+  } else {
+    logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
   }
 
   function shutdown(): void {
     logInfo("main", "🛑 Shutting down...");
-    telegramPoller.stop();
+    if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
     transport.destroy();
     memory?.close();

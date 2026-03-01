@@ -1,7 +1,6 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import type { MemoryConfig } from "./memory-config.js";
-import type { MemoryTier } from "../types/index.js";
 import { CompactionEngine } from "./compaction-engine.js";
 import { logError, logInfo } from "./logger.js";
 

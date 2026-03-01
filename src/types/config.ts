@@ -39,6 +39,8 @@ export type Config = {
   ttsEnabled: boolean;
   /** Edge TTS voice (default: en-US-AndrewMultilingualNeural) */
   ttsVoice: string;
+  /** Discord Application ID (snowflake) — used for @mention detection */
+  discordAppId?: string;
   /** Discord bot token (optional — Discord disabled if absent) */
   discordBotToken?: string;
   /** Set of allowed Discord user IDs (snowflake strings) */

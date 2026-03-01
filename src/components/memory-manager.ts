@@ -485,7 +485,7 @@ export class MemoryManager {
 
           logInfo(TAG, `Deleted transcript ${file.path} for disk budget enforcement`);
         } catch (deleteErr) {
-          logWarn(TAG, `Failed to delete transcript ${file.path}`, deleteErr);
+          logWarn(TAG, `Failed to delete transcript ${file.path}: ${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)}`);
         }
       }
     } catch (err) {

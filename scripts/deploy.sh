@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# deploy.sh — Deploy agentbridge to ~/.agentbridge runtime directory.
+#
+# Copies .env, builds the project, and deploys steering files.
+# Run from the project root: ./scripts/deploy.sh
+#
+# Usage:
+#   ./scripts/deploy.sh          # full deploy (build + env + steering + restart tmux)
+#   ./scripts/deploy.sh --quick  # env + steering only (skip build, skip tmux restart)
+
+set -euo pipefail
+
+AB_HOME="${HOME}/.agentbridge"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+QUICK=false
+
+if [[ "${1:-}" == "--quick" ]]; then
+  QUICK=true
+fi
+
+echo "🚀 Deploying agentbridge..."
+echo "   Project: $PROJECT_DIR"
+echo "   Runtime: $AB_HOME"
+echo ""
+
+# 1. Sync .env
+echo "📋 Syncing .env..."
+cp "$PROJECT_DIR/.env" "$AB_HOME/.env"
+
+# 2. Build (unless --quick)
+if [ "$QUICK" = false ]; then
+  echo "🔨 Building..."
+  cd "$PROJECT_DIR"
+  npm run build
+fi
+
+# 3. Deploy steering files
+echo "📝 Deploying steering files..."
+mkdir -p "$AB_HOME/.kiro/steering"
+cp "$PROJECT_DIR/skills/CHATS.md" "$AB_HOME/.kiro/steering/CHATS.md"
+
+# 4. Restart tmux session (unless --quick)
+if [ "$QUICK" = false ]; then
+  echo "🔄 Restarting tmux session..."
+  # Source the deployed .env for session config
+  set -a; source "$AB_HOME/.env"; set +a
+  SESSION="${TMUX_SESSION:-kiro-bridge}"
+
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+    echo "   Killed existing session '$SESSION'"
+    sleep 1
+  fi
+
+  "$PROJECT_DIR/scripts/tmux-session.sh"
+fi
+
+echo ""
+echo "✅ Deploy complete."
+echo ""
+echo "Next steps:"
+if [ "$QUICK" = true ]; then
+  echo "  Restart tmux:  tmux kill-session -t kiro-bridge && ./scripts/tmux-session.sh"
+fi
+echo "  Start bridge:  npm run dev -- --discord  (or --all, --telegram)"

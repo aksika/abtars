@@ -13,14 +13,17 @@ const TAG = "DiscordPoller";
  */
 export class DiscordPoller {
   private readonly api: DiscordApi;
+  private readonly appId: string;
   private readonly onMessage: (message: DiscordInboundMessage) => void | Promise<void>;
   private started = false;
 
   constructor(
     api: DiscordApi,
+    appId: string,
     onMessage: (message: DiscordInboundMessage) => void | Promise<void>,
   ) {
     this.api = api;
+    this.appId = appId;
     this.onMessage = onMessage;
   }
 
@@ -32,14 +35,14 @@ export class DiscordPoller {
     await this.api.connect();
 
     this.api.onMessage((raw: Message) => {
-      // Filter out self-messages
-      const botId = this.api.botUserId;
-      if (botId && raw.author.id === botId) {
+      // Filter out self-messages (use appId from config, fallback to client user id)
+      const selfId = this.api.botUserId ?? this.appId;
+      if (raw.author.id === selfId) {
         logDebug(TAG, `Ignoring self-message ${raw.id}`);
         return;
       }
 
-      const inbound = toDiscordInboundMessage(raw);
+      const inbound = toDiscordInboundMessage(raw, this.appId);
       logDebug(TAG, `Dispatching message ${inbound.id} from ${inbound.authorUsername}`);
 
       try {
@@ -67,14 +70,25 @@ export class DiscordPoller {
 }
 
 /** Convert a raw discord.js Message to a DiscordInboundMessage. */
-function toDiscordInboundMessage(raw: Message): DiscordInboundMessage {
+function toDiscordInboundMessage(raw: Message, botId: string | null): DiscordInboundMessage {
+  const parentId = (raw.channel as any).parentId ?? null;
+  const channelName: string | null = (raw.channel as any).name ?? null;
+  // Check both discord.js parsed mentions AND raw content for the bot's mention tag
+  const mentionsBotId = botId
+    ? (raw.mentions.users.has(botId) || new RegExp(`<@!?${botId}>`).test(raw.content))
+    : false;
+  logDebug(TAG, `mentionsBotId=${mentionsBotId} (appId=${botId}, mentions=${[...raw.mentions.users.keys()].join(",")}, content=${raw.content.slice(0, 60)})`);
   return {
     id: raw.id,
     channelId: raw.channelId,
+    parentChannelId: parentId,
+    channelName,
     authorId: raw.author.id,
     authorUsername: raw.author.username,
     authorIsBot: raw.author.bot ?? false,
     content: raw.content,
     timestamp: raw.createdTimestamp,
+    mentionsBotId,
+    mentionsEveryone: raw.mentions.everyone,
   };
 }

@@ -1,8 +1,8 @@
 import { mkdirSync, readFileSync, appendFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
-import type { CompactedMemory, MemoryTier, MessageRecord } from "../types/index.js";
+import type { CompactedMemory, MemoryTier } from "../types/index.js";
 import { TranscriptParser } from "./transcript-parser.js";
 import { MemoryIndex } from "./memory-index.js";
 import { logError, logInfo } from "./logger.js";

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import { logError, logWarn, logInfo } from "./logger.js";
+import { logWarn, logInfo } from "./logger.js";
 
 const TAG = "embedding-provider";
 
@@ -22,6 +22,7 @@ export class EmbeddingProvider {
   /** Load the ONNX model. Call once at startup. */
   async initialize(): Promise<void> {
     try {
+      // @ts-ignore — optional dependency, may not be installed
       const transformers = await import("@xenova/transformers");
       const pipelineFn =
         typeof transformers.pipeline === "function"
