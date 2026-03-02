@@ -21,5 +21,9 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Large binaries
+*.exe
+*.pdf
+
 # Kiro specs (local dev artifacts)
 .kiro/
