@@ -50,6 +50,8 @@ export type MemoryConfig = {
     mmrLambda: number;
     compactThresholdPct: number;
   };
+  /** Inactivity gap in hours after midnight before daily compaction triggers. */
+  dayBoundaryHours: number;
 };
 
 const TAG = "memory-config";
@@ -91,6 +93,7 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
     mmrLambda: 0.7,
     compactThresholdPct: 85,
   },
+  dayBoundaryHours: 4,
 };
 
 /**
@@ -241,5 +244,6 @@ export function loadMemoryConfig(): MemoryConfig {
       mmrLambda: parseNumberEnvSafe("MEMORY_MMR_LAMBDA", MEMORY_CONFIG_DEFAULTS.searchEnhancements.mmrLambda),
       compactThresholdPct: parseNumberEnvSafe("MEMORY_COMPACT_THRESHOLD_PCT", MEMORY_CONFIG_DEFAULTS.searchEnhancements.compactThresholdPct),
     },
+    dayBoundaryHours: parseNumberEnvSafe("MEMORY_DAY_BOUNDARY_HOURS", MEMORY_CONFIG_DEFAULTS.dayBoundaryHours),
   };
 }

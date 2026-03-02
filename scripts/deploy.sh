@@ -34,10 +34,11 @@ if [ "$QUICK" = false ]; then
   npm run build
 fi
 
-# 3. Deploy steering files
+# 3. Deploy steering files (SOUL.md + skills as steering)
 echo "📝 Deploying steering files..."
 mkdir -p "$AB_HOME/.kiro/steering"
-cp "$PROJECT_DIR/skills/CHATS.md" "$AB_HOME/.kiro/steering/CHATS.md"
+cp "$PROJECT_DIR/personal/SOUL.md" "$AB_HOME/.kiro/steering/SOUL.md"
+cp "$PROJECT_DIR/skills/memory-search/SKILL.md" "$AB_HOME/.kiro/steering/memory-search.md"
 
 # 4. Deploy launcher script
 echo "🚀 Deploying launcher..."

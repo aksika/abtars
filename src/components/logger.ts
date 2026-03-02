@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 export type LogLevel = "off" | "low" | "debug";
 
 const LEVEL_ORDER: Record<LogLevel, number> = { off: 0, low: 1, debug: 2 };
-const LOG_DIR = resolve(homedir(), ".agentbridge");
+const LOG_DIR = resolve(homedir(), ".agentbridge", "logs");
 const LOG_FILE = resolve(LOG_DIR, "bridge.log");
 
 let currentLevel: LogLevel = "low";

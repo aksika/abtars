@@ -73,6 +73,7 @@ export class CompactionEngine {
     chatId: number;
     sessionId: string;
     llmCall: (prompt: string, content: string) => Promise<string>;
+    compactionDate?: Date;
   }): Promise<CompactedMemory | null> {
     try {
       const transcriptPath = join(
@@ -95,7 +96,9 @@ export class CompactionEngine {
       const summary = await params.llmCall(DAILY_PROMPT, content);
 
       const now = new Date();
-      const dateStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+      const dateStr = params.compactionDate
+        ? params.compactionDate.toISOString().slice(0, 10)
+        : now.toISOString().slice(0, 10); // YYYY-MM-DD
       const dailyDir = join(this.config.memoryDir, "memory", "daily", String(params.chatId));
       mkdirSync(dailyDir, { recursive: true });
       const filePath = join(dailyDir, `${dateStr}.md`);

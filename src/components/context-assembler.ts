@@ -5,11 +5,6 @@ import type { ContextWindowMonitor } from "./context-window-monitor.js";
 import type { AssembledContext, MessageRecord, SearchResult } from "../types/index.js";
 import { logWarn } from "./logger.js";
 
-/** ANSI escape: wrap text in light gray (color 245) so injected context is visually distinct from user/LLM text. */
-const GRAY = "\x1b[38;5;245m";
-const RESET = "\x1b[39m";
-const gray = (s: string): string => `${GRAY}${s}${RESET}`;
-
 /**
  * Builds the LLM context window from tiered memory sources with fixed token budgets.
  *
@@ -211,7 +206,7 @@ export class ContextAssembler {
     }
 
     // 5. New Input
-    const inputSection = `${gray("[INPUT]")}\n${userInput}`;
+    const inputSection = `[INPUT]\n${userInput}`;
     usage.input = this.estimateTokens(inputSection);
     sections.push(inputSection);
 
@@ -243,10 +238,10 @@ export class ContextAssembler {
   ): { text: string; tokens: number } {
     const parts: string[] = [];
 
-    if (systemPrompt) parts.push(`${gray("[SYSTEM]")}\n${gray(systemPrompt)}`);
+    if (systemPrompt) parts.push(`[SYSTEM]\n${systemPrompt}`);
     if (includeCoreFacts) {
       const userFacts = this.memoryManager.readUserCoreFacts(chatId);
-      if (userFacts) parts.push(`${gray("[USER FACTS]")}\n${gray(userFacts)}`);
+      if (userFacts) parts.push(`[USER FACTS]\n${userFacts}`);
     }
 
     if (parts.length === 0) return { text: "", tokens: 0 };
@@ -263,7 +258,7 @@ export class ContextAssembler {
     const scratchpad = this.memoryManager.readScratchpad(chatId);
     if (!scratchpad) return { text: "", tokens: 0 };
 
-    const raw = `${gray("[SCRATCHPAD]")}\n${gray(scratchpad)}`;
+    const raw = `[SCRATCHPAD]\n${scratchpad}`;
     const truncated = this.truncateToTokenBudget(raw, budget);
     return { text: truncated, tokens: this.estimateTokens(truncated) };
   }
@@ -304,7 +299,7 @@ export class ContextAssembler {
 
       if (snippets.length === 0) return { text: "", tokens: 0 };
 
-      const raw = `${gray("[RECALLED MEMORIES]")}\n${snippets.map(s => gray(s)).join("\n")}`;
+      const raw = `[RECALLED MEMORIES]\n${snippets.join("\n")}`;
       return { text: raw, tokens: this.estimateTokens(raw) };
     } catch {
       return { text: "", tokens: 0 };
@@ -337,14 +332,14 @@ export class ContextAssembler {
       return { text: "", tokens: 0, rollingSummaryTokens: 0 };
     }
 
-    const header = `${gray("[CONVERSATION]")}\n`;
+    const header = "[CONVERSATION]\n";
     const maxChars = budget * 4;
     let rollingSummaryTokens = 0;
     let summaryBlock = "";
 
     // If rolling summary exists, prepend it and count against the working memory budget
     if (rollingSummary) {
-      summaryBlock = `${gray("[ROLLING SUMMARY (English)]")}\n${gray(rollingSummary)}\n\n`;
+      summaryBlock = `[ROLLING SUMMARY (English)]\n${rollingSummary}\n\n`;
       const summaryChars = summaryBlock.length;
 
       if (summaryChars >= maxChars) {

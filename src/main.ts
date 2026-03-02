@@ -1208,17 +1208,22 @@ async function main(): Promise<void> {
     logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
   }
 
-  function shutdown(): void {
+  async function shutdown(): Promise<void> {
     logInfo("main", "🛑 Shutting down...");
     if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
     transport.destroy();
+    try {
+      await memory?.shutdownCompaction();
+    } catch (err) {
+      logWarn("main", `Shutdown compaction error: ${err instanceof Error ? err.message : String(err)}`);
+    }
     memory?.close();
     process.exit(0);
   }
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 }
 
 main().catch((err) => {

@@ -19,6 +19,7 @@ import type { MemorySearchToolConfig } from "./memory-search-tool.js";
 import { IngestionPipeline } from "./ingestion-pipeline.js";
 import { ReflectionEngine } from "./reflection-engine.js";
 import { IntentDetector, DEFAULT_CUE_PHRASES_EN, DEFAULT_CUE_PHRASES_HU } from "./intent-detector.js";
+import { createDailyCompactionTask, runStartupCatchUp } from "./daily-compaction-task.js";
 import { RecallFallbackPipeline } from "./recall-fallback-pipeline.js";
 import type {
   MessageRecord,
@@ -38,34 +39,6 @@ import type {
 import { logDebug, logError, logInfo, logWarn } from "./logger.js";
 
 const TAG = "memory-manager";
-
-/**
- * Tool definition prompt for the memory_search tool, injected into the system prompt
- * at session start so the LLM agent knows it can search its memory.
- *
- * Requirements: 9.1, 9.2, 9.3
- */
-const GRAY = "\x1b[38;5;245m";
-const RESET = "\x1b[39m";
-
-export const MEMORY_SEARCH_TOOL_PROMPT = `${GRAY}[MEMORY SEARCH TOOL]
-You have a memory_search tool available. Use it when the user asks about something you discussed before, references past conversations, or when you need to recall specific information (facts, decisions, preferences, events).
-
-Tool: memory_search
-Parameters:
-- keywords (required): Array of English search terms. Extract key concepts from the user's message in English.
-  Example: ["project deadline", "budget"]
-- original_keyword (optional): A single keyword in the user's original language for fallback search. Use when the user stresses a specific non-English term.
-  Example: "ribanc"
-- time_range (optional): Object with "start" and "end" fields (Unix timestamps in milliseconds) to narrow results to a time window.
-  Example: { "start": 1700000000000, "end": 1710000000000 }
-
-When to use:
-- User asks "what did we talk about…", "do you remember…", "what was the decision on…"
-- User references a past topic, person, or event from earlier conversations
-- You need context from previous sessions that is not in the current conversation
-
-Do NOT use on every message — only when recall is needed.${RESET}`.trim();
 
 /**
  * Top-level coordinator for the local memory layer.
@@ -90,6 +63,7 @@ export class MemoryManager {
   private heartbeat: HeartbeatSystem | null = null;
   private memoryExtractor: MemoryExtractor | null = null;
   private memorySearchTool: MemorySearchTool | null = null;
+  private compactionLocks = new Map<number, Promise<void>>();
 
   constructor(config: MemoryConfig) {
     this.config = config;
@@ -103,6 +77,26 @@ export class MemoryManager {
   /** Get the stored LLM callback, or null if not set. */
   getLlmCall(): ((prompt: string, content: string) => Promise<string>) | null {
     return this.llmCall;
+  }
+
+  /** Acquire a per-chat compaction lock. Returns a release function, or null if already locked. */
+  acquireCompactionLock(chatId: number): Promise<() => void> | null {
+    if (this.compactionLocks.has(chatId)) return null;
+
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => { release = resolve; });
+    this.compactionLocks.set(chatId, promise);
+
+    return Promise.resolve(() => {
+      this.compactionLocks.delete(chatId);
+      release();
+    });
+  }
+
+  /** Wait for any in-progress compaction for a chat to finish. */
+  async waitForCompaction(chatId: number): Promise<void> {
+    const pending = this.compactionLocks.get(chatId);
+    if (pending) await pending;
   }
 
   /** Initialize database, create directories, and set up sub-components. */
@@ -842,17 +836,8 @@ export class MemoryManager {
     if (!this.config.memoryEnabled) return params.userInput;
 
     try {
-      // Inject memory_search tool definition into system prompt at session start
-      // (isSessionStart=true or undefined as fail-safe), but only when the search tool is available.
-      let systemPrompt = params.systemPrompt;
-      const shouldInjectToolPrompt =
-        this.memorySearchTool !== null &&
-        (params.isSessionStart === true || params.isSessionStart === undefined);
-      if (shouldInjectToolPrompt) {
-        systemPrompt = systemPrompt
-          ? `${systemPrompt}\n\n${MEMORY_SEARCH_TOOL_PROMPT}`
-          : MEMORY_SEARCH_TOOL_PROMPT;
-      }
+      // System prompt (SOUL.md + skills) is passed in from main.ts — no longer injected here.
+      const systemPrompt = params.systemPrompt;
 
       const assembler = new ContextAssembler(this, this.config);
       if (this.recallPipeline) {
@@ -1224,11 +1209,26 @@ export class MemoryManager {
         });
       }
 
-      // Register consolidation task
+      // Capture shared dependencies for task registrations
       const db = this.db;
       const transcriptParser = this.transcriptParser;
       const memoryIndex = this.memoryIndex;
       const config = this.config;
+
+      // Register daily compaction task (between memory-extraction and consolidation)
+      if (transcriptParser) {
+        const dailyCompactionTask = createDailyCompactionTask({
+          db,
+          config,
+          transcriptParser,
+          memoryIndex,
+          getLlmCall: () => this.llmCall,
+          acquireLock: (chatId: number) => this.acquireCompactionLock(chatId),
+        });
+        this.heartbeat.registerTask(dailyCompactionTask);
+      }
+
+      // Register consolidation task
       const llmCall = this.llmCall;
       if (transcriptParser && llmCall) {
         this.heartbeat.registerTask({
@@ -1253,6 +1253,20 @@ export class MemoryManager {
         });
       }
 
+      // Run startup catch-up before first heartbeat tick (non-blocking)
+      if (transcriptParser) {
+        void runStartupCatchUp({
+          db,
+          config,
+          transcriptParser,
+          memoryIndex,
+          getLlmCall: () => this.llmCall,
+          acquireLock: (chatId: number) => this.acquireCompactionLock(chatId),
+        }).catch((err) => {
+          logWarn(TAG, `Startup catch-up failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
+
       this.heartbeat.start();
     } catch (err) {
       logWarn(TAG, `Failed to start heartbeat — continuing without background processing: ${err instanceof Error ? err.message : String(err)}`);
@@ -1264,6 +1278,63 @@ export class MemoryManager {
   stopHeartbeat(): void {
     this.heartbeat?.stop();
     this.heartbeat = null;
+  }
+
+  /**
+   * Derive the compaction date from the earliest message in a session.
+   * Returns the date of the earliest message, or current date if no messages found.
+   */
+  private getSessionMessageDate(chatId: number, sessionId: string): Date {
+    const row = this.db!.prepare(
+      "SELECT MIN(timestamp) as earliest_ts FROM messages WHERE chat_id = ? AND session_id = ?"
+    ).get(chatId, sessionId) as { earliest_ts: number | null } | undefined;
+    if (row?.earliest_ts) {
+      return new Date(row.earliest_ts);
+    }
+    return new Date();
+  }
+
+  /**
+   * Compact all active sessions during graceful shutdown.
+   * Skips inactivity-gap and midnight checks — compacts everything.
+   * Errors per session are logged and do not block remaining sessions.
+   */
+  async shutdownCompaction(): Promise<void> {
+    if (!this.config.memoryEnabled || !this.db || !this.transcriptParser || !this.memoryIndex) return;
+    if (!this.llmCall) {
+      logWarn(TAG, "LLM call unavailable — skipping shutdown compaction");
+      return;
+    }
+
+    const rows = this.db
+      .prepare("SELECT DISTINCT telegram_chat_id, acp_session_id FROM sessions WHERE is_active = 1")
+      .all() as Array<{ telegram_chat_id: number; acp_session_id: string }>;
+
+    for (const row of rows) {
+      try {
+        // Wait for any in-progress compaction, then compact
+        await this.waitForCompaction(row.telegram_chat_id);
+
+        // Skip if already compacted
+        const existing = this.db!.prepare(
+          "SELECT 1 FROM compactions WHERE chat_id = ? AND source_session_id = ? AND tier = 'daily'"
+        ).get(row.telegram_chat_id, row.acp_session_id);
+        if (existing) continue;
+
+        const engine = new CompactionEngine(this.db!, this.transcriptParser!, this.memoryIndex!, this.config);
+        // Derive compaction date from earliest message in session
+        const compactionDate = this.getSessionMessageDate(row.telegram_chat_id, row.acp_session_id);
+        await engine.compact({
+          chatId: row.telegram_chat_id,
+          sessionId: row.acp_session_id,
+          llmCall: this.llmCall!,
+          compactionDate,
+        });
+      } catch (err) {
+        logError(TAG, `Shutdown compaction failed for chat ${row.telegram_chat_id} session ${row.acp_session_id}`, err);
+        // Continue with remaining sessions
+      }
+    }
   }
 
   /** Get the memory search tool for agent invocation. */

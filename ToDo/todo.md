@@ -1,3 +1,8 @@
+To improve:
+- .hu voice detection prediction: "ez egy magyar szöveg, vagy angol"
+- When reacting with emoji, send it to the chat: :heart:
+
+---
 1. study sessions_send tool in Openclaw project to access other bot's messages on Telegram
 
 

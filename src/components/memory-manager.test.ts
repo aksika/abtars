@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import fc from "fast-check";
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -807,7 +808,7 @@ describe("MemoryManager — assembleContext", () => {
   });
 });
 
-describe("MemoryManager — assembleContext memory_search tool prompt", () => {
+describe("MemoryManager — assembleContext system prompt passthrough", () => {
   let tmpDir: string;
   let manager: MemoryManager;
 
@@ -815,7 +816,6 @@ describe("MemoryManager — assembleContext memory_search tool prompt", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "mm-tool-prompt-"));
     manager = new MemoryManager(makeConfig(tmpDir));
     await manager.initialize();
-    // Set a dummy llmCall so startHeartbeat creates the search tool
     manager.setLlmCall(async () => "{}");
     manager.startHeartbeat();
   });
@@ -825,33 +825,20 @@ describe("MemoryManager — assembleContext memory_search tool prompt", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("includes memory_search tool prompt when isSessionStart is true", async () => {
+  it("passes through systemPrompt containing skill content at session start", async () => {
+    const skillPrompt = "[MEMORY SEARCH TOOL]\nYou have a memory_search tool.";
     const result = await manager.assembleContext({
       chatId: 1,
       userInput: "Hello",
-      systemPrompt: "You are helpful.",
+      systemPrompt: `You are helpful.\n\n${skillPrompt}`,
       isSessionStart: true,
     });
 
     expect(result).toContain("[MEMORY SEARCH TOOL]");
-    expect(result).toContain("memory_search");
-    expect(result).toContain("keywords");
-    expect(result).toContain("original_keyword");
-    expect(result).toContain("time_range");
+    expect(result).toContain("You are helpful.");
   });
 
-  it("includes memory_search tool prompt when isSessionStart is undefined (fail-safe)", async () => {
-    const result = await manager.assembleContext({
-      chatId: 1,
-      userInput: "Hello",
-      systemPrompt: "You are helpful.",
-    });
-
-    expect(result).toContain("[MEMORY SEARCH TOOL]");
-    expect(result).toContain("memory_search");
-  });
-
-  it("omits memory_search tool prompt when isSessionStart is false", async () => {
+  it("passes through systemPrompt on subsequent messages (isSessionStart false)", async () => {
     const result = await manager.assembleContext({
       chatId: 1,
       userInput: "Hello",
@@ -859,22 +846,10 @@ describe("MemoryManager — assembleContext memory_search tool prompt", () => {
       isSessionStart: false,
     });
 
-    expect(result).not.toContain("[MEMORY SEARCH TOOL]");
+    expect(result).toContain("You are helpful.");
   });
 
-  it("appends tool prompt to existing system prompt", async () => {
-    const result = await manager.assembleContext({
-      chatId: 1,
-      userInput: "Hello",
-      systemPrompt: "You are a helpful assistant.",
-      isSessionStart: true,
-    });
-
-    expect(result).toContain("You are a helpful assistant.");
-    expect(result).toContain("[MEMORY SEARCH TOOL]");
-  });
-
-  it("uses tool prompt as system prompt when systemPrompt is empty", async () => {
+  it("works with empty systemPrompt", async () => {
     const result = await manager.assembleContext({
       chatId: 1,
       userInput: "Hello",
@@ -882,23 +857,133 @@ describe("MemoryManager — assembleContext memory_search tool prompt", () => {
       isSessionStart: true,
     });
 
-    expect(result).toContain("[MEMORY SEARCH TOOL]");
+    expect(result).toContain("Hello");
+  });
+});
+
+// Feature: auto-daily-compaction, Property 8: Per-Chat Lock Prevents Concurrent Compaction
+describe("Property 8: Per-Chat Lock Prevents Concurrent Compaction", () => {
+  it("second acquire returns null while lock held; after release, waitForCompaction resolves and lock is re-acquirable", () => {
+    /**
+     * Validates: Requirements 8.1, 8.2
+     *
+     * For any chatId, if a lock is held, a second acquire returns null.
+     * After release, waitForCompaction resolves and a new lock is acquirable.
+     */
+    const chatIdArb = fc.integer({ min: 1, max: 1_000_000 });
+
+    fc.assert(
+      fc.asyncProperty(chatIdArb, async (chatId) => {
+        const manager = new MemoryManager(MEMORY_CONFIG_DEFAULTS);
+
+        // 1. First acquire should succeed (not null)
+        const lockPromise = manager.acquireCompactionLock(chatId);
+        expect(lockPromise).not.toBeNull();
+        const release = await lockPromise!;
+        expect(typeof release).toBe("function");
+
+        // 2. Second acquire for same chatId should return null (locked)
+        const secondAttempt = manager.acquireCompactionLock(chatId);
+        expect(secondAttempt).toBeNull();
+
+        // 3. Release the lock
+        release();
+
+        // 4. waitForCompaction should resolve (no pending lock)
+        await manager.waitForCompaction(chatId);
+
+        // 5. After release, a new lock should be acquirable
+        const reacquirePromise = manager.acquireCompactionLock(chatId);
+        expect(reacquirePromise).not.toBeNull();
+        const release2 = await reacquirePromise!;
+        expect(typeof release2).toBe("function");
+
+        // Clean up
+        release2();
+      }),
+      { numRuns: 100 },
+    );
+  });
+});
+
+// Feature: auto-daily-compaction, Property 7: Shutdown Compaction Bypasses All Checks
+describe("Property 7: Shutdown Compaction Bypasses All Checks", () => {
+  /**
+   * Validates: Requirements 7.2
+   *
+   * For any active session — regardless of whether the current time is before midnight
+   * or the inactivity gap has not elapsed — shutdownCompaction() should compact the session
+   * (provided the LLM call is available and no prior daily compaction record exists).
+   */
+
+  // Generator: produce a scenario where the heartbeat would NOT compact
+  // (same-day messages, or gap < dayBoundaryHours), yet shutdown should.
+  const scenarioArb = fc.record({
+    chatId: fc.integer({ min: 1, max: 500 }),
+    // Offset from "now" in ms — 0 means message just happened, up to 3h59m ago (under 4h gap)
+    messageAgeMs: fc.oneof(
+      // Same-day, very recent (minutes ago) — heartbeat skips (gap < dayBoundaryHours)
+      fc.integer({ min: 0, max: 3 * 3_600_000 }),
+      // Same-day, just under the 4h boundary
+      fc.integer({ min: 3 * 3_600_000, max: 4 * 3_600_000 - 1 }),
+      // Previous day but gap < dayBoundaryHours (e.g. message at 11pm, now is 1am)
+      fc.integer({ min: 1 * 3_600_000, max: 4 * 3_600_000 - 1 }),
+    ),
   });
 
-  it("omits tool prompt when memorySearchTool is not initialized", async () => {
-    // Create a manager without calling startHeartbeat
-    const noToolManager = new MemoryManager(makeConfig(tmpDir));
-    await noToolManager.initialize();
+  it("compacts all active sessions regardless of time-of-day or inactivity gap", async () => {
+    // Use a single manager per property run to avoid excessive temp dir creation
+    await fc.assert(
+      fc.asyncProperty(scenarioArb, async (scenario) => {
+        const tmpDir = mkdtempSync(join(tmpdir(), "mm-prop7-"));
+        const manager = new MemoryManager(makeConfig(tmpDir));
+        await manager.initialize();
 
-    const result = await noToolManager.assembleContext({
-      chatId: 1,
-      userInput: "Hello",
-      systemPrompt: "You are helpful.",
-      isSessionStart: true,
-    });
+        try {
+          const { chatId } = scenario;
+          const sessionId = `sess-${chatId}`;
 
-    expect(result).not.toContain("[MEMORY SEARCH TOOL]");
+          // 1. Persist an active session — channelKey must be numeric string to match chatId
+          manager.persistSession(
+            makeSession({
+              channelKey: String(chatId),
+              acpSessionId: sessionId,
+              lastActivityAt: Date.now(),
+            }),
+          );
 
-    noToolManager.close();
+          // 2. Record a message so the transcript file exists and compaction has content
+          manager.recordMessage(
+            makeRecord({
+              content: "test message for shutdown compaction",
+              chatId,
+              sessionId,
+              timestamp: Date.now() - scenario.messageAgeMs,
+            }),
+          );
+
+          // 3. Set a mock LLM call
+          manager.setLlmCall(async (_prompt: string, _content: string) => "shutdown summary");
+
+          // 4. Call shutdownCompaction — should compact regardless of timing
+          await manager.shutdownCompaction();
+
+          // 5. Verify a daily compaction record was created
+          const db = initializeDatabase(join(tmpDir, "memory.db"));
+          const row = db
+            .prepare(
+              "SELECT COUNT(*) as cnt FROM compactions WHERE chat_id = ? AND source_session_id = ? AND tier = 'daily'",
+            )
+            .get(chatId, sessionId) as { cnt: number };
+          db.close();
+
+          expect(row.cnt).toBe(1);
+        } finally {
+          manager.close();
+          rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }),
+      { numRuns: 100 },
+    );
   });
 });

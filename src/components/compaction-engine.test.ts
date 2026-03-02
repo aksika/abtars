@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fc from "fast-check";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -272,5 +273,90 @@ describe("CompactionEngine", () => {
 
     const result = await engine.compact({ chatId, sessionId, llmCall: mockLlm });
     expect(result).toBeNull();
+  });
+});
+
+
+// Feature: auto-daily-compaction, Property 3: Compaction File Named by Message Date
+describe("CompactionEngine — Property 3: Compaction File Named by Message Date", () => {
+  let tmpDir: string;
+  let db: Database.Database;
+  let memoryIndex: MemoryIndex;
+  let transcriptParser: TranscriptParser;
+  let engine: CompactionEngine;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ce-prop3-"));
+    db = initializeDatabase(join(tmpDir, "test.db"));
+    memoryIndex = new MemoryIndex(db);
+    transcriptParser = new TranscriptParser();
+    const config = makeConfig(tmpDir);
+    engine = new CompactionEngine(db, transcriptParser, memoryIndex, config);
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("file path contains the compactionDate (YYYY-MM-DD), not today's date", async () => {
+    /**
+     * **Validates: Requirements 3.1, 3.2, 3.3**
+     *
+     * For any session with messages, when compact() is called with a
+     * compactionDate derived from the earliest message timestamp, the
+     * resulting file path should contain a date string matching the
+     * calendar date of that earliest message (YYYY-MM-DD), not the
+     * current execution date.
+     */
+
+    // Generate dates that are NOT today, to distinguish message date from current date
+    const pastDateArb = fc
+      .date({
+        min: new Date("2020-01-01T00:00:00Z"),
+        max: new Date("2024-12-31T00:00:00Z"),
+      })
+      .filter((d) => d.toISOString().slice(0, 10) !== new Date().toISOString().slice(0, 10));
+
+    const chatIdArb = fc.integer({ min: 1, max: 99999 });
+
+    // Use a run counter to generate unique session IDs across iterations
+    let runIndex = 0;
+
+    await fc.assert(
+      fc.asyncProperty(pastDateArb, chatIdArb, async (compactionDate, chatId) => {
+        const sessionId = `sess-prop3-${runIndex++}`;
+
+        // Seed a transcript so compact() has content to process
+        seedTranscript(tmpDir, chatId, sessionId, ["Test message for property 3"]);
+
+        const mockLlm = async () => "Property 3 summary.";
+
+        const result = await engine.compact({
+          chatId,
+          sessionId,
+          llmCall: mockLlm,
+          compactionDate,
+        });
+
+        expect(result).not.toBeNull();
+
+        const expectedDateStr = compactionDate.toISOString().slice(0, 10);
+        const todayStr = new Date().toISOString().slice(0, 10);
+
+        // File path must contain the compactionDate, not today's date
+        expect(result!.filePath).toContain(expectedDateStr);
+        expect(result!.filePath).toContain(`${expectedDateStr}.md`);
+
+        // When compactionDate differs from today, path must NOT contain today's date
+        if (expectedDateStr !== todayStr) {
+          expect(result!.filePath).not.toContain(`${todayStr}.md`);
+        }
+
+        // Verify the file actually exists at that path
+        expect(existsSync(result!.filePath)).toBe(true);
+      }),
+      { numRuns: 100 },
+    );
   });
 });
