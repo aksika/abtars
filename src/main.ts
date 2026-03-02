@@ -39,6 +39,19 @@ function stripDiscordMentions(text: string, botAppId: string): string {
   return text.replace(new RegExp(`<@!?${botAppId}>`, "g"), "").replace(/\s{2,}/g, " ").trim();
 }
 
+/** Format milliseconds as human-readable uptime (e.g. "2d 5h 13m"). */
+function formatUptime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const parts: string[] = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0) parts.push(`${h}h`);
+  parts.push(`${m}m`);
+  return parts.join(" ");
+}
+
 /** Send a platform context announcement to the transport so the LLM knows which platform is active. */
 async function announcePlatform(
   transport: IKiroTransport,
@@ -56,6 +69,7 @@ async function announcePlatform(
 }
 
 async function main(): Promise<void> {
+  const startedAt = Date.now();
   const platforms = parsePlatformFlags();
   const config = await loadAndValidateConfig();
   setLogLevel(config.logLevel);
@@ -103,6 +117,10 @@ async function main(): Promise<void> {
       return transport.sendPrompt("system:memory", `${prompt}\n\n${content}`);
     });
     logInfo("main", "🧠 Memory LLM callback registered");
+
+    // Start heartbeat for background memory extraction and consolidation
+    memory.startHeartbeat();
+    logInfo("main", "💓 Memory heartbeat started");
   }
 
   // STT config
@@ -122,6 +140,9 @@ async function main(): Promise<void> {
   }
 
   const busyChats = new Set<string>();
+
+  // Auto-compact threshold: when Kiro's context window usage exceeds this %, trigger compaction
+  const autoCompactThreshold = parseInt(process.env["AUTO_COMPACT_THRESHOLD"] || "70", 10);
 
   // --- Telegram wiring (conditional) ---
   let telegramPoller: TelegramPoller | null = null;
@@ -281,7 +302,11 @@ async function main(): Promise<void> {
       if (text === "/status") {
         const status = transport.isReady ? "✅ Connected" : "❌ Disconnected";
         const mode = config.kiroTransport.toUpperCase();
-        await telegramApi.sendMessage(chatId, `${status} (${mode} transport)`, { message_thread_id: threadId });
+        const uptime = formatUptime(Date.now() - startedAt);
+        const ctxPct = ("contextPercent" in transport && (transport as TmuxClient).contextPercent >= 0)
+          ? `${(transport as TmuxClient).contextPercent}%`
+          : "n/a";
+        await telegramApi.sendMessage(chatId, `${status} (${mode} transport)\n⏱️ Uptime: ${uptime}\n📊 Context window: ${ctxPct}`, { message_thread_id: threadId });
         return;
       }
 
@@ -335,6 +360,41 @@ async function main(): Promise<void> {
         } else {
           await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
         }
+        return;
+      }
+
+      if (text === "/memory") {
+        if (!memory) {
+          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
+          return;
+        }
+        const stats = memory.getStats(chatId);
+        if (!stats) {
+          await telegramApi.sendMessage(chatId, "⚠️ Could not retrieve memory stats.", { message_thread_id: threadId });
+          return;
+        }
+        const dbMb = (stats.dbSizeBytes / (1024 * 1024)).toFixed(1);
+        const types = Object.entries(stats.extractedByType)
+          .map(([t, n]) => `  ${t}: ${n}`)
+          .join("\n") || "  (none)";
+        const msg = [
+          "🧠 Memory Status",
+          "",
+          `💬 Raw messages: ${stats.totalMessages}`,
+          `🧩 Extracted memories: ${stats.extractedMemories}`,
+          types,
+          `🔑 Preserved keywords: ${stats.preservedKeywords}`,
+          "",
+          `📦 Compactions:`,
+          `  daily: ${stats.compactions.daily}`,
+          `  weekly: ${stats.compactions.weekly}`,
+          `  quarterly: ${stats.compactions.quarterly}`,
+          "",
+          `📄 Ingested documents: ${stats.ingestedDocuments}`,
+          `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
+          `💾 DB size: ${dbMb} MB`,
+        ].join("\n");
+        await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
         return;
       }
 
@@ -532,6 +592,44 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (text === "/help") {
+        const helpText = [
+          "📋 Available commands:",
+          "",
+          "/new — Start a new session",
+          "/reset — Reset current session",
+          "/status — Show bot status",
+          "/stop — Stop current response",
+          "/cancel — Cancel current request",
+          "/compact — Trigger memory compaction",
+          "/facts — Show stored facts",
+          "/scratchpad — Show scratchpad",
+          "/memory — Memory storage statistics",
+          "/ingest — Ingest a document (reply to file)",
+          "/ingest list — List ingested documents",
+          "/reflect — Trigger memory reflection",
+          "/reflect list — List reflections",
+          "/reflect <days> — Reflect over N days",
+          "/reembed — Re-embed all memories",
+          "/forget topic <topic> — Forget by topic",
+          "/forget range <start> <end> — Forget date range",
+          "/forget session <id> — Forget a session",
+          "/help — Show this help message",
+        ].join("\n");
+        await telegramApi.sendMessage(chatId, helpText, { message_thread_id: threadId });
+        return;
+      }
+
+      // Unknown command guard — prevent unrecognized /commands from reaching transport
+      if (text.startsWith("/") && /^\/\w+/.test(text)) {
+        const cmd = text.split(/\s/)[0]!;
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
+        if (!known.includes(cmd)) {
+          await telegramApi.sendMessage(chatId, `❓ Unknown command: ${cmd}\nType /help for available commands.`, { message_thread_id: threadId });
+          return;
+        }
+      }
+
       if (busyChats.has(sessionKey)) {
         await telegramApi.sendMessage(chatId, "⏳ Previous request still in progress...", { message_thread_id: threadId });
         return;
@@ -569,14 +667,20 @@ async function main(): Promise<void> {
         const response = await responsePromise;
         logDebug("main", `Response (${response.length} chars): "${response.slice(0, 120)}"`);
 
-        if (!response || !response.trim()) {
+        // Prefer the clean answer-only extract (strips system prompts, memory context, thinking indicators)
+        const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
+          ? (transport as TmuxClient).answerOnly
+          : "";
+        const userResponse = cleanAnswer || response;
+
+        if (!userResponse || !userResponse.trim()) {
           logWarn("main", "Empty response from transport");
           await react(chatId, messageId, "🤷");
           await telegramApi.sendMessage(chatId, "🤷 Kiro returned an empty response. Try again or /reset.", { message_thread_id: threadId });
           return;
         }
 
-        const chunks = formatter.chunkText(response);
+        const chunks = formatter.chunkText(userResponse);
         logDebug("main", `Sending ${chunks.length} chunk(s)`);
         for (const chunk of chunks) {
           if (chunk.trim()) {
@@ -586,19 +690,13 @@ async function main(): Promise<void> {
         }
 
         if (memory) {
-          // Store answerOnly (stripped of echoed context) to prevent context-echo pollution
-          const cleanResponse = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
-            ? (transport as TmuxClient).answerOnly
-            : response;
-          memory.recordMessage({ role: "assistant", content: cleanResponse || response, timestamp: Date.now(), chatId, sessionId: sessionKey });
+          memory.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
         if (isVoiceNote && ttsConfig) {
           try {
             await telegramApi.sendChatAction(chatId, "record_voice", threadId);
-            const ttsText = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
-              ? (transport as TmuxClient).answerOnly
-              : response;
+            const ttsText = cleanAnswer || response;
             const audio = await synthesizeSpeech(ttsText, ttsConfig);
             if (audio) {
               await telegramApi.sendVoice(chatId, audio, { message_thread_id: threadId });
@@ -611,6 +709,27 @@ async function main(): Promise<void> {
 
         await react(chatId, messageId, "");
         logInfo("main", `→ Sent ${chunks.length} chunk(s) to chat ${chatId}`);
+
+        // Auto-compact when context window usage exceeds threshold
+        if (memory && "contextPercent" in transport) {
+          const pct = (transport as TmuxClient).contextPercent;
+          if (pct >= autoCompactThreshold) {
+            logInfo("main", `⚠️ Context window at ${pct}% (threshold: ${autoCompactThreshold}%) — auto-compacting`);
+            await telegramApi.sendMessage(chatId, `📦 Context window at ${pct}% — auto-compacting...`, { message_thread_id: threadId });
+            try {
+              const llm = memory.getLlmCall();
+              if (llm) {
+                const result = await memory.compactSession({ chatId, sessionId: sessionKey, llmCall: llm });
+                const msg = result
+                  ? `📦 Auto-compaction done: ${result.summary.slice(0, 200)}`
+                  : "📦 Auto-compaction: nothing to compact.";
+                await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
+              }
+            } catch (err) {
+              logError("main", "Auto-compaction failed", err);
+            }
+          }
+        }
       } catch (err) {
         logError("main", `Error for chat ${chatId}`, err);
         await react(chatId, messageId, "");
@@ -703,7 +822,11 @@ async function main(): Promise<void> {
       if (text === "/status") {
         const status = transport.isReady ? "✅ Connected" : "❌ Disconnected";
         const mode = config.kiroTransport.toUpperCase();
-        await discordApi.sendMessage(message.channelId, `${status} (${mode} transport)`);
+        const uptime = formatUptime(Date.now() - startedAt);
+        const ctxPct = ("contextPercent" in transport && (transport as TmuxClient).contextPercent >= 0)
+          ? `${(transport as TmuxClient).contextPercent}%`
+          : "n/a";
+        await discordApi.sendMessage(message.channelId, `${status} (${mode} transport)\n⏱️ Uptime: ${uptime}\n📊 Context window: ${ctxPct}`);
         return;
       }
 
@@ -716,6 +839,42 @@ async function main(): Promise<void> {
         } else {
           await discordApi.sendMessage(message.channelId, "B2B is not enabled.");
         }
+        return;
+      }
+
+      if (text === "/memory") {
+        if (!memory) {
+          await discordApi.sendMessage(message.channelId, "🧠 Memory is disabled.");
+          return;
+        }
+        const chatId = parseInt(message.channelId, 10) || 0;
+        const stats = memory.getStats(chatId);
+        if (!stats) {
+          await discordApi.sendMessage(message.channelId, "⚠️ Could not retrieve memory stats.");
+          return;
+        }
+        const dbMb = (stats.dbSizeBytes / (1024 * 1024)).toFixed(1);
+        const types = Object.entries(stats.extractedByType)
+          .map(([t, n]) => `  ${t}: ${n}`)
+          .join("\n") || "  (none)";
+        const msg = [
+          "🧠 Memory Status",
+          "",
+          `💬 Raw messages: ${stats.totalMessages}`,
+          `🧩 Extracted memories: ${stats.extractedMemories}`,
+          types,
+          `🔑 Preserved keywords: ${stats.preservedKeywords}`,
+          "",
+          `📦 Compactions:`,
+          `  daily: ${stats.compactions.daily}`,
+          `  weekly: ${stats.compactions.weekly}`,
+          `  quarterly: ${stats.compactions.quarterly}`,
+          "",
+          `📄 Ingested documents: ${stats.ingestedDocuments}`,
+          `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
+          `💾 DB size: ${dbMb} MB`,
+        ].join("\n");
+        await discordApi.sendMessage(message.channelId, msg);
         return;
       }
 
@@ -916,6 +1075,44 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (text === "/help") {
+        const helpText = [
+          "📋 Available commands:",
+          "",
+          "/new — Start a new session",
+          "/reset — Reset current session",
+          "/status — Show bot status",
+          "/stop — Stop current response",
+          "/cancel — Cancel current request",
+          "/compact — Trigger memory compaction",
+          "/facts — Show stored facts",
+          "/scratchpad — Show scratchpad",
+          "/memory — Memory storage statistics",
+          "/ingest — Ingest a document (reply to file)",
+          "/ingest list — List ingested documents",
+          "/reflect — Trigger memory reflection",
+          "/reflect list — List reflections",
+          "/reflect <days> — Reflect over N days",
+          "/reembed — Re-embed all memories",
+          "/forget topic <topic> — Forget by topic",
+          "/forget range <start> <end> — Forget date range",
+          "/forget session <id> — Forget a session",
+          "/help — Show this help message",
+        ].join("\n");
+        await discordApi.sendMessage(message.channelId, helpText);
+        return;
+      }
+
+      // Unknown command guard — prevent unrecognized /commands from reaching transport
+      if (text.startsWith("/") && /^\/\w+/.test(text)) {
+        const cmd = text.split(/\s/)[0]!;
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
+        if (!known.includes(cmd)) {
+          await discordApi.sendMessage(message.channelId, `❓ Unknown command: ${cmd}\nType /help for available commands.`);
+          return;
+        }
+      }
+
       if (busyChats.has(sessionKey)) {
         await discordApi.sendMessage(message.channelId, "⏳ Previous request still in progress...");
         return;
@@ -940,19 +1137,25 @@ async function main(): Promise<void> {
 
         const response = await transport.sendPrompt(sessionKey, prompt);
 
-        if (!response || !response.trim()) {
+        // Prefer the clean answer-only extract (strips system prompts, memory context, thinking indicators)
+        const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
+          ? (transport as TmuxClient).answerOnly
+          : "";
+        const userResponse = cleanAnswer || response;
+
+        if (!userResponse || !userResponse.trim()) {
           logWarn("main", "Empty response from transport (Discord)");
           await discordApi.sendMessage(message.channelId, "🤷 Kiro returned an empty response. Try again or /reset.");
           return;
         }
 
         // LLM opted out of responding (per CHATS.md steering)
-        if (response.trim() === "<NO_REPLY>") {
+        if (userResponse.trim() === "<NO_REPLY>") {
           logDebug("main", "Discord: LLM returned <NO_REPLY>, skipping");
           return;
         }
 
-        const chunks = formatter.chunkForPlatform(response, "discord");
+        const chunks = formatter.chunkForPlatform(userResponse, "discord");
         logDebug("main", `Discord: sending ${chunks.length} chunk(s)`);
         for (const chunk of chunks) {
           if (chunk.trim()) {
@@ -960,6 +1163,28 @@ async function main(): Promise<void> {
           }
         }
         logInfo("main", `→ Discord: sent ${chunks.length} chunk(s) to ${message.channelId}`);
+
+        // Auto-compact when context window usage exceeds threshold
+        if (memory && "contextPercent" in transport) {
+          const pct = (transport as TmuxClient).contextPercent;
+          if (pct >= autoCompactThreshold) {
+            const chatId = parseInt(message.channelId, 10) || 0;
+            logInfo("main", `⚠️ Context window at ${pct}% (threshold: ${autoCompactThreshold}%) — auto-compacting (Discord)`);
+            await discordApi.sendMessage(message.channelId, `📦 Context window at ${pct}% — auto-compacting...`);
+            try {
+              const llm = memory.getLlmCall();
+              if (llm) {
+                const result = await memory.compactSession({ chatId, sessionId: sessionKey, llmCall: llm });
+                const msg = result
+                  ? `📦 Auto-compaction done: ${result.summary.slice(0, 200)}`
+                  : "📦 Auto-compaction: nothing to compact.";
+                await discordApi.sendMessage(message.channelId, msg);
+              }
+            } catch (err) {
+              logError("main", "Auto-compaction failed (Discord)", err);
+            }
+          }
+        }
       } catch (err) {
         logError("main", `Discord error for channel ${message.channelId}`, err);
         await discordApi.sendMessage(message.channelId, "❌ Something went wrong. Try /reset to start fresh.").catch(() => {});

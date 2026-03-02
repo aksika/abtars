@@ -129,23 +129,30 @@ export class TmuxClient implements IKiroTransport {
       // Check if the last non-empty line is a Kiro prompt (N% >)
       const lines = capture.split("\n");
       const lastNonEmpty = this.getLastNonEmptyLine(lines);
+      const lastClean = this.stripAnsi(lastNonEmpty);
 
-      if (KIRO_PROMPT_RE.test(lastNonEmpty)) {
+      if (KIRO_PROMPT_RE.test(lastClean)) {
         // Kiro is back at its prompt — it's done
-        logDebug("tmux", `Detected Kiro prompt: "${lastNonEmpty}"`);
+        // Extract context window percentage from the prompt (e.g. "10% !>")
+        const pctMatch = lastClean.match(/^(\d+)%/);
+        if (pctMatch) {
+          this.lastContextPercent = parseInt(pctMatch[1]!, 10);
+          logDebug("tmux", `Context window: ${this.lastContextPercent}%`);
+        }
+        logDebug("tmux", `Detected Kiro prompt: "${lastClean}"`);
         return this.extractResponse(newContent);
       }
 
       // Check for shell prompt as fallback
-      if (SHELL_PROMPT_RE.test(lastNonEmpty) && newContent.length > 10) {
-        logDebug("tmux", `Detected shell prompt: "${lastNonEmpty}"`);
+      if (SHELL_PROMPT_RE.test(lastClean) && newContent.length > 10) {
+        logDebug("tmux", `Detected shell prompt: "${lastClean}"`);
         return this.extractResponse(newContent);
       }
 
       // Check if output has stabilized — but NOT if Kiro looks like it's still working
       if (capture === lastCapture) {
         stableCount++;
-        const looksStillWorking = STILL_WORKING_RE.test(newContent);
+        const looksStillWorking = STILL_WORKING_RE.test(this.stripAnsi(newContent));
         // Require 5 stable polls (10s) normally, or 15 (30s) if retry/tool patterns detected
         const threshold = looksStillWorking ? 15 : 5;
         if (stableCount >= threshold) {
@@ -183,59 +190,100 @@ export class TmuxClient implements IKiroTransport {
    *   M% >
    */
   private lastAnswerOnly = "";
+  private lastContextPercent = -1;
 
   /** Get just the Kiro answer lines ("> " prefixed) from the last response — for TTS. */
   get answerOnly(): string {
     return this.lastAnswerOnly;
   }
 
+  /** Get the context window usage percentage from the last Kiro prompt (e.g. 10 for "10% >"). Returns -1 if unknown. */
+  get contextPercent(): number {
+    return this.lastContextPercent;
+  }
+
   private extractResponse(raw: string): string {
-    const cleaned = this.stripAnsi(raw);
+    // ANSI color 141 (light purple) marks the "> " prefix on actual LLM response lines.
+    // We detect these BEFORE stripping ANSI to reliably distinguish LLM output from
+    // injected context (gray, color 245) and other noise.
+    const PURPLE_PREFIX = /\x1b\[38;5;141m>\s/;
 
-    const lines = cleaned.split("\n");
-    const result: string[] = [];
+    const lines = raw.split("\n");
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      // Skip empty lines at start
-      if (result.length === 0 && trimmed === "") continue;
-      // Skip Kiro prompt lines (N% > ...) — these include echoed input
-      if (KIRO_PROMPT_RE.test(trimmed)) continue;
-      // Skip the "▸ Time:" summary line
-      if (trimmed.startsWith("▸ Time:") || trimmed.startsWith("▸ Time:")) continue;
-      // Skip separator lines
-      if (/^-{4,}$/.test(trimmed)) continue;
+    // First pass: identify lines that are genuine LLM responses (purple "> " prefix)
+    const answerLines: string[] = [];
+    let lastPurpleBlockStart = -1;
 
-      result.push(line);
+    for (let i = 0; i < lines.length; i++) {
+      if (PURPLE_PREFIX.test(lines[i]!)) {
+        if (lastPurpleBlockStart === -1) lastPurpleBlockStart = i;
+      }
     }
 
-    // Find the LAST "> " block start — that's where the real answer begins.
-    // Kiro output has multiple "> " sections; early ones are tool preamble,
-    // the last one (typically after "Thinking...") is the actual response.
-    let lastBlockStart = -1;
-    for (let i = result.length - 1; i >= 0; i--) {
-      const trimmed = result[i]!.trim();
-      if (trimmed.startsWith("> ") && !trimmed.startsWith("> <br")) {
-        lastBlockStart = i;
+    // Find the LAST contiguous block of purple "> " lines — that's the real answer.
+    // Walk backwards to find the start of the last block.
+    let blockStart = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (PURPLE_PREFIX.test(lines[i]!)) {
+        blockStart = i;
+        // Keep walking back through contiguous purple lines and continuation lines
+        while (blockStart > 0) {
+          const prev = lines[blockStart - 1]!;
+          if (PURPLE_PREFIX.test(prev) || (!KIRO_PROMPT_RE.test(this.stripAnsi(prev).trim()) && !prev.includes("▸ Time:") && this.stripAnsi(prev).trim() !== "" && !PURPLE_PREFIX.test(prev) && blockStart === i)) {
+            // Only extend back through purple lines
+            if (PURPLE_PREFIX.test(prev)) {
+              blockStart--;
+            } else {
+              break;
+            }
+          } else {
+            break;
+          }
+        }
         break;
       }
     }
 
-    // Extract answer-only: from last "> " block to end, stripping "> " prefixes
-    if (lastBlockStart >= 0) {
-      const answerSlice = result.slice(lastBlockStart);
-      const answerStripped = answerSlice.map((line) => {
-        const t = line.trimStart();
-        if (t.startsWith("> ")) return t.slice(2);
-        if (t === ">") return "";
-        return line;
-      });
-      this.lastAnswerOnly = answerStripped.join("\n").trim();
+    if (blockStart >= 0) {
+      // Extract from the last purple block to the end, stripping ANSI and "> " prefix
+      for (let i = blockStart; i < lines.length; i++) {
+        const line = lines[i]!;
+        const clean = this.stripAnsi(line).trim();
+        // Stop at Kiro prompt or Time summary
+        if (KIRO_PROMPT_RE.test(clean)) break;
+        if (clean.startsWith("▸ Time:") || clean.startsWith("▸ Time:")) break;
+        if (clean === "") {
+          answerLines.push("");
+          continue;
+        }
+        // Strip "> " prefix
+        if (clean.startsWith("> ")) {
+          answerLines.push(clean.slice(2));
+        } else if (clean === ">") {
+          answerLines.push("");
+        } else {
+          answerLines.push(clean);
+        }
+      }
+      this.lastAnswerOnly = answerLines.join("\n").trim();
     } else {
       this.lastAnswerOnly = "";
     }
 
-    // Strip leading "> " from all Kiro response lines for the full text
+    // Full response: strip ANSI, then remove prompt lines and noise (legacy behavior)
+    const cleaned = this.stripAnsi(raw);
+    const allLines = cleaned.split("\n");
+    const result: string[] = [];
+
+    for (const line of allLines) {
+      const trimmed = line.trim();
+      if (result.length === 0 && trimmed === "") continue;
+      if (KIRO_PROMPT_RE.test(trimmed)) continue;
+      if (trimmed.startsWith("▸ Time:") || trimmed.startsWith("▸ Time:")) continue;
+      if (/^-{4,}$/.test(trimmed)) continue;
+      result.push(line);
+    }
+
     const stripped = result.map((line) => {
       const trimmed = line.trimStart();
       if (trimmed.startsWith("> ")) return trimmed.slice(2);
@@ -245,7 +293,7 @@ export class TmuxClient implements IKiroTransport {
 
     const final = stripped.join("\n").trim();
     logDebug("tmux", `extractResponse: ${result.length} lines → "${final.slice(0, 120)}"`);
-    if (this.lastAnswerOnly && this.lastAnswerOnly !== final) {
+    if (this.lastAnswerOnly) {
       logDebug("tmux", `answerOnly (${this.lastAnswerOnly.length} chars): "${this.lastAnswerOnly.slice(0, 120)}"`);
     }
     return final;
@@ -287,7 +335,7 @@ export class TmuxClient implements IKiroTransport {
 
   private capturePaneRaw(): string {
     try {
-      return this.exec(`tmux capture-pane -t ${this.sessionName} -p -S -2000`);
+      return this.exec(`tmux capture-pane -t ${this.sessionName} -p -e -S -2000`);
     } catch {
       return "";
     }

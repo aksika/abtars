@@ -45,8 +45,10 @@ const TAG = "memory-manager";
  *
  * Requirements: 9.1, 9.2, 9.3
  */
-export const MEMORY_SEARCH_TOOL_PROMPT = `
-[MEMORY SEARCH TOOL]
+const GRAY = "\x1b[38;5;245m";
+const RESET = "\x1b[39m";
+
+export const MEMORY_SEARCH_TOOL_PROMPT = `${GRAY}[MEMORY SEARCH TOOL]
 You have a memory_search tool available. Use it when the user asks about something you discussed before, references past conversations, or when you need to recall specific information (facts, decisions, preferences, events).
 
 Tool: memory_search
@@ -63,8 +65,7 @@ When to use:
 - User references a past topic, person, or event from earlier conversations
 - You need context from previous sessions that is not in the current conversation
 
-Do NOT use on every message — only when recall is needed.
-`.trim();
+Do NOT use on every message — only when recall is needed.${RESET}`.trim();
 
 /**
  * Top-level coordinator for the local memory layer.
@@ -1281,6 +1282,77 @@ export class MemoryManager {
     } catch (err) {
       logWarn(TAG, `Memory search failed for chat ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
       return [];
+    }
+  }
+
+  /** Get memory storage statistics for a given chat. */
+  getStats(chatId: number): {
+    totalMessages: number;
+    extractedMemories: number;
+    extractedByType: Record<string, number>;
+    compactions: { daily: number; weekly: number; quarterly: number };
+    ingestedDocuments: number;
+    preservedKeywords: number;
+    heartbeatRunning: boolean;
+    dbSizeBytes: number;
+  } | null {
+    if (!this.db) return null;
+
+    try {
+      const totalMessages = (this.db.prepare(
+        "SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ?",
+      ).get(chatId) as { cnt: number }).cnt;
+
+      const extractedMemories = (this.db.prepare(
+        "SELECT COUNT(*) as cnt FROM extracted_memories WHERE chat_id = ?",
+      ).get(chatId) as { cnt: number }).cnt;
+
+      const typeRows = this.db.prepare(
+        "SELECT memory_type, COUNT(*) as cnt FROM extracted_memories WHERE chat_id = ? GROUP BY memory_type",
+      ).all(chatId) as Array<{ memory_type: string; cnt: number }>;
+      const extractedByType: Record<string, number> = {};
+      for (const row of typeRows) {
+        extractedByType[row.memory_type] = row.cnt;
+      }
+
+      const compactionRows = this.db.prepare(
+        "SELECT tier, COUNT(*) as cnt FROM compactions WHERE chat_id = ? GROUP BY tier",
+      ).all(chatId) as Array<{ tier: string; cnt: number }>;
+      const compactionCounts = { daily: 0, weekly: 0, quarterly: 0 };
+      for (const row of compactionRows) {
+        if (row.tier in compactionCounts) {
+          compactionCounts[row.tier as keyof typeof compactionCounts] = row.cnt;
+        }
+      }
+
+      const ingestedDocuments = (this.db.prepare(
+        "SELECT COUNT(*) as cnt FROM ingested_documents WHERE chat_id = ?",
+      ).get(chatId) as { cnt: number }).cnt;
+
+      const preservedKeywords = (this.db.prepare(
+        "SELECT COUNT(*) as cnt FROM extracted_memories WHERE chat_id = ? AND preserve_original = 1",
+      ).get(chatId) as { cnt: number }).cnt;
+
+      let dbSizeBytes = 0;
+      try {
+        const pageCount = (this.db.pragma("page_count") as Array<{ page_count: number }>)[0]?.page_count ?? 0;
+        const pageSize = (this.db.pragma("page_size") as Array<{ page_size: number }>)[0]?.page_size ?? 4096;
+        dbSizeBytes = pageCount * pageSize;
+      } catch { /* ignore */ }
+
+      return {
+        totalMessages,
+        extractedMemories,
+        extractedByType,
+        compactions: compactionCounts,
+        ingestedDocuments,
+        preservedKeywords,
+        heartbeatRunning: this.heartbeat !== null,
+        dbSizeBytes,
+      };
+    } catch (err) {
+      logError(TAG, `Failed to get stats for chat ${chatId}`, err);
+      return null;
     }
   }
 
