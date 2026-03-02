@@ -38,6 +38,18 @@ export type MemoryConfig = {
   forgetThreshold: number;
   /** Recall fallback pipeline configuration. */
   recallFallback: RecallFallbackConfig;
+  /** Heartbeat system configuration for background processing. */
+  heartbeat: {
+    enabled: boolean;
+    intervalMs: number;
+  };
+  /** Search enhancement configuration for temporal decay, MMR, and timeouts. */
+  searchEnhancements: {
+    searchTimeoutMs: number;
+    decayHalflifeDays: number;
+    mmrLambda: number;
+    compactThresholdPct: number;
+  };
 };
 
 const TAG = "memory-config";
@@ -68,6 +80,16 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
     timeoutMs: 500,
     contextMessages: 5,
     minTokenLength: 3,
+  },
+  heartbeat: {
+    enabled: true,
+    intervalMs: 60000,
+  },
+  searchEnhancements: {
+    searchTimeoutMs: 1000,
+    decayHalflifeDays: 30,
+    mmrLambda: 0.7,
+    compactThresholdPct: 85,
   },
 };
 
@@ -208,6 +230,16 @@ export function loadMemoryConfig(): MemoryConfig {
       contextMessages: recallContextMessages,
       minTokenLength: recallMinTokenLength,
       ...(recallCuePhrases !== undefined && { cuePhrases: recallCuePhrases }),
+    },
+    heartbeat: {
+      enabled: parseBooleanEnv("MEMORY_HEARTBEAT_ENABLED", MEMORY_CONFIG_DEFAULTS.heartbeat.enabled),
+      intervalMs: parseNumberEnvSafe("MEMORY_HEARTBEAT_INTERVAL_MS", MEMORY_CONFIG_DEFAULTS.heartbeat.intervalMs),
+    },
+    searchEnhancements: {
+      searchTimeoutMs: parseNumberEnvSafe("MEMORY_SEARCH_TIMEOUT_MS", MEMORY_CONFIG_DEFAULTS.searchEnhancements.searchTimeoutMs),
+      decayHalflifeDays: parseNumberEnvSafe("MEMORY_DECAY_HALFLIFE_DAYS", MEMORY_CONFIG_DEFAULTS.searchEnhancements.decayHalflifeDays),
+      mmrLambda: parseNumberEnvSafe("MEMORY_MMR_LAMBDA", MEMORY_CONFIG_DEFAULTS.searchEnhancements.mmrLambda),
+      compactThresholdPct: parseNumberEnvSafe("MEMORY_COMPACT_THRESHOLD_PCT", MEMORY_CONFIG_DEFAULTS.searchEnhancements.compactThresholdPct),
     },
   };
 }

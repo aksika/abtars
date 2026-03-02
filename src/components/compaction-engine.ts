@@ -10,16 +10,26 @@ import { logError, logInfo } from "./logger.js";
 const TAG = "compaction-engine";
 
 const DAILY_PROMPT =
-  "Extract the key facts learned about the user today, major decisions made, and tasks completed. Discard pleasantries, formatting, and minor step-by-step reasoning. Output a dense summary.";
+  "Extract the key facts learned about the user today, major decisions made, and tasks completed. Discard pleasantries, formatting, and minor step-by-step reasoning. Output a dense summary in English.";
 
 const WEEKLY_PROMPT =
-  "Synthesize these daily summaries into a single weekly summary. Identify overarching themes, completed projects, and persistent user preferences. Drop transient details that no longer matter.";
+  "Synthesize these daily summaries into a single weekly summary. Identify overarching themes, completed projects, and persistent user preferences. Drop transient details that no longer matter. Output the summary in English.";
 
+const QUARTERLY_PROMPT =
+  "Consolidate these weekly summaries into a quarterly overview. Focus on major accomplishments, evolving preferences, and significant decisions across the quarter. Remove week-level granularity. Output the summary in English.";
+
+// Legacy prompts kept for backward compatibility with existing monthly/yearly files
 const MONTHLY_PROMPT =
   "Consolidate these weekly summaries into a monthly overview. Focus on major accomplishments, evolving preferences, and significant decisions. Remove week-level granularity.";
 
 const YEARLY_PROMPT =
   "Create a yearly summary from these monthly summaries. Capture the most important themes, long-term preferences, and significant milestones. Also extract a list of permanent, immutable facts about the user that should be remembered forever.\n\nYou will also receive the current User_Core_Facts file. Merge the newly extracted facts with the existing ones, producing a single holistically deduplicated list. Remove redundant or contradictory entries while preserving all unique facts. Output the merged facts separately.";
+
+/** Consolidation thresholds: number of source-tier summaries needed to trigger target-tier consolidation. */
+export const CONSOLIDATION_THRESHOLDS = {
+  weekly: 7,      // 7 daily summaries → 1 weekly
+  quarterly: 12,  // 12 weekly summaries → 1 quarterly
+} as const;
 
 function getTierPrompt(tier: MemoryTier): string {
   switch (tier) {
@@ -27,6 +37,8 @@ function getTierPrompt(tier: MemoryTier): string {
       return DAILY_PROMPT;
     case "weekly":
       return WEEKLY_PROMPT;
+    case "quarterly":
+      return QUARTERLY_PROMPT;
     case "monthly":
       return MONTHLY_PROMPT;
     case "yearly":
@@ -269,6 +281,33 @@ export class CompactionEngine {
     }));
   }
 
+  /**
+   * Check if any consolidation thresholds are met for a chat.
+   * Returns the source and target tier if consolidation should run, or null if not needed.
+   * Checks daily→weekly first (7 daily summaries), then weekly→quarterly (12 weekly summaries).
+   */
+  checkConsolidationThresholds(chatId: number): { sourceTier: MemoryTier; targetTier: MemoryTier } | null {
+    // Count daily compactions for this chat
+    const dailyCount = this.db
+      .prepare("SELECT COUNT(*) as cnt FROM compactions WHERE chat_id = ? AND tier = 'daily'")
+      .get(chatId) as { cnt: number };
+
+    if (dailyCount.cnt >= CONSOLIDATION_THRESHOLDS.weekly) {
+      return { sourceTier: "daily", targetTier: "weekly" };
+    }
+
+    // Count weekly compactions for this chat
+    const weeklyCount = this.db
+      .prepare("SELECT COUNT(*) as cnt FROM compactions WHERE chat_id = ? AND tier = 'weekly'")
+      .get(chatId) as { cnt: number };
+
+    if (weeklyCount.cnt >= CONSOLIDATION_THRESHOLDS.quarterly) {
+      return { sourceTier: "weekly", targetTier: "quarterly" };
+    }
+
+    return null;
+  }
+
   /** Generate the file name for a consolidation based on tier and date. */
   private getConsolidationFileName(tier: MemoryTier, date: Date): string {
     const year = date.getFullYear();
@@ -279,6 +318,11 @@ export class CompactionEngine {
         // ISO week number
         const weekNum = this.getISOWeek(date);
         return `${year}-W${String(weekNum).padStart(2, "0")}.md`;
+      }
+      case "quarterly": {
+        // Quarter number (1-4) based on month
+        const quarter = Math.ceil((date.getMonth() + 1) / 3);
+        return `${year}-Q${quarter}.md`;
       }
       case "monthly":
         return `${year}-${month}.md`;

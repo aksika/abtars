@@ -1,5 +1,7 @@
 import type Database from "better-sqlite3";
 import type { MessageRecord, SearchResult } from "../types/index.js";
+import type { ExtractedMemory, MemorySearchResult } from "../types/memory.js";
+import { logWarn } from "./logger.js";
 
 const FTS5_SPECIAL_CHARS = /[",()*^+\-:{}]/g;
 const FTS5_OPERATORS = new Set(["and", "or", "not", "near"]);
@@ -233,4 +235,173 @@ export class MemoryIndex {
       )
       .run(chatId, chatId, maxMessages);
   }
+
+  /**
+   * Search extracted memories by English content using FTS5 on extracted_memories_fts.
+   *
+   * Joins with extracted_memories for metadata. Supports chatId, time range,
+   * and limit filters. Returns MemorySearchResult[] with tier="extracted".
+   * Returns empty array on error.
+   */
+  searchExtracted(
+    query: string,
+    opts?: { chatId?: number; startTime?: number; endTime?: number; limit?: number },
+  ): MemorySearchResult[] {
+    try {
+      if (!query.trim()) return [];
+
+      const sanitizedQuery = sanitizeFtsQuery(query);
+      if (!sanitizedQuery) return [];
+
+      const conditions: string[] = ["extracted_memories_fts MATCH ?"];
+      const params: (string | number)[] = [sanitizedQuery];
+
+      if (opts?.chatId !== undefined) {
+        conditions.push("em.chat_id = ?");
+        params.push(opts.chatId);
+      }
+      if (opts?.startTime !== undefined) {
+        conditions.push("em.source_timestamp >= ?");
+        params.push(opts.startTime);
+      }
+      if (opts?.endTime !== undefined) {
+        conditions.push("em.source_timestamp <= ?");
+        params.push(opts.endTime);
+      }
+
+      const limit = opts?.limit ?? 20;
+      params.push(limit);
+
+      const sql = `
+        SELECT em.id, em.content_en, em.content_original, em.memory_type,
+               em.source_timestamp, em.preserve_original, rank
+        FROM extracted_memories em
+        JOIN extracted_memories_fts ON extracted_memories_fts.rowid = em.id
+        WHERE ${conditions.join(" AND ")}
+        ORDER BY rank ASC
+        LIMIT ?
+      `;
+
+      const rows = this.db.prepare(sql).all(...params) as Array<{
+        id: number;
+        content_en: string;
+        content_original: string;
+        memory_type: string;
+        source_timestamp: number;
+        preserve_original: number;
+        rank: number;
+      }>;
+
+      return rows.map((row) => ({
+        content: row.content_en,
+        content_original: row.content_original,
+        memory_type: row.memory_type,
+        source_timestamp: row.source_timestamp,
+        tier: "extracted" as const,
+        score: Math.abs(row.rank),
+      }));
+    } catch (err) {
+      logWarn("memory-index", `searchExtracted failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Search extracted memories by original-language content using FTS5 on
+   * extracted_memories_original_fts. Optionally boosts results where
+   * preserve_original is true (score multiplied by 1.5).
+   *
+   * Returns MemorySearchResult[] with tier="extracted".
+   * Returns empty array on error.
+   */
+  searchOriginal(
+    query: string,
+    opts?: { chatId?: number; limit?: number; boostPreserved?: boolean },
+  ): MemorySearchResult[] {
+    try {
+      if (!query.trim()) return [];
+
+      const sanitizedQuery = sanitizeFtsQuery(query);
+      if (!sanitizedQuery) return [];
+
+      const conditions: string[] = ["extracted_memories_original_fts MATCH ?"];
+      const params: (string | number)[] = [sanitizedQuery];
+
+      if (opts?.chatId !== undefined) {
+        conditions.push("em.chat_id = ?");
+        params.push(opts.chatId);
+      }
+
+      const limit = opts?.limit ?? 20;
+      params.push(limit);
+
+      const sql = `
+        SELECT em.id, em.content_en, em.content_original, em.memory_type,
+               em.source_timestamp, em.preserve_original, rank
+        FROM extracted_memories em
+        JOIN extracted_memories_original_fts ON extracted_memories_original_fts.rowid = em.id
+        WHERE ${conditions.join(" AND ")}
+        ORDER BY rank ASC
+        LIMIT ?
+      `;
+
+      const rows = this.db.prepare(sql).all(...params) as Array<{
+        id: number;
+        content_en: string;
+        content_original: string;
+        memory_type: string;
+        source_timestamp: number;
+        preserve_original: number;
+        rank: number;
+      }>;
+
+      const boostPreserved = opts?.boostPreserved ?? false;
+
+      return rows.map((row) => {
+        let score = Math.abs(row.rank);
+        if (boostPreserved && row.preserve_original === 1) {
+          score *= 1.5;
+        }
+        return {
+          content: row.content_en,
+          content_original: row.content_original,
+          memory_type: row.memory_type,
+          source_timestamp: row.source_timestamp,
+          tier: "extracted" as const,
+          score,
+        };
+      });
+    } catch (err) {
+      logWarn("memory-index", `searchOriginal failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Index an extracted memory in the FTS5 indexes.
+   *
+   * The FTS5 triggers on extracted_memories handle automatic indexing on INSERT,
+   * but this method provides a manual indexing path for cases where the triggers
+   * may not have fired (e.g., bulk imports or rebuilds).
+   *
+   * Always indexes content_en into extracted_memories_fts.
+   * Indexes content_original into extracted_memories_original_fts only when
+   * preserve_original is true.
+   */
+  indexExtractedMemory(memory: ExtractedMemory & { id: number }): void {
+    try {
+      this.db
+        .prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)")
+        .run(memory.id, memory.content_en);
+
+      if (memory.preserve_original) {
+        this.db
+          .prepare("INSERT INTO extracted_memories_original_fts(rowid, content_original) VALUES (?, ?)")
+          .run(memory.id, memory.content_original);
+      }
+    } catch (err) {
+      logWarn("memory-index", `indexExtractedMemory failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
 }

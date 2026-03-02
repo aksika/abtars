@@ -46,6 +46,7 @@ describe("ContextAssembler", () => {
 
     const result = await assembler.assemble({
       chatId: 1,
+      channelKey: "1",
       userInput: "What are my preferences?",
       systemPrompt: "You are a helpful assistant.",
       workingMemory: [
@@ -92,6 +93,7 @@ describe("ContextAssembler", () => {
 
     const result = await assembler.assemble({
       chatId: 1,
+      channelKey: "1",
       userInput: "Hello",
       systemPrompt: "You are helpful.",
       workingMemory: [makeMessage("user", "Hi", 0)],

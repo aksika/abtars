@@ -806,3 +806,99 @@ describe("MemoryManager — assembleContext", () => {
     disabled.close();
   });
 });
+
+describe("MemoryManager — assembleContext memory_search tool prompt", () => {
+  let tmpDir: string;
+  let manager: MemoryManager;
+
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "mm-tool-prompt-"));
+    manager = new MemoryManager(makeConfig(tmpDir));
+    await manager.initialize();
+    // Set a dummy llmCall so startHeartbeat creates the search tool
+    manager.setLlmCall(async () => "{}");
+    manager.startHeartbeat();
+  });
+
+  afterEach(() => {
+    manager.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("includes memory_search tool prompt when isSessionStart is true", async () => {
+    const result = await manager.assembleContext({
+      chatId: 1,
+      userInput: "Hello",
+      systemPrompt: "You are helpful.",
+      isSessionStart: true,
+    });
+
+    expect(result).toContain("[MEMORY SEARCH TOOL]");
+    expect(result).toContain("memory_search");
+    expect(result).toContain("keywords");
+    expect(result).toContain("original_keyword");
+    expect(result).toContain("time_range");
+  });
+
+  it("includes memory_search tool prompt when isSessionStart is undefined (fail-safe)", async () => {
+    const result = await manager.assembleContext({
+      chatId: 1,
+      userInput: "Hello",
+      systemPrompt: "You are helpful.",
+    });
+
+    expect(result).toContain("[MEMORY SEARCH TOOL]");
+    expect(result).toContain("memory_search");
+  });
+
+  it("omits memory_search tool prompt when isSessionStart is false", async () => {
+    const result = await manager.assembleContext({
+      chatId: 1,
+      userInput: "Hello",
+      systemPrompt: "You are helpful.",
+      isSessionStart: false,
+    });
+
+    expect(result).not.toContain("[MEMORY SEARCH TOOL]");
+  });
+
+  it("appends tool prompt to existing system prompt", async () => {
+    const result = await manager.assembleContext({
+      chatId: 1,
+      userInput: "Hello",
+      systemPrompt: "You are a helpful assistant.",
+      isSessionStart: true,
+    });
+
+    expect(result).toContain("You are a helpful assistant.");
+    expect(result).toContain("[MEMORY SEARCH TOOL]");
+  });
+
+  it("uses tool prompt as system prompt when systemPrompt is empty", async () => {
+    const result = await manager.assembleContext({
+      chatId: 1,
+      userInput: "Hello",
+      systemPrompt: "",
+      isSessionStart: true,
+    });
+
+    expect(result).toContain("[MEMORY SEARCH TOOL]");
+  });
+
+  it("omits tool prompt when memorySearchTool is not initialized", async () => {
+    // Create a manager without calling startHeartbeat
+    const noToolManager = new MemoryManager(makeConfig(tmpDir));
+    await noToolManager.initialize();
+
+    const result = await noToolManager.assembleContext({
+      chatId: 1,
+      userInput: "Hello",
+      systemPrompt: "You are helpful.",
+      isSessionStart: true,
+    });
+
+    expect(result).not.toContain("[MEMORY SEARCH TOOL]");
+
+    noToolManager.close();
+  });
+});

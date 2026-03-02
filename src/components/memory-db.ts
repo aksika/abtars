@@ -97,6 +97,71 @@ export function initializeDatabase(dbPath: string): Database.Database {
       ON ingested_documents(chat_id);
   `);
 
+  // Extracted memories table (Tier 3 Collection)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS extracted_memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id INTEGER NOT NULL,
+      content_original TEXT NOT NULL,
+      content_en TEXT NOT NULL,
+      memory_type TEXT NOT NULL DEFAULT 'fact',
+      source_timestamp INTEGER NOT NULL,
+      preserve_original INTEGER NOT NULL DEFAULT 0,
+      preserved_keyword TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_extracted_memories_chat_ts
+      ON extracted_memories(chat_id, source_timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_extracted_memories_preserve
+      ON extracted_memories(preserve_original) WHERE preserve_original = 1;
+
+    -- FTS5 index over extracted memories (English content)
+    CREATE VIRTUAL TABLE IF NOT EXISTS extracted_memories_fts USING fts5(
+      content_en,
+      content=extracted_memories,
+      content_rowid=id,
+      tokenize='porter unicode61'
+    );
+
+    -- Triggers to keep extracted memories FTS in sync
+    CREATE TRIGGER IF NOT EXISTS extracted_memories_ai AFTER INSERT ON extracted_memories BEGIN
+      INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (new.id, new.content_en);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS extracted_memories_ad AFTER DELETE ON extracted_memories BEGIN
+      INSERT INTO extracted_memories_fts(extracted_memories_fts, rowid, content_en)
+        VALUES('delete', old.id, old.content_en);
+    END;
+
+    -- FTS5 index for original-language content (only for preserve_original memories)
+    CREATE VIRTUAL TABLE IF NOT EXISTS extracted_memories_original_fts USING fts5(
+      content_original,
+      content=extracted_memories,
+      content_rowid=id,
+      tokenize='unicode61'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS extracted_memories_orig_ai AFTER INSERT ON extracted_memories
+      WHEN new.preserve_original = 1
+    BEGIN
+      INSERT INTO extracted_memories_original_fts(rowid, content_original)
+        VALUES (new.id, new.content_original);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS extracted_memories_orig_ad AFTER DELETE ON extracted_memories
+      WHEN old.preserve_original = 1
+    BEGIN
+      INSERT INTO extracted_memories_original_fts(extracted_memories_original_fts, rowid, content_original)
+        VALUES('delete', old.id, old.content_original);
+    END;
+
+    -- Extraction watermark table (tracks last processed timestamp per chat)
+    CREATE TABLE IF NOT EXISTS extraction_watermarks (
+      chat_id INTEGER PRIMARY KEY,
+      last_processed_timestamp INTEGER NOT NULL
+    );
+  `);
+
   // Migration: add model_version column to embeddings table for existing databases
   try {
     db.exec(`ALTER TABLE embeddings ADD COLUMN model_version TEXT DEFAULT 'Xenova/all-MiniLM-L6-v2'`);

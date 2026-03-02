@@ -41,6 +41,10 @@ export type {
   ForgetResult,
   RecallAnalysis,
   PipelineResult,
+  ExtractedMemory,
+  MemorySearchParams,
+  MemorySearchResult,
+  HeartbeatTask,
 } from "./memory.js";
 
 export type {

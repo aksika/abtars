@@ -1,7 +1,9 @@
 import type { MemoryManager } from "./memory-manager.js";
 import type { MemoryConfig } from "./memory-config.js";
 import type { RecallFallbackPipeline } from "./recall-fallback-pipeline.js";
+import type { ContextWindowMonitor } from "./context-window-monitor.js";
 import type { AssembledContext, MessageRecord, SearchResult } from "../types/index.js";
+import { logWarn } from "./logger.js";
 
 /**
  * Builds the LLM context window from tiered memory sources with fixed token budgets.
@@ -21,6 +23,8 @@ export class ContextAssembler {
   private llmCall: ((prompt: string, content: string) => Promise<string>) | null = null;
   private rollingSummaries: Map<string, string> = new Map();
   private pipeline: RecallFallbackPipeline | null = null;
+  private sessionInjectionState: Map<string, boolean> = new Map();
+  private contextWindowMonitor: ContextWindowMonitor | null = null;
 
   constructor(memoryManager: MemoryManager, config: MemoryConfig) {
     this.memoryManager = memoryManager;
@@ -35,6 +39,16 @@ export class ContextAssembler {
   /** Register the LLM callback for rolling summary generation. */
   setLlmCall(llmCall: (prompt: string, content: string) => Promise<string>): void {
     this.llmCall = llmCall;
+  }
+
+  /** Mark a session as needing re-injection (called on staleness reset). */
+  resetSessionInjection(channelKey: string): void {
+    this.sessionInjectionState.delete(channelKey);
+  }
+
+  /** Inject the context window monitor for async compression scheduling. */
+  setContextWindowMonitor(monitor: ContextWindowMonitor): void {
+    this.contextWindowMonitor = monitor;
   }
 
   /**
@@ -63,16 +77,21 @@ export class ContextAssembler {
 
     const prompt =
       "You are a conversation summarizer. Incorporate the following new messages into the existing summary. " +
-      "Produce a concise, updated summary that preserves all important information. " +
+      "Produce a concise, updated summary IN ENGLISH that preserves all important information, regardless of the language used in the conversation. " +
       "If the existing summary is empty, create a new summary from the messages.";
 
     const content = existingSummary
       ? `Existing summary:\n${existingSummary}\n\nNew messages to incorporate:\n${formattedMessages}`
       : `Messages to summarize:\n${formattedMessages}`;
 
-    const updatedSummary = await this.llmCall(prompt, content);
-    this.rollingSummaries.set(channelKey, updatedSummary);
-    return updatedSummary;
+    try {
+      const updatedSummary = await this.llmCall(prompt, content);
+      this.rollingSummaries.set(channelKey, updatedSummary);
+      return updatedSummary;
+    } catch (err) {
+      logWarn("ctx-assembler", `Rolling summary LLM call failed, retaining previous summary: ${err}`);
+      return existingSummary || "";
+    }
   }
 
   /** Estimate token count using chars / 4 heuristic. */
@@ -95,12 +114,19 @@ export class ContextAssembler {
    */
   async assemble(params: {
     chatId: number;
+    channelKey: string;
     userInput: string;
     systemPrompt: string;
     workingMemory: MessageRecord[];
+    isSessionStart?: boolean;
   }): Promise<AssembledContext> {
-    const { chatId, userInput, systemPrompt, workingMemory } = params;
+    const { chatId, channelKey, userInput, systemPrompt, workingMemory, isSessionStart } = params;
     const budget = this.config.contextBudget;
+
+    // Determine whether to inject CoreFacts + RollingSummary for this message.
+    // Inject on first message of session (isSessionStart=true) or when state is unknown (fail-safe).
+    const shouldInjectSessionContext =
+      isSessionStart === true || !this.sessionInjectionState.has(channelKey);
 
     const sections: string[] = [];
     const usage = {
@@ -113,8 +139,8 @@ export class ContextAssembler {
       rollingSummary: 0,
     };
 
-    // 1. Soul + User Core Facts
-    const soulSection = this.buildSoulSection(chatId, systemPrompt, budget.soul);
+    // 1. Soul + User Core Facts (CoreFacts omitted on subsequent messages in same session)
+    const soulSection = this.buildSoulSection(chatId, systemPrompt, budget.soul, shouldInjectSessionContext);
     if (soulSection.text) {
       sections.push(soulSection.text);
       usage.soul = soulSection.tokens;
@@ -142,12 +168,12 @@ export class ContextAssembler {
       const bufferSize = this.config.rollingBufferSize;
       recentMessages = workingMemory.slice(-bufferSize);
       const displacedMessages = workingMemory.slice(0, -bufferSize);
-      const channelKey = String(chatId);
+      const summaryChannelKey = String(chatId);
 
       // Try to generate/update rolling summary via LLM
-      const existingSummary = this.rollingSummaries.get(channelKey) ?? "";
+      const existingSummary = this.rollingSummaries.get(summaryChannelKey) ?? "";
       rollingSummaryText = await this.updateRollingSummary({
-        channelKey,
+        channelKey: summaryChannelKey,
         displacedMessages,
         existingSummary,
       });
@@ -159,8 +185,13 @@ export class ContextAssembler {
       }
     } else {
       // Conversation fits within buffer — use cached summary if available
-      const channelKey = String(chatId);
-      rollingSummaryText = this.rollingSummaries.get(channelKey) ?? "";
+      const summaryChannelKey = String(chatId);
+      rollingSummaryText = this.rollingSummaries.get(summaryChannelKey) ?? "";
+    }
+
+    // Omit rolling summary on subsequent messages in the same session
+    if (!shouldInjectSessionContext) {
+      rollingSummaryText = "";
     }
 
     const workingSection = this.buildWorkingMemorySection(
@@ -181,6 +212,21 @@ export class ContextAssembler {
 
     usage.total = usage.soul + usage.scratchpad + usage.recalled + usage.working + usage.input;
 
+    // Check context window usage and schedule async compression if needed
+    if (this.contextWindowMonitor) {
+      try {
+        const maxTokens = budget.soul + budget.scratchpad + budget.recalled + budget.working;
+        if (this.contextWindowMonitor.shouldCompress(usage.total, maxTokens)) {
+          this.contextWindowMonitor.scheduleCompression(channelKey);
+        }
+      } catch (err) {
+        logWarn("ctx-assembler", `Context window monitor failed, proceeding without compression: ${err}`);
+      }
+    }
+
+    // Mark this channel as having received session context injection
+    this.sessionInjectionState.set(channelKey, true);
+
     return { text: sections.join("\n\n"), usage };
   }
 
@@ -188,12 +234,15 @@ export class ContextAssembler {
     chatId: number,
     systemPrompt: string,
     budget: number,
+    includeCoreFacts: boolean = true,
   ): { text: string; tokens: number } {
-    const userFacts = this.memoryManager.readUserCoreFacts(chatId);
     const parts: string[] = [];
 
     if (systemPrompt) parts.push(`[SYSTEM]\n${systemPrompt}`);
-    if (userFacts) parts.push(`[USER FACTS]\n${userFacts}`);
+    if (includeCoreFacts) {
+      const userFacts = this.memoryManager.readUserCoreFacts(chatId);
+      if (userFacts) parts.push(`[USER FACTS]\n${userFacts}`);
+    }
 
     if (parts.length === 0) return { text: "", tokens: 0 };
 
@@ -290,7 +339,7 @@ export class ContextAssembler {
 
     // If rolling summary exists, prepend it and count against the working memory budget
     if (rollingSummary) {
-      summaryBlock = `[ROLLING SUMMARY]\n${rollingSummary}\n\n`;
+      summaryBlock = `[ROLLING SUMMARY (English)]\n${rollingSummary}\n\n`;
       const summaryChars = summaryBlock.length;
 
       if (summaryChars >= maxChars) {

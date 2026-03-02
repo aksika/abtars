@@ -11,6 +11,11 @@ import { TranscriptParser } from "./transcript-parser.js";
 import { CompactionEngine } from "./compaction-engine.js";
 import { SleepCycleRunner } from "./sleep-cycle-runner.js";
 import { ContextAssembler } from "./context-assembler.js";
+import { HeartbeatSystem } from "./heartbeat-system.js";
+import type { HeartbeatConfig } from "./heartbeat-system.js";
+import { MemoryExtractor } from "./memory-extractor.js";
+import { MemorySearchTool } from "./memory-search-tool.js";
+import type { MemorySearchToolConfig } from "./memory-search-tool.js";
 import { IngestionPipeline } from "./ingestion-pipeline.js";
 import { ReflectionEngine } from "./reflection-engine.js";
 import { IntentDetector, DEFAULT_CUE_PHRASES_EN, DEFAULT_CUE_PHRASES_HU } from "./intent-detector.js";
@@ -27,10 +32,39 @@ import type {
   IngestedDocument,
   Reflection,
   ForgetResult,
+  MemorySearchParams,
+  MemorySearchResult,
 } from "../types/index.js";
 import { logDebug, logError, logInfo, logWarn } from "./logger.js";
 
 const TAG = "memory-manager";
+
+/**
+ * Tool definition prompt for the memory_search tool, injected into the system prompt
+ * at session start so the LLM agent knows it can search its memory.
+ *
+ * Requirements: 9.1, 9.2, 9.3
+ */
+export const MEMORY_SEARCH_TOOL_PROMPT = `
+[MEMORY SEARCH TOOL]
+You have a memory_search tool available. Use it when the user asks about something you discussed before, references past conversations, or when you need to recall specific information (facts, decisions, preferences, events).
+
+Tool: memory_search
+Parameters:
+- keywords (required): Array of English search terms. Extract key concepts from the user's message in English.
+  Example: ["project deadline", "budget"]
+- original_keyword (optional): A single keyword in the user's original language for fallback search. Use when the user stresses a specific non-English term.
+  Example: "ribanc"
+- time_range (optional): Object with "start" and "end" fields (Unix timestamps in milliseconds) to narrow results to a time window.
+  Example: { "start": 1700000000000, "end": 1710000000000 }
+
+When to use:
+- User asks "what did we talk about…", "do you remember…", "what was the decision on…"
+- User references a past topic, person, or event from earlier conversations
+- You need context from previous sessions that is not in the current conversation
+
+Do NOT use on every message — only when recall is needed.
+`.trim();
 
 /**
  * Top-level coordinator for the local memory layer.
@@ -52,6 +86,9 @@ export class MemoryManager {
   private ingestionPipeline: IngestionPipeline | null = null;
   private reflectionEngine: ReflectionEngine | null = null;
   private recallPipeline: RecallFallbackPipeline | null = null;
+  private heartbeat: HeartbeatSystem | null = null;
+  private memoryExtractor: MemoryExtractor | null = null;
+  private memorySearchTool: MemorySearchTool | null = null;
 
   constructor(config: MemoryConfig) {
     this.config = config;
@@ -795,13 +832,27 @@ export class MemoryManager {
    */
   async assembleContext(params: {
     chatId: number;
+    channelKey?: string;
     userInput: string;
     systemPrompt: string;
     workingMemory?: MessageRecord[];
+    isSessionStart?: boolean;
   }): Promise<string> {
     if (!this.config.memoryEnabled) return params.userInput;
 
     try {
+      // Inject memory_search tool definition into system prompt at session start
+      // (isSessionStart=true or undefined as fail-safe), but only when the search tool is available.
+      let systemPrompt = params.systemPrompt;
+      const shouldInjectToolPrompt =
+        this.memorySearchTool !== null &&
+        (params.isSessionStart === true || params.isSessionStart === undefined);
+      if (shouldInjectToolPrompt) {
+        systemPrompt = systemPrompt
+          ? `${systemPrompt}\n\n${MEMORY_SEARCH_TOOL_PROMPT}`
+          : MEMORY_SEARCH_TOOL_PROMPT;
+      }
+
       const assembler = new ContextAssembler(this, this.config);
       if (this.recallPipeline) {
         assembler.setPipeline(this.recallPipeline);
@@ -811,9 +862,11 @@ export class MemoryManager {
       }
       const result = await assembler.assemble({
         chatId: params.chatId,
+        channelKey: params.channelKey ?? String(params.chatId),
         userInput: params.userInput,
-        systemPrompt: params.systemPrompt,
+        systemPrompt,
         workingMemory: params.workingMemory ?? [],
+        isSessionStart: params.isSessionStart,
       });
       return result.text;
     } catch (err) {
@@ -1113,11 +1166,130 @@ export class MemoryManager {
   }
 
 
+  /**
+   * Initialize and start the heartbeat system for background memory extraction
+   * and consolidation. Called after initialize() and setLlmCall().
+   *
+   * Creates HeartbeatSystem, MemoryExtractor, and MemorySearchTool.
+   * Registers two heartbeat tasks:
+   *   - memory-extraction: processes unprocessed transcripts for active chats
+   *   - consolidation: checks compaction thresholds and runs consolidation
+   *
+   * On failure, logs a warning and continues without background processing.
+   */
+  startHeartbeat(): void {
+    if (!this.config.memoryEnabled || !this.db || !this.memoryIndex) return;
+
+    try {
+      const heartbeatConfig: HeartbeatConfig = {
+        enabled: this.config.heartbeat.enabled,
+        intervalMs: this.config.heartbeat.intervalMs,
+      };
+
+      this.heartbeat = new HeartbeatSystem(heartbeatConfig);
+
+      // Create MemoryExtractor (requires db and llmCall)
+      if (this.llmCall) {
+        this.memoryExtractor = new MemoryExtractor(this.db, this.llmCall);
+      }
+
+      // Create MemorySearchTool
+      const searchConfig: MemorySearchToolConfig = {
+        searchTimeoutMs: this.config.searchEnhancements.searchTimeoutMs,
+        decayHalflifeDays: this.config.searchEnhancements.decayHalflifeDays,
+        mmrLambda: this.config.searchEnhancements.mmrLambda,
+      };
+      this.memorySearchTool = new MemorySearchTool(
+        this.db,
+        this.memoryIndex,
+        searchConfig,
+      );
+
+      // Register memory extraction task
+      if (this.memoryExtractor) {
+        const extractor = this.memoryExtractor;
+        const db = this.db;
+        this.heartbeat.registerTask({
+          name: "memory-extraction",
+          execute: async () => {
+            const rows = db
+              .prepare("SELECT DISTINCT telegram_chat_id FROM sessions WHERE is_active = 1")
+              .all() as Array<{ telegram_chat_id: number }>;
+
+            for (const row of rows) {
+              await extractor.processTranscripts(row.telegram_chat_id);
+            }
+          },
+        });
+      }
+
+      // Register consolidation task
+      const db = this.db;
+      const transcriptParser = this.transcriptParser;
+      const memoryIndex = this.memoryIndex;
+      const config = this.config;
+      const llmCall = this.llmCall;
+      if (transcriptParser && llmCall) {
+        this.heartbeat.registerTask({
+          name: "consolidation",
+          execute: async () => {
+            const rows = db
+              .prepare("SELECT DISTINCT telegram_chat_id FROM sessions WHERE is_active = 1")
+              .all() as Array<{ telegram_chat_id: number }>;
+
+            for (const row of rows) {
+              const engine = new CompactionEngine(db, transcriptParser, memoryIndex, config);
+              const threshold = engine.checkConsolidationThresholds(row.telegram_chat_id);
+              if (threshold) {
+                const runner = new SleepCycleRunner(engine, config);
+                await runner.runPendingConsolidations({
+                  chatId: row.telegram_chat_id,
+                  llmCall,
+                });
+              }
+            }
+          },
+        });
+      }
+
+      this.heartbeat.start();
+    } catch (err) {
+      logWarn(TAG, `Failed to start heartbeat — continuing without background processing: ${err instanceof Error ? err.message : String(err)}`);
+      this.heartbeat = null;
+    }
+  }
+
+  /** Stop the heartbeat system. Called from close(). */
+  stopHeartbeat(): void {
+    this.heartbeat?.stop();
+    this.heartbeat = null;
+  }
+
+  /** Get the memory search tool for agent invocation. */
+  getMemorySearchTool(): MemorySearchTool | null {
+    return this.memorySearchTool;
+  }
+
+  /**
+   * Execute a memory search (delegates to MemorySearchTool).
+   * Returns empty results on error for graceful degradation.
+   */
+  async memorySearch(params: MemorySearchParams, chatId: number): Promise<MemorySearchResult[]> {
+    try {
+      if (!this.memorySearchTool) return [];
+      return await this.memorySearchTool.search(params, chatId);
+    } catch (err) {
+      logWarn(TAG, `Memory search failed for chat ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
   /** Close the database connection. */
   close(): void {
     if (!this.db) return;
 
     try {
+      this.stopHeartbeat();
       this.db.close();
       this.db = null;
       logInfo(TAG, "Memory manager closed");

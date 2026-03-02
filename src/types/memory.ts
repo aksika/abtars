@@ -8,8 +8,9 @@ export type MessageRecord = {
   sessionId: string;
 };
 
-/** Hierarchical memory consolidation tier. */
-export type MemoryTier = "daily" | "weekly" | "monthly" | "yearly";
+/** Hierarchical memory consolidation tier. Quarterly added for new 3-tier compaction; monthly/yearly kept for backward compat. */
+export type MemoryTier = "daily" | "weekly" | "quarterly" | "monthly" | "yearly";
+
 
 /** A compacted summary produced by the LLM at any tier. */
 export type CompactedMemory = {
@@ -133,4 +134,40 @@ export type PipelineResult = {
   results: SearchResult[];
   stage: "primary" | "context" | "relaxed" | "substring" | "vector" | "temporal" | "none";
   isFallback: boolean;
+};
+
+/** A structured memory extracted from conversation transcripts by the MemoryExtractor. */
+export type ExtractedMemory = {
+  id?: number;
+  chat_id: number;
+  content_original: string;
+  content_en: string;
+  memory_type: "fact" | "decision" | "preference" | "event";
+  source_timestamp: number;
+  preserve_original: boolean;
+  preserved_keyword?: string;
+  created_at: number;
+};
+
+/** Parameters for the agent-initiated memory search tool. */
+export type MemorySearchParams = {
+  keywords: string[];
+  original_keyword?: string;
+  time_range?: { start: number; end: number };
+};
+
+/** A single result from the memory search tool. */
+export type MemorySearchResult = {
+  content: string;
+  content_original?: string;
+  memory_type?: string;
+  source_timestamp: number;
+  tier: "extracted" | "weekly" | "quarterly";
+  score: number;
+};
+
+/** Heartbeat task definition. */
+export type HeartbeatTask = {
+  name: string;
+  execute: () => Promise<void>;
 };
