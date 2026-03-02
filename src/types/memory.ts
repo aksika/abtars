@@ -119,3 +119,18 @@ export type ForgetResult = {
   compactionsRemoved: number;
   transcriptEntriesRemoved: number;
 };
+
+/** Result of intent detection on a user message. */
+export type RecallAnalysis = {
+  hasRecallIntent: boolean;
+  temporalRange: { startTime: number; endTime: number } | null;
+  strippedQuery: string;
+  hasTopicKeywords: boolean;
+};
+
+/** Result from the recall fallback pipeline. */
+export type PipelineResult = {
+  results: SearchResult[];
+  stage: "primary" | "context" | "relaxed" | "substring" | "vector" | "temporal" | "none";
+  isFallback: boolean;
+};

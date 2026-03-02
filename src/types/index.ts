@@ -39,6 +39,8 @@ export type {
   IngestedDocument,
   Reflection,
   ForgetResult,
+  RecallAnalysis,
+  PipelineResult,
 } from "./memory.js";
 
 export type {

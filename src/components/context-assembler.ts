@@ -1,6 +1,7 @@
 import type { MemoryManager } from "./memory-manager.js";
 import type { MemoryConfig } from "./memory-config.js";
-import type { AssembledContext, MessageRecord } from "../types/index.js";
+import type { RecallFallbackPipeline } from "./recall-fallback-pipeline.js";
+import type { AssembledContext, MessageRecord, SearchResult } from "../types/index.js";
 
 /**
  * Builds the LLM context window from tiered memory sources with fixed token budgets.
@@ -19,10 +20,16 @@ export class ContextAssembler {
   private readonly config: MemoryConfig;
   private llmCall: ((prompt: string, content: string) => Promise<string>) | null = null;
   private rollingSummaries: Map<string, string> = new Map();
+  private pipeline: RecallFallbackPipeline | null = null;
 
   constructor(memoryManager: MemoryManager, config: MemoryConfig) {
     this.memoryManager = memoryManager;
     this.config = config;
+  }
+
+  /** Inject the recall fallback pipeline (only when recallFallback.enabled is true). */
+  setPipeline(pipeline: RecallFallbackPipeline): void {
+    this.pipeline = pipeline;
   }
 
   /** Register the LLM callback for rolling summary generation. */
@@ -121,7 +128,7 @@ export class ContextAssembler {
     }
 
     // 3. Recalled Memories (async — hybrid search)
-    const recalledSection = await this.buildRecalledSection(chatId, userInput, budget.recalled);
+    const recalledSection = await this.buildRecalledSection(chatId, userInput, budget.recalled, workingMemory);
     if (recalledSection.text) {
       sections.push(recalledSection.text);
       usage.recalled = recalledSection.tokens;
@@ -211,17 +218,31 @@ export class ContextAssembler {
     chatId: number,
     userInput: string,
     budget: number,
+    workingMemory: MessageRecord[],
   ): Promise<{ text: string; tokens: number }> {
     try {
-      const results = await this.memoryManager.search(userInput, { chatId, limit: 3 });
-      if (!results || results.length === 0) return { text: "", tokens: 0 };
+      let results: SearchResult[];
+      let isFallback = false;
+
+      if (this.pipeline) {
+        // Delegate to the recall fallback pipeline
+        const pipelineResult = await this.pipeline.execute(userInput, chatId, workingMemory, 10);
+        results = pipelineResult.results;
+        isFallback = pipelineResult.isFallback;
+      } else {
+        // Fallback disabled or pipeline not injected — single-shot search
+        results = (await this.memoryManager.search(userInput, { chatId, limit: 3 })) ?? [];
+      }
+
+      if (results.length === 0) return { text: "", tokens: 0 };
 
       const snippets: string[] = [];
       let totalChars = "[RECALLED MEMORIES]\n".length;
       const maxChars = budget * 4;
 
       for (const result of results) {
-        const snippet = `- [${result.record.role}] ${result.record.content}`;
+        const label = isFallback ? `[FALLBACK] [${result.record.role}]` : `[${result.record.role}]`;
+        const snippet = `- ${label} ${result.record.content}`;
         if (totalChars + snippet.length + 1 > maxChars) break;
         snippets.push(snippet);
         totalChars += snippet.length + 1; // +1 for newline
@@ -234,6 +255,23 @@ export class ContextAssembler {
     } catch {
       return { text: "", tokens: 0 };
     }
+  }
+
+  /**
+   * Merge and deduplicate search results from primary and fallback sources.
+   * Prefers higher scores when duplicates (same timestamp + content) exist.
+   */
+  // @ts-expect-error reserved for future use when both primary and fallback results need merging
+  private mergeAndDedup(primary: SearchResult[], fallback: SearchResult[]): SearchResult[] {
+    const map = new Map<string, SearchResult>();
+    for (const r of [...primary, ...fallback]) {
+      const key = `${r.record.timestamp}:${r.record.content}`;
+      const existing = map.get(key);
+      if (!existing || r.score > existing.score) {
+        map.set(key, r);
+      }
+    }
+    return [...map.values()].sort((a, b) => b.score - a.score);
   }
 
   private buildWorkingMemorySection(

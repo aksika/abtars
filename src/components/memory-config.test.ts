@@ -187,3 +187,80 @@ describe("loadMemoryConfig", () => {
     );
   });
 });
+
+// Feature: memory-recall-fallback, Property 13: Configuration Resilience
+import fc from "fast-check";
+
+describe("loadMemoryConfig — Property 13: Configuration Resilience", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    clearMemoryEnv();
+  });
+
+  afterEach(() => {
+    clearMemoryEnv();
+  });
+
+  it("recallFallback fields are never undefined, NaN, or null for any env var combination", () => {
+    /**
+     * Validates: Requirements 5.1, 5.5
+     *
+     * For any set of environment variable values (valid numbers, invalid strings,
+     * empty, or missing), loadMemoryConfig().recallFallback should have all fields
+     * populated — never undefined, NaN, or null.
+     */
+    const envVarArb = fc.option(fc.oneof(fc.string(), fc.constant("")), { nil: undefined });
+
+    fc.assert(
+      fc.property(
+        envVarArb,
+        envVarArb,
+        envVarArb,
+        envVarArb,
+        envVarArb,
+        (fallbackEnabled, timeoutMs, contextMessages, minTokenLength, cuePhrases) => {
+          clearMemoryEnv();
+
+          if (fallbackEnabled !== undefined) process.env["MEMORY_RECALL_FALLBACK_ENABLED"] = fallbackEnabled;
+          if (timeoutMs !== undefined) process.env["MEMORY_RECALL_FALLBACK_TIMEOUT_MS"] = timeoutMs;
+          if (contextMessages !== undefined) process.env["MEMORY_RECALL_CONTEXT_MESSAGES"] = contextMessages;
+          if (minTokenLength !== undefined) process.env["MEMORY_RECALL_MIN_TOKEN_LENGTH"] = minTokenLength;
+          if (cuePhrases !== undefined) process.env["MEMORY_RECALL_CUE_PHRASES"] = cuePhrases;
+
+          const cfg = loadMemoryConfig();
+          const rf = cfg.recallFallback;
+
+          // enabled must be a boolean (not undefined/null)
+          expect(typeof rf.enabled).toBe("boolean");
+          expect(rf.enabled).not.toBeNull();
+          expect(rf.enabled).not.toBeUndefined();
+
+          // timeoutMs must be a finite number (not NaN/undefined/null)
+          expect(typeof rf.timeoutMs).toBe("number");
+          expect(Number.isFinite(rf.timeoutMs)).toBe(true);
+          expect(rf.timeoutMs).not.toBeNull();
+          expect(rf.timeoutMs).not.toBeUndefined();
+
+          // contextMessages must be a finite number (not NaN/undefined/null)
+          expect(typeof rf.contextMessages).toBe("number");
+          expect(Number.isFinite(rf.contextMessages)).toBe(true);
+          expect(rf.contextMessages).not.toBeNull();
+          expect(rf.contextMessages).not.toBeUndefined();
+
+          // minTokenLength must be a finite number (not NaN/undefined/null)
+          expect(typeof rf.minTokenLength).toBe("number");
+          expect(Number.isFinite(rf.minTokenLength)).toBe(true);
+          expect(rf.minTokenLength).not.toBeNull();
+          expect(rf.minTokenLength).not.toBeUndefined();
+
+          // cuePhrases, if present, must be a string (not undefined/null/NaN)
+          if ("cuePhrases" in rf && rf.cuePhrases !== undefined) {
+            expect(typeof rf.cuePhrases).toBe("string");
+            expect(rf.cuePhrases).not.toBeNull();
+          }
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+});

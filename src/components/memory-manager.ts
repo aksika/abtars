@@ -13,6 +13,8 @@ import { SleepCycleRunner } from "./sleep-cycle-runner.js";
 import { ContextAssembler } from "./context-assembler.js";
 import { IngestionPipeline } from "./ingestion-pipeline.js";
 import { ReflectionEngine } from "./reflection-engine.js";
+import { IntentDetector, DEFAULT_CUE_PHRASES_EN, DEFAULT_CUE_PHRASES_HU } from "./intent-detector.js";
+import { RecallFallbackPipeline } from "./recall-fallback-pipeline.js";
 import type {
   MessageRecord,
   SessionState,
@@ -49,6 +51,7 @@ export class MemoryManager {
   private llmCall: ((prompt: string, content: string) => Promise<string>) | null = null;
   private ingestionPipeline: IngestionPipeline | null = null;
   private reflectionEngine: ReflectionEngine | null = null;
+  private recallPipeline: RecallFallbackPipeline | null = null;
 
   constructor(config: MemoryConfig) {
     this.config = config;
@@ -112,6 +115,36 @@ export class MemoryManager {
         );
         this.reflectionEngine = new ReflectionEngine(this.db, compactionEngine, this.config);
         logInfo(TAG, "Reflection engine enabled");
+      }
+
+      // Initialize recall fallback pipeline when enabled
+      if (this.config.recallFallback.enabled) {
+        let detectorConfig: { cuePhrasesEn: string[]; cuePhrasesHu: string[] } | undefined;
+        if (this.config.recallFallback.cuePhrases) {
+          try {
+            const parsed = JSON.parse(this.config.recallFallback.cuePhrases);
+            detectorConfig = {
+              cuePhrasesEn: Array.isArray(parsed.en) ? parsed.en : [],
+              cuePhrasesHu: Array.isArray(parsed.hu) ? parsed.hu : [],
+            };
+          } catch {
+            logWarn(TAG, "Invalid cuePhrases JSON in recall fallback config — using defaults");
+          }
+        }
+        const detector = new IntentDetector(
+          detectorConfig ?? {
+            cuePhrasesEn: [...DEFAULT_CUE_PHRASES_EN],
+            cuePhrasesHu: [...DEFAULT_CUE_PHRASES_HU],
+          },
+        );
+        this.recallPipeline = new RecallFallbackPipeline(this, detector, {
+          enabled: true,
+          timeoutMs: this.config.recallFallback.timeoutMs,
+          contextMessages: this.config.recallFallback.contextMessages,
+          minTokenLength: this.config.recallFallback.minTokenLength,
+          vectorEnabled: this.config.vectorEnabled,
+        });
+        logInfo(TAG, "Recall fallback pipeline enabled");
       }
 
       // Run disk budget enforcement on startup
@@ -352,6 +385,17 @@ export class MemoryManager {
   /** Search conversation history (delegates to hybridSearch). */
   async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
     return this.hybridSearch(query, opts);
+  }
+
+  /** Substring search using SQL LIKE — catches compound words that FTS5 misses. */
+  substringSearch(query: string, opts?: SearchOptions): SearchResult[] {
+    if (!this.config.memoryEnabled || !this.memoryIndex) return [];
+    try {
+      return this.memoryIndex.substringSearch(query, opts);
+    } catch (err) {
+      logError(TAG, "Substring search failed", err);
+      return [];
+    }
   }
 
   /**
@@ -759,6 +803,12 @@ export class MemoryManager {
 
     try {
       const assembler = new ContextAssembler(this, this.config);
+      if (this.recallPipeline) {
+        assembler.setPipeline(this.recallPipeline);
+      }
+      if (this.llmCall) {
+        assembler.setLlmCall(this.llmCall);
+      }
       const result = await assembler.assemble({
         chatId: params.chatId,
         userInput: params.userInput,

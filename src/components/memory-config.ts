@@ -2,6 +2,15 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { logWarn } from "./logger.js";
 
+/** Configuration for the recall fallback pipeline. */
+export type RecallFallbackConfig = {
+  enabled: boolean;
+  timeoutMs: number;
+  contextMessages: number;
+  minTokenLength: number;
+  cuePhrases?: string;
+};
+
 /** Configuration for the local memory layer. */
 export type MemoryConfig = {
   memoryEnabled: boolean;
@@ -27,6 +36,8 @@ export type MemoryConfig = {
   embeddingModel: string;
   /** Relevance threshold for topic-based forgetting. */
   forgetThreshold: number;
+  /** Recall fallback pipeline configuration. */
+  recallFallback: RecallFallbackConfig;
 };
 
 const TAG = "memory-config";
@@ -52,6 +63,12 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
   ingestChunkMaxTokens: 512,
   embeddingModel: "Xenova/all-MiniLM-L6-v2",
   forgetThreshold: 0.8,
+  recallFallback: {
+    enabled: true,
+    timeoutMs: 500,
+    contextMessages: 5,
+    minTokenLength: 3,
+  },
 };
 
 /**
@@ -141,6 +158,35 @@ export function loadMemoryConfig(): MemoryConfig {
 
   const forgetThreshold = parseNumberEnvSafe("MEMORY_FORGET_THRESHOLD", MEMORY_CONFIG_DEFAULTS.forgetThreshold);
 
+  // Recall fallback pipeline config
+  const recallFallbackEnabled = parseBooleanEnv(
+    "MEMORY_RECALL_FALLBACK_ENABLED",
+    MEMORY_CONFIG_DEFAULTS.recallFallback.enabled,
+  );
+  const recallFallbackTimeoutMs = parseNumberEnvSafe(
+    "MEMORY_RECALL_FALLBACK_TIMEOUT_MS",
+    MEMORY_CONFIG_DEFAULTS.recallFallback.timeoutMs,
+  );
+  const recallContextMessages = parseNumberEnvSafe(
+    "MEMORY_RECALL_CONTEXT_MESSAGES",
+    MEMORY_CONFIG_DEFAULTS.recallFallback.contextMessages,
+  );
+  const recallMinTokenLength = parseNumberEnvSafe(
+    "MEMORY_RECALL_MIN_TOKEN_LENGTH",
+    MEMORY_CONFIG_DEFAULTS.recallFallback.minTokenLength,
+  );
+
+  let recallCuePhrases: string | undefined;
+  const rawCuePhrases = process.env["MEMORY_RECALL_CUE_PHRASES"];
+  if (rawCuePhrases !== undefined && rawCuePhrases !== "") {
+    try {
+      JSON.parse(rawCuePhrases);
+      recallCuePhrases = rawCuePhrases;
+    } catch {
+      logWarn(TAG, `MEMORY_RECALL_CUE_PHRASES is not valid JSON: "${rawCuePhrases}" — using built-in defaults`);
+    }
+  }
+
   return {
     memoryEnabled,
     memoryDir,
@@ -156,5 +202,12 @@ export function loadMemoryConfig(): MemoryConfig {
     ingestChunkMaxTokens,
     embeddingModel,
     forgetThreshold,
+    recallFallback: {
+      enabled: recallFallbackEnabled,
+      timeoutMs: recallFallbackTimeoutMs,
+      contextMessages: recallContextMessages,
+      minTokenLength: recallMinTokenLength,
+      ...(recallCuePhrases !== undefined && { cuePhrases: recallCuePhrases }),
+    },
   };
 }

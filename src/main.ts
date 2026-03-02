@@ -539,10 +539,6 @@ async function main(): Promise<void> {
 
       let typingInterval: ReturnType<typeof setInterval> | undefined;
       try {
-        if (memory) {
-          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
-        }
-
         busyChats.add(sessionKey);
         logInfo("main", `← ${isVoiceNote ? "🎤 " : ""}"${text.slice(0, 60)}"`);
 
@@ -557,7 +553,9 @@ async function main(): Promise<void> {
         }
 
         if (memory) {
+          // Assemble context BEFORE recording — prevents self-echo in search results
           prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "" });
+          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
         const responsePromise = transport.sendPrompt(sessionKey, prompt);
@@ -588,7 +586,11 @@ async function main(): Promise<void> {
         }
 
         if (memory) {
-          memory.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), chatId, sessionId: sessionKey });
+          // Store answerOnly (stripped of echoed context) to prevent context-echo pollution
+          const cleanResponse = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
+            ? (transport as TmuxClient).answerOnly
+            : response;
+          memory.recordMessage({ role: "assistant", content: cleanResponse || response, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
         if (isVoiceNote && ttsConfig) {

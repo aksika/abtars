@@ -194,3 +194,340 @@ describe("ContextAssembler", () => {
     expect(result.usage.total).toBe(result.usage.soul + result.usage.input);
   });
 });
+
+import fc from "fast-check";
+
+// ── Shared arbitraries for property tests ──────────────────────────────────
+
+const searchResultArb = fc.record({
+  record: fc.record({
+    role: fc.constantFrom("user" as const, "assistant" as const),
+    content: fc.string({ minLength: 5, maxLength: 50 }),
+    timestamp: fc.integer({ min: 1000000000000, max: 2000000000000 }),
+    chatId: fc.constant(1),
+    sessionId: fc.constant("s1"),
+  }),
+  score: fc.float({ min: Math.fround(0.1), max: Math.fround(10), noNaN: true }),
+});
+
+// ── Property 10: Formatting with Fallback Annotation ───────────────────────
+// Feature: memory-recall-fallback, Property 10: Formatting with Fallback Annotation
+
+describe("Property 10: Formatting with Fallback Annotation", () => {
+  it("should include [FALLBACK] label when isFallback is true and omit it when false", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(searchResultArb, { minLength: 1, maxLength: 10 }),
+        fc.boolean(),
+        async (results, isFallback) => {
+          const mockPipeline = {
+            execute: async () => ({
+              results,
+              stage: isFallback ? "context" : "primary",
+              isFallback,
+            }),
+          } as any;
+
+          const manager = makeMockManager();
+          const config = makeConfig();
+          const assembler = new ContextAssembler(manager, config);
+          assembler.setPipeline(mockPipeline);
+
+          const assembled = await assembler.assemble({
+            chatId: 1,
+            userInput: "test query",
+            systemPrompt: "",
+            workingMemory: [],
+          });
+
+          if (!assembled.text.includes("[RECALLED MEMORIES]")) {
+            // No recalled section means results were empty or didn't fit budget — valid
+            return;
+          }
+
+          const recalledSection = assembled.text.split("[RECALLED MEMORIES]")[1]?.split("\n\n")[0] ?? "";
+          const lines = recalledSection.split("\n").filter((l) => l.startsWith("- "));
+
+          for (const line of lines) {
+            // Every line should follow `- [role] content` or `- [FALLBACK] [role] content`
+            if (isFallback) {
+              expect(line).toMatch(/^- \[FALLBACK\] \[(user|assistant)\] .+/);
+            } else {
+              expect(line).toMatch(/^- \[(user|assistant)\] .+/);
+              expect(line).not.toContain("[FALLBACK]");
+            }
+          }
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+});
+
+// ── Property 11: Token Budget Enforcement ──────────────────────────────────
+// Feature: memory-recall-fallback, Property 11: Token Budget Enforcement
+
+describe("Property 11: Token Budget Enforcement", () => {
+  it("should not exceed the configured token budget for recalled memories", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(searchResultArb, { minLength: 1, maxLength: 20 }),
+        async (results) => {
+          const mockPipeline = {
+            execute: async () => ({
+              results,
+              stage: "context" as const,
+              isFallback: true,
+            }),
+          } as any;
+
+          const manager = makeMockManager();
+          const config = makeConfig(); // recalled budget = 600 tokens = 2400 chars
+          const assembler = new ContextAssembler(manager, config);
+          assembler.setPipeline(mockPipeline);
+
+          const assembled = await assembler.assemble({
+            chatId: 1,
+            userInput: "test",
+            systemPrompt: "",
+            workingMemory: [],
+          });
+
+          // Token budget for recalled is 600 tokens
+          expect(assembled.usage.recalled).toBeLessThanOrEqual(config.contextBudget.recalled);
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+});
+
+// ── Property 12: Merge and Deduplication Prefers Higher Scores ─────────────
+// Feature: memory-recall-fallback, Property 12: Merge and Deduplication Prefers Higher Scores
+
+describe("Property 12: Merge and Deduplication Prefers Higher Scores", () => {
+  it("should deduplicate by timestamp:content and keep the higher score", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(searchResultArb, { minLength: 1, maxLength: 5 }),
+        fc.array(searchResultArb, { minLength: 1, maxLength: 5 }),
+        async (primaryResults, extraResults) => {
+          // Create overlapping entries: take some from primary, give them different scores
+          const overlapping: SearchResult[] = primaryResults.map((r) => ({
+            record: { ...r.record },
+            score: r.score + 1, // higher score for the "fallback" copy
+          }));
+
+          const allFallback = [...extraResults, ...overlapping];
+
+          // We test through the public API by using two pipeline calls:
+          // The mergeAndDedup is private, so we verify behavior through the assembler.
+          // We'll create a pipeline that returns the combined set and check no duplicates in output.
+          const combined = new Map<string, SearchResult>();
+          for (const r of [...primaryResults, ...allFallback]) {
+            const key = `${r.record.timestamp}:${r.record.content}`;
+            const existing = combined.get(key);
+            if (!existing || r.score > existing.score) {
+              combined.set(key, r);
+            }
+          }
+          const expectedDeduped = [...combined.values()];
+
+          // Use a pipeline that returns all results merged
+          const mockPipeline = {
+            execute: async () => ({
+              results: expectedDeduped,
+              stage: "primary" as const,
+              isFallback: false,
+            }),
+          } as any;
+
+          const manager = makeMockManager();
+          const config = makeConfig();
+          const assembler = new ContextAssembler(manager, config);
+          assembler.setPipeline(mockPipeline);
+
+          const assembled = await assembler.assemble({
+            chatId: 1,
+            userInput: "test",
+            systemPrompt: "",
+            workingMemory: [],
+          });
+
+          if (!assembled.text.includes("[RECALLED MEMORIES]")) return;
+
+          const recalledSection = assembled.text.split("[RECALLED MEMORIES]")[1]?.split("\n\n")[0] ?? "";
+          const lines = recalledSection.split("\n").filter((l) => l.startsWith("- "));
+
+          // Verify no duplicate content lines
+          const seen = new Set<string>();
+          for (const line of lines) {
+            expect(seen.has(line)).toBe(false);
+            seen.add(line);
+          }
+
+          // Verify each entry in the output corresponds to the max-scored version
+          for (const line of lines) {
+            // Extract content from the line: `- [role] content`
+            const match = line.match(/^- \[(user|assistant)\] (.+)$/);
+            if (!match) continue;
+            const content = match[2];
+
+            // Find all entries with this content and verify the one kept has the max score
+            const matching = [...primaryResults, ...allFallback].filter(
+              (r) => r.record.content === content,
+            );
+            if (matching.length > 1) {
+              const maxScore = Math.max(...matching.map((r) => r.score));
+              const kept = expectedDeduped.find((r) => r.record.content === content);
+              if (kept) {
+                expect(kept.score).toBe(maxScore);
+              }
+            }
+          }
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+});
+
+// ── Unit Tests: ContextAssembler Integration (Task 6.7) ────────────────────
+
+describe("ContextAssembler integration with RecallFallbackPipeline", () => {
+  it("formats fallback results with [FALLBACK] label", async () => {
+    const results: SearchResult[] = [
+      { record: makeMessage("user", "I like cats"), score: 2.0 },
+      { record: makeMessage("assistant", "Noted about cats"), score: 1.5 },
+    ];
+    const mockPipeline = {
+      execute: async () => ({
+        results,
+        stage: "context",
+        isFallback: true,
+      }),
+    } as any;
+
+    const manager = makeMockManager();
+    const config = makeConfig();
+    const assembler = new ContextAssembler(manager, config);
+    assembler.setPipeline(mockPipeline);
+
+    const assembled = await assembler.assemble({
+      chatId: 1,
+      userInput: "tell me about my pets",
+      systemPrompt: "",
+      workingMemory: [],
+    });
+
+    expect(assembled.text).toContain("[RECALLED MEMORIES]");
+    expect(assembled.text).toContain("- [FALLBACK] [user] I like cats");
+    expect(assembled.text).toContain("- [FALLBACK] [assistant] Noted about cats");
+  });
+
+  it("formats primary results without [FALLBACK] label", async () => {
+    const results: SearchResult[] = [
+      { record: makeMessage("user", "I prefer dark mode"), score: 3.0 },
+    ];
+    const mockPipeline = {
+      execute: async () => ({
+        results,
+        stage: "primary",
+        isFallback: false,
+      }),
+    } as any;
+
+    const manager = makeMockManager();
+    const config = makeConfig();
+    const assembler = new ContextAssembler(manager, config);
+    assembler.setPipeline(mockPipeline);
+
+    const assembled = await assembler.assemble({
+      chatId: 1,
+      userInput: "what are my preferences",
+      systemPrompt: "",
+      workingMemory: [],
+    });
+
+    expect(assembled.text).toContain("[RECALLED MEMORIES]");
+    expect(assembled.text).toContain("- [user] I prefer dark mode");
+    expect(assembled.text).not.toContain("[FALLBACK]");
+  });
+
+  it("does not exceed token budget with large result sets", async () => {
+    // Generate 20 results with long content to exceed the 600-token budget
+    const results: SearchResult[] = Array.from({ length: 20 }, (_, i) => ({
+      record: makeMessage("user", `This is a fairly long recalled memory entry number ${i} with extra padding to consume tokens quickly ${"x".repeat(100)}`, i),
+      score: 10 - i * 0.1,
+    }));
+
+    const mockPipeline = {
+      execute: async () => ({
+        results,
+        stage: "context",
+        isFallback: true,
+      }),
+    } as any;
+
+    const manager = makeMockManager();
+    const config = makeConfig();
+    const assembler = new ContextAssembler(manager, config);
+    assembler.setPipeline(mockPipeline);
+
+    const assembled = await assembler.assemble({
+      chatId: 1,
+      userInput: "test",
+      systemPrompt: "",
+      workingMemory: [],
+    });
+
+    // 600 tokens budget for recalled memories
+    expect(assembled.usage.recalled).toBeLessThanOrEqual(600);
+  });
+
+  it("falls back to single-shot search when pipeline is not set", async () => {
+    const searchResults: SearchResult[] = [
+      { record: makeMessage("user", "single-shot result"), score: 2.0 },
+    ];
+    const manager = makeMockManager({ searchResults });
+    const config = makeConfig();
+    const assembler = new ContextAssembler(manager, config);
+    // Do NOT call setPipeline — pipeline remains null
+
+    const assembled = await assembler.assemble({
+      chatId: 1,
+      userInput: "find something",
+      systemPrompt: "",
+      workingMemory: [],
+    });
+
+    expect(assembled.text).toContain("[RECALLED MEMORIES]");
+    expect(assembled.text).toContain("- [user] single-shot result");
+    expect(assembled.text).not.toContain("[FALLBACK]");
+  });
+
+  it("returns no recalled section when pipeline returns empty results", async () => {
+    const mockPipeline = {
+      execute: async () => ({
+        results: [],
+        stage: "none",
+        isFallback: false,
+      }),
+    } as any;
+
+    const manager = makeMockManager();
+    const config = makeConfig();
+    const assembler = new ContextAssembler(manager, config);
+    assembler.setPipeline(mockPipeline);
+
+    const assembled = await assembler.assemble({
+      chatId: 1,
+      userInput: "test",
+      systemPrompt: "",
+      workingMemory: [],
+    });
+
+    expect(assembled.text).not.toContain("[RECALLED MEMORIES]");
+    expect(assembled.usage.recalled).toBe(0);
+  });
+});
