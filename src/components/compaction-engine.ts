@@ -93,7 +93,9 @@ export class CompactionEngine {
         .map((m) => `[${m.role}] ${m.content}`)
         .join("\n");
 
-      const summary = await params.llmCall(DAILY_PROMPT, content);
+      const raw = await params.llmCall(DAILY_PROMPT, content);
+      // Strip tool-use noise that leaks through tmux response parsing
+      const summary = raw.replace(/^(?:Reading file:.*|[✓✗].*|I'll share my reasoning.*|Let me (?:analyze|think).*| - Completed in.*|\s*)\n/gm, "").trim();
 
       const now = new Date();
       const dateStr = params.compactionDate
