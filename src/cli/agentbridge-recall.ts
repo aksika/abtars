@@ -72,15 +72,23 @@ try {
   // Stage 1: FTS5
   for (const r of index.search(query, searchOpts)) add(r, "fts");
 
-  // Stage 2: Substring (accent-insensitive, catches compound words)
+  // Stage 2: Relaxed FTS5 (OR-style, drops short tokens)
+  if (results.length === 0) {
+    const relaxed = query.split(/\s+/).filter(t => t.length >= 3).join(" OR ");
+    if (relaxed && relaxed !== query) {
+      for (const r of index.search(relaxed, searchOpts)) add(r, "relaxed");
+    }
+  }
+
+  // Stage 3: Substring (accent-insensitive, catches compound words)
   for (const r of index.substringSearch(query, searchOpts)) add(r, "substring");
 
-  // Stage 3: Original-language substring
+  // Stage 4: Original-language substring
   if (params.original && params.original !== query) {
     for (const r of index.substringSearch(params.original, searchOpts)) add(r, "original");
   }
 
-  // Stage 4: Compaction summaries
+  // Stage 5: Compaction summaries
   const allKw = [...params.keywords];
   if (params.original) allKw.push(params.original);
   const conditions = ["chat_id = ?"];
