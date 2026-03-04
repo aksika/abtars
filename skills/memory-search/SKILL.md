@@ -4,25 +4,42 @@ description: Search persistent memory for recalled facts, decisions, preferences
 user-invocable: false
 ---
 
-# Memory Search Tool
+# Memory Search Skill
 
-You have a `memory_search` tool available. Use it when the user asks about something you discussed before, references past conversations, or when you need to recall specific information (facts, decisions, preferences, events).
+You have access to a persistent memory system via a shell command. Use it to recall past conversations, facts, decisions, and preferences.
 
-## Tool: memory_search
+## How to invoke
+
+Run this command using your shell tool:
+
+```bash
+agentbridge-recall --keywords "keyword1,keyword2" --chat-id <CHAT_ID>
+```
 
 ### Parameters
 
-- **keywords** (required): Array of English search terms. Extract key concepts from the user's message in English.
-  Example: `["project deadline", "budget"]`
-- **original_keyword** (optional): A single keyword in the user's original language for fallback search. Use when the user stresses a specific non-English term.
-  Example: `"ribanc"`
-- **time_range** (optional): Object with `start` and `end` fields (Unix timestamps in milliseconds) to narrow results to a time window.
-  Example: `{ "start": 1700000000000, "end": 1710000000000 }`
+- `--keywords` (required): Comma-separated English search terms. Extract key concepts from the user's message.
+  Example: `--keywords "project deadline,budget"`
+- `--original` (optional): A single keyword in the user's original language for fallback search. Use when the user stresses a specific non-English term.
+  Example: `--original "kiskutya"`
+- `--time-start` (optional): Unix timestamp in milliseconds — start of time range.
+- `--time-end` (optional): Unix timestamp in milliseconds — end of time range.
+- `--chat-id` (required): The Telegram chat ID. Use `7773842843` for the main chat.
 
-### When to use
+### Output
 
-- User asks "what did we talk about…", "do you remember…", "what was the decision on…"
-- User references a past topic, person, or event from earlier conversations
-- You need context from previous sessions that is not in the current conversation
+JSON array of results, each with: `content`, `source_timestamp`, `date`, `tier`, `score`.
 
-Do NOT use on every message — only when recall is needed.
+## When to use
+
+- The user's message doesn't make sense in the current conversation context (e.g., a single word or phrase you don't recognize)
+- The user explicitly asks to recall something: "do you remember", "emlékszel", "what did we talk about", "mondtam"
+- The user references a past topic, person, or event not in the current conversation
+- You need context from previous sessions
+
+## When NOT to use
+
+- **Never** on short confirmations: "yes", "ok", "do it", "approved", "go ahead" — these are continuations of the current conversation
+- **Never** when the current conversation context already explains the message
+- **Never** proactively on every message — only when recall is genuinely needed
+- **Never** when the user is giving you a new instruction that's clear from context

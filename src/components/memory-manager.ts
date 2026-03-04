@@ -1306,34 +1306,50 @@ export class MemoryManager {
       return;
     }
 
+    // Query uncompacted sessions from messages table (works for both tmux and ACP transports)
     const rows = this.db
-      .prepare("SELECT DISTINCT telegram_chat_id, acp_session_id FROM sessions WHERE is_active = 1")
-      .all() as Array<{ telegram_chat_id: number; acp_session_id: string }>;
+      .prepare(`
+        SELECT DISTINCT m.chat_id, m.session_id
+        FROM messages m
+        WHERE NOT EXISTS (
+          SELECT 1 FROM compactions c
+          WHERE c.chat_id = m.chat_id AND c.source_session_id = m.session_id AND c.tier = 'daily'
+        )
+      `)
+      .all() as Array<{ chat_id: number; session_id: string }>;
 
     for (const row of rows) {
       try {
-        // Wait for any in-progress compaction, then compact
-        await this.waitForCompaction(row.telegram_chat_id);
-
-        // Skip if already compacted
-        const existing = this.db!.prepare(
-          "SELECT 1 FROM compactions WHERE chat_id = ? AND source_session_id = ? AND tier = 'daily'"
-        ).get(row.telegram_chat_id, row.acp_session_id);
-        if (existing) continue;
+        await this.waitForCompaction(row.chat_id);
 
         const engine = new CompactionEngine(this.db!, this.transcriptParser!, this.memoryIndex!, this.config);
-        // Derive compaction date from earliest message in session
-        const compactionDate = this.getSessionMessageDate(row.telegram_chat_id, row.acp_session_id);
+        const compactionDate = this.getSessionMessageDate(row.chat_id, row.session_id);
         await engine.compact({
-          chatId: row.telegram_chat_id,
-          sessionId: row.acp_session_id,
+          chatId: row.chat_id,
+          sessionId: row.session_id,
           llmCall: this.llmCall!,
           compactionDate,
         });
       } catch (err) {
-        logError(TAG, `Shutdown compaction failed for chat ${row.telegram_chat_id} session ${row.acp_session_id}`, err);
-        // Continue with remaining sessions
+        logError(TAG, `Shutdown compaction failed for chat ${row.chat_id} session ${row.session_id}`, err);
       }
+    }
+  }
+
+  /** Get the latest daily compaction for a chat (for session-start injection). */
+  getLatestCompaction(chatId: number): { timestamp: number; summary: string } | null {
+    if (!this.db) return null;
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT timestamp, summary FROM compactions
+           WHERE chat_id = ? AND tier = 'daily'
+           ORDER BY timestamp DESC LIMIT 1`,
+        )
+        .get(chatId) as { timestamp: number; summary: string } | undefined;
+      return row ?? null;
+    } catch {
+      return null;
     }
   }
 

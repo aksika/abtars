@@ -26,9 +26,8 @@ WORKING_DIR=$(eval echo "$WORKING_DIR")
 mkdir -p "$WORKING_DIR" 2>/dev/null || true
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "✅ tmux session '$SESSION' already running."
-  echo "   Attach: tmux attach -t $SESSION"
-  exit 0
+  echo "♻️  Killing existing tmux session '$SESSION'..."
+  tmux kill-session -t "$SESSION"
 fi
 
 # Build kiro-cli command with optional --model flag

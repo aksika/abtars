@@ -37,13 +37,21 @@ fi
 # 3. Deploy steering files (SOUL.md + skills as steering)
 echo "📝 Deploying steering files..."
 mkdir -p "$AB_HOME/.kiro/steering"
-cp "$PROJECT_DIR/personal/SOUL.md" "$AB_HOME/.kiro/steering/SOUL.md"
+cp "$PROJECT_DIR/persona/SOUL.md" "$AB_HOME/.kiro/steering/SOUL.md"
 cp "$PROJECT_DIR/skills/memory-search/SKILL.md" "$AB_HOME/.kiro/steering/memory-search.md"
 
-# 4. Deploy launcher script
-echo "🚀 Deploying launcher..."
+# 4. Deploy launcher script + recall CLI
+echo "🚀 Deploying launcher + recall CLI..."
 cp "$PROJECT_DIR/scripts/agentbridge.sh" "$AB_HOME/agentbridge.sh"
 chmod +x "$AB_HOME/agentbridge.sh"
+
+# Deploy agentbridge-recall CLI (agent-callable memory search)
+RECALL_SCRIPT="$AB_HOME/agentbridge-recall"
+echo '#!/usr/bin/env bash' > "$RECALL_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-recall.js\" \"\$@\"" >> "$RECALL_SCRIPT"
+chmod +x "$RECALL_SCRIPT"
+mkdir -p "$HOME/.local/bin"
+ln -sf "$RECALL_SCRIPT" "$HOME/.local/bin/agentbridge-recall"
 
 # 4. Restart tmux session (unless --quick)
 if [ "$QUICK" = false ]; then

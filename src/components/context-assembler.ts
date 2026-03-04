@@ -153,11 +153,13 @@ export class ContextAssembler {
       usage.scratchpad = scratchpadSection.tokens;
     }
 
-    // 3. Recalled Memories (async — hybrid search)
-    const recalledSection = await this.buildRecalledSection(chatId, userInput, budget.recalled, workingMemory);
-    if (recalledSection.text) {
-      sections.push(recalledSection.text);
-      usage.recalled = recalledSection.tokens;
+    // 3. Last Session Summary (session-start only — replaces auto-recalled memories)
+    if (shouldInjectSessionContext) {
+      const summarySection = this.buildLastSessionSummary(chatId, budget.recalled);
+      if (summarySection.text) {
+        sections.push(summarySection.text);
+        usage.recalled = summarySection.tokens;
+      }
     }
 
     // 4. Working Memory — with rolling summary for long conversations
@@ -200,7 +202,9 @@ export class ContextAssembler {
       rollingSummaryText,
     );
     if (workingSection.text) {
-      sections.push(workingSection.text);
+      // Prepend session-start timestamp to give the LLM a temporal anchor
+      const sessionMarker = `[SESSION START — ${new Date().toISOString()}]`;
+      sections.push(`${sessionMarker}\n${workingSection.text}`);
       usage.working = workingSection.tokens;
       usage.rollingSummary = workingSection.rollingSummaryTokens;
     }
@@ -263,6 +267,29 @@ export class ContextAssembler {
     return { text: truncated, tokens: this.estimateTokens(truncated) };
   }
 
+  /**
+   * Build a timestamped last-session summary for session-start injection.
+   * Fetches the latest daily compaction and formats it with an "ended at" timestamp.
+   */
+  private buildLastSessionSummary(
+    chatId: number,
+    budget: number,
+  ): { text: string; tokens: number } {
+    try {
+      const compaction = this.memoryManager.getLatestCompaction(chatId);
+      if (!compaction) return { text: "", tokens: 0 };
+
+      const endedAt = new Date(compaction.timestamp).toISOString();
+      const raw = `[LAST SESSION SUMMARY — ended ${endedAt}]
+${compaction.summary}`;
+      const truncated = this.truncateToTokenBudget(raw, budget);
+      return { text: truncated, tokens: this.estimateTokens(truncated) };
+    } catch {
+      return { text: "", tokens: 0 };
+    }
+  }
+
+  // @ts-expect-error retained for potential future use — recall is now skill-driven
   private async buildRecalledSection(
     chatId: number,
     userInput: string,

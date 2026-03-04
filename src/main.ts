@@ -142,6 +142,7 @@ async function main(): Promise<void> {
   }
 
   const busyChats = new Set<string>();
+  const pendingSessionStart = new Set<string>();
 
   // Auto-compact threshold: when Kiro's context window usage exceeds this %, trigger compaction
   const autoCompactThreshold = parseInt(process.env["AUTO_COMPACT_THRESHOLD"] || "70", 10);
@@ -325,6 +326,7 @@ async function main(): Promise<void> {
       if (text === "/new" || text === "/reset") {
         await transport.resetSession(sessionKey);
         if (isGroup) conversationBuffer.clear(bufKey);
+        pendingSessionStart.add(sessionKey);
         await telegramApi.sendMessage(chatId, "🔄 New session started.", { message_thread_id: threadId });
         logInfo("main", "Session reset");
         return;
@@ -346,6 +348,19 @@ async function main(): Promise<void> {
         busyChats.delete(sessionKey);
         await telegramApi.sendMessage(chatId, "🛑 Ctrl+C sent to Kiro.", { message_thread_id: threadId });
         logInfo("main", "Ctrl+C interrupt sent");
+        return;
+      }
+
+      if (text === "/restart") {
+        if (transport instanceof TmuxClient) {
+          await telegramApi.sendMessage(chatId, "\u267b\ufe0f Restarting Kiro...", { message_thread_id: threadId });
+          busyChats.delete(sessionKey);
+          await (transport as TmuxClient).restartSession(config.workingDir, process.env["KIRO_MODEL"]);
+          pendingSessionStart.add(sessionKey);
+          await telegramApi.sendMessage(chatId, "\u2705 Kiro restarted.", { message_thread_id: threadId });
+        } else {
+          await telegramApi.sendMessage(chatId, "\u26a0\ufe0f /restart only works with tmux transport.", { message_thread_id: threadId });
+        }
         return;
       }
 
@@ -654,7 +669,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
         if (!known.includes(cmd)) {
           await telegramApi.sendMessage(chatId, `❓ Unknown command: ${cmd}\nType /help for available commands.`, { message_thread_id: threadId });
           return;
@@ -683,7 +698,9 @@ async function main(): Promise<void> {
 
         if (memory) {
           // Assemble context BEFORE recording — prevents self-echo in search results
-          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "" });
+          const isSessionStart = pendingSessionStart.has(sessionKey);
+          pendingSessionStart.delete(sessionKey);
+          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "", isSessionStart });
           memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
@@ -845,6 +862,7 @@ async function main(): Promise<void> {
       if (text === "/new" || text === "/reset") {
         await transport.resetSession(sessionKey);
         conversationBuffer.clear(bufKey);
+        pendingSessionStart.add(sessionKey);
         await discordApi.sendMessage(message.channelId, "🔄 New session started.");
         logInfo("main", `Discord session reset for ${sessionKey}`);
         return;
@@ -869,6 +887,19 @@ async function main(): Promise<void> {
           logInfo("main", `B2B session reset by user ${message.authorId}`);
         } else {
           await discordApi.sendMessage(message.channelId, "B2B is not enabled.");
+        }
+        return;
+      }
+
+      if (text === "/restart") {
+        if (transport instanceof TmuxClient) {
+          await discordApi.sendMessage(message.channelId, "\u267b\ufe0f Restarting Kiro...");
+          busyChats.delete(sessionKey);
+          await (transport as TmuxClient).restartSession(config.workingDir, process.env["KIRO_MODEL"]);
+          pendingSessionStart.add(sessionKey);
+          await discordApi.sendMessage(message.channelId, "\u2705 Kiro restarted.");
+        } else {
+          await discordApi.sendMessage(message.channelId, "\u26a0\ufe0f /restart only works with tmux transport.");
         }
         return;
       }
@@ -1137,7 +1168,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
         if (!known.includes(cmd)) {
           await discordApi.sendMessage(message.channelId, `❓ Unknown command: ${cmd}\nType /help for available commands.`);
           return;
@@ -1163,7 +1194,9 @@ async function main(): Promise<void> {
 
         if (memory) {
           const chatId = parseInt(message.channelId, 10) || 0;
-          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "" });
+          const isSessionStart = pendingSessionStart.has(sessionKey);
+          pendingSessionStart.delete(sessionKey);
+          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "", isSessionStart });
         }
 
         const response = await transport.sendPrompt(sessionKey, prompt);
@@ -1243,13 +1276,13 @@ async function main(): Promise<void> {
     logInfo("main", "🛑 Shutting down...");
     if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
-    transport.destroy();
     try {
       await memory?.shutdownCompaction();
     } catch (err) {
       logWarn("main", `Shutdown compaction error: ${err instanceof Error ? err.message : String(err)}`);
     }
     memory?.close();
+    transport.destroy();
     process.exit(0);
   }
 

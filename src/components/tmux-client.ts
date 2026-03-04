@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { writeFileSync, unlinkSync } from "node:fs";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug } from "./logger.js";
 
@@ -59,9 +60,18 @@ export class TmuxClient implements IKiroTransport {
         logInfo("tmux", `Retry #${attempt}: resending prompt`);
       }
 
-      // Send the message
-      const escaped = message.replace(/'/g, "'\\''");
-      this.exec(`tmux send-keys -t ${this.sessionName} '${escaped}' Enter`);
+      // Send the message — use temp file for long prompts to avoid tmux command length limit
+      if (message.length > 4000) {
+        const tmpFile = `/tmp/agentbridge-prompt-${Date.now()}.txt`;
+        writeFileSync(tmpFile, message);
+        const readCmd = `Please read ${tmpFile} and follow the instructions inside it exactly. Output ONLY what is requested.`;
+        const escaped = readCmd.replace(/'/g, "'\\''");
+        this.exec(`tmux send-keys -t ${this.sessionName} '${escaped}' Enter`);
+        setTimeout(() => { try { unlinkSync(tmpFile); } catch {} }, 120_000);
+      } else {
+        const escaped = message.replace(/'/g, "'\\''");
+        this.exec(`tmux send-keys -t ${this.sessionName} '${escaped}' Enter`);
+      }
 
       // Wait for initial processing
       await sleep(this.captureDelaySec * 1000);
@@ -93,6 +103,21 @@ export class TmuxClient implements IKiroTransport {
     // Kiro asks "Are you sure? [y/n]:" — confirm with 'y'
     this.exec(`tmux send-keys -t ${this.sessionName} 'y' Enter`);
     await sleep(1000);
+  }
+
+  async restartSession(workingDir: string, kiroModel?: string): Promise<void> {
+    // Kill existing tmux session and start fresh
+    if (this.sessionExists()) {
+      this.exec(`tmux kill-session -t ${this.sessionName}`);
+      await sleep(1000);
+    }
+    let cmd = `kiro-cli chat --trust-all-tools`;
+    if (kiroModel) cmd += ` --model ${kiroModel}`;
+    this.exec(`tmux new-session -d -s ${this.sessionName} -c '${workingDir}' '${cmd}'`);
+    this.exec(`tmux set-option -t ${this.sessionName} history-limit 5000`);
+    await sleep(3000);
+    this.ready = this.sessionExists();
+    logInfo("tmux", `Session restarted (ready=${this.ready})`);
   }
 
   async sendInterrupt(): Promise<void> {

@@ -62,8 +62,8 @@ describe("ContextAssembler", () => {
     expect(result.text).toContain("User prefers TypeScript");
     expect(result.text).toContain("[SCRATCHPAD]");
     expect(result.text).toContain("Current task: fix bug #42");
-    expect(result.text).toContain("[RECALLED MEMORIES]");
-    expect(result.text).toContain("I like dark mode");
+    // Recalled memories are no longer auto-injected (skill-driven recall)
+    expect(result.text).not.toContain("[RECALLED MEMORIES]");
     expect(result.text).toContain("[CONVERSATION]");
     expect(result.text).toContain("user: Hello");
     expect(result.text).toContain("assistant: Hi there!");
@@ -73,7 +73,7 @@ describe("ContextAssembler", () => {
     // Usage breakdown should be populated
     expect(result.usage.soul).toBeGreaterThan(0);
     expect(result.usage.scratchpad).toBeGreaterThan(0);
-    expect(result.usage.recalled).toBeGreaterThan(0);
+    expect(result.usage.recalled).toBe(0);
     expect(result.usage.working).toBeGreaterThan(0);
     expect(result.usage.input).toBeGreaterThan(0);
     expect(result.usage.total).toBe(
@@ -397,14 +397,10 @@ describe("Property 12: Merge and Deduplication Prefers Higher Scores", () => {
 // ── Unit Tests: ContextAssembler Integration (Task 6.7) ────────────────────
 
 describe("ContextAssembler integration with RecallFallbackPipeline", () => {
-  it("formats fallback results with [FALLBACK] label", async () => {
-    const results: SearchResult[] = [
-      { record: makeMessage("user", "I like cats"), score: 2.0 },
-      { record: makeMessage("assistant", "Noted about cats"), score: 1.5 },
-    ];
+  it("does not inject recalled memories (skill-driven recall)", async () => {
     const mockPipeline = {
       execute: async () => ({
-        results,
+        results: [{ record: makeMessage("user", "I like cats"), score: 2.0 }],
         stage: "context",
         isFallback: true,
       }),
@@ -422,18 +418,14 @@ describe("ContextAssembler integration with RecallFallbackPipeline", () => {
       workingMemory: [],
     });
 
-    expect(assembled.text).toContain("[RECALLED MEMORIES]");
-    expect(assembled.text).toContain("- [FALLBACK] [user] I like cats");
-    expect(assembled.text).toContain("- [FALLBACK] [assistant] Noted about cats");
+    expect(assembled.text).not.toContain("[RECALLED MEMORIES]");
+    expect(assembled.usage.recalled).toBe(0);
   });
 
-  it("formats primary results without [FALLBACK] label", async () => {
-    const results: SearchResult[] = [
-      { record: makeMessage("user", "I prefer dark mode"), score: 3.0 },
-    ];
+  it("does not inject primary recall results (skill-driven recall)", async () => {
     const mockPipeline = {
       execute: async () => ({
-        results,
+        results: [{ record: makeMessage("user", "I prefer dark mode"), score: 3.0 }],
         stage: "primary",
         isFallback: false,
       }),
@@ -451,9 +443,8 @@ describe("ContextAssembler integration with RecallFallbackPipeline", () => {
       workingMemory: [],
     });
 
-    expect(assembled.text).toContain("[RECALLED MEMORIES]");
-    expect(assembled.text).toContain("- [user] I prefer dark mode");
-    expect(assembled.text).not.toContain("[FALLBACK]");
+    expect(assembled.text).not.toContain("[RECALLED MEMORIES]");
+    expect(assembled.usage.recalled).toBe(0);
   });
 
   it("does not exceed token budget with large result sets", async () => {
@@ -487,14 +478,13 @@ describe("ContextAssembler integration with RecallFallbackPipeline", () => {
     expect(assembled.usage.recalled).toBeLessThanOrEqual(600);
   });
 
-  it("falls back to single-shot search when pipeline is not set", async () => {
+  it("does not inject single-shot search results (skill-driven recall)", async () => {
     const searchResults: SearchResult[] = [
       { record: makeMessage("user", "single-shot result"), score: 2.0 },
     ];
     const manager = makeMockManager({ searchResults });
     const config = makeConfig();
     const assembler = new ContextAssembler(manager, config);
-    // Do NOT call setPipeline — pipeline remains null
 
     const assembled = await assembler.assemble({
       chatId: 1,
@@ -503,9 +493,8 @@ describe("ContextAssembler integration with RecallFallbackPipeline", () => {
       workingMemory: [],
     });
 
-    expect(assembled.text).toContain("[RECALLED MEMORIES]");
-    expect(assembled.text).toContain("- [user] single-shot result");
-    expect(assembled.text).not.toContain("[FALLBACK]");
+    expect(assembled.text).not.toContain("[RECALLED MEMORIES]");
+    expect(assembled.usage.recalled).toBe(0);
   });
 
   it("returns no recalled section when pipeline returns empty results", async () => {
