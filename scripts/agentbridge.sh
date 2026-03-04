@@ -47,14 +47,10 @@ echo "   Platform: $PLATFORM"
 echo "   Node:     $(node --version)"
 echo ""
 
-# --- ensure tmux session is running ---
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "✅ tmux session '$SESSION' already running."
-else
-  echo "🔄 Starting tmux session '$SESSION'..."
-  "$PROJECT_DIR/scripts/tmux-session.sh"
-  sleep 2
-fi
+# --- always restart tmux session fresh ---
+echo "♻️  Restarting tmux session '$SESSION'..."
+"$PROJECT_DIR/scripts/tmux-session.sh"
+sleep 2
 
 # --- start the bridge ---
 echo "🌉 Starting bridge..."
