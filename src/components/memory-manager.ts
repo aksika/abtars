@@ -65,9 +65,15 @@ export class MemoryManager {
   private contextAssembler: ContextAssembler | null = null;
   private memorySearchTool: MemorySearchTool | null = null;
   private compactionLocks = new Map<number, Promise<void>>();
+  private isBusyFn: (() => boolean) | null = null;
 
   constructor(config: MemoryConfig) {
     this.config = config;
+  }
+
+  /** Register a callback that returns true when the transport is busy (e.g. processing a user prompt). */
+  setIsBusy(fn: () => boolean): void {
+    this.isBusyFn = fn;
   }
 
   /** Register the LLM callback. Called once from main.ts after transport is ready. */
@@ -1195,18 +1201,24 @@ export class MemoryManager {
         searchConfig,
       );
 
-      // Register memory extraction task
+      // Register memory extraction task (skips when transport is busy)
       if (this.memoryExtractor) {
         const extractor = this.memoryExtractor;
         const db = this.db;
+        const isBusy = () => this.isBusyFn?.() ?? false;
         this.heartbeat.registerTask({
           name: "memory-extraction",
           execute: async () => {
+            if (isBusy()) {
+              logDebug(TAG, "Skipping extraction — transport is busy");
+              return;
+            }
             const rows = db
               .prepare("SELECT DISTINCT chat_id FROM messages")
               .all() as Array<{ chat_id: number }>;
 
             for (const row of rows) {
+              if (isBusy()) break;
               await extractor.processTranscripts(row.chat_id);
             }
           },

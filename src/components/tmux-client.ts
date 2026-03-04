@@ -157,7 +157,18 @@ export class TmuxClient implements IKiroTransport {
       const lastClean = this.stripAnsi(lastNonEmpty);
 
       if (KIRO_PROMPT_RE.test(lastClean)) {
-        // Kiro is back at its prompt — it's done
+        // Kiro is back at its prompt — but it might continue (tool use, multi-step).
+        // Cooldown: wait 3s and re-check. If pane changed, keep polling.
+        const snapshot = capture;
+        await sleep(3000);
+        const recheck = this.capturePaneRaw();
+        if (recheck !== snapshot) {
+          logDebug("tmux", `Prompt detected but output still changing — continuing poll`);
+          lastCapture = recheck;
+          stableCount = 0;
+          continue;
+        }
+
         // Extract context window percentage from the prompt (e.g. "10% !>")
         const pctMatch = lastClean.match(/^(\d+)%/);
         if (pctMatch) {
