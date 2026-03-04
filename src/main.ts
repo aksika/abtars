@@ -17,6 +17,8 @@ import { DiscordSecurityGate } from "./components/discord-security-gate.js";
 import { ChannelAdapter } from "./components/channel-adapter.js";
 import { B2BRouter } from "./components/b2b-router.js";
 import type { IKiroTransport } from "./components/kiro-transport.js";
+import { formatReactionSignal } from "./components/reaction-signal.js";
+import { routeReaction } from "./components/reaction-router.js";
 import type { TelegramUpdate, DiscordInboundMessage } from "./types/index.js";
 
 /**
@@ -178,13 +180,42 @@ async function main(): Promise<void> {
       if (update.message_reaction) {
         const reaction = update.message_reaction;
         const user = reaction.user;
-        if (!user || user.is_bot) return;
+        if (!user) {
+          logDebug("main", "Reaction update missing user field, ignoring");
+          return;
+        }
+        if (user.is_bot) return;
+
         const oldEmojis = new Set(reaction.old_reaction.map((r) => r.emoji));
         const added = reaction.new_reaction.filter((r) => !oldEmojis.has(r.emoji));
-        if (added.length > 0) {
-          const senderName = user.first_name || user.username || `id:${user.id}`;
-          const emojis = added.map((r) => r.emoji).join("");
-          logInfo("main", `Reaction ${emojis} from ${senderName} on msg ${reaction.message_id}`);
+        if (added.length === 0) return;
+
+        const senderName = user.first_name || user.username || `id:${user.id}`;
+        const emojis = added.map((r) => r.emoji);
+        logInfo("main", `Reaction ${emojis.join("")} from ${senderName} on msg ${reaction.message_id}`);
+
+        const isAuthorized = securityGate.authorizeUserId(user.id);
+        const signal = formatReactionSignal(senderName, emojis);
+        const chatId = reaction.chat.id;
+        const route = routeReaction(isAuthorized, reaction.chat.type);
+
+        if (route === "discard") {
+          logDebug("main", `Unauthorized reaction from user ${user.id}, discarding`);
+          return;
+        }
+
+        if (route === "buffer") {
+          const bufKey = tgBufferKey(chatId);
+          conversationBuffer.push(bufKey, senderName, signal);
+          logDebug("main", `Buffered reaction signal for group ${chatId}`);
+        } else {
+          const sessionKey = `telegram:${chatId}`;
+          try {
+            await transport.sendPrompt(sessionKey, signal);
+            logDebug("main", `Sent reaction signal to transport for chat ${chatId}`);
+          } catch (err) {
+            logError("main", `Failed to send reaction signal for chat ${chatId}`, err);
+          }
         }
         return;
       }

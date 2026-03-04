@@ -50,9 +50,9 @@ export async function synthesizeSpeech(
   }
 }
 
-/** Strip reasoning, tool noise, HTML tags, and markdown for cleaner TTS output. */
-function cleanForTts(text: string): string {
-  return text
+/** Strip reasoning, tool noise, HTML tags, markdown, and emojis for cleaner TTS output. */
+export function cleanForTts(text: string): string {
+  let result = text
     // --- HTML tags ---
     .replace(/<br\s*\/?>/gi, "\n")                            // <br> → newline
     .replace(/<[^>]+>/g, "")                                  // strip all HTML tags
@@ -72,8 +72,18 @@ function cleanForTts(text: string): string {
     .replace(/[*_~]{1,3}/g, "")                               // bold/italic/strike
     .replace(/^#{1,6}\s+/gm, "")                              // headings
     .replace(/^[-*+]\s+/gm, "")                               // list markers
-    .replace(/^\d+\.\s+/gm, "")                               // numbered lists
-    // --- Cleanup ---
+    .replace(/^\d+\.\s+/gm, "");                              // numbered lists
+
+  // --- Emoji filtering ---
+  try {
+    result = result.replace(/\p{Extended_Pictographic}/gu, "");
+  } catch (err) {
+    logWarn("tts", `Emoji filter failed, using unfiltered text: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // --- Cleanup ---
+  return result
     .replace(/\n{3,}/g, "\n\n")                               // excess newlines
     .trim();
 }
+

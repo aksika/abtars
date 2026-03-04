@@ -21,4 +21,10 @@ export class SecurityGate {
     if (userId === undefined) return false;
     return this.allowedUserIds.has(userId);
   }
+
+  /** Returns true iff the given user ID is in the whitelist. */
+  authorizeUserId(userId: number): boolean {
+    return this.allowedUserIds.has(userId);
+  }
+
 }
