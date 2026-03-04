@@ -728,7 +728,27 @@ async function main(): Promise<void> {
           telegramApi.sendChatAction(chatId, "typing", threadId).catch(() => {});
         }, 8000);
 
+        // Stream intermediate chunks to Telegram as Kiro works
+        let intermediateDelivered = false;
+        if (transport instanceof TmuxClient) {
+          (transport as TmuxClient).onIntermediateResponse = (chunk: string) => {
+            intermediateDelivered = true;
+            const isFullMode = fullModeChats.has(sessionKey);
+            const chunks = formatter.chunkText(isFullMode ? chunk : chunk);
+            for (const c of chunks) {
+              if (c.trim()) {
+                telegramApi.sendChatAction(chatId, "typing", threadId).catch(() => {});
+                telegramApi.sendMessage(chatId, c, { message_thread_id: threadId }).catch(() => {});
+              }
+            }
+          };
+        }
+
         const response = await responsePromise;
+
+        if (transport instanceof TmuxClient) {
+          (transport as TmuxClient).onIntermediateResponse = undefined;
+        }
         logDebug("main", `Response (${response.length} chars): "${response.slice(0, 120)}"`);
 
         // Prefer the clean answer-only extract (strips system prompts, memory context, thinking indicators)
@@ -738,18 +758,23 @@ async function main(): Promise<void> {
         const userResponse = fullModeChats.has(sessionKey) ? response : (cleanAnswer || response);
 
         if (!userResponse || !userResponse.trim()) {
-          logWarn("main", "Empty response from transport");
-          await react(chatId, messageId, "🤷");
-          await telegramApi.sendMessage(chatId, "🤷 Kiro returned an empty response. Try again or /reset.", { message_thread_id: threadId });
+          if (!intermediateDelivered) {
+            logWarn("main", "Empty response from transport");
+            await react(chatId, messageId, "🤷");
+            await telegramApi.sendMessage(chatId, "🤷 Kiro returned an empty response. Try again or /reset.", { message_thread_id: threadId });
+          }
           return;
         }
 
-        const chunks = formatter.chunkText(userResponse);
-        logDebug("main", `Sending ${chunks.length} chunk(s)`);
-        for (const chunk of chunks) {
-          if (chunk.trim()) {
-            await telegramApi.sendChatAction(chatId, "typing", threadId);
-            await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
+        // Only send final response if nothing was streamed, or if there's new content
+        if (!intermediateDelivered) {
+          const chunks = formatter.chunkText(userResponse);
+          logDebug("main", `Sending ${chunks.length} chunk(s)`);
+          for (const chunk of chunks) {
+            if (chunk.trim()) {
+              await telegramApi.sendChatAction(chatId, "typing", threadId);
+              await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
+            }
           }
         }
 
@@ -772,7 +797,7 @@ async function main(): Promise<void> {
         }
 
         await react(chatId, messageId, "");
-        logInfo("main", `→ Sent ${chunks.length} chunk(s) to chat ${chatId}`);
+        logInfo("main", `→ Response delivered to chat ${chatId}${intermediateDelivered ? " (streamed)" : ""}`);
 
         // Auto-compact when context window usage exceeds threshold
         if (memory && "contextPercent" in transport) {

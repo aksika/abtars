@@ -10,9 +10,6 @@ const KIRO_PROMPT_RE = /^\d+%\s*!?>/;
 // Also match common shell prompts as fallback
 const SHELL_PROMPT_RE = /[$❯%#]\s*$/;
 
-// Patterns that indicate Kiro is still working (don't treat stable output as "done")
-const STILL_WORKING_RE = /WARNING:\s*Retry|retrying within|using tool:|Searching|Fetching content|Reading file|Running command|Executing/i;
-
 /**
  * Communicates with kiro-cli running inside a tmux session.
  * Uses `tmux send-keys` to send prompts and `tmux capture-pane`
@@ -23,6 +20,9 @@ export class TmuxClient implements IKiroTransport {
   private readonly captureDelaySec: number;
   private readonly maxWaitSec: number;
   private ready = false;
+
+  /** Optional callback for streaming intermediate responses before final prompt. */
+  onIntermediateResponse?: (text: string) => void;
 
   constructor(sessionName: string, captureDelaySec: number, maxWaitSec: number) {
     this.sessionName = sessionName;
@@ -131,14 +131,17 @@ export class TmuxClient implements IKiroTransport {
   }
 
   /**
-   * Poll capture-pane until Kiro's prompt reappears (meaning it's done),
-   * or until output stabilizes, or timeout.
+   * Poll capture-pane until Kiro's prompt reappears (N% >).
+   * Delivers intermediate purple-line responses via onIntermediateResponse callback
+   * so the user sees partial answers while Kiro continues with tools.
+   * Only returns when the actual Kiro prompt appears or timeout.
    */
   private async pollForResponse(beforeSnapshot: string): Promise<string> {
     const startTime = Date.now();
     const maxWaitMs = this.maxWaitSec * 1000;
     let lastCapture = "";
     let stableCount = 0;
+    let lastDeliveredAnswer = "";
 
     while (Date.now() - startTime < maxWaitMs) {
       const capture = this.capturePaneRaw();
@@ -157,8 +160,7 @@ export class TmuxClient implements IKiroTransport {
       const lastClean = this.stripAnsi(lastNonEmpty);
 
       if (KIRO_PROMPT_RE.test(lastClean)) {
-        // Kiro is back at its prompt — but it might continue (tool use, multi-step).
-        // Cooldown: wait 3s and re-check. If pane changed, keep polling.
+        // Kiro prompt detected — cooldown 3s to catch multi-step continuations
         const snapshot = capture;
         await sleep(3000);
         const recheck = this.capturePaneRaw();
@@ -169,7 +171,6 @@ export class TmuxClient implements IKiroTransport {
           continue;
         }
 
-        // Extract context window percentage from the prompt (e.g. "10% !>")
         const pctMatch = lastClean.match(/^(\d+)%/);
         if (pctMatch) {
           this.lastContextPercent = parseInt(pctMatch[1]!, 10);
@@ -185,16 +186,24 @@ export class TmuxClient implements IKiroTransport {
         return this.extractResponse(newContent);
       }
 
-      // Check if output has stabilized — but NOT if Kiro looks like it's still working
+      // No prompt yet — deliver intermediate answer if we have new purple lines
+      if (this.onIntermediateResponse && capture !== lastCapture) {
+        const intermediateAnswer = this.extractAnswerOnly(newContent);
+        if (intermediateAnswer && intermediateAnswer !== lastDeliveredAnswer) {
+          const newPart = intermediateAnswer.startsWith(lastDeliveredAnswer)
+            ? intermediateAnswer.slice(lastDeliveredAnswer.length).trim()
+            : intermediateAnswer;
+          if (newPart) {
+            logDebug("tmux", `Delivering intermediate chunk (${newPart.length} chars)`);
+            this.onIntermediateResponse(newPart);
+            lastDeliveredAnswer = intermediateAnswer;
+          }
+        }
+      }
+
+      // Track stabilization but do NOT return on it — only N% > ends the poll
       if (capture === lastCapture) {
         stableCount++;
-        const looksStillWorking = STILL_WORKING_RE.test(this.stripAnsi(newContent));
-        // Require 5 stable polls (10s) normally, or 15 (30s) if retry/tool patterns detected
-        const threshold = looksStillWorking ? 15 : 5;
-        if (stableCount >= threshold) {
-          logDebug("tmux", `Output stabilized after ${stableCount} polls${looksStillWorking ? " (was retrying)" : ""}`);
-          return this.extractResponse(newContent);
-        }
       } else {
         stableCount = 0;
         lastCapture = capture;
@@ -236,6 +245,35 @@ export class TmuxClient implements IKiroTransport {
   /** Get the context window usage percentage from the last Kiro prompt (e.g. 10 for "10% >"). Returns -1 if unknown. */
   get contextPercent(): number {
     return this.lastContextPercent;
+  }
+
+  /** Extract just the purple "> " answer lines from raw tmux output (no side effects). */
+  private extractAnswerOnly(raw: string): string {
+    const PURPLE_PREFIX = /\x1b\[38;5;141m>\s/;
+    const lines = raw.split("\n");
+
+    // Find last contiguous block of purple lines
+    let blockStart = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (PURPLE_PREFIX.test(lines[i]!)) {
+        blockStart = i;
+        while (blockStart > 0 && PURPLE_PREFIX.test(lines[blockStart - 1]!)) blockStart--;
+        break;
+      }
+    }
+    if (blockStart < 0) return "";
+
+    const answerLines: string[] = [];
+    for (let i = blockStart; i < lines.length; i++) {
+      const clean = this.stripAnsi(lines[i]!).trim();
+      if (KIRO_PROMPT_RE.test(clean)) break;
+      if (clean.startsWith("▸ Time:")) break;
+      if (clean.startsWith("> ")) answerLines.push(clean.slice(2));
+      else if (clean === ">") answerLines.push("");
+      else if (clean === "") answerLines.push("");
+      else answerLines.push(clean);
+    }
+    return answerLines.join("\n").trim();
   }
 
   private extractResponse(raw: string): string {
