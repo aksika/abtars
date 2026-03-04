@@ -1199,11 +1199,11 @@ export class MemoryManager {
           name: "memory-extraction",
           execute: async () => {
             const rows = db
-              .prepare("SELECT DISTINCT telegram_chat_id FROM sessions WHERE is_active = 1")
-              .all() as Array<{ telegram_chat_id: number }>;
+              .prepare("SELECT DISTINCT chat_id FROM messages")
+              .all() as Array<{ chat_id: number }>;
 
             for (const row of rows) {
-              await extractor.processTranscripts(row.telegram_chat_id);
+              await extractor.processTranscripts(row.chat_id);
             }
           },
         });

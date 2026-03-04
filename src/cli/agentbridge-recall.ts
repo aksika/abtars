@@ -194,6 +194,47 @@ function search(db: Database.Database, params: ReturnType<typeof parseArgs>): Re
     }
   }
 
+  // 4. Raw messages fallback (when extracted_memories is empty)
+  if (results.length === 0) {
+    const allKeywords = [...params.keywords];
+    if (params.original) allKeywords.push(params.original);
+
+    const conditions = ["chat_id = ?"];
+    const sqlParams: (string | number)[] = [params.chatId];
+
+    if (params.timeStart) { conditions.push("timestamp >= ?"); sqlParams.push(params.timeStart); }
+    if (params.timeEnd) { conditions.push("timestamp <= ?"); sqlParams.push(params.timeEnd); }
+
+    const likeClauses = allKeywords.map((kw) => {
+      const escaped = kw.replace(/%/g, "\\%").replace(/_/g, "\\_");
+      sqlParams.push(`%${escaped}%`);
+      return "content LIKE ? ESCAPE '\\'";
+    });
+    conditions.push(`(${likeClauses.join(" OR ")})`);
+
+    const sql = `
+      SELECT role, content, timestamp FROM messages
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY timestamp DESC LIMIT 20
+    `;
+
+    const rows = db.prepare(sql).all(...sqlParams) as Array<{
+      role: string; content: string; timestamp: number;
+    }>;
+
+    for (const row of rows) {
+      const ageDays = (now - row.timestamp) / MS_PER_DAY;
+      const decayedScore = 0.5 * Math.pow(2, -ageDays / DECAY_HALFLIFE_DAYS);
+      results.push({
+        content: `[${row.role}] ${row.content}`,
+        source_timestamp: row.timestamp,
+        date: new Date(row.timestamp).toISOString(),
+        tier: "raw_message",
+        score: decayedScore,
+      });
+    }
+  }
+
   // Sort by score descending, limit
   results.sort((a, b) => b.score - a.score);
   return results.slice(0, RESULT_LIMIT);
