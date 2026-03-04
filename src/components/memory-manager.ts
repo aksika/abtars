@@ -62,6 +62,7 @@ export class MemoryManager {
   private recallPipeline: RecallFallbackPipeline | null = null;
   private heartbeat: HeartbeatSystem | null = null;
   private memoryExtractor: MemoryExtractor | null = null;
+  private contextAssembler: ContextAssembler | null = null;
   private memorySearchTool: MemorySearchTool | null = null;
   private compactionLocks = new Map<number, Promise<void>>();
 
@@ -839,7 +840,10 @@ export class MemoryManager {
       // System prompt (SOUL.md + skills) is passed in from main.ts — no longer injected here.
       const systemPrompt = params.systemPrompt;
 
-      const assembler = new ContextAssembler(this, this.config);
+      if (!this.contextAssembler) {
+        this.contextAssembler = new ContextAssembler(this, this.config);
+      }
+      const assembler = this.contextAssembler;
       if (this.recallPipeline) {
         assembler.setPipeline(this.recallPipeline);
       }
