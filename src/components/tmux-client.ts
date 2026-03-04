@@ -160,17 +160,6 @@ export class TmuxClient implements IKiroTransport {
       const lastClean = this.stripAnsi(lastNonEmpty);
 
       if (KIRO_PROMPT_RE.test(lastClean)) {
-        // Kiro prompt detected — cooldown 3s to catch multi-step continuations
-        const snapshot = capture;
-        await sleep(3000);
-        const recheck = this.capturePaneRaw();
-        if (recheck !== snapshot) {
-          logDebug("tmux", `Prompt detected but output still changing — continuing poll`);
-          lastCapture = recheck;
-          stableCount = 0;
-          continue;
-        }
-
         const pctMatch = lastClean.match(/^(\d+)%/);
         if (pctMatch) {
           this.lastContextPercent = parseInt(pctMatch[1]!, 10);
