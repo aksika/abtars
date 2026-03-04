@@ -143,6 +143,7 @@ async function main(): Promise<void> {
 
   const busyChats = new Set<string>();
   const pendingSessionStart = new Set<string>();
+  const fullModeChats = new Set<string>();
 
   // Auto-compact threshold: when Kiro's context window usage exceeds this %, trigger compaction
   const autoCompactThreshold = parseInt(process.env["AUTO_COMPACT_THRESHOLD"] || "70", 10);
@@ -361,6 +362,18 @@ async function main(): Promise<void> {
         } else {
           await telegramApi.sendMessage(chatId, "\u26a0\ufe0f /restart only works with tmux transport.", { message_thread_id: threadId });
         }
+        return;
+      }
+
+      if (text === "/full") {
+        fullModeChats.add(sessionKey);
+        await telegramApi.sendMessage(chatId, "📺 Full mode — sending raw output, TTS disabled.", { message_thread_id: threadId });
+        return;
+      }
+
+      if (text === "/short") {
+        fullModeChats.delete(sessionKey);
+        await telegramApi.sendMessage(chatId, "✂️ Short mode — clean responses, TTS enabled.", { message_thread_id: threadId });
         return;
       }
 
@@ -660,6 +673,8 @@ async function main(): Promise<void> {
           "/forget topic <topic> — Forget by topic",
           "/forget range <start> <end> — Forget date range",
           "/forget session <id> — Forget a session",
+          "/full — Raw tmux output, no TTS",
+          "/short — Clean responses (default)",
           "/help — Show this help message",
         ].join("\n");
         await telegramApi.sendMessage(chatId, helpText, { message_thread_id: threadId });
@@ -669,7 +684,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
         if (!known.includes(cmd)) {
           await telegramApi.sendMessage(chatId, `❓ Unknown command: ${cmd}\nType /help for available commands.`, { message_thread_id: threadId });
           return;
@@ -719,7 +734,7 @@ async function main(): Promise<void> {
         const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
           ? (transport as TmuxClient).answerOnly
           : "";
-        const userResponse = cleanAnswer || response;
+        const userResponse = fullModeChats.has(sessionKey) ? response : (cleanAnswer || response);
 
         if (!userResponse || !userResponse.trim()) {
           logWarn("main", "Empty response from transport");
@@ -741,7 +756,7 @@ async function main(): Promise<void> {
           memory.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
-        if (isVoiceNote && ttsConfig) {
+        if (isVoiceNote && ttsConfig && !fullModeChats.has(sessionKey)) {
           try {
             await telegramApi.sendChatAction(chatId, "record_voice", threadId);
             const ttsText = cleanAnswer || response;
@@ -1159,6 +1174,8 @@ async function main(): Promise<void> {
           "/forget topic <topic> — Forget by topic",
           "/forget range <start> <end> — Forget date range",
           "/forget session <id> — Forget a session",
+          "/full — Raw tmux output, no TTS",
+          "/short — Clean responses (default)",
           "/help — Show this help message",
         ].join("\n");
         await discordApi.sendMessage(message.channelId, helpText);
@@ -1168,7 +1185,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
         if (!known.includes(cmd)) {
           await discordApi.sendMessage(message.channelId, `❓ Unknown command: ${cmd}\nType /help for available commands.`);
           return;
@@ -1205,7 +1222,7 @@ async function main(): Promise<void> {
         const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
           ? (transport as TmuxClient).answerOnly
           : "";
-        const userResponse = cleanAnswer || response;
+        const userResponse = fullModeChats.has(sessionKey) ? response : (cleanAnswer || response);
 
         if (!userResponse || !userResponse.trim()) {
           logWarn("main", "Empty response from transport (Discord)");
