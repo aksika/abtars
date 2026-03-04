@@ -1235,16 +1235,16 @@ export class MemoryManager {
           name: "consolidation",
           execute: async () => {
             const rows = db
-              .prepare("SELECT DISTINCT telegram_chat_id FROM sessions WHERE is_active = 1")
-              .all() as Array<{ telegram_chat_id: number }>;
+              .prepare("SELECT DISTINCT chat_id FROM messages")
+              .all() as Array<{ chat_id: number }>;
 
             for (const row of rows) {
               const engine = new CompactionEngine(db, transcriptParser, memoryIndex, config);
-              const threshold = engine.checkConsolidationThresholds(row.telegram_chat_id);
+              const threshold = engine.checkConsolidationThresholds(row.chat_id);
               if (threshold) {
                 const runner = new SleepCycleRunner(engine, config);
                 await runner.runPendingConsolidations({
-                  chatId: row.telegram_chat_id,
+                  chatId: row.chat_id,
                   llmCall,
                 });
               }

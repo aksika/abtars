@@ -67,19 +67,18 @@ export function getUncompactedSessions(
 ): Array<{ sessionId: string; lastMessageTimestamp: number }> {
   const rows = db
     .prepare(
-      `SELECT s.acp_session_id, MAX(m.timestamp) as last_message_ts
-       FROM sessions s
-       JOIN messages m ON m.chat_id = s.telegram_chat_id AND m.session_id = s.acp_session_id
-       WHERE s.telegram_chat_id = ?
-         AND s.acp_session_id NOT IN (
+      `SELECT session_id, MAX(timestamp) as last_message_ts
+       FROM messages
+       WHERE chat_id = ?
+         AND session_id NOT IN (
            SELECT source_session_id FROM compactions WHERE chat_id = ? AND tier = 'daily'
          )
-       GROUP BY s.acp_session_id`,
+       GROUP BY session_id`,
     )
-    .all(chatId, chatId) as Array<{ acp_session_id: string; last_message_ts: number }>;
+    .all(chatId, chatId) as Array<{ session_id: string; last_message_ts: number }>;
 
   return rows.map((row) => ({
-    sessionId: row.acp_session_id,
+    sessionId: row.session_id,
     lastMessageTimestamp: row.last_message_ts,
   }));
 }
@@ -115,11 +114,11 @@ export function createDailyCompactionTask(deps: DailyCompactionDeps): HeartbeatT
 
       // Get all active chats
       const chats = deps.db
-        .prepare("SELECT DISTINCT telegram_chat_id FROM sessions WHERE is_active = 1")
-        .all() as Array<{ telegram_chat_id: number }>;
+        .prepare("SELECT DISTINCT chat_id FROM messages")
+        .all() as Array<{ chat_id: number }>;
 
       for (const chat of chats) {
-        const chatId = chat.telegram_chat_id;
+        const chatId = chat.chat_id;
         const lock = deps.acquireLock(chatId);
         if (!lock) {
           logDebug(TAG, `Chat ${chatId} already being compacted — skipping`);
