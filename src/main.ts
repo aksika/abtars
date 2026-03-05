@@ -687,12 +687,14 @@ async function main(): Promise<void> {
       }
 
       // // prefix → pass-through to Kiro (e.g. //agent → /agent)
+      let passThrough = false;
       if (text.startsWith("//")) {
         text = text.slice(1);
+        passThrough = true;
       }
 
       // Unknown command guard — prevent unrecognized /commands from reaching transport
-      if (text.startsWith("/") && /^\/\w+/.test(text)) {
+      if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
         const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
         if (!known.includes(cmd)) {
@@ -1218,12 +1220,14 @@ async function main(): Promise<void> {
       }
 
       // // prefix → pass-through to Kiro (e.g. //agent → /agent)
+      let passThrough = false;
       if (text.startsWith("//")) {
         text = text.slice(1);
+        passThrough = true;
       }
 
       // Unknown command guard — prevent unrecognized /commands from reaching transport
-      if (text.startsWith("/") && /^\/\w+/.test(text)) {
+      if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
         const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
         if (!known.includes(cmd)) {
