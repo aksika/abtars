@@ -81,30 +81,50 @@ export class MemoryExtractor {
       return [];
     }
 
-    // Build a single transcript segment from the unprocessed messages
-    const transcript = rows
-      .map((r) => `[${r.role}] ${r.content}`)
-      .join("\n");
+    // Process in batches to keep each LLM call under ~3K chars of transcript
+    // (prompt is ~1.2K, tmux send-keys limit is ~4K)
+    const MAX_BATCH_CHARS = 3000;
+    const allMemories: ExtractedMemory[] = [];
+    let batch: typeof rows = [];
+    let batchChars = 0;
 
-    const lastTimestamp = rows[rows.length - 1]!.timestamp;
-
-    try {
-      const memories = await this.extractFromSegment(transcript, chatId, lastTimestamp);
-
-      if (memories.length > 0) {
-        this.insertMemories(memories);
+    for (const row of rows) {
+      const line = `[${row.role}] ${row.content}\n`;
+      if (batchChars + line.length > MAX_BATCH_CHARS && batch.length > 0) {
+        const transcript = batch.map((r) => `[${r.role}] ${r.content}`).join("\n");
+        const lastTs = batch[batch.length - 1]!.timestamp;
+        try {
+          const memories = await this.extractFromSegment(transcript, chatId, lastTs);
+          if (memories.length > 0) this.insertMemories(memories);
+          allMemories.push(...memories);
+          this.updateWatermark(chatId, lastTs);
+        } catch (err) {
+          logError(TAG, `Failed to extract memories for chat ${chatId} (batch)`, err);
+          return allMemories;
+        }
+        batch = [];
+        batchChars = 0;
       }
-
-      // Advance watermark only on success
-      this.updateWatermark(chatId, lastTimestamp);
-      logDebug(TAG, `Extracted ${memories.length} memories for chat ${chatId}, watermark advanced to ${lastTimestamp}`);
-
-      return memories;
-    } catch (err) {
-      // On failure: log error, do NOT advance watermark (retry on next tick)
-      logError(TAG, `Failed to extract memories for chat ${chatId}`, err);
-      return [];
+      batch.push(row);
+      batchChars += line.length;
     }
+
+    if (batch.length > 0) {
+      const transcript = batch.map((r) => `[${r.role}] ${r.content}`).join("\n");
+      const lastTs = batch[batch.length - 1]!.timestamp;
+      try {
+        const memories = await this.extractFromSegment(transcript, chatId, lastTs);
+        if (memories.length > 0) this.insertMemories(memories);
+        allMemories.push(...memories);
+        this.updateWatermark(chatId, lastTs);
+      } catch (err) {
+        logError(TAG, `Failed to extract memories for chat ${chatId} (final batch)`, err);
+        return allMemories;
+      }
+    }
+
+    logDebug(TAG, `Extracted ${allMemories.length} memories for chat ${chatId}`);
+    return allMemories;
   }
 
   /**
