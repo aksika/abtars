@@ -26,14 +26,17 @@ import type { TelegramUpdate, DiscordInboundMessage } from "./types/index.js";
  * No flags → telegram only (default).
  * --all → every platform.
  * Individual flags can be combined: --telegram --discord
+ *
+ * Also parses --acp / --tmux to override transport (default: tmux).
  */
-function parsePlatformFlags(): { telegram: boolean; discord: boolean } {
+function parsePlatformFlags(): { telegram: boolean; discord: boolean; transport?: "tmux" | "acp" } {
   const args = process.argv.slice(2);
-  if (args.includes("--all")) return { telegram: true, discord: true };
+  const transport = args.includes("--acp") ? "acp" as const : args.includes("--tmux") ? "tmux" as const : undefined;
+  if (args.includes("--all")) return { telegram: true, discord: true, transport };
   const hasTelegram = args.includes("--telegram");
   const hasDiscord = args.includes("--discord");
-  if (!hasTelegram && !hasDiscord) return { telegram: true, discord: false };
-  return { telegram: hasTelegram, discord: hasDiscord };
+  if (!hasTelegram && !hasDiscord) return { telegram: true, discord: false, transport };
+  return { telegram: hasTelegram, discord: hasDiscord, transport };
 }
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
@@ -74,6 +77,7 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
   const platforms = parsePlatformFlags();
   const config = await loadAndValidateConfig();
+  if (platforms.transport) config.kiroTransport = platforms.transport;
   setLogLevel(config.logLevel);
 
   const enabledList = [

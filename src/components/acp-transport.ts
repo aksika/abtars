@@ -12,6 +12,7 @@ import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn } from "./logger.js";
 
 const TAG = "acp";
+const TEMP_THROTTLE_MS = 2000; // TEMPORARY — remove after testing
 
 /**
  * ACP transport using @agentclientprotocol/sdk.
@@ -93,6 +94,9 @@ export class AcpTransport implements IKiroTransport {
     this.responseChunks.set(sessionId, []);
 
     logDebug(TAG, `Sending prompt to session ${sessionId}: "${message.slice(0, 80)}"`);
+
+    // TEMPORARY throttle — avoid overloading kiro-cli
+    await new Promise((r) => setTimeout(r, TEMP_THROTTLE_MS));
 
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.
