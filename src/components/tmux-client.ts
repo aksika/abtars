@@ -116,6 +116,9 @@ export class TmuxClient implements IKiroTransport {
     this.exec(`tmux new-session -d -s ${this.sessionName} -c '${workingDir}' '${cmd}'`);
     this.exec(`tmux set-option -t ${this.sessionName} history-limit 5000`);
     await sleep(3000);
+    // Enable thinking tool
+    this.exec(`tmux send-keys -t ${this.sessionName} '/settings chat.enableThinking true' Enter`);
+    await sleep(2000);
     this.ready = this.sessionExists();
     logInfo("tmux", `Session restarted (ready=${this.ready})`);
   }

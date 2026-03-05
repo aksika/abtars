@@ -45,6 +45,10 @@ tmux new-session -d -s "$SESSION" -c "$WORKING_DIR" "$KIRO_CMD"
 tmux set-option -t "$SESSION" history-limit 5000
 sleep 3
 
+# Enable thinking tool by default
+tmux send-keys -t "$SESSION" '/settings chat.enableThinking true' Enter
+sleep 2
+
 # Verify kiro-cli started
 OUTPUT=$(tmux capture-pane -t "$SESSION" -p -S -10 2>/dev/null || echo "")
 
