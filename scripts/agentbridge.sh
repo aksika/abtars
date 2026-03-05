@@ -5,8 +5,9 @@
 # Deployed to ~/.agentbridge/ by deploy.sh
 #
 # Usage:
-#   ~/.agentbridge/agentbridge.sh                  # default: --discord
+#   ~/.agentbridge/agentbridge.sh                  # default: --telegram
 #   ~/.agentbridge/agentbridge.sh --telegram
+#   ~/.agentbridge/agentbridge.sh --acp             # use ACP transport
 #   ~/.agentbridge/agentbridge.sh --all
 #   ~/.agentbridge/agentbridge.sh stop             # kill bridge + tmux session
 
@@ -14,7 +15,7 @@ set -euo pipefail
 
 AB_HOME="${HOME}/.agentbridge"
 PROJECT_DIR="/mnt/c/Users/qakosal/workspace/agent/agentbridge"
-PLATFORM="${1:---discord}"
+ARGS=("${@:---telegram}")
 
 # Load env
 if [ -f "$AB_HOME/.env" ]; then
@@ -24,7 +25,7 @@ fi
 SESSION="${TMUX_SESSION:-kiro-bridge}"
 
 # --- stop command ---
-if [ "$PLATFORM" = "stop" ]; then
+if [[ " ${ARGS[*]} " == *" stop "* ]]; then
   echo "🛑 Stopping agentbridge..."
   # Kill the bridge process if running
   pkill -f "node.*dist/main.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
@@ -43,16 +44,20 @@ export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
 echo "🚀 AgentBridge launcher"
-echo "   Platform: $PLATFORM"
+echo "   Args:     ${ARGS[*]}"
 echo "   Node:     $(node --version)"
 echo ""
 
-# --- always restart tmux session fresh ---
-echo "♻️  Restarting tmux session '$SESSION'..."
-"$PROJECT_DIR/scripts/tmux-session.sh"
-sleep 2
+# --- skip tmux session for ACP transport ---
+if [[ " ${ARGS[*]} " == *" --acp "* ]]; then
+  echo "🔌 ACP transport — skipping tmux session"
+else
+  echo "♻️  Restarting tmux session '$SESSION'..."
+  "$PROJECT_DIR/scripts/tmux-session.sh"
+  sleep 2
+fi
 
 # --- start the bridge ---
 echo "🌉 Starting bridge..."
 cd "$PROJECT_DIR"
-exec node dist/main.js "$PLATFORM"
+exec node dist/main.js "${ARGS[@]}"
