@@ -686,6 +686,11 @@ async function main(): Promise<void> {
         return;
       }
 
+      // // prefix → pass-through to Kiro (e.g. //agent → /agent)
+      if (text.startsWith("//")) {
+        text = text.slice(1);
+      }
+
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
@@ -1210,6 +1215,11 @@ async function main(): Promise<void> {
         ].join("\n");
         await discordApi.sendMessage(message.channelId, helpText);
         return;
+      }
+
+      // // prefix → pass-through to Kiro (e.g. //agent → /agent)
+      if (text.startsWith("//")) {
+        text = text.slice(1);
       }
 
       // Unknown command guard — prevent unrecognized /commands from reaching transport
