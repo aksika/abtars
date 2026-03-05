@@ -159,21 +159,28 @@ export class AcpTransport implements IKiroTransport {
 
   private handleSessionUpdate(params: SessionNotification): void {
     const update = params.update;
-    if (!("sessionUpdate" in update)) return;
+    if (!("sessionUpdate" in update)) {
+      logDebug(TAG, `[update] non-session: ${JSON.stringify(update).slice(0, 200)}`);
+      return;
+    }
 
     const sessionId = params.sessionId;
+    logDebug(TAG, `[update] ${update.sessionUpdate}`);
 
     switch (update.sessionUpdate) {
       case "agent_message_chunk": {
-        if (update.content?.type === "text") {
-          const text = update.content.text;
+        const content = update.content;
+        if (content?.type === "text") {
+          const text = content.text;
           const chunks = this.responseChunks.get(sessionId);
           if (chunks) chunks.push(text);
-
-          // Stream to callback if set
           if (this.onIntermediateResponse && text.trim()) {
             this.onIntermediateResponse(text);
           }
+        } else if ((content as { type?: string })?.type === "thinking") {
+          logDebug(TAG, `[thinking] ${(content as { text?: string }).text?.slice(0, 120) ?? ""}`);
+        } else {
+          logDebug(TAG, `[chunk] type=${content?.type}: ${JSON.stringify(content).slice(0, 200)}`);
         }
         break;
       }
@@ -185,6 +192,10 @@ export class AcpTransport implements IKiroTransport {
         if (update.status) {
           logDebug(TAG, `[tool update] ${update.toolCallId}: ${update.status}`);
         }
+        break;
+      }
+      default: {
+        logDebug(TAG, `[update] unhandled: ${JSON.stringify(update).slice(0, 300)}`);
         break;
       }
     }
