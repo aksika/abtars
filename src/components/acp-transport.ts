@@ -26,9 +26,15 @@ export class AcpTransport implements IKiroTransport {
   private client: ClientSideConnection | null = null;
   private sessions = new Map<string, string>(); // sessionKey → acpSessionId
   private responseChunks = new Map<string, string[]>(); // sessionId → chunks
+  private lastContextPercent = -1;
 
   /** Optional callback for streaming intermediate responses. */
   onIntermediateResponse?: (text: string) => void;
+
+  /** Context window usage percentage from Kiro metadata. */
+  get contextPercent(): number {
+    return this.lastContextPercent;
+  }
 
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
@@ -69,6 +75,13 @@ export class AcpTransport implements IKiroTransport {
         },
         requestPermission: async (params: RequestPermissionRequest) => {
           return this.handlePermission(params);
+        },
+        extNotification: async (method: string, params: Record<string, unknown>) => {
+          logDebug(TAG, `[ext] ${method}`);
+          if (method === "_kiro.dev/metadata") {
+            const pct = params["contextUsagePercentage"];
+            if (typeof pct === "number") this.lastContextPercent = pct;
+          }
         },
       }),
       stream,
