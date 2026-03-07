@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { loadAndValidateConfig } from "./components/config.js";
 import { SecurityGate } from "./components/security-gate.js";
 import { ResponseFormatter } from "./components/response-formatter.js";
@@ -20,24 +22,15 @@ import type { IKiroTransport } from "./components/kiro-transport.js";
 import { formatReactionSignal } from "./components/reaction-signal.js";
 import { routeReaction } from "./components/reaction-router.js";
 import type { TelegramUpdate, DiscordInboundMessage } from "./types/index.js";
-
-/**
- * Parse --telegram / --discord / --all CLI flags.
- * No flags → telegram only (default).
- * --all → every platform.
- * Individual flags can be combined: --telegram --discord
- *
- * Also parses --acp / --tmux to override transport (default: tmux).
- */
-function parsePlatformFlags(): { telegram: boolean; discord: boolean; transport?: "tmux" | "acp" } {
-  const args = process.argv.slice(2);
-  const transport = args.includes("--acp") ? "acp" as const : args.includes("--tmux") ? "tmux" as const : undefined;
-  if (args.includes("--all")) return { telegram: true, discord: true, transport };
-  const hasTelegram = args.includes("--telegram");
-  const hasDiscord = args.includes("--discord");
-  if (!hasTelegram && !hasDiscord) return { telegram: true, discord: false, transport };
-  return { telegram: hasTelegram, discord: hasDiscord, transport };
-}
+import { parsePlatformFlags } from "./components/cli-flags.js";
+import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard-config.js";
+import type { SubsystemRefs } from "./components/dashboard-config.js";
+import { AuthGate } from "./components/auth-gate.js";
+import { PlatformController } from "./components/platform-controller.js";
+import { TransportController } from "./components/transport-controller.js";
+import { MemorySearchController } from "./components/memory-search-controller.js";
+import { DashboardServer } from "./components/dashboard-server.js";
+import { renderDashboardHtml } from "./components/dashboard-ui.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
 function stripDiscordMentions(text: string, botAppId: string): string {
@@ -1333,8 +1326,94 @@ async function main(): Promise<void> {
     logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
   }
 
+  // --- Web Dashboard wiring (conditional) ---
+  let dashboardServer: DashboardServer | null = null;
+
+  if (platforms.web) {
+    const dashConfig = loadDashboardConfig(process.env);
+    try {
+      validateDashboardConfig(dashConfig, true);
+    } catch (err) {
+      logError("main", err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+
+    // Read logo and base64-encode
+    let logoBase64 = "";
+    try {
+      const logoPath = join(process.cwd(), "logo", "KiroProfessor.jpg");
+      logoBase64 = readFileSync(logoPath).toString("base64");
+    } catch (err) {
+      logWarn("main", `Could not read logo: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const dashboardHtml = renderDashboardHtml(logoBase64);
+
+    // Build getStatus function that assembles StatusSnapshot from all subsystem refs
+    const getStatus = () => {
+      const refs: SubsystemRefs = {
+        startedAt,
+        telegramPoller: telegramPoller
+          ? { running: (telegramPoller as unknown as Record<string, boolean>).running ?? false }
+          : null,
+        discordPoller: discordPoller
+          ? { started: (discordPoller as unknown as Record<string, boolean>).started ?? false }
+          : null,
+        transport: {
+          type: config.kiroTransport as "tmux" | "acp",
+          isReady: transport.isReady,
+          contextPercent: "contextPercent" in transport ? (transport as TmuxClient).contextPercent : -1,
+        },
+        memory: memory
+          ? { getStats: (chatId: number) => memory!.getStats(chatId) }
+          : null,
+        heartbeat: memory
+          ? {
+              running: memory.getStats(0)?.heartbeatRunning ?? false,
+              intervalMs: memoryConfig.heartbeat.intervalMs,
+              tasks: [],
+            }
+          : null,
+        chatId: 0,
+      };
+      return buildStatusSnapshot(refs);
+    };
+
+    const authGate = new AuthGate(dashConfig.webAuthToken);
+    const platformController = new PlatformController({ telegramPoller, discordPoller });
+    const transportController = new TransportController({
+      config,
+      getCurrentTransport: () => transport,
+      setTransport: (t) => { transport = t; },
+      platformRefs: { telegramPoller, discordPoller },
+      memory,
+    });
+    const memorySearchController = memory
+      ? new MemorySearchController({
+          memoryIndex: memory.getMemoryIndex()!,
+          db: memory.getDatabase()!,
+        })
+      : null;
+
+    dashboardServer = new DashboardServer({
+      config: dashConfig,
+      authGate,
+      getStatus,
+      platformController,
+      transportController,
+      memorySearchController,
+      dashboardHtml,
+    });
+
+    await dashboardServer.start();
+    logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort}`);
+  }
+
   async function shutdown(): Promise<void> {
     logInfo("main", "🛑 Shutting down...");
+    if (dashboardServer) {
+      try { await dashboardServer.stop(); } catch { /* best-effort */ }
+    }
     if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
     try {

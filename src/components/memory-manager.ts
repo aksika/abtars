@@ -86,6 +86,16 @@ export class MemoryManager {
     return this.llmCall;
   }
 
+  /** Expose the underlying MemoryIndex for direct search access (used by MemorySearchController). */
+  getMemoryIndex(): MemoryIndex | null {
+    return this.memoryIndex;
+  }
+
+  /** Expose the underlying database for direct query access (used by MemorySearchController). */
+  getDatabase(): import("better-sqlite3").Database | null {
+    return this.db;
+  }
+
   /** Acquire a per-chat compaction lock. Returns a release function, or null if already locked. */
   acquireCompactionLock(chatId: number): Promise<() => void> | null {
     if (this.compactionLocks.has(chatId)) return null;

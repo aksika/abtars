@@ -1,0 +1,240 @@
+/**
+ * Dashboard configuration, data models, and utility functions for the
+ * Kiro Professor Web UI.
+ */
+
+// ── Dashboard Config ────────────────────────────────────────────────────────
+
+export type DashboardConfig = {
+  webPort: number;
+  webHost: string;
+  webAuthToken: string;
+  webPushIntervalMs: number;
+};
+
+const DASHBOARD_DEFAULTS = {
+  webPort: 3000,
+  webHost: "127.0.0.1",
+  webPushIntervalMs: 5000,
+} as const;
+
+/**
+ * Parse dashboard-related environment variables into a typed config object.
+ * Invalid numeric values silently fall back to defaults.
+ */
+export function loadDashboardConfig(
+  env: Record<string, string | undefined>,
+): DashboardConfig {
+  return {
+    webPort: parseNumericEnv(env["WEB_PORT"], DASHBOARD_DEFAULTS.webPort),
+    webHost: env["WEB_HOST"]?.trim() || DASHBOARD_DEFAULTS.webHost,
+    webAuthToken: env["WEB_AUTH_TOKEN"]?.trim() ?? "",
+    webPushIntervalMs: parseNumericEnv(
+      env["WEB_PUSH_INTERVAL_MS"],
+      DASHBOARD_DEFAULTS.webPushIntervalMs,
+    ),
+  };
+}
+
+/**
+ * Validate that the dashboard config is usable when `--web` is enabled.
+ * Throws if `WEB_AUTH_TOKEN` is missing.
+ */
+export function validateDashboardConfig(
+  config: DashboardConfig,
+  webEnabled: boolean,
+): void {
+  if (webEnabled && !config.webAuthToken) {
+    throw new Error(
+      "WEB_AUTH_TOKEN is required when --web is enabled",
+    );
+  }
+}
+
+// ── Data Models ─────────────────────────────────────────────────────────────
+
+export type StatusSnapshot = {
+  timestamp: string;
+  uptimeMs: number;
+  platforms: PlatformStates;
+  transport: TransportStatus;
+  memory: MemoryStatus;
+  heartbeat: HeartbeatStatus;
+};
+
+export type PlatformStates = {
+  telegram: { configured: boolean; running: boolean };
+  discord: { configured: boolean; running: boolean };
+};
+
+export type TransportStatus = {
+  type: "tmux" | "acp";
+  ready: boolean;
+  contextPercent: number;
+};
+
+export type MemoryStatus = {
+  enabled: boolean;
+  stats: {
+    totalMessages: number;
+    extractedMemories: number;
+    extractedByType: Record<string, number>;
+    preservedKeywords: number;
+    compactions: { daily: number; weekly: number; quarterly: number };
+    ingestedDocuments: number;
+    dbSizeBytes: number;
+  } | null;
+  error?: string;
+};
+
+export type HeartbeatStatus = {
+  running: boolean;
+  intervalMs: number;
+  taskNames: string[];
+};
+
+// ── Memory Search Types ─────────────────────────────────────────────────────
+
+export type WebSearchResult = {
+  content: string;
+  date: string;
+  source: string;
+  score: number;
+};
+
+export type MemorySearchResponse = {
+  results: WebSearchResult[];
+  layers: Record<string, { status: "ok" | "not_implemented" | "skipped" }>;
+};
+
+// ── Snapshot Builder ────────────────────────────────────────────────────────
+
+/**
+ * Refs to subsystems used for building a StatusSnapshot.
+ * All fields are nullable to handle disabled/unconfigured subsystems.
+ */
+export type SubsystemRefs = {
+  startedAt: number;
+  telegramPoller: { running: boolean } | null;
+  discordPoller: { started: boolean } | null;
+  transport: {
+    type: "tmux" | "acp";
+    isReady: boolean;
+    contextPercent?: number;
+  };
+  memory: {
+    getStats: (chatId: number) => {
+      totalMessages: number;
+      extractedMemories: number;
+      extractedByType: Record<string, number>;
+      preservedKeywords: number;
+      compactions: { daily: number; weekly: number; quarterly: number };
+      ingestedDocuments: number;
+      dbSizeBytes: number;
+    } | null;
+  } | null;
+  heartbeat: {
+    running: boolean;
+    intervalMs: number;
+    tasks: { name: string }[];
+  } | null;
+  chatId: number;
+};
+
+/**
+ * Build a complete StatusSnapshot from subsystem refs.
+ * Handles disabled subsystems and getStats() errors gracefully:
+ * - When memory is null → enabled: false, stats: null
+ * - When getStats() throws → includes error field, stats: null
+ * - Other subsystem data is always included regardless of errors
+ */
+export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
+  const now = Date.now();
+
+  // Platforms
+  const platforms: PlatformStates = {
+    telegram: {
+      configured: refs.telegramPoller !== null,
+      running: refs.telegramPoller?.running ?? false,
+    },
+    discord: {
+      configured: refs.discordPoller !== null,
+      running: refs.discordPoller?.started ?? false,
+    },
+  };
+
+  // Transport
+  const transport: TransportStatus = {
+    type: refs.transport.type,
+    ready: refs.transport.isReady,
+    contextPercent: refs.transport.contextPercent ?? -1,
+  };
+
+  // Memory
+  let memory: MemoryStatus;
+  if (refs.memory === null) {
+    memory = { enabled: false, stats: null };
+  } else {
+    try {
+      const raw = refs.memory.getStats(refs.chatId);
+      memory = { enabled: true, stats: raw };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      memory = { enabled: true, stats: null, error: msg };
+    }
+  }
+
+  // Heartbeat
+  const heartbeat: HeartbeatStatus = refs.heartbeat
+    ? {
+        running: refs.heartbeat.running,
+        intervalMs: refs.heartbeat.intervalMs,
+        taskNames: refs.heartbeat.tasks.map((t) => t.name),
+      }
+    : { running: false, intervalMs: 0, taskNames: [] };
+
+  return {
+    timestamp: new Date(now).toISOString(),
+    uptimeMs: now - refs.startedAt,
+    platforms,
+    transport,
+    memory,
+    heartbeat,
+  };
+}
+
+// ── Utility Functions ───────────────────────────────────────────────────────
+
+/**
+ * Format a millisecond duration into a human-readable uptime string.
+ * Example: 7_530_000 → "2h 5m 30s"
+ */
+export function formatUptime(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
+
+  return parts.join(" ");
+}
+
+// ── Internal Helpers ────────────────────────────────────────────────────────
+
+/**
+ * Parse a string as a finite positive integer, falling back to `fallback`
+ * when the value is missing, empty, or not a valid number.
+ */
+function parseNumericEnv(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.floor(n);
+}

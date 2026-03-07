@@ -8,6 +8,7 @@
     "build": "tsc",
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
     "test": "vitest --run",
     "test:watch": "vitest"
   },
@@ -21,12 +22,14 @@
     "discord.js": "^14.25.1",
     "dotenv": "^16.4.7",
     "pdf-parse": "^2.4.5",
+    "ws": "^8.19.0",
     "youtube-transcript": "^1.2.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.0",
     "@types/pdf-parse": "^1.1.5",
+    "@types/ws": "^8.18.1",
     "fast-check": "^3.23.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
