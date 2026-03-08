@@ -1365,16 +1365,15 @@ async function main(): Promise<void> {
           contextPercent: "contextPercent" in transport ? (transport as TmuxClient).contextPercent : -1,
         },
         memory: memory
-          ? { getStats: (chatId: number) => memory!.getStats(chatId) }
+          ? { getStats: (chatId?: number) => memory!.getStats(chatId) }
           : null,
         heartbeat: memory
           ? {
-              running: memory.getStats(0)?.heartbeatRunning ?? false,
+              running: memory.getStats()?.heartbeatRunning ?? false,
               intervalMs: memoryConfig.heartbeat.intervalMs,
               tasks: [],
             }
           : null,
-        chatId: 0,
       };
       return buildStatusSnapshot(refs);
     };

@@ -37,6 +37,20 @@ export class MemorySearchController {
     this.db = deps.db;
   }
 
+  /** List distinct chat IDs that have stored messages. */
+  listChats(): { status: number; body: object } {
+    try {
+      const rows = this.db
+        .prepare("SELECT DISTINCT chat_id FROM messages ORDER BY chat_id")
+        .all() as Array<{ chat_id: number }>;
+      return { status: 200, body: { chatIds: rows.map((r) => r.chat_id) } };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `listChats failed: ${msg}`);
+      return { status: 500, body: { error: msg } };
+    }
+  }
+
   /**
    * Handle `GET /api/memory/search?keywords=...&chatId=...&layers=...&original=...&timeStart=...&timeEnd=...`
    */
@@ -50,9 +64,9 @@ export class MemorySearchController {
     }
 
     const chatIdRaw = params.get("chatId")?.trim() ?? "";
-    const chatId = chatIdRaw ? Number(chatIdRaw) : NaN;
-    if (!Number.isFinite(chatId)) {
-      return { status: 400, body: { error: "chatId required" } };
+    const chatId = chatIdRaw ? Number(chatIdRaw) : undefined;
+    if (chatIdRaw && !Number.isFinite(chatId!)) {
+      return { status: 400, body: { error: "chatId must be a number" } };
     }
 
     const keywords = keywordsRaw
@@ -79,7 +93,7 @@ export class MemorySearchController {
     const query = keywords.join(" ");
 
     const searchOpts = {
-      chatId,
+      chatId: chatId as number | undefined,
       startTime: timeStart,
       endTime: timeEnd,
       limit: 20,
@@ -165,6 +179,8 @@ export class MemorySearchController {
     return { status: 200, body: response };
   }
 
+
+
   // ── Layer search methods ────────────────────────────────────────────────
 
   /**
@@ -172,7 +188,7 @@ export class MemorySearchController {
    */
   private searchL1(
     query: string,
-    opts: { chatId: number; startTime?: number; endTime?: number; limit?: number },
+    opts: { chatId?: number; startTime?: number; endTime?: number; limit?: number },
   ): WebSearchResult[] {
     const results: WebSearchResult[] = [];
 
@@ -220,7 +236,7 @@ export class MemorySearchController {
    */
   private searchL2(
     query: string,
-    opts: { chatId: number; startTime?: number; endTime?: number; limit?: number },
+    opts: { chatId?: number; startTime?: number; endTime?: number; limit?: number },
   ): WebSearchResult[] {
     const extracted = this.memoryIndex.searchExtracted(query, opts);
     return extracted.map((r) => ({
@@ -236,12 +252,17 @@ export class MemorySearchController {
    */
   private searchL3(
     keywords: string[],
-    chatId: number,
+    chatId: number | undefined,
     timeStart?: number,
     timeEnd?: number,
   ): WebSearchResult[] {
-    const conditions: string[] = ["chat_id = ?", "tier IN ('weekly', 'quarterly')"];
-    const params: (string | number)[] = [chatId];
+    const conditions: string[] = ["tier IN ('weekly', 'quarterly')"];
+    const params: (string | number)[] = [];
+
+    if (chatId !== undefined) {
+      conditions.push("chat_id = ?");
+      params.push(chatId);
+    }
 
     if (timeStart !== undefined) {
       conditions.push("timestamp >= ?");
@@ -290,9 +311,9 @@ export class MemorySearchController {
   /**
    * L4: Original-language substring search via MemoryIndex.searchOriginal.
    */
-  private searchL4(original: string, chatId: number): WebSearchResult[] {
+  private searchL4(original: string, chatId: number | undefined): WebSearchResult[] {
     const results = this.memoryIndex.searchOriginal(original, {
-      chatId,
+      chatId: chatId ?? 0,
       limit: 20,
       boostPreserved: true,
     });

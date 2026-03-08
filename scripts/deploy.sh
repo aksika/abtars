@@ -39,6 +39,7 @@ echo "📝 Deploying steering files..."
 mkdir -p "$AB_HOME/.kiro/steering"
 cp "$PROJECT_DIR/persona/SOUL.md" "$AB_HOME/.kiro/steering/SOUL.md"
 cp "$PROJECT_DIR/skills/memory-search/SKILL.md" "$AB_HOME/.kiro/steering/memory-search.md"
+cp "$PROJECT_DIR/skills/instant-store/SKILL.md" "$AB_HOME/.kiro/steering/instant-store.md"
 
 # 4. Deploy launcher script + recall CLI
 echo "🚀 Deploying launcher + recall CLI..."
@@ -52,6 +53,13 @@ echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-recall.js\" \"\$@\"" >> "$RE
 chmod +x "$RECALL_SCRIPT"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$RECALL_SCRIPT" "$HOME/.local/bin/agentbridge-recall"
+
+# Deploy agentbridge-store CLI (agent-callable memory storage)
+STORE_SCRIPT="$AB_HOME/agentbridge-store"
+echo '#!/usr/bin/env bash' > "$STORE_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-store.js\" \"\$@\"" >> "$STORE_SCRIPT"
+chmod +x "$STORE_SCRIPT"
+ln -sf "$STORE_SCRIPT" "$HOME/.local/bin/agentbridge-store"
 
 # 4. Restart tmux session (unless --quick)
 if [ "$QUICK" = false ]; then

@@ -123,7 +123,7 @@ export type SubsystemRefs = {
     contextPercent?: number;
   };
   memory: {
-    getStats: (chatId: number) => {
+    getStats: (chatId?: number) => {
       totalMessages: number;
       extractedMemories: number;
       extractedByType: Record<string, number>;
@@ -138,7 +138,7 @@ export type SubsystemRefs = {
     intervalMs: number;
     tasks: { name: string }[];
   } | null;
-  chatId: number;
+  chatId?: number;
 };
 
 /**

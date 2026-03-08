@@ -69,18 +69,17 @@ describe("MemorySearchController.handle — validation", () => {
     expect(result.body).toEqual({ error: "keywords required" });
   });
 
-  it("returns 400 when chatId is missing", async () => {
+  it("searches all chats when chatId is omitted", async () => {
     const ctrl = new MemorySearchController(makeDeps());
     const result = await ctrl.handle(params({ keywords: "test" }));
-    expect(result.status).toBe(400);
-    expect(result.body).toEqual({ error: "chatId required" });
+    expect(result.status).toBe(200);
   });
 
   it("returns 400 when chatId is not a number", async () => {
     const ctrl = new MemorySearchController(makeDeps());
     const result = await ctrl.handle(params({ keywords: "test", chatId: "abc" }));
     expect(result.status).toBe(400);
-    expect(result.body).toEqual({ error: "chatId required" });
+    expect(result.body).toEqual({ error: "chatId must be a number" });
   });
 });
 

@@ -146,6 +146,7 @@ export type ExtractedMemory = {
   source_timestamp: number;
   preserve_original: boolean;
   preserved_keyword?: string;
+  emotion_score: number;
   created_at: number;
 };
 
@@ -171,3 +172,21 @@ export type HeartbeatTask = {
   name: string;
   execute: () => Promise<void>;
 };
+
+/** Parameters for the agent-initiated instant memory store tool. */
+export type InstantStoreParams = {
+  chatId: number;
+  contentEn: string;
+  contentOriginal: string;
+  memoryType: "fact" | "decision" | "preference" | "event";
+  emotionScore: number;
+  keyword?: string;
+};
+
+/** Result of an instant memory store operation. */
+export type InstantStoreResult = {
+  stored: boolean;
+  memoriesCount: number;
+  error?: string;
+};
+

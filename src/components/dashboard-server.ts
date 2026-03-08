@@ -142,6 +142,22 @@ export class DashboardServer {
         return;
       }
 
+      // GET /api/memory/chats — auth gate → list stored chat IDs
+      if (method === "GET" && pathname === "/api/memory/chats") {
+        if (!this.deps.authGate.guard(req, res)) return;
+
+        if (!this.deps.memorySearchController) {
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "memory not enabled" }));
+          return;
+        }
+
+        const result = this.deps.memorySearchController.listChats();
+        res.writeHead(result.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result.body));
+        return;
+      }
+
       // POST /api/platforms/:platform/:action — auth gate → platform controller
       const platformMatch = method === "POST" && pathname?.match(/^\/api\/platforms\/([^/]+)\/([^/]+)$/);
       if (platformMatch) {

@@ -497,9 +497,12 @@ function getMemoryCard(): string {
     </div>
   </div>
   <hr style="border-color:#0f3460;margin:12px 0;">
+  <div class="search-box" style="margin-bottom:6px;">
+    <input type="text" id="mem-chatid-input" placeholder="0 = all chats" style="width:120px;text-align:center;flex:none;">
+    <button onclick="listChatIds()">LIST</button>
+  </div>
   <div class="search-box">
     <input type="text" id="mem-search-input" placeholder="Search memory keywords...">
-    <button onclick="searchMemory()">Search</button>
   </div>
   <div class="layer-toggles" id="layer-toggles">
     <button class="layer-btn active" data-layer="L1" onclick="toggleLayer(this)">L1</button>
@@ -781,8 +784,15 @@ function getScript(): string {
     var keywords = input ? input.value.trim() : '';
     if (!keywords) return;
 
+    var chatIdInput = document.getElementById('mem-chatid-input');
+    var chatIdVal = chatIdInput ? chatIdInput.value.trim() : '0';
+    var chatId = parseInt(chatIdVal, 10) || 0;
+
     var layers = getSelectedLayers();
-    var url = '/api/memory/search?keywords=' + encodeURIComponent(keywords) + '&chatId=1&layers=' + encodeURIComponent(layers.join(','));
+    var url = '/api/memory/search?keywords=' + encodeURIComponent(keywords) + '&original=' + encodeURIComponent(keywords) + '&layers=' + encodeURIComponent(layers.join(','));
+    if (chatId > 0) {
+      url += '&chatId=' + chatId;
+    }
 
     fetch(url, {
       headers: { 'Authorization': 'Bearer ' + token }
@@ -813,6 +823,36 @@ function getScript(): string {
     });
   };
 
+  // ── List Chat IDs API ──────────────────────────────────────────────
+  window.listChatIds = function() {
+    fetch('/api/memory/chats', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      var container = document.getElementById('mem-search-results');
+      if (!container) return;
+
+      if (data.error) {
+        container.innerHTML = '<div style="color:#f44336;padding:6px 0;">' + escHtml(data.error) + '</div>';
+        return;
+      }
+
+      if (!data.chatIds || data.chatIds.length === 0) {
+        container.innerHTML = '<div style="color:#666;padding:6px 0;">No chats found</div>';
+        return;
+      }
+
+      container.innerHTML = '<div style="padding:6px 0;color:#e0e0e0;">' +
+        '<strong>Stored Chat IDs:</strong><br>' +
+        data.chatIds.map(function(id) {
+          return '<span style="cursor:pointer;color:#64b5f6;margin-right:12px;" onclick="document.getElementById(&quot;mem-chatid-input&quot;).value=&quot;' + id + '&quot;">' + id + '</span>';
+        }).join('') +
+        '</div>';
+    }).catch(function(err) {
+      var container = document.getElementById('mem-search-results');
+      if (container) container.innerHTML = '<div style="color:#f44336;">Failed to list chats: ' + escHtml(err.message) + '</div>';
+    });
+  };
+
   // ── Layer Toggles ──────────────────────────────────────────────────
   window.toggleLayer = function(btn) {
     if (btn.disabled) return;
@@ -834,6 +874,13 @@ function getScript(): string {
   var searchInput = document.getElementById('mem-search-input');
   if (searchInput) {
     searchInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') searchMemory();
+    });
+  }
+
+  var chatIdInput = document.getElementById('mem-chatid-input');
+  if (chatIdInput) {
+    chatIdInput.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') searchMemory();
     });
   }

@@ -15,7 +15,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { MemoryIndex } from "../components/memory-index.js";
-import type { SearchResult } from "../types/memory.js";
+import type { SearchResult, MemorySearchResult } from "../types/memory.js";
 
 const DB_PATH = join(homedir(), ".agentbridge", "memory", "memory.db");
 const RESULT_LIMIT = 10;
@@ -88,7 +88,22 @@ try {
     for (const r of index.substringSearch(params.original, searchOpts)) add(r, "original");
   }
 
-  // Stage 5: Compaction summaries
+  // Stage 5: Extracted memories — English (L2)
+  const addExtracted = (r: MemorySearchResult, source: string) => {
+    const key = `${r.source_timestamp}:${r.content.slice(0, 80)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    results.push({ content: r.content, date: new Date(r.source_timestamp).toISOString(), source, score: r.score });
+  };
+
+  for (const r of index.searchExtracted(query, searchOpts)) addExtracted(r, "extracted");
+
+  // Stage 6: Extracted memories — original language (L4)
+  if (params.original) {
+    for (const r of index.searchOriginal(params.original, { chatId: params.chatId, limit: RESULT_LIMIT * 3 })) addExtracted(r, "extracted:original");
+  }
+
+  // Stage 7: Compaction summaries
   const allKw = [...params.keywords];
   if (params.original) allKw.push(params.original);
   const conditions = ["chat_id = ?"];

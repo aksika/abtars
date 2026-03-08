@@ -35,7 +35,10 @@ import type {
   ForgetResult,
   MemorySearchParams,
   MemorySearchResult,
+  InstantStoreParams,
+  InstantStoreResult,
 } from "../types/index.js";
+import { clampEmotionScore } from "./emotion-utils.js";
 import { logDebug, logError, logInfo, logWarn } from "./logger.js";
 
 const TAG = "memory-manager";
@@ -126,6 +129,14 @@ export class MemoryManager {
 
       const dbPath = join(this.config.memoryDir, "memory.db");
       this.db = initializeDatabase(dbPath);
+
+      // Idempotent migration: add emotion_score column if it doesn't exist
+      try {
+        this.db.exec("ALTER TABLE extracted_memories ADD COLUMN emotion_score INTEGER DEFAULT 0");
+      } catch {
+        // Column already exists — safe to ignore
+      }
+
       this.memoryIndex = new MemoryIndex(this.db);
       this.transcriptWriter = new TranscriptWriter(this.config.memoryDir);
       this.transcriptParser = new TranscriptParser();
@@ -1399,73 +1410,140 @@ export class MemoryManager {
   }
 
   /** Get memory storage statistics for a given chat. */
-  getStats(chatId: number): {
-    totalMessages: number;
-    extractedMemories: number;
-    extractedByType: Record<string, number>;
-    compactions: { daily: number; weekly: number; quarterly: number };
-    ingestedDocuments: number;
-    preservedKeywords: number;
-    heartbeatRunning: boolean;
-    dbSizeBytes: number;
-  } | null {
-    if (!this.db) return null;
+  getStats(chatId?: number): {
+      totalMessages: number;
+      extractedMemories: number;
+      extractedByType: Record<string, number>;
+      compactions: { daily: number; weekly: number; quarterly: number };
+      ingestedDocuments: number;
+      preservedKeywords: number;
+      heartbeatRunning: boolean;
+      dbSizeBytes: number;
+    } | null {
+      if (!this.db) return null;
+
+      try {
+        const chatFilter = chatId !== undefined;
+        const chatWhere = chatFilter ? " WHERE chat_id = ?" : "";
+        const chatParams = chatFilter ? [chatId] : [];
+
+        const totalMessages = (this.db.prepare(
+          `SELECT COUNT(*) as cnt FROM messages${chatWhere}`,
+        ).get(...chatParams) as { cnt: number }).cnt;
+
+        const extractedMemories = (this.db.prepare(
+          `SELECT COUNT(*) as cnt FROM extracted_memories${chatWhere}`,
+        ).get(...chatParams) as { cnt: number }).cnt;
+
+        const typeRows = this.db.prepare(
+          `SELECT memory_type, COUNT(*) as cnt FROM extracted_memories${chatWhere} GROUP BY memory_type`,
+        ).all(...chatParams) as Array<{ memory_type: string; cnt: number }>;
+        const extractedByType: Record<string, number> = {};
+        for (const row of typeRows) {
+          extractedByType[row.memory_type] = row.cnt;
+        }
+
+        const compactionRows = this.db.prepare(
+          `SELECT tier, COUNT(*) as cnt FROM compactions${chatWhere} GROUP BY tier`,
+        ).all(...chatParams) as Array<{ tier: string; cnt: number }>;
+        const compactionCounts = { daily: 0, weekly: 0, quarterly: 0 };
+        for (const row of compactionRows) {
+          if (row.tier in compactionCounts) {
+            compactionCounts[row.tier as keyof typeof compactionCounts] = row.cnt;
+          }
+        }
+
+        const ingestedDocuments = (this.db.prepare(
+          `SELECT COUNT(*) as cnt FROM ingested_documents${chatWhere}`,
+        ).get(...chatParams) as { cnt: number }).cnt;
+
+        const preservedKeywords = (this.db.prepare(
+          `SELECT COUNT(*) as cnt FROM extracted_memories${chatFilter ? " WHERE chat_id = ? AND preserve_original = 1" : " WHERE preserve_original = 1"}`,
+        ).get(...chatParams) as { cnt: number }).cnt;
+
+        let dbSizeBytes = 0;
+        try {
+          const pageCount = (this.db.pragma("page_count") as Array<{ page_count: number }>)[0]?.page_count ?? 0;
+          const pageSize = (this.db.pragma("page_size") as Array<{ page_size: number }>)[0]?.page_size ?? 4096;
+          dbSizeBytes = pageCount * pageSize;
+        } catch { /* ignore */ }
+
+        return {
+          totalMessages,
+          extractedMemories,
+          extractedByType,
+          compactions: compactionCounts,
+          ingestedDocuments,
+          preservedKeywords,
+          heartbeatRunning: this.heartbeat !== null,
+          dbSizeBytes,
+        };
+      } catch (err) {
+        logError(TAG, `Failed to get stats${chatId !== undefined ? ` for chat ${chatId}` : ""}`, err);
+        return null;
+      }
+    }
+
+  /**
+   * Immediately persist a memory from the agent's instant_store tool.
+   * Validates inputs, inserts into extracted_memories, and advances the watermark.
+   */
+  async instantStore(params: InstantStoreParams): Promise<InstantStoreResult> {
+    if (!this.db) {
+      return { stored: false, memoriesCount: 0, error: "memory disabled" };
+    }
 
     try {
-      const totalMessages = (this.db.prepare(
-        "SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ?",
-      ).get(chatId) as { cnt: number }).cnt;
-
-      const extractedMemories = (this.db.prepare(
-        "SELECT COUNT(*) as cnt FROM extracted_memories WHERE chat_id = ?",
-      ).get(chatId) as { cnt: number }).cnt;
-
-      const typeRows = this.db.prepare(
-        "SELECT memory_type, COUNT(*) as cnt FROM extracted_memories WHERE chat_id = ? GROUP BY memory_type",
-      ).all(chatId) as Array<{ memory_type: string; cnt: number }>;
-      const extractedByType: Record<string, number> = {};
-      for (const row of typeRows) {
-        extractedByType[row.memory_type] = row.cnt;
+      // Validate required string fields
+      if (!params.contentEn || typeof params.contentEn !== "string" || params.contentEn.trim() === "") {
+        return { stored: false, memoriesCount: 0, error: "content-en is required" };
+      }
+      if (!params.contentOriginal || typeof params.contentOriginal !== "string" || params.contentOriginal.trim() === "") {
+        return { stored: false, memoriesCount: 0, error: "content-original is required" };
       }
 
-      const compactionRows = this.db.prepare(
-        "SELECT tier, COUNT(*) as cnt FROM compactions WHERE chat_id = ? GROUP BY tier",
-      ).all(chatId) as Array<{ tier: string; cnt: number }>;
-      const compactionCounts = { daily: 0, weekly: 0, quarterly: 0 };
-      for (const row of compactionRows) {
-        if (row.tier in compactionCounts) {
-          compactionCounts[row.tier as keyof typeof compactionCounts] = row.cnt;
-        }
+      // Validate memory type
+      const validTypes = new Set(["fact", "decision", "preference", "event"]);
+      if (!validTypes.has(params.memoryType)) {
+        return { stored: false, memoriesCount: 0, error: "invalid memory_type" };
       }
 
-      const ingestedDocuments = (this.db.prepare(
-        "SELECT COUNT(*) as cnt FROM ingested_documents WHERE chat_id = ?",
-      ).get(chatId) as { cnt: number }).cnt;
+      // Clamp emotion score
+      const emotionScore = clampEmotionScore(params.emotionScore);
 
-      const preservedKeywords = (this.db.prepare(
-        "SELECT COUNT(*) as cnt FROM extracted_memories WHERE chat_id = ? AND preserve_original = 1",
-      ).get(chatId) as { cnt: number }).cnt;
+      const now = Date.now();
 
-      let dbSizeBytes = 0;
-      try {
-        const pageCount = (this.db.pragma("page_count") as Array<{ page_count: number }>)[0]?.page_count ?? 0;
-        const pageSize = (this.db.pragma("page_size") as Array<{ page_size: number }>)[0]?.page_size ?? 4096;
-        dbSizeBytes = pageCount * pageSize;
-      } catch { /* ignore */ }
+      // Insert into extracted_memories with preserve_original = true
+      this.db.prepare(
+        `INSERT INTO extracted_memories
+           (chat_id, content_original, content_en, memory_type, source_timestamp,
+            preserve_original, preserved_keyword, emotion_score, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        params.chatId,
+        params.contentOriginal.trim(),
+        params.contentEn.trim(),
+        params.memoryType,
+        now,
+        1, // preserve_original = true
+        params.keyword?.trim() || null,
+        emotionScore,
+        now,
+      );
 
-      return {
-        totalMessages,
-        extractedMemories,
-        extractedByType,
-        compactions: compactionCounts,
-        ingestedDocuments,
-        preservedKeywords,
-        heartbeatRunning: this.heartbeat !== null,
-        dbSizeBytes,
-      };
+      // Advance watermark to prevent heartbeat re-extraction
+      this.db.prepare(
+        `INSERT INTO extraction_watermarks (chat_id, last_processed_timestamp)
+         VALUES (?, ?)
+         ON CONFLICT(chat_id) DO UPDATE SET last_processed_timestamp = excluded.last_processed_timestamp`,
+      ).run(params.chatId, now);
+
+      logInfo(TAG, `Instant store: persisted memory for chat ${params.chatId} (type=${params.memoryType}, emotion=${emotionScore})`);
+      return { stored: true, memoriesCount: 1 };
     } catch (err) {
-      logError(TAG, `Failed to get stats for chat ${chatId}`, err);
-      return null;
+      const message = err instanceof Error ? err.message : String(err);
+      logError(TAG, `Instant store failed for chat ${params.chatId}`, err);
+      return { stored: false, memoriesCount: 0, error: message };
     }
   }
 

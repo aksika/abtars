@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { ExtractedMemory } from "../types/memory.js";
+import { clampEmotionScore } from "./emotion-utils.js";
 import { logDebug, logError, logWarn } from "./logger.js";
 
 const TAG = "memory-extractor";
@@ -23,6 +24,9 @@ RULES:
   - "content_en": the memory expressed in English
   - "content_original": the memory in the original conversation language
   - "memory_type": one of "fact", "decision", "preference", "event"
+  - "emotion_score": integer from -5 to +5 representing emotional valence
+    -5 = angry, -3 = frustrated, -1 = slightly negative,
+     0 = neutral, +1 = slightly positive, +3 = pleased, +5 = happy
   - "preserve_original": boolean, default false
   - "preserved_keyword": string or null
 - If the conversation is already in English, set content_original = content_en (identical values)
@@ -36,6 +40,7 @@ OUTPUT FORMAT (strict JSON array):
     "content_en": "English description of the memory",
     "content_original": "Original language description (same as content_en if English)",
     "memory_type": "fact|decision|preference|event",
+    "emotion_score": 0,
     "preserve_original": false,
     "preserved_keyword": null
   }
@@ -206,6 +211,7 @@ export class MemoryExtractor {
         source_timestamp: timestamp,
         preserve_original: preserveOriginal,
         preserved_keyword: preserveOriginal ? preservedKeyword : undefined,
+        emotion_score: clampEmotionScore(obj.emotion_score),
         created_at: now,
       });
     }
@@ -220,8 +226,8 @@ export class MemoryExtractor {
   private insertMemories(memories: ExtractedMemory[]): void {
     const stmt = this.db.prepare(
       `INSERT INTO extracted_memories
-         (chat_id, content_original, content_en, memory_type, source_timestamp, preserve_original, preserved_keyword, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (chat_id, content_original, content_en, memory_type, source_timestamp, preserve_original, preserved_keyword, emotion_score, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
     const insertAll = this.db.transaction((mems: ExtractedMemory[]) => {
@@ -234,6 +240,7 @@ export class MemoryExtractor {
           m.source_timestamp,
           m.preserve_original ? 1 : 0,
           m.preserved_keyword ?? null,
+          m.emotion_score,
           m.created_at,
         );
       }

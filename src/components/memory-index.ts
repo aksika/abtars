@@ -6,6 +6,9 @@ import { logWarn } from "./logger.js";
 const FTS5_SPECIAL_CHARS = /[",()*^+\-:{}]/g;
 const FTS5_OPERATORS = new Set(["and", "or", "not", "near"]);
 
+/** Weight applied to the log1p emotion boost in search ranking. */
+export const EMOTION_BOOST_WEIGHT = 0.5;
+
 /** Strip diacritical marks (accents) from a string using Unicode NFD decomposition. */
 function stripAccents(str: string): string {
   return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -274,7 +277,7 @@ export class MemoryIndex {
 
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
-               em.source_timestamp, em.preserve_original, rank
+               em.source_timestamp, em.preserve_original, em.emotion_score, rank
         FROM extracted_memories em
         JOIN extracted_memories_fts ON extracted_memories_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
@@ -289,17 +292,22 @@ export class MemoryIndex {
         memory_type: string;
         source_timestamp: number;
         preserve_original: number;
+        emotion_score: number;
         rank: number;
       }>;
 
-      return rows.map((row) => ({
-        content: row.content_en,
-        content_original: row.content_original,
-        memory_type: row.memory_type,
-        source_timestamp: row.source_timestamp,
-        tier: "extracted" as const,
-        score: Math.abs(row.rank),
-      }));
+      return rows.map((row) => {
+        const bm25Score = Math.abs(row.rank);
+        const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
+        return {
+          content: row.content_en,
+          content_original: row.content_original,
+          memory_type: row.memory_type,
+          source_timestamp: row.source_timestamp,
+          tier: "extracted" as const,
+          score: bm25Score + emotionBoost,
+        };
+      });
     } catch (err) {
       logWarn("memory-index", `searchExtracted failed: ${err instanceof Error ? err.message : String(err)}`);
       return [];
@@ -337,7 +345,7 @@ export class MemoryIndex {
 
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
-               em.source_timestamp, em.preserve_original, rank
+               em.source_timestamp, em.preserve_original, em.emotion_score, rank
         FROM extracted_memories em
         JOIN extracted_memories_original_fts ON extracted_memories_original_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
@@ -352,6 +360,7 @@ export class MemoryIndex {
         memory_type: string;
         source_timestamp: number;
         preserve_original: number;
+        emotion_score: number;
         rank: number;
       }>;
 
@@ -362,6 +371,8 @@ export class MemoryIndex {
         if (boostPreserved && row.preserve_original === 1) {
           score *= 1.5;
         }
+        const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
+        score += emotionBoost;
         return {
           content: row.content_en,
           content_original: row.content_original,

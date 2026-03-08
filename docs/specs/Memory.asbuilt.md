@@ -2,7 +2,7 @@
 
 ## Overview
 
-The local memory layer is fully implemented and operational across three completed phases plus a search enhancements phase. It provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search with model-version-aware cosine similarity, hierarchical memory consolidation (daily → weekly → quarterly, with legacy monthly/yearly preserved), dynamic context assembly with token budgets and rolling summary compression, external document ingestion (YouTube, PDF, text/markdown), LLM-generated reflections, embedding model hot-swap with `/reembed`, selective forgetting across all storage layers, heartbeat-driven background memory extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity re-ranking, context window monitoring with async compression, and per-session context injection.
+The local memory layer is fully implemented and operational across three completed phases plus a search enhancements phase and an instant memory store feature. It provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search with model-version-aware cosine similarity, hierarchical memory consolidation (daily → weekly → quarterly, with legacy monthly/yearly preserved), dynamic context assembly with token budgets and rolling summary compression, external document ingestion (YouTube, PDF, text/markdown), LLM-generated reflections, embedding model hot-swap with `/reembed`, selective forgetting across all storage layers, heartbeat-driven background memory extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity re-ranking, context window monitoring with async compression, per-session context injection, agent-initiated instant memory storage with emotion scoring, and emotion-boosted search ranking via log1p dampening.
 
 ### Phase Summary
 
@@ -11,6 +11,7 @@ The local memory layer is fully implemented and operational across three complet
 | Phase 1 — Wire the Foundation | LLM compaction, context assembly in prompt flow, rolling summary | ✅ Complete |
 | Phase 2 — Command-Based Features | `/ingest`, `/reflect`, `/reembed`, `/forget` commands | ✅ Complete |
 | Memory Search Enhancements | 4+1 tier architecture: heartbeat extraction, English-normalized storage, agent-initiated recall, temporal decay, MMR | ✅ Complete |
+| Instant Memory Store | Agent-initiated instant storage, emotion scoring, emotion-boosted search ranking | ✅ Complete |
 | Phase 3 — Intelligence Layer | Proactive recall, importance scoring, contradiction detection, cross-channel linking, feedback loop, topic chunking | 📋 Designed, not implemented |
 
 ---
@@ -24,15 +25,17 @@ src/
 │   │                          # SearchResult, VectorSearchResult, SearchOptions, AssembledContext,
 │   │                          # IngestionSource, IngestionResult, IngestedDocument, Reflection,
 │   │                          # ForgetResult, RecallAnalysis, PipelineResult,
-│   │                          # ExtractedMemory, MemorySearchParams, MemorySearchResult, HeartbeatTask
+│   │                          # ExtractedMemory, MemorySearchParams, MemorySearchResult, HeartbeatTask,
+│   │                          # InstantStoreParams, InstantStoreResult
 │   └── index.ts               # Re-exports all types
 ├── components/
 │   ├── memory-config.ts       # MemoryConfig type + loadMemoryConfig() from env vars
 │   ├── memory-db.ts           # initializeDatabase() — SQLite schema creation + migrations
 │   ├── memory-manager.ts      # MemoryManager — top-level coordinator
-│   ├── memory-index.ts        # MemoryIndex — FTS5 full-text search (messages + extracted memories)
+│   ├── memory-index.ts        # MemoryIndex — FTS5 full-text search (messages + extracted memories) + emotion boost
 │   ├── memory-search-tool.ts  # MemorySearchTool — agent-initiated recall with decay + MMR (NEW)
-│   ├── memory-extractor.ts    # MemoryExtractor — LLM-based memory extraction from transcripts (NEW)
+│   ├── memory-extractor.ts    # MemoryExtractor — LLM-based memory extraction from transcripts with emotion scoring (NEW)
+│   ├── emotion-utils.ts       # clampEmotionScore() — shared emotion score clamping utility (NEW)
 │   ├── heartbeat-system.ts    # HeartbeatSystem — periodic background task runner (NEW)
 │   ├── context-window-monitor.ts # ContextWindowMonitor — threshold-based async compression (NEW)
 │   ├── transcript-writer.ts   # TranscriptWriter — JSONL append
@@ -46,6 +49,12 @@ src/
 │   ├── reflection-engine.ts   # ReflectionEngine — LLM-generated meta-summaries
 │   ├── recall-fallback-pipeline.ts # RecallFallbackPipeline — multi-stage search cascade
 │   └── intent-detector.ts     # IntentDetector — recall intent and temporal range detection
+├── cli/
+│   ├── agentbridge-recall.ts  # CLI for agent-initiated memory search (L1-L4 + compactions)
+│   └── agentbridge-store.ts   # CLI for agent-initiated instant memory storage (NEW)
+├── skills/
+│   ├── memory-search/SKILL.md # Skill definition for agentbridge-recall
+│   └── instant-store/SKILL.md # Skill definition for agentbridge-store (NEW)
 └── main.ts                    # Transport wiring, command handlers, LLM callback registration
 ```
 
@@ -96,6 +105,20 @@ src/
 | MemoryConfig extensions | `src/components/memory-config.ts` | ✅ Complete | heartbeat + searchEnhancements config sections |
 | Schema extensions | `src/components/memory-db.ts` | ✅ Complete | extracted_memories, extraction_watermarks, dual FTS5 tables |
 
+### Instant Memory Store
+
+| Component | File | Status | Notes |
+|-----------|------|--------|-------|
+| agentbridge-store CLI | `src/cli/agentbridge-store.ts` | ✅ Complete | CLI for agent-initiated instant memory storage with arg validation |
+| MemoryManager.instantStore() | `src/components/memory-manager.ts` | ✅ Complete | Validates inputs, clamps emotion, inserts memory, advances watermark |
+| clampEmotionScore utility | `src/components/emotion-utils.ts` | ✅ Complete | Shared clamping to [-5,+5], defaults non-integers to 0 |
+| Emotion score on ExtractedMemory | `src/types/memory.ts` | ✅ Complete | `emotion_score: number` field, `InstantStoreParams`, `InstantStoreResult` types |
+| Schema migration | `src/components/memory-manager.ts` | ✅ Complete | Idempotent `ALTER TABLE ADD COLUMN emotion_score INTEGER DEFAULT 0` |
+| MemoryExtractor emotion parsing | `src/components/memory-extractor.ts` | ✅ Complete | Extraction prompt includes emotion_score, parseResponse clamps via clampEmotionScore |
+| Emotion-boosted search ranking | `src/components/memory-index.ts` | ✅ Complete | `EMOTION_BOOST_WEIGHT * log1p(abs(emotion_score))` additive boost on searchExtracted + searchOriginal |
+| agentbridge-recall L2/L4 search | `src/cli/agentbridge-recall.ts` | ✅ Complete | Recall CLI now searches extracted memories (L2) and original-language (L4) |
+| Instant store skill definition | `skills/instant-store/SKILL.md` | ✅ Complete | Agent guidance: when to use, parameters, emotion score scale |
+
 ### Intelligence Layer (Phase 3 — Designed, Not Implemented)
 
 | Component | File | Status | Notes |
@@ -123,7 +146,8 @@ src/
 2. **LLM Callback Registration**: `memory.setLlmCall((prompt, content) => transport.sendPrompt("system:memory", ...))` — enables compaction, context assembly rolling summary, reflections, and memory extraction
 3. **Heartbeat Start**: `memory.startHeartbeat()` creates HeartbeatSystem, MemoryExtractor, and MemorySearchTool. Registers two background tasks: memory extraction (processes unprocessed transcripts for active chats) and consolidation (checks compaction thresholds). Heartbeat ticks every 60s (configurable).
 4. **Message in**: `main.ts` calls `memory.recordMessage()` → TranscriptWriter appends JSONL → MemoryIndex inserts into SQLite + FTS5 → optionally VectorIndex stores embedding with model version → prunes if over limit → checks disk budget every 100 writes
-5. **Background Memory Extraction** (heartbeat-driven): HeartbeatSystem tick → MemoryExtractor queries unprocessed transcripts via watermark → LLM extracts structured memories (facts, decisions, preferences, events) → stores in `extracted_memories` with dual-column `content_en` + `content_original` → FTS5 triggers auto-index `content_en`; `content_original` indexed only when `preserve_original=1` → watermark advanced on success, unchanged on failure
+5. **Background Memory Extraction** (heartbeat-driven): HeartbeatSystem tick → MemoryExtractor queries unprocessed transcripts via watermark → LLM extracts structured memories (facts, decisions, preferences, events) with emotion scores → stores in `extracted_memories` with dual-column `content_en` + `content_original` + `emotion_score` → FTS5 triggers auto-index `content_en`; `content_original` indexed only when `preserve_original=1` → watermark advanced on success, unchanged on failure
+6. **Agent-Initiated Instant Storage**: Agent decides message is worth remembering → invokes `agentbridge-store` CLI with content, type, emotion score → `MemoryManager.instantStore()` validates, clamps emotion, inserts into `extracted_memories` with `preserve_original=true` → advances watermark to prevent heartbeat re-extraction → returns JSON result → agent weaves acknowledgment into response
 6. **Context Assembly**: `memory.assembleContext({ chatId, channelKey, userInput, systemPrompt, workingMemory, isSessionStart })` builds 5-tier context:
    - Tier 1: Soul (system prompt + user_core_facts.md) — injected at session start only
    - Tier 2: Scratchpad
@@ -287,10 +311,57 @@ Monitors context window token usage at prompt construction time. Called during `
 
 Two new methods added to `MemoryIndex`:
 
-- `searchExtracted(query, opts?)`: FTS5 search on `extracted_memories_fts` (content_en) with chatId, time range, limit filters. Returns `MemorySearchResult[]` with `tier: "extracted"`.
-- `searchOriginal(query, opts?)`: FTS5 search on `extracted_memories_original_fts` (content_original) with optional `boostPreserved` flag (1.5x score multiplier for `preserve_original=1` matches). Returns `MemorySearchResult[]`.
+- `searchExtracted(query, opts?)`: FTS5 search on `extracted_memories_fts` (content_en) with chatId, time range, limit filters. Returns `MemorySearchResult[]` with `tier: "extracted"`. Applies emotion boost: `EMOTION_BOOST_WEIGHT * log1p(abs(emotion_score))` additive to BM25 score.
+- `searchOriginal(query, opts?)`: FTS5 search on `extracted_memories_original_fts` (content_original) with optional `boostPreserved` flag (1.5x score multiplier for `preserve_original=1` matches). Also applies emotion boost. Returns `MemorySearchResult[]`.
 
 Both methods use `sanitizeFtsQuery()` for FTS5 special character handling and return empty arrays on error.
+
+### Instant Memory Store
+
+Agent-initiated immediate memory persistence. The LLM agent decides when to store memories (instead of regex detection), invokes `agentbridge-store` CLI, and provides emotion scores.
+
+**agentbridge-store CLI** (`src/cli/agentbridge-store.ts`):
+- Parses `--content-en`, `--content-original`, `--memory-type`, `--emotion-score`, `--chat-id`, `--keyword`
+- Validates required params, outputs error JSON for missing/invalid params
+- Calls `MemoryManager.instantStore()`, outputs JSON result to stdout
+- Follows same pattern as `agentbridge-recall`
+
+**MemoryManager.instantStore()** (`src/components/memory-manager.ts`):
+1. Validates inputs: non-empty `contentEn` and `contentOriginal`, valid `memoryType`
+2. Clamps `emotionScore` to [-5, +5] via `clampEmotionScore()`
+3. INSERTs into `extracted_memories` with `preserve_original = true`
+4. FTS5 triggers auto-index the content
+5. Advances extraction watermark to `Date.now()` (prevents heartbeat re-extraction)
+6. Returns `{ stored: true, memoriesCount: 1 }` on success
+7. On error: logs, returns `{ stored: false, memoriesCount: 0, error: message }`
+
+**clampEmotionScore** (`src/components/emotion-utils.ts`):
+- Shared by `agentbridge-store` CLI and `MemoryExtractor.parseResponse()`
+- Clamps integer values to [-5, +5], defaults non-integers/null/undefined/NaN to 0
+
+**Emotion Score** (`emotion_score` column on `extracted_memories`):
+- Integer [-5, +5] representing emotional valence (VAD model)
+- Scale: -5=angry, -3=frustrated, -1=slightly negative, 0=neutral, +1=slightly positive, +3=pleased, +5=happy
+- Assessed by the agent during instant storage, and by the LLM during heartbeat extraction
+- Schema migration: `ALTER TABLE extracted_memories ADD COLUMN emotion_score INTEGER DEFAULT 0` (idempotent)
+
+**Emotion-Boosted Search Ranking**:
+- `EMOTION_BOOST_WEIGHT = 0.5` constant in `memory-index.ts`
+- Formula: `final_score = bm25_score + EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(emotion_score))`
+- Additive boost preserves BM25 ordering for equally-emotional results
+- `log1p(0) = 0` means neutral memories get zero boost
+- Applied in application layer after FTS5 returns BM25 scores
+- Applied to both `searchExtracted()` (L2) and `searchOriginal()` (L4)
+
+**agentbridge-recall L2/L4 Integration**:
+- Recall CLI updated to search extracted memories (L2 via `searchExtracted()`) and original-language (L4 via `searchOriginal()`)
+- Results merged with existing raw message search, deduplicated, sorted by score
+
+**Skill Definition** (`skills/instant-store/SKILL.md`):
+- Documents when to use: explicit storage requests, frustration signals, emotionally significant statements, important facts/decisions/preferences
+- Documents when NOT to use: routine messages, greetings, confirmations, info already in context
+- Includes emotion score scale with examples
+- Deployed as steering file to `~/.agentbridge/.kiro/steering/instant-store.md`
 
 ### LLM Callback Wiring (Phase 1)
 
@@ -420,6 +491,7 @@ CREATE TABLE extracted_memories (
   source_timestamp INTEGER NOT NULL,
   preserve_original INTEGER NOT NULL DEFAULT 0,
   preserved_keyword TEXT,
+  emotion_score INTEGER DEFAULT 0,            -- -5 to +5 emotional valence (Instant Memory Store)
   created_at INTEGER NOT NULL
 );
 CREATE INDEX idx_extracted_memories_chat_ts ON extracted_memories(chat_id, source_timestamp DESC);
@@ -448,7 +520,7 @@ CREATE TABLE extraction_watermarks (
 );
 ```
 
-WAL mode enabled. Foreign keys enabled. Migration handles adding `model_version` column to existing databases via `ALTER TABLE` with safe error catch.
+WAL mode enabled. Foreign keys enabled. Migrations handle adding `model_version` column to embeddings and `emotion_score` column to extracted_memories via `ALTER TABLE` with safe error catch (idempotent).
 
 ---
 
@@ -505,7 +577,7 @@ All configuration is via `MEMORY_*` environment variables parsed in `loadMemoryC
 | `MEMORY_MMR_LAMBDA` | `0.7` | SE | MMR relevance vs. diversity balance (1.0=pure relevance, 0.0=pure diversity) |
 | `MEMORY_COMPACT_THRESHOLD_PCT` | `85` | SE | Context window compression threshold percentage |
 
-(SE = Search Enhancements phase)
+(SE = Search Enhancements phase, IMS = Instant Memory Store)
 
 ---
 
@@ -530,10 +602,12 @@ All types are defined in `src/types/memory.ts` and re-exported from `src/types/i
 | `ForgetResult` | 2 | Forget operation result (messagesRemoved, embeddingsRemoved, compactionsRemoved, transcriptEntriesRemoved) |
 | `RecallAnalysis` | SE | Intent detection result (hasRecallIntent, temporalRange, strippedQuery, hasTopicKeywords) |
 | `PipelineResult` | SE | Recall fallback pipeline result (results, stage, isFallback) |
-| `ExtractedMemory` | SE | Structured memory from transcripts (chat_id, content_original, content_en, memory_type, source_timestamp, preserve_original, preserved_keyword, created_at) |
+| `ExtractedMemory` | SE | Structured memory from transcripts (chat_id, content_original, content_en, memory_type, source_timestamp, preserve_original, preserved_keyword, emotion_score, created_at) |
 | `MemorySearchParams` | SE | Agent search tool parameters (keywords[], original_keyword?, time_range?) |
 | `MemorySearchResult` | SE | Search tool result (content, content_original?, memory_type?, source_timestamp, tier, score) |
 | `HeartbeatTask` | SE | Background task definition (name, execute function) |
+| `InstantStoreParams` | IMS | Instant store input (chatId, contentEn, contentOriginal, memoryType, emotionScore, keyword?) |
+| `InstantStoreResult` | IMS | Instant store output (stored, memoriesCount, error?) |
 
 ---
 
@@ -560,6 +634,13 @@ Consistent "try, log, continue" pattern throughout:
 - **ContextWindowMonitor**: `shouldCompress()` failure → compression not scheduled, request proceeds normally.
 - **ContextAssembler session injection**: Unknown state (e.g., after restart) → defaults to injecting CoreFacts + RollingSummary (fail-safe).
 - **Configuration**: All numeric env vars parsed via `parseNumberEnvSafe` (logs warning, returns default). Boolean env vars use `parseBooleanEnv`. Never throws.
+
+### Instant Memory Store Error Handling
+
+- **agentbridge-store CLI**: Missing required arg → `{ stored: false, error: "<param> is required" }` with exit code 1. Invalid `memory_type` → `{ stored: false, error: "invalid memory_type" }`. Invalid `chat-id` → `{ stored: false, error: "invalid chat-id" }`.
+- **MemoryManager.instantStore()**: Empty content → `{ stored: false, error: "content-en/original is required" }`. DB write failure → logs error, returns `{ stored: false, error: message }`, watermark not advanced. Memory disabled → `{ stored: false, error: "memory disabled" }`.
+- **clampEmotionScore()**: Non-integer/null/undefined/NaN → defaults to 0. Out of range → clamped to -5 or +5. Never throws.
+- **Emotion boost**: Applied in application layer; if `emotion_score` is 0, boost is exactly 0 (no distortion of BM25 scores).
 
 ---
 
@@ -597,7 +678,7 @@ Consistent "try, log, continue" pattern throughout:
 
 6. **MemorySearchTool does not integrate vector search** — The agent-initiated search tool uses FTS5 only (English + original-language). Vector similarity search is available via the existing `hybridSearch()` path in MemoryManager but is not wired into the MemorySearchTool pipeline. This means the search tool relies on keyword matching rather than semantic similarity for extracted memories.
 
-7. **Optional property-based tests not implemented** — The design document specifies 26 correctness properties with corresponding property-based tests. These were marked as optional in the task list and were not implemented in the MVP. Unit tests cover the core functionality.
+7. **Optional property-based tests partially implemented** — The Search Enhancements design document specifies 26 correctness properties. These were not implemented in the SE MVP. The Instant Memory Store phase added 8 property-based tests covering emotion scoring, instant storage, and search ranking. The remaining SE properties are not yet implemented.
 
 8. **Broader content_original search not implemented** — The design mentions that non-preserved memories could be searched via LIKE/substring matching on `content_original`. The current implementation only searches `content_original` via the `extracted_memories_original_fts` index, which only contains `preserve_original=1` rows.
 
@@ -605,13 +686,17 @@ Consistent "try, log, continue" pattern throughout:
 
 ## Test Coverage
 
-262 tests passing across 21 test files.
+277 tests passing across 25 test files.
 
 Test files:
 - `tests/fts5-query-sanitization.test.ts` — FTS5 query sanitization edge cases
 - `src/components/compaction-engine.test.ts` — compaction logic, tier consolidation, quarterly thresholds
 - `src/components/config.test.ts` — config parsing
 - `src/components/context-assembler.test.ts` — context assembly tiers, token budgets, English rolling summary, session injection
+- `src/components/emotion-utils.test.ts` — Property 1: emotion score clamping (fast-check, 100 iterations) (NEW)
+- `src/components/emotion-boost.test.ts` — Properties 5, 6, 7: emotion boost formula, emotional > neutral ranking, round-trip (fast-check, 100 iterations each) (NEW)
+- `src/components/instant-store.test.ts` — Properties 2, 3, 4: valid persistence, invalid rejection, watermark advance (fast-check, 100 iterations each) (NEW)
+- `src/cli/agentbridge-store.test.ts` — Property 8: CLI argument validation (fast-check, 100 iterations) (NEW)
 - `src/components/intent-detector.test.ts` — recall intent and temporal range detection
 - `src/components/jsonrpc.test.ts` — JSON-RPC protocol handling
 - `src/components/memory-config.test.ts` — memory config parsing, heartbeat + searchEnhancements sections, env var handling
@@ -629,6 +714,21 @@ Test files:
 - `src/components/transcript-parser.test.ts` — JSONL reading and parseTail
 - `src/components/transcript-writer.test.ts` — JSONL writing
 - `src/components/vector-index.test.ts` — vector search, cosine similarity, hybrid search FTS-only mode
+
+### Instant Memory Store Property-Based Tests
+
+8 correctness properties validated via fast-check with ≥100 iterations each:
+
+| Property | Test File | Description |
+|----------|-----------|-------------|
+| P1: Emotion Score Clamping | `emotion-utils.test.ts` | clampEmotionScore returns [-5,+5] for any input; integers preserved, non-integers default to 0 |
+| P2: Valid Memory Persistence | `instant-store.test.ts` | instantStore inserts exactly one row with correct fields for valid params |
+| P3: Invalid Input Rejection | `instant-store.test.ts` | Empty content returns stored:false, no DB row |
+| P4: Watermark Advance | `instant-store.test.ts` | After instantStore, processTranscripts skips covered messages |
+| P5: Emotion Boost Formula | `emotion-boost.test.ts` | final_score = bm25 + 0.5 * log1p(abs(emotion_score)); zero boost when neutral |
+| P6: Emotional > Neutral | `emotion-boost.test.ts` | Emotional memory strictly outscores neutral with same BM25 |
+| P7: Emotion Round-Trip | `emotion-boost.test.ts` | emotion_score preserved exactly through store → search |
+| P8: CLI Argument Validation | `agentbridge-store.test.ts` | Missing required param returns error JSON, no DB modification |
 
 ---
 
