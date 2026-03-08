@@ -31,6 +31,10 @@ import { TransportController } from "./components/transport-controller.js";
 import { MemorySearchController } from "./components/memory-search-controller.js";
 import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
+import { loadNotebookLMConfig } from "./components/notebooklm-config.js";
+import { NotebookLMClient } from "./components/notebooklm-client.js";
+import { NotebookRegistry } from "./components/notebook-registry.js";
+import { handleKBCommand } from "./components/kb-command-handler.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
 function stripDiscordMentions(text: string, botAppId: string): string {
@@ -88,6 +92,26 @@ async function main(): Promise<void> {
     logInfo("main", `🧠 Memory enabled (dir=${memoryConfig.memoryDir})`);
   } else {
     logInfo("main", "🧠 Memory disabled");
+  }
+
+  // Initialize NotebookLM Layer 6
+  const nlmConfig = loadNotebookLMConfig();
+  let nlmClient: NotebookLMClient | null = null;
+  let nlmRegistry: NotebookRegistry | null = null;
+  if (nlmConfig.enabled) {
+    nlmClient = new NotebookLMClient(nlmConfig);
+    nlmRegistry = new NotebookRegistry();
+    try {
+      await nlmClient.initialize();
+      logInfo("main", `📚 NotebookLM Layer 6 enabled (cli=${nlmConfig.cliPath})`);
+    } catch (err) {
+      logWarn("main", `📚 NotebookLM init failed, disabling Layer 6: ${err instanceof Error ? err.message : String(err)}`);
+      nlmConfig.enabled = false;
+      nlmClient = null;
+      nlmRegistry = null;
+    }
+  } else {
+    logInfo("main", "📚 NotebookLM Layer 6 disabled");
   }
 
   const formatter = new ResponseFormatter();
@@ -450,6 +474,8 @@ async function main(): Promise<void> {
           `📄 Ingested documents: ${stats.ingestedDocuments}`,
           `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
           `💾 DB size: ${dbMb} MB`,
+          "",
+          `📚 Layer 6 (NotebookLM): ${nlmConfig.enabled ? "enabled" : "disabled"}${nlmConfig.enabled && nlmRegistry ? ` — ${nlmRegistry.list().length} notebooks, cache: ${nlmClient?.getCacheStats().size ?? 0}` : ""}`,
         ].join("\n");
         await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
         return;
@@ -649,6 +675,13 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (text === "/kb" || text.startsWith("/kb ")) {
+        const kbArgs = text.slice("/kb".length).trim();
+        const result = await handleKBCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
+        await telegramApi.sendMessage(chatId, result.text, { message_thread_id: threadId });
+        return;
+      }
+
       if (text === "/help") {
         const helpText = [
           "📋 Available commands:",
@@ -673,6 +706,7 @@ async function main(): Promise<void> {
           "/forget session <id> — Forget a session",
           "/full — Raw tmux output, no TTS",
           "/short — Clean responses (default)",
+          "/kb — Knowledge base (list/create/sources/query)",
           "/help — Show this help message",
         ].join("\n");
         await telegramApi.sendMessage(chatId, helpText, { message_thread_id: threadId });
@@ -689,7 +723,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/kb", "/help"];
         if (!known.includes(cmd)) {
           await telegramApi.sendMessage(chatId, `❓ Unknown command: ${cmd}\nType /help for available commands.`, { message_thread_id: threadId });
           return;
@@ -997,6 +1031,8 @@ async function main(): Promise<void> {
           `📄 Ingested documents: ${stats.ingestedDocuments}`,
           `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
           `💾 DB size: ${dbMb} MB`,
+          "",
+          `📚 Layer 6 (NotebookLM): ${nlmConfig.enabled ? "enabled" : "disabled"}${nlmConfig.enabled && nlmRegistry ? ` — ${nlmRegistry.list().length} notebooks, cache: ${nlmClient?.getCacheStats().size ?? 0}` : ""}`,
         ].join("\n");
         await discordApi.sendMessage(message.channelId, msg);
         return;
@@ -1199,6 +1235,13 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (text === "/kb" || text.startsWith("/kb ")) {
+        const kbArgs = text.slice("/kb".length).trim();
+        const result = await handleKBCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
+        await discordApi.sendMessage(message.channelId, result.text);
+        return;
+      }
+
       if (text === "/help") {
         const helpText = [
           "📋 Available commands:",
@@ -1223,6 +1266,7 @@ async function main(): Promise<void> {
           "/forget session <id> — Forget a session",
           "/full — Raw tmux output, no TTS",
           "/short — Clean responses (default)",
+          "/kb — Knowledge base (list/create/sources/query)",
           "/help — Show this help message",
         ].join("\n");
         await discordApi.sendMessage(message.channelId, helpText);
@@ -1239,7 +1283,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/kb", "/help"];
         if (!known.includes(cmd)) {
           await discordApi.sendMessage(message.channelId, `❓ Unknown command: ${cmd}\nType /help for available commands.`);
           return;

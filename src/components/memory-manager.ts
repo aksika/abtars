@@ -1321,10 +1321,10 @@ export class MemoryManager {
    * Derive the compaction date from the earliest message in a session.
    * Returns the date of the earliest message, or current date if no messages found.
    */
-  private getSessionMessageDate(chatId: number, sessionId: string): Date {
+  private getSessionMessageDate(chatId: number, sessionId: string, sinceTimestamp: number = 0): Date {
     const row = this.db!.prepare(
-      "SELECT MIN(timestamp) as earliest_ts FROM messages WHERE chat_id = ? AND session_id = ?"
-    ).get(chatId, sessionId) as { earliest_ts: number | null } | undefined;
+      "SELECT MIN(timestamp) as earliest_ts FROM messages WHERE chat_id = ? AND session_id = ? AND timestamp > ?"
+    ).get(chatId, sessionId, sinceTimestamp) as { earliest_ts: number | null } | undefined;
     if (row?.earliest_ts) {
       return new Date(row.earliest_ts);
     }
@@ -1343,29 +1343,33 @@ export class MemoryManager {
       return;
     }
 
-    // Query uncompacted sessions from messages table (works for both tmux and ACP transports)
+    // Query sessions that have messages newer than their latest daily compaction
     const rows = this.db
       .prepare(`
-        SELECT DISTINCT m.chat_id, m.session_id
+        SELECT m.chat_id, m.session_id,
+               COALESCE(
+                 (SELECT MAX(c.timestamp) FROM compactions c
+                  WHERE c.chat_id = m.chat_id AND c.source_session_id = m.session_id AND c.tier = 'daily'),
+                 0
+               ) as watermark
         FROM messages m
-        WHERE NOT EXISTS (
-          SELECT 1 FROM compactions c
-          WHERE c.chat_id = m.chat_id AND c.source_session_id = m.session_id AND c.tier = 'daily'
-        )
+        GROUP BY m.chat_id, m.session_id
+        HAVING MAX(m.timestamp) > watermark
       `)
-      .all() as Array<{ chat_id: number; session_id: string }>;
+      .all() as Array<{ chat_id: number; session_id: string; watermark: number }>;
 
     for (const row of rows) {
       try {
         await this.waitForCompaction(row.chat_id);
 
         const engine = new CompactionEngine(this.db!, this.transcriptParser!, this.memoryIndex!, this.config);
-        const compactionDate = this.getSessionMessageDate(row.chat_id, row.session_id);
+        const compactionDate = this.getSessionMessageDate(row.chat_id, row.session_id, row.watermark);
         await engine.compact({
           chatId: row.chat_id,
           sessionId: row.session_id,
           llmCall: this.llmCall!,
           compactionDate,
+          sinceTimestamp: row.watermark,
         });
       } catch (err) {
         logError(TAG, `Shutdown compaction failed for chat ${row.chat_id} session ${row.session_id}`, err);

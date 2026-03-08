@@ -58,39 +58,45 @@ export function isEligibleForCompaction(params: {
 }
 
 /**
- * Query sessions for a given chat that have not yet been compacted at the daily tier.
- * Returns each session's ID and the timestamp of its most recent message.
+ * Query sessions for a given chat that have messages newer than their latest daily compaction.
+ * Returns each session's ID, the timestamp of its most recent message, and the
+ * watermark (latest compaction timestamp) so callers can filter to only new messages.
  */
 export function getUncompactedSessions(
   db: Database.Database,
   chatId: number,
-): Array<{ sessionId: string; lastMessageTimestamp: number }> {
+): Array<{ sessionId: string; lastMessageTimestamp: number; sinceTimestamp: number }> {
   const rows = db
     .prepare(
-      `SELECT session_id, MAX(timestamp) as last_message_ts
-       FROM messages
-       WHERE chat_id = ?
-         AND session_id NOT IN (
-           SELECT source_session_id FROM compactions WHERE chat_id = ? AND tier = 'daily'
-         )
-       GROUP BY session_id`,
+      `SELECT m.session_id,
+              MAX(m.timestamp) as last_message_ts,
+              COALESCE(
+                (SELECT MAX(c.timestamp) FROM compactions c
+                 WHERE c.chat_id = ? AND c.source_session_id = m.session_id AND c.tier = 'daily'),
+                0
+              ) as watermark
+       FROM messages m
+       WHERE m.chat_id = ?
+       GROUP BY m.session_id
+       HAVING MAX(m.timestamp) > watermark`,
     )
-    .all(chatId, chatId) as Array<{ session_id: string; last_message_ts: number }>;
+    .all(chatId, chatId) as Array<{ session_id: string; last_message_ts: number; watermark: number }>;
 
   return rows.map((row) => ({
     sessionId: row.session_id,
     lastMessageTimestamp: row.last_message_ts,
+    sinceTimestamp: row.watermark,
   }));
 }
 
 /**
- * Get the earliest message timestamp for a session, used to derive the compaction date
- * (file naming uses the date of the source messages, not the execution date).
+ * Get the earliest message timestamp for a session after a given watermark,
+ * used to derive the compaction date for the new batch of messages.
  */
-function getEarliestMessageDate(db: Database.Database, chatId: number, sessionId: string): Date {
+function getEarliestMessageDate(db: Database.Database, chatId: number, sessionId: string, sinceTimestamp: number = 0): Date {
   const row = db
-    .prepare("SELECT MIN(timestamp) as earliest_ts FROM messages WHERE chat_id = ? AND session_id = ?")
-    .get(chatId, sessionId) as { earliest_ts: number } | undefined;
+    .prepare("SELECT MIN(timestamp) as earliest_ts FROM messages WHERE chat_id = ? AND session_id = ? AND timestamp > ?")
+    .get(chatId, sessionId, sinceTimestamp) as { earliest_ts: number } | undefined;
   return row?.earliest_ts ? new Date(row.earliest_ts) : new Date();
 }
 
@@ -147,12 +153,13 @@ export function createDailyCompactionTask(deps: DailyCompactionDeps): HeartbeatT
                 deps.memoryIndex,
                 deps.config,
               );
-              const compactionDate = getEarliestMessageDate(deps.db, chatId, session.sessionId);
+              const compactionDate = getEarliestMessageDate(deps.db, chatId, session.sessionId, session.sinceTimestamp);
               await engine.compact({
                 chatId,
                 sessionId: session.sessionId,
                 llmCall,
                 compactionDate,
+                sinceTimestamp: session.sinceTimestamp,
               });
               logInfo(TAG, `Daily compaction completed for chat ${chatId}, session ${session.sessionId}`);
             } catch (err) {
@@ -188,17 +195,17 @@ export async function runStartupCatchUp(deps: DailyCompactionDeps): Promise<void
     return;
   }
 
-  // Get all active chats
+  // Get all active chats from messages table (sessions table may be empty for tmux transport)
   const chats = deps.db
-    .prepare("SELECT DISTINCT telegram_chat_id FROM sessions WHERE is_active = 1")
-    .all() as Array<{ telegram_chat_id: number }>;
+    .prepare("SELECT DISTINCT chat_id FROM messages")
+    .all() as Array<{ chat_id: number }>;
 
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
   const todayStartMs = todayStart.getTime();
 
   for (const chat of chats) {
-    const chatId = chat.telegram_chat_id;
+    const chatId = chat.chat_id;
     const sessions = getUncompactedSessions(deps.db, chatId);
 
     for (const session of sessions) {
@@ -207,12 +214,13 @@ export async function runStartupCatchUp(deps: DailyCompactionDeps): Promise<void
 
       try {
         const engine = new CompactionEngine(deps.db, deps.transcriptParser, deps.memoryIndex, deps.config);
-        const compactionDate = getEarliestMessageDate(deps.db, chatId, session.sessionId);
+        const compactionDate = getEarliestMessageDate(deps.db, chatId, session.sessionId, session.sinceTimestamp);
         await engine.compact({
           chatId,
           sessionId: session.sessionId,
           llmCall,
           compactionDate,
+          sinceTimestamp: session.sinceTimestamp,
         });
         logInfo(TAG, `Startup catch-up compacted chat ${chatId}, session ${session.sessionId}`);
       } catch (err) {

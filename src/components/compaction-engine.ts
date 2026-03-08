@@ -74,6 +74,7 @@ export class CompactionEngine {
     sessionId: string;
     llmCall: (prompt: string, content: string) => Promise<string>;
     compactionDate?: Date;
+    sinceTimestamp?: number;
   }): Promise<CompactedMemory | null> {
     try {
       const transcriptPath = join(
@@ -83,7 +84,10 @@ export class CompactionEngine {
         `${params.sessionId}.jsonl`,
       );
 
-      const messages = this.transcriptParser.parse(transcriptPath);
+      const allMessages = this.transcriptParser.parse(transcriptPath);
+      // Filter to only messages after the last compaction watermark
+      const since = params.sinceTimestamp ?? 0;
+      const messages = since > 0 ? allMessages.filter((m) => m.timestamp > since) : allMessages;
       if (messages.length === 0) {
         logInfo(TAG, `No messages to compact for chat ${params.chatId}, session ${params.sessionId}`);
         return null;

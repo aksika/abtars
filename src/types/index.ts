@@ -54,3 +54,16 @@ export type {
   BridgeMessage,
   DiscordInboundMessage,
 } from "./discord.js";
+
+export type {
+  NotebookLMConfig,
+  RAGResult,
+  RAGCitation,
+  SourceDescriptor,
+  SourceInfo,
+  NotebookInfo,
+  NotebookRegistryEntry,
+  NotebookRegistryData,
+  KBQueryResult,
+  KBErrorResult,
+} from "./notebooklm.js";
