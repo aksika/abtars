@@ -780,6 +780,23 @@ async function main(): Promise<void> {
               await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
             }
           }
+        } else if (transport instanceof TmuxClient) {
+          // Intermediate streaming may not have delivered the full answer — send the tail
+          const delivered = (transport as TmuxClient).intermediateDeliveredText;
+          const finalAnswer = cleanAnswer || response;
+          if (delivered && finalAnswer.length > delivered.length && finalAnswer.startsWith(delivered)) {
+            const tail = finalAnswer.slice(delivered.length).trim();
+            if (tail) {
+              logDebug("main", `Sending streamed tail (${tail.length} chars)`);
+              const tailChunks = formatter.chunkText(tail);
+              for (const chunk of tailChunks) {
+                if (chunk.trim()) {
+                  await telegramApi.sendChatAction(chatId, "typing", threadId);
+                  await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
+                }
+              }
+            }
+          }
         }
 
         if (memory) {

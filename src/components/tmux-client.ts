@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { writeFileSync, unlinkSync } from "node:fs";
 import type { IKiroTransport } from "./kiro-transport.js";
-import { logInfo, logDebug } from "./logger.js";
+import { logInfo, logDebug, logWarn } from "./logger.js";
 
 // Kiro CLI prompt pattern: "N% >" or "N% !>" where N is a number (context usage percentage)
 // The "!" appears in trust-all-tools mode
@@ -23,6 +23,9 @@ export class TmuxClient implements IKiroTransport {
 
   /** Optional callback for streaming intermediate responses before final prompt. */
   onIntermediateResponse?: (text: string) => void;
+
+  /** Tracks the cumulative text delivered via intermediate chunks (for tail detection). */
+  private lastIntermediateDelivered = "";
 
   constructor(sessionName: string, captureDelaySec: number, maxWaitSec: number) {
     this.sessionName = sessionName;
@@ -50,6 +53,7 @@ export class TmuxClient implements IKiroTransport {
       throw new Error("tmux session not available");
     }
 
+    this.lastIntermediateDelivered = "";
     const maxAttempts = 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       // Snapshot pane content before sending
@@ -61,16 +65,21 @@ export class TmuxClient implements IKiroTransport {
       }
 
       // Send the message — use temp file for long prompts to avoid tmux command length limit
-      if (message.length > 4000) {
-        const tmpFile = `/tmp/agentbridge-prompt-${Date.now()}.txt`;
-        writeFileSync(tmpFile, message);
-        const readCmd = `Please read ${tmpFile} and follow the instructions inside it exactly. Output ONLY what is requested.`;
-        const escaped = readCmd.replace(/'/g, "'\\''");
-        this.exec(`tmux send-keys -t ${this.sessionName} '${escaped}' Enter`);
-        setTimeout(() => { try { unlinkSync(tmpFile); } catch {} }, 120_000);
-      } else {
-        const escaped = message.replace(/'/g, "'\\''");
-        this.exec(`tmux send-keys -t ${this.sessionName} '${escaped}' Enter`);
+      try {
+        if (message.length > 4000) {
+          const tmpFile = `/tmp/agentbridge-prompt-${Date.now()}.txt`;
+          writeFileSync(tmpFile, message);
+          const readCmd = `Please read ${tmpFile} and follow the instructions inside it exactly. Output ONLY what is requested.`;
+          const escaped = readCmd.replace(/'/g, "'\\''");
+          this.exec(`tmux send-keys -t ${this.sessionName} '${escaped}' Enter`);
+          setTimeout(() => { try { unlinkSync(tmpFile); } catch {} }, 120_000);
+        } else {
+          const escaped = message.replace(/'/g, "'\\''");
+          this.exec(`tmux send-keys -t ${this.sessionName} '${escaped}' Enter`);
+        }
+      } catch (err) {
+        logWarn("tmux", `send-keys failed: ${err instanceof Error ? err.message : String(err)}`);
+        return "⚠️ Failed to send message to Kiro session. The tmux session may be in copy mode or unresponsive. Try /reset.";
       }
 
       // Wait for initial processing
@@ -189,6 +198,7 @@ export class TmuxClient implements IKiroTransport {
             logDebug("tmux", `Delivering intermediate chunk (${newPart.length} chars)`);
             this.onIntermediateResponse(newPart);
             lastDeliveredAnswer = intermediateAnswer;
+            this.lastIntermediateDelivered = intermediateAnswer;
           }
         }
       }
@@ -237,6 +247,10 @@ export class TmuxClient implements IKiroTransport {
   /** Get the context window usage percentage from the last Kiro prompt (e.g. 10 for "10% >"). Returns -1 if unknown. */
   get contextPercent(): number {
     return this.lastContextPercent;
+  }
+  /** Get the cumulative text that was delivered via intermediate streaming. */
+  get intermediateDeliveredText(): string {
+    return this.lastIntermediateDelivered;
   }
 
   /** Extract just the purple "> " answer lines from raw tmux output (no side effects). */

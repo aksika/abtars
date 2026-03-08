@@ -1,3 +1,21 @@
+The Sleep CLI 
+Sleeping routine during overnight: Memory tidyness
+Call a subagent: most skilled model, currently Opus 4.6 preferred
+
+- Daily/weekly/Quarterly compactions - this is exsisting and the timing is figured out already -> review
+- SQL database cleaning!!
+- Topics: we will review and reorganize the topic files for tidyness and clarity
+
+- Timestep and bulletpoint description what happend in the cylce into the the memory log for audit trail
+
+---
+
+Topic skill:
+if I say save this topic "Tesla" you will create an md file based on the name and condese anything there what we have been dicussing in this topic inside .agentbridge/topics/Tesla-<todaysdate>.md.
+Anytime you are later compacting this topic, you change the date in the filename. If you just add new text, the filename remains the same
+
+
+---
 To improve:
 - .hu voice detection prediction: "ez egy magyar szöveg, vagy angol"
 - When reacting with emoji, send it to the chat: :heart:
