@@ -1,5 +1,5 @@
 /**
- * Telegram /nlm command handler for NotebookLM Layer 6 knowledge base.
+ * Telegram /nlm command handler — calls `nlm` CLI directly.
  *
  * Subcommands:
  *   /nlm list                — List notebooks
@@ -8,22 +8,60 @@
  *   /nlm query <question>    — Query the default notebook
  */
 
-import type { NotebookLMConfig } from "../types/index.js";
-import type { NotebookLMClient } from "./notebooklm-client.js";
-import type { NotebookRegistry } from "./notebook-registry.js";
-import { logError } from "./logger.js";
+import { execFile } from "node:child_process";
+import { logError, logDebug, logInfo } from "./logger.js";
 
 const TAG = "NLMCommand";
+const TIMEOUT_MS = 120_000; // 2 minutes — NLM queries can be slow
 
 export type NLMCommandResult = { text: string };
 
-export async function handleNLMCommand(
-  args: string,
-  config: NotebookLMConfig,
-  client: NotebookLMClient | null,
-  registry: NotebookRegistry | null,
-): Promise<NLMCommandResult> {
-  if (!config.enabled || !client || !registry) {
+export type NLMConfig = {
+  enabled: boolean;
+  defaultNotebook: string; // notebook ID (not name)
+};
+
+export function loadNLMConfig(): NLMConfig {
+  const raw = process.env["NOTEBOOKLM_ENABLED"];
+  return {
+    enabled: raw === "true" || raw === "1",
+    defaultNotebook: process.env["NOTEBOOKLM_DEFAULT_NOTEBOOK"] || "",
+  };
+}
+
+/** Execute `nlm` CLI and return stdout. */
+function nlmExec(args: string[]): Promise<{ ok: true; data: string } | { ok: false; error: string }> {
+  const start = Date.now();
+  logDebug(TAG, `nlm ${args.join(" ")}`);
+
+  return new Promise((resolve) => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+
+    try {
+      execFile("nlm", args, { signal: ac.signal, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+        clearTimeout(timer);
+        logDebug(TAG, `nlm completed in ${Date.now() - start}ms`);
+
+        if (err) {
+          if (err.name === "AbortError" || (err as NodeJS.ErrnoException).code === "ABORT_ERR") {
+            resolve({ ok: false, error: `Timeout after ${TIMEOUT_MS / 1000}s` });
+            return;
+          }
+          resolve({ ok: false, error: stderr?.trim() || err.message });
+          return;
+        }
+        resolve({ ok: true, data: stdout.trim() });
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+}
+
+export async function handleNLMCommand(args: string, config: NLMConfig): Promise<NLMCommandResult> {
+  if (!config.enabled) {
     return { text: "📚 Knowledge base is disabled." };
   }
 
@@ -32,86 +70,87 @@ export async function handleNLMCommand(
 
   try {
     switch (sub) {
-      case "list":
-        return await handleList(client, registry);
-      case "create":
-        return await handleCreate(parts.slice(1).join(" "), client, registry);
-      case "sources":
-        return await handleSources(parts[1] ?? "", client, registry);
-      case "query":
-        return await handleQuery(parts.slice(1).join(" "), config, client, registry);
+      case "list": return await handleList();
+      case "create": return await handleCreate(parts.slice(1).join(" "));
+      case "sources": return await handleSources(parts[1] ?? "");
+      case "query": return await handleQuery(parts.slice(1).join(" "), config);
       default:
-        return { text: "Usage: /nlm list | /nlm create <name> | /nlm sources <notebook> | /nlm query <question>" };
+        return { text: "Usage: /nlm list | /nlm create <name> | /nlm sources <notebook-id> | /nlm query <question>" };
     }
   } catch (err) {
-    logError(TAG, "KB command failed", err);
-    return { text: `❌ KB error: ${err instanceof Error ? err.message : String(err)}` };
+    logError(TAG, "NLM command failed", err);
+    return { text: `❌ NLM error: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
-async function handleList(client: NotebookLMClient, registry: NotebookRegistry): Promise<NLMCommandResult> {
-  const result = await client.listNotebooks();
+async function handleList(): Promise<NLMCommandResult> {
+  const result = await nlmExec(["notebook", "list", "--json"]);
   if (!result.ok) return { text: `❌ ${result.error}` };
-  if (result.data.length === 0) return { text: "📚 No notebooks found." };
-  const lines = result.data.map((n) => {
-    const registered = registry.resolve(n.name) ? " ✓" : "";
-    return `• ${n.name} (${n.id})${registered}`;
-  });
-  return { text: `📚 Notebooks:\n\n${lines.join("\n")}` };
+
+  try {
+    const notebooks = JSON.parse(result.data);
+    if (!Array.isArray(notebooks) || notebooks.length === 0) return { text: "📚 No notebooks found." };
+    const lines = notebooks.map((n: Record<string, unknown>) =>
+      `• ${n.title ?? n.name ?? "?"} (${n.id ?? n.notebook_id ?? "?"})`
+    );
+    return { text: `📚 Notebooks:\n\n${lines.join("\n")}` };
+  } catch {
+    // Non-JSON output — just return it as-is
+    return { text: `📚 ${result.data}` };
+  }
 }
 
-async function handleCreate(
-  name: string,
-  client: NotebookLMClient,
-  registry: NotebookRegistry,
-): Promise<NLMCommandResult> {
+async function handleCreate(name: string): Promise<NLMCommandResult> {
   if (!name) return { text: "Usage: /nlm create <name>" };
-  const result = await client.createNotebook(name);
+  const result = await nlmExec(["notebook", "create", name, "--json"]);
   if (!result.ok) return { text: `❌ ${result.error}` };
-  registry.register({
-    name,
-    notebookId: result.data,
-    description: "",
-    createdAt: Date.now(),
-    sourceCount: 0,
-  });
-  return { text: `✅ Notebook "${name}" created (${result.data})` };
-}
 
-async function handleSources(
-  notebookName: string,
-  client: NotebookLMClient,
-  registry: NotebookRegistry,
-): Promise<NLMCommandResult> {
-  if (!notebookName) return { text: "Usage: /nlm sources <notebook-name>" };
-  const nbId = registry.resolve(notebookName);
-  if (!nbId) {
-    return { text: `❌ Notebook "${notebookName}" not found. Available: ${registry.availableNames().join(", ") || "(none)"}` };
+  try {
+    const parsed = JSON.parse(result.data);
+    const id = parsed.notebook_id ?? parsed.id ?? "?";
+    logInfo(TAG, `Created notebook "${name}" → ${id}`);
+    return { text: `✅ Notebook "${name}" created (${id})` };
+  } catch {
+    return { text: `✅ ${result.data}` };
   }
-  const result = await client.listSources(nbId);
-  if (!result.ok) return { text: `❌ ${result.error}` };
-  if (result.data.length === 0) return { text: `📄 No sources in "${notebookName}".` };
-  const lines = result.data.map((s) => `• [${s.type}] ${s.name}`);
-  return { text: `📄 Sources in "${notebookName}":\n\n${lines.join("\n")}` };
 }
 
-async function handleQuery(
-  question: string,
-  config: NotebookLMConfig,
-  client: NotebookLMClient,
-  registry: NotebookRegistry,
-): Promise<NLMCommandResult> {
+async function handleSources(notebookId: string): Promise<NLMCommandResult> {
+  if (!notebookId) return { text: "Usage: /nlm sources <notebook-id>" };
+  const result = await nlmExec(["source", "list", notebookId, "--json"]);
+  if (!result.ok) return { text: `❌ ${result.error}` };
+
+  try {
+    const sources = JSON.parse(result.data);
+    if (!Array.isArray(sources) || sources.length === 0) return { text: `📄 No sources in notebook.` };
+    const lines = sources.map((s: Record<string, unknown>) =>
+      `• [${s.type ?? s.source_type ?? "?"}] ${s.title ?? s.name ?? "?"}`
+    );
+    return { text: `📄 Sources:\n\n${lines.join("\n")}` };
+  } catch {
+    return { text: `📄 ${result.data}` };
+  }
+}
+
+async function handleQuery(question: string, config: NLMConfig): Promise<NLMCommandResult> {
   if (!question) return { text: "Usage: /nlm query <question>" };
-  const notebookName = config.defaultNotebook;
-  if (!notebookName) return { text: "❌ No default notebook configured (NOTEBOOKLM_DEFAULT_NOTEBOOK)." };
-  const nbId = registry.resolve(notebookName);
-  if (!nbId) {
-    return { text: `❌ Default notebook "${notebookName}" not found. Available: ${registry.availableNames().join(", ") || "(none)"}` };
-  }
-  const result = await client.query(nbId, question);
+  const nbId = config.defaultNotebook;
+  if (!nbId) return { text: "❌ No default notebook configured (NOTEBOOKLM_DEFAULT_NOTEBOOK)." };
+
+  const result = await nlmExec(["notebook", "query", nbId, question, "--json"]);
   if (!result.ok) return { text: `❌ ${result.error}` };
-  const citations = result.data.citations.length > 0
-    ? `\n\n📎 Sources: ${result.data.citations.map((c) => c.sourceName).join(", ")}`
-    : "";
-  return { text: `📚 ${result.data.answer}${citations}` };
+
+  try {
+    const parsed = JSON.parse(result.data);
+    const answer = parsed.answer ?? parsed.response ?? result.data;
+    const sources = parsed.sources_used ?? parsed.citations ?? [];
+    const citations = Array.isArray(sources) && sources.length > 0
+      ? `\n\n📎 Sources: ${sources.map((s: Record<string, unknown>) => s.title ?? s.name ?? s.source_name ?? "?").join(", ")}`
+      : "";
+    logInfo(TAG, `Query OK — answerLen=${String(answer).length}`);
+    return { text: `📚 ${answer}${citations}` };
+  } catch {
+    // Non-JSON — return raw output
+    return { text: `📚 ${result.data}` };
+  }
 }

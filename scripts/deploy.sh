@@ -70,13 +70,6 @@ echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-sleep.js\" \"\$@\"" >> "$SLE
 chmod +x "$SLEEP_SCRIPT"
 ln -sf "$SLEEP_SCRIPT" "$HOME/.local/bin/agentbridge-sleep"
 
-# Deploy agentbridge-nlm CLI (NotebookLM knowledge base)
-NLM_SCRIPT="$AB_HOME/agentbridge-nlm"
-echo '#!/usr/bin/env bash' > "$NLM_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-nlm.js\" \"\$@\"" >> "$NLM_SCRIPT"
-chmod +x "$NLM_SCRIPT"
-ln -sf "$NLM_SCRIPT" "$HOME/.local/bin/agentbridge-nlm"
-
 # 4. Done
 echo ""
 echo "✅ Deploy complete."

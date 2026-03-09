@@ -797,7 +797,7 @@ function getScript(): string {
     var nlmBadge = document.getElementById('plat-nlm-badge');
     if (nlmBadge) {
       if (snap.notebooklm && snap.notebooklm.enabled) {
-        nlmBadge.textContent = 'active (cache: ' + snap.notebooklm.hits + 'h/' + snap.notebooklm.misses + 'm)';
+        nlmBadge.textContent = 'active';
         nlmBadge.className = 'badge running';
       } else {
         nlmBadge.textContent = 'disabled';

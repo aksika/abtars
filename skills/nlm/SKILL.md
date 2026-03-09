@@ -1,5 +1,5 @@
 ---
-name: knowledge-base
+name: nlm
 description: Query the NotebookLM knowledge base (Layer 6) for answers grounded in curated reference material
 user-invocable: false
 ---
@@ -13,20 +13,25 @@ You have access to a persistent knowledge base powered by Google NotebookLM. Use
 Run this command using your shell tool:
 
 ```bash
-agentbridge-nlm query --query "your question here" --chat-id <CHAT_ID>
+nlm notebook query <NOTEBOOK_ID> "your question here" --json
 ```
 
 ### Parameters
 
-- `--query` (required): A natural-language question to ask the knowledge base. Be specific and descriptive.
-  Example: `--query "What does the RFC say about authentication requirements?"`
-- `--notebook` (optional): The notebook name to query. Defaults to the configured default notebook.
-  Example: `--notebook "research"`
-- `--chat-id` (required): The Telegram chat ID. Use `7773842843` for the main chat.
+- `<NOTEBOOK_ID>` (required): The notebook ID to query. Use the default notebook ID from your environment.
+- `"your question here"` (required): A natural-language question. Be specific and descriptive.
+
+### Other useful commands
+
+```bash
+nlm notebook list --json          # List all notebooks
+nlm notebook create <name> --json # Create a new notebook
+nlm source list <NOTEBOOK_ID> --json  # List sources in a notebook
+```
 
 ### Output
 
-JSON object with: `answer`, `citations` (array of source references), `confidence`, `notebookName`, `cached`.
+JSON object with: `answer`, `sources_used` (array of source references).
 
 ## When to use
 

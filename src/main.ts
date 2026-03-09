@@ -33,10 +33,7 @@ import { TransportController } from "./components/transport-controller.js";
 import { MemorySearchController } from "./components/memory-search-controller.js";
 import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
-import { loadNotebookLMConfig } from "./components/notebooklm-config.js";
-import { NotebookLMClient } from "./components/notebooklm-client.js";
-import { NotebookRegistry } from "./components/notebook-registry.js";
-import { handleNLMCommand } from "./components/nlm-command-handler.js";
+import { handleNLMCommand, loadNLMConfig } from "./components/nlm-command-handler.js";
 import { SleepTrigger, loadSleepTriggerConfig } from "./components/sleep-trigger.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
@@ -97,25 +94,9 @@ async function main(): Promise<void> {
     logInfo("main", "🧠 Memory disabled");
   }
 
-  // Initialize NotebookLM Layer 6
-  const nlmConfig = loadNotebookLMConfig();
-  let nlmClient: NotebookLMClient | null = null;
-  let nlmRegistry: NotebookRegistry | null = null;
-  if (nlmConfig.enabled) {
-    nlmClient = new NotebookLMClient(nlmConfig);
-    nlmRegistry = new NotebookRegistry();
-    try {
-      await nlmClient.initialize();
-      logInfo("main", `📚 NotebookLM Layer 6 enabled (cli=${nlmConfig.cliPath})`);
-    } catch (err) {
-      logWarn("main", `📚 NotebookLM init failed, disabling Layer 6: ${err instanceof Error ? err.message : String(err)}`);
-      nlmConfig.enabled = false;
-      nlmClient = null;
-      nlmRegistry = null;
-    }
-  } else {
-    logInfo("main", "📚 NotebookLM Layer 6 disabled");
-  }
+  // Initialize NLM (calls `nlm` CLI directly — no wrapper)
+  const nlmConfig = loadNLMConfig();
+  logInfo("main", `📚 NLM Layer 6 ${nlmConfig.enabled ? "enabled" : "disabled"}`);
 
   const formatter = new ResponseFormatter();
 
@@ -499,7 +480,7 @@ async function main(): Promise<void> {
           `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
           `💾 DB size: ${dbMb} MB`,
           "",
-          `📚 Layer 6 (NotebookLM): ${nlmConfig.enabled ? "enabled" : "disabled"}${nlmConfig.enabled && nlmRegistry ? ` — ${nlmRegistry.list().length} notebooks, cache: ${nlmClient?.getCacheStats().size ?? 0}` : ""}`,
+          `📚 Layer 6 (NotebookLM): ${nlmConfig.enabled ? "enabled" : "disabled"}`,
         ].join("\n");
         await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
         return;
@@ -701,7 +682,7 @@ async function main(): Promise<void> {
 
       if (text === "/nlm" || text.startsWith("/nlm ")) {
         const kbArgs = text.slice("/nlm".length).trim();
-        const result = await handleNLMCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
+        const result = await handleNLMCommand(kbArgs, nlmConfig);
         await telegramApi.sendMessage(chatId, result.text, { message_thread_id: threadId });
         return;
       }
@@ -1056,7 +1037,7 @@ async function main(): Promise<void> {
           `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
           `💾 DB size: ${dbMb} MB`,
           "",
-          `📚 Layer 6 (NotebookLM): ${nlmConfig.enabled ? "enabled" : "disabled"}${nlmConfig.enabled && nlmRegistry ? ` — ${nlmRegistry.list().length} notebooks, cache: ${nlmClient?.getCacheStats().size ?? 0}` : ""}`,
+          `📚 Layer 6 (NotebookLM): ${nlmConfig.enabled ? "enabled" : "disabled"}`,
         ].join("\n");
         await discordApi.sendMessage(message.channelId, msg);
         return;
@@ -1261,7 +1242,7 @@ async function main(): Promise<void> {
 
       if (text === "/nlm" || text.startsWith("/nlm ")) {
         const kbArgs = text.slice("/nlm".length).trim();
-        const result = await handleNLMCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
+        const result = await handleNLMCommand(kbArgs, nlmConfig);
         await discordApi.sendMessage(message.channelId, result.text);
         return;
       }
@@ -1459,9 +1440,7 @@ async function main(): Promise<void> {
               tasks: [],
             }
           : null,
-        notebooklm: nlmClient
-          ? { enabled: nlmConfig.enabled, getCacheStats: () => nlmClient!.getCacheStats() }
-          : null,
+        notebooklm: nlmConfig.enabled,
       };
       return buildStatusSnapshot(refs);
     };

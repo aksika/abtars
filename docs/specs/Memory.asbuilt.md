@@ -37,7 +37,7 @@ Every piece of information the agent can store or recall lives in one of these c
 | ID | Name | Backend | Content | Access Method | Scope |
 |----|------|---------|---------|---------------|-------|
 | KB0 | Soul / Persona | `persona/SOUL.md` | Agent identity, personality, behavioral rules, core truths | Loaded into C0 Tier 1 (Soul) on every context assembly | Static — defines who the agent is |
-| KB1 | NotebookLM | Google NotebookLM API | Curated reference documents: research papers, technical docs, guides | `agentbridge-nlm query --query "..." --chat-id <id>` | External — grounded answers with citations, cached responses |
+| KB1 | NotebookLM | Google NotebookLM API | Curated reference documents: research papers, technical docs, guides | `nlm notebook query <id> "question" --json` | External — grounded answers with citations |
 
 ### Compartment Data Flow
 

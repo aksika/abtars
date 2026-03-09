@@ -60,7 +60,7 @@ export type StatusSnapshot = {
   transport: TransportStatus;
   memory: MemoryStatus;
   heartbeat: HeartbeatStatus;
-  notebooklm: { enabled: boolean; size: number; hits: number; misses: number } | null;
+  notebooklm: { enabled: boolean } | null;
 };
 
 export type PlatformStates = {
@@ -140,10 +140,7 @@ export type SubsystemRefs = {
     tasks: { name: string }[];
   } | null;
   chatId?: number;
-  notebooklm: {
-    enabled: boolean;
-    getCacheStats: () => { size: number; hits: number; misses: number };
-  } | null;
+  notebooklm: boolean;
 };
 
 /**
@@ -205,9 +202,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     transport,
     memory,
     heartbeat,
-    notebooklm: refs.notebooklm
-      ? { enabled: refs.notebooklm.enabled, ...refs.notebooklm.getCacheStats() }
-      : null,
+    notebooklm: refs.notebooklm ? { enabled: true } : null,
   };
 }
 
