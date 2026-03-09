@@ -1493,7 +1493,7 @@ async function main(): Promise<void> {
     });
 
     await dashboardServer.start();
-    logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort}`);
+    logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort} (token: ${dashConfig.webAuthToken})`);
   }
 
   async function shutdown(): Promise<void> {

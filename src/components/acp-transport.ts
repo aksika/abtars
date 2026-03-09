@@ -80,7 +80,7 @@ export class AcpTransport implements IKiroTransport {
           logDebug(TAG, `[ext] ${method}`);
           if (method === "_kiro.dev/metadata") {
             const pct = params["contextUsagePercentage"];
-            if (typeof pct === "number") this.lastContextPercent = pct;
+            if (typeof pct === "number") this.lastContextPercent = Math.ceil(pct);
           }
         },
       }),

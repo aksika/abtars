@@ -1,6 +1,6 @@
 import type { TelegramUpdate } from "../types/index.js";
 import type { TelegramApi } from "./telegram-api.js";
-import { logDebug, logError } from "./logger.js";
+import { logError } from "./logger.js";
 
 /**
  * Long-polls the Telegram Bot API for updates. Never self-terminates —
@@ -42,7 +42,7 @@ export class TelegramPoller {
     while (this.running) {
       try {
         this.abortController = new AbortController();
-        logDebug("poller", `getUpdates (offset=${this.offset}, timeout=${this.pollTimeout})`);
+        // logDebug("poller", `getUpdates (offset=${this.offset}, timeout=${this.pollTimeout})`);
         const updates = await this.api.getUpdates(
           this.offset,
           this.pollTimeout,
@@ -50,7 +50,7 @@ export class TelegramPoller {
         );
 
         failures = 0;
-        logDebug("poller", `Got ${updates.length} update(s)`);
+        // logDebug("poller", `Got ${updates.length} update(s)`);
 
         if (updates.length > 0) {
           const maxId = Math.max(...updates.map((u) => u.update_id));

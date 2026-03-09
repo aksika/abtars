@@ -10,7 +10,6 @@
 
 import type Database from "better-sqlite3";
 import type { MemoryIndex } from "./memory-index.js";
-import { sanitizeFtsQuery } from "./memory-index.js";
 import { logWarn } from "./logger.js";
 import type { WebSearchResult, MemorySearchResponse } from "./dashboard-config.js";
 
@@ -84,6 +83,7 @@ export class MemorySearchController {
       : DEFAULT_LAYERS;
 
     const original = params.get("original")?.trim() ?? "";
+    const mode: "or" | "and" = params.get("mode")?.trim().toLowerCase() === "and" ? "and" : "or";
     const timeStart = parseOptionalNumber(params.get("timeStart"));
     const timeEnd = parseOptionalNumber(params.get("timeEnd"));
 
@@ -102,7 +102,7 @@ export class MemorySearchController {
     // L1: Raw Messages — FTS5 + relaxed FTS5 + substring
     if (requestedLayers.includes("L1")) {
       try {
-        const l1Results = this.searchL1(query, searchOpts);
+        const l1Results = this.searchL1(query, searchOpts, mode);
         allResults.push(...l1Results);
         layerStatuses["L1"] = { status: "ok" };
       } catch (err) {
@@ -116,7 +116,7 @@ export class MemorySearchController {
     // L2: Extracted Memories — FTS5 on extracted_memories
     if (requestedLayers.includes("L2")) {
       try {
-        const l2Results = this.searchL2(query, searchOpts);
+        const l2Results = this.searchL2(query, searchOpts, mode);
         allResults.push(...l2Results);
         layerStatuses["L2"] = { status: "ok" };
       } catch (err) {
@@ -130,7 +130,7 @@ export class MemorySearchController {
     // L3: Compaction Summaries — LIKE on compactions table
     if (requestedLayers.includes("L3")) {
       try {
-        const l3Results = this.searchL3(keywords, chatId, timeStart, timeEnd);
+        const l3Results = this.searchL3(keywords, chatId, timeStart, timeEnd, mode);
         allResults.push(...l3Results);
         layerStatuses["L3"] = { status: "ok" };
       } catch (err) {
@@ -145,7 +145,7 @@ export class MemorySearchController {
     if (requestedLayers.includes("L4")) {
       if (original) {
         try {
-          const l4Results = this.searchL4(original, chatId);
+          const l4Results = this.searchL4(original, chatId, mode);
           allResults.push(...l4Results);
           layerStatuses["L4"] = { status: "ok" };
         } catch (err) {
@@ -189,11 +189,12 @@ export class MemorySearchController {
   private searchL1(
     query: string,
     opts: { chatId?: number; startTime?: number; endTime?: number; limit?: number },
+    mode: "or" | "and",
   ): WebSearchResult[] {
     const results: WebSearchResult[] = [];
 
     // FTS5 search
-    const ftsResults = this.memoryIndex.search(query, opts);
+    const ftsResults = this.memoryIndex.search(query, opts, mode);
     for (const r of ftsResults) {
       results.push({
         content: r.record.content,
@@ -203,28 +204,14 @@ export class MemorySearchController {
       });
     }
 
-    // Relaxed FTS5 (individual tokens with prefix matching)
-    const relaxedQuery = buildRelaxedQuery(query);
-    if (relaxedQuery && relaxedQuery !== sanitizeFtsQuery(query)) {
-      const relaxedResults = this.memoryIndex.search(relaxedQuery, opts);
-      for (const r of relaxedResults) {
-        results.push({
-          content: r.record.content,
-          date: new Date(r.record.timestamp).toISOString(),
-          source: "L1:relaxed",
-          score: r.score * 0.8, // slightly lower score for relaxed matches
-        });
-      }
-    }
-
     // Substring search
-    const substringResults = this.memoryIndex.substringSearch(query, opts);
+    const substringResults = this.memoryIndex.substringSearch(query, opts, mode);
     for (const r of substringResults) {
       results.push({
         content: r.record.content,
         date: new Date(r.record.timestamp).toISOString(),
         source: "L1:substring",
-        score: r.score * 0.6, // lower score for substring matches
+        score: r.score * 0.6,
       });
     }
 
@@ -237,8 +224,9 @@ export class MemorySearchController {
   private searchL2(
     query: string,
     opts: { chatId?: number; startTime?: number; endTime?: number; limit?: number },
+    mode: "or" | "and",
   ): WebSearchResult[] {
-    const extracted = this.memoryIndex.searchExtracted(query, opts);
+    const extracted = this.memoryIndex.searchExtracted(query, opts, mode);
     return extracted.map((r) => ({
       content: r.content,
       date: new Date(r.source_timestamp).toISOString(),
@@ -255,8 +243,9 @@ export class MemorySearchController {
     chatId: number | undefined,
     timeStart?: number,
     timeEnd?: number,
+    mode: "or" | "and" = "or",
   ): WebSearchResult[] {
-    const conditions: string[] = ["tier IN ('weekly', 'quarterly')"];
+    const conditions: string[] = ["tier IN ('daily', 'weekly', 'quarterly')"];
     const params: (string | number)[] = [];
 
     if (chatId !== undefined) {
@@ -283,7 +272,8 @@ export class MemorySearchController {
       });
 
     if (likeClauses.length === 0) return [];
-    conditions.push(`(${likeClauses.join(" OR ")})`);
+    const joiner = mode === "and" ? " AND " : " OR ";
+    conditions.push(`(${likeClauses.join(joiner)})`);
 
     const sql = `
       SELECT id, tier, timestamp, summary
@@ -311,12 +301,12 @@ export class MemorySearchController {
   /**
    * L4: Original-language substring search via MemoryIndex.searchOriginal.
    */
-  private searchL4(original: string, chatId: number | undefined): WebSearchResult[] {
+  private searchL4(original: string, chatId: number | undefined, mode: "or" | "and" = "or"): WebSearchResult[] {
     const results = this.memoryIndex.searchOriginal(original, {
-      chatId: chatId ?? 0,
+      chatId: chatId,
       limit: 20,
       boostPreserved: true,
-    });
+    }, mode);
 
     return results.map((r) => ({
       content: r.content_original || r.content,
@@ -328,19 +318,6 @@ export class MemorySearchController {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-/**
- * Build a relaxed FTS5 query by splitting into individual tokens with
- * prefix matching. Uses OR semantics for broader recall.
- */
-function buildRelaxedQuery(query: string): string {
-  const tokens = query
-    .replace(/[^\w\s\u00C0-\u024F]/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length >= 2);
-  if (tokens.length === 0) return "";
-  return tokens.map((t) => `"${t}"*`).join(" OR ");
-}
 
 /**
  * Deduplicate results by `timestamp + content_prefix` (first 50 chars).

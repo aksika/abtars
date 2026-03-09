@@ -54,6 +54,7 @@ ${getHeaderHtml(logoBase64)}
 <div id="connection-banner" class="connection-banner" style="display:none;">
   Connection lost. Reconnecting<span id="reconnect-dots">...</span>
 </div>
+<div class="dashboard-layout">
 <main class="grid">
   ${getBridgeHealthCard()}
   ${getPlatformsCard()}
@@ -61,6 +62,8 @@ ${getHeaderHtml(logoBase64)}
   ${getMemoryCard()}
   ${getHeartbeatCard()}
 </main>
+${getSearchPanel()}
+</div>
 <script>
 ${formatBytesHelper()}
 ${getScript()}
@@ -80,6 +83,13 @@ body {
   background: #1a1a2e;
   color: #e0e0e0;
   min-height: 100vh;
+  overflow: hidden;
+}
+
+.dashboard-layout {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 69px);
 }
 
 header {
@@ -117,6 +127,7 @@ header h1 {
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 20px;
   padding: 24px;
+  flex-shrink: 0;
 }
 
 .card {
@@ -305,6 +316,18 @@ header h1 {
   border-bottom: 1px solid rgba(255,255,255,0.04);
 }
 
+.search-result-item .result-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 2px;
+}
+
+.search-result-item .result-content {
+  font-size: 0.8rem;
+  color: #ccc;
+}
+
 .search-result-item .source {
   font-size: 0.7rem;
   color: #7e7e9e;
@@ -313,23 +336,93 @@ header h1 {
 .search-result-item .score {
   font-size: 0.7rem;
   color: #ff9800;
-  float: right;
+  font-weight: 600;
 }
 
-/* Heartbeat task list */
-.task-list {
-  list-style: none;
+/* Split card */
+.card-split { display: flex; flex-direction: column; }
+.split-divider { border: none; border-top: 1px solid #0f3460; margin: 14px 0; }
+.split-bottom h2 { margin-bottom: 10px; }
+
+/* Search toggle button */
+.btn-search-toggle {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #0f3460;
+  border-radius: 6px;
+  background: transparent;
+  color: #a0c4ff;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+.btn-search-toggle:hover { background: rgba(15,52,96,0.5); }
+
+/* Search panel */
+.search-panel {
+  background: #16213e;
+  border-top: 1px solid #0f3460;
+  padding: 16px 24px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.search-panel-header { margin-bottom: 12px; flex-shrink: 0; }
+.search-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.keyword-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #0f3460;
+  border-radius: 6px;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  font-size: 0.85rem;
+  outline: none;
+}
+.keyword-input:focus { border-color: #a0c4ff; }
+.btn-search {
+  padding: 6px 18px;
+  border: none;
+  border-radius: 6px;
+  background: #0f3460;
+  color: #a0c4ff;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.keyword-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.keyword-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background: #0f3460;
+  color: #a0c4ff;
+  border-radius: 12px;
   font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.2s;
 }
-
-.task-list li {
-  padding: 3px 0;
-  color: #bbb;
-}
-
-.task-list li::before {
-  content: '▸ ';
-  color: #7e7e9e;
+.keyword-chip:hover { background: #f44336; color: #fff; }
+.search-panel .search-results {
+  max-height: none;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  font-size: 0.8rem;
 }
 
 /* Responsive */
@@ -356,29 +449,61 @@ function getHeaderHtml(logoBase64: string): string {
 
 function getBridgeHealthCard(): string {
   return `
-<div class="card" id="card-health">
-  <h2>Bridge Health</h2>
-  <div class="stat-row">
-    <span class="stat-label">Uptime</span>
-    <span class="stat-value" id="health-uptime">—</span>
+<div class="card card-split" id="card-health">
+  <div class="split-top">
+    <h2>Bridge Health</h2>
+    <div class="stat-row">
+      <span class="stat-label">Uptime</span>
+      <span class="stat-value" id="health-uptime">—</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Enabled Platforms</span>
+      <span class="stat-value" id="health-platforms">—</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Heartbeat</span>
+      <span class="stat-value" id="hb-status">
+        <span class="indicator red"></span> stopped
+      </span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">HB Interval</span>
+      <span class="stat-value" id="hb-interval">—</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Last Update</span>
+      <span class="stat-value" id="health-timestamp">—</span>
+    </div>
   </div>
-  <div class="stat-row">
-    <span class="stat-label">Enabled Platforms</span>
-    <span class="stat-value" id="health-platforms">—</span>
-  </div>
-  <div class="stat-row">
-    <span class="stat-label">Heartbeat</span>
-    <span class="stat-value" id="hb-status">
-      <span class="indicator red"></span> stopped
-    </span>
-  </div>
-  <div class="stat-row">
-    <span class="stat-label">HB Interval</span>
-    <span class="stat-value" id="hb-interval">—</span>
-  </div>
-  <div class="stat-row">
-    <span class="stat-label">Last Update</span>
-    <span class="stat-value" id="health-timestamp">—</span>
+  <hr class="split-divider">
+  <div class="split-bottom">
+    <h2>Transport</h2>
+    <div class="stat-row">
+      <span class="stat-label">Type</span>
+      <span class="stat-value" id="transport-type">—</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Connection</span>
+      <span class="stat-value" id="transport-state">
+        <span class="indicator red"></span> disconnected
+      </span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Switch Mode</span>
+      <span class="stat-value">
+        <button class="btn-start" style="font-size:0.75rem;padding:3px 10px;" onclick="switchTransport('tmux')" id="btn-switch-tmux">tmux</button>
+        <button class="btn-stop" style="font-size:0.75rem;padding:3px 10px;" onclick="switchTransport('acp')" id="btn-switch-acp">acp</button>
+      </span>
+    </div>
+    <div style="margin-top:10px;">
+      <span class="stat-label">Context Window</span>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="transport-ctx-bar" style="width:0%"></div>
+      </div>
+      <div style="text-align:right;font-size:0.75rem;color:#9e9e9e;margin-top:2px;">
+        <span id="transport-ctx-pct">—</span>
+      </div>
+    </div>
   </div>
 </div>`;
 }
@@ -443,36 +568,7 @@ function getPlatformsCard(): string {
 }
 
 function getTransportCard(): string {
-  return `
-<div class="card" id="card-transport">
-  <h2>Transport</h2>
-  <div class="stat-row">
-    <span class="stat-label">Type</span>
-    <span class="stat-value" id="transport-type">—</span>
-  </div>
-  <div class="stat-row">
-    <span class="stat-label">Connection</span>
-    <span class="stat-value" id="transport-state">
-      <span class="indicator red"></span> disconnected
-    </span>
-  </div>
-  <div class="stat-row">
-    <span class="stat-label">Switch Mode</span>
-    <span class="stat-value">
-      <button class="btn-start" style="font-size:0.75rem;padding:3px 10px;" onclick="switchTransport('tmux')" id="btn-switch-tmux">tmux</button>
-      <button class="btn-stop" style="font-size:0.75rem;padding:3px 10px;" onclick="switchTransport('acp')" id="btn-switch-acp">acp</button>
-    </span>
-  </div>
-  <div style="margin-top:10px;">
-    <span class="stat-label">Context Window</span>
-    <div class="progress-bar-bg">
-      <div class="progress-bar-fill" id="transport-ctx-bar" style="width:0%"></div>
-    </div>
-    <div style="text-align:right;font-size:0.75rem;color:#9e9e9e;margin-top:2px;">
-      <span id="transport-ctx-pct">—</span>
-    </div>
-  </div>
-</div>`;
+  return '';
 }
 
 function getMemoryCard(): string {
@@ -506,26 +602,40 @@ function getMemoryCard(): string {
     </div>
   </div>
   <hr style="border-color:#0f3460;margin:12px 0;">
-  <div class="search-box" style="margin-bottom:6px;">
-    <input type="text" id="mem-chatid-input" placeholder="0 = all chats" style="width:120px;text-align:center;flex:none;">
-    <button onclick="listChatIds()">LIST</button>
-  </div>
-  <div class="search-box">
-    <input type="text" id="mem-search-input" placeholder="Search memory keywords...">
-  </div>
-  <div class="layer-toggles" id="layer-toggles">
-    <button class="layer-btn active" data-layer="L1" onclick="toggleLayer(this)">L1</button>
-    <button class="layer-btn active" data-layer="L2" onclick="toggleLayer(this)">L2</button>
-    <button class="layer-btn active" data-layer="L3" onclick="toggleLayer(this)">L3</button>
-    <button class="layer-btn active" data-layer="L4" onclick="toggleLayer(this)">L4</button>
-    <button class="layer-btn" data-layer="L5" disabled title="coming soon">L5</button>
-  </div>
-  <div class="search-results" id="mem-search-results"></div>
+  <button class="btn-search-toggle" onclick="toggleSearchPanel()">🔍 Search Memory</button>
 </div>`;
 }
 
 function getHeartbeatCard(): string {
   return '';
+}
+
+function getSearchPanel(): string {
+  return `
+<div id="search-panel" class="search-panel" style="display:none;">
+  <div class="search-panel-header">
+    <div class="search-panel-row">
+      <div class="search-box" style="margin:0;">
+        <input type="text" id="mem-chatid-input" placeholder="0 = all chats" style="width:100px;text-align:center;flex:none;">
+        <button onclick="listChatIds()">LIST</button>
+      </div>
+      <div class="layer-toggles" id="layer-toggles" style="margin:0;">
+        <button class="layer-btn active" data-layer="L1" onclick="toggleLayer(this)">L1:messages</button>
+        <button class="layer-btn active" data-layer="L2" onclick="toggleLayer(this)">L2:extracted</button>
+        <button class="layer-btn active" data-layer="L3" onclick="toggleLayer(this)">L3:compactions</button>
+        <button class="layer-btn active" data-layer="L4" onclick="toggleLayer(this)">L4:original</button>
+        <button class="layer-btn" data-layer="NLM" onclick="toggleLayer(this)">NLM</button>
+      </div>
+    </div>
+    <div class="search-panel-row" style="margin-top:8px;">
+      <button class="layer-btn active" id="mode-toggle" onclick="toggleSearchMode()" style="min-width:42px;">OR</button>
+      <input type="text" id="mem-keyword-input" class="keyword-input" placeholder="Type keyword + Enter to add filter...">
+      <button class="btn-search" onclick="searchMemory()">Search</button>
+    </div>
+    <div id="keyword-filters" class="keyword-filters"></div>
+  </div>
+  <div class="search-results" id="mem-search-results"></div>
+</div>`;
 }
 
 // ── Inline Script ───────────────────────────────────────────────────────────
@@ -773,18 +883,74 @@ function getScript(): string {
     }).catch(function(err) { alert('Request failed: ' + err.message); });
   };
 
+  // ── Search Panel Toggle ─────────────────────────────────────────────
+  window.toggleSearchPanel = function() {
+    var panel = document.getElementById('search-panel');
+    if (panel) panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+  };
+
+  // ── Keyword Filters ────────────────────────────────────────────────
+  var keywordFilters = [];
+  var searchMode = 'or';
+
+  window.toggleSearchMode = function() {
+    searchMode = searchMode === 'or' ? 'and' : 'or';
+    var btn = document.getElementById('mode-toggle');
+    if (btn) {
+      btn.textContent = searchMode.toUpperCase();
+      btn.classList.toggle('active', searchMode === 'or');
+    }
+    searchMemory();
+  };
+
+  function renderFilters() {
+    var container = document.getElementById('keyword-filters');
+    if (!container) return;
+    container.innerHTML = keywordFilters.map(function(kw, i) {
+      return '<span class="keyword-chip" onclick="removeFilter(' + i + ')">' + escHtml(kw) + ' ✕</span>';
+    }).join('');
+  }
+
+  window.removeFilter = function(index) {
+    keywordFilters.splice(index, 1);
+    renderFilters();
+    searchMemory();
+  };
+
+  var kwInput = document.getElementById('mem-keyword-input');
+  if (kwInput) {
+    kwInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        var val = kwInput.value.trim();
+        if (val && keywordFilters.indexOf(val) === -1) {
+          keywordFilters.push(val);
+          renderFilters();
+          searchMemory();
+        }
+        kwInput.value = '';
+      }
+    });
+  }
+
   // ── Memory Search API ──────────────────────────────────────────────
   window.searchMemory = function() {
-    var input = document.getElementById('mem-search-input');
-    var keywords = input ? input.value.trim() : '';
-    if (!keywords) return;
+    var container = document.getElementById('mem-search-results');
+    if (keywordFilters.length === 0) {
+      if (container) container.innerHTML = '';
+      return;
+    }
 
     var chatIdInput = document.getElementById('mem-chatid-input');
     var chatIdVal = chatIdInput ? chatIdInput.value.trim() : '0';
     var chatId = parseInt(chatIdVal, 10) || 0;
 
     var layers = getSelectedLayers();
-    var url = '/api/memory/search?keywords=' + encodeURIComponent(keywords) + '&original=' + encodeURIComponent(keywords) + '&layers=' + encodeURIComponent(layers.join(','));
+    if (layers.length === 0) {
+      if (container) container.innerHTML = '<div style="color:#666;padding:6px 0;">No layers selected</div>';
+      return;
+    }
+    var keywords = keywordFilters.join(',');
+    var url = '/api/memory/search?keywords=' + encodeURIComponent(keywords) + '&original=' + encodeURIComponent(keywords) + '&layers=' + encodeURIComponent(layers.join(',')) + '&mode=' + searchMode;
     if (chatId > 0) {
       url += '&chatId=' + chatId;
     }
@@ -792,7 +958,6 @@ function getScript(): string {
     fetch(url, {
       headers: { 'Authorization': 'Bearer ' + token }
     }).then(function(r) { return r.json(); }).then(function(data) {
-      var container = document.getElementById('mem-search-results');
       if (!container) return;
 
       if (data.error) {
@@ -807,13 +972,11 @@ function getScript(): string {
 
       container.innerHTML = data.results.map(function(r) {
         return '<div class="search-result-item">' +
-          '<span class="score">score: ' + (r.score != null ? r.score.toFixed(2) : '—') + '</span>' +
-          '<div>' + escHtml(r.content.substring(0, 200)) + '</div>' +
-          '<div class="source">' + escHtml(r.source) + ' · ' + escHtml(r.date) + '</div>' +
+          '<div class="result-meta"><span class="score">' + (r.score != null ? r.score.toFixed(2) : '—') + '</span> <span class="source">' + escHtml(r.source) + '</span> <span class="source">' + escHtml(r.date) + '</span></div>' +
+          '<div class="result-content">' + escHtml(r.content.substring(0, 200)) + '</div>' +
           '</div>';
       }).join('');
     }).catch(function(err) {
-      var container = document.getElementById('mem-search-results');
       if (container) container.innerHTML = '<div style="color:#f44336;">Search failed: ' + escHtml(err.message) + '</div>';
     });
   };
@@ -852,6 +1015,7 @@ function getScript(): string {
   window.toggleLayer = function(btn) {
     if (btn.disabled) return;
     btn.classList.toggle('active');
+    searchMemory();
   };
 
   function getSelectedLayers() {
@@ -859,25 +1023,11 @@ function getScript(): string {
     var selected = [];
     for (var i = 0; i < btns.length; i++) {
       if (btns[i].classList.contains('active') && !btns[i].disabled) {
-        selected.push(btns[i].getAttribute('data-layer'));
+        var layer = btns[i].getAttribute('data-layer');
+        if (layer !== 'NLM') selected.push(layer);
       }
     }
     return selected;
-  }
-
-  // ── Enter key for search ───────────────────────────────────────────
-  var searchInput = document.getElementById('mem-search-input');
-  if (searchInput) {
-    searchInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') searchMemory();
-    });
-  }
-
-  var chatIdInput = document.getElementById('mem-chatid-input');
-  if (chatIdInput) {
-    chatIdInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') searchMemory();
-    });
   }
 
   // ── Start Connection ───────────────────────────────────────────────

@@ -77,29 +77,11 @@ echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-kb.js\" \"\$@\"" >> "$KB_SCR
 chmod +x "$KB_SCRIPT"
 ln -sf "$KB_SCRIPT" "$HOME/.local/bin/agentbridge-kb"
 
-# 4. Restart tmux session (unless --quick)
-if [ "$QUICK" = false ]; then
-  echo "🔄 Restarting tmux session..."
-  # Source the deployed .env for session config
-  set -a; source "$AB_HOME/.env"; set +a
-  SESSION="${TMUX_SESSION:-kiro-bridge}"
-
-  if tmux has-session -t "$SESSION" 2>/dev/null; then
-    tmux kill-session -t "$SESSION"
-    echo "   Killed existing session '$SESSION'"
-    sleep 1
-  fi
-
-  "$PROJECT_DIR/scripts/tmux-session.sh"
-fi
-
+# 4. Done
 echo ""
 echo "✅ Deploy complete."
 echo ""
 echo "Next steps:"
-if [ "$QUICK" = true ]; then
-  echo "  Restart tmux:  tmux kill-session -t kiro-bridge && ./scripts/tmux-session.sh"
-fi
 echo "  Start bridge:  ~/.agentbridge/agentbridge.sh"
 echo "  Start bridge:  ~/.agentbridge/agentbridge.sh --all"
 echo "  Stop bridge:   ~/.agentbridge/agentbridge.sh stop"

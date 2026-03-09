@@ -1,3 +1,6 @@
+
+ther should be a new .env def for memory agent: MEMORY_SUBAGENT_MODEL=claude-opus-4.6
+
 The Sleep CLI 
 Sleeping routine during overnight: Memory tidyness
 Call a subagent: most skilled model, currently Opus 4.6 preferred

@@ -23,13 +23,14 @@ function stripAccents(str: string): string {
  * where "jelszó" needs to match "jelszóra", "jelszót", etc.
  * Returns empty string if no valid tokens remain.
  */
-export function sanitizeFtsQuery(query: string): string {
+export function sanitizeFtsQuery(query: string, mode: "or" | "and" = "and"): string {
   const stripped = query.replace(FTS5_SPECIAL_CHARS, " ");
   const tokens = stripped
     .split(/\s+/)
     .filter((t) => t.length > 0 && !FTS5_OPERATORS.has(t.toLowerCase()));
   if (tokens.length === 0) return "";
-  return tokens.map((t) => `"${t}"*`).join(" ");
+  const joiner = mode === "or" ? " OR " : " ";
+  return tokens.map((t) => `"${t}"*`).join(joiner);
 }
 
 /**
@@ -79,10 +80,11 @@ export class MemoryIndex {
       endTime?: number;
       limit?: number;
     },
+    mode: "or" | "and" = "and",
   ): SearchResult[] {
     if (!query.trim()) return [];
 
-    const sanitizedQuery = sanitizeFtsQuery(query);
+    const sanitizedQuery = sanitizeFtsQuery(query, mode);
     if (!sanitizedQuery) return [];
 
     const conditions: string[] = ["messages_fts MATCH ?"];
@@ -156,6 +158,7 @@ export class MemoryIndex {
       endTime?: number;
       limit?: number;
     },
+    mode: "or" | "and" = "or",
   ): SearchResult[] {
     const tokens = query
       .replace(/[^\w\s\u00C0-\u024F]/g, " ")
@@ -211,6 +214,7 @@ export class MemoryIndex {
       const normalizedContent = stripAccents(row.content.toLowerCase());
       const matchCount = normalizedTokens.filter((t) => normalizedContent.includes(t)).length;
       if (matchCount === 0) continue;
+      if (mode === "and" && matchCount < normalizedTokens.length) continue;
 
       results.push({
         record: {
@@ -249,11 +253,12 @@ export class MemoryIndex {
   searchExtracted(
     query: string,
     opts?: { chatId?: number; startTime?: number; endTime?: number; limit?: number },
+    mode: "or" | "and" = "and",
   ): MemorySearchResult[] {
     try {
       if (!query.trim()) return [];
 
-      const sanitizedQuery = sanitizeFtsQuery(query);
+      const sanitizedQuery = sanitizeFtsQuery(query, mode);
       if (!sanitizedQuery) return [];
 
       const conditions: string[] = ["extracted_memories_fts MATCH ?"];
@@ -325,11 +330,12 @@ export class MemoryIndex {
   searchOriginal(
     query: string,
     opts?: { chatId?: number; limit?: number; boostPreserved?: boolean },
+    mode: "or" | "and" = "and",
   ): MemorySearchResult[] {
     try {
       if (!query.trim()) return [];
 
-      const sanitizedQuery = sanitizeFtsQuery(query);
+      const sanitizedQuery = sanitizeFtsQuery(query, mode);
       if (!sanitizedQuery) return [];
 
       const conditions: string[] = ["extracted_memories_original_fts MATCH ?"];

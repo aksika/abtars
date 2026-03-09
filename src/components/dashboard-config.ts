@@ -172,7 +172,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
   const transport: TransportStatus = {
     type: refs.transport.type,
     ready: refs.transport.isReady,
-    contextPercent: refs.transport.contextPercent ?? -1,
+    contextPercent: Math.ceil(refs.transport.contextPercent ?? -1),
   };
 
   // Memory
