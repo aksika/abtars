@@ -105,9 +105,9 @@ export class CompactionEngine {
       const dateStr = params.compactionDate
         ? params.compactionDate.toISOString().slice(0, 10)
         : now.toISOString().slice(0, 10); // YYYY-MM-DD
-      const dailyDir = join(this.config.memoryDir, "memory", "daily", String(params.chatId));
-      mkdirSync(dailyDir, { recursive: true });
-      const filePath = join(dailyDir, `${dateStr}.md`);
+      const workingDir = join(this.config.memoryDir, "working", dateStr);
+      mkdirSync(workingDir, { recursive: true });
+      const filePath = join(workingDir, `transcript_${params.chatId}.md`);
 
       // Append to existing daily file if it already exists
       if (existsSync(filePath)) {
@@ -156,12 +156,13 @@ export class CompactionEngine {
 
   /** Consolidate source files into a higher tier. */
   async consolidate(params: {
-    chatId: number;
+    chatId?: number;
     sourceTier: MemoryTier;
     targetTier: MemoryTier;
     sourceFiles: string[];
     llmCall: (prompt: string, content: string) => Promise<string>;
   }): Promise<CompactedMemory | null> {
+    const chatId = params.chatId ?? 0;
     try {
       // Read all source files' content
       const contents: string[] = [];
@@ -174,7 +175,7 @@ export class CompactionEngine {
       }
 
       if (contents.length === 0) {
-        logInfo(TAG, `No source content to consolidate for chat ${params.chatId}`);
+        logInfo(TAG, `No source content to consolidate for chat ${chatId}`);
         return null;
       }
 
@@ -184,12 +185,10 @@ export class CompactionEngine {
       const summary = await params.llmCall(prompt, concatenated);
 
       // Determine target file path based on tier
-      const targetDir = join(
-        this.config.memoryDir,
-        "memory",
-        params.targetTier,
-        String(params.chatId),
-      );
+      // When chatId is provided, use per-chat subdirectory; otherwise flat layout
+      const targetDir = params.chatId
+        ? join(this.config.memoryDir, params.targetTier, String(params.chatId))
+        : join(this.config.memoryDir, params.targetTier);
       mkdirSync(targetDir, { recursive: true });
 
       const now = new Date();
@@ -215,7 +214,7 @@ export class CompactionEngine {
           `INSERT INTO compactions (chat_id, source_session_id, tier, timestamp, summary, file_path)
            VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(params.chatId, "consolidation", params.targetTier, timestamp, summary, filePath);
+        .run(chatId, "consolidation", params.targetTier, timestamp, summary, filePath);
 
       const compactionId = Number(result.lastInsertRowid);
 
@@ -224,18 +223,18 @@ export class CompactionEngine {
         role: "compaction",
         content: summary,
         timestamp,
-        chatId: params.chatId,
+        chatId,
         sessionId: "consolidation",
       });
 
       logInfo(
         TAG,
-        `Consolidated ${params.sourceFiles.length} ${params.sourceTier} files into ${params.targetTier} for chat ${params.chatId}: ${filePath}`,
+        `Consolidated ${params.sourceFiles.length} ${params.sourceTier} files into ${params.targetTier}: ${filePath}`,
       );
 
       return {
         id: compactionId,
-        chatId: params.chatId,
+        chatId,
         sourceSessionId: "consolidation",
         tier: params.targetTier,
         timestamp,
@@ -243,7 +242,7 @@ export class CompactionEngine {
         filePath,
       };
     } catch (err) {
-      logError(TAG, `Failed to consolidate ${params.sourceTier} → ${params.targetTier} for chat ${params.chatId}`, err);
+      logError(TAG, `Failed to consolidate ${params.sourceTier} → ${params.targetTier}`, err);
       return null;
     }
   }

@@ -20,30 +20,23 @@ function makeConfig(memoryDir: string): MemoryConfig {
   return { ...MEMORY_CONFIG_DEFAULTS, memoryDir };
 }
 
-/** Create a daily .md file with some content. */
-function createDailyFile(baseDir: string, chatId: number, dateStr: string, content?: string): string {
-  const dir = join(baseDir, "memory", "daily", String(chatId));
+/** Create a flat daily .md file with the new naming pattern: daily_YYYYMMDD.md */
+function createDailyFile(baseDir: string, dateStr: string, content?: string): string {
+  const dir = join(baseDir, "daily");
   mkdirSync(dir, { recursive: true });
-  const filePath = join(dir, `${dateStr}.md`);
+  // dateStr comes in as "YYYY-MM-DD", convert to "YYYYMMDD" for filename
+  const compact = dateStr.replace(/-/g, "");
+  const filePath = join(dir, `daily_${compact}.md`);
   writeFileSync(filePath, content ?? `Summary for ${dateStr}`);
   return filePath;
 }
 
-/** Create a weekly .md file with some content. */
-function createWeeklyFile(baseDir: string, chatId: number, weekStr: string, content?: string): string {
-  const dir = join(baseDir, "memory", "weekly", String(chatId));
+/** Create a flat weekly .md file: YYYY-Wxx.md */
+function createWeeklyFile(baseDir: string, weekStr: string, content?: string): string {
+  const dir = join(baseDir, "weekly");
   mkdirSync(dir, { recursive: true });
   const filePath = join(dir, `${weekStr}.md`);
   writeFileSync(filePath, content ?? `Weekly summary for ${weekStr}`);
-  return filePath;
-}
-
-/** Create a monthly .md file with some content. */
-function createMonthlyFile(baseDir: string, chatId: number, monthStr: string, content?: string): string {
-  const dir = join(baseDir, "memory", "monthly", String(chatId));
-  mkdirSync(dir, { recursive: true });
-  const filePath = join(dir, `${monthStr}.md`);
-  writeFileSync(filePath, content ?? `Monthly summary for ${monthStr}`);
   return filePath;
 }
 
@@ -72,172 +65,171 @@ describe("SleepCycleRunner", () => {
   });
 
   it("no rollup needed when fewer than 7 daily files", async () => {
-    const chatId = 1;
     // Create 5 daily files in the same ISO week (Mon 2024-01-01 to Fri 2024-01-05)
-    createDailyFile(tmpDir, chatId, "2024-01-01");
-    createDailyFile(tmpDir, chatId, "2024-01-02");
-    createDailyFile(tmpDir, chatId, "2024-01-03");
-    createDailyFile(tmpDir, chatId, "2024-01-04");
-    createDailyFile(tmpDir, chatId, "2024-01-05");
+    createDailyFile(tmpDir, "2024-01-01");
+    createDailyFile(tmpDir, "2024-01-02");
+    createDailyFile(tmpDir, "2024-01-03");
+    createDailyFile(tmpDir, "2024-01-04");
+    createDailyFile(tmpDir, "2024-01-05");
 
     const mockLlm = vi.fn(async () => "Should not be called");
 
-    await runner.runPendingConsolidations({ chatId, llmCall: mockLlm });
+    await runner.runPendingConsolidations({ llmCall: mockLlm });
 
     // LLM should not have been called
     expect(mockLlm).not.toHaveBeenCalled();
 
     // Daily files should still exist
-    const dailyDir = join(tmpDir, "memory", "daily", String(chatId));
+    const dailyDir = join(tmpDir, "daily");
     const remaining = readdirSync(dailyDir).filter((f) => f.endsWith(".md"));
     expect(remaining).toHaveLength(5);
   });
 
   it("weekly rollup triggered with 7+ daily files in same ISO week", async () => {
-    const chatId = 2;
     // ISO week 1 of 2024: Mon 2024-01-01 through Sun 2024-01-07
-    createDailyFile(tmpDir, chatId, "2024-01-01");
-    createDailyFile(tmpDir, chatId, "2024-01-02");
-    createDailyFile(tmpDir, chatId, "2024-01-03");
-    createDailyFile(tmpDir, chatId, "2024-01-04");
-    createDailyFile(tmpDir, chatId, "2024-01-05");
-    createDailyFile(tmpDir, chatId, "2024-01-06");
-    createDailyFile(tmpDir, chatId, "2024-01-07");
+    createDailyFile(tmpDir, "2024-01-01");
+    createDailyFile(tmpDir, "2024-01-02");
+    createDailyFile(tmpDir, "2024-01-03");
+    createDailyFile(tmpDir, "2024-01-04");
+    createDailyFile(tmpDir, "2024-01-05");
+    createDailyFile(tmpDir, "2024-01-06");
+    createDailyFile(tmpDir, "2024-01-07");
 
     const mockLlm = vi.fn(async () => "Weekly consolidated summary.");
 
-    await runner.runPendingConsolidations({ chatId, llmCall: mockLlm });
+    await runner.runPendingConsolidations({ llmCall: mockLlm });
 
     // LLM should have been called once for the weekly rollup
     expect(mockLlm).toHaveBeenCalledTimes(1);
 
     // Daily files should be deleted
-    const dailyDir = join(tmpDir, "memory", "daily", String(chatId));
+    const dailyDir = join(tmpDir, "daily");
     const remainingDaily = readdirSync(dailyDir).filter((f) => f.endsWith(".md"));
     expect(remainingDaily).toHaveLength(0);
 
-    // Weekly file should exist
-    const weeklyDir = join(tmpDir, "memory", "weekly", String(chatId));
+    // Weekly file should exist in flat layout (no chatId subdirectory)
+    const weeklyDir = join(tmpDir, "weekly");
     expect(existsSync(weeklyDir)).toBe(true);
     const weeklyFiles = readdirSync(weeklyDir).filter((f) => f.endsWith(".md"));
     expect(weeklyFiles).toHaveLength(1);
   });
 
-  it("monthly rollup triggered with 4+ weekly files in same month", async () => {
-    const chatId = 3;
-    // Create 4 weekly files all falling in January 2024
+  it("quarterly rollup triggered with 4+ weekly files in same quarter", async () => {
+    // Create 4 weekly files all falling in Q1 2024 (January)
     // W01 (Jan 1-7), W02 (Jan 8-14), W03 (Jan 15-21), W04 (Jan 22-28)
-    createWeeklyFile(tmpDir, chatId, "2024-W01");
-    createWeeklyFile(tmpDir, chatId, "2024-W02");
-    createWeeklyFile(tmpDir, chatId, "2024-W03");
-    createWeeklyFile(tmpDir, chatId, "2024-W04");
+    createWeeklyFile(tmpDir, "2024-W01");
+    createWeeklyFile(tmpDir, "2024-W02");
+    createWeeklyFile(tmpDir, "2024-W03");
+    createWeeklyFile(tmpDir, "2024-W04");
 
-    const mockLlm = vi.fn(async () => "Monthly consolidated summary.");
+    const mockLlm = vi.fn(async () => "Quarterly consolidated summary.");
 
-    await runner.runPendingConsolidations({ chatId, llmCall: mockLlm });
+    await runner.runPendingConsolidations({ llmCall: mockLlm });
 
-    // LLM should have been called once for the monthly rollup
+    // LLM should have been called once for the quarterly rollup
     expect(mockLlm).toHaveBeenCalledTimes(1);
 
     // Weekly files should be deleted
-    const weeklyDir = join(tmpDir, "memory", "weekly", String(chatId));
+    const weeklyDir = join(tmpDir, "weekly");
     const remainingWeekly = readdirSync(weeklyDir).filter((f) => f.endsWith(".md"));
     expect(remainingWeekly).toHaveLength(0);
 
-    // Monthly file should exist
-    const monthlyDir = join(tmpDir, "memory", "monthly", String(chatId));
-    expect(existsSync(monthlyDir)).toBe(true);
-    const monthlyFiles = readdirSync(monthlyDir).filter((f) => f.endsWith(".md"));
-    expect(monthlyFiles).toHaveLength(1);
-  });
-
-  it("yearly rollup triggered with 12+ monthly files in same year", async () => {
-    const chatId = 4;
-    // Create 12 monthly files for 2024
-    for (let m = 1; m <= 12; m++) {
-      createMonthlyFile(tmpDir, chatId, `2024-${String(m).padStart(2, "0")}`);
-    }
-
-    const mockLlm = vi.fn(async () => "Yearly consolidated summary.");
-
-    await runner.runPendingConsolidations({ chatId, llmCall: mockLlm });
-
-    // LLM should have been called once for the yearly rollup
-    expect(mockLlm).toHaveBeenCalledTimes(1);
-
-    // Monthly files should be deleted
-    const monthlyDir = join(tmpDir, "memory", "monthly", String(chatId));
-    const remainingMonthly = readdirSync(monthlyDir).filter((f) => f.endsWith(".md"));
-    expect(remainingMonthly).toHaveLength(0);
-
-    // Yearly file should exist
-    const yearlyDir = join(tmpDir, "memory", "yearly", String(chatId));
-    expect(existsSync(yearlyDir)).toBe(true);
-    const yearlyFiles = readdirSync(yearlyDir).filter((f) => f.endsWith(".md"));
-    expect(yearlyFiles).toHaveLength(1);
+    // Quarterly file should exist in flat layout
+    const quarterlyDir = join(tmpDir, "quarterly");
+    expect(existsSync(quarterlyDir)).toBe(true);
+    const quarterlyFiles = readdirSync(quarterlyDir).filter((f) => f.endsWith(".md"));
+    expect(quarterlyFiles).toHaveLength(1);
   });
 
   it("failed consolidation retains source files unchanged", async () => {
-    const chatId = 5;
     // Create 7 daily files in the same ISO week
-    createDailyFile(tmpDir, chatId, "2024-01-01");
-    createDailyFile(tmpDir, chatId, "2024-01-02");
-    createDailyFile(tmpDir, chatId, "2024-01-03");
-    createDailyFile(tmpDir, chatId, "2024-01-04");
-    createDailyFile(tmpDir, chatId, "2024-01-05");
-    createDailyFile(tmpDir, chatId, "2024-01-06");
-    createDailyFile(tmpDir, chatId, "2024-01-07");
+    createDailyFile(tmpDir, "2024-01-01");
+    createDailyFile(tmpDir, "2024-01-02");
+    createDailyFile(tmpDir, "2024-01-03");
+    createDailyFile(tmpDir, "2024-01-04");
+    createDailyFile(tmpDir, "2024-01-05");
+    createDailyFile(tmpDir, "2024-01-06");
+    createDailyFile(tmpDir, "2024-01-07");
 
     const failingLlm = vi.fn(async () => {
       throw new Error("LLM timeout");
     });
 
-    await runner.runPendingConsolidations({ chatId, llmCall: failingLlm });
+    await runner.runPendingConsolidations({ llmCall: failingLlm });
 
     // Daily files should still exist (retained on failure)
-    const dailyDir = join(tmpDir, "memory", "daily", String(chatId));
+    const dailyDir = join(tmpDir, "daily");
     const remaining = readdirSync(dailyDir).filter((f) => f.endsWith(".md"));
     expect(remaining).toHaveLength(7);
 
     // No weekly file should have been created
-    const weeklyDir = join(tmpDir, "memory", "weekly", String(chatId));
+    const weeklyDir = join(tmpDir, "weekly");
     expect(existsSync(weeklyDir)).toBe(false);
   });
 
   it("multiple weeks with different file counts — only weeks with 7+ trigger rollup", async () => {
-    const chatId = 6;
     // ISO week 1 of 2024 (Mon Jan 1 - Sun Jan 7): 7 files → should trigger
-    createDailyFile(tmpDir, chatId, "2024-01-01");
-    createDailyFile(tmpDir, chatId, "2024-01-02");
-    createDailyFile(tmpDir, chatId, "2024-01-03");
-    createDailyFile(tmpDir, chatId, "2024-01-04");
-    createDailyFile(tmpDir, chatId, "2024-01-05");
-    createDailyFile(tmpDir, chatId, "2024-01-06");
-    createDailyFile(tmpDir, chatId, "2024-01-07");
+    createDailyFile(tmpDir, "2024-01-01");
+    createDailyFile(tmpDir, "2024-01-02");
+    createDailyFile(tmpDir, "2024-01-03");
+    createDailyFile(tmpDir, "2024-01-04");
+    createDailyFile(tmpDir, "2024-01-05");
+    createDailyFile(tmpDir, "2024-01-06");
+    createDailyFile(tmpDir, "2024-01-07");
 
     // ISO week 2 of 2024 (Mon Jan 8 - Sun Jan 14): only 3 files → should NOT trigger
-    createDailyFile(tmpDir, chatId, "2024-01-08");
-    createDailyFile(tmpDir, chatId, "2024-01-09");
-    createDailyFile(tmpDir, chatId, "2024-01-10");
+    createDailyFile(tmpDir, "2024-01-08");
+    createDailyFile(tmpDir, "2024-01-09");
+    createDailyFile(tmpDir, "2024-01-10");
 
     const mockLlm = vi.fn(async () => "Weekly consolidated summary for week 1.");
 
-    await runner.runPendingConsolidations({ chatId, llmCall: mockLlm });
+    await runner.runPendingConsolidations({ llmCall: mockLlm });
 
     // LLM should have been called exactly once (only for week 1)
     expect(mockLlm).toHaveBeenCalledTimes(1);
 
-    // Week 1 daily files should be deleted
-    const dailyDir = join(tmpDir, "memory", "daily", String(chatId));
+    // Week 1 daily files should be deleted, week 2 files remain
+    const dailyDir = join(tmpDir, "daily");
     const remaining = readdirSync(dailyDir).filter((f) => f.endsWith(".md")).sort();
-    // Only week 2 files should remain
     expect(remaining).toHaveLength(3);
-    expect(remaining).toEqual(["2024-01-08.md", "2024-01-09.md", "2024-01-10.md"]);
+    expect(remaining).toEqual(["daily_20240108.md", "daily_20240109.md", "daily_20240110.md"]);
 
     // Weekly file should exist for week 1
-    const weeklyDir = join(tmpDir, "memory", "weekly", String(chatId));
+    const weeklyDir = join(tmpDir, "weekly");
     expect(existsSync(weeklyDir)).toBe(true);
     const weeklyFiles = readdirSync(weeklyDir).filter((f) => f.endsWith(".md"));
     expect(weeklyFiles).toHaveLength(1);
+  });
+
+  describe("groupDailyByWeek", () => {
+    it("parses daily_YYYYMMDD.md filenames and groups by ISO week", () => {
+      const files = [
+        "/fake/memory/daily/daily_20240101.md",
+        "/fake/memory/daily/daily_20240102.md",
+        "/fake/memory/daily/daily_20240108.md",
+      ];
+
+      const grouped = runner.groupDailyByWeek(files);
+
+      // 2024-01-01 and 2024-01-02 are in ISO week 1
+      // 2024-01-08 is in ISO week 2
+      expect(grouped.size).toBe(2);
+      expect(grouped.get("2024-W01")).toHaveLength(2);
+      expect(grouped.get("2024-W02")).toHaveLength(1);
+    });
+
+    it("ignores files that don't match the daily_YYYYMMDD.md pattern", () => {
+      const files = [
+        "/fake/memory/daily/daily_20240101.md",
+        "/fake/memory/daily/random_file.md",
+        "/fake/memory/daily/2024-01-02.md", // old format
+      ];
+
+      const grouped = runner.groupDailyByWeek(files);
+
+      expect(grouped.size).toBe(1);
+      expect(grouped.get("2024-W01")).toHaveLength(1);
+    });
   });
 });

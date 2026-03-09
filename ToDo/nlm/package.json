@@ -1,0 +1,9 @@
+{
+  "name": "@openclaw/notebooklm",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}

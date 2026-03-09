@@ -15,27 +15,24 @@ export class SleepCycleRunner {
     this.config = config;
   }
 
-  /** Check and run any pending consolidations for a chat. Called on session start. */
+  /** Check and run any pending consolidations. Called on session start. */
   async runPendingConsolidations(params: {
-    chatId: number;
     llmCall: (prompt: string, content: string) => Promise<string>;
   }): Promise<void> {
     try {
-      // Run consolidation checks in order: daily→weekly, weekly→monthly, monthly→yearly
-      await this.runWeeklyRollups(params.chatId, params.llmCall);
-      await this.runMonthlyRollups(params.chatId, params.llmCall);
-      await this.runYearlyRollups(params.chatId, params.llmCall);
+      // Run consolidation checks in order: daily→weekly, weekly→quarterly
+      await this.runWeeklyRollups(params.llmCall);
+      await this.runQuarterlyRollups(params.llmCall);
     } catch (err) {
-      logError(TAG, `Failed to run pending consolidations for chat ${params.chatId}`, err);
+      logError(TAG, "Failed to run pending consolidations", err);
     }
   }
 
   /** Run daily→weekly rollups for any weeks with 7+ daily files. */
-  private async runWeeklyRollups(
-    chatId: number,
+  async runWeeklyRollups(
     llmCall: (prompt: string, content: string) => Promise<string>,
   ): Promise<void> {
-    const dailyDir = join(this.config.memoryDir, "memory", "daily", String(chatId));
+    const dailyDir = join(this.config.memoryDir, "daily");
     const files = this.listFiles(dailyDir);
     if (files.length === 0) return;
 
@@ -43,76 +40,44 @@ export class SleepCycleRunner {
 
     for (const [weekKey, weekFiles] of grouped) {
       if (weekFiles.length >= 7) {
-        logInfo(TAG, `Weekly rollup triggered for chat ${chatId}, week ${weekKey}: ${weekFiles.length} daily files`);
+        logInfo(TAG, `Weekly rollup triggered for week ${weekKey}: ${weekFiles.length} daily files`);
         try {
           await this.compactionEngine.consolidate({
-            chatId,
             sourceTier: "daily",
             targetTier: "weekly",
             sourceFiles: weekFiles,
             llmCall,
           });
         } catch (err) {
-          logError(TAG, `Weekly rollup failed for chat ${chatId}, week ${weekKey}`, err);
+          logError(TAG, `Weekly rollup failed for week ${weekKey}`, err);
           // Retain source files, will retry on next session start
         }
       }
     }
   }
 
-  /** Run weekly→monthly rollups for any months with 4+ weekly files. */
-  private async runMonthlyRollups(
-    chatId: number,
+  /** Run weekly→quarterly rollups for any quarters with 4+ weekly files. */
+  private async runQuarterlyRollups(
     llmCall: (prompt: string, content: string) => Promise<string>,
   ): Promise<void> {
-    const weeklyDir = join(this.config.memoryDir, "memory", "weekly", String(chatId));
+    const weeklyDir = join(this.config.memoryDir, "weekly");
     const files = this.listFiles(weeklyDir);
     if (files.length === 0) return;
 
-    const grouped = this.groupWeeklyByMonth(files);
+    const grouped = this.groupWeeklyByQuarter(files);
 
-    for (const [monthKey, monthFiles] of grouped) {
-      if (monthFiles.length >= 4) {
-        logInfo(TAG, `Monthly rollup triggered for chat ${chatId}, month ${monthKey}: ${monthFiles.length} weekly files`);
+    for (const [quarterKey, quarterFiles] of grouped) {
+      if (quarterFiles.length >= 4) {
+        logInfo(TAG, `Quarterly rollup triggered for ${quarterKey}: ${quarterFiles.length} weekly files`);
         try {
           await this.compactionEngine.consolidate({
-            chatId,
             sourceTier: "weekly",
-            targetTier: "monthly",
-            sourceFiles: monthFiles,
+            targetTier: "quarterly",
+            sourceFiles: quarterFiles,
             llmCall,
           });
         } catch (err) {
-          logError(TAG, `Monthly rollup failed for chat ${chatId}, month ${monthKey}`, err);
-        }
-      }
-    }
-  }
-
-  /** Run monthly→yearly rollups for any years with 12+ monthly files. */
-  private async runYearlyRollups(
-    chatId: number,
-    llmCall: (prompt: string, content: string) => Promise<string>,
-  ): Promise<void> {
-    const monthlyDir = join(this.config.memoryDir, "memory", "monthly", String(chatId));
-    const files = this.listFiles(monthlyDir);
-    if (files.length === 0) return;
-
-    const grouped = this.groupMonthlyByYear(files);
-
-    for (const [yearKey, yearFiles] of grouped) {
-      if (yearFiles.length >= 12) {
-        logInfo(TAG, `Yearly rollup triggered for chat ${chatId}, year ${yearKey}: ${yearFiles.length} monthly files`);
-        try {
-          await this.compactionEngine.consolidate({
-            chatId,
-            sourceTier: "monthly",
-            targetTier: "yearly",
-            sourceFiles: yearFiles,
-            llmCall,
-          });
-        } catch (err) {
-          logError(TAG, `Yearly rollup failed for chat ${chatId}, year ${yearKey}`, err);
+          logError(TAG, `Quarterly rollup failed for ${quarterKey}`, err);
         }
       }
     }
@@ -141,20 +106,20 @@ export class SleepCycleRunner {
   }
 
   /**
-   * Group daily files by ISO week. Daily files are named YYYY-MM-DD.md.
+   * Group daily files by ISO week. Daily files are named daily_YYYYMMDD.md.
    * Returns a Map keyed by "YYYY-Wxx" with arrays of full file paths.
    */
-  private groupDailyByWeek(files: string[]): Map<string, string[]> {
+  groupDailyByWeek(files: string[]): Map<string, string[]> {
     const groups = new Map<string, string[]>();
 
     for (const filePath of files) {
-      const name = basename(filePath, ".md"); // YYYY-MM-DD
-      const parts = name.split("-");
-      if (parts.length !== 3) continue;
+      const name = basename(filePath, ".md"); // daily_YYYYMMDD
+      const match = name.match(/^daily_(\d{4})(\d{2})(\d{2})$/);
+      if (!match) continue;
 
-      const year = Number(parts[0]);
-      const month = Number(parts[1]) - 1; // 0-indexed
-      const day = Number(parts[2]);
+      const year = Number(match[1]);
+      const month = Number(match[2]) - 1; // 0-indexed
+      const day = Number(match[3]);
 
       if (Number.isNaN(year) || Number.isNaN(month) || Number.isNaN(day)) continue;
 
@@ -176,11 +141,11 @@ export class SleepCycleRunner {
   }
 
   /**
-   * Group weekly files by month. Weekly files are named YYYY-Wxx.md.
-   * Determines the month by computing the Thursday of the ISO week (ISO standard).
-   * Returns a Map keyed by "YYYY-MM" with arrays of full file paths.
+   * Group weekly files by quarter. Weekly files are named YYYY-Wxx.md.
+   * Determines the quarter by computing the Thursday of the ISO week (ISO standard).
+   * Returns a Map keyed by "YYYY-Qn" with arrays of full file paths.
    */
-  private groupWeeklyByMonth(files: string[]): Map<string, string[]> {
+  private groupWeeklyByQuarter(files: string[]): Map<string, string[]> {
     const groups = new Map<string, string[]>();
 
     for (const filePath of files) {
@@ -191,7 +156,7 @@ export class SleepCycleRunner {
       const year = Number(match[1]);
       const week = Number(match[2]);
 
-      // Find the Thursday of this ISO week to determine the month
+      // Find the Thursday of this ISO week to determine the quarter
       // Jan 4 is always in ISO week 1
       const jan4 = new Date(Date.UTC(year, 0, 4));
       const jan4DayOfWeek = jan4.getUTCDay() || 7;
@@ -202,31 +167,11 @@ export class SleepCycleRunner {
       const thursday = new Date(mondayWeek1.getTime());
       thursday.setUTCDate(mondayWeek1.getUTCDate() + (week - 1) * 7 + 3);
 
-      const monthKey = `${thursday.getUTCFullYear()}-${String(thursday.getUTCMonth() + 1).padStart(2, "0")}`;
-      const group = groups.get(monthKey) ?? [];
+      const quarter = Math.ceil((thursday.getUTCMonth() + 1) / 3);
+      const quarterKey = `${thursday.getUTCFullYear()}-Q${quarter}`;
+      const group = groups.get(quarterKey) ?? [];
       group.push(filePath);
-      groups.set(monthKey, group);
-    }
-
-    return groups;
-  }
-
-  /**
-   * Group monthly files by year. Monthly files are named YYYY-MM.md.
-   * Returns a Map keyed by "YYYY" with arrays of full file paths.
-   */
-  private groupMonthlyByYear(files: string[]): Map<string, string[]> {
-    const groups = new Map<string, string[]>();
-
-    for (const filePath of files) {
-      const name = basename(filePath, ".md"); // YYYY-MM
-      const match = name.match(/^(\d{4})-(\d{2})$/);
-      if (!match) continue;
-
-      const yearKey = match[1]!;
-      const group = groups.get(yearKey) ?? [];
-      group.push(filePath);
-      groups.set(yearKey, group);
+      groups.set(quarterKey, group);
     }
 
     return groups;

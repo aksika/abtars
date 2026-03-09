@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
 import { SecurityGate } from "./components/security-gate.js";
 import { ResponseFormatter } from "./components/response-formatter.js";
@@ -35,6 +37,7 @@ import { loadNotebookLMConfig } from "./components/notebooklm-config.js";
 import { NotebookLMClient } from "./components/notebooklm-client.js";
 import { NotebookRegistry } from "./components/notebook-registry.js";
 import { handleKBCommand } from "./components/kb-command-handler.js";
+import { SleepTrigger, loadSleepTriggerConfig } from "./components/sleep-trigger.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
 function stripDiscordMentions(text: string, botAppId: string): string {
@@ -145,6 +148,30 @@ async function main(): Promise<void> {
     // Start heartbeat for background memory extraction and consolidation
     memory.startHeartbeat();
     logInfo("main", "💓 Memory heartbeat started");
+
+    // Check if sleep routine should run on startup
+    try {
+      const sleepTriggerConfig = loadSleepTriggerConfig();
+      const auditDir = join(memoryConfig.memoryDir, "audit");
+      const workingDir = join(memoryConfig.memoryDir, "working");
+      const sleepTrigger = new SleepTrigger(sleepTriggerConfig, auditDir, workingDir);
+
+      if (sleepTrigger.shouldRunOnStartup()) {
+        logInfo("main", "😴 Startup sleep trigger fired — spawning sleep routine in background");
+        const thisDir = dirname(fileURLToPath(import.meta.url));
+        const sleepScript = join(thisDir, "cli", "agentbridge-sleep.js");
+        const child = spawn(process.execPath, [sleepScript], {
+          stdio: "ignore",
+          detached: true,
+        });
+        child.unref();
+        logInfo("main", `😴 Sleep routine spawned (pid=${child.pid})`);
+      } else {
+        logDebug("main", "😴 No startup sleep needed");
+      }
+    } catch (err) {
+      logWarn("main", `Sleep trigger check failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // STT config
@@ -166,9 +193,6 @@ async function main(): Promise<void> {
   const busyChats = new Set<string>();
   const pendingSessionStart = new Set<string>();
   const fullModeChats = new Set<string>();
-
-  // Auto-compact threshold: when Kiro's context window usage exceeds this %, trigger compaction
-  const autoCompactThreshold = parseInt(process.env["AUTO_COMPACT_THRESHOLD"] || "70", 10);
 
   // --- Telegram wiring (conditional) ---
   let telegramPoller: TelegramPoller | null = null;
@@ -675,8 +699,8 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (text === "/kb" || text.startsWith("/kb ")) {
-        const kbArgs = text.slice("/kb".length).trim();
+      if (text === "/nlm" || text.startsWith("/nlm ")) {
+        const kbArgs = text.slice("/nlm".length).trim();
         const result = await handleKBCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
         await telegramApi.sendMessage(chatId, result.text, { message_thread_id: threadId });
         return;
@@ -706,7 +730,7 @@ async function main(): Promise<void> {
           "/forget session <id> — Forget a session",
           "/full — Raw tmux output, no TTS",
           "/short — Clean responses (default)",
-          "/kb — Knowledge base (list/create/sources/query)",
+          "/nlm — Knowledge base (list/create/sources/query)",
           "/help — Show this help message",
         ].join("\n");
         await telegramApi.sendMessage(chatId, helpText, { message_thread_id: threadId });
@@ -723,7 +747,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/kb", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
         if (!known.includes(cmd)) {
           await telegramApi.sendMessage(chatId, `❓ Unknown command: ${cmd}\nType /help for available commands.`, { message_thread_id: threadId });
           return;
@@ -854,21 +878,21 @@ async function main(): Promise<void> {
         await react(chatId, messageId, "");
         logInfo("main", `→ Response delivered to chat ${chatId}${intermediateDelivered ? " (streamed)" : ""}`);
 
-        // Auto-compact when context window usage exceeds threshold
+        // Auto-compact when context window usage exceeds threshold (percentage-based)
         if (memory && "contextPercent" in transport) {
           const pct = (transport as TmuxClient).contextPercent;
-          if (pct >= autoCompactThreshold) {
-            logInfo("main", `⚠️ Context window at ${pct}% (threshold: ${autoCompactThreshold}%) — auto-compacting`);
+          const threshold = memory.getConfig().searchEnhancements.compactThresholdPct;
+          if (pct >= threshold) {
+            logInfo("main", `⚠️ Context window at ${pct}% (threshold: ${threshold}%) — auto-compacting`);
             await telegramApi.sendMessage(chatId, `📦 Context window at ${pct}% — auto-compacting...`, { message_thread_id: threadId });
             try {
-              const llm = memory.getLlmCall();
-              if (llm) {
-                const result = await memory.compactSession({ chatId, sessionId: sessionKey, llmCall: llm });
-                const msg = result
-                  ? `📦 Auto-compaction done: ${result.summary.slice(0, 200)}`
-                  : "📦 Auto-compaction: nothing to compact.";
-                await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
-              }
+              await memory.checkAutoCompact({
+                chatId,
+                sessionId: sessionKey,
+                contextPercent: pct,
+                sendCompactCommand: (sk, cmd) => transport.sendPrompt(sk, cmd),
+              });
+              await telegramApi.sendMessage(chatId, "📦 Auto-compaction complete.", { message_thread_id: threadId });
             } catch (err) {
               logError("main", "Auto-compaction failed", err);
             }
@@ -1235,8 +1259,8 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (text === "/kb" || text.startsWith("/kb ")) {
-        const kbArgs = text.slice("/kb".length).trim();
+      if (text === "/nlm" || text.startsWith("/nlm ")) {
+        const kbArgs = text.slice("/nlm".length).trim();
         const result = await handleKBCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
         await discordApi.sendMessage(message.channelId, result.text);
         return;
@@ -1266,7 +1290,7 @@ async function main(): Promise<void> {
           "/forget session <id> — Forget a session",
           "/full — Raw tmux output, no TTS",
           "/short — Clean responses (default)",
-          "/kb — Knowledge base (list/create/sources/query)",
+          "/nlm — Knowledge base (list/create/sources/query)",
           "/help — Show this help message",
         ].join("\n");
         await discordApi.sendMessage(message.channelId, helpText);
@@ -1283,7 +1307,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/kb", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
         if (!known.includes(cmd)) {
           await discordApi.sendMessage(message.channelId, `❓ Unknown command: ${cmd}\nType /help for available commands.`);
           return;
@@ -1343,22 +1367,22 @@ async function main(): Promise<void> {
         }
         logInfo("main", `→ Discord: sent ${chunks.length} chunk(s) to ${message.channelId}`);
 
-        // Auto-compact when context window usage exceeds threshold
+        // Auto-compact when context window usage exceeds threshold (percentage-based)
         if (memory && "contextPercent" in transport) {
           const pct = (transport as TmuxClient).contextPercent;
-          if (pct >= autoCompactThreshold) {
+          const threshold = memory.getConfig().searchEnhancements.compactThresholdPct;
+          if (pct >= threshold) {
             const chatId = parseInt(message.channelId, 10) || 0;
-            logInfo("main", `⚠️ Context window at ${pct}% (threshold: ${autoCompactThreshold}%) — auto-compacting (Discord)`);
+            logInfo("main", `⚠️ Context window at ${pct}% (threshold: ${threshold}%) — auto-compacting (Discord)`);
             await discordApi.sendMessage(message.channelId, `📦 Context window at ${pct}% — auto-compacting...`);
             try {
-              const llm = memory.getLlmCall();
-              if (llm) {
-                const result = await memory.compactSession({ chatId, sessionId: sessionKey, llmCall: llm });
-                const msg = result
-                  ? `📦 Auto-compaction done: ${result.summary.slice(0, 200)}`
-                  : "📦 Auto-compaction: nothing to compact.";
-                await discordApi.sendMessage(message.channelId, msg);
-              }
+              await memory.checkAutoCompact({
+                chatId,
+                sessionId: sessionKey,
+                contextPercent: pct,
+                sendCompactCommand: (sk, cmd) => transport.sendPrompt(sk, cmd),
+              });
+              await discordApi.sendMessage(message.channelId, "📦 Auto-compaction complete.");
             } catch (err) {
               logError("main", "Auto-compaction failed (Discord)", err);
             }
@@ -1434,6 +1458,9 @@ async function main(): Promise<void> {
               intervalMs: memoryConfig.heartbeat.intervalMs,
               tasks: [],
             }
+          : null,
+        notebooklm: nlmClient
+          ? { enabled: nlmConfig.enabled, getCacheStats: () => nlmClient!.getCacheStats() }
           : null,
       };
       return buildStatusSnapshot(refs);

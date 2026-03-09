@@ -40,6 +40,8 @@ mkdir -p "$AB_HOME/.kiro/steering"
 cp "$PROJECT_DIR/persona/SOUL.md" "$AB_HOME/.kiro/steering/SOUL.md"
 cp "$PROJECT_DIR/skills/memory-search/SKILL.md" "$AB_HOME/.kiro/steering/memory-search.md"
 cp "$PROJECT_DIR/skills/instant-store/SKILL.md" "$AB_HOME/.kiro/steering/instant-store.md"
+cp "$PROJECT_DIR/skills/knowledge-base/SKILL.md" "$AB_HOME/.kiro/steering/knowledge-base.md"
+cp "$PROJECT_DIR/skills/topic-save/SKILL.md" "$AB_HOME/.kiro/steering/topic-save.md"
 
 # 4. Deploy launcher script + recall CLI
 echo "🚀 Deploying launcher + recall CLI..."
@@ -60,6 +62,20 @@ echo '#!/usr/bin/env bash' > "$STORE_SCRIPT"
 echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-store.js\" \"\$@\"" >> "$STORE_SCRIPT"
 chmod +x "$STORE_SCRIPT"
 ln -sf "$STORE_SCRIPT" "$HOME/.local/bin/agentbridge-store"
+
+# Deploy agentbridge-sleep CLI (overnight memory maintenance)
+SLEEP_SCRIPT="$AB_HOME/agentbridge-sleep"
+echo '#!/usr/bin/env bash' > "$SLEEP_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-sleep.js\" \"\$@\"" >> "$SLEEP_SCRIPT"
+chmod +x "$SLEEP_SCRIPT"
+ln -sf "$SLEEP_SCRIPT" "$HOME/.local/bin/agentbridge-sleep"
+
+# Deploy agentbridge-kb CLI (NotebookLM knowledge base)
+KB_SCRIPT="$AB_HOME/agentbridge-kb"
+echo '#!/usr/bin/env bash' > "$KB_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-kb.js\" \"\$@\"" >> "$KB_SCRIPT"
+chmod +x "$KB_SCRIPT"
+ln -sf "$KB_SCRIPT" "$HOME/.local/bin/agentbridge-kb"
 
 # 4. Restart tmux session (unless --quick)
 if [ "$QUICK" = false ]; then

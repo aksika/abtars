@@ -367,6 +367,16 @@ function getBridgeHealthCard(): string {
     <span class="stat-value" id="health-platforms">—</span>
   </div>
   <div class="stat-row">
+    <span class="stat-label">Heartbeat</span>
+    <span class="stat-value" id="hb-status">
+      <span class="indicator red"></span> stopped
+    </span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">HB Interval</span>
+    <span class="stat-value" id="hb-interval">—</span>
+  </div>
+  <div class="stat-row">
     <span class="stat-label">Last Update</span>
     <span class="stat-value" id="health-timestamp">—</span>
   </div>
@@ -405,10 +415,9 @@ function getPlatformsCard(): string {
       <span><span class="badge coming" title="coming soon">coming soon</span>
       <button disabled>Start</button></span>
     </div>
-    <div class="platform-item">
+    <div class="platform-item" id="plat-nlm">
       <span class="name">LM Notebook</span>
-      <span><span class="badge coming" title="coming soon">coming soon</span>
-      <button disabled>Start</button></span>
+      <span><span class="badge disabled" id="plat-nlm-badge">—</span></span>
     </div>
     <div class="platform-item">
       <span class="name">Keep</span>
@@ -516,24 +525,7 @@ function getMemoryCard(): string {
 }
 
 function getHeartbeatCard(): string {
-  return `
-<div class="card" id="card-heartbeat">
-  <h2>Heartbeat</h2>
-  <div class="stat-row">
-    <span class="stat-label">Status</span>
-    <span class="stat-value" id="hb-status">
-      <span class="indicator red"></span> stopped
-    </span>
-  </div>
-  <div class="stat-row">
-    <span class="stat-label">Interval</span>
-    <span class="stat-value" id="hb-interval">—</span>
-  </div>
-  <div style="margin-top:8px;">
-    <span class="stat-label">Tasks</span>
-    <ul class="task-list" id="hb-tasks"></ul>
-  </div>
-</div>`;
+  return '';
 }
 
 // ── Inline Script ───────────────────────────────────────────────────────────
@@ -691,6 +683,18 @@ function getScript(): string {
       }
     }
 
+    // NotebookLM
+    var nlmBadge = document.getElementById('plat-nlm-badge');
+    if (nlmBadge) {
+      if (snap.notebooklm && snap.notebooklm.enabled) {
+        nlmBadge.textContent = 'active (cache: ' + snap.notebooklm.hits + 'h/' + snap.notebooklm.misses + 'm)';
+        nlmBadge.className = 'badge running';
+      } else {
+        nlmBadge.textContent = 'disabled';
+        nlmBadge.className = 'badge disabled';
+      }
+    }
+
     // Heartbeat
     if (snap.heartbeat) {
       el = document.getElementById('hb-status');
@@ -704,15 +708,6 @@ function getScript(): string {
 
       el = document.getElementById('hb-interval');
       if (el) el.textContent = snap.heartbeat.intervalMs ? (snap.heartbeat.intervalMs / 1000) + 's' : '—';
-
-      el = document.getElementById('hb-tasks');
-      if (el) {
-        if (snap.heartbeat.taskNames && snap.heartbeat.taskNames.length > 0) {
-          el.innerHTML = snap.heartbeat.taskNames.map(function(n) { return '<li>' + escHtml(n) + '</li>'; }).join('');
-        } else {
-          el.innerHTML = '<li style="color:#666;">No tasks registered</li>';
-        }
-      }
     }
   }
 

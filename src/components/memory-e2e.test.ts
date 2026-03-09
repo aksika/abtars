@@ -159,14 +159,19 @@ describe("Memory system — end-to-end smoke test", () => {
     expect(existsSync(transcriptPath)).toBe(false);
   });
 
-  it("auto-compaction triggers when transcript exceeds threshold", async () => {
+  it("auto-compaction triggers when context percent exceeds threshold", async () => {
     mm.close();
     rmSync(tmpDir, { recursive: true, force: true });
     tmpDir = mkdtempSync(join(tmpdir(), "e2e-autocompact-"));
-    mm = new MemoryManager(makeConfig(tmpDir, { autoCompactThreshold: 50 }));
+    mm = new MemoryManager(makeConfig(tmpDir, {
+      searchEnhancements: {
+        ...MEMORY_CONFIG_DEFAULTS.searchEnhancements,
+        compactThresholdPct: 85,
+      },
+    }));
     await mm.initialize();
 
-    // Record a message with enough content to exceed 50 tokens (200+ chars)
+    // Record a message so there's a transcript to write as safety net
     mm.recordMessage(makeRecord({
       content: "x".repeat(250),
       chatId: 10,
@@ -174,12 +179,17 @@ describe("Memory system — end-to-end smoke test", () => {
       timestamp: 1000,
     }));
 
-    const mockLlm = async () => "Auto-compacted summary of session.";
-    mm.setLlmCall(mockLlm);
-    await mm.checkAutoCompact({ chatId: 10, sessionId: "s1" });
+    const mockSendCompact = async (_sk: string, _cmd: string) => "compacted";
+    await mm.checkAutoCompact({
+      chatId: 10,
+      sessionId: "s1",
+      contextPercent: 90,
+      sendCompactCommand: mockSendCompact,
+    });
 
-    // Daily compaction file should exist
-    const dailyDir = join(tmpDir, "memory", "daily", "10");
-    expect(existsSync(dailyDir)).toBe(true);
+    // Working directory safety-net file should exist
+    const today = new Date().toISOString().slice(0, 10);
+    const workingDir = join(tmpDir, "working", today);
+    expect(existsSync(workingDir)).toBe(true);
   });
 });

@@ -342,16 +342,10 @@ describe("CompactionEngine — Property 3: Compaction File Named by Message Date
         expect(result).not.toBeNull();
 
         const expectedDateStr = compactionDate.toISOString().slice(0, 10);
-        const todayStr = new Date().toISOString().slice(0, 10);
 
-        // File path must contain the compactionDate, not today's date
-        expect(result!.filePath).toContain(expectedDateStr);
-        expect(result!.filePath).toContain(`${expectedDateStr}.md`);
-
-        // When compactionDate differs from today, path must NOT contain today's date
-        if (expectedDateStr !== todayStr) {
-          expect(result!.filePath).not.toContain(`${todayStr}.md`);
-        }
+        // File path must land in working/{YYYY-MM-DD}/transcript_{chatId}.md
+        expect(result!.filePath).toContain(join("working", expectedDateStr));
+        expect(result!.filePath).toContain(`transcript_${chatId}.md`);
 
         // Verify the file actually exists at that path
         expect(existsSync(result!.filePath)).toBe(true);

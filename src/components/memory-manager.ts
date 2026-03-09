@@ -1,5 +1,7 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
 import { initializeDatabase } from "./memory-db.js";
@@ -13,13 +15,12 @@ import { SleepCycleRunner } from "./sleep-cycle-runner.js";
 import { ContextAssembler } from "./context-assembler.js";
 import { HeartbeatSystem } from "./heartbeat-system.js";
 import type { HeartbeatConfig } from "./heartbeat-system.js";
-import { MemoryExtractor } from "./memory-extractor.js";
+import { SleepTrigger, loadSleepTriggerConfig } from "./sleep-trigger.js";
 import { MemorySearchTool } from "./memory-search-tool.js";
 import type { MemorySearchToolConfig } from "./memory-search-tool.js";
 import { IngestionPipeline } from "./ingestion-pipeline.js";
 import { ReflectionEngine } from "./reflection-engine.js";
 import { IntentDetector, DEFAULT_CUE_PHRASES_EN, DEFAULT_CUE_PHRASES_HU } from "./intent-detector.js";
-import { createDailyCompactionTask, runStartupCatchUp } from "./daily-compaction-task.js";
 import { RecallFallbackPipeline } from "./recall-fallback-pipeline.js";
 import type {
   MessageRecord,
@@ -64,7 +65,6 @@ export class MemoryManager {
   private reflectionEngine: ReflectionEngine | null = null;
   private recallPipeline: RecallFallbackPipeline | null = null;
   private heartbeat: HeartbeatSystem | null = null;
-  private memoryExtractor: MemoryExtractor | null = null;
   private contextAssembler: ContextAssembler | null = null;
   private memorySearchTool: MemorySearchTool | null = null;
   private compactionLocks = new Map<number, Promise<void>>();
@@ -97,6 +97,11 @@ export class MemoryManager {
   /** Expose the underlying database for direct query access (used by MemorySearchController). */
   getDatabase(): import("better-sqlite3").Database | null {
     return this.db;
+  }
+
+  /** Expose the memory configuration (used by main.ts for threshold checks). */
+  getConfig(): MemoryConfig {
+    return this.config;
   }
 
   /** Acquire a per-chat compaction lock. Returns a release function, or null if already locked. */
@@ -703,15 +708,21 @@ export class MemoryManager {
   async checkAutoCompact(params: {
     chatId: number;
     sessionId: string;
+    contextPercent: number;
+    sendCompactCommand: (sessionKey: string, command: string) => Promise<string>;
   }): Promise<void> {
     if (!this.config.memoryEnabled || !this.transcriptParser) return;
 
-    if (!this.llmCall) {
-      logDebug(TAG, `Skipping auto-compaction for chat ${params.chatId}: LlmCall not available`);
-      return;
-    }
+    const threshold = this.config.searchEnhancements.compactThresholdPct;
+    if (params.contextPercent < threshold) return;
+
+    logInfo(
+      TAG,
+      `Auto-compact triggered for chat ${params.chatId} session ${params.sessionId} (context ${params.contextPercent}% >= ${threshold}% threshold)`,
+    );
 
     try {
+      // Step 1: Write raw transcript to working directory as safety net (Requirement 2.2)
       const transcriptPath = join(
         this.config.memoryDir,
         "transcripts",
@@ -719,39 +730,56 @@ export class MemoryManager {
         `${params.sessionId}.jsonl`,
       );
 
-      if (!existsSync(transcriptPath)) return;
+      if (!existsSync(transcriptPath)) {
+        logDebug(TAG, `No transcript file for chat ${params.chatId} session ${params.sessionId} — skipping safety-net write`);
+      } else {
+        const messages = this.transcriptParser.parse(transcriptPath);
+        if (messages.length > 0) {
+          const now = new Date();
+          const dateStr = now.toISOString().slice(0, 10);
+          const workingDir = join(this.config.memoryDir, "working", dateStr);
+          mkdirSync(workingDir, { recursive: true });
 
-      const messages = this.transcriptParser.parse(transcriptPath);
-      if (messages.length === 0) return;
+          const safetyPath = join(workingDir, `transcript_${params.chatId}.md`);
+          const rawContent = messages
+            .map((m) => `[${m.role}] ${m.content}`)
+            .join("\n");
 
-      const totalTokens = messages.reduce(
-        (sum, m) => sum + Math.ceil(m.content.length / 4),
-        0,
-      );
+          // Append to existing file if present (Requirement 2.4 — same append behavior)
+          if (existsSync(safetyPath)) {
+            appendFileSync(safetyPath, `\n---\n\n${rawContent}`);
+          } else {
+            writeFileSync(safetyPath, rawContent);
+          }
 
-      if (totalTokens <= this.config.autoCompactThreshold) return;
+          logInfo(TAG, `Safety-net transcript written to ${safetyPath}`);
+        }
+      }
 
-      logInfo(
-        TAG,
-        `Auto-compact triggered for chat ${params.chatId} session ${params.sessionId} (${totalTokens} tokens > ${this.config.autoCompactThreshold} threshold)`,
-      );
+      // Step 2: Send /compact to the Kiro CLI agent for LLM-powered summarization (Requirement 2.3)
+      logInfo(TAG, `Sending /compact to Kiro CLI agent for chat ${params.chatId}`);
+      await params.sendCompactCommand(params.sessionId, "/compact");
+      logInfo(TAG, `Kiro CLI /compact completed for chat ${params.chatId}`);
 
-      if (!this.db || !this.memoryIndex) return;
-
-      const engine = new CompactionEngine(
-        this.db,
-        this.transcriptParser,
-        this.memoryIndex,
-        this.config,
-      );
-
-      await engine.compact({
-        chatId: params.chatId,
-        sessionId: params.sessionId,
-        llmCall: this.llmCall,
-      });
+      // Step 3: Update compaction watermark in DB (Requirement 2.5)
+      if (this.db) {
+        const watermark = Date.now();
+        this.db
+          .prepare(
+            `INSERT INTO compactions (chat_id, source_session_id, tier, timestamp, summary, file_path)
+             VALUES (?, ?, 'daily', ?, ?, ?)`,
+          )
+          .run(
+            params.chatId,
+            params.sessionId,
+            watermark,
+            "[auto-compact via /compact]",
+            "",
+          );
+        logInfo(TAG, `Compaction watermark updated for chat ${params.chatId} at ${watermark}`);
+      }
     } catch (err) {
-      logError(TAG, `Auto-compact failed for chat ${params.chatId} session ${params.sessionId} — preserving original messages`, err);
+      logError(TAG, `Auto-compact failed for chat ${params.chatId} session ${params.sessionId} — raw transcript already saved as safety net`, err);
     }
   }
 
@@ -837,7 +865,6 @@ export class MemoryManager {
         const runner = new SleepCycleRunner(engine, this.config);
 
         await runner.runPendingConsolidations({
-          chatId: params.chatId,
           llmCall: this.llmCall,
         });
       } catch (err) {
@@ -1184,13 +1211,12 @@ export class MemoryManager {
 
 
   /**
-   * Initialize and start the heartbeat system for background memory extraction
-   * and consolidation. Called after initialize() and setLlmCall().
+   * Initialize and start the heartbeat system for background tasks.
+   * Called after initialize() and setLlmCall().
    *
-   * Creates HeartbeatSystem, MemoryExtractor, and MemorySearchTool.
-   * Registers two heartbeat tasks:
-   *   - memory-extraction: processes unprocessed transcripts for active chats
-   *   - consolidation: checks compaction thresholds and runs consolidation
+   * Creates HeartbeatSystem and MemorySearchTool.
+   * Registers heartbeat tasks:
+   *   - sleep-trigger: hourly check for sleep routine (TODO: Task 11.2)
    *
    * On failure, logs a warning and continues without background processing.
    */
@@ -1205,11 +1231,6 @@ export class MemoryManager {
 
       this.heartbeat = new HeartbeatSystem(heartbeatConfig);
 
-      // Create MemoryExtractor (requires db and llmCall)
-      if (this.llmCall) {
-        this.memoryExtractor = new MemoryExtractor(this.db, this.llmCall);
-      }
-
       // Create MemorySearchTool
       const searchConfig: MemorySearchToolConfig = {
         searchTimeoutMs: this.config.searchEnhancements.searchTimeoutMs,
@@ -1222,87 +1243,57 @@ export class MemoryManager {
         searchConfig,
       );
 
-      // Register memory extraction task (skips when transport is busy)
-      if (this.memoryExtractor) {
-        const extractor = this.memoryExtractor;
-        const db = this.db;
-        const isBusy = () => this.isBusyFn?.() ?? false;
-        this.heartbeat.registerTask({
-          name: "memory-extraction",
-          execute: async () => {
-            if (isBusy()) {
-              logDebug(TAG, "Skipping extraction — transport is busy");
-              return;
-            }
-            const rows = db
-              .prepare("SELECT DISTINCT chat_id FROM messages")
-              .all() as Array<{ chat_id: number }>;
-
-            for (const row of rows) {
-              if (isBusy()) break;
-              await extractor.processTranscripts(row.chat_id);
-            }
-          },
-        });
-      }
-
-      // Capture shared dependencies for task registrations
+      // Sleep-trigger cron task (Task 11.2)
+      // Checks hourly whether the sleep routine should run based on:
+      //   - Time since last successful sleep run (configurable via MEMORY_SLEEP_INTERVAL_HOURS, default 24)
+      //   - User inactivity (configurable via MEMORY_SLEEP_INACTIVITY_MINUTES, default 30)
+      const isBusy = () => this.isBusyFn?.() ?? false;
+      const sleepTriggerConfig = loadSleepTriggerConfig();
+      const auditDir = join(this.config.memoryDir, "audit");
+      const workingDir = join(this.config.memoryDir, "working");
+      const sleepTrigger = new SleepTrigger(sleepTriggerConfig, auditDir, workingDir);
       const db = this.db;
-      const transcriptParser = this.transcriptParser;
-      const memoryIndex = this.memoryIndex;
-      const config = this.config;
 
-      // Register daily compaction task (between memory-extraction and consolidation)
-      if (transcriptParser) {
-        const dailyCompactionTask = createDailyCompactionTask({
-          db,
-          config,
-          transcriptParser,
-          memoryIndex,
-          getLlmCall: () => this.llmCall,
-          acquireLock: (chatId: number) => this.acquireCompactionLock(chatId),
-        });
-        this.heartbeat.registerTask(dailyCompactionTask);
-      }
+      this.heartbeat.registerTask({
+        name: "sleep-trigger",
+        execute: async () => {
+          if (isBusy()) {
+            logDebug(TAG, "Skipping sleep-trigger — transport is busy");
+            return;
+          }
 
-      // Register consolidation task
-      const llmCall = this.llmCall;
-      if (transcriptParser && llmCall) {
-        this.heartbeat.registerTask({
-          name: "consolidation",
-          execute: async () => {
-            const rows = db
-              .prepare("SELECT DISTINCT chat_id FROM messages")
-              .all() as Array<{ chat_id: number }>;
+          // Query DB for the most recent message timestamp
+          let lastMessageTs = 0;
+          try {
+            const row = db!.prepare("SELECT MAX(timestamp) as latest FROM messages").get() as
+              | { latest: number | null }
+              | undefined;
+            lastMessageTs = row?.latest ?? 0;
+          } catch (err) {
+            logWarn(TAG, `sleep-trigger: failed to query last message timestamp: ${err instanceof Error ? err.message : String(err)}`);
+            return;
+          }
 
-            for (const row of rows) {
-              const engine = new CompactionEngine(db, transcriptParser, memoryIndex, config);
-              const threshold = engine.checkConsolidationThresholds(row.chat_id);
-              if (threshold) {
-                const runner = new SleepCycleRunner(engine, config);
-                await runner.runPendingConsolidations({
-                  chatId: row.chat_id,
-                  llmCall,
-                });
-              }
-            }
-          },
-        });
-      }
+          if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) {
+            logDebug(TAG, "sleep-trigger: conditions not met — skipping");
+            return;
+          }
 
-      // Run startup catch-up before first heartbeat tick (non-blocking)
-      if (transcriptParser) {
-        void runStartupCatchUp({
-          db,
-          config,
-          transcriptParser,
-          memoryIndex,
-          getLlmCall: () => this.llmCall,
-          acquireLock: (chatId: number) => this.acquireCompactionLock(chatId),
-        }).catch((err) => {
-          logWarn(TAG, `Startup catch-up failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
-      }
+          // Spawn agentbridge-sleep as a detached background process
+          try {
+            const thisDir = dirname(fileURLToPath(import.meta.url));
+            const sleepScript = join(thisDir, "cli", "agentbridge-sleep.js");
+            const child = spawn(process.execPath, [sleepScript], {
+              stdio: "ignore",
+              detached: true,
+            });
+            child.unref();
+            logInfo(TAG, `😴 Sleep routine spawned from cron (pid=${child.pid})`);
+          } catch (err) {
+            logWarn(TAG, `sleep-trigger: failed to spawn sleep routine: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        },
+      });
 
       this.heartbeat.start();
     } catch (err) {
@@ -1315,20 +1306,6 @@ export class MemoryManager {
   stopHeartbeat(): void {
     this.heartbeat?.stop();
     this.heartbeat = null;
-  }
-
-  /**
-   * Derive the compaction date from the earliest message in a session.
-   * Returns the date of the earliest message, or current date if no messages found.
-   */
-  private getSessionMessageDate(chatId: number, sessionId: string, sinceTimestamp: number = 0): Date {
-    const row = this.db!.prepare(
-      "SELECT MIN(timestamp) as earliest_ts FROM messages WHERE chat_id = ? AND session_id = ? AND timestamp > ?"
-    ).get(chatId, sessionId, sinceTimestamp) as { earliest_ts: number | null } | undefined;
-    if (row?.earliest_ts) {
-      return new Date(row.earliest_ts);
-    }
-    return new Date();
   }
 
   /**
@@ -1363,12 +1340,12 @@ export class MemoryManager {
         await this.waitForCompaction(row.chat_id);
 
         const engine = new CompactionEngine(this.db!, this.transcriptParser!, this.memoryIndex!, this.config);
-        const compactionDate = this.getSessionMessageDate(row.chat_id, row.session_id, row.watermark);
+        // Use today's date for the working directory (Requirement 3.1)
+        // compact() defaults to today when compactionDate is omitted
         await engine.compact({
           chatId: row.chat_id,
           sessionId: row.session_id,
           llmCall: this.llmCall!,
-          compactionDate,
           sinceTimestamp: row.watermark,
         });
       } catch (err) {

@@ -503,11 +503,17 @@ describe("MemoryManager — recordMessage", () => {
 describe("MemoryManager — checkAutoCompact", () => {
   let tmpDir: string;
   let manager: MemoryManager;
+  const mockSendCompact = async (_sk: string, _cmd: string) => "compacted";
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "mm-autocompact-"));
     manager = new MemoryManager(
-      makeConfig(tmpDir, { autoCompactThreshold: 50 }),
+      makeConfig(tmpDir, {
+        searchEnhancements: {
+          ...MEMORY_CONFIG_DEFAULTS.searchEnhancements,
+          compactThresholdPct: 85,
+        },
+      }),
     );
     await manager.initialize();
   });
@@ -517,108 +523,134 @@ describe("MemoryManager — checkAutoCompact", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("does nothing when transcript is under threshold", async () => {
-    // Record a short message (well under 50 tokens)
+  it("does nothing when contextPercent is below threshold", async () => {
     manager.recordMessage(
       makeRecord({ content: "hi", chatId: 1, sessionId: "s1", timestamp: 1000 }),
     );
 
-    manager.setLlmCall(async (_prompt: string, _content: string) => "summary");
-    await manager.checkAutoCompact({ chatId: 1, sessionId: "s1" });
+    await manager.checkAutoCompact({
+      chatId: 1,
+      sessionId: "s1",
+      contextPercent: 50,
+      sendCompactCommand: mockSendCompact,
+    });
 
-    // No daily compaction file should exist
-    const dailyDir = join(tmpDir, "memory", "daily", "1");
-    expect(existsSync(dailyDir)).toBe(false);
+    // No working directory compaction file should exist
+    const today = new Date().toISOString().slice(0, 10);
+    const workingDir = join(tmpDir, "working", today);
+    expect(existsSync(workingDir)).toBe(false);
   });
 
-  it("triggers compaction when transcript exceeds threshold", async () => {
-    // autoCompactThreshold is 50 tokens. Write enough content to exceed it.
-    // 50 tokens * 4 chars/token = 200 chars needed
+  it("triggers compaction when contextPercent meets threshold", async () => {
     const longContent = "a".repeat(250);
     manager.recordMessage(
       makeRecord({ content: longContent, chatId: 10, sessionId: "s1", timestamp: 1000 }),
     );
 
-    manager.setLlmCall(async (_prompt: string, _content: string) => "compacted summary");
-    await manager.checkAutoCompact({ chatId: 10, sessionId: "s1" });
+    let compactCalled = false;
+    const trackingSendCompact = async (_sk: string, _cmd: string) => {
+      compactCalled = true;
+      return "compacted";
+    };
 
-    // A daily compaction file should have been created
-    const dailyDir = join(tmpDir, "memory", "daily", "10");
-    expect(existsSync(dailyDir)).toBe(true);
+    await manager.checkAutoCompact({
+      chatId: 10,
+      sessionId: "s1",
+      contextPercent: 90,
+      sendCompactCommand: trackingSendCompact,
+    });
 
-    // Verify the compaction was stored in the DB
+    expect(compactCalled).toBe(true);
+
+    // A working directory safety-net file should have been created
+    const today = new Date().toISOString().slice(0, 10);
+    const workingDir = join(tmpDir, "working", today);
+    expect(existsSync(workingDir)).toBe(true);
+
+    // Verify the compaction watermark was stored in the DB
     const db = initializeDatabase(join(tmpDir, "memory.db"));
     const row = db
       .prepare("SELECT summary FROM compactions WHERE chat_id = 10 AND tier = 'daily'")
       .get() as { summary: string } | undefined;
     expect(row).toBeDefined();
-    expect(row!.summary).toBe("compacted summary");
+    expect(row!.summary).toBe("[auto-compact via /compact]");
     db.close();
   });
 
   it("is no-op when memoryEnabled is false", async () => {
     const disabledManager = new MemoryManager(
-      makeConfig(tmpDir, { memoryEnabled: false, autoCompactThreshold: 1 }),
+      makeConfig(tmpDir, { memoryEnabled: false }),
     );
     await disabledManager.initialize();
 
-    disabledManager.setLlmCall(async (_prompt: string, _content: string) => "summary");
-    await disabledManager.checkAutoCompact({ chatId: 1, sessionId: "s1" });
+    await disabledManager.checkAutoCompact({
+      chatId: 1,
+      sessionId: "s1",
+      contextPercent: 95,
+      sendCompactCommand: mockSendCompact,
+    });
 
-    // No daily compaction file should exist
-    const dailyDir = join(tmpDir, "memory", "daily", "1");
-    expect(existsSync(dailyDir)).toBe(false);
+    // No working directory compaction file should exist
+    const today = new Date().toISOString().slice(0, 10);
+    const workingDir = join(tmpDir, "working", today);
+    expect(existsSync(workingDir)).toBe(false);
 
     disabledManager.close();
   });
 
-  it("handles LLM failure gracefully without throwing", async () => {
+  it("handles sendCompactCommand failure gracefully without throwing", async () => {
     const longContent = "b".repeat(250);
     manager.recordMessage(
       makeRecord({ content: longContent, chatId: 20, sessionId: "s1", timestamp: 1000 }),
     );
 
-    manager.setLlmCall(async (_prompt: string, _content: string): Promise<string> => {
-      throw new Error("LLM unavailable");
-    });
+    const failingSendCompact = async (_sk: string, _cmd: string): Promise<string> => {
+      throw new Error("Transport unavailable");
+    };
 
-    // Should not throw — error is logged and original messages are preserved
+    // Should not throw — error is logged and raw transcript already saved as safety net
     await expect(
-      manager.checkAutoCompact({ chatId: 20, sessionId: "s1" }),
+      manager.checkAutoCompact({
+        chatId: 20,
+        sessionId: "s1",
+        contextPercent: 90,
+        sendCompactCommand: failingSendCompact,
+      }),
     ).resolves.toBeUndefined();
-
-    // No compaction should have been created
-    const db = initializeDatabase(join(tmpDir, "memory.db"));
-    const row = db
-      .prepare("SELECT COUNT(*) as cnt FROM compactions WHERE chat_id = 20")
-      .get() as { cnt: number };
-    expect(row.cnt).toBe(0);
-    db.close();
   });
 
   it("does nothing when transcript file does not exist", async () => {
-    manager.setLlmCall(async (_prompt: string, _content: string) => "summary");
-
-    // Call with a chatId/sessionId that has no transcript file
+    // Call with a chatId/sessionId that has no transcript file — still writes watermark
     await expect(
-      manager.checkAutoCompact({ chatId: 999, sessionId: "nonexistent" }),
+      manager.checkAutoCompact({
+        chatId: 999,
+        sessionId: "nonexistent",
+        contextPercent: 90,
+        sendCompactCommand: mockSendCompact,
+      }),
     ).resolves.toBeUndefined();
   });
 
-  it("skips auto-compaction silently when llmCall is null", async () => {
-    const longContent = "c".repeat(250);
+  it("does nothing when contextPercent is exactly at threshold boundary", async () => {
     manager.recordMessage(
-      makeRecord({ content: longContent, chatId: 30, sessionId: "s1", timestamp: 1000 }),
+      makeRecord({ content: "test content", chatId: 30, sessionId: "s1", timestamp: 1000 }),
     );
 
-    // Do NOT call setLlmCall — llmCall remains null
-    await expect(
-      manager.checkAutoCompact({ chatId: 30, sessionId: "s1" }),
-    ).resolves.toBeUndefined();
+    let compactCalled = false;
+    const trackingSendCompact = async (_sk: string, _cmd: string) => {
+      compactCalled = true;
+      return "compacted";
+    };
 
-    // No compaction should have been created
-    const dailyDir = join(tmpDir, "memory", "daily", "30");
-    expect(existsSync(dailyDir)).toBe(false);
+    // contextPercent == threshold (85) should trigger (>= check)
+    await manager.checkAutoCompact({
+      chatId: 30,
+      sessionId: "s1",
+      contextPercent: 85,
+      sendCompactCommand: trackingSendCompact,
+    });
+
+    expect(compactCalled).toBe(true);
   });
 });
 

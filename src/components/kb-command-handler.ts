@@ -1,11 +1,11 @@
 /**
- * Telegram /kb command handler for NotebookLM Layer 6 knowledge base.
+ * Telegram /nlm command handler for NotebookLM Layer 6 knowledge base.
  *
  * Subcommands:
- *   /kb list                — List registered notebooks
- *   /kb create <name>       — Create a new notebook
- *   /kb sources <notebook>  — List sources in a notebook
- *   /kb query <question>    — Query the default notebook
+ *   /nlm list                — List notebooks
+ *   /nlm create <name>       — Create a new notebook
+ *   /nlm sources <notebook>  — List sources in a notebook
+ *   /nlm query <question>    — Query the default notebook
  */
 
 import type { NotebookLMConfig } from "../types/index.js";
@@ -33,7 +33,7 @@ export async function handleKBCommand(
   try {
     switch (sub) {
       case "list":
-        return handleList(registry);
+        return await handleList(client, registry);
       case "create":
         return await handleCreate(parts.slice(1).join(" "), client, registry);
       case "sources":
@@ -49,14 +49,13 @@ export async function handleKBCommand(
   }
 }
 
-function handleList(registry: NotebookRegistry): KBCommandResult {
-  const entries = registry.list();
-  if (entries.length === 0) {
-    return { text: "📚 No notebooks registered. Use /kb create <name> to create one." };
-  }
-  const lines = entries.map((e) => {
-    const date = new Date(e.createdAt).toISOString().slice(0, 10);
-    return `• ${e.name} — ${e.sourceCount} sources (${date})`;
+async function handleList(client: NotebookLMClient, registry: NotebookRegistry): Promise<KBCommandResult> {
+  const result = await client.listNotebooks();
+  if (!result.ok) return { text: `❌ ${result.error}` };
+  if (result.data.length === 0) return { text: "📚 No notebooks found." };
+  const lines = result.data.map((n) => {
+    const registered = registry.resolve(n.name) ? " ✓" : "";
+    return `• ${n.name} (${n.id})${registered}`;
   });
   return { text: `📚 Notebooks:\n\n${lines.join("\n")}` };
 }
