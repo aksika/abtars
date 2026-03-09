@@ -29,13 +29,6 @@ import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
 
 const TAG = "agentbridge-sleep";
 
-// ── Preferred models in priority order ──────────────────────────────────────
-const MODEL_PRIORITY = [
-  "claude-opus-4-0-20250514",
-  "claude-sonnet-4-20250514",
-  "claude-sonnet-3-5-20241022",
-];
-
 // ── Argument parsing ────────────────────────────────────────────────────────
 
 export type RawArgs = {
@@ -103,7 +96,7 @@ async function invokeSubagent(
   const { AcpTransport } = await import("../components/acp-transport.js");
   const transport = new AcpTransport(config.kiroCLIPath, config.workingDir);
 
-  const usedModel = MODEL_PRIORITY[0]!;
+  const usedModel = process.env.MEMORY_SUBAGENT_MODEL || process.env.KIRO_MODEL || "unknown";
 
   try {
     await transport.initialize();

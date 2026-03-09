@@ -117,6 +117,17 @@ async function main(): Promise<void> {
     logInfo("main", "📚 NotebookLM Layer 6 disabled");
   }
 
+  // Load persona TOOLS.md for system prompt injection
+  let toolsPrompt = "";
+  try {
+    const thisDir = dirname(fileURLToPath(import.meta.url));
+    const toolsPath = join(thisDir, "..", "persona", "TOOLS.md");
+    toolsPrompt = readFileSync(toolsPath, "utf-8").trim();
+    logInfo("main", "📋 Loaded persona/TOOLS.md for system prompt");
+  } catch {
+    logDebug("main", "📋 No persona/TOOLS.md found, skipping");
+  }
+
   const formatter = new ResponseFormatter();
 
   // Shared conversation buffer for both platforms
@@ -778,7 +789,7 @@ async function main(): Promise<void> {
           // Assemble context BEFORE recording — prevents self-echo in search results
           const isSessionStart = pendingSessionStart.has(sessionKey);
           pendingSessionStart.delete(sessionKey);
-          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "", isSessionStart });
+          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: toolsPrompt, isSessionStart });
           memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
@@ -1335,7 +1346,7 @@ async function main(): Promise<void> {
           const chatId = parseInt(message.channelId, 10) || 0;
           const isSessionStart = pendingSessionStart.has(sessionKey);
           pendingSessionStart.delete(sessionKey);
-          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "", isSessionStart });
+          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: toolsPrompt, isSessionStart });
         }
 
         const response = await transport.sendPrompt(sessionKey, prompt);

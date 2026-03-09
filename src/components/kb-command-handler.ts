@@ -41,7 +41,7 @@ export async function handleKBCommand(
       case "query":
         return await handleQuery(parts.slice(1).join(" "), config, client, registry);
       default:
-        return { text: "Usage: /kb list | /kb create <name> | /kb sources <notebook> | /kb query <question>" };
+        return { text: "Usage: /nlm list | /nlm create <name> | /nlm sources <notebook> | /nlm query <question>" };
     }
   } catch (err) {
     logError(TAG, "KB command failed", err);
@@ -65,7 +65,7 @@ async function handleCreate(
   client: NotebookLMClient,
   registry: NotebookRegistry,
 ): Promise<KBCommandResult> {
-  if (!name) return { text: "Usage: /kb create <name>" };
+  if (!name) return { text: "Usage: /nlm create <name>" };
   const result = await client.createNotebook(name);
   if (!result.ok) return { text: `❌ ${result.error}` };
   registry.register({
@@ -83,7 +83,7 @@ async function handleSources(
   client: NotebookLMClient,
   registry: NotebookRegistry,
 ): Promise<KBCommandResult> {
-  if (!notebookName) return { text: "Usage: /kb sources <notebook-name>" };
+  if (!notebookName) return { text: "Usage: /nlm sources <notebook-name>" };
   const nbId = registry.resolve(notebookName);
   if (!nbId) {
     return { text: `❌ Notebook "${notebookName}" not found. Available: ${registry.availableNames().join(", ") || "(none)"}` };
@@ -101,7 +101,7 @@ async function handleQuery(
   client: NotebookLMClient,
   registry: NotebookRegistry,
 ): Promise<KBCommandResult> {
-  if (!question) return { text: "Usage: /kb query <question>" };
+  if (!question) return { text: "Usage: /nlm query <question>" };
   const notebookName = config.defaultNotebook;
   if (!notebookName) return { text: "❌ No default notebook configured (NOTEBOOKLM_DEFAULT_NOTEBOOK)." };
   const nbId = registry.resolve(notebookName);

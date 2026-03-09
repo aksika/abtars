@@ -163,7 +163,7 @@ export type MemorySearchResult = {
   content_original?: string;
   memory_type?: string;
   source_timestamp: number;
-  tier: "extracted" | "weekly" | "quarterly";
+  tier: "extracted" | "daily" | "weekly" | "quarterly";
   score: number;
 };
 

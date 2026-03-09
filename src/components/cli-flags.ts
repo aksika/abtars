@@ -5,7 +5,7 @@
  * --web   → web dashboard only
  * Individual flags can be combined: --telegram --discord --web
  *
- * Also parses --acp / --tmux to override transport (default: tmux).
+ * Also parses --acp / --tmux to override transport (default: acp).
  */
 export function parsePlatformFlags(args?: string[]): { telegram: boolean; discord: boolean; web: boolean; transport?: "tmux" | "acp" } {
   const argv = args ?? process.argv.slice(2);

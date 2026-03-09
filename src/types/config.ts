@@ -19,7 +19,7 @@ export type Config = {
   permissionTimeoutMs: number;
   /** Telegram long-poll timeout in seconds */
   pollTimeoutS: number;
-  /** Transport method: "tmux" (default) or "acp" */
+  /** Transport method: "acp" (default) or "tmux" */
   kiroTransport: KiroTransport;
   /** tmux session name (only used when transport=tmux) */
   tmuxSession: string;
@@ -66,7 +66,7 @@ export const CONFIG_DEFAULTS = {
   trustMode: false,
   permissionTimeoutMs: 60_000,
   pollTimeoutS: 30,
-  kiroTransport: "tmux" as KiroTransport,
+  kiroTransport: "acp" as KiroTransport,
   tmuxSession: "kiro-bridge",
   tmuxCaptureDelaySec: 3,
   tmuxMaxWaitSec: 300,

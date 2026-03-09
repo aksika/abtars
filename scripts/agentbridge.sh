@@ -49,7 +49,11 @@ echo "   Node:     $(node --version)"
 echo ""
 
 # --- skip tmux session for ACP transport ---
-if [[ " ${ARGS[*]} " == *" --acp "* ]]; then
+if [[ " ${ARGS[*]} " == *" --tmux "* ]]; then
+  echo "♻️  Restarting tmux session '$SESSION'..."
+  "$PROJECT_DIR/scripts/tmux-session.sh"
+  sleep 2
+elif [[ " ${ARGS[*]} " == *" --acp "* ]] || [[ "${KIRO_TRANSPORT:-acp}" == "acp" ]]; then
   echo "🔌 ACP transport — skipping tmux session"
 else
   echo "♻️  Restarting tmux session '$SESSION'..."

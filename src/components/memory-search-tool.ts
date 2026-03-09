@@ -2,7 +2,6 @@ import type Database from "better-sqlite3";
 
 import { logDebug, logWarn } from "./logger.js";
 import type { MemoryIndex } from "./memory-index.js";
-import { sanitizeFtsQuery } from "./memory-index.js";
 import type { MemorySearchParams, MemorySearchResult } from "../types/memory.js";
 
 const TAG = "memory-search-tool";
@@ -240,22 +239,40 @@ export class MemorySearchTool {
   ): MemorySearchResult[] {
     if (!keywords.length) return [];
 
-    // Build OR-style FTS5 query: "kw1"* OR "kw2"*
-    const ftsQuery = sanitizeFtsQuery(keywords.join(" "));
-    if (!ftsQuery) return [];
-
-    // Search extracted memories via MemoryIndex
-    const extractedResults = this.memoryIndex.searchExtracted(ftsQuery, {
+    const query = keywords.join(" ");
+    const searchOpts = {
       chatId,
       startTime: timeRange?.start,
       endTime: timeRange?.end,
       limit: 20,
-    });
+    };
 
-    // Search compacted summaries (weekly + quarterly) via LIKE matching
+    // L1: Raw messages — FTS5 + substring
+    const messageResults: MemorySearchResult[] = [];
+    for (const r of this.memoryIndex.search(query, searchOpts, "or")) {
+      messageResults.push({
+        content: r.record.content,
+        source_timestamp: r.record.timestamp,
+        tier: "extracted" as const,
+        score: r.score,
+      });
+    }
+    for (const r of this.memoryIndex.substringSearch(query, searchOpts, "or")) {
+      messageResults.push({
+        content: r.record.content,
+        source_timestamp: r.record.timestamp,
+        tier: "extracted" as const,
+        score: r.score * 0.6,
+      });
+    }
+
+    // L2: Extracted memories — FTS5
+    const extractedResults = this.memoryIndex.searchExtracted(query, searchOpts, "or");
+
+    // L3: Compaction summaries — LIKE matching
     const compactionResults = this.searchCompactions(keywords, chatId, timeRange);
 
-    return [...extractedResults, ...compactionResults];
+    return [...messageResults, ...extractedResults, ...compactionResults];
   }
 
   /**
@@ -268,7 +285,7 @@ export class MemorySearchTool {
     timeRange?: { start: number; end: number },
   ): MemorySearchResult[] {
     try {
-      const conditions: string[] = ["chat_id = ?", "tier IN ('weekly', 'quarterly')"];
+      const conditions: string[] = ["chat_id = ?", "tier IN ('daily', 'weekly', 'quarterly')"];
       const params: (string | number)[] = [chatId];
 
       if (timeRange?.start !== undefined) {
@@ -311,7 +328,7 @@ export class MemorySearchTool {
       return rows.map((row) => ({
         content: row.summary,
         source_timestamp: row.timestamp,
-        tier: row.tier as "weekly" | "quarterly",
+        tier: row.tier as "daily" | "weekly" | "quarterly",
         score: 1.0, // base score for LIKE matches
       }));
     } catch (err) {
