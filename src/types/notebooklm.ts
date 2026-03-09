@@ -58,8 +58,8 @@ export type NotebookRegistryData = {
   notebooks: NotebookRegistryEntry[];
 };
 
-/** Result of an agentbridge-kb query command (JSON output). */
-export type KBQueryResult = {
+/** Result of an agentbridge-nlm query command (JSON output). */
+export type NLMQueryResult = {
   answer: string;
   citations: RAGCitation[];
   confidence: string;
@@ -67,7 +67,7 @@ export type KBQueryResult = {
   cached: boolean;
 };
 
-/** Error result from agentbridge-kb (JSON output). */
-export type KBErrorResult = {
+/** Error result from agentbridge-nlm (JSON output). */
+export type NLMErrorResult = {
   error: string;
 };

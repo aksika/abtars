@@ -38,7 +38,7 @@
   "bin": {
     "agentbridge-recall": "dist/cli/agentbridge-recall.js",
     "agentbridge-store": "dist/cli/agentbridge-store.js",
-    "agentbridge-kb": "dist/cli/agentbridge-kb.js",
+    "agentbridge-nlm": "dist/cli/agentbridge-nlm.js",
     "agentbridge-sleep": "dist/cli/agentbridge-sleep.js"
   }
 }

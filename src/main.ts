@@ -36,7 +36,7 @@ import { renderDashboardHtml } from "./components/dashboard-ui.js";
 import { loadNotebookLMConfig } from "./components/notebooklm-config.js";
 import { NotebookLMClient } from "./components/notebooklm-client.js";
 import { NotebookRegistry } from "./components/notebook-registry.js";
-import { handleKBCommand } from "./components/kb-command-handler.js";
+import { handleNLMCommand } from "./components/nlm-command-handler.js";
 import { SleepTrigger, loadSleepTriggerConfig } from "./components/sleep-trigger.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
@@ -115,17 +115,6 @@ async function main(): Promise<void> {
     }
   } else {
     logInfo("main", "📚 NotebookLM Layer 6 disabled");
-  }
-
-  // Load persona TOOLS.md for system prompt injection
-  let toolsPrompt = "";
-  try {
-    const thisDir = dirname(fileURLToPath(import.meta.url));
-    const toolsPath = join(thisDir, "..", "persona", "TOOLS.md");
-    toolsPrompt = readFileSync(toolsPath, "utf-8").trim();
-    logInfo("main", "📋 Loaded persona/TOOLS.md for system prompt");
-  } catch {
-    logDebug("main", "📋 No persona/TOOLS.md found, skipping");
   }
 
   const formatter = new ResponseFormatter();
@@ -712,7 +701,7 @@ async function main(): Promise<void> {
 
       if (text === "/nlm" || text.startsWith("/nlm ")) {
         const kbArgs = text.slice("/nlm".length).trim();
-        const result = await handleKBCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
+        const result = await handleNLMCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
         await telegramApi.sendMessage(chatId, result.text, { message_thread_id: threadId });
         return;
       }
@@ -789,7 +778,7 @@ async function main(): Promise<void> {
           // Assemble context BEFORE recording — prevents self-echo in search results
           const isSessionStart = pendingSessionStart.has(sessionKey);
           pendingSessionStart.delete(sessionKey);
-          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: toolsPrompt, isSessionStart });
+          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "", isSessionStart });
           memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
@@ -1272,7 +1261,7 @@ async function main(): Promise<void> {
 
       if (text === "/nlm" || text.startsWith("/nlm ")) {
         const kbArgs = text.slice("/nlm".length).trim();
-        const result = await handleKBCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
+        const result = await handleNLMCommand(kbArgs, nlmConfig, nlmClient, nlmRegistry);
         await discordApi.sendMessage(message.channelId, result.text);
         return;
       }
@@ -1346,7 +1335,7 @@ async function main(): Promise<void> {
           const chatId = parseInt(message.channelId, 10) || 0;
           const isSessionStart = pendingSessionStart.has(sessionKey);
           pendingSessionStart.delete(sessionKey);
-          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: toolsPrompt, isSessionStart });
+          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: "", isSessionStart });
         }
 
         const response = await transport.sendPrompt(sessionKey, prompt);
@@ -1509,16 +1498,17 @@ async function main(): Promise<void> {
 
   async function shutdown(): Promise<void> {
     logInfo("main", "🛑 Shutting down...");
+    const forceTimer = setTimeout(() => {
+      logWarn("main", "⚠️  Shutdown timed out — forcing exit");
+      process.exit(1);
+    }, 5_000);
+    forceTimer.unref();
+
     if (dashboardServer) {
       try { await dashboardServer.stop(); } catch { /* best-effort */ }
     }
     if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
-    try {
-      await memory?.shutdownCompaction();
-    } catch (err) {
-      logWarn("main", `Shutdown compaction error: ${err instanceof Error ? err.message : String(err)}`);
-    }
     memory?.close();
     transport.destroy();
     process.exit(0);

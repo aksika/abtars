@@ -40,7 +40,7 @@ mkdir -p "$AB_HOME/.kiro/steering"
 cp "$PROJECT_DIR/persona/SOUL.md" "$AB_HOME/.kiro/steering/SOUL.md"
 cp "$PROJECT_DIR/skills/memory-search/SKILL.md" "$AB_HOME/.kiro/steering/memory-search.md"
 cp "$PROJECT_DIR/skills/instant-store/SKILL.md" "$AB_HOME/.kiro/steering/instant-store.md"
-cp "$PROJECT_DIR/skills/knowledge-base/SKILL.md" "$AB_HOME/.kiro/steering/knowledge-base.md"
+cp "$PROJECT_DIR/skills/nlm/SKILL.md" "$AB_HOME/.kiro/steering/nlm.md"
 cp "$PROJECT_DIR/skills/topic-save/SKILL.md" "$AB_HOME/.kiro/steering/topic-save.md"
 
 # 4. Deploy launcher script + recall CLI
@@ -70,12 +70,12 @@ echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-sleep.js\" \"\$@\"" >> "$SLE
 chmod +x "$SLEEP_SCRIPT"
 ln -sf "$SLEEP_SCRIPT" "$HOME/.local/bin/agentbridge-sleep"
 
-# Deploy agentbridge-kb CLI (NotebookLM knowledge base)
-KB_SCRIPT="$AB_HOME/agentbridge-kb"
-echo '#!/usr/bin/env bash' > "$KB_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-kb.js\" \"\$@\"" >> "$KB_SCRIPT"
-chmod +x "$KB_SCRIPT"
-ln -sf "$KB_SCRIPT" "$HOME/.local/bin/agentbridge-kb"
+# Deploy agentbridge-nlm CLI (NotebookLM knowledge base)
+NLM_SCRIPT="$AB_HOME/agentbridge-nlm"
+echo '#!/usr/bin/env bash' > "$NLM_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-nlm.js\" \"\$@\"" >> "$NLM_SCRIPT"
+chmod +x "$NLM_SCRIPT"
+ln -sf "$NLM_SCRIPT" "$HOME/.local/bin/agentbridge-nlm"
 
 # 4. Done
 echo ""

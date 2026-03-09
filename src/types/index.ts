@@ -64,6 +64,6 @@ export type {
   NotebookInfo,
   NotebookRegistryEntry,
   NotebookRegistryData,
-  KBQueryResult,
-  KBErrorResult,
+  NLMQueryResult as KBQueryResult,
+  NLMErrorResult as KBErrorResult,
 } from "./notebooklm.js";

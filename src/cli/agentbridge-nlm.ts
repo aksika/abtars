@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /**
- * agentbridge-kb — CLI for agent-initiated knowledge base operations.
+ * agentbridge-nlm — CLI for agent-initiated knowledge base operations.
  *
  * Wraps the NotebookLM CLI to provide query, notebook management,
  * and source management via the Layer 6 knowledge base.
  *
  * Usage:
- *   agentbridge-kb query --query "What does the RFC say?" --chat-id 123
- *   agentbridge-kb query --query "auth requirements" --notebook research --chat-id 123
- *   agentbridge-kb notebooks list
- *   agentbridge-kb notebooks create --name "research" --description "Research papers"
- *   agentbridge-kb sources list --notebook research
- *   agentbridge-kb sources add --notebook research --type url --identifier https://example.com
- *   agentbridge-kb sources remove --notebook research --source-id abc123
+ *   agentbridge-nlm query --query "What does the RFC say?" --chat-id 123
+ *   agentbridge-nlm query --query "auth requirements" --notebook research --chat-id 123
+ *   agentbridge-nlm notebooks list
+ *   agentbridge-nlm notebooks create --name "research" --description "Research papers"
+ *   agentbridge-nlm sources list --notebook research
+ *   agentbridge-nlm sources add --notebook research --type url --identifier https://example.com
+ *   agentbridge-nlm sources remove --notebook research --source-id abc123
  */
 
 import { loadNotebookLMConfig } from "../components/notebooklm-config.js";
@@ -243,8 +243,8 @@ async function main() {
 }
 
 // Only run when executed as a script
-const isDirectRun = process.argv[1]?.endsWith("agentbridge-kb.ts") ||
-  process.argv[1]?.endsWith("agentbridge-kb.js");
+const isDirectRun = process.argv[1]?.endsWith("agentbridge-nlm.ts") ||
+  process.argv[1]?.endsWith("agentbridge-nlm.js");
 if (isDirectRun) {
   main();
 }

@@ -13,7 +13,7 @@ You have access to a persistent knowledge base powered by Google NotebookLM. Use
 Run this command using your shell tool:
 
 ```bash
-agentbridge-kb query --query "your question here" --chat-id <CHAT_ID>
+agentbridge-nlm query --query "your question here" --chat-id <CHAT_ID>
 ```
 
 ### Parameters

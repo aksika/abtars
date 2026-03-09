@@ -13,16 +13,16 @@ import type { NotebookLMClient } from "./notebooklm-client.js";
 import type { NotebookRegistry } from "./notebook-registry.js";
 import { logError } from "./logger.js";
 
-const TAG = "KBCommand";
+const TAG = "NLMCommand";
 
-export type KBCommandResult = { text: string };
+export type NLMCommandResult = { text: string };
 
-export async function handleKBCommand(
+export async function handleNLMCommand(
   args: string,
   config: NotebookLMConfig,
   client: NotebookLMClient | null,
   registry: NotebookRegistry | null,
-): Promise<KBCommandResult> {
+): Promise<NLMCommandResult> {
   if (!config.enabled || !client || !registry) {
     return { text: "📚 Knowledge base is disabled." };
   }
@@ -49,7 +49,7 @@ export async function handleKBCommand(
   }
 }
 
-async function handleList(client: NotebookLMClient, registry: NotebookRegistry): Promise<KBCommandResult> {
+async function handleList(client: NotebookLMClient, registry: NotebookRegistry): Promise<NLMCommandResult> {
   const result = await client.listNotebooks();
   if (!result.ok) return { text: `❌ ${result.error}` };
   if (result.data.length === 0) return { text: "📚 No notebooks found." };
@@ -64,7 +64,7 @@ async function handleCreate(
   name: string,
   client: NotebookLMClient,
   registry: NotebookRegistry,
-): Promise<KBCommandResult> {
+): Promise<NLMCommandResult> {
   if (!name) return { text: "Usage: /nlm create <name>" };
   const result = await client.createNotebook(name);
   if (!result.ok) return { text: `❌ ${result.error}` };
@@ -82,7 +82,7 @@ async function handleSources(
   notebookName: string,
   client: NotebookLMClient,
   registry: NotebookRegistry,
-): Promise<KBCommandResult> {
+): Promise<NLMCommandResult> {
   if (!notebookName) return { text: "Usage: /nlm sources <notebook-name>" };
   const nbId = registry.resolve(notebookName);
   if (!nbId) {
@@ -100,7 +100,7 @@ async function handleQuery(
   config: NotebookLMConfig,
   client: NotebookLMClient,
   registry: NotebookRegistry,
-): Promise<KBCommandResult> {
+): Promise<NLMCommandResult> {
   if (!question) return { text: "Usage: /nlm query <question>" };
   const notebookName = config.defaultNotebook;
   if (!notebookName) return { text: "❌ No default notebook configured (NOTEBOOKLM_DEFAULT_NOTEBOOK)." };
