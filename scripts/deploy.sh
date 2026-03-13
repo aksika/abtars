@@ -42,6 +42,7 @@ cp "$PROJECT_DIR/skills/memory-search/SKILL.md" "$AB_HOME/.kiro/steering/memory-
 cp "$PROJECT_DIR/skills/instant-store/SKILL.md" "$AB_HOME/.kiro/steering/instant-store.md"
 cp "$PROJECT_DIR/skills/nlm/SKILL.md" "$AB_HOME/.kiro/steering/nlm.md"
 cp "$PROJECT_DIR/skills/topic-save/SKILL.md" "$AB_HOME/.kiro/steering/topic-save.md"
+cp "$PROJECT_DIR/skills/mcporter/SKILL.md" "$AB_HOME/.kiro/steering/mcporter.md"
 
 # 4. Deploy launcher script + recall CLI
 echo "🚀 Deploying launcher + recall CLI..."
@@ -69,6 +70,19 @@ echo '#!/usr/bin/env bash' > "$SLEEP_SCRIPT"
 echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-sleep.js\" \"\$@\"" >> "$SLEEP_SCRIPT"
 chmod +x "$SLEEP_SCRIPT"
 ln -sf "$SLEEP_SCRIPT" "$HOME/.local/bin/agentbridge-sleep"
+
+# Deploy mcporter CLI (MCP tool access)
+MCPORTER_DIR="$HOME/workspace/mcporter"
+if [ -f "$MCPORTER_DIR/dist/cli.js" ]; then
+  MCPORTER_SCRIPT="$AB_HOME/mcporter"
+  echo '#!/usr/bin/env bash' > "$MCPORTER_SCRIPT"
+  echo "exec node \"$MCPORTER_DIR/dist/cli.js\" \"\$@\"" >> "$MCPORTER_SCRIPT"
+  chmod +x "$MCPORTER_SCRIPT"
+  ln -sf "$MCPORTER_SCRIPT" "$HOME/.local/bin/mcporter"
+  echo "   mcporter CLI linked"
+else
+  echo "   ⚠️  mcporter not built — skipping (run: cd ~/workspace/mcporter && npm run build)"
+fi
 
 # 4. Done
 echo ""

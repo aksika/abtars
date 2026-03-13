@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
 import { SecurityGate } from "./components/security-gate.js";
@@ -35,10 +35,43 @@ import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
 import { handleNLMCommand, loadNLMConfig } from "./components/nlm-command-handler.js";
 import { SleepTrigger, loadSleepTriggerConfig } from "./components/sleep-trigger.js";
+import { AgentApiServer } from "./components/agent-api-server.js";
+import { loadAgentApiConfig } from "./components/agent-api-config.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
 function stripDiscordMentions(text: string, botAppId: string): string {
   return text.replace(new RegExp(`<@!?${botAppId}>`, "g"), "").replace(/\s{2,}/g, " ").trim();
+}
+
+
+/** Run mcporter list and return a status summary. */
+function getMcporterStatus(): string {
+  try {
+    const raw = execSync("mcporter list --json 2>/dev/null", { timeout: 15_000 }).toString();
+    const data = JSON.parse(raw);
+    const servers = data.servers ?? [];
+    const ok = servers.filter((s: Record<string, unknown>) => s.status === "ok").length;
+    const total = servers.length;
+    const names = servers
+      .slice(0, 10)
+      .map((s: Record<string, unknown>) => `  ${s.status === "ok" ? "✅" : "❌"} ${s.name}`)
+      .join("\n");
+    return [
+      "📦 mcporter Status",
+      "",
+      `Servers: ${ok}/${total} online`,
+      "",
+      names,
+      total > 10 ? `  ... and ${total - 10} more` : "",
+    ].filter(Boolean).join("\n");
+  } catch {
+    try {
+      const ver = execSync("mcporter --version 2>/dev/null", { timeout: 5_000 }).toString().trim();
+      return `📦 mcporter v${ver} — installed but list failed (check config)`;
+    } catch {
+      return "📦 mcporter — not installed or not in PATH";
+    }
+  }
 }
 
 /** Format milliseconds as human-readable uptime (e.g. "2d 5h 13m"). */
@@ -687,6 +720,11 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (text === "/mcporter") {
+        await telegramApi.sendMessage(chatId, getMcporterStatus(), { message_thread_id: threadId });
+        return;
+      }
+
       if (text === "/help") {
         const helpText = [
           "📋 Available commands:",
@@ -1247,6 +1285,11 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (text === "/mcporter") {
+        await discordApi.sendMessage(message.channelId, getMcporterStatus());
+        return;
+      }
+
       if (text === "/help") {
         const helpText = [
           "📋 Available commands:",
@@ -1413,7 +1456,10 @@ async function main(): Promise<void> {
       logWarn("main", `Could not read logo: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const dashboardHtml = renderDashboardHtml(logoBase64);
+    const agentApiOpts = platforms.agent
+      ? (() => { try { return loadAgentApiConfig(process.env as Record<string, string | undefined>); } catch { return undefined; } })()
+      : undefined;
+    const dashboardHtml = renderDashboardHtml(logoBase64, agentApiOpts ? { agentApi: { port: agentApiOpts.port, allowedIps: agentApiOpts.allowedIps } } : undefined);
 
     // Build getStatus function that assembles StatusSnapshot from all subsystem refs
     const getStatus = () => {
@@ -1475,6 +1521,20 @@ async function main(): Promise<void> {
     logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort} (token: ${dashConfig.webAuthToken})`);
   }
 
+  // --- Agent API wiring (conditional) ---
+  let agentApiServer: AgentApiServer | null = null;
+
+  if (platforms.agent) {
+    const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
+    agentApiServer = new AgentApiServer({
+      config: agentConfig,
+      transport: () => transport,
+      memory,
+    });
+    await agentApiServer.start();
+    logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port} (allowed: ${agentConfig.allowedIps.join(", ")})`);
+  }
+
   async function shutdown(): Promise<void> {
     logInfo("main", "🛑 Shutting down...");
     const forceTimer = setTimeout(() => {
@@ -1483,6 +1543,9 @@ async function main(): Promise<void> {
     }, 5_000);
     forceTimer.unref();
 
+    if (agentApiServer) {
+      try { await agentApiServer.stop(); } catch { /* best-effort */ }
+    }
     if (dashboardServer) {
       try { await dashboardServer.stop(); } catch { /* best-effort */ }
     }

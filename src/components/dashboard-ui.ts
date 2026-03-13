@@ -38,7 +38,15 @@ function formatBytes(bytes) {
 
 // ── Main Render Function ────────────────────────────────────────────────────
 
-export function renderDashboardHtml(logoBase64: string): string {
+export function renderDashboardHtml(logoBase64: string, opts?: { agentApi?: { port: number; allowedIps: string[] } }): string {
+  const agentHtml = opts?.agentApi
+    ? `<div class="platform-item">
+      <span class="name">Agent API</span>
+      <span>
+        <span class="badge running" title="Port ${opts.agentApi.port} — allowed: ${opts.agentApi.allowedIps.join(", ")}">⚠️ port ${opts.agentApi.port}</span>
+      </span>
+    </div>`
+    : "";
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -57,7 +65,7 @@ ${getHeaderHtml(logoBase64)}
 <div class="dashboard-layout">
 <main class="grid">
   ${getBridgeHealthCard()}
-  ${getPlatformsCard()}
+  ${getPlatformsCard(agentHtml)}
   ${getTransportCard()}
   ${getMemoryCard()}
   ${getHeartbeatCard()}
@@ -508,7 +516,7 @@ function getBridgeHealthCard(): string {
 </div>`;
 }
 
-function getPlatformsCard(): string {
+function getPlatformsCard(agentHtml: string): string {
   return `
 <div class="card" id="card-platforms">
   <h2>Platforms</h2>
@@ -530,7 +538,7 @@ function getPlatformsCard(): string {
         <button class="btn-start" onclick="togglePlatform('discord','start')" id="plat-discord-start">Start</button>
         <button class="btn-stop" onclick="togglePlatform('discord','stop')" id="plat-discord-stop">Stop</button>
       </span>
-    </div>
+    </div>${agentHtml}
   </div>
 
   <div class="platform-group">
