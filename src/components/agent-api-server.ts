@@ -14,8 +14,8 @@ export interface TrafficEntry {
   ts: number;
   ip: string;
   endpoint: string;
-  promptSnippet: string;
-  responseSnippet: string;
+  prompt: string;
+  response: string;
   durationMs: number;
   status: number;
 }
@@ -140,7 +140,7 @@ export class AgentApiServer {
     const body = JSON.parse(await readBody(req));
     const prompt = body.prompt;
     if (!prompt || typeof prompt !== "string") {
-      this.pushTraffic({ ts: start, ip, endpoint: "prompt", promptSnippet: "", responseSnippet: "400: prompt required", durationMs: Date.now() - start, status: 400 });
+      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt: "", response: "400: prompt required", durationMs: Date.now() - start, status: 400 });
       res.writeHead(400).end(JSON.stringify({ error: "prompt required" }));
       return;
     }
@@ -149,7 +149,7 @@ export class AgentApiServer {
     const t = this.transport();
 
     if (!t.isReady) {
-      this.pushTraffic({ ts: start, ip, endpoint: "prompt", promptSnippet: prompt.slice(0, 80), responseSnippet: "503: transport not ready", durationMs: Date.now() - start, status: 503 });
+      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt: prompt, response: "503: transport not ready", durationMs: Date.now() - start, status: 503 });
       res.writeHead(503).end(JSON.stringify({ error: "transport not ready" }));
       return;
     }
@@ -169,7 +169,7 @@ export class AgentApiServer {
 
     this.log("ASSISTANT", response);
 
-    this.pushTraffic({ ts: start, ip, endpoint: "prompt", promptSnippet: prompt.slice(0, 80), responseSnippet: response.slice(0, 120), durationMs: Date.now() - start, status: 200 });
+    this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt: prompt, response: response, durationMs: Date.now() - start, status: 200 });
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ response, sessionKey }));
   }
 
@@ -179,14 +179,14 @@ export class AgentApiServer {
     this.rulesInjected = false;
     this.log("SYSTEM", "Session reset");
     this.logFile = this.newLogFile();
-    this.pushTraffic({ ts: start, ip: "", endpoint: "reset", promptSnippet: "", responseSnippet: "ok", durationMs: Date.now() - start, status: 200 });
+    this.pushTraffic({ ts: start, ip: "", endpoint: "reset", prompt: "", response: "ok", durationMs: Date.now() - start, status: 200 });
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
   }
 
   private handleStatus(res: ServerResponse): void {
     const start = Date.now();
     const t = this.transport();
-    this.pushTraffic({ ts: start, ip: "", endpoint: "status", promptSnippet: "", responseSnippet: `ready=${t.isReady}`, durationMs: Date.now() - start, status: 200 });
+    this.pushTraffic({ ts: start, ip: "", endpoint: "status", prompt: "", response: `ready=${t.isReady}`, durationMs: Date.now() - start, status: 200 });
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
       ready: t.isReady,
       sessionKey: this.config.sessionKey,

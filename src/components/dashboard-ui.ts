@@ -477,8 +477,8 @@ header h1 {
 .a2a-endpoint.reset { color: #ff9800; }
 .a2a-endpoint.status { color: #888; }
 .a2a-body { color: #ccc; }
-.a2a-body .a2a-prompt { color: #a0c4ff; }
-.a2a-body .a2a-response { color: #888; margin-top: 2px; }
+.a2a-body .a2a-prompt { color: #a0c4ff; white-space: pre-wrap; word-break: break-word; }
+.a2a-body .a2a-response { color: #888; margin-top: 2px; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; }
 .a2a-body .a2a-meta { color: #555; font-size: 0.7rem; }
 .a2a-empty { color: #555; text-align: center; padding: 40px; }
 
@@ -1001,10 +1001,10 @@ function getScript(): string {
       var epClass = e.endpoint === 'prompt' ? 'prompt' : e.endpoint === 'reset' ? 'reset' : 'status';
       var body = '';
       if (e.endpoint === 'prompt') {
-        body = '<div class="a2a-prompt">→ ' + escHtml(e.promptSnippet) + '</div>';
-        if (e.responseSnippet) body += '<div class="a2a-response">← ' + escHtml(e.responseSnippet) + '</div>';
+        body = '<div class="a2a-prompt">→ ' + escHtml(e.prompt) + '</div>';
+        if (e.response) body += '<div class="a2a-response">← ' + escHtml(e.response) + '</div>';
       } else {
-        body = '<div class="a2a-response">' + escHtml(e.responseSnippet || e.endpoint) + '</div>';
+        body = '<div class="a2a-response">' + escHtml(e.response || e.endpoint) + '</div>';
       }
       body += '<div class="a2a-meta">' + (e.ip || '—') + ' · ' + e.durationMs + 'ms · ' + e.status + '</div>';
       html += '<div class="a2a-entry"><span class="a2a-time">' + time + '</span><span class="a2a-endpoint ' + epClass + '">' + e.endpoint + '</span><div class="a2a-body">' + body + '</div></div>';
