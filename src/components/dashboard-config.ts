@@ -53,6 +53,8 @@ export function validateDashboardConfig(
 
 // ── Data Models ─────────────────────────────────────────────────────────────
 
+import type { TrafficEntry } from "./agent-api-server.js";
+
 export type StatusSnapshot = {
   timestamp: string;
   uptimeMs: number;
@@ -61,6 +63,7 @@ export type StatusSnapshot = {
   memory: MemoryStatus;
   heartbeat: HeartbeatStatus;
   notebooklm: { enabled: boolean } | null;
+  agentApi: { traffic: TrafficEntry[] } | null;
 };
 
 export type PlatformStates = {
@@ -141,6 +144,7 @@ export type SubsystemRefs = {
   } | null;
   chatId?: number;
   notebooklm: boolean;
+  agentApi: { getTrafficLog: () => TrafficEntry[] } | null;
 };
 
 /**
@@ -203,6 +207,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     memory,
     heartbeat,
     notebooklm: refs.notebooklm ? { enabled: true } : null,
+    agentApi: refs.agentApi ? { traffic: refs.agentApi.getTrafficLog() } : null,
   };
 }
 

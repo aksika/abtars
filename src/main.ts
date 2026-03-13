@@ -1487,6 +1487,7 @@ async function main(): Promise<void> {
             }
           : null,
         notebooklm: nlmConfig.enabled,
+        agentApi: agentApiServer ? { getTrafficLog: () => agentApiServer!.getTrafficLog() } : null,
       };
       return buildStatusSnapshot(refs);
     };

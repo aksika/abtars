@@ -43,6 +43,8 @@ cp "$PROJECT_DIR/skills/instant-store/SKILL.md" "$AB_HOME/.kiro/steering/instant
 cp "$PROJECT_DIR/skills/nlm/SKILL.md" "$AB_HOME/.kiro/steering/nlm.md"
 cp "$PROJECT_DIR/skills/topic-save/SKILL.md" "$AB_HOME/.kiro/steering/topic-save.md"
 cp "$PROJECT_DIR/skills/mcporter/SKILL.md" "$AB_HOME/.kiro/steering/mcporter.md"
+mkdir -p "$AB_HOME/skills/agents"
+cp "$PROJECT_DIR/skills/agents/"*.md "$AB_HOME/skills/agents/"
 
 # 4. Deploy launcher script + recall CLI
 echo "🚀 Deploying launcher + recall CLI..."

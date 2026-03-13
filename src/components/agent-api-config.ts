@@ -4,6 +4,7 @@ export interface AgentApiConfig {
   token: string;
   sessionKey: string;
   chatId: number;
+  agentCodename: string;
 }
 
 export function loadAgentApiConfig(env: Record<string, string | undefined>): AgentApiConfig {
@@ -18,5 +19,6 @@ export function loadAgentApiConfig(env: Record<string, string | undefined>): Age
     token: env["AGENT_API_TOKEN"] ?? "",
     sessionKey: env["AGENT_SESSION_KEY"] || "agent:molty",
     chatId: parseInt(env["AGENT_CHAT_ID"] || "1", 10),
+    agentCodename: (env["AGENT_CODENAME"] || "MOLTY").replace(/[^a-zA-Z0-9_]/g, ""),
   };
 }

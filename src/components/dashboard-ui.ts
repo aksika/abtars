@@ -43,7 +43,7 @@ export function renderDashboardHtml(logoBase64: string, opts?: { agentApi?: { po
     ? `<div class="platform-item">
       <span class="name">Agent API</span>
       <span>
-        <span class="badge running" title="Port ${opts.agentApi.port} — allowed: ${opts.agentApi.allowedIps.join(", ")}">⚠️ port ${opts.agentApi.port}</span>
+        <span class="badge running clickable" title="Port ${opts.agentApi.port} — allowed: ${opts.agentApi.allowedIps.join(", ")}" onclick="toggleA2APanel()">⚠️ port ${opts.agentApi.port}</span>
       </span>
     </div>`
     : "";
@@ -71,6 +71,7 @@ ${getHeaderHtml(logoBase64)}
   ${getHeartbeatCard()}
 </main>
 ${getSearchPanel()}
+${getA2APanel()}
 </div>
 <script>
 ${formatBytesHelper()}
@@ -184,6 +185,8 @@ header h1 {
 }
 
 .badge.running  { background: rgba(76,175,80,0.2); color: #4caf50; }
+.badge.clickable { cursor: pointer; transition: background 0.2s; }
+.badge.clickable:hover { background: rgba(76,175,80,0.35); }
 .badge.stopped  { background: rgba(255,152,0,0.2); color: #ff9800; }
 .badge.error    { background: rgba(244,67,54,0.2); color: #f44336; }
 .badge.disabled { background: rgba(100,100,100,0.2); color: #777; }
@@ -433,6 +436,52 @@ header h1 {
   font-size: 0.8rem;
 }
 
+/* A2A Traffic Panel */
+.a2a-panel {
+  background: #16213e;
+  border-top: 1px solid #0f3460;
+  padding: 16px 24px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.a2a-panel .a2a-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+.a2a-panel .a2a-header h3 { margin: 0; font-size: 0.95rem; color: #a0c4ff; }
+.a2a-panel .a2a-count { font-size: 0.75rem; color: #888; }
+.a2a-entries {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  font-size: 0.8rem;
+}
+.a2a-entry {
+  padding: 8px 10px;
+  border-bottom: 1px solid #0f3460;
+  display: grid;
+  grid-template-columns: 70px 60px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+.a2a-entry:hover { background: rgba(160,196,255,0.05); }
+.a2a-time { color: #888; font-family: monospace; font-size: 0.75rem; }
+.a2a-endpoint { font-weight: 500; }
+.a2a-endpoint.prompt { color: #4caf50; }
+.a2a-endpoint.reset { color: #ff9800; }
+.a2a-endpoint.status { color: #888; }
+.a2a-body { color: #ccc; }
+.a2a-body .a2a-prompt { color: #a0c4ff; }
+.a2a-body .a2a-response { color: #888; margin-top: 2px; }
+.a2a-body .a2a-meta { color: #555; font-size: 0.7rem; }
+.a2a-empty { color: #555; text-align: center; padding: 40px; }
+
 /* Responsive */
 @media (max-width: 768px) {
   .grid {
@@ -646,6 +695,19 @@ function getSearchPanel(): string {
 </div>`;
 }
 
+function getA2APanel(): string {
+  return `
+<div id="a2a-panel" class="a2a-panel" style="display:none;">
+  <div class="a2a-header">
+    <h3>🔗 A2A Traffic — Kiro Professor ↔ Agents</h3>
+    <span class="a2a-count" id="a2a-count"></span>
+  </div>
+  <div class="a2a-entries" id="a2a-entries">
+    <div class="a2a-empty">No traffic yet. Waiting for agent requests...</div>
+  </div>
+</div>`;
+}
+
 // ── Inline Script ───────────────────────────────────────────────────────────
 
 function getScript(): string {
@@ -827,6 +889,9 @@ function getScript(): string {
       el = document.getElementById('hb-interval');
       if (el) el.textContent = snap.heartbeat.intervalMs ? (snap.heartbeat.intervalMs / 1000) + 's' : '—';
     }
+
+    // A2A Traffic
+    updateA2ATraffic(snap.agentApi);
   }
 
   function updatePlatformRow(name, state) {
@@ -895,7 +960,57 @@ function getScript(): string {
   window.toggleSearchPanel = function() {
     var panel = document.getElementById('search-panel');
     if (panel) panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+    // Hide A2A when search opens
+    var a2a = document.getElementById('a2a-panel');
+    if (a2a && panel && panel.style.display === 'flex') a2a.style.display = 'none';
   };
+
+  // ── A2A Traffic Panel ──────────────────────────────────────────────
+  var lastTrafficCount = 0;
+
+  window.toggleA2APanel = function() {
+    var panel = document.getElementById('a2a-panel');
+    if (panel) panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+    // Hide search when A2A opens
+    var search = document.getElementById('search-panel');
+    if (search && panel && panel.style.display === 'flex') search.style.display = 'none';
+  };
+
+  function updateA2ATraffic(agentApi) {
+    if (!agentApi || !agentApi.traffic) return;
+    var entries = agentApi.traffic;
+    if (entries.length === lastTrafficCount) return;
+    lastTrafficCount = entries.length;
+
+    var countEl = document.getElementById('a2a-count');
+    if (countEl) countEl.textContent = entries.length + ' entries';
+
+    var container = document.getElementById('a2a-entries');
+    if (!container) return;
+
+    if (entries.length === 0) {
+      container.innerHTML = '<div class="a2a-empty">No traffic yet. Waiting for agent requests...</div>';
+      return;
+    }
+
+    // Show newest first
+    var html = '';
+    for (var i = entries.length - 1; i >= 0; i--) {
+      var e = entries[i];
+      var time = new Date(e.ts).toLocaleTimeString();
+      var epClass = e.endpoint === 'prompt' ? 'prompt' : e.endpoint === 'reset' ? 'reset' : 'status';
+      var body = '';
+      if (e.endpoint === 'prompt') {
+        body = '<div class="a2a-prompt">→ ' + escHtml(e.promptSnippet) + '</div>';
+        if (e.responseSnippet) body += '<div class="a2a-response">← ' + escHtml(e.responseSnippet) + '</div>';
+      } else {
+        body = '<div class="a2a-response">' + escHtml(e.responseSnippet || e.endpoint) + '</div>';
+      }
+      body += '<div class="a2a-meta">' + (e.ip || '—') + ' · ' + e.durationMs + 'ms · ' + e.status + '</div>';
+      html += '<div class="a2a-entry"><span class="a2a-time">' + time + '</span><span class="a2a-endpoint ' + epClass + '">' + e.endpoint + '</span><div class="a2a-body">' + body + '</div></div>';
+    }
+    container.innerHTML = html;
+  }
 
   // ── Keyword Filters ────────────────────────────────────────────────
   var keywordFilters = [];
