@@ -1,4 +1,5 @@
 ---
+alwaysApply: true
 name: memory-search
 description: Search persistent memory for recalled facts, decisions, preferences, and past conversations
 user-invocable: false

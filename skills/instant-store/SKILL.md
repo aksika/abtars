@@ -1,4 +1,5 @@
 ---
+alwaysApply: true
 name: instant-store
 description: Immediately persist important information from user messages as memories with emotional context
 user-invocable: false
