@@ -119,7 +119,7 @@ export class AgentApiServer {
       const today = new Date().toISOString().slice(0, 10);
       const dir = join(this.workingDir, "memory", "working", today);
       mkdirSync(dir, { recursive: true });
-      const dest = join(dir, "transcript_a2a.md");
+      const dest = join(dir, "transcript_a2a.chat");
       await this.agentTransport.sendPrompt("a2a:save", `/chat save ${dest}`);
       logInfo(TAG, `A2A chat saved to ${dest}`);
     } catch (e) {

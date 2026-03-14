@@ -107,7 +107,7 @@ export class CompactionEngine {
         : now.toISOString().slice(0, 10); // YYYY-MM-DD
       const workingDir = join(this.config.memoryDir, "working", dateStr);
       mkdirSync(workingDir, { recursive: true });
-      const filePath = join(workingDir, `transcript_${params.chatId}.md`);
+      const filePath = join(workingDir, `transcript_${params.chatId}.chat`);
 
       // Append to existing daily file if it already exists
       if (existsSync(filePath)) {

@@ -219,7 +219,7 @@ async function main(): Promise<void> {
     const today = new Date().toISOString().slice(0, 10);
     const dir = join(memoryConfig.memoryDir, "working", today);
     mkdirSync(dir, { recursive: true });
-    const dest = join(dir, `transcript_${chatId}.md`);
+    const dest = join(dir, `transcript_${chatId}.chat`);
     try {
       await transport.sendPrompt(sessionKey, `/chat save ${dest}`);
       logInfo("main", `Chat saved to ${dest}`);

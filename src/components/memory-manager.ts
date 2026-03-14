@@ -768,7 +768,7 @@ export class MemoryManager {
           const workingDir = join(this.config.memoryDir, "working", dateStr);
           mkdirSync(workingDir, { recursive: true });
 
-          const safetyPath = join(workingDir, `transcript_${params.chatId}.md`);
+          const safetyPath = join(workingDir, `transcript_${params.chatId}.chat`);
           const rawContent = messages
             .map((m) => `[${m.role}] ${m.content}`)
             .join("\n");
