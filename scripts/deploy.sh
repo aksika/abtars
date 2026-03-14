@@ -98,7 +98,13 @@ else
   echo "   ⚠️  mcporter not built — skipping (run: cd ~/workspace/mcporter && npm run build)"
 fi
 
-# 4. Done
+# 5. Restart tmux/kiro session (unless --quick)
+if [ "$QUICK" = false ]; then
+  echo "🔄 Restarting kiro tmux session..."
+  "$PROJECT_DIR/scripts/tmux-session.sh"
+fi
+
+# 6. Done
 echo ""
 echo "✅ Deploy complete."
 echo ""
