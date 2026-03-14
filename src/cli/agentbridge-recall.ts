@@ -18,7 +18,8 @@ import { MemoryIndex } from "../components/memory-index.js";
 import type { SearchResult, MemorySearchResult } from "../types/memory.js";
 
 const DB_PATH = join(homedir(), ".agentbridge", "memory", "memory.db");
-const RESULT_LIMIT = 10;
+const DEFAULT_LIMIT = 10;
+const MAX_LIMIT = 50;
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -27,6 +28,7 @@ function parseArgs() {
   let timeStart: number | undefined;
   let timeEnd: number | undefined;
   let chatId = 0;
+  let limit = DEFAULT_LIMIT;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -35,14 +37,15 @@ function parseArgs() {
       case "--time-start": timeStart = parseInt(args[++i] ?? "", 10) || undefined; break;
       case "--time-end": timeEnd = parseInt(args[++i] ?? "", 10) || undefined; break;
       case "--chat-id": chatId = parseInt(args[++i] ?? "", 10) || 0; break;
+      case "--limit": limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(args[++i] ?? "", 10) || DEFAULT_LIMIT)); break;
     }
   }
 
   if (!keywords.length || !chatId) {
-    console.error("Usage: agentbridge-recall --keywords \"kw1,kw2\" --chat-id <id> [--original <kw>] [--time-start <ms>] [--time-end <ms>]");
+    console.error("Usage: agentbridge-recall --keywords \"kw1,kw2\" --chat-id <id> [--original <kw>] [--limit <N>] [--time-start <ms>] [--time-end <ms>]");
     process.exit(1);
   }
-  return { keywords, original, timeStart, timeEnd, chatId };
+  return { keywords, original, timeStart, timeEnd, chatId, limit };
 }
 
 if (!existsSync(DB_PATH)) {
@@ -55,7 +58,7 @@ const db = new Database(DB_PATH, { readonly: true });
 
 try {
   const index = new MemoryIndex(db);
-  const searchOpts = { chatId: params.chatId, startTime: params.timeStart, endTime: params.timeEnd, limit: RESULT_LIMIT * 3 };
+  const searchOpts = { chatId: params.chatId, startTime: params.timeStart, endTime: params.timeEnd, limit: params.limit * 3 };
   const query = params.keywords.join(" ");
 
   type Out = { content: string; date: string; source: string; score: number };
@@ -72,8 +75,8 @@ try {
   // Stage 1: FTS5
   for (const r of index.search(query, searchOpts)) add(r, "fts");
 
-  // Stage 2: Relaxed FTS5 (OR-style, drops short tokens)
-  if (results.length === 0) {
+  // Stage 2: Relaxed FTS5 (OR-style, drops short tokens) — always run when limit > 10
+  if (results.length === 0 || params.limit > 10) {
     const relaxed = query.split(/\s+/).filter(t => t.length >= 3).join(" OR ");
     if (relaxed && relaxed !== query) {
       for (const r of index.search(relaxed, searchOpts)) add(r, "relaxed");
@@ -100,7 +103,7 @@ try {
 
   // Stage 6: Extracted memories — original language (L4)
   if (params.original) {
-    for (const r of index.searchOriginal(params.original, { chatId: params.chatId, limit: RESULT_LIMIT * 3 })) addExtracted(r, "extracted:original");
+    for (const r of index.searchOriginal(params.original, { chatId: params.chatId, limit: params.limit * 3 })) addExtracted(r, "extracted:original");
   }
 
   // Stage 7: Compaction summaries
@@ -118,7 +121,7 @@ try {
   }
 
   results.sort((a, b) => b.score - a.score);
-  console.log(JSON.stringify(results.slice(0, RESULT_LIMIT), null, 2));
+  console.log(JSON.stringify(results.slice(0, params.limit), null, 2));
 } finally {
   db.close();
 }
