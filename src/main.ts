@@ -801,16 +801,11 @@ async function main(): Promise<void> {
 
         if (memory) {
           // Assemble context BEFORE recording — prevents self-echo in search results
-          const isSessionStart = pendingSessionStart.has(sessionKey);
           pendingSessionStart.delete(sessionKey);
-          if (config.kiroTransport === "tmux") {
-            // tmux: kiro-cli has its own steering + conversation state.
-            // Only inject recalled memories, not soul/working memory.
-            const recalled = await memory.recallForPrompt(chatId, prompt);
-            if (recalled) prompt = `[RECALLED MEMORIES]\n${recalled}\n\n${prompt}`;
-          } else {
-            prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: soulPrompt, isSessionStart });
-          }
+          // Both transports: kiro-cli loads steering via --agent config.
+          // Only inject recalled memories, not soul/working memory.
+          const recalled = await memory.recallForPrompt(chatId, prompt);
+          if (recalled) prompt = `[RECALLED MEMORIES]\n${recalled}\n\n${prompt}`;
           logDebug("main", `Context (${prompt.length} chars, ${config.kiroTransport})`);
           memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
