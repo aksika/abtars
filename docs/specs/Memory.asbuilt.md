@@ -2,7 +2,7 @@
 
 ## Overview
 
-The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, hierarchical memory consolidation (daily → weekly → quarterly), external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, and an automated overnight sleep maintenance cycle.
+The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, hierarchical memory consolidation (daily → weekly → quarterly), external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, and an automated overnight sleep maintenance cycle, emoji stripping before DB indexing, and regex-based prompt injection scanning on A2A inbound messages.
 
 **Recall architecture**: The bridge does NOT inject recalled memories or context into the prompt. The LLM agent handles all recall autonomously — it reads the `memory-search.md` steering file, decides when to search, extracts relevant keywords from user input, and invokes `agentbridge-recall` via `execute_bash`. This leverages the LLM's natural language understanding for keyword extraction instead of a heuristic pipeline.
 
@@ -15,6 +15,7 @@ The local memory layer provides SQLite-backed persistence, JSONL transcript file
 | Search Enhancements | Heartbeat extraction, English-normalized storage, agent recall, temporal decay, MMR | ✅ Complete |
 | Instant Memory Store | Agent-initiated storage, emotion scoring, emotion-boosted ranking | ✅ Complete |
 | Sleep CLI | Automated overnight maintenance: state gathering, subagent-driven cleanup, audit trail | ✅ Complete |
+| Data Integrity | Emoji stripping (DB indexing), A2A prompt injection scanning (22 patterns) | ✅ Complete |
 | Phase 3 — Intelligence | Proactive recall, importance scoring, contradiction detection | 📋 Designed |
 
 ---
@@ -300,6 +301,7 @@ src/
     vector-index.ts        # Model-version-aware cosine similarity
     ingestion-pipeline.ts  # YouTube/PDF/text/markdown ingestion
     reflection-engine.ts   # LLM-generated meta-summaries
+    prompt-scanner.ts      # A2A prompt injection scanning (22 patterns)
     recall-fallback-pipeline.ts # Multi-stage search cascade
     intent-detector.ts     # Recall intent + temporal range detection
   cli/
@@ -373,6 +375,14 @@ src/
 | SleepPromptBuilder | `components/sleep-prompt-builder.ts` | Builds comprehensive maintenance prompt for subagent |
 | SleepCycleRunner | `components/sleep-cycle-runner.ts` | Daily->weekly (7 files) and weekly->quarterly (4 files) rollups |
 
+### Data Integrity
+
+| Component | File | Notes |
+|-----------|------|-------|
+| stripEmojis | `components/memory-manager.ts` | Strips `\p{Emoji_Presentation}` and `\p{Extended_Pictographic}` from message content before DB/FTS5 indexing. JSONL transcripts retain raw emojis for audit. Emotion captured via `emotion_score`, not glyphs |
+| PromptScanner | `components/prompt-scanner.ts` | 22 compiled regex patterns in 3 categories (prompt injection 14, exfiltration 5, destructive 3) + 10 invisible unicode chars. `scanPrompt(text)` returns `null` if clean or `{ patternId, matched }` if blocked |
+| A2A scan integration | `components/agent-api-server.ts` | Calls `scanPrompt()` in `handlePrompt()` after body parsing, before transport spawn. On match: HTTP 200 with graceful refusal message (not 4xx), no kiro-cli spawn, blocked content never enters memory DB |
+
 ### Phase 3 -- Intelligence (Designed, Not Implemented)
 
 Proactive Recall, ImportanceScorer, ContradictionDetector, Cross-Channel Linking, FeedbackTracker, Topic-Based Chunking.
@@ -427,10 +437,11 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 2. **LLM Callback**: `memory.setLlmCall(...)` wires transport for compaction, context assembly, reflections, extraction
 3. **Heartbeat Start**: `memory.startHeartbeat()` registers memory-extraction + consolidation + sleep-trigger cron tasks
 4. **Sleep Startup Check**: `SleepTrigger.shouldRunOnStartup()` -> spawns `agentbridge-sleep.js` detached if needed
-5. **Message In**: `memory.recordMessage()` -> JSONL append -> FTS5 index -> optional vector index -> prune -> disk budget check every 100 writes
+5. **Message In**: `memory.recordMessage()` -> JSONL append (raw, with emojis) -> `stripEmojis()` on content -> FTS5 index (emoji-free) -> optional vector index -> prune -> disk budget check every 100 writes
 6. **Background Extraction** (heartbeat): MemoryExtractor queries unprocessed transcripts -> LLM extracts structured memories with emotion scores -> dual-column `content_en` + `content_original` -> FTS5 auto-index -> watermark advanced
 7. **Instant Storage**: Agent invokes `agentbridge-store` CLI -> validates -> clamps emotion -> inserts `extracted_memories` -> advances watermark
 8. **Prompt Path**: Bridge sends raw user message to kiro-cli (no context injection). Agent reads `memory-search.md` steering, decides if recall is needed, invokes `agentbridge-recall` via `execute_bash` with extracted keywords. ContextAssembler (4-tier) exists but is not used in the main Telegram/Discord prompt path.
+8b. **A2A Prompt Scanning**: Inbound A2A messages pass through `scanPrompt()` before transport spawn. 22 regex patterns + invisible unicode detection. On match: HTTP 200 with graceful refusal, no kiro-cli spawn, no memory recording. Blocked content never enters C2/C3.
 9. **Agent Search**: `agentbridge-recall` -> 7-stage cascade (FTS5 AND -> relaxed OR -> substring -> original-language -> extracted memories -> compactions) -> merge + deduplicate -> temporal decay -> MMR re-ranking
 10. **Idle Chat Save**: After 10min inactivity, bridge sends `/chat save` to kiro-cli, dumping full conversation (incl. reasoning) to `working/{date}/transcript_{chatId}.chat`. Also triggered before `/reset`. A2A sessions save `transcript_a2a.chat` before idle timeout kill.
 11. **Auto-Compaction**: When context window exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), writes safety-net transcript to working dir, sends `/compact` to Kiro CLI, updates watermark
