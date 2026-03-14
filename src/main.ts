@@ -1532,7 +1532,8 @@ async function main(): Promise<void> {
     const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
     agentApiServer = new AgentApiServer({
       config: agentConfig,
-      transport: () => transport,
+      cliPath: config.kiroCLIPath,
+      workingDir: config.workingDir,
       memory,
     });
     await agentApiServer.start();

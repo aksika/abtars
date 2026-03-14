@@ -4,11 +4,13 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./kiro-transport.js";
+import { AcpTransport } from "./acp-transport.js";
 import { MemoryManager } from "./memory-manager.js";
-import { logWarn } from "./logger.js";
+import { logInfo, logWarn } from "./logger.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
+const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
 export interface TrafficEntry {
   ts: number;
@@ -22,12 +24,12 @@ export interface TrafficEntry {
 
 interface AgentApiDeps {
   config: AgentApiConfig;
-  transport: () => IKiroTransport;
+  cliPath: string;
+  workingDir: string;
   memory: MemoryManager | null;
 }
 
 function normalizeIp(raw: string): string {
-  // Strip IPv4-mapped IPv6 prefix
   return raw.replace(/^::ffff:/, "");
 }
 
@@ -43,17 +45,21 @@ function readBody(req: IncomingMessage): Promise<string> {
 export class AgentApiServer {
   private server;
   private config: AgentApiConfig;
-  private transport: () => IKiroTransport;
+  private cliPath: string;
+  private workingDir: string;
   private memory: MemoryManager | null;
   private trafficLog: TrafficEntry[] = [];
   private agentRules: string;
   private rulesInjected = false;
   private logDir: string;
   private logFile: string;
+  private agentTransport: AcpTransport | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
-    this.transport = deps.transport;
+    this.cliPath = deps.cliPath;
+    this.workingDir = deps.workingDir;
     this.memory = deps.memory;
     this.server = createServer((req, res) => this.handle(req, res));
     this.logDir = join(process.env.HOME ?? "", ".agentbridge/logs/agents");
@@ -82,7 +88,37 @@ export class AgentApiServer {
   }
 
   async stop(): Promise<void> {
+    this.killAgentTransport();
     return new Promise((resolve) => this.server.close(() => resolve()));
+  }
+
+  /** Spawn a dedicated kiro-cli ACP process for A2A. No --agent flag (no SOUL needed). */
+  private async ensureAgentTransport(): Promise<AcpTransport> {
+    if (this.agentTransport?.isReady) {
+      this.resetIdleTimer();
+      return this.agentTransport;
+    }
+    logInfo(TAG, "Spawning dedicated kiro-cli for A2A");
+    this.agentTransport = new AcpTransport(this.cliPath, this.workingDir, { skipAgent: true });
+    await this.agentTransport.initialize();
+    this.resetIdleTimer();
+    return this.agentTransport;
+  }
+
+  private resetIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.killAgentTransport(), IDLE_TIMEOUT_MS);
+  }
+
+  private killAgentTransport(): void {
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+    if (!this.agentTransport) return;
+    logInfo(TAG, "A2A idle timeout — flushing memory, closing log, killing kiro-cli");
+    this.log("SYSTEM", "Idle timeout — session closed");
+    this.agentTransport.destroy();
+    this.agentTransport = null;
+    this.rulesInjected = false;
+    this.logFile = this.newLogFile();
   }
 
   getTrafficLog(): TrafficEntry[] {
@@ -145,14 +181,16 @@ export class AgentApiServer {
       return;
     }
 
-    const { sessionKey, chatId } = this.config;
-    const t = this.transport();
-
-    if (!t.isReady) {
-      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt: prompt, response: "503: transport not ready", durationMs: Date.now() - start, status: 503 });
-      res.writeHead(503).end(JSON.stringify({ error: "transport not ready" }));
+    let t: IKiroTransport;
+    try {
+      t = await this.ensureAgentTransport();
+    } catch (err) {
+      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt, response: "503: spawn failed", durationMs: Date.now() - start, status: 503 });
+      res.writeHead(503).end(JSON.stringify({ error: "failed to spawn agent kiro-cli" }));
       return;
     }
+
+    const { sessionKey, chatId } = this.config;
 
     // Record user message
     this.memory?.recordMessage({ role: "user", content: prompt, timestamp: Date.now(), chatId, sessionId: sessionKey });
@@ -175,22 +213,21 @@ export class AgentApiServer {
 
   private async handleReset(res: ServerResponse): Promise<void> {
     const start = Date.now();
-    await this.transport().resetSession(this.config.sessionKey);
-    this.rulesInjected = false;
+    this.killAgentTransport();
     this.log("SYSTEM", "Session reset");
-    this.logFile = this.newLogFile();
     this.pushTraffic({ ts: start, ip: "", endpoint: "reset", prompt: "", response: "ok", durationMs: Date.now() - start, status: 200 });
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
   }
 
   private handleStatus(res: ServerResponse): void {
     const start = Date.now();
-    const t = this.transport();
-    this.pushTraffic({ ts: start, ip: "", endpoint: "status", prompt: "", response: `ready=${t.isReady}`, durationMs: Date.now() - start, status: 200 });
+    const ready = this.agentTransport?.isReady ?? false;
+    this.pushTraffic({ ts: start, ip: "", endpoint: "status", prompt: "", response: `ready=${ready}`, durationMs: Date.now() - start, status: 200 });
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-      ready: t.isReady,
+      ready,
       sessionKey: this.config.sessionKey,
       chatId: this.config.chatId,
+      hasProcess: this.agentTransport !== null,
     }));
   }
 }

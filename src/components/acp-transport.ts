@@ -39,13 +39,17 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
 
-  constructor(cliPath: string, workingDir: string) {
+  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean }) {
     this.cliPath = cliPath;
     this.workingDir = workingDir;
+    this.skipAgent = opts?.skipAgent ?? false;
   }
 
+  private readonly skipAgent: boolean;
+
   async initialize(): Promise<void> {
-    this.agent = spawn(this.cliPath, ["acp", "--agent", "professor"], {
+    const args = this.skipAgent ? ["acp"] : ["acp", "--agent", "professor"];
+    this.agent = spawn(this.cliPath, args, {
       cwd: this.workingDir,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -150,11 +154,13 @@ export class AcpTransport implements IKiroTransport {
   }
 
   destroy(): void {
+    this.sessions.clear();
     if (this.agent) {
       this.agent.kill("SIGTERM");
       this.agent = null;
       this.client = null;
     }
+    logInfo(TAG, "ACP transport destroyed");
   }
 
   private handleSessionUpdate(params: SessionNotification): void {
