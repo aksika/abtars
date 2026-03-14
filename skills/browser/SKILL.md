@@ -84,6 +84,24 @@ Navigation is restricted by the `BROWSER_ALLOWED_DOMAINS` environment variable. 
 
 ## Session management
 
-Sessions persist across calls with the same `--session-id`. When the main AgentBridge process is running, sessions are shared via IPC — a browser tab opened in one call is still available in the next. If the main process is not running, the CLI falls back to an ephemeral browser (sessions last only for that single call).
+Sessions persist across calls with the same `--session-id`. The browser runs inside a Docker container for sandboxing.
+
+### Ensuring the browser container is running
+
+Before using the browser, check if the container is up. If not, start it:
+
+```bash
+# Check status
+docker ps --filter name=agentbridge-browser --format "{{.Status}}"
+
+# Start if not running (builds image on first run)
+~/workspace/agent/agentbridge/scripts/browser-docker.sh
+```
+
+The container stays running across kiro restarts (`--restart unless-stopped`). You only need to start it once.
+
+### How sessions work
+
+When the container is running, sessions are shared via a Unix socket at `~/.agentbridge/browser.sock` — a browser tab opened in one call is still available in the next. If the container is not running and the main AgentBridge process is not running either, the CLI falls back to an ephemeral browser (sessions last only for that single call).
 
 Sessions are automatically closed after 5 minutes of inactivity. Maximum 3 concurrent sessions (configurable via `BROWSER_MAX_SESSIONS`).
