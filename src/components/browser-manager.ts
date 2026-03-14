@@ -107,7 +107,7 @@ export class BrowserManager {
       .launch({
         headless: true,
         channel: process.env["BROWSER_CHANNEL"] || undefined,
-        args: ["--no-sandbox"],
+        args: ["--no-sandbox", "--headless=new"],
       })
       .then((browser) => {
         this._browser = browser;

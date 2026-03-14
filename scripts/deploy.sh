@@ -32,8 +32,9 @@ if [ "$QUICK" = false ]; then
   echo "🔨 Building..."
   cd "$PROJECT_DIR"
   npm run build
-  echo "🌐 Installing Patchright browser..."
-  npx patchright install chrome 2>/dev/null || npx patchright install chromium
+  # Browser install is a one-time manual step (requires sudo for system deps):
+  #   npx patchright install chrome   # preferred, or:
+  #   npx patchright install chromium  # fallback
 fi
 
 # 3. Deploy steering files (SOUL.md + skills as steering)
