@@ -1,5 +1,4 @@
 ---
-alwaysApply: true
 name: nlm
 description: Query the NotebookLM knowledge base (Layer 6) for answers grounded in curated reference material
 user-invocable: false

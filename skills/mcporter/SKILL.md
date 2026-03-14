@@ -1,5 +1,4 @@
 ---
-alwaysApply: true
 name: mcporter
 description: Call external MCP servers via the mcporter CLI. Use for accessing tools from services like Context7, Linear, GitHub, Notion, etc.
 ---

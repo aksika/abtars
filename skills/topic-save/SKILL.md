@@ -1,5 +1,4 @@
 ---
-alwaysApply: true
 name: topic-save
 description: Save, update, and manage topic-specific knowledge files from conversation discussions
 user-invocable: true
