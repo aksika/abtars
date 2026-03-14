@@ -3,9 +3,12 @@
   "description": "Kiro Professor - AI Subject Matter Expert with persistent memory",
   "prompt": "You are Kiro Professor. Follow your SOUL.md identity.",
   "resources": [
-    "file://.kiro/steering/**/*.md",
-    "file://AGENTS.md"
+    "file://.kiro/steering/**/*.md"
   ],
-  "tools": ["*"],
-  "allowedTools": ["@builtin"]
+  "tools": [
+    "*"
+  ],
+  "allowedTools": [
+    "@builtin"
+  ]
 }

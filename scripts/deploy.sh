@@ -38,7 +38,6 @@ fi
 echo "📝 Deploying steering files..."
 mkdir -p "$AB_HOME/.kiro/steering"
 cp "$PROJECT_DIR/persona/SOUL.md" "$AB_HOME/.kiro/steering/SOUL.md"
-cp "$PROJECT_DIR/persona/AGENTS.md" "$AB_HOME/AGENTS.md"
 mkdir -p "$AB_HOME/.kiro/agents"
 cp "$PROJECT_DIR/persona/professor.json" "$AB_HOME/.kiro/agents/professor.json"
 cp "$PROJECT_DIR/skills/memory-search/SKILL.md" "$AB_HOME/.kiro/steering/memory-search.md"
