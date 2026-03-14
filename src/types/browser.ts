@@ -51,8 +51,8 @@ export type PageElement = {
 /** Internal session state tracked by BrowserManager. */
 export type BrowserSession = {
   sessionId: string;
-  context: import("playwright").BrowserContext;
-  page: import("playwright").Page;
+  context: import("patchright").BrowserContext;
+  page: import("patchright").Page;
   createdAt: number;
   lastActivityAt: number;
 };

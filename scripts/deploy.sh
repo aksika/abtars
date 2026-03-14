@@ -32,8 +32,8 @@ if [ "$QUICK" = false ]; then
   echo "🔨 Building..."
   cd "$PROJECT_DIR"
   npm run build
-  echo "🌐 Ensuring Playwright Chromium is installed..."
-  npx playwright install chromium
+  echo "🌐 Installing Patchright browser..."
+  npx patchright install chrome 2>/dev/null || npx patchright install chromium
 fi
 
 # 3. Deploy steering files (SOUL.md + skills as steering)

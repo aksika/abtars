@@ -1,5 +1,5 @@
-import { chromium } from "playwright";
-import type { Browser, BrowserContext, Page } from "playwright";
+import { chromium } from "patchright";
+import type { Browser, BrowserContext, Page } from "patchright";
 import type { BrowserSession } from "../types/browser.js";
 
 // ---------------------------------------------------------------------------
@@ -104,7 +104,11 @@ export class BrowserManager {
     if (this._launching) return this._launching;
 
     this._launching = chromium
-      .launch({ headless: true, args: ["--no-sandbox"] })
+      .launch({
+        headless: true,
+        channel: process.env["BROWSER_CHANNEL"] || undefined,
+        args: ["--no-sandbox"],
+      })
       .then((browser) => {
         this._browser = browser;
         this._launching = null;

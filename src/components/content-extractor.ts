@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { Page } from "patchright";
 
 /**
  * Strips non-content HTML elements and returns clean plain text.
