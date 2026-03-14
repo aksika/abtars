@@ -110,6 +110,11 @@ export class TelegramApi {
     return json.result.message_id;
   }
 
+  /** Register bot command menu (shown when user types /). */
+  async setMyCommands(commands: Array<{ command: string; description: string }>): Promise<void> {
+    await this.call("setMyCommands", { commands });
+  }
+
   /** Long-poll for updates. */
   async getUpdates(
     offset: number,

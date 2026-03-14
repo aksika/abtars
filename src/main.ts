@@ -248,6 +248,23 @@ async function main(): Promise<void> {
     const botUsername = botInfo.username?.toLowerCase() ?? "";
     logInfo("main", `🤖 Telegram bot: @${botInfo.username}`);
 
+    // Register command menu so Telegram shows picker when user types /
+    await telegramApi.setMyCommands([
+      { command: "new", description: "Start a fresh session" },
+      { command: "reset", description: "Start a fresh session" },
+      { command: "status", description: "Connection & uptime info" },
+      { command: "stop", description: "Send Ctrl+C to Kiro" },
+      { command: "restart", description: "Restart Kiro (tmux only)" },
+      { command: "full", description: "Raw output mode, TTS off" },
+      { command: "short", description: "Clean output mode, TTS on" },
+      { command: "memory", description: "Memory system stats" },
+      { command: "facts", description: "Show core knowledge" },
+      { command: "compact", description: "Run session compaction" },
+      { command: "reflect", description: "Generate a reflection" },
+      { command: "ingest", description: "Ingest a document or URL" },
+      { command: "forget", description: "Forget topic or date range" },
+    ]).catch((err) => logWarn("main", `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
+
     const react = async (chatId: number, messageId: number, emoji: string): Promise<void> => {
       try {
         const reaction = emoji ? [{ type: "emoji" as const, emoji }] : [];
