@@ -153,12 +153,21 @@ export class ContextAssembler {
       usage.scratchpad = scratchpadSection.tokens;
     }
 
-    // 3. Last Session Summary (session-start only — replaces auto-recalled memories)
+    // 3a. Last Session Summary (session-start only)
     if (shouldInjectSessionContext) {
       const summarySection = this.buildLastSessionSummary(chatId, budget.recalled);
       if (summarySection.text) {
         sections.push(summarySection.text);
         usage.recalled = summarySection.tokens;
+      }
+    }
+
+    // 3b. Recalled Memories (active recall based on user input)
+    if (!shouldInjectSessionContext || usage.recalled === 0) {
+      const recalledSection = await this.buildRecalledSection(chatId, userInput, budget.recalled - usage.recalled, workingMemory);
+      if (recalledSection.text) {
+        sections.push(recalledSection.text);
+        usage.recalled += recalledSection.tokens;
       }
     }
 
@@ -289,7 +298,6 @@ ${compaction.summary}`;
     }
   }
 
-  // @ts-expect-error retained for potential future use — recall is now skill-driven
   private async buildRecalledSection(
     chatId: number,
     userInput: string,
