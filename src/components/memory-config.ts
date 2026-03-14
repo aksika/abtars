@@ -85,7 +85,7 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
   },
   heartbeat: {
     enabled: true,
-    intervalMs: 60000,
+    intervalMs: 300000,
   },
   searchEnhancements: {
     searchTimeoutMs: 1000,
