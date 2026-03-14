@@ -1,0 +1,11 @@
+{
+  "name": "professor",
+  "description": "Kiro Professor - AI Subject Matter Expert with persistent memory",
+  "prompt": "You are Kiro Professor. Follow your SOUL.md identity.",
+  "resources": [
+    "file://.kiro/steering/**/*.md",
+    "file://AGENTS.md"
+  ],
+  "tools": ["*"],
+  "allowedTools": ["@builtin"]
+}
