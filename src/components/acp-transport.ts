@@ -129,16 +129,12 @@ export class AcpTransport implements IKiroTransport {
     return chunks.join("") || "(no response)";
   }
 
-  async resetSession(sessionKey: string): Promise<void> {
-    const sessionId = this.sessions.get(sessionKey);
-    if (sessionId && this.client) {
-      try {
-        await this.client.cancel({ sessionId });
-      } catch {
-        // Session may already be dead
-      }
-    }
-    this.sessions.delete(sessionKey);
+  async resetSession(_sessionKey: string): Promise<void> {
+    // Kill and respawn the entire ACP process so the new first session
+    // gets --agent professor again. Just deleting the session would create
+    // session #2 which loses the agent identity.
+    this.destroy();
+    await this.initialize();
   }
 
   async sendInterrupt(): Promise<void> {
