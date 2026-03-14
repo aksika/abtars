@@ -452,6 +452,16 @@ export class MemoryManager {
     return this.hybridSearch(query, opts);
   }
 
+  /** Lightweight recall for tmux mode — returns formatted snippets or empty string. */
+  async recallForPrompt(chatId: number, userInput: string): Promise<string> {
+    if (!this.config.memoryEnabled) return "";
+    try {
+      const results = await this.search(userInput, { chatId, limit: 3 });
+      if (results.length === 0) return "";
+      return results.map(r => `- [${r.record.role}] ${r.record.content}`).join("\n");
+    } catch { return ""; }
+  }
+
   /** Substring search using SQL LIKE — catches compound words that FTS5 misses. */
   substringSearch(query: string, opts?: SearchOptions): SearchResult[] {
     if (!this.config.memoryEnabled || !this.memoryIndex) return [];

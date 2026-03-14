@@ -1,4 +1,4 @@
-import { readFileSync, appendFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -124,7 +124,6 @@ async function main(): Promise<void> {
     const soulPath = join(memoryConfig.memoryDir, "..", ".kiro", "steering", "SOUL.md");
     soulPrompt = readFileSync(soulPath, "utf-8").replace(/^---[\s\S]*?---\n?/, "");
     logInfo("main", `👻 SOUL loaded (${soulPrompt.length} chars)`);
-    appendFileSync("/tmp/ab_debug.log", `${new Date().toISOString()} SOUL loaded ${soulPrompt.length} chars\n`);
   } catch { logInfo("main", "👻 No SOUL.md found"); }
   if (memoryConfig.memoryEnabled) {
     memory = new MemoryManager(memoryConfig);
@@ -804,9 +803,16 @@ async function main(): Promise<void> {
           // Assemble context BEFORE recording — prevents self-echo in search results
           const isSessionStart = pendingSessionStart.has(sessionKey);
           pendingSessionStart.delete(sessionKey);
-          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: soulPrompt, isSessionStart });
-          logDebug("main", `Assembled context (${prompt.length} chars), soul=${soulPrompt.length}, hasSYSTEM=${prompt.includes("[SYSTEM]")}`);
-          appendFileSync("/tmp/ab_debug.log", `${new Date().toISOString()} assembled=${prompt.length} soul=${soulPrompt.length} hasSYSTEM=${prompt.includes("[SYSTEM]")} first200=${JSON.stringify(prompt.slice(0,200))}\n`);          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
+          if (config.kiroTransport === "tmux") {
+            // tmux: kiro-cli has its own steering + conversation state.
+            // Only inject recalled memories, not soul/working memory.
+            const recalled = await memory.recallForPrompt(chatId, prompt);
+            if (recalled) prompt = `[RECALLED MEMORIES]\n${recalled}\n\n${prompt}`;
+          } else {
+            prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: soulPrompt, isSessionStart });
+          }
+          logDebug("main", `Context (${prompt.length} chars, ${config.kiroTransport})`);
+          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
         const responsePromise = transport.sendPrompt(sessionKey, prompt);
