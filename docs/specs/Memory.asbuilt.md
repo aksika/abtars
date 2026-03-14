@@ -31,7 +31,7 @@ Every piece of information the agent can store or recall lives in one of these c
 | C1 | Consolidated Summaries | Markdown files | `working/{date}/` (intra-day), `daily/` (daily), `weekly/` (weekly rollups), `quarterly/` (quarterly rollups) | CompactionEngine, SleepCycleRunner, sleep subagent | ContextAssembler (last session), MemorySearchTool (compaction LIKE), sleep subagent (consolidation source) | Persistent — promoted up tiers, source deleted after rollup |
 | C2 | SQLite + FTS5 | `memory.db` | `messages` + FTS5, `extracted_memories` + dual FTS5, `compactions`, `sessions`, `extraction_watermarks` | recordMessage(), MemoryExtractor, CompactionEngine, agentbridge-store | MemoryIndex, MemorySearchTool, agentbridge-recall, RecallFallbackPipeline | Persistent — pruned by max messages, disk budget, selective forget |
 | C3 | JSONL Transcripts | `transcripts/{chatId}/{sessionId}.jsonl` | Raw message-by-message session logs (role, content, timestamp) | TranscriptWriter | TranscriptParser (restore, parseTail), MemoryExtractor (watermark-based) | Persistent — append-only, one file per session |
-| C4 | Markdown Knowledge Files | Flat files | `core/` (permanent facts), `~/.agentbridge/topics/` (topic summaries) | Agent (facts), topic-save skill (topics) | Sleep subagent (topic reorg) | Persistent — manually managed |
+| C4 | Markdown Knowledge Files | Flat files | `core/user_profile.md` + `core/agent_notes.md` (agent-maintained), `~/.agentbridge/topics/` (topic summaries) | Agent (proactive writes via steering), topic-save skill (topics) | Sleep subagent (topic reorg) | Persistent — agent-maintained |
 | C5 | Vector Index | `memory.db` (`embeddings`) | ONNX embedding vectors per message, model-version-aware | EmbeddingProvider | VectorIndex (cosine similarity), hybridSearch (RRF fusion with FTS5) | Persistent — optional (`MEMORY_VECTOR_ENABLED`), re-embedded on model swap |
 
 ### Knowledge Bases
@@ -209,7 +209,7 @@ ContextAssembler 4-tier assembly:
 ```
 +----------------------------------------------+
 | Tier 1: Soul + User Core Facts               |  500 tokens
-|   System prompt + per-chat permanent facts    |  CoreFacts on session-start only
+|   System prompt + core knowledge               |  User profile + agent notes on session-start
 +----------------------------------------------+
 | Tier 2: Recalled Memories                    |  600 tokens
 |   Last session summary (session-start only)  |
@@ -262,10 +262,11 @@ All paths relative to `~/.agentbridge/memory/` (configurable via `MEMORY_DIR`).
   quarterly/
     YYYY-Qn.md                 # Quarterly rollup summaries
   core/
-    {chatId}/user_core_facts.md  # Per-chat permanent facts
+    user_profile.md              # Who the user is (agent-maintained)
+    agent_notes.md               # Environment facts, lessons learned (agent-maintained)
   audit/
     sleep_YYYYMMDD_HHmmss.md   # Sleep cycle audit trail logs
-  (legacy: monthly/, yearly/, scratchpads/ -- preserved, not actively written)
+  (legacy: monthly/, yearly/, scratchpads/, {chatId}/user_core_facts.md -- preserved, not actively written)
 ```
 
 ---

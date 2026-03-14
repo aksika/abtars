@@ -494,8 +494,8 @@ async function main(): Promise<void> {
 
       if (text === "/facts") {
         if (memory) {
-          const facts = memory.readUserCoreFacts(chatId);
-          const msg = facts ? `📋 Your facts:\n\n${facts}` : "📋 No facts stored yet.";
+          const facts = memory.readCoreKnowledge();
+          const msg = facts ? `📋 Core knowledge:\n\n${facts}` : "📋 No core knowledge yet.";
           await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
         } else {
           await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
@@ -756,7 +756,7 @@ async function main(): Promise<void> {
           "/stop — Stop current response",
           "/cancel — Cancel current request",
           "/compact — Trigger memory compaction",
-          "/facts — Show stored facts",
+          "/facts — Show core knowledge (user profile + agent notes)",
           "/memory — Memory storage statistics",
           "/ingest — Ingest a document (reply to file)",
           "/ingest list — List ingested documents",
@@ -1322,7 +1322,7 @@ async function main(): Promise<void> {
           "/stop — Stop current response",
           "/cancel — Cancel current request",
           "/compact — Trigger memory compaction",
-          "/facts — Show stored facts",
+          "/facts — Show core knowledge (user profile + agent notes)",
           "/memory — Memory storage statistics",
           "/ingest — Ingest a document (reply to file)",
           "/ingest list — List ingested documents",

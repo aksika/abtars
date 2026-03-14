@@ -458,8 +458,8 @@ export class MemoryManager {
     const parts: string[] = [];
     try {
       // Core facts (always injected if non-empty)
-      const facts = this.readUserCoreFacts(chatId);
-      if (facts.trim()) parts.push(`[CORE FACTS]\n${facts.trim()}`);
+      const facts = this.readCoreKnowledge();
+      if (facts.trim()) parts.push(`[CORE KNOWLEDGE]\n${facts.trim()}`);
 
       // Recalled memories via pipeline (keyword extraction + intent detection)
       const workingMemory = sessionId
@@ -515,25 +515,23 @@ export class MemoryManager {
     });
   }
 
-  /** Read user core facts for a chat. Creates empty file if not exists. */
-  readUserCoreFacts(chatId: number): string {
+  /** Read user profile + agent notes from core/. */
+  readCoreKnowledge(): string {
     if (!this.config.memoryEnabled) return "";
 
-    try {
-      const dir = join(this.config.memoryDir, "core", String(chatId));
-      const filePath = join(dir, "user_core_facts.md");
-
-      if (!existsSync(filePath)) {
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(filePath, "", "utf-8");
-        return "";
+    const parts: string[] = [];
+    for (const file of ["user_profile.md", "agent_notes.md"]) {
+      try {
+        const filePath = join(this.config.memoryDir, "core", file);
+        if (existsSync(filePath)) {
+          const content = readFileSync(filePath, "utf-8").trim();
+          if (content) parts.push(content);
+        }
+      } catch (err) {
+        logError(TAG, `Failed to read core/${file}`, err);
       }
-
-      return readFileSync(filePath, "utf-8");
-    } catch (err) {
-      logError(TAG, `Failed to read user core facts for chat ${chatId}`, err);
-      return "";
     }
+    return parts.join("\n\n");
   }
 
   /** Ingest an external document via the IngestionPipeline. */

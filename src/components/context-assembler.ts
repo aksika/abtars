@@ -236,7 +236,7 @@ export class ContextAssembler {
   }
 
   private buildSoulSection(
-    chatId: number,
+    _chatId: number,
     systemPrompt: string,
     budget: number,
     includeCoreFacts: boolean = true,
@@ -245,8 +245,8 @@ export class ContextAssembler {
 
     if (systemPrompt) parts.push(`[SYSTEM]\n${systemPrompt}`);
     if (includeCoreFacts) {
-      const userFacts = this.memoryManager.readUserCoreFacts(chatId);
-      if (userFacts) parts.push(`[USER FACTS]\n${userFacts}`);
+      const knowledge = this.memoryManager.readCoreKnowledge();
+      if (knowledge) parts.push(`[CORE KNOWLEDGE]\n${knowledge}`);
     }
 
     if (parts.length === 0) return { text: "", tokens: 0 };
