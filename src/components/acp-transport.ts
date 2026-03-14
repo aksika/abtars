@@ -219,7 +219,6 @@ export class AcpTransport implements IKiroTransport {
 
     const session = await this.client.newSession({
       cwd: this.workingDir,
-      agent: "professor",
       mcpServers: [],
     });
     this.sessions.set(sessionKey, session.sessionId);
