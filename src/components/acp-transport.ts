@@ -45,7 +45,7 @@ export class AcpTransport implements IKiroTransport {
   }
 
   async initialize(): Promise<void> {
-    this.agent = spawn(this.cliPath, ["acp"], {
+    this.agent = spawn(this.cliPath, ["acp", "--agent", "professor"], {
       cwd: this.workingDir,
       stdio: ["pipe", "pipe", "pipe"],
     });

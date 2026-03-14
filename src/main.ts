@@ -92,6 +92,8 @@ async function announcePlatform(
   transport: IKiroTransport,
   platform: string,
 ): Promise<void> {
+  // Skip for ACP — creating a system session wastes the --agent first-session slot
+  if (transport instanceof AcpTransport) return;
   const ts = new Date().toISOString();
   const msg = `[SYSTEM] Platform: ${platform} | Connected at: ${ts} | Refer to your CHATS.md steering for ${platform}-specific behavior.`;
   const sessionKey = `system:${platform.toLowerCase()}`;
