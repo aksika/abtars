@@ -110,10 +110,21 @@ export class AgentApiServer {
     this.idleTimer = setTimeout(() => this.killAgentTransport(), IDLE_TIMEOUT_MS);
   }
 
-  private killAgentTransport(): void {
+  private async killAgentTransport(): Promise<void> {
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     if (!this.agentTransport) return;
-    logInfo(TAG, "A2A idle timeout — flushing memory, closing log, killing kiro-cli");
+    logInfo(TAG, "A2A idle timeout — saving chat, closing log, killing kiro-cli");
+    // Save conversation before destroying
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const dir = join(this.workingDir, "memory", "working", today);
+      mkdirSync(dir, { recursive: true });
+      const dest = join(dir, "transcript_a2a.md");
+      await this.agentTransport.sendPrompt("a2a:save", `/chat save ${dest}`);
+      logInfo(TAG, `A2A chat saved to ${dest}`);
+    } catch (e) {
+      logWarn(TAG, `A2A chat save failed: ${e}`);
+    }
     this.log("SYSTEM", "Idle timeout — session closed");
     this.agentTransport.destroy();
     this.agentTransport = null;

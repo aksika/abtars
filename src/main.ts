@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -210,6 +210,33 @@ async function main(): Promise<void> {
   const pendingSessionStart = new Set<string>();
   const fullModeChats = new Set<string>();
 
+  // Idle chat-save: after 10min inactivity, save kiro-cli conversation to working dir
+  const CHAT_SAVE_IDLE_MS = 10 * 60 * 1000;
+  const idleSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  async function saveChatToWorking(sessionKey: string, chatId: number): Promise<void> {
+    if (!memoryConfig.memoryEnabled) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const dir = join(memoryConfig.memoryDir, "working", today);
+    mkdirSync(dir, { recursive: true });
+    const dest = join(dir, `transcript_${chatId}.md`);
+    try {
+      await transport.sendPrompt(sessionKey, `/chat save ${dest}`);
+      logInfo("main", `Chat saved to ${dest}`);
+    } catch (e) {
+      logWarn("main", `Chat save failed: ${e}`);
+    }
+  }
+
+  function resetIdleSaveTimer(sessionKey: string, chatId: number): void {
+    const existing = idleSaveTimers.get(sessionKey);
+    if (existing) clearTimeout(existing);
+    idleSaveTimers.set(sessionKey, setTimeout(() => {
+      idleSaveTimers.delete(sessionKey);
+      saveChatToWorking(sessionKey, chatId);
+    }, CHAT_SAVE_IDLE_MS));
+  }
+
   // --- Telegram wiring (conditional) ---
   let telegramPoller: TelegramPoller | null = null;
 
@@ -387,6 +414,9 @@ async function main(): Promise<void> {
       const sessionKey = `telegram:${chatId}`;
 
       if (text === "/new" || text === "/reset") {
+        const timer = idleSaveTimers.get(sessionKey);
+        if (timer) { clearTimeout(timer); idleSaveTimers.delete(sessionKey); }
+        await saveChatToWorking(sessionKey, chatId);
         await transport.resetSession(sessionKey);
         if (isGroup) conversationBuffer.clear(bufKey);
         pendingSessionStart.add(sessionKey);
@@ -923,6 +953,7 @@ async function main(): Promise<void> {
       } finally {
         clearInterval(typingInterval);
         busyChats.delete(sessionKey);
+        resetIdleSaveTimer(sessionKey, chatId);
       }
     };
 
@@ -998,6 +1029,10 @@ async function main(): Promise<void> {
 
       // Command handling
       if (text === "/new" || text === "/reset") {
+        const timer = idleSaveTimers.get(sessionKey);
+        if (timer) { clearTimeout(timer); idleSaveTimers.delete(sessionKey); }
+        const discordChatId = parseInt(message.channelId, 10) || 0;
+        await saveChatToWorking(sessionKey, discordChatId);
         await transport.resetSession(sessionKey);
         conversationBuffer.clear(bufKey);
         pendingSessionStart.add(sessionKey);
@@ -1415,6 +1450,7 @@ async function main(): Promise<void> {
         await discordApi.sendMessage(message.channelId, "❌ Something went wrong. Try /reset to start fresh.").catch(() => {});
       } finally {
         busyChats.delete(sessionKey);
+        resetIdleSaveTimer(sessionKey, parseInt(message.channelId, 10) || 0);
       }
     };
 
