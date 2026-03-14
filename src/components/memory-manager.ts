@@ -452,11 +452,17 @@ export class MemoryManager {
     return this.hybridSearch(query, opts);
   }
 
-  /** Lightweight recall for tmux mode — returns formatted snippets or empty string. */
+  /** Lightweight recall — uses pipeline if available, falls back to raw search. */
   async recallForPrompt(chatId: number, userInput: string): Promise<string> {
     if (!this.config.memoryEnabled) return "";
     try {
-      const results = await this.search(userInput, { chatId, limit: 3 });
+      let results: SearchResult[];
+      if (this.recallPipeline) {
+        const pr = await this.recallPipeline.execute(userInput, chatId, [], 3);
+        results = pr.results;
+      } else {
+        results = await this.search(userInput, { chatId, limit: 3 });
+      }
       if (results.length === 0) return "";
       return results.map(r => `- [${r.record.role}] ${r.record.content}`).join("\n");
     } catch { return ""; }
