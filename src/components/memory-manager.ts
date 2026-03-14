@@ -452,20 +452,32 @@ export class MemoryManager {
     return this.hybridSearch(query, opts);
   }
 
-  /** Lightweight recall — uses pipeline if available, falls back to raw search. */
-  async recallForPrompt(chatId: number, userInput: string): Promise<string> {
+  /** Recall memories + core facts for prompt injection. Uses pipeline for keyword extraction. */
+  async recallForPrompt(chatId: number, userInput: string, sessionId?: string): Promise<string> {
     if (!this.config.memoryEnabled) return "";
+    const parts: string[] = [];
     try {
+      // Core facts (always injected if non-empty)
+      const facts = this.readUserCoreFacts(chatId);
+      if (facts.trim()) parts.push(`[CORE FACTS]\n${facts.trim()}`);
+
+      // Recalled memories via pipeline (keyword extraction + intent detection)
+      const workingMemory = sessionId
+        ? this.loadRecentMessages(chatId, sessionId, 6)
+        : [];
       let results: SearchResult[];
       if (this.recallPipeline) {
-        const pr = await this.recallPipeline.execute(userInput, chatId, [], 3);
+        const pr = await this.recallPipeline.execute(userInput, chatId, workingMemory, 3);
         results = pr.results;
       } else {
         results = await this.search(userInput, { chatId, limit: 3 });
       }
-      if (results.length === 0) return "";
-      return results.map(r => `- [${r.record.role}] ${r.record.content}`).join("\n");
-    } catch { return ""; }
+      if (results.length > 0) {
+        const snippets = results.map(r => `- [${r.record.role}] ${r.record.content}`);
+        parts.push(`[RECALLED MEMORIES]\n${snippets.join("\n")}`);
+      }
+    } catch { /* silent */ }
+    return parts.join("\n\n");
   }
 
   /** Substring search using SQL LIKE — catches compound words that FTS5 misses. */

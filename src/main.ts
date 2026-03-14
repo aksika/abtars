@@ -119,12 +119,6 @@ async function main(): Promise<void> {
   // Initialize memory layer
   const memoryConfig = loadMemoryConfig();
   let memory: MemoryManager | null = null;
-  let soulPrompt = "";
-  try {
-    const soulPath = join(memoryConfig.memoryDir, "..", ".kiro", "steering", "SOUL.md");
-    soulPrompt = readFileSync(soulPath, "utf-8").replace(/^---[\s\S]*?---\n?/, "");
-    logInfo("main", `👻 SOUL loaded (${soulPrompt.length} chars)`);
-  } catch { logInfo("main", "👻 No SOUL.md found"); }
   if (memoryConfig.memoryEnabled) {
     memory = new MemoryManager(memoryConfig);
     await memory.initialize();
@@ -800,12 +794,9 @@ async function main(): Promise<void> {
         }
 
         if (memory) {
-          // Assemble context BEFORE recording — prevents self-echo in search results
           pendingSessionStart.delete(sessionKey);
-          // Both transports: kiro-cli loads steering via --agent config.
-          // Only inject recalled memories, not soul/working memory.
-          const recalled = await memory.recallForPrompt(chatId, prompt);
-          if (recalled) prompt = `[RECALLED MEMORIES]\n${recalled}\n\n${prompt}`;
+          const recalled = await memory.recallForPrompt(chatId, prompt, sessionKey);
+          if (recalled) prompt = `${recalled}\n\n${prompt}`;
           logDebug("main", `Context (${prompt.length} chars, ${config.kiroTransport})`);
           memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
@@ -1366,9 +1357,10 @@ async function main(): Promise<void> {
 
         if (memory) {
           const chatId = parseInt(message.channelId, 10) || 0;
-          const isSessionStart = pendingSessionStart.has(sessionKey);
           pendingSessionStart.delete(sessionKey);
-          prompt = await memory.assembleContext({ chatId, userInput: prompt, systemPrompt: soulPrompt, isSessionStart });
+          const recalled = await memory.recallForPrompt(chatId, prompt, sessionKey);
+          if (recalled) prompt = `${recalled}\n\n${prompt}`;
+          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
         const response = await transport.sendPrompt(sessionKey, prompt);
