@@ -37,6 +37,8 @@ import { handleNLMCommand, loadNLMConfig } from "./components/nlm-command-handle
 import { SleepTrigger, loadSleepTriggerConfig } from "./components/sleep-trigger.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
+import { detectIngestSourceType } from "./components/ingest-source-detect.js";
+import { BrowserManager } from "./components/browser-manager.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
 function stripDiscordMentions(text: string, botAppId: string): string {
@@ -132,6 +134,13 @@ async function main(): Promise<void> {
   // Initialize NLM (calls `nlm` CLI directly — no wrapper)
   const nlmConfig = loadNLMConfig();
   logInfo("main", `📚 NLM Layer 6 ${nlmConfig.enabled ? "enabled" : "disabled"}`);
+
+  // Initialize BrowserManager singleton for browser tool and webpage ingestion
+  const browserManager = new BrowserManager();
+  if (memory) {
+    memory.setBrowserManager(browserManager);
+  }
+  logInfo("main", "🌐 BrowserManager initialized");
 
   const formatter = new ResponseFormatter();
 
@@ -591,16 +600,7 @@ async function main(): Promise<void> {
           return;
         }
         // Auto-detect source type
-        let sourceType: "youtube" | "pdf" | "text" | "markdown";
-        if (arg.startsWith("http") && (arg.includes("youtube.com") || arg.includes("youtu.be"))) {
-          sourceType = "youtube";
-        } else if (arg.endsWith(".pdf")) {
-          sourceType = "pdf";
-        } else if (arg.endsWith(".md")) {
-          sourceType = "markdown";
-        } else {
-          sourceType = "text";
-        }
+        const sourceType = detectIngestSourceType(arg);
         try {
           await telegramApi.sendMessage(chatId, `📥 Ingesting ${sourceType} source: ${arg}...`, { message_thread_id: threadId });
           const result = await memory.ingestDocument({ type: sourceType, identifier: arg }, chatId);
@@ -1156,16 +1156,7 @@ async function main(): Promise<void> {
         }
         const chatId = parseInt(message.channelId, 10) || 0;
         // Auto-detect source type
-        let sourceType: "youtube" | "pdf" | "text" | "markdown";
-        if (arg.startsWith("http") && (arg.includes("youtube.com") || arg.includes("youtu.be"))) {
-          sourceType = "youtube";
-        } else if (arg.endsWith(".pdf")) {
-          sourceType = "pdf";
-        } else if (arg.endsWith(".md")) {
-          sourceType = "markdown";
-        } else {
-          sourceType = "text";
-        }
+        const sourceType = detectIngestSourceType(arg);
         try {
           await discordApi.sendMessage(message.channelId, `📥 Ingesting ${sourceType} source: ${arg}...`);
           const result = await memory.ingestDocument({ type: sourceType, identifier: arg }, chatId);
@@ -1591,6 +1582,7 @@ async function main(): Promise<void> {
     }
     if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
+    try { await browserManager.shutdown(); } catch { /* best-effort */ }
     memory?.close();
     transport.destroy();
     process.exit(0);

@@ -67,6 +67,7 @@ export class MemoryManager {
   private writeCounter: number = 0;
   private llmCall: ((prompt: string, content: string) => Promise<string>) | null = null;
   private ingestionPipeline: IngestionPipeline | null = null;
+  private browserManager: import("./browser-manager.js").BrowserManager | null = null;
   private reflectionEngine: ReflectionEngine | null = null;
   private recallPipeline: RecallFallbackPipeline | null = null;
   private heartbeat: HeartbeatSystem | null = null;
@@ -97,6 +98,11 @@ export class MemoryManager {
   /** Expose the underlying MemoryIndex for direct search access (used by MemorySearchController). */
   getMemoryIndex(): MemoryIndex | null {
     return this.memoryIndex;
+  }
+
+  /** Register the BrowserManager for webpage ingestion. Called from main.ts after BrowserManager is created. */
+  setBrowserManager(bm: import("./browser-manager.js").BrowserManager): void {
+    this.browserManager = bm;
   }
 
   /** Expose the underlying database for direct query access (used by MemorySearchController). */
@@ -165,6 +171,7 @@ export class MemoryManager {
             this.embeddingProvider,
             this.vectorIndex,
             this.config,
+            this.browserManager ?? undefined,
           );
           logInfo(TAG, "Ingestion pipeline enabled");
         } else {
