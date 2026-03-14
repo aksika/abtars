@@ -54,3 +54,11 @@ export type {
   BridgeMessage,
   DiscordInboundMessage,
 } from "./discord.js";
+
+export type {
+  BrowserActionType,
+  BrowserAction,
+  BrowserToolResult,
+  PageElement,
+  BrowserSession,
+} from "./browser.js";

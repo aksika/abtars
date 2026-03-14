@@ -22,6 +22,7 @@
     "discord.js": "^14.25.1",
     "dotenv": "^16.4.7",
     "pdf-parse": "^2.4.5",
+    "playwright": "^1.58.2",
     "ws": "^8.19.0",
     "youtube-transcript": "^1.2.1"
   },
@@ -38,6 +39,7 @@
   "bin": {
     "agentbridge-recall": "dist/cli/agentbridge-recall.js",
     "agentbridge-store": "dist/cli/agentbridge-store.js",
-    "agentbridge-sleep": "dist/cli/agentbridge-sleep.js"
+    "agentbridge-sleep": "dist/cli/agentbridge-sleep.js",
+    "agentbridge-browser": "dist/cli/agentbridge-browser.js"
   }
 }

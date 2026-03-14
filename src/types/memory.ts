@@ -76,7 +76,7 @@ export type AssembledContext = {
 
 /** Source descriptor for the ingestion pipeline (Phase 2). */
 export type IngestionSource = {
-  type: "youtube" | "pdf" | "text" | "markdown";
+  type: "youtube" | "pdf" | "text" | "markdown" | "webpage";
   /** URL or file path identifying the source. */
   identifier: string;
 };
