@@ -56,6 +56,9 @@ cp "$PROJECT_DIR/skills/agents/"*.md "$AB_HOME/skills/agents/"
 echo "🚀 Deploying launcher + recall CLI..."
 cp "$PROJECT_DIR/scripts/agentbridge.sh" "$AB_HOME/agentbridge.sh"
 chmod +x "$AB_HOME/agentbridge.sh"
+cp "$PROJECT_DIR/scripts/browser-docker.sh" "$AB_HOME/browser-docker.sh"
+sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=\"$PROJECT_DIR\"|" "$AB_HOME/browser-docker.sh"
+chmod +x "$AB_HOME/browser-docker.sh"
 
 # Deploy agentbridge-recall CLI (agent-callable memory search)
 RECALL_SCRIPT="$AB_HOME/agentbridge-recall"

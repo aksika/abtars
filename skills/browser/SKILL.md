@@ -95,7 +95,7 @@ Before using the browser, check if the container is up. If not, start it:
 docker ps --filter name=agentbridge-browser --format "{{.Status}}"
 
 # Start if not running (builds image on first run)
-~/workspace/agent/agentbridge/scripts/browser-docker.sh
+~/.agentbridge/browser-docker.sh
 ```
 
 The container stays running across kiro restarts (`--restart unless-stopped`). You only need to start it once.
