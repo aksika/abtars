@@ -39,6 +39,9 @@ import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { detectIngestSourceType } from "./components/ingest-source-detect.js";
 import { BrowserManager } from "./components/browser-manager.js";
+import { BrowserTool } from "./components/browser-tool.js";
+import { BrowserIpcServer } from "./components/browser-ipc-server.js";
+import { DomainAllowlist } from "./components/domain-allowlist.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
 function stripDiscordMentions(text: string, botAppId: string): string {
@@ -141,6 +144,13 @@ async function main(): Promise<void> {
     memory.setBrowserManager(browserManager);
   }
   logInfo("main", "🌐 BrowserManager initialized");
+
+  // Start browser IPC server so CLI invocations share sessions
+  const allowlist = DomainAllowlist.fromEnv();
+  const browserTool = new BrowserTool(browserManager, allowlist);
+  const browserIpc = new BrowserIpcServer(browserTool);
+  await browserIpc.start();
+  logInfo("main", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
 
   const formatter = new ResponseFormatter();
 
@@ -1582,6 +1592,7 @@ async function main(): Promise<void> {
     }
     if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
+    try { await browserIpc.shutdown(); } catch { /* best-effort */ }
     try { await browserManager.shutdown(); } catch { /* best-effort */ }
     memory?.close();
     transport.destroy();

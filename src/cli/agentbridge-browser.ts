@@ -21,10 +21,13 @@
  *   { "success": false, "error": "navigate action requires --url" }
  */
 
-import type { BrowserAction, BrowserActionType } from "../types/browser.js";
+import * as net from "node:net";
+import * as fs from "node:fs";
+import type { BrowserAction, BrowserActionType, BrowserToolResult } from "../types/browser.js";
 import { BrowserManager } from "../components/browser-manager.js";
 import { BrowserTool } from "../components/browser-tool.js";
 import { DomainAllowlist } from "../components/domain-allowlist.js";
+import { getDefaultSocketPath } from "../components/browser-ipc-server.js";
 
 /** The 7 valid browser action types. */
 const VALID_ACTIONS: ReadonlySet<string> = new Set<BrowserActionType>([
@@ -118,6 +121,44 @@ export function validateArgs(
 
 // --- CLI entry point (only runs when executed directly) ---
 
+/**
+ * Try executing the action via the main process IPC socket.
+ * Returns null if socket unavailable (caller should fall back to ephemeral).
+ */
+export function executeViaIpc(
+  action: BrowserAction,
+  socketPath?: string,
+): Promise<BrowserToolResult | null> {
+  const sock = socketPath ?? getDefaultSocketPath();
+
+  if (!fs.existsSync(sock)) return Promise.resolve(null);
+
+  return new Promise<BrowserToolResult | null>((resolve) => {
+    const conn = net.createConnection(sock, () => {
+      conn.end(JSON.stringify(action) + "\n");
+    });
+
+    let data = "";
+    conn.on("data", (chunk) => { data += chunk.toString(); });
+
+    conn.on("end", () => {
+      try {
+        resolve(JSON.parse(data.trim()) as BrowserToolResult);
+      } catch {
+        resolve(null);
+      }
+    });
+
+    conn.on("error", () => resolve(null));
+
+    // Don't hang forever if main process is stuck.
+    conn.setTimeout(60_000, () => {
+      conn.destroy();
+      resolve(null);
+    });
+  });
+}
+
 async function main() {
   const raw = parseArgs(process.argv);
   const validation = validateArgs(raw);
@@ -127,17 +168,15 @@ async function main() {
     process.exit(1);
   }
 
-  // Try IPC to main process BrowserManager via Unix domain socket;
-  // fall back to ephemeral browser if main process not running.
-  let browserManager: BrowserManager;
-  let isEphemeral = false;
+  // Try IPC to main process first (sessions persist across calls).
+  const ipcResult = await executeViaIpc(validation.action);
+  if (ipcResult !== null) {
+    console.log(JSON.stringify(ipcResult));
+    return;
+  }
 
-  // For now, always use an ephemeral BrowserManager.
-  // IPC via ~/.agentbridge/browser.sock can be added when the main process
-  // exposes a socket server.
-  browserManager = new BrowserManager();
-  isEphemeral = true;
-
+  // Fallback: ephemeral browser (no session persistence).
+  const browserManager = new BrowserManager();
   const allowlist = DomainAllowlist.fromEnv();
   const tool = new BrowserTool(browserManager, allowlist);
 
@@ -148,9 +187,7 @@ async function main() {
     const message = err instanceof Error ? err.message : String(err);
     console.log(JSON.stringify({ success: false, error: message }));
   } finally {
-    if (isEphemeral) {
-      await browserManager.shutdown();
-    }
+    await browserManager.shutdown();
   }
 }
 

@@ -84,4 +84,6 @@ Navigation is restricted by the `BROWSER_ALLOWED_DOMAINS` environment variable. 
 
 ## Session management
 
-Sessions persist across calls with the same `--session-id`. Sessions are automatically closed after 5 minutes of inactivity. Maximum 3 concurrent sessions (configurable via `BROWSER_MAX_SESSIONS`).
+Sessions persist across calls with the same `--session-id`. When the main AgentBridge process is running, sessions are shared via IPC — a browser tab opened in one call is still available in the next. If the main process is not running, the CLI falls back to an ephemeral browser (sessions last only for that single call).
+
+Sessions are automatically closed after 5 minutes of inactivity. Maximum 3 concurrent sessions (configurable via `BROWSER_MAX_SESSIONS`).
