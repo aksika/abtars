@@ -7,6 +7,8 @@ import type { IngestionSource, IngestionResult, IngestedDocument } from "../type
 import { logInfo } from "./logger.js";
 import { YoutubeTranscript } from "youtube-transcript";
 import { PDFParse } from "pdf-parse";
+import type { BrowserManager } from "./browser-manager.js";
+import { WebScraper } from "./web-scraper.js";
 
 const TAG = "ingestion-pipeline";
 
@@ -20,17 +22,20 @@ export class IngestionPipeline {
   readonly embeddingProvider: EmbeddingProvider;
   private readonly vectorIndex: VectorIndex;
   private readonly config: MemoryConfig;
+  private readonly browserManager?: BrowserManager;
 
   constructor(
     db: Database.Database,
     embeddingProvider: EmbeddingProvider,
     vectorIndex: VectorIndex,
     config: MemoryConfig,
+    browserManager?: BrowserManager,
   ) {
     this.db = db;
     this.embeddingProvider = embeddingProvider;
     this.vectorIndex = vectorIndex;
     this.config = config;
+    this.browserManager = browserManager;
   }
 
   /**
@@ -56,6 +61,21 @@ export class IngestionPipeline {
           throw new Error(`Failed to read ${source.type} file "${source.identifier}": ${msg}`);
         }
         break;
+      case "webpage": {
+        if (!this.browserManager) {
+          throw new Error(
+            `Cannot ingest webpage "${source.identifier}": no BrowserManager provided to IngestionPipeline.`,
+          );
+        }
+        const scraper = new WebScraper(this.browserManager);
+        text = await scraper.extractText(source.identifier);
+        if (!text || text.trim().length === 0) {
+          throw new Error(
+            `Failed to extract text from webpage "${source.identifier}": page returned no readable content.`,
+          );
+        }
+        break;
+      }
       default:
         throw new Error(`Unsupported source type: ${source.type}`);
     }
