@@ -2,7 +2,9 @@
 
 ## Overview
 
-The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, hierarchical memory consolidation (daily → weekly → quarterly), dynamic context assembly with token budgets, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, context window monitoring, per-session context injection, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, and an automated overnight sleep maintenance cycle.
+The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, hierarchical memory consolidation (daily → weekly → quarterly), external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, and an automated overnight sleep maintenance cycle.
+
+**Recall architecture**: The bridge does NOT inject recalled memories or context into the prompt. The LLM agent handles all recall autonomously — it reads the `memory-search.md` steering file, decides when to search, extracts relevant keywords from user input, and invokes `agentbridge-recall` via `execute_bash`. This leverages the LLM's natural language understanding for keyword extraction instead of a heuristic pipeline.
 
 ### Phase Summary
 
@@ -25,7 +27,7 @@ Every piece of information the agent can store or recall lives in one of these c
 
 | ID | Name | Medium | What Lives Here | Written By | Read By | Volatility |
 |----|------|--------|----------------|------------|---------|------------|
-| C0 | LLM Context Window | In-memory (prompt) | 5-tier assembled context: Soul + CoreFacts, Scratchpad, Last Session Summary, Rolling Summary + last N messages, New Input | ContextAssembler | LLM (every turn) | Ephemeral — rebuilt each turn |
+| C0 | LLM Context Window | In-memory (prompt) | Raw user message only. Agent loads persona via steering (KB0), searches memories via `agentbridge-recall` tool on demand. No bridge-side context injection. | Bridge (raw pass-through) | LLM (every turn) | Ephemeral — rebuilt each turn |
 | C1 | Consolidated Summaries | Markdown files | `working/{date}/` (intra-day), `daily/` (daily), `weekly/` (weekly rollups), `quarterly/` (quarterly rollups) | CompactionEngine, SleepCycleRunner, sleep subagent | ContextAssembler (last session), MemorySearchTool (compaction LIKE), sleep subagent (consolidation source) | Persistent — promoted up tiers, source deleted after rollup |
 | C2 | SQLite + FTS5 | `memory.db` | `messages` + FTS5, `extracted_memories` + dual FTS5, `compactions`, `sessions`, `extraction_watermarks` | recordMessage(), MemoryExtractor, CompactionEngine, agentbridge-store | MemoryIndex, MemorySearchTool, agentbridge-recall, RecallFallbackPipeline | Persistent — pruned by max messages, disk budget, selective forget |
 | C3 | JSONL Transcripts | `transcripts/{chatId}/{sessionId}.jsonl` | Raw message-by-message session logs (role, content, timestamp) | TranscriptWriter | TranscriptParser (restore, parseTail), MemoryExtractor (watermark-based) | Persistent — append-only, one file per session |
@@ -36,25 +38,25 @@ Every piece of information the agent can store or recall lives in one of these c
 
 | ID | Name | Backend | Content | Access Method | Scope |
 |----|------|---------|---------|---------------|-------|
-| KB0 | Soul / Persona | `persona/SOUL.md` | Agent identity, personality, behavioral rules, core truths | Loaded into C0 Tier 1 (Soul) on every context assembly | Static — defines who the agent is |
+| KB0 | Soul / Persona | `persona/SOUL.md` | Agent identity, personality, behavioral rules, core truths | Loaded via kiro-cli agent config (`--agent professor`) as steering resource | Static — defines who the agent is |
 | KB1 | NotebookLM | Google NotebookLM API | Curated reference documents: research papers, technical docs, guides | `nlm notebook query <id> "question" --json` | External — grounded answers with citations |
 
 ### Compartment Data Flow
 
 ```
-User Message
+User Message (raw, no bridge-side injection)
     |
     v
-+----------+    append     +----------+
-| C0       |<--------------| C3       |  JSONL transcript
-| Context  |    restore    | Transcripts
-| Window   |               +----------+
++----------+               +----------+
+| C0       |    append     | C3       |  JSONL transcript
+| LLM      |-------------->| Transcripts
+| Context  |               +----------+
 |          |                     |
-|          |              watermark-based
-|          |                     v
-|          |               +----------+    FTS5 auto-index
-|          |<--- search ---| C2       |<-----------------+
-|          |               | SQLite   |                  |
+| (agent   |              watermark-based
+|  decides |                     v
+|  when to |               +----------+    FTS5 auto-index
+|  search) |--- recall --->| C2       |<-----------------+
+|          |  (via tool)   | SQLite   |                  |
 |          |               | + FTS5   |    +----------+  |
 |          |               +----------+    | C5       |  |
 |          |                     ^         | Vectors  |  |
@@ -62,18 +64,12 @@ User Message
 |          |              compaction                      |
 |          |                     |              extraction|
 |          |               +----------+         +--------+-+
-|          |<-- summary ---| C1       |         | Heartbeat |
+|          |               | C1       |         | Heartbeat |
 |          |               | Summaries|         | Extractor |
 |          |               +----------+         +-----------+
 |          |
-|          |<-- facts -----+----------+
-|          |               | C4       |
-|          |<-- scratchpad | Markdown  |
-|          |               | Files    |
-|          |               +----------+
-|          |
 |          |<-- soul ------+----------+
-|          |               | KB0      |
+|          |   (steering)  | KB0      |
 |          |               | Persona  |
 +----------+               +----------+
 
@@ -95,11 +91,12 @@ The memory system is organized into 7 functional layers, from low-level storage 
 |  agentbridge-sleep, SleepTrigger, SleepStateGatherer,               |
 |  SleepPromptBuilder, SleepCycleRunner                               |
 +---------------------------------------------------------------------+
-|  Layer 6: Context Assembly & Prompt Construction                     |
+|  Layer 6: Context Assembly & Prompt Construction (available, not in main path) |
 |  ContextAssembler, ContextWindowMonitor                             |
 +---------------------------------------------------------------------+
-|  Layer 5: Agent-Initiated Recall & Search                           |
-|  MemorySearchTool, agentbridge-recall, RecallFallbackPipeline,      |
+|  Layer 5: Agent-Initiated Recall & Search (agent-driven via steering)  |
+|  agentbridge-recall (primary), MemorySearchTool,                     |
+|  RecallFallbackPipeline (available, not in main path),               |
 |  IntentDetector                                                      |
 +---------------------------------------------------------------------+
 |  Layer 4: Background Extraction & Enrichment                        |
@@ -173,13 +170,13 @@ Extraction flow: HeartbeatSystem tick -> MemoryExtractor queries messages above 
 
 ### Layer 5: Agent-Initiated Recall & Search
 
-Provides the search interfaces the LLM agent uses to actively retrieve memories during conversation.
+Provides the search interfaces the LLM agent uses to actively retrieve memories during conversation. **The agent drives all recall** — the bridge sends raw user input, and the agent (via `memory-search.md` steering) decides when to search and what keywords to use.
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
 | MemorySearchTool | `memory-search-tool.ts` | Primary agent search. 5-step pipeline with timeout enforcement (default 1000ms). Graceful degradation at any timeout point |
-| agentbridge-recall | `cli/agentbridge-recall.ts` | Standalone CLI. 7-stage cascade across all search layers. Opens DB read-only, outputs JSON |
-| RecallFallbackPipeline | `recall-fallback-pipeline.ts` | Multi-stage cascade for context assembly. 5 stages with time-budget (default 500ms) |
+| agentbridge-recall | `cli/agentbridge-recall.ts` | Standalone CLI invoked by agent via `execute_bash`. 7-stage cascade across all search layers. Opens DB read-only, outputs JSON. **This is the primary recall mechanism.** |
+| RecallFallbackPipeline | `recall-fallback-pipeline.ts` | Multi-stage cascade. Available but not used in main prompt path (agent uses agentbridge-recall directly) |
 | IntentDetector | `intent-detector.ts` | Detects recall intent from cue phrases, extracts temporal ranges |
 
 MemorySearchTool 5-step pipeline:
@@ -200,11 +197,11 @@ agentbridge-recall 7-stage cascade:
 
 ### Layer 6: Context Assembly & Prompt Construction
 
-Builds the final prompt sent to the LLM by assembling memory tiers into a token-budgeted context window.
+Available infrastructure for token-budgeted context assembly. **Not used in the main Telegram/Discord prompt path** — the bridge sends raw user messages and the agent handles recall via tools. These components remain available for future use or alternative transport modes.
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| ContextAssembler | `context-assembler.ts` | 5-tier assembly with per-tier token budgets. Rolling summary generation, session injection state, recalled memory integration |
+| ContextAssembler | `context-assembler.ts` | 5-tier assembly with per-tier token budgets. Rolling summary generation, session injection state, recalled memory integration. **Not called from main prompt path.** |
 | ContextWindowMonitor | `context-window-monitor.ts` | When `(currentTokens / maxTokens) * 100 > MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), schedules compression via `process.nextTick()` — non-blocking |
 
 ContextAssembler 5-tier assembly:
@@ -438,8 +435,8 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 5. **Message In**: `memory.recordMessage()` -> JSONL append -> FTS5 index -> optional vector index -> prune -> disk budget check every 100 writes
 6. **Background Extraction** (heartbeat): MemoryExtractor queries unprocessed transcripts -> LLM extracts structured memories with emotion scores -> dual-column `content_en` + `content_original` -> FTS5 auto-index -> watermark advanced
 7. **Instant Storage**: Agent invokes `agentbridge-store` CLI -> validates -> clamps emotion -> inserts `extracted_memories` -> advances watermark
-8. **Context Assembly**: 5-tier: Soul -> Scratchpad -> Recalled -> Working (English rolling summary + last N) -> New Input. ContextWindowMonitor checks threshold after assembly.
-9. **Agent Search**: `agentbridge-recall` -> FTS5 English + compactions + optional original-language -> merge + deduplicate -> temporal decay -> MMR re-ranking
+8. **Prompt Path**: Bridge sends raw user message to kiro-cli (no context injection). Agent reads `memory-search.md` steering, decides if recall is needed, invokes `agentbridge-recall` via `execute_bash` with extracted keywords. ContextAssembler (5-tier) exists but is not used in the main Telegram/Discord prompt path.
+9. **Agent Search**: `agentbridge-recall` -> 7-stage cascade (FTS5 AND -> relaxed OR -> substring -> original-language -> extracted memories -> compactions) -> merge + deduplicate -> temporal decay -> MMR re-ranking
 10. **Auto-Compaction**: When context window exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), writes safety-net transcript to working dir, sends `/compact` to Kiro CLI, updates watermark
 11. **Consolidation** (heartbeat): 7 daily -> 1 weekly, 4 weekly -> 1 quarterly. English summaries.
 12. **Sleep Cycle** (cron or startup): SleepTrigger fires -> `agentbridge-sleep` gathers state -> builds prompt -> invokes Opus subagent -> subagent performs maintenance -> audit trail written
