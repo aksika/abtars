@@ -24,7 +24,6 @@ export type MemoryConfig = {
   autoCompactThreshold: number;
   contextBudget: {
     soul: number;
-    scratchpad: number;
     recalled: number;
     working: number;
   };
@@ -69,7 +68,6 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
   autoCompactThreshold: 3000,
   contextBudget: {
     soul: 500,
-    scratchpad: 300,
     recalled: 600,
     working: 2000,
   },
@@ -155,10 +153,6 @@ export function loadMemoryConfig(): MemoryConfig {
 
   const contextBudget = {
     soul: parseNumberEnvSafe("MEMORY_CONTEXT_BUDGET_SOUL", MEMORY_CONFIG_DEFAULTS.contextBudget.soul),
-    scratchpad: parseNumberEnvSafe(
-      "MEMORY_CONTEXT_BUDGET_SCRATCHPAD",
-      MEMORY_CONFIG_DEFAULTS.contextBudget.scratchpad,
-    ),
     recalled: parseNumberEnvSafe(
       "MEMORY_CONTEXT_BUDGET_RECALLED",
       MEMORY_CONFIG_DEFAULTS.contextBudget.recalled,

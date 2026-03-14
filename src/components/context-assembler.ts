@@ -10,7 +10,7 @@ import { logWarn } from "./logger.js";
  *
  * Assembly order (priority):
  * 1. Soul + User Core Facts (system prompt + user_core_facts.md)
- * 2. Scratchpad
+ * 2. (removed)
  * 3. Recalled Memories (top-3 hybrid search results)
  * 4. Working Memory (last N raw messages)
  * 5. New Input (user's latest query)
@@ -131,7 +131,6 @@ export class ContextAssembler {
     const sections: string[] = [];
     const usage = {
       soul: 0,
-      scratchpad: 0,
       recalled: 0,
       working: 0,
       input: 0,
@@ -146,14 +145,7 @@ export class ContextAssembler {
       usage.soul = soulSection.tokens;
     }
 
-    // 2. Scratchpad
-    const scratchpadSection = this.buildScratchpadSection(chatId, budget.scratchpad);
-    if (scratchpadSection.text) {
-      sections.push(scratchpadSection.text);
-      usage.scratchpad = scratchpadSection.tokens;
-    }
-
-    // 3a. Last Session Summary (session-start only)
+    // 2. Last Session Summary (session-start only)
     if (shouldInjectSessionContext) {
       const summarySection = this.buildLastSessionSummary(chatId, budget.recalled);
       if (summarySection.text) {
@@ -223,12 +215,12 @@ export class ContextAssembler {
     usage.input = this.estimateTokens(inputSection);
     sections.push(inputSection);
 
-    usage.total = usage.soul + usage.scratchpad + usage.recalled + usage.working + usage.input;
+    usage.total = usage.soul + usage.recalled + usage.working + usage.input;
 
     // Check context window usage and schedule async compression if needed
     if (this.contextWindowMonitor) {
       try {
-        const maxTokens = budget.soul + budget.scratchpad + budget.recalled + budget.working;
+        const maxTokens = budget.soul + budget.recalled + budget.working;
         if (this.contextWindowMonitor.shouldCompress(usage.total, maxTokens)) {
           this.contextWindowMonitor.scheduleCompression(channelKey);
         }
@@ -260,18 +252,6 @@ export class ContextAssembler {
     if (parts.length === 0) return { text: "", tokens: 0 };
 
     const raw = parts.join("\n\n");
-    const truncated = this.truncateToTokenBudget(raw, budget);
-    return { text: truncated, tokens: this.estimateTokens(truncated) };
-  }
-
-  private buildScratchpadSection(
-    chatId: number,
-    budget: number,
-  ): { text: string; tokens: number } {
-    const scratchpad = this.memoryManager.readScratchpad(chatId);
-    if (!scratchpad) return { text: "", tokens: 0 };
-
-    const raw = `[SCRATCHPAD]\n${scratchpad}`;
     const truncated = this.truncateToTokenBudget(raw, budget);
     return { text: truncated, tokens: this.estimateTokens(truncated) };
   }

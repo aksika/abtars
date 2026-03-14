@@ -503,17 +503,6 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (text === "/scratchpad") {
-        if (memory) {
-          const pad = memory.readScratchpad(chatId);
-          const msg = pad ? `📝 Scratchpad:\n\n${pad}` : "📝 Scratchpad is empty.";
-          await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
-        } else {
-          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
-        }
-        return;
-      }
-
       if (text === "/memory") {
         if (!memory) {
           await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
@@ -768,7 +757,6 @@ async function main(): Promise<void> {
           "/cancel — Cancel current request",
           "/compact — Trigger memory compaction",
           "/facts — Show stored facts",
-          "/scratchpad — Show scratchpad",
           "/memory — Memory storage statistics",
           "/ingest — Ingest a document (reply to file)",
           "/ingest list — List ingested documents",
@@ -798,7 +786,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
         if (!known.includes(cmd)) {
           await telegramApi.sendMessage(chatId, `❓ Unknown command: ${cmd}\nType /help for available commands.`, { message_thread_id: threadId });
           return;
@@ -1335,7 +1323,6 @@ async function main(): Promise<void> {
           "/cancel — Cancel current request",
           "/compact — Trigger memory compaction",
           "/facts — Show stored facts",
-          "/scratchpad — Show scratchpad",
           "/memory — Memory storage statistics",
           "/ingest — Ingest a document (reply to file)",
           "/ingest list — List ingested documents",
@@ -1365,7 +1352,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/scratchpad", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/memory", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
         if (!known.includes(cmd)) {
           await discordApi.sendMessage(message.channelId, `❓ Unknown command: ${cmd}\nType /help for available commands.`);
           return;

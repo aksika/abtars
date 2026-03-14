@@ -65,7 +65,6 @@ export type AssembledContext = {
   /** Token usage breakdown per tier. */
   usage: {
     soul: number;
-    scratchpad: number;
     recalled: number;
     working: number;
     input: number;

@@ -515,40 +515,6 @@ export class MemoryManager {
     });
   }
 
-  /** Read the scratchpad for a chat. Creates empty file if not exists. */
-  readScratchpad(chatId: number): string {
-    if (!this.config.memoryEnabled) return "";
-
-    try {
-      const dir = join(this.config.memoryDir, "scratchpads", String(chatId));
-      const filePath = join(dir, "scratchpad.md");
-
-      if (!existsSync(filePath)) {
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(filePath, "", "utf-8");
-        return "";
-      }
-
-      return readFileSync(filePath, "utf-8");
-    } catch (err) {
-      logError(TAG, `Failed to read scratchpad for chat ${chatId}`, err);
-      return "";
-    }
-  }
-
-  /** Write to the scratchpad for a chat. */
-  writeScratchpad(chatId: number, content: string): void {
-    if (!this.config.memoryEnabled) return;
-
-    try {
-      const dir = join(this.config.memoryDir, "scratchpads", String(chatId));
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "scratchpad.md"), content, "utf-8");
-    } catch (err) {
-      logError(TAG, `Failed to write scratchpad for chat ${chatId}`, err);
-    }
-  }
-
   /** Read user core facts for a chat. Creates empty file if not exists. */
   readUserCoreFacts(chatId: number): string {
     if (!this.config.memoryEnabled) return "";
@@ -904,7 +870,7 @@ export class MemoryManager {
   /**
    * Build assembled context for a user message. Called by transport before sending to LLM.
    * Delegates to ContextAssembler.assemble() with all five tiers
-   * (soul/core facts, scratchpad, recalled memories, working memory, new input).
+   * (soul/core facts, recalled memories, working memory, new input).
    * Falls back to raw userInput if assembly fails, logging a warning.
    * Returns the assembled context text as a string.
    */
