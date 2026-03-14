@@ -308,25 +308,135 @@ For our A2A use case: 1M function calls/month is massive — even at 1000 messag
 
 Starter plan (pay-as-you-go beyond free): $2.20/M function calls, $0.22/GB storage.
 
-## 7. Self-Hosting Option
+## 7. Scheduling & Cron Jobs
 
-Convex backend is open source (FSL Apache 2.0 → converts to full Apache 2.0 after 2 years). Self-hosting via Docker + Postgres:
+Convex has built-in durable scheduling — relevant for A2A retry logic, message cleanup, and deferred task execution.
 
-```bash
-git clone https://github.com/get-convex/convex-backend
-cd convex-backend/self-hosted
-# Follow README for Docker Compose setup
+### Scheduled Functions
+
+Schedule any function to run after a delay or at a specific time. Stored in the database, survives restarts.
+
+```typescript
+// Schedule a retry in 30 seconds if processing fails
+export const retryMessage = mutation({
+  args: { messageId: v.id("a2a_messages") },
+  handler: async (ctx, { messageId }) => {
+    const msg = await ctx.db.get(messageId);
+    if (msg?.status === "failed") {
+      await ctx.db.patch(messageId, { status: "pending" });
+      // Or schedule a more complex retry action
+      await ctx.scheduler.runAfter(30000, internal.a2a.processMessage, { messageId });
+    }
+  },
+});
 ```
 
-Self-hosting gives:
-- Full control over data location
-- No usage limits (only your hardware)
-- Same codebase as cloud service
-- Requires managing infrastructure (Postgres, the Convex runtime)
+Key details:
+- `ctx.scheduler.runAfter(delayMs, fn, args)` — run after delay
+- `ctx.scheduler.runAt(timestamp, fn, args)` — run at specific time
+- Scheduling from mutations is atomic with the transaction (if mutation fails, nothing is scheduled)
+- Scheduling from actions is NOT atomic (scheduled function runs even if action later fails)
+- `runAfter(0, ...)` = add to queue immediately (like `setTimeout(fn, 0)`)
+- Mutations are retried automatically on internal errors (exactly-once); actions are at-most-once
+- Can cancel via `ctx.scheduler.cancel(scheduledFnId)`
+- Status queryable via `_scheduled_functions` system table (Pending → InProgress → Success/Failed/Canceled)
+- Results retained for 7 days after completion
+- Limit: 1000 scheduled functions per single function call, 8MB total argument size
 
-For our use case: **cloud free tier first**, self-host later if needed.
+### Cron Jobs
 
-## 8. Comparison: Convex vs Alternatives for A2A
+Recurring schedules defined in `convex/crons.ts`:
+
+```typescript
+import { cronJobs } from "convex/server";
+import { internal } from "./_generated/api";
+
+const crons = cronJobs();
+
+// Clean up completed messages older than 7 days
+crons.interval("cleanup old messages", { hours: 6 }, internal.a2a.cleanupOldMessages);
+
+// Health check: flag stale "processing" messages
+crons.interval("stale message check", { minutes: 5 }, internal.a2a.checkStaleMessages);
+
+export default crons;
+```
+
+Schedule types:
+- `crons.interval()` — every N seconds/minutes/hours (seconds-level granularity)
+- `crons.cron()` — standard crontab syntax (`"0 16 1 * *"`)
+- `crons.hourly()`, `crons.daily()`, `crons.weekly()`, `crons.monthly()` — named convenience methods
+- At most one run of each cron executes at a time; if previous run is still going, next is skipped
+
+### A2A Relevance
+
+For our use case, scheduling enables:
+- **Retry failed messages**: schedule a retry mutation after N seconds on failure
+- **Message TTL**: cron job to clean up old completed/failed messages
+- **Stale detection**: cron to flag messages stuck in "processing" too long
+- **Deferred delivery**: schedule a message to be delivered at a future time
+
+## 8. Self-Hosting Option
+
+Convex backend is open source (FSL Apache 2.0 → converts to full Apache 2.0 after 2 years). Three services to deploy: backend, dashboard, and your frontend app.
+
+### Quick Start (Docker)
+
+```bash
+# Download docker-compose.yml from get-convex/convex-backend/self-hosted/docker/
+docker compose up
+
+# Generate admin key for dashboard/CLI
+docker compose exec backend ./generate_admin_key.sh
+```
+
+Default ports:
+- Backend API: `http://127.0.0.1:3210`
+- HTTP actions: `http://127.0.0.1:3211`
+- Dashboard: `http://localhost:6791`
+
+### Project Configuration
+
+```env
+# .env.local in your Convex project (NOT committed to source control)
+CONVEX_SELF_HOSTED_URL='http://127.0.0.1:3210'
+CONVEX_SELF_HOSTED_ADMIN_KEY='<your admin key>'
+```
+
+Then use the CLI normally: `npx convex dev`, `npx convex deploy`, etc.
+
+### Storage Options
+
+- **Default**: SQLite (local, zero config, good for dev/small deployments)
+- **Production**: Postgres or MySQL (external, scalable)
+- **File storage**: can use S3 for exports, snapshots, modules, files, and search indexes
+- Docker volume for persistent state (or cloud equivalent like AWS EBS)
+
+### Advanced Hosting Options
+
+Documented guides exist for:
+- Fly.io deployment
+- Railway.com deployment
+- Hosting on your own servers (bare metal / VMs)
+- Running the binary directly (no Docker)
+- Postgres/MySQL database backend
+- S3 storage integration
+- Dashboard customization
+- Version upgrades
+- Benchmarking and performance tuning (knobs)
+
+### Limitations
+
+Self-hosted supports all free-tier features. Cloud-hosted is optimized for scale.
+
+### For Our Use Case
+
+**Cloud free tier first** — zero ops, generous limits. Self-host later if:
+- We need data locality (all data on our infrastructure)
+- Usage exceeds free tier (unlikely for A2A messaging volume)
+- We want zero external dependencies for air-gapped setups
+
+## 9. Comparison: Convex vs Alternatives for A2A
 
 | Aspect | Convex | Redis Pub/Sub | NATS | PostgreSQL + LISTEN/NOTIFY | Current HTTP |
 |--------|--------|--------------|------|---------------------------|-------------|
@@ -342,7 +452,7 @@ For our use case: **cloud free tier first**, self-host later if needed.
 
 Convex wins on: TypeScript alignment (matches our stack), persistence + reactivity combo, free tier generosity, and the fact that it's a single dependency that gives us DB + real-time + serverless functions.
 
-## 9. Risks & Considerations
+## 10. Risks & Considerations
 
 - **External dependency**: adds a cloud service dependency (mitigated by self-host option)
 - **Latency**: cloud Convex adds network hop vs localhost HTTP (~50ms vs ~1ms)
@@ -350,7 +460,7 @@ Convex wins on: TypeScript alignment (matches our stack), persistence + reactivi
 - **Vendor lock-in**: schema/functions are Convex-specific (mitigated by open source)
 - **WSL networking**: WebSocket from WSL to Convex cloud should work fine (outbound only)
 
-## 10. Implementation Roadmap
+## 11. Implementation Roadmap
 
 ### Phase 1: Prototype (additive, no changes to existing A2A)
 1. `npm install convex` in agentbridge
@@ -369,7 +479,7 @@ Convex wins on: TypeScript alignment (matches our stack), persistence + reactivi
 10. Convex-side serverless functions for message preprocessing
 11. Consider self-hosting if usage grows
 
-## 11. Quick Start Commands
+## 12. Quick Start Commands
 
 ```bash
 # Install
@@ -385,7 +495,7 @@ npx convex deploy
 npx convex dev
 ```
 
-## 12. Verdict
+## 13. Verdict
 
 Convex is a strong fit for **async, persistent A2A messaging** alongside our existing HTTP A2A. The TypeScript-native approach matches our stack perfectly. Free tier covers our volume easily. The reactive WebSocket subscriptions give us real-time message delivery without polling.
 
