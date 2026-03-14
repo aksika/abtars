@@ -797,9 +797,6 @@ async function main(): Promise<void> {
 
         if (memory) {
           pendingSessionStart.delete(sessionKey);
-          const recalled = await memory.recallForPrompt(chatId, prompt, sessionKey);
-          if (recalled) prompt = `${recalled}\n\n${prompt}`;
-          logDebug("main", `Context (${prompt.length} chars, ${config.kiroTransport})`);
           memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
@@ -1360,8 +1357,6 @@ async function main(): Promise<void> {
         if (memory) {
           const chatId = parseInt(message.channelId, 10) || 0;
           pendingSessionStart.delete(sessionKey);
-          const recalled = await memory.recallForPrompt(chatId, prompt, sessionKey);
-          if (recalled) prompt = `${recalled}\n\n${prompt}`;
           memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
