@@ -103,11 +103,14 @@ export class BrowserManager {
     // Avoid duplicate launches if multiple callers race.
     if (this._launching) return this._launching;
 
+    const args = ["--headless=new"];
+    if (process.env["BROWSER_NO_SANDBOX"] === "1") args.push("--no-sandbox");
+
     this._launching = chromium
       .launch({
         headless: true,
         channel: process.env["BROWSER_CHANNEL"] || undefined,
-        args: ["--no-sandbox", "--headless=new"],
+        args,
       })
       .then((browser) => {
         this._browser = browser;
