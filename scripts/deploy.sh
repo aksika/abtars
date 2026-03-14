@@ -32,6 +32,8 @@ if [ "$QUICK" = false ]; then
   echo "🔨 Building..."
   cd "$PROJECT_DIR"
   npm run build
+  echo "🌐 Ensuring Playwright Chromium is installed..."
+  npx playwright install chromium
 fi
 
 # 3. Deploy steering files (SOUL.md + skills as steering)
@@ -45,6 +47,7 @@ cp "$PROJECT_DIR/skills/instant-store/SKILL.md" "$AB_HOME/.kiro/steering/instant
 cp "$PROJECT_DIR/skills/nlm/SKILL.md" "$AB_HOME/.kiro/steering/nlm.md"
 cp "$PROJECT_DIR/skills/topic-save/SKILL.md" "$AB_HOME/.kiro/steering/topic-save.md"
 cp "$PROJECT_DIR/skills/mcporter/SKILL.md" "$AB_HOME/.kiro/steering/mcporter.md"
+cp "$PROJECT_DIR/skills/browser/SKILL.md" "$AB_HOME/.kiro/steering/browser.md"
 mkdir -p "$AB_HOME/skills/agents"
 cp "$PROJECT_DIR/skills/agents/"*.md "$AB_HOME/skills/agents/"
 
@@ -74,6 +77,13 @@ echo '#!/usr/bin/env bash' > "$SLEEP_SCRIPT"
 echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-sleep.js\" \"\$@\"" >> "$SLEEP_SCRIPT"
 chmod +x "$SLEEP_SCRIPT"
 ln -sf "$SLEEP_SCRIPT" "$HOME/.local/bin/agentbridge-sleep"
+
+# Deploy agentbridge-browser CLI (agent-callable headless browser)
+BROWSER_SCRIPT="$AB_HOME/agentbridge-browser"
+echo '#!/usr/bin/env bash' > "$BROWSER_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-browser.js\" \"\$@\"" >> "$BROWSER_SCRIPT"
+chmod +x "$BROWSER_SCRIPT"
+ln -sf "$BROWSER_SCRIPT" "$HOME/.local/bin/agentbridge-browser"
 
 # Deploy mcporter CLI (MCP tool access)
 MCPORTER_DIR="$HOME/workspace/mcporter"
