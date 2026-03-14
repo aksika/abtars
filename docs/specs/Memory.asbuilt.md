@@ -31,7 +31,7 @@ Every piece of information the agent can store or recall lives in one of these c
 | C1 | Consolidated Summaries | Markdown files | `working/{date}/` (intra-day), `daily/` (daily), `weekly/` (weekly rollups), `quarterly/` (quarterly rollups) | CompactionEngine, SleepCycleRunner, sleep subagent | ContextAssembler (last session), MemorySearchTool (compaction LIKE), sleep subagent (consolidation source) | Persistent — promoted up tiers, source deleted after rollup |
 | C2 | SQLite + FTS5 | `memory.db` | `messages` + FTS5, `extracted_memories` + dual FTS5, `compactions`, `sessions`, `extraction_watermarks` | recordMessage(), MemoryExtractor, CompactionEngine, agentbridge-store | MemoryIndex, MemorySearchTool, agentbridge-recall, RecallFallbackPipeline | Persistent — pruned by max messages, disk budget, selective forget |
 | C3 | JSONL Transcripts | `transcripts/{chatId}/{sessionId}.jsonl` | Raw message-by-message session logs (role, content, timestamp) | TranscriptWriter | TranscriptParser (restore, parseTail), MemoryExtractor (watermark-based) | Persistent — append-only, one file per session |
-| C4 | Markdown Knowledge Files | Flat files | `scratchpads/` (per-chat notes), `core/` (permanent facts), `~/.agentbridge/topics/` (topic summaries) | Agent (scratchpad/facts), topic-save skill (topics) | ContextAssembler (soul + scratchpad tiers), sleep subagent (topic reorg) | Persistent — manually managed |
+| C4 | Markdown Knowledge Files | Flat files | `core/` (permanent facts), `~/.agentbridge/topics/` (topic summaries) | Agent (facts), topic-save skill (topics) | Sleep subagent (topic reorg) | Persistent — manually managed |
 | C5 | Vector Index | `memory.db` (`embeddings`) | ONNX embedding vectors per message, model-version-aware | EmbeddingProvider | VectorIndex (cosine similarity), hybridSearch (RRF fusion with FTS5) | Persistent — optional (`MEMORY_VECTOR_ENABLED`), re-embedded on model swap |
 
 ### Knowledge Bases
@@ -124,7 +124,7 @@ Responsible for raw data storage — both structured (SQLite) and unstructured (
 | SQLite DB | `memory-db.ts` | Schema creation, migrations. 8 tables + 3 FTS5 virtual tables + triggers for auto-indexing |
 | TranscriptWriter | `transcript-writer.ts` | Appends JSONL records per session to `transcripts/{chatId}/{sessionId}.jsonl` |
 | TranscriptParser | `transcript-parser.ts` | Reads JSONL files, provides `parseTail()` for recent-message loading |
-| File System Layout | — | `working/` (intra-day), `daily/`, `weekly/`, `quarterly/`, `audit/`, `scratchpads/`, `core/` |
+| File System Layout | — | `working/` (intra-day), `daily/`, `weekly/`, `quarterly/`, `audit/`, `core/` |
 
 Data enters this layer via `MemoryManager.recordMessage()` which writes to both JSONL transcript and SQLite `messages` table simultaneously.
 
@@ -201,32 +201,29 @@ Available infrastructure for token-budgeted context assembly. **Not used in the 
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| ContextAssembler | `context-assembler.ts` | 5-tier assembly with per-tier token budgets. Rolling summary generation, session injection state, recalled memory integration. **Not called from main prompt path.** |
+| ContextAssembler | `context-assembler.ts` | 4-tier assembly with per-tier token budgets. Rolling summary generation, session injection state, recalled memory integration. **Not called from main prompt path.** |
 | ContextWindowMonitor | `context-window-monitor.ts` | When `(currentTokens / maxTokens) * 100 > MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), schedules compression via `process.nextTick()` — non-blocking |
 
-ContextAssembler 5-tier assembly:
+ContextAssembler 4-tier assembly:
 
 ```
 +----------------------------------------------+
 | Tier 1: Soul + User Core Facts               |  500 tokens
 |   System prompt + per-chat permanent facts    |  CoreFacts on session-start only
 +----------------------------------------------+
-| Tier 2: Scratchpad                           |  300 tokens
-|   Per-chat scratchpad content                |
-+----------------------------------------------+
-| Tier 3: Recalled Memories                    |  600 tokens
+| Tier 2: Recalled Memories                    |  600 tokens
 |   Last session summary (session-start only)  |
 +----------------------------------------------+
-| Tier 4: Working Memory                       |  2000 tokens
+| Tier 3: Working Memory                       |  2000 tokens
 |   Rolling summary (English, LLM-generated)   |  Summary on session-start only
 |   + last N messages (rollingBufferSize=20)   |  Prepended with [SESSION START]
 +----------------------------------------------+
-| Tier 5: New Input                            |
+| Tier 4: New Input                            |
 |   Current user message                       |
 +----------------------------------------------+
 ```
 
-Session injection: on first message of a session, tiers 1/3/4 inject extra context (CoreFacts, last session summary, rolling summary). Subsequent messages omit these to save tokens.
+Session injection: on first message of a session, tiers 1/2/3 inject extra context (CoreFacts, last session summary, rolling summary). Subsequent messages omit these to save tokens.
 
 ### Layer 7: Overnight Maintenance
 
@@ -257,20 +254,18 @@ All paths relative to `~/.agentbridge/memory/` (configurable via `MEMORY_DIR`).
       {sessionId}.jsonl        # Raw JSONL transcript per session
   working/
     {YYYY-MM-DD}/
-      transcript_{chatId}.md   # Intra-day working memory (pre-compaction)
+      transcript_{chatId}.chat   # Full kiro-cli conversation dump (incl. reasoning)
   daily/
     daily_YYYYMMDD.md          # Daily consolidated summaries
   weekly/
     YYYY-Wxx.md                # Weekly rollup summaries (ISO week)
   quarterly/
     YYYY-Qn.md                 # Quarterly rollup summaries
-  scratchpads/
-    {chatId}/scratchpad.md     # Per-chat scratchpad
   core/
     {chatId}/user_core_facts.md  # Per-chat permanent facts
   audit/
     sleep_YYYYMMDD_HHmmss.md   # Sleep cycle audit trail logs
-  (legacy: monthly/, yearly/ -- preserved, not actively written)
+  (legacy: monthly/, yearly/, scratchpads/ -- preserved, not actively written)
 ```
 
 ---
@@ -299,7 +294,7 @@ src/
     sleep-trigger.ts       # Sleep trigger logic (startup + cron)
     sleep-state-gatherer.ts # System state snapshot
     sleep-prompt-builder.ts # Maintenance prompt construction
-    context-assembler.ts   # 5-tier context + rolling summary
+    context-assembler.ts   # 4-tier context + rolling summary
     embedding-provider.ts  # Local ONNX embeddings + hot-swap
     vector-index.ts        # Model-version-aware cosine similarity
     ingestion-pipeline.ts  # YouTube/PDF/text/markdown ingestion
@@ -334,7 +329,7 @@ src/
 | VectorIndex | `components/vector-index.ts` | Model-version-aware cosine similarity |
 | CompactionEngine | `components/compaction-engine.ts` | Daily compaction + tier consolidation, English summaries |
 | SleepCycleRunner | `components/sleep-cycle-runner.ts` | Hierarchical rollups (7 daily->weekly, 4 weekly->quarterly) |
-| ContextAssembler | `components/context-assembler.ts` | 5-tier assembly + English rolling summary + session injection |
+| ContextAssembler | `components/context-assembler.ts` | 4-tier assembly + English rolling summary + session injection |
 | MemoryManager | `components/memory-manager.ts` | Coordinator for all subsystems |
 | main.ts | `main.ts` | Telegram + Discord wiring, sleep trigger integration |
 
@@ -400,7 +395,6 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 | `MEMORY_AUTO_COMPACT_THRESHOLD` | `3000` | Token threshold for auto-compact (legacy) |
 | `MEMORY_COMPACT_THRESHOLD_PCT` | `85` | Context window % to trigger auto-compact |
 | `MEMORY_CONTEXT_BUDGET_SOUL` | `500` | Token budget: soul tier |
-| `MEMORY_CONTEXT_BUDGET_SCRATCHPAD` | `300` | Token budget: scratchpad tier |
 | `MEMORY_CONTEXT_BUDGET_RECALLED` | `600` | Token budget: recalled memories tier |
 | `MEMORY_CONTEXT_BUDGET_WORKING` | `2000` | Token budget: working memory tier |
 | `MEMORY_ROLLING_BUFFER_SIZE` | `20` | Recent messages kept in full detail |
@@ -413,7 +407,7 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 | `MEMORY_RECALL_MIN_TOKEN_LENGTH` | `3` | Min token length for recall |
 | `MEMORY_RECALL_CUE_PHRASES` | (built-in) | JSON override for cue phrases |
 | `MEMORY_HEARTBEAT_ENABLED` | `true` | Enable heartbeat background tasks |
-| `MEMORY_HEARTBEAT_INTERVAL_MS` | `60000` | Heartbeat tick interval |
+| `MEMORY_HEARTBEAT_INTERVAL_MS` | `300000` | Heartbeat tick interval (5min) |
 | `MEMORY_SEARCH_TIMEOUT_MS` | `1000` | Search timeout |
 | `MEMORY_DECAY_HALFLIFE_DAYS` | `30` | Temporal decay half-life |
 | `MEMORY_MMR_LAMBDA` | `0.7` | MMR diversity parameter |
@@ -435,12 +429,13 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 5. **Message In**: `memory.recordMessage()` -> JSONL append -> FTS5 index -> optional vector index -> prune -> disk budget check every 100 writes
 6. **Background Extraction** (heartbeat): MemoryExtractor queries unprocessed transcripts -> LLM extracts structured memories with emotion scores -> dual-column `content_en` + `content_original` -> FTS5 auto-index -> watermark advanced
 7. **Instant Storage**: Agent invokes `agentbridge-store` CLI -> validates -> clamps emotion -> inserts `extracted_memories` -> advances watermark
-8. **Prompt Path**: Bridge sends raw user message to kiro-cli (no context injection). Agent reads `memory-search.md` steering, decides if recall is needed, invokes `agentbridge-recall` via `execute_bash` with extracted keywords. ContextAssembler (5-tier) exists but is not used in the main Telegram/Discord prompt path.
+8. **Prompt Path**: Bridge sends raw user message to kiro-cli (no context injection). Agent reads `memory-search.md` steering, decides if recall is needed, invokes `agentbridge-recall` via `execute_bash` with extracted keywords. ContextAssembler (4-tier) exists but is not used in the main Telegram/Discord prompt path.
 9. **Agent Search**: `agentbridge-recall` -> 7-stage cascade (FTS5 AND -> relaxed OR -> substring -> original-language -> extracted memories -> compactions) -> merge + deduplicate -> temporal decay -> MMR re-ranking
-10. **Auto-Compaction**: When context window exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), writes safety-net transcript to working dir, sends `/compact` to Kiro CLI, updates watermark
-11. **Consolidation** (heartbeat): 7 daily -> 1 weekly, 4 weekly -> 1 quarterly. English summaries.
-12. **Sleep Cycle** (cron or startup): SleepTrigger fires -> `agentbridge-sleep` gathers state -> builds prompt -> invokes Opus subagent -> subagent performs maintenance -> audit trail written
-13. **Shutdown**: `memory.stopHeartbeat()` -> `memory.close()`
+10. **Idle Chat Save**: After 10min inactivity, bridge sends `/chat save` to kiro-cli, dumping full conversation (incl. reasoning) to `working/{date}/transcript_{chatId}.chat`. Also triggered before `/reset`. A2A sessions save `transcript_a2a.chat` before idle timeout kill.
+11. **Auto-Compaction**: When context window exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), writes safety-net transcript to working dir, sends `/compact` to Kiro CLI, updates watermark
+12. **Consolidation** (heartbeat): 7 daily -> 1 weekly, 4 weekly -> 1 quarterly. English summaries.
+13. **Sleep Cycle** (cron or startup): SleepTrigger fires -> `agentbridge-sleep` gathers state -> builds prompt -> invokes Opus subagent -> subagent performs maintenance -> audit trail written
+14. **Shutdown**: `memory.stopHeartbeat()` -> `memory.close()`
 
 ### Sleep Cycle Flow
 
@@ -489,7 +484,6 @@ The sleep cycle is the overnight maintenance routine. It runs via two triggers:
 | `/stop`, `/cancel` | Ctrl+C interrupt |
 | `/compact` | Manual LLM compaction |
 | `/facts` | Display user core facts |
-| `/scratchpad` | Display scratchpad |
 | `/memory` | Memory stats (messages, extracted, compactions, disk, heartbeat, NotebookLM) |
 | `/ingest <url>` | Ingest YouTube/PDF/text/markdown |
 | `/ingest list` | List ingested documents |
