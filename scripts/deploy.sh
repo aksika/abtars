@@ -5,8 +5,8 @@
 # Run from the project root: ./scripts/deploy.sh
 #
 # Usage:
-#   ./scripts/deploy.sh          # full deploy (build + env + steering + restart tmux)
-#   ./scripts/deploy.sh --quick  # env + steering only (skip build, skip tmux restart)
+#   ./scripts/deploy.sh          # full deploy (build + env + steering + launcher)
+#   ./scripts/deploy.sh --quick  # env + steering + launcher only (skip build)
 
 set -euo pipefail
 
@@ -99,13 +99,7 @@ else
   echo "   ⚠️  mcporter not built — skipping (run: cd ~/workspace/mcporter && npm run build)"
 fi
 
-# 5. Restart tmux/kiro session (unless --quick)
-if [ "$QUICK" = false ]; then
-  echo "🔄 Restarting kiro tmux session..."
-  "$PROJECT_DIR/scripts/tmux-session.sh"
-fi
-
-# 6. Done
+# 5. Done
 echo ""
 echo "✅ Deploy complete."
 echo ""
