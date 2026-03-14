@@ -62,10 +62,14 @@ export class AcpTransport implements IKiroTransport {
       logDebug(TAG, `[stderr] ${chunk.toString().trim()}`);
     });
 
+    const thisProcess = this.agent;
     this.agent.on("exit", (code, signal) => {
       logWarn(TAG, `kiro-cli exited (code=${code}, signal=${signal})`);
-      this.agent = null;
-      this.client = null;
+      // Only clear state if this is still the active process (not after respawn)
+      if (this.agent === thisProcess) {
+        this.agent = null;
+        this.client = null;
+      }
     });
 
     const input = Writable.toWeb(this.agent.stdin);
