@@ -44,6 +44,11 @@ import { logDebug, logError, logInfo, logWarn } from "./logger.js";
 
 const TAG = "memory-manager";
 
+/** Strip emoji characters from text. Emotion is captured via score, not glyphs. */
+function stripEmojis(text: string): string {
+  return text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").replace(/ {2,}/g, " ").trim();
+}
+
 /**
  * Top-level coordinator for the local memory layer.
  *
@@ -313,21 +318,24 @@ export class MemoryManager {
     if (!this.config.memoryEnabled || !this.db) return;
 
     try {
-      // 1. Append to JSONL transcript
+      // 1. Append to JSONL transcript (raw, with emojis for debug/audit)
       this.transcriptWriter?.append(record);
 
-      // 2. Index in FTS (returns the inserted message id)
-      if (!this.memoryIndex) return;
-      const messageId = this.memoryIndex.index(record);
+      // 2. Strip emojis before DB indexing — emotion is captured via score
+      const cleaned = { ...record, content: stripEmojis(record.content) };
 
-      // 3. Fire-and-forget vector indexing if available
+      // 3. Index in FTS (returns the inserted message id)
+      if (!this.memoryIndex) return;
+      const messageId = this.memoryIndex.index(cleaned);
+
+      // 4. Fire-and-forget vector indexing if available
       if (this.vectorIndex) {
-        this.vectorIndex.index(messageId, record.content).catch((err) =>
+        this.vectorIndex.index(messageId, cleaned.content).catch((err) =>
           logError(TAG, "Vector indexing failed", err),
         );
       }
 
-      // 4. Prune if chat exceeds maxMessagesPerChat
+      // 5. Prune if chat exceeds maxMessagesPerChat
       if (this.config.maxMessagesPerChat > 0) {
         this.memoryIndex.prune(record.chatId, this.config.maxMessagesPerChat);
       }
