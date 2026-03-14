@@ -6,6 +6,7 @@ import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./kiro-transport.js";
 import { AcpTransport } from "./acp-transport.js";
 import { MemoryManager } from "./memory-manager.js";
+import { scanPrompt } from "./prompt-scanner.js";
 import { logInfo, logWarn } from "./logger.js";
 
 const TAG = "agent-api";
@@ -189,6 +190,17 @@ export class AgentApiServer {
     if (!prompt || typeof prompt !== "string") {
       this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt: "", response: "400: prompt required", durationMs: Date.now() - start, status: 400 });
       res.writeHead(400).end(JSON.stringify({ error: "prompt required" }));
+      return;
+    }
+
+    // Scan for prompt injection before touching kiro-cli
+    const hit = scanPrompt(prompt);
+    if (hit) {
+      const refusal = `I can't process this request as phrased — it triggered a security filter (${hit.patternId}). Please rephrase your request without instructions that could be interpreted as prompt injection or system access commands.`;
+      logWarn(TAG, `BLOCKED ${ip}: ${hit.patternId} — "${hit.matched}"`);
+      this.log("BLOCKED", `${hit.patternId}: ${hit.matched}`);
+      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt, response: `blocked: ${hit.patternId}`, durationMs: Date.now() - start, status: 200 });
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ response: refusal, sessionKey: this.config.sessionKey }));
       return;
     }
 
