@@ -169,56 +169,6 @@ describe("MemoryManager — session CRUD", () => {
   });
 });
 
-describe("MemoryManager — scratchpad", () => {
-  let tmpDir: string;
-  let manager: MemoryManager;
-
-  beforeEach(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), "mm-scratch-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
-    await manager.initialize();
-  });
-
-  afterEach(() => {
-    manager.close();
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("readScratchpad returns empty string and creates file when none exists", () => {
-    const content = manager.readScratchpad(42);
-    expect(content).toBe("");
-    // File should now exist
-    expect(existsSync(join(tmpDir, "scratchpads", "42", "scratchpad.md"))).toBe(true);
-  });
-
-  it("writeScratchpad + readScratchpad round-trip", () => {
-    manager.writeScratchpad(42, "# Tasks\n- Buy milk\n- Fix bug #123");
-    const content = manager.readScratchpad(42);
-    expect(content).toBe("# Tasks\n- Buy milk\n- Fix bug #123");
-  });
-
-  it("readScratchpad returns empty string when memoryEnabled is false", async () => {
-    const disabled = new MemoryManager(makeConfig(tmpDir, { memoryEnabled: false }));
-    await disabled.initialize();
-
-    const content = disabled.readScratchpad(42);
-    expect(content).toBe("");
-
-    disabled.close();
-  });
-
-  it("writeScratchpad is no-op when memoryEnabled is false", async () => {
-    const disabled = new MemoryManager(makeConfig(tmpDir, { memoryEnabled: false }));
-    await disabled.initialize();
-
-    disabled.writeScratchpad(42, "should not be written");
-    // No file should be created
-    expect(existsSync(join(tmpDir, "scratchpads", "42", "scratchpad.md"))).toBe(false);
-
-    disabled.close();
-  });
-});
-
 describe("MemoryManager — enforceDiskBudget", () => {
   let tmpDir: string;
   let manager: MemoryManager;
@@ -566,15 +516,6 @@ describe("MemoryManager — checkAutoCompact", () => {
     const today = new Date().toISOString().slice(0, 10);
     const workingDir = join(tmpDir, "working", today);
     expect(existsSync(workingDir)).toBe(true);
-
-    // Verify the compaction watermark was stored in the DB
-    const db = initializeDatabase(join(tmpDir, "memory.db"));
-    const row = db
-      .prepare("SELECT summary FROM compactions WHERE chat_id = 10 AND tier = 'daily'")
-      .get() as { summary: string } | undefined;
-    expect(row).toBeDefined();
-    expect(row!.summary).toBe("[auto-compact via /compact]");
-    db.close();
   });
 
   it("is no-op when memoryEnabled is false", async () => {
@@ -706,89 +647,6 @@ describe("MemoryManager — loadRecentMessages", () => {
   });
 });
 
-describe("MemoryManager — compactSession", () => {
-  let tmpDir: string;
-  let manager: MemoryManager;
-
-  beforeEach(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), "mm-compact-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
-    await manager.initialize();
-  });
-
-  afterEach(() => {
-    manager.close();
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("delegates to CompactionEngine and returns CompactedMemory", async () => {
-    // Record some messages first
-    for (let i = 0; i < 3; i++) {
-      manager.recordMessage(
-        makeRecord({
-          content: `conversation message ${i}`,
-          chatId: 5,
-          sessionId: "s1",
-          timestamp: 1000 + i,
-        }),
-      );
-    }
-
-    const mockLlm = async (_prompt: string, _content: string) =>
-      "Key facts: user discussed 3 topics";
-
-    const result = await manager.compactSession({
-      chatId: 5,
-      sessionId: "s1",
-      llmCall: mockLlm,
-    });
-
-    expect(result).not.toBeNull();
-    expect(result!.chatId).toBe(5);
-    expect(result!.sourceSessionId).toBe("s1");
-    expect(result!.tier).toBe("daily");
-    expect(result!.summary).toBe("Key facts: user discussed 3 topics");
-    expect(result!.filePath).toBeTruthy();
-
-    // Verify the daily file was written
-    expect(existsSync(result!.filePath)).toBe(true);
-  });
-
-  it("returns null when memoryEnabled is false", async () => {
-    const disabled = new MemoryManager(makeConfig(tmpDir, { memoryEnabled: false }));
-    await disabled.initialize();
-
-    const mockLlm = async (_prompt: string, _content: string) => "summary";
-    const result = await disabled.compactSession({
-      chatId: 1,
-      sessionId: "s1",
-      llmCall: mockLlm,
-    });
-
-    expect(result).toBeNull();
-    disabled.close();
-  });
-
-  it("returns null on LLM failure", async () => {
-    manager.recordMessage(
-      makeRecord({ content: "some content", chatId: 7, sessionId: "s1", timestamp: 1000 }),
-    );
-
-    const failingLlm = async (_prompt: string, _content: string): Promise<string> => {
-      throw new Error("LLM unavailable");
-    };
-
-    const result = await manager.compactSession({
-      chatId: 7,
-      sessionId: "s1",
-      llmCall: failingLlm,
-    });
-
-    // CompactionEngine.compact returns null on LLM failure
-    expect(result).toBeNull();
-  });
-});
-
 describe("MemoryManager — assembleContext", () => {
   let tmpDir: string;
   let manager: MemoryManager;
@@ -893,129 +751,77 @@ describe("MemoryManager — assembleContext system prompt passthrough", () => {
   });
 });
 
-// Feature: auto-daily-compaction, Property 8: Per-Chat Lock Prevents Concurrent Compaction
-describe("Property 8: Per-Chat Lock Prevents Concurrent Compaction", () => {
-  it("second acquire returns null while lock held; after release, waitForCompaction resolves and lock is re-acquirable", () => {
-    /**
-     * Validates: Requirements 8.1, 8.2
-     *
-     * For any chatId, if a lock is held, a second acquire returns null.
-     * After release, waitForCompaction resolves and a new lock is acquirable.
-     */
-    const chatIdArb = fc.integer({ min: 1, max: 1_000_000 });
+describe("MemoryManager — chat_backup", () => {
+  let tmpDir: string;
+  let manager: MemoryManager;
 
-    fc.assert(
-      fc.asyncProperty(chatIdArb, async (chatId) => {
-        const manager = new MemoryManager(MEMORY_CONFIG_DEFAULTS);
-
-        // 1. First acquire should succeed (not null)
-        const lockPromise = manager.acquireCompactionLock(chatId);
-        expect(lockPromise).not.toBeNull();
-        const release = await lockPromise!;
-        expect(typeof release).toBe("function");
-
-        // 2. Second acquire for same chatId should return null (locked)
-        const secondAttempt = manager.acquireCompactionLock(chatId);
-        expect(secondAttempt).toBeNull();
-
-        // 3. Release the lock
-        release();
-
-        // 4. waitForCompaction should resolve (no pending lock)
-        await manager.waitForCompaction(chatId);
-
-        // 5. After release, a new lock should be acquirable
-        const reacquirePromise = manager.acquireCompactionLock(chatId);
-        expect(reacquirePromise).not.toBeNull();
-        const release2 = await reacquirePromise!;
-        expect(typeof release2).toBe("function");
-
-        // Clean up
-        release2();
-      }),
-      { numRuns: 100 },
-    );
-  });
-});
-
-// Feature: auto-daily-compaction, Property 7: Shutdown Compaction Bypasses All Checks
-describe("Property 7: Shutdown Compaction Bypasses All Checks", () => {
-  /**
-   * Validates: Requirements 7.2
-   *
-   * For any active session — regardless of whether the current time is before midnight
-   * or the inactivity gap has not elapsed — shutdownCompaction() should compact the session
-   * (provided the LLM call is available and no prior daily compaction record exists).
-   */
-
-  // Generator: produce a scenario where the heartbeat would NOT compact
-  // (same-day messages, or gap < dayBoundaryHours), yet shutdown should.
-  const scenarioArb = fc.record({
-    chatId: fc.integer({ min: 1, max: 500 }),
-    // Offset from "now" in ms — 0 means message just happened, up to 3h59m ago (under 4h gap)
-    messageAgeMs: fc.oneof(
-      // Same-day, very recent (minutes ago) — heartbeat skips (gap < dayBoundaryHours)
-      fc.integer({ min: 0, max: 3 * 3_600_000 }),
-      // Same-day, just under the 4h boundary
-      fc.integer({ min: 3 * 3_600_000, max: 4 * 3_600_000 - 1 }),
-      // Previous day but gap < dayBoundaryHours (e.g. message at 11pm, now is 1am)
-      fc.integer({ min: 1 * 3_600_000, max: 4 * 3_600_000 - 1 }),
-    ),
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "mm-backup-"));
+    manager = new MemoryManager(makeConfig(tmpDir));
+    await manager.initialize();
   });
 
-  it("compacts all active sessions regardless of time-of-day or inactivity gap", async () => {
-    // Use a single manager per property run to avoid excessive temp dir creation
-    await fc.assert(
-      fc.asyncProperty(scenarioArb, async (scenario) => {
-        const tmpDir = mkdtempSync(join(tmpdir(), "mm-prop7-"));
-        const manager = new MemoryManager(makeConfig(tmpDir));
-        await manager.initialize();
+  afterEach(() => {
+    manager.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
 
-        try {
-          const { chatId } = scenario;
-          const sessionId = `sess-${chatId}`;
-
-          // 1. Persist an active session — channelKey must be numeric string to match chatId
-          manager.persistSession(
-            makeSession({
-              channelKey: String(chatId),
-              acpSessionId: sessionId,
-              lastActivityAt: Date.now(),
-            }),
-          );
-
-          // 2. Record a message so the transcript file exists and compaction has content
-          manager.recordMessage(
-            makeRecord({
-              content: "test message for shutdown compaction",
-              chatId,
-              sessionId,
-              timestamp: Date.now() - scenario.messageAgeMs,
-            }),
-          );
-
-          // 3. Set a mock LLM call
-          manager.setLlmCall(async (_prompt: string, _content: string) => "shutdown summary");
-
-          // 4. Call shutdownCompaction — should compact regardless of timing
-          await manager.shutdownCompaction();
-
-          // 5. Verify a daily compaction record was created
-          const db = initializeDatabase(join(tmpDir, "memory.db"));
-          const row = db
-            .prepare(
-              "SELECT COUNT(*) as cnt FROM compactions WHERE chat_id = ? AND source_session_id = ? AND tier = 'daily'",
-            )
-            .get(chatId, sessionId) as { cnt: number };
-          db.close();
-
-          expect(row.cnt).toBe(1);
-        } finally {
-          manager.close();
-          rmSync(tmpDir, { recursive: true, force: true });
-        }
-      }),
-      { numRuns: 100 },
+  it("recordMessage inserts a row into chat_backup", () => {
+    manager.recordMessage(
+      makeRecord({ content: "backup test", chatId: 42, sessionId: "s1", timestamp: Date.now() }),
     );
+
+    const db = initializeDatabase(join(tmpDir, "memory.db"));
+    const row = db
+      .prepare("SELECT content, chat_id FROM chat_backup WHERE chat_id = 42")
+      .get() as { content: string; chat_id: number } | undefined;
+    db.close();
+
+    expect(row).toBeDefined();
+    expect(row!.content).toBe("backup test");
+  });
+
+  it("pruneBackup deletes rows older than 7 days on initialize", async () => {
+    // Insert old and recent rows directly
+    const db = initializeDatabase(join(tmpDir, "memory.db"));
+    const eightDaysAgo = Date.now() - 8 * 24 * 3_600_000;
+    const oneDayAgo = Date.now() - 1 * 24 * 3_600_000;
+    db.prepare("INSERT INTO chat_backup (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)")
+      .run(1, "s1", "user", "old message", eightDaysAgo);
+    db.prepare("INSERT INTO chat_backup (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)")
+      .run(1, "s1", "user", "recent message", oneDayAgo);
+    db.close();
+
+    // Re-initialize triggers pruneBackup
+    manager.close();
+    manager = new MemoryManager(makeConfig(tmpDir));
+    await manager.initialize();
+
+    const db2 = initializeDatabase(join(tmpDir, "memory.db"));
+    const rows = db2.prepare("SELECT content FROM chat_backup ORDER BY timestamp").all() as { content: string }[];
+    db2.close();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.content).toBe("recent message");
+  });
+
+  it("pruneBackup keeps all rows when none are older than 7 days", async () => {
+    manager.recordMessage(
+      makeRecord({ content: "msg1", chatId: 1, timestamp: Date.now() - 3 * 24 * 3_600_000 }),
+    );
+    manager.recordMessage(
+      makeRecord({ content: "msg2", chatId: 1, timestamp: Date.now() }),
+    );
+
+    // Re-initialize triggers pruneBackup
+    manager.close();
+    manager = new MemoryManager(makeConfig(tmpDir));
+    await manager.initialize();
+
+    const db = initializeDatabase(join(tmpDir, "memory.db"));
+    const count = db.prepare("SELECT COUNT(*) as cnt FROM chat_backup").get() as { cnt: number };
+    db.close();
+
+    expect(count.cnt).toBe(2);
   });
 });

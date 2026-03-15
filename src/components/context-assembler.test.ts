@@ -10,13 +10,12 @@ function makeConfig(overrides?: Partial<MemoryConfig>): MemoryConfig {
 }
 
 function makeMockManager(opts: {
-  scratchpad?: string;
-  userCoreFacts?: string;
+  coreKnowledge?: string;
   searchResults?: SearchResult[];
 } = {}) {
   return {
-    readScratchpad: (_chatId: number) => opts.scratchpad ?? "",
-    readUserCoreFacts: (_chatId: number) => opts.userCoreFacts ?? "",
+    readCoreKnowledge: () => opts.coreKnowledge ?? "",
+    getLatestCompaction: () => null,
     search: async (_query: string, _opts?: any) => opts.searchResults ?? [],
   } as any;
 }
@@ -34,8 +33,7 @@ function makeMessage(role: "user" | "assistant", content: string, idx = 0): Mess
 describe("ContextAssembler", () => {
   it("assembles context with all tiers populated", async () => {
     const manager = makeMockManager({
-      scratchpad: "Current task: fix bug #42",
-      userCoreFacts: "User prefers TypeScript",
+      coreKnowledge: "User prefers TypeScript",
       searchResults: [
         { record: makeMessage("user", "I like dark mode"), score: 1.5 },
         { record: makeMessage("assistant", "Noted, dark mode preference saved"), score: 1.2 },
@@ -58,12 +56,8 @@ describe("ContextAssembler", () => {
     // All sections should be present
     expect(result.text).toContain("[SYSTEM]");
     expect(result.text).toContain("You are a helpful assistant.");
-    expect(result.text).toContain("[USER FACTS]");
+    expect(result.text).toContain("[CORE KNOWLEDGE]");
     expect(result.text).toContain("User prefers TypeScript");
-    expect(result.text).toContain("[SCRATCHPAD]");
-    expect(result.text).toContain("Current task: fix bug #42");
-    // Recalled memories are no longer auto-injected (skill-driven recall)
-    expect(result.text).not.toContain("[RECALLED MEMORIES]");
     expect(result.text).toContain("[CONVERSATION]");
     expect(result.text).toContain("user: Hello");
     expect(result.text).toContain("assistant: Hi there!");
@@ -72,22 +66,16 @@ describe("ContextAssembler", () => {
 
     // Usage breakdown should be populated
     expect(result.usage.soul).toBeGreaterThan(0);
-    expect(result.usage.scratchpad).toBeGreaterThan(0);
-    expect(result.usage.recalled).toBe(0);
     expect(result.usage.working).toBeGreaterThan(0);
     expect(result.usage.input).toBeGreaterThan(0);
     expect(result.usage.total).toBe(
-      result.usage.soul + result.usage.scratchpad + result.usage.recalled +
+      result.usage.soul + result.usage.recalled +
       result.usage.working + result.usage.input,
     );
   });
 
-  it("omits empty tiers (no scratchpad, no recalled memories)", async () => {
-    const manager = makeMockManager({
-      scratchpad: "",
-      userCoreFacts: "",
-      searchResults: [],
-    });
+  it("omits empty tiers (no recalled memories)", async () => {
+    const manager = makeMockManager();
     const config = makeConfig();
     const assembler = new ContextAssembler(manager, config);
 
@@ -100,20 +88,16 @@ describe("ContextAssembler", () => {
     });
 
     expect(result.text).toContain("[SYSTEM]");
-    expect(result.text).not.toContain("[USER FACTS]");
-    expect(result.text).not.toContain("[SCRATCHPAD]");
     expect(result.text).not.toContain("[RECALLED MEMORIES]");
     expect(result.text).toContain("[CONVERSATION]");
     expect(result.text).toContain("[INPUT]");
-    expect(result.usage.scratchpad).toBe(0);
     expect(result.usage.recalled).toBe(0);
   });
 
   it("truncates working memory when over budget (drops oldest)", async () => {
     const manager = makeMockManager();
-    // Set a very small working memory budget (10 tokens = 40 chars)
     const config = makeConfig({
-      contextBudget: { soul: 500, scratchpad: 300, recalled: 600, working: 10 },
+      contextBudget: { soul: 500, recalled: 600, working: 10 },
     });
     const assembler = new ContextAssembler(manager, config);
 
@@ -141,14 +125,10 @@ describe("ContextAssembler", () => {
   });
 
   it("respects token budgets per tier", async () => {
-    // Create content that exceeds each tier's budget
-    const longFacts = "A".repeat(3000); // 750 tokens, exceeds soul budget of 500
-    const longScratchpad = "B".repeat(2000); // 500 tokens, exceeds scratchpad budget of 300
+    const longKnowledge = "A".repeat(3000); // 750 tokens, exceeds soul budget of 500
 
     const manager = makeMockManager({
-      userCoreFacts: longFacts,
-      scratchpad: longScratchpad,
-      searchResults: [],
+      coreKnowledge: longKnowledge,
     });
     const config = makeConfig();
     const assembler = new ContextAssembler(manager, config);
@@ -160,17 +140,12 @@ describe("ContextAssembler", () => {
       workingMemory: [],
     });
 
-    // Each tier should respect its budget
+    // Soul tier should respect its budget
     expect(result.usage.soul).toBeLessThanOrEqual(config.contextBudget.soul);
-    expect(result.usage.scratchpad).toBeLessThanOrEqual(config.contextBudget.scratchpad);
   });
 
   it("returns only soul + input when memory is empty", async () => {
-    const manager = makeMockManager({
-      scratchpad: "",
-      userCoreFacts: "",
-      searchResults: [],
-    });
+    const manager = makeMockManager();
     const config = makeConfig();
     const assembler = new ContextAssembler(manager, config);
 
@@ -185,10 +160,8 @@ describe("ContextAssembler", () => {
     expect(result.text).toContain("You are a bot.");
     expect(result.text).toContain("[INPUT]");
     expect(result.text).toContain("Hello world");
-    expect(result.text).not.toContain("[SCRATCHPAD]");
     expect(result.text).not.toContain("[RECALLED MEMORIES]");
     expect(result.text).not.toContain("[CONVERSATION]");
-    expect(result.usage.scratchpad).toBe(0);
     expect(result.usage.recalled).toBe(0);
     expect(result.usage.working).toBe(0);
     expect(result.usage.soul).toBeGreaterThan(0);
@@ -397,7 +370,7 @@ describe("Property 12: Merge and Deduplication Prefers Higher Scores", () => {
 // ── Unit Tests: ContextAssembler Integration (Task 6.7) ────────────────────
 
 describe("ContextAssembler integration with RecallFallbackPipeline", () => {
-  it("does not inject recalled memories (skill-driven recall)", async () => {
+  it("injects recalled memories from pipeline", async () => {
     const mockPipeline = {
       execute: async () => ({
         results: [{ record: makeMessage("user", "I like cats"), score: 2.0 }],
@@ -418,11 +391,12 @@ describe("ContextAssembler integration with RecallFallbackPipeline", () => {
       workingMemory: [],
     });
 
-    expect(assembled.text).not.toContain("[RECALLED MEMORIES]");
-    expect(assembled.usage.recalled).toBe(0);
+    expect(assembled.text).toContain("[RECALLED MEMORIES]");
+    expect(assembled.text).toContain("I like cats");
+    expect(assembled.usage.recalled).toBeGreaterThan(0);
   });
 
-  it("does not inject primary recall results (skill-driven recall)", async () => {
+  it("injects primary recall results from pipeline", async () => {
     const mockPipeline = {
       execute: async () => ({
         results: [{ record: makeMessage("user", "I prefer dark mode"), score: 3.0 }],
@@ -443,8 +417,9 @@ describe("ContextAssembler integration with RecallFallbackPipeline", () => {
       workingMemory: [],
     });
 
-    expect(assembled.text).not.toContain("[RECALLED MEMORIES]");
-    expect(assembled.usage.recalled).toBe(0);
+    expect(assembled.text).toContain("[RECALLED MEMORIES]");
+    expect(assembled.text).toContain("I prefer dark mode");
+    expect(assembled.usage.recalled).toBeGreaterThan(0);
   });
 
   it("does not exceed token budget with large result sets", async () => {
@@ -478,7 +453,7 @@ describe("ContextAssembler integration with RecallFallbackPipeline", () => {
     expect(assembled.usage.recalled).toBeLessThanOrEqual(600);
   });
 
-  it("does not inject single-shot search results (skill-driven recall)", async () => {
+  it("injects single-shot search results when no pipeline", async () => {
     const searchResults: SearchResult[] = [
       { record: makeMessage("user", "single-shot result"), score: 2.0 },
     ];
@@ -493,8 +468,9 @@ describe("ContextAssembler integration with RecallFallbackPipeline", () => {
       workingMemory: [],
     });
 
-    expect(assembled.text).not.toContain("[RECALLED MEMORIES]");
-    expect(assembled.usage.recalled).toBe(0);
+    expect(assembled.text).toContain("[RECALLED MEMORIES]");
+    expect(assembled.text).toContain("single-shot result");
+    expect(assembled.usage.recalled).toBeGreaterThan(0);
   });
 
   it("returns no recalled section when pipeline returns empty results", async () => {

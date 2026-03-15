@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
-import type { CompactionEngine } from "./compaction-engine.js";
 import type { MemoryConfig } from "./memory-config.js";
 
 export type Reflection = {
@@ -18,12 +17,10 @@ export type Reflection = {
  */
 export class ReflectionEngine {
   readonly db: Database.Database;
-  readonly compactionEngine: CompactionEngine;
   readonly config: MemoryConfig;
 
-  constructor(db: Database.Database, compactionEngine: CompactionEngine, config: MemoryConfig) {
+  constructor(db: Database.Database, config: MemoryConfig) {
     this.db = db;
-    this.compactionEngine = compactionEngine;
     this.config = config;
   }
 

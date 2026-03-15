@@ -2,7 +2,7 @@
 
 ## Overview
 
-The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, hierarchical memory consolidation (daily → weekly → quarterly), external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, and an automated overnight sleep maintenance cycle, emoji stripping before DB indexing, and regex-based prompt injection scanning on A2A inbound messages.
+The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, an automated sleep maintenance cycle with template-based subagent instructions, immutable chat_backup safety table, emoji stripping before DB indexing, and regex-based prompt injection scanning on A2A inbound messages.
 
 **Recall architecture**: The bridge does NOT inject recalled memories or context into the prompt. The LLM agent handles all recall autonomously — it reads the `memory-search.md` steering file, decides when to search, extracts relevant keywords from user input, and invokes `agentbridge-recall` via `execute_bash`. This leverages the LLM's natural language understanding for keyword extraction instead of a heuristic pipeline.
 
@@ -29,8 +29,8 @@ Every piece of information the agent can store or recall lives in one of these c
 | ID | Name | Medium | What Lives Here | Written By | Read By | Volatility |
 |----|------|--------|----------------|------------|---------|------------|
 | C0 | LLM Context Window | In-memory (prompt) | Raw user message only. Agent loads persona via steering (KB0), searches memories via `agentbridge-recall` tool on demand. No bridge-side context injection. | Bridge (raw pass-through) | LLM (every turn) | Ephemeral — rebuilt each turn |
-| C1 | Consolidated Summaries | Markdown files | `working/{date}/` (intra-day), `daily/` (daily), `weekly/` (weekly rollups), `quarterly/` (quarterly rollups) | CompactionEngine, SleepCycleRunner, sleep subagent | ContextAssembler (last session), MemorySearchTool (compaction LIKE), sleep subagent (consolidation source) | Persistent — promoted up tiers, source deleted after rollup |
-| C2 | SQLite + FTS5 | `memory.db` | `messages` + FTS5, `extracted_memories` + dual FTS5, `compactions`, `sessions`, `extraction_watermarks` | recordMessage(), MemoryExtractor, CompactionEngine, agentbridge-store | MemoryIndex, MemorySearchTool, agentbridge-recall, RecallFallbackPipeline | Persistent — pruned by max messages, disk budget, selective forget |
+| C1 | Consolidated Summaries | Markdown files | `working/{date}/` (intra-day), `daily/` (daily), `weekly/` (weekly rollups), `quarterly/` (quarterly rollups) | Sleep subagent (via template instructions) | ContextAssembler (last session), MemorySearchTool (compaction LIKE), sleep subagent (consolidation source) | Persistent — promoted up tiers, source deleted after rollup |
+| C2 | SQLite + FTS5 | `memory.db` | `messages` + FTS5, `extracted_memories` + dual FTS5, `compactions`, `sessions`, `extraction_watermarks`, `chat_backup` | recordMessage(), MemoryExtractor, agentbridge-store | MemoryIndex, MemorySearchTool, agentbridge-recall, RecallFallbackPipeline | Persistent — pruned by max messages, disk budget, selective forget. chat_backup pruned >7 days on startup |
 | C3 | JSONL Transcripts | `transcripts/{chatId}/{sessionId}.jsonl` | Raw message-by-message session logs (role, content, timestamp) | TranscriptWriter | TranscriptParser (restore, parseTail), MemoryExtractor (watermark-based) | Persistent — append-only, one file per session |
 | C4 | Markdown Knowledge Files | Flat files | `core/user_profile.md` + `core/agent_notes.md` (agent-maintained), `~/.agentbridge/topics/` (topic summaries) | Agent (proactive writes via steering), topic-save skill (topics) | Sleep subagent (topic reorg) | Persistent — agent-maintained |
 | C5 | Vector Index | `memory.db` (`embeddings`) | ONNX embedding vectors per message, model-version-aware | EmbeddingProvider | VectorIndex (cosine similarity), hybridSearch (RRF fusion with FTS5) | Persistent — optional (`MEMORY_VECTOR_ENABLED`), re-embedded on model swap |
@@ -90,7 +90,7 @@ The memory system is organized into 7 functional layers, from low-level storage 
 +---------------------------------------------------------------------+
 |  Layer 7: Overnight Maintenance                                      |
 |  agentbridge-sleep, SleepTrigger, SleepStateGatherer,               |
-|  SleepPromptBuilder, SleepCycleRunner                               |
+|  sleep-prompt-loader, sleeping_prompt.md template                    |
 +---------------------------------------------------------------------+
 |  Layer 6: Context Assembly & Prompt Construction (available, not in main path) |
 |  ContextAssembler, ContextWindowMonitor                             |
@@ -104,8 +104,9 @@ The memory system is organized into 7 functional layers, from low-level storage 
 |  HeartbeatSystem, MemoryExtractor, IngestionPipeline,               |
 |  ReflectionEngine, agentbridge-store (Instant Store)                |
 +---------------------------------------------------------------------+
-|  Layer 3: Compaction & Consolidation                                |
-|  CompactionEngine, SleepCycleRunner                                 |
+|  Layer 3: Consolidation (subagent-driven via sleep template)        |
+|  Sleep subagent consolidates working dirs → daily → weekly →        |
+|  quarterly per sleeping_prompt.md instructions                      |
 +---------------------------------------------------------------------+
 |  Layer 2: Indexing & Search Primitives                              |
 |  MemoryIndex (FTS5), VectorIndex, EmbeddingProvider                 |
@@ -140,20 +141,15 @@ Provides the low-level search interfaces that all higher layers query against.
 | EmbeddingProvider | `embedding-provider.ts` | Local ONNX embedding generation. Handles model hot-swap via `detectModelChange()` and full re-embedding via `reembed()` |
 | sanitizeFtsQuery | `memory-index.ts` | Strips accents, removes FTS5 special characters, normalizes whitespace |
 
-### Layer 3: Compaction & Consolidation
+### Layer 3: Consolidation (Subagent-Driven)
 
-Transforms raw conversation data into progressively more compressed summaries across time tiers.
-
-| Component | File | Responsibility |
-|-----------|------|----------------|
-| CompactionEngine | `compaction-engine.ts` | `compact()` — LLM-summarizes session messages into compacted summary. `consolidate()` — merges source-tier files into target-tier file via LLM, deletes sources on success |
-| SleepCycleRunner | `sleep-cycle-runner.ts` | Orchestrates tier rollups: groups daily files by ISO week (threshold 7), weekly files by quarter (threshold 4) |
+Consolidation is performed by the sleep subagent following instructions in `sleeping_prompt.md`. No dedicated compaction engine — the subagent reads raw transcripts and working-dir files, produces consolidated summaries, and promotes them through tiers.
 
 | Source | Target | Threshold | File Naming | Trigger |
 |--------|--------|-----------|-------------|---------|
 | working dirs | daily | Past-day dirs exist | `daily_YYYYMMDD.md` | Sleep subagent |
-| daily | weekly | 7 daily files in same ISO week | `YYYY-Wxx.md` | SleepCycleRunner |
-| weekly | quarterly | 4 weekly files in same quarter | `YYYY-Qn.md` | SleepCycleRunner |
+| daily | weekly | 7 daily files in same ISO week | `YYYY-Wxx.md` | Sleep subagent |
+| weekly | quarterly | 4 weekly files in same quarter | `YYYY-Qn.md` | Sleep subagent |
 
 ### Layer 4: Background Extraction & Enrichment
 
@@ -187,7 +183,7 @@ MemorySearchTool 5-step pipeline:
 4. Temporal decay: `score *= 2^(-age_days / halflife_days)` (default 30 days)
 5. MMR re-ranking: Jaccard similarity, lambda=0.7
 
-agentbridge-recall 7-stage cascade:
+agentbridge-recall 8-stage cascade:
 1. FTS5 full-text on messages
 2. Relaxed FTS5 (OR-style, drops tokens < 3 chars)
 3. Substring LIKE (accent-insensitive)
@@ -195,6 +191,7 @@ agentbridge-recall 7-stage cascade:
 5. Extracted memories — English FTS5
 6. Extracted memories — original language FTS5
 7. Compaction summary LIKE
+8. chat_backup LIKE fallback (immutable safety table)
 
 ### Layer 6: Context Assembly & Prompt Construction
 
@@ -209,11 +206,12 @@ ContextAssembler 4-tier assembly:
 
 ```
 +----------------------------------------------+
-| Tier 1: Soul + User Core Facts               |  500 tokens
-|   System prompt + core knowledge               |  User profile + agent notes on session-start
+| Tier 1: Soul + Core Knowledge                |  500 tokens
+|   System prompt + core knowledge             |  user_profile.md + agent_notes.md on session-start
 +----------------------------------------------+
 | Tier 2: Recalled Memories                    |  600 tokens
 |   Last session summary (session-start only)  |
+|   Active recall (search-based)               |
 +----------------------------------------------+
 | Tier 3: Working Memory                       |  2000 tokens
 |   Rolling summary (English, LLM-generated)   |  Summary on session-start only
@@ -228,18 +226,17 @@ Session injection: on first message of a session, tiers 1/2/3 inject extra conte
 
 ### Layer 7: Overnight Maintenance
 
-Automated maintenance cycle during user inactivity. Consolidates working memory, cleans DB, enforces disk budgets, reorganizes topics.
+Automated maintenance cycle during user inactivity. Template-driven: the sleep subagent receives `sleeping_prompt.md` with variable-substituted system state and follows its instructions for consolidation, DB cleanup, disk budget enforcement, and topic reorganization.
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| agentbridge-sleep CLI | `cli/agentbridge-sleep.ts` | Orchestrator: gather state -> build prompt -> invoke Opus subagent via ACP -> parse outcomes -> write audit trail |
-| SleepTrigger | `sleep-trigger.ts` | Dual triggers: (1) startup catch-up, (2) internal cron via heartbeat |
-| SleepStateGatherer | `sleep-state-gatherer.ts` | Produces StateSnapshot: working dirs, DB stats, FTS5 integrity, disk usage, topic files |
-| SleepPromptBuilder | `sleep-prompt-builder.ts` | 4 instruction sections: daily consolidation, DB cleanup, disk budget, topic reorg |
-| SleepCycleRunner | `sleep-cycle-runner.ts` | Hierarchical rollups: 7 daily -> weekly, 4 weekly -> quarterly |
+| agentbridge-sleep CLI | `cli/agentbridge-sleep.ts` | Orchestrator: gather state -> load template -> invoke subagent via ACP -> write audit trail |
+| SleepTrigger | `sleep-trigger.ts` | Simplified dual triggers: (1) always on startup, (2) heartbeat cron (≥8am, 10min idle, once/day) |
+| SleepStateGatherer | `sleep-state-gatherer.ts` | Produces StateSnapshot: working dirs, DB stats, FTS5 integrity, disk usage, topic files, last sleep audit, wakeup date, todo/cron contents, transcript paths |
+| sleep-prompt-loader | `sleep-prompt-loader.ts` | Reads `sleeping_prompt.md` template, replaces `${VARIABLES}` with StateSnapshot values |
+| sleeping_prompt.md | `persona/sleeping_prompt.md` | Editable template with 6 sections: daily summary, reminder/todo extraction, DB maintenance (with CRITICAL no-delete rule), cron verification, topic reorg, disk budget |
 
-Startup triggers (any one): no audit exists, audit older than 24h, new day + past 9am + yesterday unconsolidated.
-Cron triggers (all required): 24h elapsed, user inactive 30min, transport not busy.
+During sleep, the bridge auto-replies "waking up" to incoming messages and queues them. After sleep finishes, queued messages are re-injected through the normal message handler.
 
 ---
 
@@ -270,6 +267,9 @@ All paths relative to `~/.agentbridge/memory/` (configurable via `MEMORY_DIR`).
   (legacy: monthly/, yearly/, scratchpads/, {chatId}/user_core_facts.md -- preserved, not actively written)
 ```
 
+Additional deployed files:
+- `~/.agentbridge/sleeping_prompt.md` — sleep template (copied by `deploy.sh`)
+
 ---
 
 ## Architecture
@@ -291,11 +291,9 @@ src/
     context-window-monitor.ts # Threshold-based async compression
     transcript-writer.ts   # JSONL append
     transcript-parser.ts   # JSONL read + parseTail()
-    compaction-engine.ts   # Daily compaction + tier consolidation
-    sleep-cycle-runner.ts  # Hierarchical rollups
-    sleep-trigger.ts       # Sleep trigger logic (startup + cron)
+    sleep-trigger.ts       # Sleep trigger logic (always startup + cron)
     sleep-state-gatherer.ts # System state snapshot
-    sleep-prompt-builder.ts # Maintenance prompt construction
+    sleep-prompt-loader.ts # Template loader replacing SleepPromptBuilder
     context-assembler.ts   # 4-tier context + rolling summary
     embedding-provider.ts  # Local ONNX embeddings + hot-swap
     vector-index.ts        # Model-version-aware cosine similarity
@@ -306,8 +304,10 @@ src/
     intent-detector.ts     # Recall intent + temporal range detection
   cli/
     agentbridge-sleep.ts   # Sleep CLI (overnight maintenance)
-    agentbridge-recall.ts  # Agent-initiated memory search
+    agentbridge-recall.ts  # Agent-initiated memory search (8-stage cascade)
     agentbridge-store.ts   # Agent-initiated instant storage
+  persona/
+    sleeping_prompt.md     # Editable sleep template with ${VARIABLE} substitution
   skills/
     memory-search/SKILL.md
     instant-store/SKILL.md
@@ -326,12 +326,10 @@ src/
 | MemoryConfig | `components/memory-config.ts` | 20+ config fields incl. heartbeat, searchEnhancements, dayBoundaryHours |
 | TranscriptWriter | `components/transcript-writer.ts` | JSONL append per session |
 | TranscriptParser | `components/transcript-parser.ts` | JSONL read + parseTail() |
-| SQLite schema | `components/memory-db.ts` | 8 tables + 3 FTS5 virtual tables + triggers + migrations |
+| SQLite schema | `components/memory-db.ts` | 9 tables + 3 FTS5 virtual tables + triggers + migrations (incl. chat_backup) |
 | MemoryIndex | `components/memory-index.ts` | BM25 search, prune, removeSession, searchExtracted, searchOriginal, emotion boost |
 | EmbeddingProvider | `components/embedding-provider.ts` | ONNX embeddings, model versioning, reembed |
 | VectorIndex | `components/vector-index.ts` | Model-version-aware cosine similarity |
-| CompactionEngine | `components/compaction-engine.ts` | Daily compaction + tier consolidation, English summaries |
-| SleepCycleRunner | `components/sleep-cycle-runner.ts` | Hierarchical rollups (7 daily->weekly, 4 weekly->quarterly) |
 | ContextAssembler | `components/context-assembler.ts` | 4-tier assembly + English rolling summary + session injection |
 | MemoryManager | `components/memory-manager.ts` | Coordinator for all subsystems |
 | main.ts | `main.ts` | Telegram + Discord wiring, sleep trigger integration |
@@ -369,11 +367,12 @@ src/
 
 | Component | File | Notes |
 |-----------|------|-------|
-| agentbridge-sleep CLI | `cli/agentbridge-sleep.ts` | Orchestrator: gather state -> build prompt -> invoke subagent -> audit |
-| SleepTrigger | `components/sleep-trigger.ts` | Startup catch-up + cron-based trigger logic |
-| SleepStateGatherer | `components/sleep-state-gatherer.ts` | Scans working dirs, DB stats, FTS5 health, disk usage, topic files |
-| SleepPromptBuilder | `components/sleep-prompt-builder.ts` | Builds comprehensive maintenance prompt for subagent |
-| SleepCycleRunner | `components/sleep-cycle-runner.ts` | Daily->weekly (7 files) and weekly->quarterly (4 files) rollups |
+| agentbridge-sleep CLI | `cli/agentbridge-sleep.ts` | Orchestrator: gather state -> load template -> invoke subagent -> audit |
+| SleepTrigger | `components/sleep-trigger.ts` | Always on startup + heartbeat cron (≥8am, 10min idle, once/day) |
+| SleepStateGatherer | `components/sleep-state-gatherer.ts` | Scans working dirs, DB stats, FTS5 health, disk usage, topic files, last sleep audit, transcript paths |
+| sleep-prompt-loader | `components/sleep-prompt-loader.ts` | Reads sleeping_prompt.md template, replaces ${VARIABLES} with StateSnapshot values |
+| sleeping_prompt.md | `persona/sleeping_prompt.md` | Editable template: daily summary, reminders, DB maintenance, cron, topics, disk budget |
+| chat_backup table | `components/memory-db.ts` | Immutable copy of all messages, pruned >7 days on startup by wired logic |
 
 ### Data Integrity
 
@@ -422,10 +421,7 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 | `MEMORY_SEARCH_TIMEOUT_MS` | `1000` | Search timeout |
 | `MEMORY_DECAY_HALFLIFE_DAYS` | `30` | Temporal decay half-life |
 | `MEMORY_MMR_LAMBDA` | `0.7` | MMR diversity parameter |
-| `MEMORY_DAY_BOUNDARY_HOURS` | `4` | Inactivity gap for day boundary |
-| `MEMORY_SLEEP_INTERVAL_HOURS` | `24` | Hours between sleep runs |
-| `MEMORY_SLEEP_MORNING_HOUR` | `9` | Earliest hour for morning catch-up |
-| `MEMORY_SLEEP_INACTIVITY_MINUTES` | `30` | User inactivity before cron sleep |
+| `MEMORY_DAY_BOUNDARY_HOURS` | `4` | Inactivity gap for day boundary (legacy, unused by new sleep trigger) |
 
 ---
 
@@ -436,56 +432,58 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 1. **Startup**: `main.ts` -> `loadMemoryConfig()` -> `MemoryManager.initialize()` -> opens SQLite, creates schema, optionally loads embedding model, initializes IngestionPipeline + ReflectionEngine
 2. **LLM Callback**: `memory.setLlmCall(...)` wires transport for compaction, context assembly, reflections, extraction
 3. **Heartbeat Start**: `memory.startHeartbeat()` registers memory-extraction + consolidation + sleep-trigger cron tasks
-4. **Sleep Startup Check**: `SleepTrigger.shouldRunOnStartup()` -> spawns `agentbridge-sleep.js` detached if needed
-5. **Message In**: `memory.recordMessage()` -> JSONL append (raw, with emojis) -> `stripEmojis()` on content -> FTS5 index (emoji-free) -> optional vector index -> prune -> disk budget check every 100 writes
+4. **Sleep Startup Check**: `SleepTrigger.shouldRunOnStartup()` always returns true -> spawns `agentbridge-sleep.js` detached. During sleep, incoming messages get auto-reply ("waking up") and are queued. After sleep finishes, queued messages are re-injected.
+5. **Message In**: `memory.recordMessage()` -> JSONL append (raw, with emojis) -> `stripEmojis()` on content -> FTS5 index (emoji-free) -> insert into `chat_backup` (immutable copy) -> optional vector index -> prune -> disk budget check every 100 writes
 6. **Background Extraction** (heartbeat): MemoryExtractor queries unprocessed transcripts -> LLM extracts structured memories with emotion scores -> dual-column `content_en` + `content_original` -> FTS5 auto-index -> watermark advanced
 7. **Instant Storage**: Agent invokes `agentbridge-store` CLI -> validates -> clamps emotion -> inserts `extracted_memories` -> advances watermark
 8. **Prompt Path**: Bridge sends raw user message to kiro-cli (no context injection). Agent reads `memory-search.md` steering, decides if recall is needed, invokes `agentbridge-recall` via `execute_bash` with extracted keywords. ContextAssembler (4-tier) exists but is not used in the main Telegram/Discord prompt path.
 8b. **A2A Prompt Scanning**: Inbound A2A messages pass through `scanPrompt()` before transport spawn. 22 regex patterns + invisible unicode detection. On match: HTTP 200 with graceful refusal, no kiro-cli spawn, no memory recording. Blocked content never enters C2/C3.
-9. **Agent Search**: `agentbridge-recall` -> 7-stage cascade (FTS5 AND -> relaxed OR -> substring -> original-language -> extracted memories -> compactions) -> merge + deduplicate -> temporal decay -> MMR re-ranking
+9. **Agent Search**: `agentbridge-recall` -> 8-stage cascade (FTS5 AND -> relaxed OR -> substring -> original-language -> extracted memories EN -> extracted memories original -> compactions -> chat_backup) -> merge + deduplicate -> temporal decay -> MMR re-ranking
 10. **Idle Chat Save**: After 10min inactivity, bridge sends `/chat save` to kiro-cli, dumping full conversation (incl. reasoning) to `working/{date}/transcript_{chatId}.chat`. Also triggered before `/reset`. A2A sessions save `transcript_a2a.chat` before idle timeout kill.
-11. **Auto-Compaction**: When context window exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), writes safety-net transcript to working dir, sends `/compact` to Kiro CLI, updates watermark
-12. **Consolidation** (heartbeat): 7 daily -> 1 weekly, 4 weekly -> 1 quarterly. English summaries.
-13. **Sleep Cycle** (cron or startup): SleepTrigger fires -> `agentbridge-sleep` gathers state -> builds prompt -> invokes Opus subagent -> subagent performs maintenance -> audit trail written
+11. **Auto-Compaction**: When context window exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), writes safety-net transcript to working dir, sends `/compact` to Kiro CLI
+12. **Consolidation** (sleep subagent): Follows `sleeping_prompt.md` template instructions. Working dirs -> daily, 7 daily -> weekly, 4 weekly -> quarterly. English summaries.
+13. **Sleep Cycle** (startup or cron): SleepTrigger fires -> `agentbridge-sleep` gathers state -> loads template with variable substitution -> invokes subagent via ACP -> subagent performs maintenance -> audit trail written
 14. **Shutdown**: `memory.stopHeartbeat()` -> `memory.close()`
 
 ### Sleep Cycle Flow
 
-The sleep cycle is the overnight maintenance routine. It runs via two triggers:
+The sleep cycle is the maintenance routine. It runs via two triggers:
 
-**Trigger 1 -- Startup catch-up** (`main.ts`):
-- On boot, `SleepTrigger.shouldRunOnStartup()` checks:
-  - No previous audit file exists, OR
-  - Most recent audit older than `MEMORY_SLEEP_INTERVAL_HOURS`, OR
-  - New calendar day AND hour >= `MEMORY_SLEEP_MORNING_HOUR` AND yesterday's working dir exists
-- If true, spawns `agentbridge-sleep.js` as detached child process
+**Trigger 1 -- Startup** (`main.ts`):
+- `SleepTrigger.shouldRunOnStartup()` always returns true
+- Spawns `agentbridge-sleep.js` as detached child process
+- Sets `sleepChild` — incoming messages during sleep get auto-reply ("Oh good morning, I am just waking up, give me a minute please.. I answer you soon ☕") and are queued in `pendingMessages`
+- On sleep exit, queued messages are re-injected via `telegramPoller.injectUpdate()`
 
 **Trigger 2 -- Internal cron** (`memory-manager.ts` heartbeat):
-- Registered as heartbeat task, checked every tick (default 60s)
-- `SleepTrigger.shouldRunFromCron(lastMessageTs)` checks:
-  - `MEMORY_SLEEP_INTERVAL_HOURS` elapsed since last sleep, AND
-  - User inactive for `MEMORY_SLEEP_INACTIVITY_MINUTES`
-  - Transport not busy (no active user prompts)
+- Registered as heartbeat task, checked every tick (default 5min)
+- `SleepTrigger.shouldRunFromCron(lastMessageTs)` checks all three:
+  - Hour ≥ 8
+  - Last message > 10min ago
+  - No audit file for today's date
 - If true, spawns `agentbridge-sleep.js` as detached child process
 
 **Sleep CLI Execution** (`agentbridge-sleep.ts`):
-1. Initialize MemoryManager (opens DB)
-2. `SleepStateGatherer.gather()` -> scans working dirs, queries DB stats, checks FTS5 integrity, calculates disk usage, lists topic files
-3. `SleepPromptBuilder.build(snapshot)` -> constructs comprehensive maintenance prompt with:
-   - System state tables (working dirs, DB stats, FTS5 health, disk usage, topic files)
-   - Daily consolidation instructions (past-day working dirs -> `daily_YYYYMMDD.md`)
-   - Database cleanup instructions (FTS5 repair, orphan deletion, message pruning, VACUUM/ANALYZE)
-   - Disk budget enforcement instructions
-   - Topic reorganization instructions (merge duplicates, update stale, delete empty)
+1. Initialize MemoryManager (opens DB, runs `pruneBackup()` to delete chat_backup rows >7 days)
+2. `SleepStateGatherer.gather()` -> scans working dirs, queries DB stats, checks FTS5 integrity, calculates disk usage, lists topic files, reads last sleep audit, determines wakeup date, reads todo/cron contents, lists transcript paths
+3. `loadSleepPrompt(snapshot)` -> reads `sleeping_prompt.md` template (from `~/.agentbridge/` deployed or `persona/` dev), replaces `${VARIABLES}` with StateSnapshot values
 4. `--dry-run`: prints prompt to stdout and exits
 5. Normal mode: invokes subagent via ACP transport (model priority: Opus 4 -> Sonnet 4 -> Sonnet 3.5)
-6. Parses outcome counts from subagent response (regex-based)
-7. Writes audit trail to `~/.agentbridge/memory/audit/sleep_YYYYMMDD_HHmmss.md`
+6. Writes audit trail to `~/.agentbridge/memory/audit/sleep_YYYYMMDD_HHmmss.md`
 
-**Consolidation Thresholds** (`SleepCycleRunner`):
-- 7 daily files in same ISO week -> weekly rollup (`YYYY-Wxx.md`)
-- 4 weekly files in same quarter -> quarterly rollup (`YYYY-Qn.md`)
-- Source files deleted after successful consolidation
+**sleeping_prompt.md template sections:**
+- §1 Daily Summary — consolidate working dirs into daily files
+- §2 Reminder & Todo Extraction — extract actionable items
+- §3 Database Maintenance — FTS5 repair, orphan cleanup, VACUUM/ANALYZE. CRITICAL SAFETY RULE: DO NOT delete any rows from messages or chat_backup
+- §4 Cron Verification — check scheduled tasks
+- §5 Topic Reorg — merge duplicates, update stale, delete empty
+- §6 Disk Budget — enforce size limits
+
+**chat_backup safety table:**
+- Every message recorded via `recordMessage()` is also inserted into `chat_backup`
+- Immutable — the LLM is instructed never to delete from it
+- Pruned by wired logic only: `pruneBackup()` deletes rows >7 days on startup
+- Searchable as Stage 8 fallback in `agentbridge-recall` (LIKE search)
 
 ### Command Handlers
 
@@ -494,7 +492,7 @@ The sleep cycle is the overnight maintenance routine. It runs via two triggers:
 | `/new`, `/reset` | Reset session, clear buffer |
 | `/status` | Connection status + uptime + context % |
 | `/stop`, `/cancel` | Ctrl+C interrupt |
-| `/compact` | Manual LLM compaction |
+| `/compact` | Handled by sleep cycle (returns info message) |
 | `/facts` | Display user core facts |
 | `/memory` | Memory stats (messages, extracted, compactions, disk, heartbeat, NotebookLM) |
 | `/ingest <url>` | Ingest YouTube/PDF/text/markdown |
@@ -516,9 +514,8 @@ The sleep cycle is the overnight maintenance routine. It runs via two triggers:
 ### Auto-Compaction (Percentage-Based)
 
 Triggered when context window usage exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (default 85%). The `checkAutoCompact()` method in MemoryManager:
-1. Writes raw transcript to `working/{YYYY-MM-DD}/transcript_{chatId}.md` as safety net
+1. Writes raw transcript to `working/{YYYY-MM-DD}/transcript_{chatId}.chat` as safety net
 2. Sends `/compact` command to Kiro CLI agent for LLM summarization
-3. Updates compaction watermark in DB
 
 ### Emotion Scoring
 
@@ -529,15 +526,15 @@ Triggered when context window usage exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (defa
 
 ### LLM Callback Wiring
 
-Single callback registered in `main.ts`: `memory.setLlmCall((prompt, content) => transport.sendPrompt("system:memory", ...))`. Flows to CompactionEngine, SleepCycleRunner, ContextAssembler, ReflectionEngine, MemoryExtractor. All consumers handle null gracefully.
+Single callback registered in `main.ts`: `memory.setLlmCall((prompt, content) => transport.sendPrompt("system:memory", ...))`. Flows to ContextAssembler, ReflectionEngine, MemoryExtractor. All consumers handle null gracefully.
 
 ### Consolidation Tiers
 
 | Source | Target | Threshold | File Naming |
 |--------|--------|-----------|-------------|
 | working dirs | daily | Past-day dirs (sleep subagent) | `daily_YYYYMMDD.md` |
-| daily | weekly | 7 daily files in same ISO week | `YYYY-Wxx.md` |
-| weekly | quarterly | 4 weekly files in same quarter | `YYYY-Qn.md` |
+| daily | weekly | 7 daily files in same ISO week (sleep subagent) | `YYYY-Wxx.md` |
+| weekly | quarterly | 4 weekly files in same quarter (sleep subagent) | `YYYY-Qn.md` |
 | (legacy monthly/yearly preserved but not actively written) | | | |
 
 ---
@@ -546,23 +543,24 @@ Single callback registered in `main.ts`: `memory.setLlmCall((prompt, content) =>
 
 ### agentbridge-sleep
 
-Overnight maintenance orchestrator. Thin CLI that gathers state, builds prompt, invokes subagent.
+Overnight maintenance orchestrator. Thin CLI that gathers state, loads template, invokes subagent.
 
 ```
 agentbridge sleep [--dry-run] [--verbose]
 ```
 
-- `--dry-run`: Gather state + build prompt, print to stdout, skip subagent
+- `--dry-run`: Gather state + load template, print to stdout, skip subagent
 - `--verbose`: Detailed logging at each phase
 - Exit 0 on success, 1 on fatal error
 - Always uses ACP transport (never tmux)
 - Model priority: `claude-opus-4-0-20250514` -> `claude-sonnet-4-20250514` -> `claude-sonnet-3-5-20241022`
+- Template: `~/.agentbridge/sleeping_prompt.md` (deployed) or `persona/sleeping_prompt.md` (dev)
 - Audit trail: `~/.agentbridge/memory/audit/sleep_YYYYMMDD_HHmmss.md`
 - `package.json` bin: `"agentbridge-sleep": "dist/cli/agentbridge-sleep.js"`
 
 ### agentbridge-recall
 
-Agent-initiated memory search across 4 layers + compactions.
+Agent-initiated memory search across 4 layers + compactions + chat_backup (8-stage cascade).
 
 ### agentbridge-store
 
@@ -572,10 +570,10 @@ Agent-initiated instant memory storage with emotion scoring.
 
 ## Test Coverage
 
-466 tests across 40 test files. All passing.
+600 tests across 56 test files. All passing.
 
 ---
 
 ## Deployment
 
-`scripts/deploy.sh` builds TypeScript, copies dist + node_modules + package.json to `~/.agentbridge/`, and links all bin entries including `agentbridge-sleep`.
+`scripts/deploy.sh` builds TypeScript, copies dist + node_modules + package.json to `~/.agentbridge/`, copies `sleeping_prompt.md` to `~/.agentbridge/`, and links all bin entries including `agentbridge-sleep`.

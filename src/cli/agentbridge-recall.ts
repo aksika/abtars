@@ -120,6 +120,20 @@ try {
     if (!seen.has(key)) { seen.add(key); results.push({ content: c.summary, date: new Date(c.timestamp).toISOString(), source: `compaction:${c.tier}`, score: 0.5 }); }
   }
 
+  // Stage 8: chat_backup fallback (LIKE search on immutable backup)
+  if (results.length < params.limit) {
+    const bkConditions = ["chat_id = ?"];
+    const bkParams: (string | number)[] = [params.chatId];
+    if (params.timeStart) { bkConditions.push("timestamp >= ?"); bkParams.push(params.timeStart); }
+    if (params.timeEnd) { bkConditions.push("timestamp <= ?"); bkParams.push(params.timeEnd); }
+    bkConditions.push(`(${allKw.map(kw => { bkParams.push(`%${kw}%`); return "content LIKE ?"; }).join(" OR ")})`);
+    const backupRows = db.prepare(`SELECT role, content, timestamp FROM chat_backup WHERE ${bkConditions.join(" AND ")} ORDER BY timestamp DESC LIMIT 20`).all(...bkParams) as Array<{ role: string; content: string; timestamp: number }>;
+    for (const r of backupRows) {
+      const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
+      if (!seen.has(key)) { seen.add(key); results.push({ content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "backup", score: 0.3 }); }
+    }
+  }
+
   results.sort((a, b) => b.score - a.score);
   console.log(JSON.stringify(results.slice(0, params.limit), null, 2));
 } finally {

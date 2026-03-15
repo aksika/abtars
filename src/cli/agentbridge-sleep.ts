@@ -23,7 +23,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { MemoryManager } from "../components/memory-manager.js";
 import { loadMemoryConfig } from "../components/memory-config.js";
 import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
-import { SleepPromptBuilder } from "../components/sleep-prompt-builder.js";
+import { loadSleepPrompt } from "../components/sleep-prompt-loader.js";
 import { logInfo, logError, setLogLevel } from "../components/logger.js";
 import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
 
@@ -315,10 +315,9 @@ async function main(): Promise<void> {
 
     // Phase 3: Build prompt
     if (flags.verbose) logInfo(TAG, "Phase 3: Building sleep prompt");
-    const builder = new SleepPromptBuilder();
     let prompt: string;
     try {
-      prompt = builder.build(snapshot);
+      prompt = loadSleepPrompt(snapshot);
       if (flags.verbose) logInfo(TAG, `Prompt built (${prompt.length} chars)`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -36,6 +36,11 @@ export class TelegramPoller {
     this.abortController = null;
   }
 
+  /** Inject a synthetic update into the handler (used for queued messages after sleep). */
+  injectUpdate(update: TelegramUpdate): void {
+    void this.onUpdate(update);
+  }
+
   private async poll(): Promise<void> {
     let failures = 0;
 

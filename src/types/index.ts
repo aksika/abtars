@@ -28,7 +28,6 @@ export type {
 export type {
   MessageRecord,
   MemoryTier,
-  CompactedMemory,
   StoredSession,
   SearchResult,
   VectorSearchResult,

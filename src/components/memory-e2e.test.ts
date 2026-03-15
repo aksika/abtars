@@ -36,7 +36,7 @@ describe("Memory system — end-to-end smoke test", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("full lifecycle: record → search → compact → restore → context → budget", async () => {
+  it("full lifecycle: record → search → restore → context", async () => {
     const chatId = 42;
     const sess1 = "sess-alpha";
     const sess2 = "sess-beta";
@@ -69,19 +69,7 @@ describe("Memory system — end-to-end smoke test", () => {
     const mlResults = await mm.search("machine learning", { chatId });
     expect(mlResults.length).toBeGreaterThanOrEqual(1);
 
-    // 3. Compact session 1 — verify daily .md file
-    const mockLlm = async (_prompt: string, _content: string) =>
-      "User discussed quantum physics across 5 messages.";
-    const compacted = await mm.compactSession({ chatId, sessionId: sess1, llmCall: mockLlm });
-    expect(compacted).not.toBeNull();
-    expect(compacted!.tier).toBe("daily");
-    expect(existsSync(compacted!.filePath)).toBe(true);
-
-    // Compaction should be searchable
-    const compactionSearch = await mm.search("quantum physics", { chatId });
-    expect(compactionSearch.length).toBeGreaterThanOrEqual(1);
-
-    // 4. Load recent messages from session 2 — verify count
+    // 3. Load recent messages from session 2 — verify count
     const recent = mm.loadRecentMessages(chatId, sess2, 3);
     expect(recent).toHaveLength(3);
     expect(recent[0]!.content).toContain("session2 message 2");
@@ -103,12 +91,7 @@ describe("Memory system — end-to-end smoke test", () => {
     expect(ctx).toContain("[INPUT]");
     expect(ctx).toContain("What did we discuss about quantum?");
 
-    // 6. Scratchpad round-trip
-    mm.writeScratchpad(chatId, "# TODO\n- Review quantum notes");
-    const pad = mm.readScratchpad(chatId);
-    expect(pad).toBe("# TODO\n- Review quantum notes");
-
-    // 7. Session persistence round-trip
+    // 4. Session persistence round-trip
     mm.persistSession({
       channelKey: `telegram:${chatId}`,
       acpSessionId: sess1,

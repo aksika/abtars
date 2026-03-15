@@ -12,20 +12,6 @@ export type MessageRecord = {
 export type MemoryTier = "daily" | "weekly" | "quarterly" | "monthly" | "yearly";
 
 
-/** A compacted summary produced by the LLM at any tier. */
-export type CompactedMemory = {
-  id: number;
-  chatId: number;
-  sourceSessionId: string;
-  tier: MemoryTier;
-  /** Unix timestamp in milliseconds when compaction was created */
-  timestamp: number;
-  /** LLM-generated summary text */
-  summary: string;
-  /** Path to the .md file on disk */
-  filePath: string;
-};
-
 /** A persisted session row restored from SQLite. */
 export type StoredSession = {
   channelKey: string;

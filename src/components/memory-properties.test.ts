@@ -402,38 +402,6 @@ describe("Property 13: Pruning preserves most recent messages", () => {
   });
 });
 
-// --- Property 24: Scratchpad Persistence Round-Trip ---
-
-describe("Property 24: Scratchpad persistence round-trip", () => {
-  let tmpDir: string;
-  let mm: MemoryManager;
-
-  beforeEach(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), "prop24-"));
-    mm = new MemoryManager(makeConfig(tmpDir));
-    await mm.initialize();
-  });
-  afterEach(() => {
-    mm.close();
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("write then read returns identical content", () => {
-    fc.assert(
-      fc.property(
-        fc.integer({ min: 1, max: 1000 }),
-        fc.string({ minLength: 1, maxLength: 500 }),
-        (chatId, content) => {
-          mm.writeScratchpad(chatId, content);
-          const read = mm.readScratchpad(chatId);
-          expect(read).toBe(content);
-        },
-      ),
-      { numRuns: 50 },
-    );
-  });
-});
-
 // --- Property 26: Context Assembly Respects Token Budgets ---
 
 describe("Property 26: Context assembly respects token budgets", () => {
@@ -442,24 +410,19 @@ describe("Property 26: Context assembly respects token budgets", () => {
       fc.asyncProperty(
         fc.integer({ min: 10, max: 200 }),
         fc.integer({ min: 10, max: 200 }),
-        fc.integer({ min: 10, max: 200 }),
         fc.integer({ min: 10, max: 500 }),
-        async (soulBudget, scratchBudget, recalledBudget, workingBudget) => {
+        async (soulBudget, recalledBudget, workingBudget) => {
           const tmpDir = mkdtempSync(join(tmpdir(), "prop26-"));
           try {
             const config = makeConfig(tmpDir, {
               contextBudget: {
                 soul: soulBudget,
-                scratchpad: scratchBudget,
                 recalled: recalledBudget,
                 working: workingBudget,
               },
             });
             const mm = new MemoryManager(config);
             await mm.initialize();
-
-            // Write some content to scratchpad
-            mm.writeScratchpad(1, "A".repeat(2000));
 
             // Use ContextAssembler directly to verify per-tier budget enforcement
             const assembler = new ContextAssembler(mm, config);
@@ -477,11 +440,10 @@ describe("Property 26: Context assembly respects token budgets", () => {
             });
 
             expect(result.usage.soul).toBeLessThanOrEqual(soulBudget);
-            expect(result.usage.scratchpad).toBeLessThanOrEqual(scratchBudget);
             expect(result.usage.recalled).toBeLessThanOrEqual(recalledBudget);
             expect(result.usage.working).toBeLessThanOrEqual(workingBudget);
             expect(result.usage.total).toBe(
-              result.usage.soul + result.usage.scratchpad + result.usage.recalled +
+              result.usage.soul + result.usage.recalled +
               result.usage.working + result.usage.input,
             );
 

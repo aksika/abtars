@@ -160,6 +160,19 @@ export function initializeDatabase(dbPath: string): Database.Database {
       chat_id INTEGER PRIMARY KEY,
       last_processed_timestamp INTEGER NOT NULL
     );
+
+    -- Chat backup: immutable copy of messages, never touched by LLM/sleep.
+    -- Pruned on startup by wired logic (>7 days).
+    CREATE TABLE IF NOT EXISTS chat_backup (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id INTEGER NOT NULL,
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      timestamp INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_backup_chat_ts
+      ON chat_backup(chat_id, timestamp);
   `);
 
   // Migration: add model_version column to embeddings table for existing databases

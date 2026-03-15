@@ -34,7 +34,7 @@ import { MemorySearchController } from "./components/memory-search-controller.js
 import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
 import { handleNLMCommand, loadNLMConfig } from "./components/nlm-command-handler.js";
-import { SleepTrigger, loadSleepTriggerConfig } from "./components/sleep-trigger.js";
+import { SleepTrigger } from "./components/sleep-trigger.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { detectIngestSourceType } from "./components/ingest-source-detect.js";
@@ -177,6 +177,11 @@ async function main(): Promise<void> {
   await transport.initialize();
   logInfo("main", "✅ Transport ready");
 
+  // Sleep state: queue messages during sleep, auto-reply "waking up"
+  let sleepChild: import("node:child_process").ChildProcess | null = null;
+  const pendingMessages: Array<{ chatId: number; text: string; threadId?: number; sessionKey: string }> = [];
+  const sleepRepliedChats = new Set<number>();
+
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
   if (memory) {
     memory.setLlmCall(async (prompt: string, content: string) => {
@@ -189,25 +194,26 @@ async function main(): Promise<void> {
     memory.startHeartbeat();
     logInfo("main", "💓 Memory heartbeat started");
 
-    // Check if sleep routine should run on startup
+    // Always run sleep on startup
     try {
-      const sleepTriggerConfig = loadSleepTriggerConfig();
       const auditDir = join(memoryConfig.memoryDir, "audit");
-      const workingDir = join(memoryConfig.memoryDir, "working");
-      const sleepTrigger = new SleepTrigger(sleepTriggerConfig, auditDir, workingDir);
+      const sleepTrigger = new SleepTrigger(auditDir);
 
       if (sleepTrigger.shouldRunOnStartup()) {
         logInfo("main", "😴 Startup sleep trigger fired — spawning sleep routine in background");
         const thisDir = dirname(fileURLToPath(import.meta.url));
         const sleepScript = join(thisDir, "cli", "agentbridge-sleep.js");
-        const child = spawn(process.execPath, [sleepScript], {
+        sleepChild = spawn(process.execPath, [sleepScript], {
           stdio: "ignore",
           detached: true,
         });
-        child.unref();
-        logInfo("main", `😴 Sleep routine spawned (pid=${child.pid})`);
-      } else {
-        logDebug("main", "😴 No startup sleep needed");
+        sleepChild.on("exit", () => {
+          logInfo("main", "😴 Sleep routine finished");
+          sleepChild = null;
+          processPendingMessages();
+        });
+        sleepChild.unref();
+        logInfo("main", `😴 Sleep routine spawned (pid=${sleepChild.pid})`);
       }
     } catch (err) {
       logWarn("main", `Sleep trigger check failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -260,6 +266,35 @@ async function main(): Promise<void> {
       saveChatToWorking(sessionKey, chatId);
     }, CHAT_SAVE_IDLE_MS));
   }
+
+  // Process messages that were queued during sleep
+  const processPendingMessages = (): void => {
+    sleepRepliedChats.clear();
+    if (pendingMessages.length === 0) return;
+    logInfo("main", `Processing ${pendingMessages.length} message(s) queued during sleep`);
+    // Re-inject each pending message by simulating the update flow
+    // We do this asynchronously so the bridge can handle them normally
+    const queued = [...pendingMessages];
+    pendingMessages.length = 0;
+    for (const msg of queued) {
+      // Create a minimal synthetic TelegramUpdate and push it through the poller
+      const syntheticUpdate = {
+        update_id: 0,
+        message: {
+          message_id: 0,
+          from: { id: msg.chatId, is_bot: false, first_name: "queued" },
+          chat: { id: msg.chatId, first_name: "queued", type: "private" as const },
+          date: Math.floor(Date.now() / 1000),
+          text: msg.text,
+          ...(msg.threadId ? { message_thread_id: msg.threadId } : {}),
+        },
+      };
+      // Push through the telegram poller's handler if available
+      if (telegramPoller) {
+        telegramPoller.injectUpdate(syntheticUpdate);
+      }
+    }
+  };
 
   // --- Telegram wiring (conditional) ---
   let telegramPoller: TelegramPoller | null = null;
@@ -511,25 +546,7 @@ async function main(): Promise<void> {
       }
 
       if (text === "/compact") {
-        if (!memory) {
-          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
-          return;
-        }
-        const llm = memory.getLlmCall();
-        if (!llm) {
-          await telegramApi.sendMessage(chatId, "⚠️ LLM is not available. Cannot run compaction.", { message_thread_id: threadId });
-          return;
-        }
-        try {
-          const result = await memory.compactSession({ chatId, sessionId: sessionKey, llmCall: llm });
-          const msg = result
-            ? `📦 Compaction complete:\n\n${result.summary}`
-            : "📦 Nothing to compact — no messages found for this session.";
-          await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
-        } catch (err) {
-          logError("main", "Compaction failed", err);
-          await telegramApi.sendMessage(chatId, "❌ Compaction failed. Check logs for details.", { message_thread_id: threadId });
-        }
+        await telegramApi.sendMessage(chatId, "📦 Compaction is now handled by the sleep cycle. Use /sleep to trigger manually.", { message_thread_id: threadId });
         return;
       }
 
@@ -835,6 +852,16 @@ async function main(): Promise<void> {
         busyChats.add(sessionKey);
         logInfo("main", `← ${isVoiceNote ? "🎤 " : ""}"${text.slice(0, 60)}"`);
 
+        // Queue message if sleep is in progress
+        if (sleepChild) {
+          if (!sleepRepliedChats.has(chatId)) {
+            await telegramApi.sendMessage(chatId, "Oh good morning, I am just waking up, give me a minute please.. I answer you soon ☕", { message_thread_id: threadId });
+            sleepRepliedChats.add(chatId);
+          }
+          pendingMessages.push({ chatId, text, threadId, sessionKey });
+          busyChats.delete(sessionKey);
+          return;
+        }
         // Prepend buffered conversation context
         let prompt = text;
         if (isGroup) {

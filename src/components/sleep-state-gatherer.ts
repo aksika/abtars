@@ -1,8 +1,8 @@
 import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
-import { readdirSync, statSync, existsSync } from "node:fs";
+import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { logInfo, logWarn, logError } from "./logger.js";
+import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 
 const TAG = "sleep-state-gatherer";
 
@@ -43,6 +43,11 @@ export interface StateSnapshot {
   diskUsageBytes: number;
   diskBudgetBytes: number;
   topicFiles: TopicFileEntry[];
+  lastSleepAudit: string | null;
+  wakeupDate: string | null;
+  todoContents: string | null;
+  cronContents: string | null;
+  transcriptPaths: Array<{ chatId: number; path: string; messageCount: number }>;
 }
 
 export class SleepStateGatherer {
@@ -69,6 +74,11 @@ export class SleepStateGatherer {
       diskUsageBytes,
       diskBudgetBytes: this.config.diskBudgetBytes,
       topicFiles,
+      lastSleepAudit: this.getLastSleepAudit(),
+      wakeupDate: this.getWakeupDate(),
+      todoContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "todo.md")),
+      cronContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "cron.json")),
+      transcriptPaths: this.listTranscripts(),
     };
 
     logInfo(
@@ -224,5 +234,68 @@ export class SleepStateGatherer {
     }
 
     return entries;
+  }
+
+  /** Read a file's contents or return null if missing. */
+  private readFileOrNull(path: string): string | null {
+    try {
+      return existsSync(path) ? readFileSync(path, "utf-8") : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Get ISO timestamp of the most recent sleep audit file. */
+  private getLastSleepAudit(): string | null {
+    const auditDir = join(this.config.memoryDir, "audit");
+    if (!existsSync(auditDir)) return null;
+    try {
+      const files = readdirSync(auditDir)
+        .filter((f) => /^sleep_\d{8}_\d{6}\.md$/.test(f))
+        .sort()
+        .reverse();
+      if (files.length === 0) return null;
+      const match = files[0]!.match(/^sleep_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.md$/);
+      if (!match) return null;
+      const [, y, mo, d, h, mi, s] = match;
+      return new Date(+y!, +mo! - 1, +d!, +h!, +mi!, +s!).toISOString();
+    } catch {
+      return null;
+    }
+  }
+
+  /** Derive wake-up date from last sleep audit (the date portion). */
+  private getWakeupDate(): string | null {
+    const audit = this.getLastSleepAudit();
+    return audit ? audit.slice(0, 10) : null;
+  }
+
+  /** List transcript files with message counts. */
+  private listTranscripts(): Array<{ chatId: number; path: string; messageCount: number }> {
+    const transcriptsDir = join(this.config.memoryDir, "transcripts");
+    if (!existsSync(transcriptsDir)) return [];
+    const results: Array<{ chatId: number; path: string; messageCount: number }> = [];
+    try {
+      for (const chatDir of readdirSync(transcriptsDir, { withFileTypes: true })) {
+        if (!chatDir.isDirectory()) continue;
+        const chatId = parseInt(chatDir.name, 10);
+        if (isNaN(chatId)) continue;
+        const chatPath = join(transcriptsDir, chatDir.name);
+        for (const file of readdirSync(chatPath)) {
+          if (!file.endsWith(".jsonl")) continue;
+          const filePath = join(chatPath, file);
+          try {
+            const content = readFileSync(filePath, "utf-8");
+            const lineCount = content.split("\n").filter((l) => l.trim()).length;
+            results.push({ chatId, path: filePath, messageCount: lineCount });
+          } catch {
+            logDebug(TAG, `Failed to read transcript ${filePath}`);
+          }
+        }
+      }
+    } catch (err) {
+      logWarn(TAG, `Failed to list transcripts: ${err}`);
+    }
+    return results;
   }
 }

@@ -39,7 +39,6 @@ describe("loadMemoryConfig", () => {
     expect(cfg.autoCompactThreshold).toBe(3000);
     expect(cfg.contextBudget).toEqual({
       soul: 500,
-      scratchpad: 300,
       recalled: 600,
       working: 2000,
     });
@@ -149,13 +148,11 @@ describe("loadMemoryConfig", () => {
 
   it("parses all context budget env vars", () => {
     process.env["MEMORY_CONTEXT_BUDGET_SOUL"] = "800";
-    process.env["MEMORY_CONTEXT_BUDGET_SCRATCHPAD"] = "400";
     process.env["MEMORY_CONTEXT_BUDGET_RECALLED"] = "900";
     process.env["MEMORY_CONTEXT_BUDGET_WORKING"] = "3000";
     const cfg = loadMemoryConfig();
     expect(cfg.contextBudget).toEqual({
       soul: 800,
-      scratchpad: 400,
       recalled: 900,
       working: 3000,
     });
@@ -163,11 +160,9 @@ describe("loadMemoryConfig", () => {
 
   it("falls back to defaults for invalid context budget values", () => {
     process.env["MEMORY_CONTEXT_BUDGET_SOUL"] = "bad";
-    process.env["MEMORY_CONTEXT_BUDGET_SCRATCHPAD"] = "bad";
     const cfg = loadMemoryConfig();
     expect(cfg.contextBudget.soul).toBe(500);
-    expect(cfg.contextBudget.scratchpad).toBe(300);
-    expect(logger.logWarn).toHaveBeenCalledTimes(2);
+    expect(logger.logWarn).toHaveBeenCalledTimes(1);
   });
 
   // --- MEMORY_ROLLING_BUFFER_SIZE ---

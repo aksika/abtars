@@ -49,6 +49,7 @@ cp "$PROJECT_DIR/skills/nlm/SKILL.md" "$AB_HOME/.kiro/steering/nlm.md"
 cp "$PROJECT_DIR/skills/topic-save/SKILL.md" "$AB_HOME/.kiro/steering/topic-save.md"
 cp "$PROJECT_DIR/skills/mcporter/SKILL.md" "$AB_HOME/.kiro/steering/mcporter.md"
 cp "$PROJECT_DIR/skills/browser/SKILL.md" "$AB_HOME/.kiro/steering/browser.md"
+cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/sleeping_prompt.md"
 mkdir -p "$AB_HOME/skills/agents"
 cp "$PROJECT_DIR/skills/agents/"*.md "$AB_HOME/skills/agents/"
 
