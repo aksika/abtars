@@ -145,12 +145,17 @@ async function main(): Promise<void> {
   }
   logInfo("main", "🌐 BrowserManager initialized");
 
-  // Start browser IPC server so CLI invocations share sessions
+  // Start browser IPC server — skip if Docker container owns the socket
   const allowlist = DomainAllowlist.fromEnv();
   const browserTool = new BrowserTool(browserManager, allowlist);
-  const browserIpc = new BrowserIpcServer(browserTool);
-  await browserIpc.start();
-  logInfo("main", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
+  let browserIpc: BrowserIpcServer | null = null;
+  if (process.env["BROWSER_DOCKER"] === "1") {
+    logInfo("main", "🐳 Browser Docker mode — skipping local IPC server");
+  } else {
+    browserIpc = new BrowserIpcServer(browserTool);
+    await browserIpc.start();
+    logInfo("main", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
+  }
 
   const formatter = new ResponseFormatter();
 
@@ -1592,7 +1597,7 @@ async function main(): Promise<void> {
     }
     if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
-    try { await browserIpc.shutdown(); } catch { /* best-effort */ }
+    try { await browserIpc?.shutdown(); } catch { /* best-effort */ }
     try { await browserManager.shutdown(); } catch { /* best-effort */ }
     memory?.close();
     transport.destroy();
