@@ -25,5 +25,9 @@ RUN mkdir -p /run/browser
 
 ENV BROWSER_SOCKET_PATH=/run/browser/browser.sock
 ENV BROWSER_CHANNEL=chrome
+ENV BROWSER_NO_SANDBOX=1
+
+# Writable dirs for non-root user
+RUN mkdir -p /tmp /run/browser && chmod 777 /tmp /run/browser
 
 CMD ["node", "dist/cli/browser-server.js"]

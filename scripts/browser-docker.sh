@@ -36,6 +36,7 @@ case "${1:-start}" in
     docker run -d \
       --name "$CONTAINER" \
       --restart unless-stopped \
+      --user "$(id -u):$(id -g)" \
       -v "$SOCKET_DIR:/run/browser" \
       -e BROWSER_SOCKET_PATH=/run/browser/browser.sock \
       -e BROWSER_CHANNEL="${BROWSER_CHANNEL:-chrome}" \
