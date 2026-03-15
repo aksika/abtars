@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Manage the agentbridge-browser Docker container.
 # Usage:
-#   ./scripts/browser-docker.sh          # build + start
+#   ./scripts/browser-docker.sh          # build + start (headless)
+#   ./scripts/browser-docker.sh --headed # build + start (visible via WSLg)
 #   ./scripts/browser-docker.sh stop     # stop + remove
 #   ./scripts/browser-docker.sh status   # check if running
 set -euo pipefail
@@ -11,6 +12,13 @@ CONTAINER="agentbridge-browser"
 AB_HOME="${HOME}/.agentbridge"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SOCKET_DIR="$AB_HOME"
+HEADED=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --headed) HEADED=true ;;
+  esac
+done
 
 case "${1:-start}" in
   stop)
@@ -33,6 +41,11 @@ case "${1:-start}" in
 
     # Run — mount socket dir, pass env
     echo "🚀 Starting $CONTAINER..."
+    EXTRA_ARGS=""
+    if [ "$HEADED" = true ]; then
+      EXTRA_ARGS="-e DISPLAY=$DISPLAY -e BROWSER_HEADED=1 -v /tmp/.X11-unix:/tmp/.X11-unix"
+      echo "   👁️  Headed mode — browser visible via WSLg"
+    fi
     docker run -d \
       --name "$CONTAINER" \
       --restart unless-stopped \
@@ -41,6 +54,7 @@ case "${1:-start}" in
       -e BROWSER_SOCKET_PATH=/run/browser/browser.sock \
       -e BROWSER_CHANNEL="${BROWSER_CHANNEL:-chrome}" \
       -e BROWSER_ALLOWED_DOMAINS="${BROWSER_ALLOWED_DOMAINS:-}" \
+      $EXTRA_ARGS \
       "$IMAGE"
 
     echo "✅ Browser container running — socket at $SOCKET_DIR/browser.sock"

@@ -30,4 +30,5 @@ ENV BROWSER_NO_SANDBOX=1
 # Writable dirs for non-root user
 RUN mkdir -p /tmp /run/browser && chmod 777 /tmp /run/browser
 
+# Default: headless. Set BROWSER_HEADED=1 and mount X11 socket for visible mode.
 CMD ["node", "dist/cli/browser-server.js"]
