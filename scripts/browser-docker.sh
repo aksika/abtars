@@ -14,13 +14,15 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SOCKET_DIR="$AB_HOME"
 HEADED=false
 
+CMD=""
 for arg in "$@"; do
   case "$arg" in
     --headed) HEADED=true ;;
+    *) CMD="$arg" ;;
   esac
 done
 
-case "${1:-start}" in
+case "${CMD:-start}" in
   stop)
     docker rm -f "$CONTAINER" 2>/dev/null && echo "Stopped $CONTAINER" || echo "Not running"
     ;;
