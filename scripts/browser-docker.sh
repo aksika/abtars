@@ -33,7 +33,7 @@ case "${CMD:-start}" in
   start|"")
     # Build
     echo "🔨 Building $IMAGE..."
-    docker build -t "$IMAGE" -f "$PROJECT_DIR/docker/browser/Dockerfile" "$PROJECT_DIR"
+    DOCKER_BUILDKIT=0 docker build -t "$IMAGE" -f "$PROJECT_DIR/docker/browser/Dockerfile" "$PROJECT_DIR" 2>&1 | tail -5
 
     # Stop old container if running
     docker rm -f "$CONTAINER" 2>/dev/null || true
