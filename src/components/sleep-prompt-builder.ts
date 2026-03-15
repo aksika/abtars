@@ -176,9 +176,9 @@ Delete orphaned FTS5 entries whose corresponding rows in the source tables no lo
 #### 2c. Message Pruning
 
 Prune messages from the \`messages\` table that have been compacted into daily, weekly, or quarterly summaries:
-- Delete messages that have a corresponding compaction record in the \`compactions\` table
-- **Preserve all messages from today (${today})** — do not delete any messages from the current calendar day
-- Be conservative: only prune messages that are confirmed compacted
+- **NEVER delete messages newer than 7 days** — always keep the last 7 days of messages regardless of compaction status
+- Only delete messages older than 7 days that have a corresponding compaction record in the \`compactions\` table (join on chat_id AND source_session_id AND compaction timestamp >= message timestamp)
+- Be conservative: if in doubt, keep the message
 
 #### 2d. Embeddings Orphan Deletion
 
