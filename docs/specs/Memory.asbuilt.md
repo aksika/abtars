@@ -2,7 +2,7 @@
 
 ## Overview
 
-The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, an automated sleep maintenance cycle with template-based subagent instructions and 7-step garbage collection, immutable chat_backup safety table, emoji stripping before DB indexing, and regex-based prompt injection scanning on A2A inbound messages.
+The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, an automated sleep maintenance cycle with template-based subagent instructions and 7-step garbage collection, immutable chat_backup safety table, emoji stripping before DB indexing, regex-based prompt injection scanning on A2A inbound messages, and Telegram reaction-to-emotion scoring via platform message ID tracking.
 
 **Recall architecture**: The bridge does NOT inject recalled memories or context into the prompt. The LLM agent handles all recall autonomously — it reads the `memory-search.md` steering file, decides when to search, extracts relevant keywords from user input, and invokes `agentbridge-recall` via `execute_bash`. This leverages the LLM's natural language understanding for keyword extraction instead of a heuristic pipeline.
 
@@ -17,6 +17,7 @@ The local memory layer provides SQLite-backed persistence, JSONL transcript file
 | Sleep CLI | Automated overnight maintenance: state gathering, subagent-driven cleanup, audit trail | ✅ Complete |
 | Sleep GC | 7-step garbage collection: purge expired, immediate deletes, emotion harvest, noise mark, repeated probes, verify-extract-mark, audit report | ✅ Complete |
 | Data Integrity | Emoji stripping (DB indexing), A2A prompt injection scanning (22 patterns) | ✅ Complete |
+| Reaction Scoring | Telegram emoji reactions → emotion_score on messages via platform_message_id | ✅ Complete |
 | Phase 3 — Intelligence | Proactive recall, importance scoring, contradiction detection | 📋 Designed |
 
 ---
@@ -124,7 +125,7 @@ Responsible for raw data storage — both structured (SQLite) and unstructured (
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| SQLite DB | `memory-db.ts` | Schema creation, migrations. 8 tables + 3 FTS5 virtual tables + triggers for auto-indexing |
+| SQLite DB | `memory-db.ts` | Schema creation, migrations. 8 tables + 3 FTS5 virtual tables + triggers for auto-indexing. `messages` table includes `platform_message_id` (Telegram message_id for reaction lookup) and `emotion_score` (set by reaction handler) |
 | TranscriptWriter | `transcript-writer.ts` | Appends JSONL records per session to `transcripts/{chatId}/{sessionId}.jsonl` |
 | TranscriptParser | `transcript-parser.ts` | Reads JSONL files, provides `parseTail()` for recent-message loading |
 | File System Layout | — | `working/` (intra-day), `daily/`, `weekly/`, `quarterly/`, `audit/`, `core/` |
@@ -288,7 +289,7 @@ src/
     memory-index.ts        # FTS5 search + emotion boost
     memory-search-tool.ts  # Agent-initiated recall with decay + MMR
     memory-extractor.ts    # LLM-based extraction with emotion scoring
-    emotion-utils.ts       # clampEmotionScore() utility
+    emotion-utils.ts       # clampEmotionScore() + emojiToScore() utilities
     heartbeat-system.ts    # Periodic background task runner
     context-window-monitor.ts # Threshold-based async compression
     transcript-writer.ts   # JSONL append
@@ -363,6 +364,7 @@ src/
 | agentbridge-store CLI | `cli/agentbridge-store.ts` | `--content-en`, `--content-original`, `--memory-type`, `--emotion-score`, `--chat-id`, `--keyword` |
 | MemoryManager.instantStore() | `components/memory-manager.ts` | Validates, clamps emotion, inserts, advances watermark |
 | clampEmotionScore | `components/emotion-utils.ts` | Shared clamping to [-5,+5] |
+| emojiToScore | `components/emotion-utils.ts` | Maps Telegram reaction emojis to [-5,+5] scores |
 | Emotion-boosted ranking | `components/memory-index.ts` | `0.5 * log1p(abs(emotion_score))` additive boost |
 
 ### Sleep CLI (Overnight Maintenance)
@@ -435,7 +437,8 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 2. **LLM Callback**: `memory.setLlmCall(...)` wires transport for compaction, context assembly, reflections, extraction
 3. **Heartbeat Start**: `memory.startHeartbeat()` registers memory-extraction + consolidation + sleep-trigger cron tasks
 4. **Sleep Startup Check**: `SleepTrigger.shouldRunOnStartup()` always returns true -> spawns `agentbridge-sleep.js` detached. During sleep, incoming messages get auto-reply ("waking up") and are queued. After sleep finishes, queued messages are re-injected.
-5. **Message In**: `memory.recordMessage()` -> JSONL append (raw, with emojis) -> `stripEmojis()` on content -> FTS5 index (emoji-free) -> insert into `chat_backup` (immutable copy) -> optional vector index -> prune -> disk budget check every 100 writes
+5. **Message In**: `memory.recordMessage()` -> JSONL append (raw, with emojis) -> `stripEmojis()` on content -> FTS5 index (emoji-free, with `platform_message_id`) -> insert into `chat_backup` (immutable copy) -> optional vector index -> prune -> disk budget check every 100 writes
+5b. **Telegram Reaction**: Authorized user reacts to message -> `emojiToScore(emoji)` -> `memory.updateEmotionByPlatformId(chatId, messageId, score)` -> updates `messages.emotion_score` on the row matching `platform_message_id`
 6. **Background Extraction** (heartbeat): MemoryExtractor queries unprocessed transcripts -> LLM extracts structured memories with emotion scores -> dual-column `content_en` + `content_original` -> FTS5 auto-index -> watermark advanced
 7. **Instant Storage**: Agent invokes `agentbridge-store` CLI -> validates -> clamps emotion -> inserts `extracted_memories` -> advances watermark
 8. **Prompt Path**: Bridge sends raw user message to kiro-cli (no context injection). Agent reads `memory-search.md` steering, decides if recall is needed, invokes `agentbridge-recall` via `execute_bash` with extracted keywords. ContextAssembler (4-tier) exists but is not used in the main Telegram/Discord prompt path.
@@ -534,10 +537,15 @@ Triggered when context window usage exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (defa
 
 ### Emotion Scoring
 
-- Integer [-5, +5] on `extracted_memories.emotion_score`
+- Integer [-5, +5] on `extracted_memories.emotion_score` and `messages.emotion_score`
 - Scale: -5=angry, -3=frustrated, -1=slightly negative, 0=neutral, +1=slightly positive, +3=pleased, +5=happy
-- Assessed by agent (instant store) and LLM (heartbeat extraction)
-- Search boost: `final_score = bm25_score + 0.5 * log1p(abs(emotion_score))`
+- Sources:
+  - **Telegram reactions**: `emojiToScore()` maps emoji → score, stored on `messages.emotion_score` via `updateEmotionByPlatformId()`. Only authorized users' reactions are processed. Emoji mapping: ❤️/🔥/👏/❤=4, 🤩=4, 👍/😂/💯/⚡=3, 🎉=3, 😊/🙏=2, 🤔/😮/unknown=1, 👎/😢=-3, 😡/🤮=-4, 💩=-5
+  - **LLM extraction**: heartbeat MemoryExtractor assesses emotion on `extracted_memories`
+  - **Agent instant store**: `agentbridge-store` sets emotion on `extracted_memories`
+- `messages.platform_message_id` stores the Telegram message_id for reaction lookup (user messages: `message.message_id`, assistant messages: last sent chunk's message_id)
+- Search boost (on extracted_memories): `final_score = bm25_score + 0.5 * log1p(abs(emotion_score))`
+- Sleep GC Step 3 harvests emotional reactions from `messages.emotion_score` → updates nearest `extracted_memories.emotion_score`
 
 ### LLM Callback Wiring
 
@@ -585,7 +593,7 @@ Agent-initiated instant memory storage with emotion scoring.
 
 ## Test Coverage
 
-643 tests across 62 test files. All passing.
+648 tests across 62 test files. All passing.
 
 ---
 
