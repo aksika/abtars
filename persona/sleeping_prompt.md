@@ -25,7 +25,7 @@ Read the JSONL transcript files for the period between the previous sleep audit 
 
 Summarize into a daily file:
 - Output: `~/.agentbridge/memory/daily/daily_${WAKEUP_DATE}.md` (replace hyphens: `daily_YYYYMMDD.md`)
-- If the daily file already exists for this date, **skip** — do not overwrite
+- If the daily file already exists, **read it first**. If it already covers the full window (previous sleep → now), skip. If it only covers a partial window (e.g., written by an earlier run that didn't capture later activity), **overwrite it** with a complete summary covering the full window.
 - The date in the filename is the **wake-up date** (date portion of the previous sleep audit), not today's date
 - Include: key topics discussed, decisions made, facts learned, action items, emotional highlights
 - Exclude: routine greetings, tool execution noise, formatting artifacts, step-by-step reasoning
