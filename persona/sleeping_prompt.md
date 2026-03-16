@@ -54,9 +54,22 @@ ${TODO_CONTENTS}
 
 This is the most important maintenance task. Scan ALL messages in `~/.agentbridge/memory/memory.db` and clean up noise.
 
+### Scan Strategy
+
+First, dump all user messages for review:
+```sql
+sqlite3 ~/.agentbridge/memory/memory.db "SELECT id, substr(content,1,100) FROM messages WHERE role='user' ORDER BY id;"
+```
+Classify each into: KEEP, GARBAGE, DUPE, or WRONG_CHAT. Then execute the steps below.
+
+For any message you mark or delete, always include its paired assistant response:
+```sql
+SELECT id FROM messages WHERE id > <user_msg_id> AND role='assistant' ORDER BY id LIMIT 1;
+```
+
 ### Step 1: Purge expired garbage
 
-Read `~/.agentbridge/memory/garbage.json` (create if missing). Format: `{"<message_id>": "<ISO timestamp>"}`.
+Read `~/.agentbridge/memory/garbage.json` (create `{}` if missing). Format: `{"<message_id>": "<ISO timestamp>"}`.
 Delete from the `messages` table any entry whose garbage timestamp is older than 7 days:
 
 ```sql
@@ -69,17 +82,24 @@ Remove those entries from `garbage.json` and write the file back.
 
 Find and delete directly from the `messages` table:
 
-- **Duplicates**: same `content` + same `chat_id` within 5 minutes — keep the first, delete the rest
-- **Wrong chat**: messages where the user explicitly says "wrong chat", "rossz chat", or similar — delete the message AND the one before it
+**Duplicates** — find with:
+```sql
+SELECT a.id, b.id FROM messages a JOIN messages b
+ON a.chat_id = b.chat_id AND a.content = b.content AND a.id < b.id
+AND abs(a.timestamp - b.timestamp) < 300000;
+```
+Keep the first (lowest id), delete the rest + their paired assistant responses.
 
-Delete both the user message and its paired assistant response.
+**Wrong chat** — messages where user says "wrong chat", "rossz chat", or similar. Delete the message, the one before it (the misdirected message), and both their assistant responses.
+
+**Whisper/STT garbage** — garbled transcriptions that make no sense in any language (e.g., "Fønekur og sigtmær", "Týžkuťo.", "tu dotky mohlti"). These are speech-to-text errors. Delete immediately + paired responses.
 
 ### Step 3: Emotion harvest + garbage marking
 
 Scan remaining messages for emotional reactions with no informational content. Examples:
-- Positive: "fasza!", "király!", "awesome!", "excellent!", "nice!"
+- Positive: "fasza!", "király!", "awesome!", "excellent!", "nice!", "Good job professor", "Gracias", "Oh yes!"
 - Negative: "a faszomat!", "baszd meg!", "goddamn it!", "fuck!", "for fuck sake"
-- Reactions: single emoji-like expressions, exclamations, expletives
+- Pure reactions: ":D", "😂", exclamations with no info
 
 For each:
 1. Identify the nearest relevant message or extracted_memory that the emotion refers to
@@ -89,26 +109,38 @@ For each:
 ### Step 4: Pure noise marking
 
 Mark as garbage (add to `garbage.json`) messages that carry zero informational content:
-- Single-word greetings: "hi", "hallo", "hello", "hey"
-- Pings with no content: "prof", "professor", "vagy prof?", "are you there?"
-- Filler acknowledgments: "ja", "igen", "aha", "ok", "oké", "I see"
+- Single-word greetings with no follow-up context: "hi", "hallo", "hello", "hey"
+- Pings with no content: "prof", "professor", "vagy prof?", "are you there?", "vagyunk prof?"
+- Filler acknowledgments that add nothing: "ja", "igen", "aha", "I see", "jaja"
 - Single characters: "a", "?"
+- Filler phrases: "Na nézzük", "Alakulsz akkor tesó", "de mar tudod..", "you tell me"
 
-Use your judgment — if a short message has context-dependent meaning (e.g., "Approved" confirming an action), keep it.
+Do NOT mark as garbage:
+- Action confirmations: "Approved", "Done", "Yeah, do it", "Ok do it now"
+- Instructions: "Check tmux ls", "Run doctor on Molty pls"
+- Questions with real content
+- Facts or jokes meant to be remembered
+- Messages that start a new conversation topic
+
 Always mark both the user message AND its paired assistant response.
 
 ### Step 5: Repeated probe marking
 
-Find messages where the same question appears 3+ times across different sessions AND the answer already exists in `extracted_memories`:
-- Keep the **first occurrence** and its assistant response
-- Mark all subsequent occurrences (+ their responses) as garbage in `garbage.json`
+Find messages where the same question appears 3+ times:
+```sql
+SELECT content, COUNT(*) as cnt, GROUP_CONCAT(id) as ids
+FROM messages WHERE role='user'
+GROUP BY content HAVING cnt >= 3 ORDER BY cnt DESC;
+```
 
-Example: "kiskutya?" appears 20 times, answer "5 centi" is in extracted_memories → keep first pair, mark 19 pairs as garbage.
+For each group: keep the **first occurrence** (lowest id) and its assistant response. Mark ALL subsequent occurrences + their responses as garbage in `garbage.json`.
+
+This applies to memory test probes like "kiskutya?", "ki vagy?", "who are you?", "jelszó?" — the answer is already stored in extracted_memories, repeats have no value.
 
 ### Step 6: Report
 
 In your sleep audit, include a GC summary:
-- Messages immediately deleted (dupes + wrong chat): count
+- Messages immediately deleted (dupes + wrong chat + STT garbage): count
 - Messages garbage-marked this cycle: count
 - Expired garbage purged: count
 - Emotion scores updated: list of (memory_id, old_score → new_score)
