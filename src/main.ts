@@ -520,13 +520,36 @@ async function main(): Promise<void> {
       }
 
       if (text === "/status") {
+        const thisDir = dirname(fileURLToPath(import.meta.url));
+        let version = "?";
+        try { version = JSON.parse(readFileSync(join(thisDir, "..", "package.json"), "utf-8")).version; } catch { /* */ }
+        let model = process.env["KIRO_MODEL"] || "";
+        if (!model) {
+          try { model = JSON.parse(execSync("kiro-cli settings list --format json 2>/dev/null", { timeout: 3000, encoding: "utf-8" }))["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
+        }
         const status = transport.isReady ? "✅ Connected" : "❌ Disconnected";
         const mode = config.kiroTransport.toUpperCase();
         const uptime = formatUptime(Date.now() - startedAt);
         const ctxPct = ("contextPercent" in transport && (transport as TmuxClient).contextPercent >= 0)
           ? `${(transport as TmuxClient).contextPercent}%`
           : "n/a";
-        await telegramApi.sendMessage(chatId, `${status} (${mode} transport)\n⏱️ Uptime: ${uptime}\n📊 Context window: ${ctxPct}`, { message_thread_id: threadId });
+        const cronInfo = memory?.getCronInfo();
+        const lines = [
+          `Kiro Professor v${version}`,
+          `🤖 Model: ${model}`,
+          `📊 Context window: ${ctxPct}`,
+          `⏱️ Uptime: ${uptime}`,
+          `🔌 Transport: ${mode} — ${status}`,
+        ];
+        if (cronInfo) {
+          const mins = Math.round(cronInfo.intervalMs / 60000);
+          lines.push(
+            `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
+            `📋 Tasks: ${cronInfo.tasks.join(", ") || "(none)"}`,
+            `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
+          );
+        }
+        await telegramApi.sendMessage(chatId, lines.join("\n"), { message_thread_id: threadId });
         return;
       }
 
@@ -580,23 +603,10 @@ async function main(): Promise<void> {
       }
 
       if (text === "/cron") {
-        if (!memory) {
-          await telegramApi.sendMessage(chatId, "🧠 Memory is disabled.", { message_thread_id: threadId });
-          return;
-        }
-        const info = memory.getCronInfo();
-        const mins = Math.round(info.intervalMs / 60000);
-        const tasks = info.tasks.length > 0 ? info.tasks.join(", ") : "(none)";
-        const audit = info.lastSleepAudit ?? "(never)";
-        const msg = [
-          "⏰ Internal Cron",
-          "",
-          `💓 Heartbeat: ${info.heartbeatRunning ? "running" : "stopped"}`,
-          `🔄 Interval: ${mins}min`,
-          `📋 Tasks: ${tasks}`,
-          `😴 Last sleep: ${audit}`,
-        ].join("\n");
-        await telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId });
+        const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
+        let crontab: string;
+        try { crontab = execSync("crontab -l 2>/dev/null || echo '(no crontab)'", { timeout: 3000, encoding: "utf-8" }).trim(); } catch { crontab = "(failed to read crontab)"; }
+        await telegramApi.sendMessage(chatId, `⏰ ${now}\n\n${crontab}`, { message_thread_id: threadId });
         return;
       }
 
@@ -846,7 +856,8 @@ async function main(): Promise<void> {
           "/compact — Trigger memory compaction",
           "/facts — Show core knowledge (user profile + agent notes)",
           "/memory — Memory storage statistics",
-          "/cron — Internal cron status",          "/ingest — Ingest a document (reply to file)",
+          "/cron — System crontab",
+          "/ingest — Ingest a document (reply to file)",
           "/ingest list — List ingested documents",
           "/reflect — Trigger memory reflection",
           "/reflect list — List reflections",
@@ -1129,13 +1140,36 @@ async function main(): Promise<void> {
       }
 
       if (text === "/status") {
+        const thisDir = dirname(fileURLToPath(import.meta.url));
+        let version = "?";
+        try { version = JSON.parse(readFileSync(join(thisDir, "..", "package.json"), "utf-8")).version; } catch { /* */ }
+        let model = process.env["KIRO_MODEL"] || "";
+        if (!model) {
+          try { model = JSON.parse(execSync("kiro-cli settings list --format json 2>/dev/null", { timeout: 3000, encoding: "utf-8" }))["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
+        }
         const status = transport.isReady ? "✅ Connected" : "❌ Disconnected";
         const mode = config.kiroTransport.toUpperCase();
         const uptime = formatUptime(Date.now() - startedAt);
         const ctxPct = ("contextPercent" in transport && (transport as TmuxClient).contextPercent >= 0)
           ? `${(transport as TmuxClient).contextPercent}%`
           : "n/a";
-        await discordApi.sendMessage(message.channelId, `${status} (${mode} transport)\n⏱️ Uptime: ${uptime}\n📊 Context window: ${ctxPct}`);
+        const cronInfo = memory?.getCronInfo();
+        const lines = [
+          `Kiro Professor v${version}`,
+          `🤖 Model: ${model}`,
+          `📊 Context window: ${ctxPct}`,
+          `⏱️ Uptime: ${uptime}`,
+          `🔌 Transport: ${mode} — ${status}`,
+        ];
+        if (cronInfo) {
+          const mins = Math.round(cronInfo.intervalMs / 60000);
+          lines.push(
+            `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
+            `📋 Tasks: ${cronInfo.tasks.join(", ") || "(none)"}`,
+            `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
+          );
+        }
+        await discordApi.sendMessage(message.channelId, lines.join("\n"));
         return;
       }
 
@@ -1203,23 +1237,10 @@ async function main(): Promise<void> {
       }
 
       if (text === "/cron") {
-        if (!memory) {
-          await discordApi.sendMessage(message.channelId, "🧠 Memory is disabled.");
-          return;
-        }
-        const info = memory.getCronInfo();
-        const mins = Math.round(info.intervalMs / 60000);
-        const tasks = info.tasks.length > 0 ? info.tasks.join(", ") : "(none)";
-        const audit = info.lastSleepAudit ?? "(never)";
-        const msg = [
-          "⏰ Internal Cron",
-          "",
-          `💓 Heartbeat: ${info.heartbeatRunning ? "running" : "stopped"}`,
-          `🔄 Interval: ${mins}min`,
-          `📋 Tasks: ${tasks}`,
-          `😴 Last sleep: ${audit}`,
-        ].join("\n");
-        await discordApi.sendMessage(message.channelId, msg);
+        const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
+        let crontab: string;
+        try { crontab = execSync("crontab -l 2>/dev/null || echo '(no crontab)'", { timeout: 3000, encoding: "utf-8" }).trim(); } catch { crontab = "(failed to read crontab)"; }
+        await discordApi.sendMessage(message.channelId, `⏰ ${now}\n\n${crontab}`);
         return;
       }
 
@@ -1435,7 +1456,8 @@ async function main(): Promise<void> {
           "/compact — Trigger memory compaction",
           "/facts — Show core knowledge (user profile + agent notes)",
           "/memory — Memory storage statistics",
-          "/cron — Internal cron status",          "/ingest — Ingest a document (reply to file)",
+          "/cron — System crontab",
+          "/ingest — Ingest a document (reply to file)",
           "/ingest list — List ingested documents",
           "/reflect — Trigger memory reflection",
           "/reflect list — List reflections",

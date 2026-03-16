@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { createInterface } from "node:readline";
 
 // --- Types ---
 
@@ -150,13 +151,69 @@ export function main(argv: string[] = process.argv): void {
 
   const logFd = openSync(logFile, "w");
   const child = spawn("kiro-cli", ["acp", "--agent", "professor"], {
-    stdio: ["pipe", logFd, logFd],
+    stdio: ["pipe", "pipe", logFd],
     detached: true,
   });
 
-  // Send prompt as first message then close stdin
-  child.stdin?.write(prompt);
-  child.stdin?.end();
+  // ACP JSON-RPC handshake: initialize → newSession → prompt → close
+  const rl = createInterface({ input: child.stdout! });
+  const send = (msg: object) => child.stdin?.write(JSON.stringify(msg) + "\n");
+  let reqId = 0;
+
+  const waitResponse = (id: number): Promise<Record<string, unknown>> =>
+    new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("ACP response timeout")), 30_000);
+      const handler = (line: string) => {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.id === id) {
+            clearTimeout(timeout);
+            rl.off("line", handler);
+            if (parsed.error) reject(new Error(parsed.error.message));
+            else resolve(parsed.result);
+          }
+        } catch { /* skip non-JSON or notifications */ }
+      };
+      rl.on("line", handler);
+    });
+
+  // Pipe stdout to log file too
+  child.stdout?.on("data", (chunk: Buffer) => {
+    const buf = Buffer.from(chunk);
+    const fd = openSync(logFile, "a");
+    writeFileSync(fd, buf);
+    closeSync(fd);
+  });
+
+  (async () => {
+    try {
+      // 1. Initialize
+      send({ jsonrpc: "2.0", id: ++reqId, method: "initialize", params: {
+        protocolVersion: "2025-03-26", clientCapabilities: {},
+        clientInfo: { name: "agentbridge-browse", version: "1.0.0" },
+      }});
+      await waitResponse(reqId);
+
+      // 2. New session
+      send({ jsonrpc: "2.0", id: ++reqId, method: "session/new", params: {
+        cwd: homedir(), mcpServers: [],
+      }});
+      const sessionResult = await waitResponse(reqId) as { sessionId?: string };
+      const sessionId = sessionResult.sessionId;
+      if (!sessionId) throw new Error("No sessionId in session/new response");
+
+      // 3. Send prompt (this blocks until the agent finishes)
+      send({ jsonrpc: "2.0", id: ++reqId, method: "session/prompt", params: {
+        sessionId, prompt: [{ type: "text", text: prompt }],
+      }});
+      // Don't await — let it run detached. The bridge picks up results from the log.
+    } catch (err) {
+      const fd = openSync(logFile, "a");
+      writeFileSync(fd, `\nACP_HANDSHAKE_ERROR: ${err}\n`);
+      closeSync(fd);
+    }
+  })();
+
   child.unref();
   closeSync(logFd);
 
