@@ -16,7 +16,6 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { createInterface } from "node:readline";
 
 // --- Types ---
 
@@ -66,7 +65,7 @@ export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId
 
 // --- Prompt loading ---
 
-export function loadBrowsePrompt(task: string, chatId: number): string {
+export function loadBrowsePrompt(task: string, chatId: number, taskId?: string): string {
   const deployed = join(homedir(), ".agentbridge", "browsing_prompt.md");
   const dev = join(process.cwd(), "persona", "browsing_prompt.md");
 
@@ -86,11 +85,17 @@ export function loadBrowsePrompt(task: string, chatId: number): string {
     browserStatus = out || "not running";
   } catch { browserStatus = "not running (docker check failed)"; }
 
+  const date = new Date().toISOString().slice(0, 10);
+  const reportFile = `browse_${taskId ?? "unknown"}_${date}.md`;
+
   const vars: Record<string, string> = {
     TASK: task,
     CHAT_ID: String(chatId),
     TIMESTAMP: new Date().toISOString(),
     BROWSER_STATUS: browserStatus,
+    TASK_ID: taskId ?? "unknown",
+    DATE: date,
+    REPORT_FILE: reportFile,
   };
 
   let result = template;
@@ -119,7 +124,7 @@ export function writePendingBrowse(entries: PendingBrowseEntry[]): void {
 
 // --- Main ---
 
-export async function main(argv: string[] = process.argv): Promise<void> {
+export function main(argv: string[] = process.argv): void {
   const raw = parseArgs(argv);
   const validation = validateArgs(raw);
 
@@ -139,81 +144,64 @@ export async function main(argv: string[] = process.argv): Promise<void> {
 
   const taskId = randomBytes(3).toString("hex");
   const logsDir = join(homedir(), ".agentbridge", "logs");
+  const subagentsDir = join(homedir(), ".agentbridge", "subagents");
   mkdirSync(logsDir, { recursive: true });
+  mkdirSync(subagentsDir, { recursive: true });
   const logFile = join(logsDir, `browse_${taskId}.log`);
 
   // Build prompt
-  const prompt = loadBrowsePrompt(task, chatId);
+  const prompt = loadBrowsePrompt(task, chatId, taskId);
 
   // Spawn detached kiro-cli acp subprocess
   const promptFile = join(logsDir, `browse_${taskId}_prompt.txt`);
   writeFileSync(promptFile, prompt, "utf-8");
 
+  // Spawn a detached wrapper that handles the full ACP lifecycle.
+  // The wrapper does: initialize → newSession → prompt → wait for completion → exit.
+  // This avoids broken pipe from parent exit.
+  const wrapperScript = `
+const { spawn } = require("child_process");
+const { createInterface } = require("readline");
+const { appendFileSync } = require("fs");
+const logFile = process.argv[2];
+const promptFile = process.argv[3];
+const prompt = require("fs").readFileSync(promptFile, "utf-8");
+const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "pipe"] });
+child.stdout.on("data", c => { try { appendFileSync(logFile, c); } catch {} });
+child.stderr.on("data", c => { try { appendFileSync(logFile, c); } catch {} });
+const rl = createInterface({ input: child.stdout });
+let reqId = 0;
+const send = msg => child.stdin.write(JSON.stringify(msg) + "\\n");
+const waitRes = id => new Promise((resolve, reject) => {
+  const t = setTimeout(() => reject(new Error("timeout")), 30000);
+  const h = line => { try { const p = JSON.parse(line); if (p.id === id) { clearTimeout(t); rl.off("line", h); p.error ? reject(new Error(p.error.message)) : resolve(p.result); } } catch {} };
+  rl.on("line", h);
+});
+(async () => {
+  try {
+    send({ jsonrpc: "2.0", id: ++reqId, method: "initialize", params: { protocolVersion: "2025-03-26", clientCapabilities: {}, clientInfo: { name: "agentbridge-browse", version: "1.0.0" } } });
+    await waitRes(reqId);
+    send({ jsonrpc: "2.0", id: ++reqId, method: "session/new", params: { cwd: ${JSON.stringify(homedir())}, mcpServers: [] } });
+    const sess = await waitRes(reqId);
+    if (!sess.sessionId) throw new Error("no sessionId");
+    send({ jsonrpc: "2.0", id: ++reqId, method: "session/prompt", params: { sessionId: sess.sessionId, prompt: [{ type: "text", text: prompt }] } });
+    await waitRes(reqId);
+  } catch (e) { appendFileSync(logFile, "\\nACP_ERROR: " + e + "\\n"); }
+  child.kill(); process.exit();
+})();
+child.on("exit", () => process.exit());
+`;
+  const wrapperFile = join(logsDir, `browse_${taskId}_wrapper.cjs`);
+  writeFileSync(wrapperFile, wrapperScript);
+
   const logFd = openSync(logFile, "w");
-  const child = spawn("kiro-cli", ["acp", "--agent", "professor"], {
-    stdio: ["pipe", "pipe", logFd],
+  closeSync(logFd); // just create the file
+
+  const child = spawn("node", [wrapperFile, logFile, promptFile], {
+    stdio: "ignore",
     detached: true,
   });
-
-  // Pipe stdout to log file
-  child.stdout?.on("data", (chunk: Buffer) => {
-    const fd = openSync(logFile, "a");
-    writeFileSync(fd, chunk);
-    closeSync(fd);
-  });
-
-  // ACP JSON-RPC handshake
-  const rl = createInterface({ input: child.stdout! });
-  let reqId = 0;
-  const send = (msg: object) => child.stdin?.write(JSON.stringify(msg) + "\n");
-
-  const waitResponse = (id: number): Promise<Record<string, unknown>> =>
-    new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("ACP response timeout")), 30_000);
-      const handler = (line: string) => {
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed.id === id) {
-            clearTimeout(timeout);
-            rl.off("line", handler);
-            if (parsed.error) reject(new Error(parsed.error.message));
-            else resolve(parsed.result);
-          }
-        } catch { /* skip non-JSON */ }
-      };
-      rl.on("line", handler);
-    });
-
-  try {
-    // 1. Initialize
-    send({ jsonrpc: "2.0", id: ++reqId, method: "initialize", params: {
-      protocolVersion: "2025-03-26", clientCapabilities: {},
-      clientInfo: { name: "agentbridge-browse", version: "1.0.0" },
-    }});
-    await waitResponse(reqId);
-
-    // 2. New session
-    send({ jsonrpc: "2.0", id: ++reqId, method: "session/new", params: {
-      cwd: homedir(), mcpServers: [],
-    }});
-    const sessionResult = await waitResponse(reqId) as { sessionId?: string };
-    const sessionId = sessionResult.sessionId;
-    if (!sessionId) throw new Error("No sessionId in session/new response");
-
-    // 3. Send prompt — fire and forget, child runs detached
-    send({ jsonrpc: "2.0", id: ++reqId, method: "session/prompt", params: {
-      sessionId, prompt: [{ type: "text", text: prompt }],
-    }});
-  } catch (err) {
-    const fd = openSync(logFile, "a");
-    writeFileSync(fd, `\nACP_HANDSHAKE_ERROR: ${err}\n`);
-    closeSync(fd);
-  }
-
-  // Detach — child continues processing the prompt
-  rl.close();
   child.unref();
-  closeSync(logFd);
 
   // Record in pending_browse.json
   const entries = readPendingBrowse();

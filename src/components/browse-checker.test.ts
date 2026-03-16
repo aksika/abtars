@@ -42,8 +42,10 @@ describe("checkBrowseTasks", () => {
 
   it("delivers result when pid is dead", async () => {
     const { checkBrowseTasks } = await import("./cron-checker.js");
-    const logFile = join(tmpDir, "test.log");
-    writeFileSync(logFile, "Browser found 3 notifications", "utf-8");
+    const logsDir = join(tmpDir, ".agentbridge", "logs");
+    mkdirSync(logsDir, { recursive: true });
+    const logFile = join(logsDir, "browse_abc123.log");
+    writeFileSync(logFile, '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Found 3 notifications"}}}}\n', "utf-8");
 
     writeBrowse([{
       taskId: "abc123", task: "check X", chatId: 42,
@@ -56,8 +58,17 @@ describe("checkBrowseTasks", () => {
     const reminders = readReminders();
     expect(reminders).toHaveLength(1);
     expect(reminders[0].chatId).toBe(42);
-    expect(reminders[0].message).toContain("Browser task completed");
-    expect(reminders[0].message).toContain("3 notifications");
+    expect(reminders[0].message).toContain("Browse task complete");
+    expect(reminders[0].message).toContain("Report:");
+
+    // Report file should exist in subagents dir
+    const subDir = join(tmpDir, ".agentbridge", "subagents");
+    expect(existsSync(subDir)).toBe(true);
+    const files = require("node:fs").readdirSync(subDir) as string[];
+    const report = files.find((f: string) => f.startsWith("browse_abc123"));
+    expect(report).toBeDefined();
+    const content = readFileSync(join(subDir, report!), "utf-8");
+    expect(content).toContain("Found 3 notifications");
 
     const remaining = readBrowse();
     expect(remaining).toHaveLength(0);
@@ -120,6 +131,6 @@ describe("checkBrowseTasks", () => {
 
     const reminders = readReminders();
     expect(reminders).toHaveLength(1);
-    expect(reminders[0].message).toContain("no log file");
+    expect(reminders[0].message).toContain("Report:");
   });
 });

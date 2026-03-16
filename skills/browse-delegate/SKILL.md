@@ -23,11 +23,27 @@ agentbridge-browse --task "description of what to do" --chat-id <CHAT_ID>
 
 ### Output
 
-Returns immediately with `{ "ok": true, "taskId": "...", "status": "spawned" }`. The Browser Agent runs in the background and results are delivered to the chat automatically when it finishes.
+Returns immediately with `{ "ok": true, "taskId": "...", "status": "spawned" }`. The Browser Agent runs in the background. When it finishes, you receive a notification:
 
-## What to tell the user
+```
+🌐 Browse task complete: <task description>
+Report: ~/.agentbridge/subagents/browse_<taskId>_<date>.md
+```
 
-After calling `agentbridge-browse`, tell the user you've dispatched the task and they'll get results shortly. Then continue handling other messages — you are NOT blocked.
+The report file contains the agent's full findings.
+
+## What to do when the report arrives
+
+1. **Read** the report file
+2. **Summarize** and send the summary to the user
+3. **Move or delete** the file from `~/.agentbridge/subagents/`:
+   - **Research/reports**: `mv` to `~/reports/` or the appropriate directory
+   - **Quick checks**: `rm` the file after you've sent the content to the user
+4. Never leave orphan files in `~/.agentbridge/subagents/`
+
+## What to tell the user (after dispatching)
+
+Tell the user you've dispatched the task and they'll get results shortly. Then continue handling other messages — you are NOT blocked.
 
 ## Rules
 

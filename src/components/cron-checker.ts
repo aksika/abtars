@@ -5,7 +5,7 @@
  * Tasks     → spawns kiro-cli subprocess, calls onTaskComplete callback
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
@@ -202,13 +202,11 @@ function isProcessAlive(pid: number): boolean {
   catch { return false; }
 }
 
-function readLogTail(logFile: string, maxChars: number = 2000): string {
+/** Extract full agent response text from ACP JSON-RPC log. */
+function extractAgentText(logFile: string): string {
   try {
-    if (!existsSync(logFile)) return "(no log file)";
+    if (!existsSync(logFile)) return "";
     const content = readFileSync(logFile, "utf-8");
-    if (!content) return "(empty log)";
-
-    // Extract agent response text from ACP JSON-RPC log
     const chunks: string[] = [];
     for (const line of content.split("\n")) {
       try {
@@ -217,18 +215,32 @@ function readLogTail(logFile: string, maxChars: number = 2000): string {
           const text = msg.params.update.content?.text;
           if (text) chunks.push(text);
         }
-      } catch { /* skip non-JSON lines */ }
+      } catch { /* skip non-JSON */ }
     }
+    return chunks.join("");
+  } catch { return ""; }
+}
 
-    if (chunks.length > 0) {
-      const full = chunks.join("");
-      return full.length > maxChars ? full.slice(0, maxChars) + "\n…(truncated)" : full;
-    }
+const subagentsDir = (): string => join(homedir(), ".agentbridge", "subagents");
 
-    // Fallback: last N chars of raw log
-    const tail = content.slice(-500);
-    return tail.length > maxChars ? tail.slice(0, maxChars) + "…" : tail;
-  } catch { return "(failed to read log)"; }
+/** Ensure report file exists in subagents dir. Returns the file path. */
+function ensureReportFile(taskId: string): string {
+  const dir = subagentsDir();
+  mkdirSync(dir, { recursive: true });
+
+  // Check if agent already wrote the file
+  try {
+    const existing = readdirSync(dir).find(f => f.startsWith(`browse_${taskId}`));
+    if (existing) return join(dir, existing);
+  } catch { /* */ }
+
+  // Fallback: extract from log and write
+  const logFile = join(homedir(), ".agentbridge", "logs", `browse_${taskId}.log`);
+  const text = extractAgentText(logFile);
+  const date = new Date().toISOString().slice(0, 10);
+  const reportPath = join(dir, `browse_${taskId}_${date}.md`);
+  writeFileSync(reportPath, text || "(no output captured)", "utf-8");
+  return reportPath;
 }
 
 /**
@@ -246,25 +258,26 @@ export function checkBrowseTasks(): void {
     const elapsed = now - entry.startedAt;
 
     if (!alive) {
-      // Process finished — deliver result
-      const result = readLogTail(entry.logFile);
+      // Process finished — ensure report file exists, notify with path
+      const reportPath = ensureReportFile(entry.taskId);
       const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
       appendReminder({
         chatId: entry.chatId,
-        message: `🌐 Browser task completed: ${taskLabel}\n\n${result}`,
+        message: `🌐 Browse task complete: ${taskLabel}\nReport: ${reportPath}`,
         createdAt: now,
       });
-      logInfo(TAG, `🌐 Browse task "${taskLabel}" finished (pid=${entry.pid})`);
+      logInfo(TAG, `🌐 Browse task "${taskLabel}" finished — report: ${reportPath}`);
     } else if (elapsed > entry.timeoutMs) {
-      // Timed out — kill and report
+      // Timed out — kill, save partial, notify
       try { process.kill(entry.pid, "SIGKILL"); } catch { /* already dead */ }
+      const reportPath = ensureReportFile(entry.taskId);
       const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
       appendReminder({
         chatId: entry.chatId,
-        message: `🌐 Browser task timed out after ${Math.round(entry.timeoutMs / 1000)}s: ${taskLabel}`,
+        message: `🌐 Browse task timed out (${Math.round(entry.timeoutMs / 1000)}s): ${taskLabel}\nPartial report: ${reportPath}`,
         createdAt: now,
       });
-      logWarn(TAG, `🌐 Browse task "${taskLabel}" timed out — killed pid=${entry.pid}`);
+      logWarn(TAG, `🌐 Browse task "${taskLabel}" timed out — partial report: ${reportPath}`);
     } else {
       // Still running within timeout — keep
       remaining.push(entry);

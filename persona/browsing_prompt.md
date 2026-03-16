@@ -10,7 +10,7 @@ ${TASK}
 
 Complete this task autonomously using the browser tools below. Navigate, interact, extract information, take screenshots as needed. Reason about what you see and adapt your approach if something unexpected happens (login walls, errors, empty pages).
 
-When finished, write a concise summary of what you found or did. This summary will be sent back to the user.
+When finished, write your full findings to `~/.agentbridge/subagents/${REPORT_FILE}` and output `REPORT_SAVED: <path>`.
 
 ---
 
@@ -63,10 +63,21 @@ For authenticated sites (X/Twitter, Facebook, etc.), cookies may already be stor
 
 ## Output Format
 
-When you complete the task, output a clear summary:
+**Always** write your full findings to the report file:
+
+```
+~/.agentbridge/subagents/${REPORT_FILE}
+```
+
+Then output a single line as your final message:
+```
+REPORT_SAVED: ~/.agentbridge/subagents/${REPORT_FILE}
+```
+
+The report file should contain:
 - What you navigated to
 - What you found or did
 - Any errors or issues encountered
 - Key information extracted
 
-Keep it concise — this goes directly to the user as a message.
+Write the report even for short tasks — the caller decides what to do with it.
