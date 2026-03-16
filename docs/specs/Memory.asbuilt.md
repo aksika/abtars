@@ -2,7 +2,7 @@
 
 ## Overview
 
-The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, an automated sleep maintenance cycle with template-based subagent instructions, immutable chat_backup safety table, emoji stripping before DB indexing, and regex-based prompt injection scanning on A2A inbound messages.
+The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, an automated sleep maintenance cycle with template-based subagent instructions and 7-step garbage collection, immutable chat_backup safety table, emoji stripping before DB indexing, and regex-based prompt injection scanning on A2A inbound messages.
 
 **Recall architecture**: The bridge does NOT inject recalled memories or context into the prompt. The LLM agent handles all recall autonomously — it reads the `memory-search.md` steering file, decides when to search, extracts relevant keywords from user input, and invokes `agentbridge-recall` via `execute_bash`. This leverages the LLM's natural language understanding for keyword extraction instead of a heuristic pipeline.
 
@@ -15,6 +15,7 @@ The local memory layer provides SQLite-backed persistence, JSONL transcript file
 | Search Enhancements | Heartbeat extraction, English-normalized storage, agent recall, temporal decay, MMR | ✅ Complete |
 | Instant Memory Store | Agent-initiated storage, emotion scoring, emotion-boosted ranking | ✅ Complete |
 | Sleep CLI | Automated overnight maintenance: state gathering, subagent-driven cleanup, audit trail | ✅ Complete |
+| Sleep GC | 7-step garbage collection: purge expired, immediate deletes, emotion harvest, noise mark, repeated probes, verify-extract-mark, audit report | ✅ Complete |
 | Data Integrity | Emoji stripping (DB indexing), A2A prompt injection scanning (22 patterns) | ✅ Complete |
 | Phase 3 — Intelligence | Proactive recall, importance scoring, contradiction detection | 📋 Designed |
 
@@ -234,7 +235,7 @@ Automated maintenance cycle during user inactivity. Template-driven: the sleep s
 | SleepTrigger | `sleep-trigger.ts` | Simplified dual triggers: (1) always on startup, (2) heartbeat cron (≥8am, 10min idle, once/day) |
 | SleepStateGatherer | `sleep-state-gatherer.ts` | Produces StateSnapshot: working dirs, DB stats, FTS5 integrity, disk usage, topic files, last sleep audit, wakeup date, todo/cron contents, transcript paths |
 | sleep-prompt-loader | `sleep-prompt-loader.ts` | Reads `sleeping_prompt.md` template, replaces `${VARIABLES}` with StateSnapshot values |
-| sleeping_prompt.md | `persona/sleeping_prompt.md` | Editable template with 6 sections: daily summary, reminder/todo extraction, DB maintenance (with CRITICAL no-delete rule), cron verification, topic reorg, disk budget |
+| sleeping_prompt.md | `persona/sleeping_prompt.md` | Editable template with 7 sections: daily summary, reminder/todo extraction, garbage collection (7-step GC protocol), cron verification, topic reorg, disk budget, audit report |
 
 During sleep, the bridge auto-replies "waking up" to incoming messages and queues them. After sleep finishes, queued messages are re-injected through the normal message handler.
 
@@ -269,6 +270,7 @@ All paths relative to `~/.agentbridge/memory/` (configurable via `MEMORY_DIR`).
 
 Additional deployed files:
 - `~/.agentbridge/sleeping_prompt.md` — sleep template (copied by `deploy.sh`)
+- `~/.agentbridge/garbage.json` — GC grace-period tracking (created by sleep subagent)
 
 ---
 
@@ -474,10 +476,23 @@ The sleep cycle is the maintenance routine. It runs via two triggers:
 **sleeping_prompt.md template sections:**
 - §1 Daily Summary — consolidate working dirs into daily files
 - §2 Reminder & Todo Extraction — extract actionable items
-- §3 Database Maintenance — FTS5 repair, orphan cleanup, VACUUM/ANALYZE. CRITICAL SAFETY RULE: DO NOT delete any rows from messages or chat_backup
+- §3 Garbage Collection — 7-step GC protocol:
+  - Step 1: Purge expired garbage (>7 days in `garbage.json` → hard DELETE from messages)
+  - Step 2: Immediate deletes — dupes (same content/chat within 5min), wrong-chat, STT garbage + paired assistant responses
+  - Step 3: Emotion harvest — emotional reactions → update `emotion_score` on nearest extracted_memory, then garbage-mark
+  - Step 4: Pure noise — greetings, pings, filler, single chars → garbage-mark (with explicit DO NOT mark list)
+  - Step 5: Repeated probes — GROUP BY HAVING cnt≥3, keep first, garbage-mark rest
+  - Step 6: Verify extractions — check if conversation facts exist in `extracted_memories`, extract missing via `agentbridge-store`, then garbage-mark verbose originals
+  - Step 7: Report — GC summary in sleep audit
 - §4 Cron Verification — check scheduled tasks
 - §5 Topic Reorg — merge duplicates, update stale, delete empty
 - §6 Disk Budget — enforce size limits
+
+**Garbage collection data:**
+- `garbage.json` at `~/.agentbridge/garbage.json`: `{"<message_id>": "<ISO timestamp when marked>"}`
+- Messages with timestamp >7 days old get hard-deleted from `messages` table on next sleep cycle (Step 1)
+- Immediate deletes (Step 2) bypass the grace period — dupes, wrong-chat, and STT garbage are deleted directly
+- Facts are extracted to `extracted_memories` before verbose originals are garbage-marked (Step 6)
 
 **chat_backup safety table:**
 - Every message recorded via `recordMessage()` is also inserted into `chat_backup`
@@ -570,10 +585,14 @@ Agent-initiated instant memory storage with emotion scoring.
 
 ## Test Coverage
 
-600 tests across 56 test files. All passing.
+643 tests across 62 test files. All passing.
 
 ---
 
 ## Deployment
 
-`scripts/deploy.sh` builds TypeScript, copies dist + node_modules + package.json to `~/.agentbridge/`, copies `sleeping_prompt.md` to `~/.agentbridge/`, and links all bin entries including `agentbridge-sleep`.
+`scripts/deploy.sh` builds TypeScript, copies dist + node_modules + package.json to `~/.agentbridge/`, copies `sleeping_prompt.md` and `daily-backup.sh` to `~/.agentbridge/`, and links all bin entries including `agentbridge-sleep`.
+
+`scripts/test-sleep-gc.sh` — integration test for sleep GC. Copies live DB to `/tmp/agentbridge-gc-test/`, snapshots pre/post, diffs. Two-phase: `bash test-sleep-gc.sh` (copy + pre-snapshot), then `bash test-sleep-gc.sh --diff` (post-snapshot + diff).
+
+`scripts/daily-backup.sh` — daily cron job: zips `memory/`, `topics/`, `.kiro/`, `titok/`, `notebooklm/`, `sleeping_prompt.md`, `browsing_prompt.md` to `~/.backup-agentbridge/agentbridge-YYYYMMDD.zip` (7-day retention), then `git add -A && commit && push` to kiroprof-backup.
