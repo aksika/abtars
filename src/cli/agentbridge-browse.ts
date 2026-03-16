@@ -11,7 +11,7 @@
  * via pending_reminders.json → bridge picks up → sends to chat.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
@@ -148,7 +148,7 @@ export function main(argv: string[] = process.argv): void {
   const promptFile = join(logsDir, `browse_${taskId}_prompt.txt`);
   writeFileSync(promptFile, prompt, "utf-8");
 
-  const logFd = require("node:fs").openSync(logFile, "w");
+  const logFd = openSync(logFile, "w");
   const child = spawn("kiro-cli", ["acp", "--agent", "professor"], {
     stdio: ["pipe", logFd, logFd],
     detached: true,
@@ -158,7 +158,7 @@ export function main(argv: string[] = process.argv): void {
   child.stdin?.write(prompt);
   child.stdin?.end();
   child.unref();
-  require("node:fs").closeSync(logFd);
+  closeSync(logFd);
 
   // Record in pending_browse.json
   const entries = readPendingBrowse();
