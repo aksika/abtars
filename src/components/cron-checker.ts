@@ -202,11 +202,32 @@ function isProcessAlive(pid: number): boolean {
   catch { return false; }
 }
 
-function readLogTail(logFile: string, maxChars: number = 500): string {
+function readLogTail(logFile: string, maxChars: number = 2000): string {
   try {
     if (!existsSync(logFile)) return "(no log file)";
     const content = readFileSync(logFile, "utf-8");
-    return content.slice(-maxChars) || "(empty log)";
+    if (!content) return "(empty log)";
+
+    // Extract agent response text from ACP JSON-RPC log
+    const chunks: string[] = [];
+    for (const line of content.split("\n")) {
+      try {
+        const msg = JSON.parse(line);
+        if (msg.method === "session/update" && msg.params?.update?.sessionUpdate === "agent_message_chunk") {
+          const text = msg.params.update.content?.text;
+          if (text) chunks.push(text);
+        }
+      } catch { /* skip non-JSON lines */ }
+    }
+
+    if (chunks.length > 0) {
+      const full = chunks.join("");
+      return full.length > maxChars ? full.slice(0, maxChars) + "\n…(truncated)" : full;
+    }
+
+    // Fallback: last N chars of raw log
+    const tail = content.slice(-500);
+    return tail.length > maxChars ? tail.slice(0, maxChars) + "…" : tail;
   } catch { return "(failed to read log)"; }
 }
 
@@ -227,21 +248,23 @@ export function checkBrowseTasks(): void {
     if (!alive) {
       // Process finished — deliver result
       const result = readLogTail(entry.logFile);
+      const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
       appendReminder({
         chatId: entry.chatId,
-        message: `🌐 Browser task completed: ${entry.task}\n\n${result}`,
+        message: `🌐 Browser task completed: ${taskLabel}\n\n${result}`,
         createdAt: now,
       });
-      logInfo(TAG, `🌐 Browse task "${entry.task}" finished (pid=${entry.pid})`);
+      logInfo(TAG, `🌐 Browse task "${taskLabel}" finished (pid=${entry.pid})`);
     } else if (elapsed > entry.timeoutMs) {
       // Timed out — kill and report
       try { process.kill(entry.pid, "SIGKILL"); } catch { /* already dead */ }
+      const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
       appendReminder({
         chatId: entry.chatId,
-        message: `🌐 Browser task timed out after ${Math.round(entry.timeoutMs / 1000)}s: ${entry.task}`,
+        message: `🌐 Browser task timed out after ${Math.round(entry.timeoutMs / 1000)}s: ${taskLabel}`,
         createdAt: now,
       });
-      logWarn(TAG, `🌐 Browse task "${entry.task}" timed out — killed pid=${entry.pid}`);
+      logWarn(TAG, `🌐 Browse task "${taskLabel}" timed out — killed pid=${entry.pid}`);
     } else {
       // Still running within timeout — keep
       remaining.push(entry);

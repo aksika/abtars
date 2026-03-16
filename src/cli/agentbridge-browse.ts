@@ -60,7 +60,8 @@ export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId
   if (!Number.isFinite(chatId)) return { ok: false, error: "invalid --chat-id" };
   const timeoutMs = args.timeout ? parseInt(args.timeout, 10) * 1000 : 5 * 60 * 1000;
   if (!Number.isFinite(timeoutMs)) return { ok: false, error: "invalid --timeout" };
-  return { ok: true, task: args.task, chatId, timeoutMs };
+  const task = args.task.length > 2000 ? args.task.slice(0, 2000) + "…" : args.task;
+  return { ok: true, task, chatId, timeoutMs };
 }
 
 // --- Prompt loading ---
