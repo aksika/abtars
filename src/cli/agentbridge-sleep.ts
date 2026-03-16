@@ -397,8 +397,10 @@ const isDirectRun =
   process.argv[1]?.endsWith("agentbridge-sleep.ts") ||
   process.argv[1]?.endsWith("agentbridge-sleep.js");
 if (isDirectRun) {
-  main().catch((err) => {
-    process.stderr.write(`Fatal: ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
-  });
+  main()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      process.stderr.write(`Fatal: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    });
 }

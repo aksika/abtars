@@ -49,7 +49,12 @@ cp "$PROJECT_DIR/skills/nlm/SKILL.md" "$AB_HOME/.kiro/steering/nlm.md"
 cp "$PROJECT_DIR/skills/topic-save/SKILL.md" "$AB_HOME/.kiro/steering/topic-save.md"
 cp "$PROJECT_DIR/skills/mcporter/SKILL.md" "$AB_HOME/.kiro/steering/mcporter.md"
 cp "$PROJECT_DIR/skills/browser/SKILL.md" "$AB_HOME/.kiro/steering/browser.md"
+cp "$PROJECT_DIR/skills/todo/SKILL.md" "$AB_HOME/.kiro/steering/todo.md"
+cp "$PROJECT_DIR/skills/cron/SKILL.md" "$AB_HOME/.kiro/steering/cron.md"
+cp "$PROJECT_DIR/skills/browse-delegate/SKILL.md" "$AB_HOME/.kiro/steering/browse-delegate.md"
+cp "$PROJECT_DIR/skills/troubleshooting/SKILL.md" "$AB_HOME/.kiro/steering/troubleshooting.md"
 cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/sleeping_prompt.md"
+cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/browsing_prompt.md"
 mkdir -p "$AB_HOME/skills/agents"
 cp "$PROJECT_DIR/skills/agents/"*.md "$AB_HOME/skills/agents/"
 
@@ -89,6 +94,27 @@ echo '#!/usr/bin/env bash' > "$BROWSER_SCRIPT"
 echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-browser.js\" \"\$@\"" >> "$BROWSER_SCRIPT"
 chmod +x "$BROWSER_SCRIPT"
 ln -sf "$BROWSER_SCRIPT" "$HOME/.local/bin/agentbridge-browser"
+
+# Deploy agentbridge-todo CLI (persistent todo list)
+TODO_SCRIPT="$AB_HOME/agentbridge-todo"
+echo '#!/usr/bin/env bash' > "$TODO_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-todo.js\" \"\$@\"" >> "$TODO_SCRIPT"
+chmod +x "$TODO_SCRIPT"
+ln -sf "$TODO_SCRIPT" "$HOME/.local/bin/agentbridge-todo"
+
+# Deploy agentbridge-cron CLI (time-based reminders and tasks)
+CRON_SCRIPT="$AB_HOME/agentbridge-cron"
+echo '#!/usr/bin/env bash' > "$CRON_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-cron.js\" \"\$@\"" >> "$CRON_SCRIPT"
+chmod +x "$CRON_SCRIPT"
+ln -sf "$CRON_SCRIPT" "$HOME/.local/bin/agentbridge-cron"
+
+# Deploy agentbridge-browse CLI (browser subagent launcher)
+BROWSE_SCRIPT="$AB_HOME/agentbridge-browse"
+echo '#!/usr/bin/env bash' > "$BROWSE_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-browse.js\" \"\$@\"" >> "$BROWSE_SCRIPT"
+chmod +x "$BROWSE_SCRIPT"
+ln -sf "$BROWSE_SCRIPT" "$HOME/.local/bin/agentbridge-browse"
 
 # Deploy mcporter CLI (MCP tool access)
 MCPORTER_DIR="$HOME/workspace/mcporter"

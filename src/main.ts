@@ -42,6 +42,7 @@ import { BrowserManager } from "./components/browser-manager.js";
 import { BrowserTool } from "./components/browser-tool.js";
 import { BrowserIpcServer } from "./components/browser-ipc-server.js";
 import { DomainAllowlist } from "./components/domain-allowlist.js";
+import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
 function stripDiscordMentions(text: string, botAppId: string): string {
@@ -276,20 +277,28 @@ async function main(): Promise<void> {
     // We do this asynchronously so the bridge can handle them normally
     const queued = [...pendingMessages];
     pendingMessages.length = 0;
+    // Group by sessionKey so multiple messages from the same chat are merged
+    // into one synthetic update, avoiding busyChats collision
+    const grouped = new Map<string, typeof queued>();
     for (const msg of queued) {
-      // Create a minimal synthetic TelegramUpdate and push it through the poller
+      const group = grouped.get(msg.sessionKey);
+      if (group) group.push(msg);
+      else grouped.set(msg.sessionKey, [msg]);
+    }
+    for (const msgs of grouped.values()) {
+      const first = msgs[0]!;
+      const combinedText = msgs.map((m) => m.text).join("\n\n");
       const syntheticUpdate = {
         update_id: 0,
         message: {
           message_id: 0,
-          from: { id: msg.chatId, is_bot: false, first_name: "queued" },
-          chat: { id: msg.chatId, first_name: "queued", type: "private" as const },
+          from: { id: first.chatId, is_bot: false, first_name: "queued" },
+          chat: { id: first.chatId, first_name: "queued", type: "private" as const },
           date: Math.floor(Date.now() / 1000),
-          text: msg.text,
-          ...(msg.threadId ? { message_thread_id: msg.threadId } : {}),
+          text: combinedText,
+          ...(first.threadId ? { message_thread_id: first.threadId } : {}),
         },
       };
-      // Push through the telegram poller's handler if available
       if (telegramPoller) {
         telegramPoller.injectUpdate(syntheticUpdate);
       }
@@ -1506,6 +1515,44 @@ async function main(): Promise<void> {
     logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
   }
 
+  // --- Cron checker (5-min interval) ---
+  const CRON_CHECK_MS = 5 * 60 * 1000;
+  const cronInterval = setInterval(() => {
+    checkCron((chatId, message, result) => {
+      // Task completion → send TG report
+      if (platforms.telegram) {
+        const api = new TelegramApi(config.telegramBotToken);
+        api.sendMessage(chatId, `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
+          logWarn("main", `Cron task TG report failed: ${err}`);
+        });
+      }
+    });
+    // Pick up pending reminders and inject as synthetic updates
+    const reminders = readPendingReminders();
+    if (reminders.length > 0) {
+      clearPendingReminders();
+      for (const r of reminders) {
+        logInfo("main", `⏰ Injecting reminder for chat ${r.chatId}: "${r.message}"`);
+        const syntheticUpdate: TelegramUpdate = {
+          update_id: 0,
+          message: {
+            message_id: 0,
+            from: { id: r.chatId, is_bot: false, first_name: "cron" },
+            chat: { id: r.chatId, type: "private" },
+            date: Math.floor(Date.now() / 1000),
+            text: `[Scheduled reminder] ${r.message}`,
+          },
+        };
+        telegramPoller?.injectUpdate(syntheticUpdate);
+      }
+    }
+    checkBrowseTasks();
+  }, CRON_CHECK_MS);
+  // Run once on startup to catch any overdue entries
+  checkCron();
+  checkBrowseTasks();
+  logInfo("main", "⏰ Cron checker started (5-min interval)");
+
   // --- Web Dashboard wiring (conditional) ---
   let dashboardServer: DashboardServer | null = null;
 
@@ -1624,6 +1671,7 @@ async function main(): Promise<void> {
     }
     if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
+    clearInterval(cronInterval);
     try { await browserIpc?.shutdown(); } catch { /* best-effort */ }
     try { await browserManager.shutdown(); } catch { /* best-effort */ }
     memory?.close();
