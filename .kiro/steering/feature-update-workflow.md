@@ -59,7 +59,15 @@ Any code that spawns detached/background processes must:
 - Have a cleanup path (timeout kill, exit handler)
 - Be verified after deploy: `ps aux | grep` for zombies from pre-fix runs
 
-## 7. Silent Failures Kill
+## 7. Never Run Destructive Commands on Live Data Directories
+
+- NEVER use `git filter-branch --tree-filter` — it modifies the working tree, not just history
+- NEVER `rm -rf .git` in a directory with live data you haven't backed up elsewhere
+- For git history rewrites, use `--index-filter` (operates on the index only) or start fresh
+- Before ANY destructive git operation: `cp -r` the entire directory first
+- The `~/.agentbridge/` directory contains live runtime data — treat it like a production database
+
+## 8. Silent Failures Kill
 
 If a process runs with `stdio: "ignore"`, crashes are invisible. When debugging:
 - Temporarily switch to `stdio: "inherit"` or pipe to a log file
