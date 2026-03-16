@@ -49,6 +49,11 @@ export class HeartbeatSystem {
     logInfo(TAG, "Heartbeat stopped");
   }
 
+  /** Get registered task names. */
+  getTaskNames(): string[] {
+    return this.tasks.map(t => t.name);
+  }
+
   /** Execute all registered tasks with error isolation. */
   private async tick(): Promise<void> {
     logDebug(TAG, `Tick — executing ${this.tasks.length} task(s)`);

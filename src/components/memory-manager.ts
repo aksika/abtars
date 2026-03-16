@@ -1283,6 +1283,22 @@ export class MemoryManager {
   }
 
   /** Get memory storage statistics for a given chat. */
+  getCronInfo(): { heartbeatRunning: boolean; intervalMs: number; tasks: string[]; lastSleepAudit: string | null } {
+    const auditDir = join(this.config.memoryDir, "audit");
+    let lastAudit: string | null = null;
+    try {
+      const files = readdirSync(auditDir).filter(f => f.startsWith("sleep_")).sort();
+      if (files.length > 0) lastAudit = files[files.length - 1]!;
+    } catch { /* no audit dir */ }
+
+    return {
+      heartbeatRunning: this.heartbeat !== null,
+      intervalMs: this.config.heartbeat.intervalMs,
+      tasks: this.heartbeat?.getTaskNames() ?? [],
+      lastSleepAudit: lastAudit,
+    };
+  }
+
   getStats(chatId?: number): {
       totalMessages: number;
       extractedMemories: number;
