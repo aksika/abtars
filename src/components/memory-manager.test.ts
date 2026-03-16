@@ -448,6 +448,21 @@ describe("MemoryManager — recordMessage", () => {
 
     disabledManager.close();
   });
+
+  it("skips DB indexing for pure-emoji messages (empty after strip)", () => {
+    const record = makeRecord({ content: "👍🙊", chatId: 42, sessionId: "s1", timestamp: Date.now() });
+    manager.recordMessage(record);
+
+    // Transcript should still have the raw emoji (written before strip)
+    const transcriptPath = join(tmpDir, "transcripts", "42", "s1.jsonl");
+    expect(existsSync(transcriptPath)).toBe(true);
+
+    // But DB should have no messages (empty after emoji strip)
+    const db = initializeDatabase(join(tmpDir, "memory.db"));
+    const row = db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = 42").get() as { cnt: number };
+    expect(row.cnt).toBe(0);
+    db.close();
+  });
 });
 
 describe("MemoryManager — checkAutoCompact", () => {

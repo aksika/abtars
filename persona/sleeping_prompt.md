@@ -50,9 +50,70 @@ For each found item:
 Current todo list:
 ${TODO_CONTENTS}
 
-## §3 Database Maintenance
+## §3 Garbage Collection (Primary Task)
 
-Run these maintenance tasks on `~/.agentbridge/memory/memory.db`:
+This is the most important maintenance task. Scan ALL messages in `~/.agentbridge/memory/memory.db` and clean up noise.
+
+### Step 1: Purge expired garbage
+
+Read `~/.agentbridge/memory/garbage.json` (create if missing). Format: `{"<message_id>": "<ISO timestamp>"}`.
+Delete from the `messages` table any entry whose garbage timestamp is older than 7 days:
+
+```sql
+DELETE FROM messages WHERE id IN (<expired_ids>);
+```
+
+Remove those entries from `garbage.json` and write the file back.
+
+### Step 2: Immediate deletes (no grace period)
+
+Find and delete directly from the `messages` table:
+
+- **Duplicates**: same `content` + same `chat_id` within 5 minutes — keep the first, delete the rest
+- **Wrong chat**: messages where the user explicitly says "wrong chat", "rossz chat", or similar — delete the message AND the one before it
+
+Delete both the user message and its paired assistant response.
+
+### Step 3: Emotion harvest + garbage marking
+
+Scan remaining messages for emotional reactions with no informational content. Examples:
+- Positive: "fasza!", "király!", "awesome!", "excellent!", "nice!"
+- Negative: "a faszomat!", "baszd meg!", "goddamn it!", "fuck!", "for fuck sake"
+- Reactions: single emoji-like expressions, exclamations, expletives
+
+For each:
+1. Identify the nearest relevant message or extracted_memory that the emotion refers to
+2. Update its `emotion_score` via `agentbridge-store` (positive reactions: +1 to +3, negative: -1 to -3, scale by intensity)
+3. Add the message ID (and its paired assistant response ID) to `garbage.json` with current ISO timestamp
+
+### Step 4: Pure noise marking
+
+Mark as garbage (add to `garbage.json`) messages that carry zero informational content:
+- Single-word greetings: "hi", "hallo", "hello", "hey"
+- Pings with no content: "prof", "professor", "vagy prof?", "are you there?"
+- Filler acknowledgments: "ja", "igen", "aha", "ok", "oké", "I see"
+- Single characters: "a", "?"
+
+Use your judgment — if a short message has context-dependent meaning (e.g., "Approved" confirming an action), keep it.
+Always mark both the user message AND its paired assistant response.
+
+### Step 5: Repeated probe marking
+
+Find messages where the same question appears 3+ times across different sessions AND the answer already exists in `extracted_memories`:
+- Keep the **first occurrence** and its assistant response
+- Mark all subsequent occurrences (+ their responses) as garbage in `garbage.json`
+
+Example: "kiskutya?" appears 20 times, answer "5 centi" is in extracted_memories → keep first pair, mark 19 pairs as garbage.
+
+### Step 6: Report
+
+In your sleep audit, include a GC summary:
+- Messages immediately deleted (dupes + wrong chat): count
+- Messages garbage-marked this cycle: count
+- Expired garbage purged: count
+- Emotion scores updated: list of (memory_id, old_score → new_score)
+
+### Database Maintenance
 
 ### FTS5 Integrity Checks
 
@@ -69,12 +130,6 @@ For each table:
 - Delete orphaned FTS entries (rowid not in source table)
 - Delete orphaned embeddings (`message_id` not in `messages`)
 - Delete stale sessions (`is_active = 0` with old `last_activity_at`)
-
-### ⚠️ CRITICAL SAFETY RULE
-
-**DO NOT delete any rows from the `messages` or `chat_backup` tables.**
-Message retention is handled by wired startup logic, not this routine.
-This rule is absolute — no exceptions, no "cleanup", no "pruning" of messages.
 
 ## §4 Cron Verification
 

@@ -319,6 +319,9 @@ export class MemoryManager {
       // 2. Strip emojis before DB indexing — emotion is captured via score
       const cleaned = { ...record, content: stripEmojis(record.content) };
 
+      // 2b. Skip empty content (e.g. pure emoji messages)
+      if (!cleaned.content) return;
+
       // 3. Index in FTS (returns the inserted message id)
       if (!this.memoryIndex) return;
       const messageId = this.memoryIndex.index(cleaned);

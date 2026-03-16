@@ -65,6 +65,9 @@ chmod +x "$AB_HOME/agentbridge.sh"
 cp "$PROJECT_DIR/scripts/browser-docker.sh" "$AB_HOME/browser-docker.sh"
 sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=\"$PROJECT_DIR\"|" "$AB_HOME/browser-docker.sh"
 chmod +x "$AB_HOME/browser-docker.sh"
+mkdir -p "$AB_HOME/scripts"
+cp "$PROJECT_DIR/scripts/daily-backup.sh" "$AB_HOME/scripts/daily-backup.sh"
+chmod +x "$AB_HOME/scripts/daily-backup.sh"
 
 # Deploy agentbridge-recall CLI (agent-callable memory search)
 RECALL_SCRIPT="$AB_HOME/agentbridge-recall"

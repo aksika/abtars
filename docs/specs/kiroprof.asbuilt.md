@@ -300,3 +300,38 @@ All CLIs, skills, and prompt templates are deployed via `scripts/deploy.sh`:
 
 **Prompt templates** (copied to `~/.agentbridge/`):
 - `persona/browsing_prompt.md` → `browsing_prompt.md`
+
+---
+
+## Sleep Garbage Collection (Dreamy)
+
+### Overview
+
+Dreamy (the sleep agent) performs garbage collection on every sleep cycle as its primary maintenance task. It scans all messages in the DB and cleans up noise while preserving emotional signals.
+
+### GC Flow
+
+1. **Purge expired garbage** — read `garbage.json`, delete messages marked >7 days ago
+2. **Immediate deletes** — duplicates (same content, same chat, within 5 min) and wrong-chat messages
+3. **Emotion harvest** — recognize emotional reactions (positive/negative), update `emotion_score` on nearest extracted_memory via `agentbridge-store`, then mark as garbage
+4. **Pure noise marking** — greetings, pings, filler with zero info content → mark in `garbage.json`
+5. **Repeated probe marking** — same question 3+ times, answer in extracted_memories → keep first + answer, mark rest
+6. **Report** — GC summary in sleep audit
+
+### Key Files
+
+- `persona/sleeping_prompt.md` — §3 contains full GC instructions
+- `~/.agentbridge/memory/garbage.json` — tracking file `{"<msg_id>": "<ISO timestamp>"}`
+- `scripts/test-sleep-gc.sh` — integration test: copy DB, run sleep, diff results
+
+### Safety
+
+- Both user AND paired assistant messages are garbage-marked/deleted together
+- 7-day grace period on garbage marks (except dupes/wrong-chat which are immediate)
+- `chat_backup` table is never touched — immutable audit trail
+- Emotion scores are harvested before deletion — no signal loss
+
+### Bug Fixes Bundled
+
+- `rebuild-db.ts` now applies `stripEmojis()` before insert
+- `recordMessage()` skips empty content after emoji stripping (pure emoji messages like "👍" no longer indexed)

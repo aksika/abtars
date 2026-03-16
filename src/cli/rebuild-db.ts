@@ -16,6 +16,10 @@ const dryRun = process.argv.includes("--dry-run");
 
 interface Line { role: string; content: string; timestamp: number; chatId: number; sessionId: string }
 
+function stripEmojis(text: string): string {
+  return text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").replace(/ {2,}/g, " ").trim();
+}
+
 function loadTranscripts(): Line[] {
   const lines: Line[] = [];
   if (!existsSync(transcriptsDir)) { console.error("No transcripts dir"); process.exit(1); }
@@ -53,8 +57,10 @@ const insertBackup = db.prepare("INSERT INTO chat_backup (chat_id, session_id, r
 
 db.transaction(() => {
   for (const l of lines) {
-    insertMsg.run(l.chatId, l.sessionId, l.role, l.content, l.timestamp);
-    insertBackup.run(l.chatId, l.sessionId, l.role, l.content, l.timestamp);
+    const clean = stripEmojis(l.content);
+    if (!clean) continue;
+    insertMsg.run(l.chatId, l.sessionId, l.role, clean, l.timestamp);
+    insertBackup.run(l.chatId, l.sessionId, l.role, clean, l.timestamp);
   }
 })();
 
