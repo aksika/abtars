@@ -137,12 +137,37 @@ For each group: keep the **first occurrence** (lowest id) and its assistant resp
 
 This applies to memory test probes like "kiskutya?", "ki vagy?", "who are you?", "jelszó?" — the answer is already stored in extracted_memories, repeats have no value.
 
-### Step 6: Report
+### Step 6: Verify extractions + mark verbose exchanges
+
+Scan messages that haven't been captured in `extracted_memories`. For each conversation exchange (group of messages on the same topic within a session):
+
+1. Check if the key facts/outcomes are already in `extracted_memories`:
+```sql
+SELECT id, content_en FROM extracted_memories ORDER BY source_timestamp DESC;
+```
+
+2. If an exchange's facts are NOT yet extracted, extract them now using `agentbridge-store`:
+```bash
+agentbridge-store --content-en "<fact>" --content-original "<original>" --memory-type <TYPE> --emotion-score <SCORE> --chat-id <CHAT_ID> --keyword "<keyword>"
+```
+
+3. After confirming the facts are stored, garbage-mark the verbose original messages (add to `garbage.json`). Keep 1-2 representative messages if the exchange is historically significant.
+
+**What to extract:** facts, decisions, preferences, events, lessons learned, tool configurations, workflow discoveries.
+
+**What NOT to extract:** greetings, debugging noise (already handled by Steps 2-5), conversations that are purely instructional with no lasting fact.
+
+**Example:** A 10-message exchange about setting up X.com cookies:
+- Extract: "X.com access works via Dockerized Patchright browser with cookies from ~/.agentbridge/titok/x-cookies.json. Must start Docker container first."
+- Garbage-mark all 10 original messages (facts now live in extracted_memories)
+
+### Step 7: Report
 
 In your sleep audit, include a GC summary:
 - Messages immediately deleted (dupes + wrong chat + STT garbage): count
 - Messages garbage-marked this cycle: count
 - Expired garbage purged: count
+- Conversations compacted: count (N messages → 1, per exchange)
 - Emotion scores updated: list of (memory_id, old_score → new_score)
 
 ### Database Maintenance
