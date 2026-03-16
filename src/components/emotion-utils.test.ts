@@ -1,5 +1,5 @@
 // Feature: instant-memory-store, Property 1: Emotion Score Clamping
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import fc from "fast-check";
 import { clampEmotionScore } from "./emotion-utils.js";
 
@@ -70,5 +70,31 @@ describe("clampEmotionScore — Property 1: Emotion Score Clamping", () => {
       }),
       { numRuns: 100 },
     );
+  });
+});
+
+describe("emojiToScore", () => {
+  // Inline import to avoid changing existing imports
+  let emojiToScore: (emoji: string) => number;
+  beforeAll(async () => {
+    const mod = await import("./emotion-utils.js");
+    emojiToScore = mod.emojiToScore;
+  });
+
+  it("maps positive emojis to positive scores", () => {
+    expect(emojiToScore("❤️")).toBe(4);
+    expect(emojiToScore("👍")).toBe(3);
+    expect(emojiToScore("😊")).toBe(2);
+  });
+
+  it("maps negative emojis to negative scores", () => {
+    expect(emojiToScore("👎")).toBe(-3);
+    expect(emojiToScore("😡")).toBe(-4);
+    expect(emojiToScore("💩")).toBe(-5);
+  });
+
+  it("defaults unknown emojis to +1", () => {
+    expect(emojiToScore("🦄")).toBe(1);
+    expect(emojiToScore("🏠")).toBe(1);
   });
 });

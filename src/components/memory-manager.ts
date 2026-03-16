@@ -144,6 +144,17 @@ export class MemoryManager {
         // Column already exists — safe to ignore
       }
 
+      // Idempotent migration: add platform_message_id + emotion_score to messages
+      try {
+        this.db.exec("ALTER TABLE messages ADD COLUMN platform_message_id INTEGER");
+      } catch { /* already exists */ }
+      try {
+        this.db.exec("ALTER TABLE messages ADD COLUMN emotion_score INTEGER DEFAULT 0");
+      } catch { /* already exists */ }
+      try {
+        this.db.exec("CREATE INDEX IF NOT EXISTS idx_messages_platform_id ON messages(chat_id, platform_message_id)");
+      } catch { /* already exists */ }
+
       this.memoryIndex = new MemoryIndex(this.db);
       this.transcriptWriter = new TranscriptWriter(this.config.memoryDir);
       this.transcriptParser = new TranscriptParser();
@@ -350,6 +361,20 @@ export class MemoryManager {
       }
     } catch (err) {
       logError(TAG, "Failed to record message", err);
+    }
+  }
+
+  /** Update emotion_score on a message identified by platform message ID. Returns true if updated. */
+  updateEmotionByPlatformId(chatId: number, platformMessageId: number, score: number): boolean {
+    if (!this.db) return false;
+    try {
+      const result = this.db.prepare(
+        "UPDATE messages SET emotion_score = ? WHERE chat_id = ? AND platform_message_id = ?",
+      ).run(score, chatId, platformMessageId);
+      return result.changes > 0;
+    } catch (err) {
+      logError(TAG, "Failed to update emotion score", err);
+      return false;
     }
   }
 

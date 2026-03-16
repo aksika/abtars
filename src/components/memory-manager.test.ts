@@ -463,6 +463,32 @@ describe("MemoryManager — recordMessage", () => {
     expect(row.cnt).toBe(0);
     db.close();
   });
+
+  it("stores platform_message_id and updates emotion_score via updateEmotionByPlatformId", () => {
+    const record = makeRecord({ content: "hello world", chatId: 1, sessionId: "s1", timestamp: Date.now(), platformMessageId: 999 });
+    manager.recordMessage(record);
+
+    // Verify platform_message_id stored
+    const db = initializeDatabase(join(tmpDir, "memory.db"));
+    const row = db.prepare("SELECT platform_message_id, emotion_score FROM messages WHERE chat_id = 1").get() as { platform_message_id: number; emotion_score: number };
+    expect(row.platform_message_id).toBe(999);
+    expect(row.emotion_score).toBe(0);
+    db.close();
+
+    // Update emotion score
+    const updated = manager.updateEmotionByPlatformId(1, 999, 3);
+    expect(updated).toBe(true);
+
+    const db2 = initializeDatabase(join(tmpDir, "memory.db"));
+    const row2 = db2.prepare("SELECT emotion_score FROM messages WHERE chat_id = 1 AND platform_message_id = 999").get() as { emotion_score: number };
+    expect(row2.emotion_score).toBe(3);
+    db2.close();
+  });
+
+  it("updateEmotionByPlatformId returns false when message not found", () => {
+    const updated = manager.updateEmotionByPlatformId(1, 12345, 3);
+    expect(updated).toBe(false);
+  });
 });
 
 describe("MemoryManager — checkAutoCompact", () => {

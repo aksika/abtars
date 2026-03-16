@@ -23,6 +23,7 @@ import { B2BRouter } from "./components/b2b-router.js";
 import type { IKiroTransport } from "./components/kiro-transport.js";
 import { formatReactionSignal } from "./components/reaction-signal.js";
 import { routeReaction } from "./components/reaction-router.js";
+import { emojiToScore } from "./components/emotion-utils.js";
 import type { TelegramUpdate, DiscordInboundMessage } from "./types/index.js";
 import { parsePlatformFlags } from "./components/cli-flags.js";
 import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard-config.js";
@@ -375,6 +376,13 @@ async function main(): Promise<void> {
         const signal = formatReactionSignal(senderName, emojis);
         const chatId = reaction.chat.id;
         const route = routeReaction(isAuthorized, reaction.chat.type);
+
+        // Update emotion_score on the reacted message (authorized users only)
+        if (isAuthorized && memory) {
+          const score = emojiToScore(emojis[0]!);
+          const updated = memory.updateEmotionByPlatformId(chatId, reaction.message_id, score);
+          if (updated) logDebug("main", `Emotion score ${score} set on platform msg ${reaction.message_id}`);
+        }
 
         if (route === "discard") {
           logDebug("main", `Unauthorized reaction from user ${user.id}, discarding`);
@@ -884,7 +892,7 @@ async function main(): Promise<void> {
 
         if (memory) {
           pendingSessionStart.delete(sessionKey);
-          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
+          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId: messageId });
         }
 
         const responsePromise = transport.sendPrompt(sessionKey, prompt);
@@ -934,13 +942,14 @@ async function main(): Promise<void> {
         }
 
         // Only send final response if nothing was streamed, or if there's new content
+        let lastSentMsgId: number | undefined;
         if (!intermediateDelivered) {
           const chunks = formatter.chunkText(userResponse);
           logDebug("main", `Sending ${chunks.length} chunk(s)`);
           for (const chunk of chunks) {
             if (chunk.trim()) {
               await telegramApi.sendChatAction(chatId, "typing", threadId);
-              await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
+              lastSentMsgId = await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
             }
           }
         } else if (transport instanceof TmuxClient) {
@@ -955,7 +964,7 @@ async function main(): Promise<void> {
               for (const chunk of tailChunks) {
                 if (chunk.trim()) {
                   await telegramApi.sendChatAction(chatId, "typing", threadId);
-                  await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
+                  lastSentMsgId = await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
                 }
               }
             }
@@ -963,7 +972,7 @@ async function main(): Promise<void> {
         }
 
         if (memory) {
-          memory.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp: Date.now(), chatId, sessionId: sessionKey });
+          memory.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId: lastSentMsgId });
         }
 
         if (isVoiceNote && ttsConfig && !fullModeChats.has(sessionKey)) {

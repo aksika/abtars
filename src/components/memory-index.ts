@@ -53,8 +53,8 @@ export class MemoryIndex {
    */
   index(record: MessageRecord): number {
     const stmt = this.db.prepare(
-      `INSERT INTO messages (chat_id, session_id, role, content, timestamp)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (chat_id, session_id, role, content, timestamp, platform_message_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     );
     const result = stmt.run(
       record.chatId,
@@ -62,6 +62,7 @@ export class MemoryIndex {
       record.role,
       record.content,
       record.timestamp,
+      record.platformMessageId ?? null,
     );
     return Number(result.lastInsertRowid);
   }

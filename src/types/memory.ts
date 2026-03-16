@@ -6,6 +6,8 @@ export type MessageRecord = {
   timestamp: number;
   chatId: number;
   sessionId: string;
+  /** Platform-specific message ID (e.g. Telegram message_id) for reaction tracking */
+  platformMessageId?: number;
 };
 
 /** Hierarchical memory consolidation tier. Quarterly added for new 3-tier compaction; monthly/yearly kept for backward compat. */

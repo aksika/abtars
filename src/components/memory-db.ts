@@ -40,10 +40,14 @@ export function initializeDatabase(dbPath: string): Database.Database {
       session_id TEXT NOT NULL,
       role TEXT NOT NULL,
       content TEXT NOT NULL,
-      timestamp INTEGER NOT NULL
+      timestamp INTEGER NOT NULL,
+      platform_message_id INTEGER,
+      emotion_score INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_messages_chat_ts
       ON messages(chat_id, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_messages_platform_id
+      ON messages(chat_id, platform_message_id);
 
     -- FTS5 virtual table
     CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
