@@ -42,7 +42,7 @@ import { BrowserManager } from "./components/browser-manager.js";
 import { BrowserTool } from "./components/browser-tool.js";
 import { BrowserIpcServer } from "./components/browser-ipc-server.js";
 import { DomainAllowlist } from "./components/domain-allowlist.js";
-import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
+import { checkCron, checkBrowseTasks, checkMissedCrons, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
 function stripDiscordMentions(text: string, botAppId: string): string {
@@ -192,14 +192,15 @@ async function main(): Promise<void> {
     logInfo("main", "🧠 Memory LLM callback registered");
 
     // Start heartbeat for background memory extraction and consolidation
-    memory.startHeartbeat();
+    // Shared sleep trigger — one instance for both startup and heartbeat
+    const auditDir = join(memoryConfig.memoryDir, "audit");
+    const sleepTrigger = new SleepTrigger(auditDir);
+
+    memory.startHeartbeat(sleepTrigger);
     logInfo("main", "💓 Memory heartbeat started");
 
-    // Always run sleep on startup
+    // Run sleep on startup if needed (≥8am, no audit today)
     try {
-      const auditDir = join(memoryConfig.memoryDir, "audit");
-      const sleepTrigger = new SleepTrigger(auditDir);
-
       if (sleepTrigger.shouldRunOnStartup()) {
         logInfo("main", "😴 Startup sleep trigger fired — spawning sleep routine in background");
         const thisDir = dirname(fileURLToPath(import.meta.url));
@@ -1547,10 +1548,12 @@ async function main(): Promise<void> {
       }
     }
     checkBrowseTasks();
+    checkMissedCrons(false); // track-only, no catch-up during runtime
   }, CRON_CHECK_MS);
   // Run once on startup to catch any overdue entries
   checkCron();
   checkBrowseTasks();
+  checkMissedCrons(true); // catch-up missed jobs
   logInfo("main", "⏰ Cron checker started (5-min interval)");
 
   // --- Web Dashboard wiring (conditional) ---

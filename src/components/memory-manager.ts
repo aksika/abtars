@@ -1141,7 +1141,7 @@ export class MemoryManager {
    *
    * On failure, logs a warning and continues without background processing.
    */
-  startHeartbeat(): void {
+  startHeartbeat(sleepTrigger?: SleepTrigger): void {
     if (!this.config.memoryEnabled || !this.db || !this.memoryIndex) return;
 
     try {
@@ -1166,7 +1166,7 @@ export class MemoryManager {
 
       const isBusy = () => this.isBusyFn?.() ?? false;
       const auditDir = join(this.config.memoryDir, "audit");
-      const sleepTrigger = new SleepTrigger(auditDir);
+      const trigger = sleepTrigger ?? new SleepTrigger(auditDir);
       const db = this.db;
 
       this.heartbeat.registerTask({
@@ -1188,7 +1188,7 @@ export class MemoryManager {
             return;
           }
 
-          if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) return;
+          if (!trigger.shouldRunFromCron(lastMessageTs)) return;
 
           try {
             const thisDir = dirname(fileURLToPath(import.meta.url));

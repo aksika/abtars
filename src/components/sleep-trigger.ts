@@ -9,17 +9,28 @@ const TAG = "sleep-trigger";
  * - Cron: ≥8am AND 10min idle AND no sleep today
  */
 export class SleepTrigger {
+  private spawnedToday = false;
+
   constructor(private auditDir: string) {}
 
-  /** Always run on startup. */
+  /** Run on startup only if ≥8am and no audit today. */
   shouldRunOnStartup(): boolean {
+    if (new Date().getHours() < 8) {
+      logDebug(TAG, "Startup: before 8am — skip");
+      return false;
+    }
+    if (this.hasSleepAuditToday()) {
+      logDebug(TAG, "Startup: already slept today — skip");
+      return false;
+    }
     logInfo(TAG, "Startup sleep triggered");
+    this.spawnedToday = true;
     return true;
   }
 
   /**
    * Check if sleep should run from heartbeat cron.
-   * Conditions: hour ≥ 8, last message > 10min ago, no audit file today.
+   * Conditions: hour ≥ 8, last message > 10min ago, no audit file today, not already spawned.
    */
   shouldRunFromCron(lastMessageTs: number): boolean {
     const now = new Date();
@@ -34,12 +45,18 @@ export class SleepTrigger {
       return false;
     }
 
+    if (this.spawnedToday) {
+      logDebug(TAG, "Already spawned today — skip");
+      return false;
+    }
+
     if (this.hasSleepAuditToday()) {
       logDebug(TAG, "Already slept today — skip");
       return false;
     }
 
     logInfo(TAG, "Cron sleep triggered (≥8am, 10min idle, no sleep today)");
+    this.spawnedToday = true;
     return true;
   }
 

@@ -95,6 +95,103 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
   if (changed) writeCron(entries);
 }
 
+// --- Missed cron catch-up (host crontab) ---
+
+import { execSync } from "node:child_process";
+import { CronExpressionParser } from "cron-parser";
+
+const cronRunsPath = (): string => join(memoryDir(), "cron_runs.json");
+const MANAGED_TAG = "# agentbridge-managed";
+
+interface CronRuns { [commandHash: string]: { lastRun: number; command: string } }
+
+function readCronRuns(): CronRuns {
+  if (!existsSync(cronRunsPath())) return {};
+  try { return JSON.parse(readFileSync(cronRunsPath(), "utf-8")); }
+  catch { return {}; }
+}
+
+function writeCronRuns(runs: CronRuns): void {
+  mkdirSync(memoryDir(), { recursive: true });
+  writeFileSync(cronRunsPath(), JSON.stringify(runs, null, 2), "utf-8");
+}
+
+function hashCommand(cmd: string): string {
+  // Simple stable hash from command text
+  let h = 0;
+  for (let i = 0; i < cmd.length; i++) h = ((h << 5) - h + cmd.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36);
+}
+
+/**
+ * Parse host crontab, find entries tagged `# agentbridge-managed`,
+ * check if any were missed while the bridge was down, and execute them.
+ *
+ * @param catchUp - if true, execute missed commands. If false, just update tracking.
+ *   Use catchUp=true on startup, catchUp=false on interval ticks.
+ */
+export function checkMissedCrons(catchUp: boolean = true): void {
+  let crontab: string;
+  try { crontab = execSync("crontab -l 2>/dev/null", { encoding: "utf-8" }); }
+  catch { return; } // no crontab
+
+  const lines = crontab.split("\n").filter(l => l.includes(MANAGED_TAG));
+  if (lines.length === 0) return;
+
+  const runs = readCronRuns();
+  const now = Date.now();
+  let changed = false;
+
+  for (const line of lines) {
+    // Extract schedule (first 5 fields) and command
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 6) continue;
+    const schedule = parts.slice(0, 5).join(" ");
+    const command = parts.slice(5).join(" ").replace(MANAGED_TAG, "").trim();
+    const key = hashCommand(command);
+
+    try {
+      const expr = CronExpressionParser.parse(schedule);
+      const prevFire = expr.prev().getTime();
+      const lastRun = runs[key]?.lastRun ?? 0;
+
+      if (prevFire > lastRun) {
+        if (catchUp) {
+          logInfo(TAG, `⏰ Missed cron detected — running: ${command.slice(0, 80)}...`);
+          try {
+            const child = spawn("bash", ["-c", command], {
+              stdio: "ignore", detached: true,
+            });
+            child.unref();
+          } catch (err) {
+            logWarn(TAG, `Failed to run missed cron: ${err instanceof Error ? err.message : String(err)}`);
+            continue;
+          }
+        }
+        runs[key] = { lastRun: now, command };
+        changed = true;
+      } else if (!runs[key]) {
+        runs[key] = { lastRun: prevFire, command };
+        changed = true;
+      }
+    } catch (err) {
+      logWarn(TAG, `Failed to parse cron schedule "${schedule}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  if (changed) writeCronRuns(runs);
+}
+
+/**
+ * Called by host crontab after successful execution to update lastRun.
+ * Usage: node -e "import(...).then(m => m.markCronRan('command'))"
+ */
+export function markCronRan(command: string): void {
+  const runs = readCronRuns();
+  runs[hashCommand(command)] = { lastRun: Date.now(), command };
+  writeCronRuns(runs);
+}
+
 // --- Browse task checker ---
 
 import { readPendingBrowse, writePendingBrowse } from "../cli/agentbridge-browse.js";

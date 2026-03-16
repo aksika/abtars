@@ -26,4 +26,5 @@ Thumbs.db
 *.pdf
 
 # Kiro specs (local dev artifacts)
-.kiro/
+.kiro/*
+!.kiro/steering/
