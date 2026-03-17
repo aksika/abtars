@@ -25,7 +25,7 @@ agentbridge-browser --action close_session --session-id browse
 
 Always use `--session-id browse` to keep state across calls.
 
-If the container is not running: `~/.agentbridge/browser-docker.sh`
+If the container is not running: `~/.agentbridge/browser-docker.sh start`
 
 ### Login state
 
