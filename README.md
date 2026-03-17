@@ -218,6 +218,7 @@ KIRO_CLI_PATH=kiro-cli
 | `TMUX_CAPTURE_DELAY_SEC` | no | `3` | Seconds before first output capture |
 | `TMUX_MAX_WAIT_SEC` | no | `300` | Max seconds to wait for Kiro response |
 | `TRUST_MODE` | no | `false` | Auto-approve Kiro actions |
+| `BROWSING_AGENT` | no | `claude-sonnet-4.6` | Model for browse subagent |
 | `PERMISSION_TIMEOUT_MS` | no | `60000` | Permission prompt timeout (acp only) |
 | `LOG_LEVEL` | no | `low` | Logging: `off`, `low`, `debug` |
 | `WEB_AUTH_TOKEN` | when `--web` | — | Bearer token for dashboard auth |

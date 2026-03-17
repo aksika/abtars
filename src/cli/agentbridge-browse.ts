@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { config as loadDotenv } from "dotenv";
 
 // --- Types ---
 
@@ -125,6 +126,7 @@ export function writePendingBrowse(entries: PendingBrowseEntry[]): void {
 // --- Main ---
 
 export function main(argv: string[] = process.argv): void {
+  loadDotenv({ path: join(homedir(), ".agentbridge", ".env") });
   const raw = parseArgs(argv);
   const validation = validateArgs(raw);
 
@@ -152,6 +154,8 @@ export function main(argv: string[] = process.argv): void {
   // Build prompt
   const prompt = loadBrowsePrompt(task, chatId, taskId);
 
+  const browseModel = process.env.BROWSING_AGENT || "claude-sonnet-4.6";
+
   // Spawn detached kiro-cli acp subprocess
   const promptFile = join(logsDir, `browse_${taskId}_prompt.txt`);
   writeFileSync(promptFile, prompt, "utf-8");
@@ -166,7 +170,7 @@ const { appendFileSync } = require("fs");
 const logFile = process.argv[2];
 const promptFile = process.argv[3];
 const prompt = require("fs").readFileSync(promptFile, "utf-8");
-const child = spawn("kiro-cli", ["acp", "--agent", "kiro_default"], { stdio: ["pipe", "pipe", "pipe"] });
+const child = spawn("kiro-cli", ["acp", "--agent", "kiro_default", "--model", ${JSON.stringify(browseModel)}], { stdio: ["pipe", "pipe", "pipe"] });
 child.stdout.on("data", c => { try { appendFileSync(logFile, c); } catch {} });
 child.stderr.on("data", c => { try { appendFileSync(logFile, c); } catch {} });
 const rl = createInterface({ input: child.stdout });
