@@ -71,16 +71,17 @@ describe("agentbridge-browse", () => {
       // Create template in the dev fallback location
       const promptDir = join(tmpDir, "persona");
       mkdirSync(promptDir, { recursive: true });
-      writeFileSync(join(promptDir, "browsing_prompt.md"), "Task: ${TASK}\nChat: ${CHAT_ID}\nTime: ${TIMESTAMP}\nBrowser: ${BROWSER_STATUS}", "utf-8");
+      writeFileSync(join(promptDir, "browsing_prompt.md"), "Task: ${TASK}\nID: ${TASK_ID}\nReport: ${REPORT_FILE}", "utf-8");
 
       // Override cwd to point to tmpDir
       process.cwd = () => tmpDir;
 
-      const result = loadBrowsePrompt("check notifications", 42);
+      const result = loadBrowsePrompt("check notifications", 42, "abc123");
       expect(result).toContain("Task: check notifications");
-      expect(result).toContain("Chat: 42");
+      expect(result).toContain("ID: abc123");
+      expect(result).toContain("browse_abc123_");
       expect(result).not.toContain("${TASK}");
-      expect(result).not.toContain("${CHAT_ID}");
+      expect(result).not.toContain("${TASK_ID}");
     });
 
     it("loads from deployed path first", () => {
