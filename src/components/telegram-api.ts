@@ -124,7 +124,11 @@ export class TelegramApi {
     const body = {
       offset,
       timeout,
-      allowed_updates: [] as string[], // empty = receive ALL update types
+      allowed_updates: [
+        "message",
+        "callback_query",
+        "message_reaction",
+      ],
     };
     return (await this.call("getUpdates", body, signal)) as TelegramUpdate[];
   }
