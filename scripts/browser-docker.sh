@@ -50,7 +50,7 @@ run_container() {
   echo "✅ Browser container running — socket at $SOCKET_DIR/browser.sock"
 }
 
-case "${CMD:-build}" in
+case "${CMD:-help}" in
   stop)
     docker rm -f "$CONTAINER" 2>/dev/null && echo "Stopped $CONTAINER" || echo "Not running"
     ;;
@@ -61,13 +61,19 @@ case "${CMD:-build}" in
   start)
     run_container
     ;;
-  build|"")
+  build)
     echo "🔨 Building $IMAGE..."
     DOCKER_BUILDKIT=0 docker build -t "$IMAGE" -f "$PROJECT_DIR/docker/browser/Dockerfile" "$PROJECT_DIR" 2>&1 | tail -5
     run_container
     ;;
   *)
-    echo "Usage: $0 [build|start|stop|status] [--headed]"
+    echo "Usage: $0 <command> [--headed]"
+    echo ""
+    echo "Commands:"
+    echo "  build   Build image + start container"
+    echo "  start   Start container (existing image)"
+    echo "  stop    Stop + remove container"
+    echo "  status  Check if running"
     exit 1
     ;;
 esac
