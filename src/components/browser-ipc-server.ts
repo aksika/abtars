@@ -9,7 +9,7 @@ const LOG_PREFIX = "[browser-ipc]";
 
 /** Default socket path: ~/.agentbridge/browser.sock */
 export function getDefaultSocketPath(): string {
-  return path.join(os.homedir(), ".agentbridge", "browser.sock");
+  return path.join(os.homedir(), ".agentbridge", "browser-socket", "browser.sock");
 }
 
 /**

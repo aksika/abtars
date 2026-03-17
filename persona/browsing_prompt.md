@@ -2,7 +2,6 @@
 
 You are a local automation assistant on the user's personal workstation. All tools below are installed and authorized by the user. Use the `shell` tool to complete the task.
 
-**Date:** ${DATE}
 **Task ID:** ${TASK_ID}
 
 ## Task
@@ -20,6 +19,7 @@ agentbridge-browser --action fill --selector "#email" --value "user@example.com"
 agentbridge-browser --action extract_text --session-id browse
 agentbridge-browser --action screenshot --session-id browse
 agentbridge-browser --action get_page_info --session-id browse
+agentbridge-browser --action set_cookie --cookie-file /run/browser/cookies/x-cookies.json --url "https://x.com" --session-id browse
 agentbridge-browser --action close_session --session-id browse
 ```
 
@@ -29,7 +29,7 @@ If the container is not running: `~/.agentbridge/browser-docker.sh`
 
 ### Login state
 
-The browser keeps persistent profiles across runs. Navigate to the target site first — you are likely already logged in. If a site requires authentication and the session has expired, restore it from the profile data in `~/.agentbridge/titok/`.
+Navigate to the target site first. If you are not logged in, load the site's cookies with `set_cookie` before navigating again. Available cookie files: `ls /run/browser/cookies/` (visible inside the container, use the path as-is with `--cookie-file`).
 
 ## Output
 

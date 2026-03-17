@@ -6,7 +6,8 @@ export type BrowserActionType =
   | "extract_text"
   | "screenshot"
   | "get_page_info"
-  | "close_session";
+  | "close_session"
+  | "set_cookie";
 
 /** Parsed browser tool action from CLI args. */
 export type BrowserAction = {
@@ -16,6 +17,7 @@ export type BrowserAction = {
   selector?: string;       // for click, fill, extract_text
   value?: string;          // for fill
   fullPage?: boolean;      // for screenshot
+  cookieFile?: string;     // for set_cookie
 };
 
 /** Result returned by the browser tool (JSON to stdout). */

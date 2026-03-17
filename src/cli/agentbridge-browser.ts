@@ -38,6 +38,7 @@ const VALID_ACTIONS: ReadonlySet<string> = new Set<BrowserActionType>([
   "screenshot",
   "get_page_info",
   "close_session",
+  "set_cookie",
 ]);
 
 export type RawBrowserArgs = {
@@ -47,6 +48,7 @@ export type RawBrowserArgs = {
   value?: string;
   sessionId: string;
   fullPage: boolean;
+  cookieFile?: string;
 };
 
 /**
@@ -65,6 +67,7 @@ export function parseArgs(argv: string[]): RawBrowserArgs {
       case "--value":      parsed.value = args[++i] ?? ""; break;
       case "--session-id": parsed.sessionId = args[++i] ?? "default"; break;
       case "--full-page":  parsed.fullPage = true; break;
+      case "--cookie-file": parsed.cookieFile = args[++i] ?? ""; break;
     }
   }
 
@@ -103,6 +106,9 @@ export function validateArgs(
       if (!raw.selector) return { ok: false, error: "fill action requires --selector" };
       if (raw.value === undefined) return { ok: false, error: "fill action requires --value" };
       break;
+    case "set_cookie":
+      if (!raw.cookieFile) return { ok: false, error: "set_cookie action requires --cookie-file" };
+      break;
     // extract_text, screenshot, get_page_info, close_session have no extra required params
   }
 
@@ -115,6 +121,7 @@ export function validateArgs(
       selector: raw.selector,
       value: raw.value,
       fullPage: raw.fullPage,
+      cookieFile: raw.cookieFile,
     },
   };
 }

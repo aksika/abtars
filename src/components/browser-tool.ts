@@ -54,6 +54,8 @@ export class BrowserTool {
           return await this._handleGetPageInfo(action);
         case "close_session":
           return await this._handleCloseSession(action);
+        case "set_cookie":
+          return await this._handleSetCookie(action);
         default:
           return { success: false, error: `Unknown action: ${String((action as BrowserAction).action)}` };
       }
@@ -327,4 +329,35 @@ export class BrowserTool {
     await this._browserManager.closeSession(action.sessionId);
     return { success: true };
   }
-}
+
+  // -------------------------------------------------------------------------
+  // set_cookie
+  // -------------------------------------------------------------------------
+
+  private async _handleSetCookie(action: BrowserAction): Promise<BrowserToolResult> {
+    const file = action.cookieFile;
+    if (!file) return { success: false, error: "set_cookie requires --cookie-file" };
+
+    // Only allow files under /run/browser/cookies (mounted read-only)
+    const COOKIES_DIR = "/run/browser/cookies";
+    const resolved = require("node:path").resolve(file) as string;
+    if (!resolved.startsWith(COOKIES_DIR)) {
+      return { success: false, error: `cookie file must be under ${COOKIES_DIR}` };
+    }
+
+    const raw = require("node:fs").readFileSync(resolved, "utf-8") as string;
+    const json = JSON.parse(raw) as Record<string, string>;
+
+    const session = await this._browserManager.getSession(action.sessionId);
+    const url = action.url ?? session.page.url();
+    let domain: string;
+    try { domain = new URL(url).hostname; } catch { domain = ""; }
+
+    const cookies = Object.entries(json).map(([name, value]) => ({
+      name, value: String(value), domain, path: "/",
+    }));
+
+    await session.context.addCookies(cookies);
+    console.log(`${LOG_PREFIX} set_cookie session="${action.sessionId}" loaded ${cookies.length} cookies for ${domain}`);
+    return { success: true, text: `Loaded ${cookies.length} cookies for ${domain}` };
+  }}

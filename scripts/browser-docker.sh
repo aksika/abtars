@@ -11,7 +11,7 @@ IMAGE="agentbridge-browser"
 CONTAINER="agentbridge-browser"
 AB_HOME="${HOME}/.agentbridge"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SOCKET_DIR="$AB_HOME"
+SOCKET_DIR="$AB_HOME/browser-socket"
 HEADED=false
 
 CMD=""
@@ -53,6 +53,7 @@ case "${CMD:-start}" in
       --restart unless-stopped \
       --user "$(id -u):$(id -g)" \
       -v "$SOCKET_DIR:/run/browser" \
+      -v "$AB_HOME/titok/cookies:/run/browser/cookies:ro" \
       -e BROWSER_SOCKET_PATH=/run/browser/browser.sock \
       -e BROWSER_CHANNEL="${BROWSER_CHANNEL:-chrome}" \
       -e BROWSER_ALLOWED_DOMAINS="${BROWSER_ALLOWED_DOMAINS:-}" \
