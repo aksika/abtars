@@ -14,7 +14,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
 
@@ -66,7 +66,7 @@ export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId
 
 // --- Prompt loading ---
 
-export function loadBrowsePrompt(task: string, chatId: number, taskId?: string): string {
+export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string): string {
   const deployed = join(homedir(), ".agentbridge", "browsing_prompt.md");
   const dev = join(process.cwd(), "persona", "browsing_prompt.md");
 
@@ -79,21 +79,11 @@ export function loadBrowsePrompt(task: string, chatId: number, taskId?: string):
     throw new Error(`browsing_prompt.md not found at ${deployed} or ${dev}`);
   }
 
-  // Check browser container status
-  let browserStatus = "unknown";
-  try {
-    const out = execSync('docker ps --filter name=agentbridge-browser --format "{{.Status}}"', { timeout: 5000 }).toString().trim();
-    browserStatus = out || "not running";
-  } catch { browserStatus = "not running (docker check failed)"; }
-
   const date = new Date().toISOString().slice(0, 10);
   const reportFile = `browse_${taskId ?? "unknown"}_${date}.md`;
 
   const vars: Record<string, string> = {
     TASK: task,
-    CHAT_ID: String(chatId),
-    TIMESTAMP: new Date().toISOString(),
-    BROWSER_STATUS: browserStatus,
     TASK_ID: taskId ?? "unknown",
     DATE: date,
     REPORT_FILE: reportFile,
@@ -154,7 +144,7 @@ export function main(argv: string[] = process.argv): void {
   // Build prompt
   const prompt = loadBrowsePrompt(task, chatId, taskId);
 
-  const browseModel = process.env.BROWSING_AGENT || "claude-sonnet-4.6";
+  const browseModel = process.env.BROWSING_AGENT || "claude-sonnet-4.5";
 
   // Spawn detached kiro-cli acp subprocess
   const promptFile = join(logsDir, `browse_${taskId}_prompt.txt`);
@@ -170,7 +160,7 @@ const { appendFileSync } = require("fs");
 const logFile = process.argv[2];
 const promptFile = process.argv[3];
 const prompt = require("fs").readFileSync(promptFile, "utf-8");
-const child = spawn("kiro-cli", ["acp", "--agent", "kiro_default", "--model", ${JSON.stringify(browseModel)}], { stdio: ["pipe", "pipe", "pipe"] });
+const child = spawn("kiro-cli", ["acp", "--agent", "professor", "--model", ${JSON.stringify(browseModel)}], { stdio: ["pipe", "pipe", "pipe"] });
 child.stdout.on("data", c => { try { appendFileSync(logFile, c); } catch {} });
 child.stderr.on("data", c => { try { appendFileSync(logFile, c); } catch {} });
 const rl = createInterface({ input: child.stdout });
