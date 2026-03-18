@@ -166,20 +166,20 @@ child.stderr.on("data", c => { try { appendFileSync(logFile, c); } catch {} });
 const rl = createInterface({ input: child.stdout });
 let reqId = 0;
 const send = msg => child.stdin.write(JSON.stringify(msg) + "\\n");
-const waitRes = id => new Promise((resolve, reject) => {
-  const t = setTimeout(() => reject(new Error("timeout")), 30000);
+const waitRes = (id, ms) => new Promise((resolve, reject) => {
+  const t = setTimeout(() => reject(new Error("timeout")), ms);
   const h = line => { try { const p = JSON.parse(line); if (p.id === id) { clearTimeout(t); rl.off("line", h); p.error ? reject(new Error(p.error.message)) : resolve(p.result); } } catch {} };
   rl.on("line", h);
 });
 (async () => {
   try {
     send({ jsonrpc: "2.0", id: ++reqId, method: "initialize", params: { protocolVersion: "2025-03-26", clientCapabilities: {}, clientInfo: { name: "agentbridge-browse", version: "1.0.0" } } });
-    await waitRes(reqId);
+    await waitRes(reqId, 60000);
     send({ jsonrpc: "2.0", id: ++reqId, method: "session/new", params: { cwd: ${JSON.stringify(homedir())}, mcpServers: [] } });
-    const sess = await waitRes(reqId);
+    const sess = await waitRes(reqId, 60000);
     if (!sess.sessionId) throw new Error("no sessionId");
     send({ jsonrpc: "2.0", id: ++reqId, method: "session/prompt", params: { sessionId: sess.sessionId, prompt: [{ type: "text", text: prompt }] } });
-    await waitRes(reqId);
+    await waitRes(reqId, 600000);
   } catch (e) { appendFileSync(logFile, "\\nACP_ERROR: " + e + "\\n"); }
   child.kill(); process.exit();
 })();
