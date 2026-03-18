@@ -1,7 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
 import { initializeDatabase } from "./memory-db.js";
@@ -12,8 +10,6 @@ import { TranscriptWriter } from "./transcript-writer.js";
 import { TranscriptParser } from "./transcript-parser.js";
 import { ContextAssembler } from "./context-assembler.js";
 import { HeartbeatSystem } from "./heartbeat-system.js";
-import type { HeartbeatConfig } from "./heartbeat-system.js";
-import { SleepTrigger } from "./sleep-trigger.js";
 import { MemorySearchTool } from "./memory-search-tool.js";
 import type { MemorySearchToolConfig } from "./memory-search-tool.js";
 import { IngestionPipeline } from "./ingestion-pipeline.js";
@@ -37,7 +33,7 @@ import type {
   InstantStoreResult,
 } from "../types/index.js";
 import { clampEmotionScore } from "./emotion-utils.js";
-import { logDebug, logError, logInfo, logWarn } from "./logger.js";
+import { logError, logInfo, logWarn } from "./logger.js";
 
 const TAG = "memory-manager";
 
@@ -71,15 +67,13 @@ export class MemoryManager {
   private contextAssembler: ContextAssembler | null = null;
   private memorySearchTool: MemorySearchTool | null = null;
   private compactionLocks = new Map<number, Promise<void>>();
-  private isBusyFn: (() => boolean) | null = null;
 
   constructor(config: MemoryConfig) {
     this.config = config;
   }
 
   /** Register a callback that returns true when the transport is busy (e.g. processing a user prompt). */
-  setIsBusy(fn: () => boolean): void {
-    this.isBusyFn = fn;
+  setIsBusy(_fn: () => boolean): void {
   }
 
   /** Register the LLM callback. Called once from main.ts after transport is ready. */
@@ -1169,76 +1163,22 @@ export class MemoryManager {
    *
    * On failure, logs a warning and continues without background processing.
    */
-  startHeartbeat(sleepTrigger?: SleepTrigger): void {
+  /** Initialize the MemorySearchTool (called from main.ts before heartbeat start). */
+  initSearchTool(): void {
     if (!this.config.memoryEnabled || !this.db || !this.memoryIndex) return;
-
-    try {
-      const heartbeatConfig: HeartbeatConfig = {
-        enabled: this.config.heartbeat.enabled,
-        intervalMs: this.config.heartbeat.intervalMs,
-      };
-
-      this.heartbeat = new HeartbeatSystem(heartbeatConfig);
-
-      // Create MemorySearchTool
-      const searchConfig: MemorySearchToolConfig = {
-        searchTimeoutMs: this.config.searchEnhancements.searchTimeoutMs,
-        decayHalflifeDays: this.config.searchEnhancements.decayHalflifeDays,
-        mmrLambda: this.config.searchEnhancements.mmrLambda,
-      };
-      this.memorySearchTool = new MemorySearchTool(
-        this.db,
-        this.memoryIndex,
-        searchConfig,
-      );
-
-      const isBusy = () => this.isBusyFn?.() ?? false;
-      const auditDir = join(this.config.memoryDir, "audit");
-      const trigger = sleepTrigger ?? new SleepTrigger(auditDir);
-      const db = this.db;
-
-      this.heartbeat.registerTask({
-        name: "sleep-trigger",
-        execute: async () => {
-          if (isBusy()) {
-            logDebug(TAG, "Skipping sleep-trigger — transport is busy");
-            return;
-          }
-
-          let lastMessageTs = 0;
-          try {
-            const row = db!.prepare("SELECT MAX(timestamp) as latest FROM messages").get() as
-              | { latest: number | null }
-              | undefined;
-            lastMessageTs = row?.latest ?? 0;
-          } catch (err) {
-            logWarn(TAG, `sleep-trigger: failed to query last message timestamp: ${err instanceof Error ? err.message : String(err)}`);
-            return;
-          }
-
-          if (!trigger.shouldRunFromCron(lastMessageTs)) return;
-
-          try {
-            const thisDir = dirname(fileURLToPath(import.meta.url));
-            const sleepScript = join(thisDir, "..", "cli", "agentbridge-sleep.js");
-            const child = spawn(process.execPath, [sleepScript], {
-              stdio: "ignore",
-              detached: true,
-            });
-            child.unref();
-            logInfo(TAG, `😴 Sleep routine spawned from cron (pid=${child.pid})`);
-          } catch (err) {
-            logWarn(TAG, `sleep-trigger: failed to spawn sleep routine: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        },
-      });
-
-      this.heartbeat.start();
-    } catch (err) {
-      logWarn(TAG, `Failed to start heartbeat — continuing without background processing: ${err instanceof Error ? err.message : String(err)}`);
-      this.heartbeat = null;
-    }
+    const searchConfig: MemorySearchToolConfig = {
+      searchTimeoutMs: this.config.searchEnhancements.searchTimeoutMs,
+      decayHalflifeDays: this.config.searchEnhancements.decayHalflifeDays,
+      mmrLambda: this.config.searchEnhancements.mmrLambda,
+    };
+    this.memorySearchTool = new MemorySearchTool(this.db, this.memoryIndex, searchConfig);
   }
+
+  /** Set the heartbeat reference (owned by main.ts). */
+  setHeartbeat(hb: HeartbeatSystem): void { this.heartbeat = hb; }
+
+  /** Expose DB for heartbeat tasks that need direct queries. */
+  getDb(): Database.Database | null { return this.db; }
 
   /** Stop the heartbeat system. Called from close(). */
   stopHeartbeat(): void {

@@ -36,6 +36,7 @@ import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
 import { handleNLMCommand, loadNLMConfig } from "./components/nlm-command-handler.js";
 import { SleepTrigger } from "./components/sleep-trigger.js";
+import { HeartbeatSystem } from "./components/heartbeat-system.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { detectIngestSourceType } from "./components/ingest-source-detect.js";
@@ -183,6 +184,7 @@ async function main(): Promise<void> {
   let sleepChild: import("node:child_process").ChildProcess | null = null;
   const pendingMessages: Array<{ chatId: number; text: string; threadId?: number; sessionKey: string }> = [];
   const sleepRepliedChats = new Set<number>();
+  const sleepTrigger = new SleepTrigger(join(memoryConfig.memoryDir, "audit"));
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
   if (memory) {
@@ -192,13 +194,8 @@ async function main(): Promise<void> {
     memory.setIsBusy(() => busyChats.size > 0);
     logInfo("main", "🧠 Memory LLM callback registered");
 
-    // Start heartbeat for background memory extraction and consolidation
-    // Shared sleep trigger — one instance for both startup and heartbeat
-    const auditDir = join(memoryConfig.memoryDir, "audit");
-    const sleepTrigger = new SleepTrigger(auditDir);
-
-    memory.startHeartbeat(sleepTrigger);
-    logInfo("main", "💓 Memory heartbeat started");
+    // Unified heartbeat — single 5-min timer for all periodic tasks
+    memory.initSearchTool();
 
     // Run sleep on startup if needed (≥8am, no audit today)
     try {
@@ -1589,21 +1586,55 @@ async function main(): Promise<void> {
     logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
   }
 
-  // --- Cron checker (5-min interval) ---
-  const CRON_CHECK_MS = 5 * 60 * 1000;
-  const cronInterval = setInterval(() => {
-    checkCron((chatId, message, result) => {
-      // Task completion → send TG report
-      if (platforms.telegram) {
-        const api = new TelegramApi(config.telegramBotToken);
-        api.sendMessage(chatId, `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
-          logWarn("main", `Cron task TG report failed: ${err}`);
-        });
+  // --- Unified heartbeat (5-min interval) ---
+  const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: 5 * 60 * 1000 });
+
+  heartbeat.registerTask({
+    name: "sleep-trigger",
+    execute: async () => {
+      if (busyChats.size > 0) return;
+      let lastMessageTs = 0;
+      try {
+        const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages").get() as { latest: number | null } | undefined;
+        lastMessageTs = row?.latest ?? 0;
+      } catch { return; }
+      if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) return;
+      try {
+        const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
+        const child = spawn(process.execPath, [sleepScript], { stdio: "ignore", detached: true });
+        child.unref();
+        logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid})`);
+      } catch (err) {
+        logWarn("main", `sleep-trigger: failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
       }
-    });
-    // Pick up pending reminders and inject as synthetic updates
-    const reminders = readPendingReminders();
-    if (reminders.length > 0) {
+    },
+  });
+
+  heartbeat.registerTask({
+    name: "cron-checker",
+    execute: async () => {
+      checkCron((chatId, message, result) => {
+        if (platforms.telegram) {
+          const api = new TelegramApi(config.telegramBotToken);
+          api.sendMessage(chatId, `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
+            logWarn("main", `Cron task TG report failed: ${err}`);
+          });
+        }
+      });
+      checkMissedCrons(false);
+    },
+  });
+
+  heartbeat.registerTask({
+    name: "browse-checker",
+    execute: async () => { checkBrowseTasks(); },
+  });
+
+  heartbeat.registerTask({
+    name: "reminder-injector",
+    execute: async () => {
+      const reminders = readPendingReminders();
+      if (reminders.length === 0) return;
       clearPendingReminders();
       for (const r of reminders) {
         logInfo("main", `⏰ Injecting reminder for chat ${r.chatId}: "${r.message}"`);
@@ -1619,15 +1650,16 @@ async function main(): Promise<void> {
         };
         telegramPoller?.injectUpdate(syntheticUpdate);
       }
-    }
-    checkBrowseTasks();
-    checkMissedCrons(false); // track-only, no catch-up during runtime
-  }, CRON_CHECK_MS);
-  // Run once on startup to catch any overdue entries
+    },
+  });
+
+  // Run once on startup, then start periodic
   checkCron();
   checkBrowseTasks();
-  checkMissedCrons(true); // catch-up missed jobs
-  logInfo("main", "⏰ Cron checker started (5-min interval)");
+  checkMissedCrons(true);
+  heartbeat.start();
+  memory?.setHeartbeat(heartbeat);
+  logInfo("main", "💓 Heartbeat started (5-min interval)");
 
   // --- Web Dashboard wiring (conditional) ---
   let dashboardServer: DashboardServer | null = null;
@@ -1747,7 +1779,7 @@ async function main(): Promise<void> {
     }
     if (telegramPoller) telegramPoller.stop();
     if (discordPoller) discordPoller.stop();
-    clearInterval(cronInterval);
+    heartbeat.stop();
     try { await browserIpc?.shutdown(); } catch { /* best-effort */ }
     try { await browserManager.shutdown(); } catch { /* best-effort */ }
     memory?.close();

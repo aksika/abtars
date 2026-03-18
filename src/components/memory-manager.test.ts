@@ -748,7 +748,7 @@ describe("MemoryManager — assembleContext system prompt passthrough", () => {
     manager = new MemoryManager(makeConfig(tmpDir));
     await manager.initialize();
     manager.setLlmCall(async () => "{}");
-    manager.startHeartbeat();
+    manager.initSearchTool();
   });
 
   afterEach(() => {
