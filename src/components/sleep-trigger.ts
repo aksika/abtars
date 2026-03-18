@@ -21,8 +21,8 @@ export class SleepTrigger {
     }
     // If last audit is >24h ago, run immediately regardless of hour
     const lastAuditAge = this.getLastAuditAgeMs();
-    if (lastAuditAge > 24 * 60 * 60 * 1000) {
-      logInfo(TAG, `Startup sleep triggered (last audit ${Math.round(lastAuditAge / 3600000)}h ago)`);
+    if (lastAuditAge > 25 * 60 * 60 * 1000) {
+      logInfo(TAG, `Startup sleep triggered (last audit ${Math.round(lastAuditAge / 3600000)}h ago, >25h threshold)`);
       this.spawnedToday = true;
       return true;
     }
