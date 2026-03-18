@@ -159,13 +159,13 @@ Runs asynchronously in the background to extract structured knowledge from raw c
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| HeartbeatSystem | `heartbeat-system.ts` | Periodic task runner (default 60s). Error isolation — one failing task doesn't block others |
-| MemoryExtractor | `memory-extractor.ts` | LLM extraction: queries unprocessed messages above watermark, batches into ~3K char segments, produces dual-column `content_en` + `content_original` + `emotion_score` [-5,+5]. FTS5 triggers auto-index |
+| HeartbeatSystem | `heartbeat-system.ts` | Periodic task runner (default 30min). Currently runs only `sleep-trigger`. Error isolation — one failing task doesn't block others |
+| MemoryExtractor | `memory-extractor.ts` | LLM extraction: queries unprocessed messages above watermark, batches into ~3K char segments, produces dual-column `content_en` + `content_original` + `emotion_score` [-5,+5]. FTS5 triggers auto-index. **Not wired into heartbeat** — extraction is driven by sleep subagent (§6 verify-extract-mark) and agent-initiated `agentbridge-store` |
 | IngestionPipeline | `ingestion-pipeline.ts` | External document ingestion: YouTube, PDF, text, markdown. Chunks into configurable token sizes |
 | ReflectionEngine | `reflection-engine.ts` | LLM-generated topic-clustered meta-summaries |
 | agentbridge-store | `cli/agentbridge-store.ts` | Agent-initiated instant memory storage with emotion scoring |
 
-Extraction flow: HeartbeatSystem tick -> MemoryExtractor queries messages above watermark -> batches ~3K chars -> LLM extracts structured JSON -> parsed, validated, inserted into `extracted_memories` -> FTS5 auto-index -> watermark advanced.
+Extraction flow: Sleep subagent §6 (verify-extract-mark) checks if conversation facts exist in `extracted_memories`, extracts missing via `agentbridge-store`, then garbage-marks verbose originals. Agent also invokes `agentbridge-store` directly during conversation for instant storage with emotion scoring.
 
 ### Layer 5: Agent-Initiated Recall & Search
 
@@ -435,11 +435,11 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 
 1. **Startup**: `main.ts` -> `loadMemoryConfig()` -> `MemoryManager.initialize()` -> opens SQLite, creates schema, optionally loads embedding model, initializes IngestionPipeline + ReflectionEngine
 2. **LLM Callback**: `memory.setLlmCall(...)` wires transport for compaction, context assembly, reflections, extraction
-3. **Heartbeat Start**: `memory.startHeartbeat()` registers memory-extraction + consolidation + sleep-trigger cron tasks
+3. **Heartbeat Start**: `memory.startHeartbeat()` registers sleep-trigger cron task
 4. **Sleep Startup Check**: `SleepTrigger.shouldRunOnStartup()` always returns true -> spawns `agentbridge-sleep.js` detached. During sleep, incoming messages get auto-reply ("waking up") and are queued. After sleep finishes, queued messages are re-injected.
 5. **Message In**: `memory.recordMessage()` -> JSONL append (raw, with emojis) -> `stripEmojis()` on content -> FTS5 index (emoji-free, with `platform_message_id`) -> insert into `chat_backup` (immutable copy) -> optional vector index -> prune -> disk budget check every 100 writes
 5b. **Telegram Reaction**: Authorized user reacts to message -> `emojiToScore(emoji)` -> `memory.updateEmotionByPlatformId(chatId, messageId, score)` -> updates `messages.emotion_score` on the row matching `platform_message_id`
-6. **Background Extraction** (heartbeat): MemoryExtractor queries unprocessed transcripts -> LLM extracts structured memories with emotion scores -> dual-column `content_en` + `content_original` -> FTS5 auto-index -> watermark advanced
+6. **Background Extraction** (sleep subagent + instant store): Sleep subagent's §6 (verify-extract-mark) checks if conversation facts exist in `extracted_memories`, extracts missing via `agentbridge-store`. Agent also invokes `agentbridge-store` directly during conversation for instant storage. **Note:** `MemoryExtractor` class exists but is not registered as a heartbeat task — extraction is subagent-driven, not background-driven.
 7. **Instant Storage**: Agent invokes `agentbridge-store` CLI -> validates -> clamps emotion -> inserts `extracted_memories` -> advances watermark
 8. **Prompt Path**: Bridge sends raw user message to kiro-cli (no context injection). Agent reads `memory-search.md` steering, decides if recall is needed, invokes `agentbridge-recall` via `execute_bash` with extracted keywords. ContextAssembler (4-tier) exists but is not used in the main Telegram/Discord prompt path.
 8b. **A2A Prompt Scanning**: Inbound A2A messages pass through `scanPrompt()` before transport spawn. 22 regex patterns + invisible unicode detection. On match: HTTP 200 with graceful refusal, no kiro-cli spawn, no memory recording. Blocked content never enters C2/C3.
