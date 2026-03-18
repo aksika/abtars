@@ -1220,7 +1220,7 @@ export class MemoryManager {
 
           try {
             const thisDir = dirname(fileURLToPath(import.meta.url));
-            const sleepScript = join(thisDir, "cli", "agentbridge-sleep.js");
+            const sleepScript = join(thisDir, "..", "cli", "agentbridge-sleep.js");
             const child = spawn(process.execPath, [sleepScript], {
               stdio: "ignore",
               detached: true,
