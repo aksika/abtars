@@ -70,7 +70,7 @@ File: `src/cli/agentbridge-todo.test.ts` — 7 tests covering add, list, done, r
 
 ### Overview
 
-A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. A heartbeat checker fires due entries: reminders are injected into the conversation as synthetic messages; tasks spawn a kiro-cli subprocess and report results via Telegram.
+A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. A unified `HeartbeatSystem` (5-min interval, owned by `main.ts`) fires due entries: reminders are injected into the conversation as synthetic messages; tasks spawn a kiro-cli subprocess and report results via Telegram.
 
 ### Architecture
 
@@ -80,7 +80,7 @@ User: "remind me tomorrow at 8am"
                                                         ↓
                                           ~/.agentbridge/memory/cron.json
 
-Every 5 min (main.ts setInterval):
+Every 5 min (main.ts HeartbeatSystem — cron-checker + reminder-injector tasks):
   → checkCron() reads cron.json
   → Due reminders → pending_reminders.json → injected as synthetic TelegramUpdate
   → Due tasks → spawn kiro-cli acp → on exit, send TG report
@@ -124,7 +124,7 @@ Path: `~/.agentbridge/memory/cron.json`
 ### Cron Checker
 
 Source: `src/components/cron-checker.ts`
-Wired in: `src/main.ts` — 5-minute `setInterval` + one startup check
+Wired in: `src/main.ts` — registered as `cron-checker` task in the unified `HeartbeatSystem` (5-min interval) + one startup check
 
 **Reminder flow:**
 1. `checkCron()` finds entries where `fireAt <= now` and `fired === false`
@@ -197,7 +197,7 @@ Background (detached):
   → writes output to ~/.agentbridge/logs/browse_<taskId>.log
   → process exits
 
-Every 5 min (main.ts cron interval):
+Every 5 min (main.ts HeartbeatSystem — browse-checker task):
   → checkBrowseTasks() reads pending_browse.json
   → pid dead? → read log tail → deliver result via pending_reminders.json → inject into chat
   → pid alive past timeout? → kill, report timeout
@@ -219,11 +219,12 @@ Deployed to: `~/.local/bin/agentbridge-browse` (via `scripts/deploy.sh`)
 Output: `{ "ok": true, "taskId": "a1b2c3", "status": "spawned", "pid": 12345 }`
 
 Internally:
-1. Loads `browsing_prompt.md` template, replaces `${TASK}`, `${CHAT_ID}`, `${TIMESTAMP}`, `${BROWSER_STATUS}`
-2. Spawns detached `kiro-cli acp --agent professor` with prompt on stdin
-3. Logs subprocess output to `~/.agentbridge/logs/browse_<taskId>.log`
-4. Writes task metadata to `~/.agentbridge/memory/pending_browse.json`
-5. Prints JSON result and exits immediately
+1. Loads `browsing_prompt.md` template, replaces `${TASK}`, `${TASK_ID}`, `${REPORT_FILE}`
+2. Reads `BROWSING_AGENT` from env (default `claude-sonnet-4.5`), spawns detached wrapper that runs `kiro-cli acp --agent professor --model <BROWSING_AGENT>`
+3. Wrapper handles full ACP lifecycle: initialize (60s timeout) → session/new (60s) → session/prompt (10min)
+4. Logs subprocess output to `~/.agentbridge/logs/browse_<taskId>.log`
+5. Writes task metadata to `~/.agentbridge/memory/pending_browse.json`
+6. Prints JSON result and exits immediately
 
 ### Prompt Template
 
@@ -231,10 +232,10 @@ File: `persona/browsing_prompt.md` → deployed to `~/.agentbridge/browsing_prom
 
 Sections:
 - Task goal (from `--task`)
-- Full browser tool reference (`agentbridge-browser` actions: navigate, click, fill, extract_text, screenshot, get_page_info, close_session)
-- Docker container management (check status, start if needed)
-- Cookie/auth state instructions (check `~/.agentbridge/titok/` for stored cookies)
-- Output format requirements (concise summary for the user)
+- Full browser tool reference (`agentbridge-browser` actions: navigate, click, fill, extract_text, screenshot, get_page_info, set_cookie, close_session)
+- Docker container management (`~/.agentbridge/browser-docker.sh start`)
+- Login state: navigate first, use `set_cookie` with container-internal cookie files (`/run/browser/cookies/`) if not logged in
+- Output: write findings to `~/.agentbridge/subagents/browse_<taskId>_<date>.md`
 
 ### Task Lifecycle
 
@@ -254,7 +255,7 @@ File: `~/.agentbridge/memory/pending_browse.json`
 ]
 ```
 
-Checked by `checkBrowseTasks()` in `src/components/cron-checker.ts`, wired into the 5-min interval in `main.ts` alongside `checkCron()`. Also runs once on startup.
+Checked by `checkBrowseTasks()` in `src/components/cron-checker.ts`, registered as `browse-checker` task in the unified `HeartbeatSystem` in `main.ts`. Also runs once on startup.
 
 ### Delegation Steering
 
@@ -265,6 +266,29 @@ Rules for the professor:
 - NEVER run `docker exec` on the browser container
 - NEVER write inline scripts that interact with the browser
 - ALWAYS use `agentbridge-browse --task "..." --chat-id <ID>`
+
+### Browser Docker Architecture
+
+Container: `agentbridge-browser` — headless Chromium controlled via `agentbridge-browser` CLI over Unix socket IPC.
+
+Management script: `scripts/browser-docker.sh` → deployed to `~/.agentbridge/browser-docker.sh`
+
+| Command | Description |
+|---------|-------------|
+| `browser-docker.sh build` | Build image + start container |
+| `browser-docker.sh start` | Start container (existing image) |
+| `browser-docker.sh stop` | Stop + remove container |
+| `browser-docker.sh status` | Check if running |
+
+Docker mounts (isolated):
+```
+~/.agentbridge/browser-socket/ → /run/browser       (rw, IPC socket)
+~/.agentbridge/titok/cookies/  → /run/browser/cookies (ro, cookie files only)
+```
+
+The `set_cookie` action loads JSON cookie files into the browser context. Cookie files must be under `/run/browser/cookies/` (enforced by path validation in `browser-tool.ts`). Cookie file format: `{ "cookie_name": "cookie_value", ... }`.
+
+Socket path: `~/.agentbridge/browser-socket/browser.sock`
 
 ### Troubleshooting
 

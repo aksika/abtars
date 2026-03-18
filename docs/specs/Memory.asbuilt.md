@@ -2,7 +2,7 @@
 
 ## Overview
 
-The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, heartbeat-driven background extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, an automated sleep maintenance cycle with template-based subagent instructions and 7-step garbage collection, immutable chat_backup safety table, emoji stripping before DB indexing, regex-based prompt injection scanning on A2A inbound messages, and Telegram reaction-to-emotion scoring via platform message ID tracking.
+The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, sleep-subagent-driven extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, an automated sleep maintenance cycle with template-based subagent instructions and 7-step garbage collection, immutable chat_backup safety table, emoji stripping before DB indexing, regex-based prompt injection scanning on A2A inbound messages, and Telegram reaction-to-emotion scoring via platform message ID tracking.
 
 **Recall architecture**: The bridge does NOT inject recalled memories or context into the prompt. The LLM agent handles all recall autonomously — it reads the `memory-search.md` steering file, decides when to search, extracts relevant keywords from user input, and invokes `agentbridge-recall` via `execute_bash`. This leverages the LLM's natural language understanding for keyword extraction instead of a heuristic pipeline.
 
@@ -12,7 +12,7 @@ The local memory layer provides SQLite-backed persistence, JSONL transcript file
 |-------|-------|--------|
 | Phase 1 — Foundation | LLM compaction, context assembly, rolling summary | ✅ Complete |
 | Phase 2 — Commands | `/ingest`, `/reflect`, `/reembed`, `/forget` | ✅ Complete |
-| Search Enhancements | Heartbeat extraction, English-normalized storage, agent recall, temporal decay, MMR | ✅ Complete |
+| Search Enhancements | English-normalized storage, agent recall, temporal decay, MMR | ✅ Complete |
 | Instant Memory Store | Agent-initiated storage, emotion scoring, emotion-boosted ranking | ✅ Complete |
 | Sleep CLI | Automated overnight maintenance: state gathering, subagent-driven cleanup, audit trail | ✅ Complete |
 | Sleep GC | 7-step garbage collection: purge expired, immediate deletes, emotion harvest, noise mark, repeated probes, verify-extract-mark, audit report | ✅ Complete |
@@ -103,7 +103,7 @@ The memory system is organized into 7 functional layers, from low-level storage 
 |  IntentDetector                                                      |
 +---------------------------------------------------------------------+
 |  Layer 4: Background Extraction & Enrichment                        |
-|  HeartbeatSystem, MemoryExtractor, IngestionPipeline,               |
+|  MemoryExtractor (class exists, not wired), IngestionPipeline,      |
 |  ReflectionEngine, agentbridge-store (Instant Store)                |
 +---------------------------------------------------------------------+
 |  Layer 3: Consolidation (subagent-driven via sleep template)        |
@@ -159,7 +159,7 @@ Runs asynchronously in the background to extract structured knowledge from raw c
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| HeartbeatSystem | `heartbeat-system.ts` | Periodic task runner (default 30min). Currently runs only `sleep-trigger`. Error isolation — one failing task doesn't block others |
+| HeartbeatSystem | `heartbeat-system.ts` | Unified periodic task runner (5-min interval, owned by `main.ts`). 4 tasks: `sleep-trigger`, `cron-checker`, `browse-checker`, `reminder-injector`. Error isolation — one failing task doesn't block others |
 | MemoryExtractor | `memory-extractor.ts` | LLM extraction: queries unprocessed messages above watermark, batches into ~3K char segments, produces dual-column `content_en` + `content_original` + `emotion_score` [-5,+5]. FTS5 triggers auto-index. **Not wired into heartbeat** — extraction is driven by sleep subagent (§6 verify-extract-mark) and agent-initiated `agentbridge-store` |
 | IngestionPipeline | `ingestion-pipeline.ts` | External document ingestion: YouTube, PDF, text, markdown. Chunks into configurable token sizes |
 | ReflectionEngine | `reflection-engine.ts` | LLM-generated topic-clustered meta-summaries |
@@ -335,7 +335,7 @@ src/
 | VectorIndex | `components/vector-index.ts` | Model-version-aware cosine similarity |
 | ContextAssembler | `components/context-assembler.ts` | 4-tier assembly + English rolling summary + session injection |
 | MemoryManager | `components/memory-manager.ts` | Coordinator for all subsystems |
-| main.ts | `main.ts` | Telegram + Discord wiring, sleep trigger integration |
+| main.ts | `main.ts` | Telegram + Discord wiring, unified heartbeat (4 tasks), sleep trigger integration |
 
 ### Commands (Phase 2)
 
@@ -421,7 +421,7 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 | `MEMORY_RECALL_MIN_TOKEN_LENGTH` | `3` | Min token length for recall |
 | `MEMORY_RECALL_CUE_PHRASES` | (built-in) | JSON override for cue phrases |
 | `MEMORY_HEARTBEAT_ENABLED` | `true` | Enable heartbeat background tasks |
-| `MEMORY_HEARTBEAT_INTERVAL_MS` | `300000` | Heartbeat tick interval (5min) |
+| `MEMORY_HEARTBEAT_INTERVAL_MS` | `300000` | Heartbeat tick interval (5min). **Note:** currently overridden by main.ts which creates its own HeartbeatSystem at 5min. These config values are unused. |
 | `MEMORY_SEARCH_TIMEOUT_MS` | `1000` | Search timeout |
 | `MEMORY_DECAY_HALFLIFE_DAYS` | `30` | Temporal decay half-life |
 | `MEMORY_MMR_LAMBDA` | `0.7` | MMR diversity parameter |
@@ -435,7 +435,7 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 
 1. **Startup**: `main.ts` -> `loadMemoryConfig()` -> `MemoryManager.initialize()` -> opens SQLite, creates schema, optionally loads embedding model, initializes IngestionPipeline + ReflectionEngine
 2. **LLM Callback**: `memory.setLlmCall(...)` wires transport for compaction, context assembly, reflections, extraction
-3. **Heartbeat Start**: `memory.startHeartbeat()` registers sleep-trigger cron task
+3. **Heartbeat Start**: `main.ts` creates a unified `HeartbeatSystem` (5-min interval) with 4 tasks: `sleep-trigger`, `cron-checker`, `browse-checker`, `reminder-injector`. Passes reference to memory via `memory.setHeartbeat()`
 4. **Sleep Startup Check**: `SleepTrigger.shouldRunOnStartup()` always returns true -> spawns `agentbridge-sleep.js` detached. During sleep, incoming messages get auto-reply ("waking up") and are queued. After sleep finishes, queued messages are re-injected.
 5. **Message In**: `memory.recordMessage()` -> JSONL append (raw, with emojis) -> `stripEmojis()` on content -> FTS5 index (emoji-free, with `platform_message_id`) -> insert into `chat_backup` (immutable copy) -> optional vector index -> prune -> disk budget check every 100 writes
 5b. **Telegram Reaction**: Authorized user reacts to message -> `emojiToScore(emoji)` -> `memory.updateEmotionByPlatformId(chatId, messageId, score)` -> updates `messages.emotion_score` on the row matching `platform_message_id`
@@ -448,7 +448,7 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 11. **Auto-Compaction**: When context window exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), writes safety-net transcript to working dir, sends `/compact` to Kiro CLI
 12. **Consolidation** (sleep subagent): Follows `sleeping_prompt.md` template instructions. Working dirs -> daily, 7 daily -> weekly, 4 weekly -> quarterly. English summaries.
 13. **Sleep Cycle** (startup or cron): SleepTrigger fires -> `agentbridge-sleep` gathers state -> loads template with variable substitution -> invokes subagent via ACP -> subagent performs maintenance -> audit trail written
-14. **Shutdown**: `memory.stopHeartbeat()` -> `memory.close()`
+14. **Shutdown**: `heartbeat.stop()` -> `memory.close()`
 
 ### Sleep Cycle Flow
 
@@ -460,8 +460,8 @@ The sleep cycle is the maintenance routine. It runs via two triggers:
 - Sets `sleepChild` — incoming messages during sleep get auto-reply ("Oh good morning, I am just waking up, give me a minute please.. I answer you soon ☕") and are queued in `pendingMessages`
 - On sleep exit, queued messages are re-injected via `telegramPoller.injectUpdate()`
 
-**Trigger 2 -- Internal cron** (`memory-manager.ts` heartbeat):
-- Registered as heartbeat task, checked every tick (default 5min)
+**Trigger 2 -- Heartbeat cron** (`main.ts` heartbeat, `sleep-trigger` task):
+- Registered as heartbeat task in `main.ts`, checked every tick (5min)
 - `SleepTrigger.shouldRunFromCron(lastMessageTs)` checks all three:
   - Hour ≥ 8
   - Last message > 10min ago
@@ -541,7 +541,7 @@ Triggered when context window usage exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (defa
 - Scale: -5=angry, -3=frustrated, -1=slightly negative, 0=neutral, +1=slightly positive, +3=pleased, +5=happy
 - Sources:
   - **Telegram reactions**: `emojiToScore()` maps emoji → score, stored on `messages.emotion_score` via `updateEmotionByPlatformId()`. Only authorized users' reactions are processed. Emoji mapping: ❤️/🔥/👏/❤=4, 🤩=4, 👍/😂/💯/⚡=3, 🎉=3, 😊/🙏=2, 🤔/😮/unknown=1, 👎/😢=-3, 😡/🤮=-4, 💩=-5
-  - **LLM extraction**: heartbeat MemoryExtractor assesses emotion on `extracted_memories`
+  - **LLM extraction**: sleep subagent assesses emotion on `extracted_memories`
   - **Agent instant store**: `agentbridge-store` sets emotion on `extracted_memories`
 - `messages.platform_message_id` stores the Telegram message_id for reaction lookup (user messages: `message.message_id`, assistant messages: last sent chunk's message_id)
 - Search boost (on extracted_memories): `final_score = bm25_score + 0.5 * log1p(abs(emotion_score))`
