@@ -13,14 +13,21 @@ export class SleepTrigger {
 
   constructor(private auditDir: string) {}
 
-  /** Run on startup only if ≥8am and no audit today. */
+  /** Run on startup if no audit today, or if last audit is >24h old regardless of hour. */
   shouldRunOnStartup(): boolean {
-    if (new Date().getHours() < 8) {
-      logDebug(TAG, "Startup: before 8am — skip");
-      return false;
-    }
     if (this.hasSleepAuditToday()) {
       logDebug(TAG, "Startup: already slept today — skip");
+      return false;
+    }
+    // If last audit is >24h ago, run immediately regardless of hour
+    const lastAuditAge = this.getLastAuditAgeMs();
+    if (lastAuditAge > 24 * 60 * 60 * 1000) {
+      logInfo(TAG, `Startup sleep triggered (last audit ${Math.round(lastAuditAge / 3600000)}h ago)`);
+      this.spawnedToday = true;
+      return true;
+    }
+    if (new Date().getHours() < 8) {
+      logDebug(TAG, "Startup: before 8am — skip");
       return false;
     }
     logInfo(TAG, "Startup sleep triggered");
@@ -72,6 +79,23 @@ export class SleepTrigger {
       return readdirSync(this.auditDir).some((f) => f.startsWith(`sleep_${dateStr}`));
     } catch {
       return false;
+    }
+  }
+
+  /** Get age of the most recent audit file in ms. Returns Infinity if none. */
+  private getLastAuditAgeMs(): number {
+    if (!existsSync(this.auditDir)) return Infinity;
+    try {
+      const files = readdirSync(this.auditDir).filter(f => f.startsWith("sleep_")).sort();
+      if (files.length === 0) return Infinity;
+      const last = files[files.length - 1]!;
+      // sleep_YYYYMMDD_HHmmss.md → extract timestamp
+      const m = last.match(/^sleep_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+      if (!m) return Infinity;
+      const ts = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`).getTime();
+      return Date.now() - ts;
+    } catch {
+      return Infinity;
     }
   }
 }

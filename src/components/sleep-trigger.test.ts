@@ -26,11 +26,11 @@ describe("SleepTrigger", () => {
     vi.useRealTimers();
   });
 
-  it("startup: skips before 8am", () => {
+  it("startup: runs before 8am if no recent audit", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-15T07:59:00"));
     const trigger = new SleepTrigger(auditDir);
-    expect(trigger.shouldRunOnStartup()).toBe(false);
+    expect(trigger.shouldRunOnStartup()).toBe(true);
     vi.useRealTimers();
   });
 
