@@ -150,6 +150,7 @@ export type MemorySearchResult = {
   content_original?: string;
   memory_type?: string;
   source_timestamp: number;
+  source_message_ids?: string;
   tier: "extracted" | "daily" | "weekly" | "quarterly";
   score: number;
 };

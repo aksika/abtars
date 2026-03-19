@@ -100,7 +100,7 @@ try {
     if (seen.has(key)) return;
     seen.add(key);
     if (r.id !== undefined) extractedIds.push(r.id);
-    results.push({ content: r.content, date: new Date(r.source_timestamp).toISOString(), source, score: r.score });
+    results.push({ content: r.content, date: new Date(r.source_timestamp).toISOString(), source, score: r.score, ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}) });
   };
 
   for (const r of index.searchExtracted(query, searchOpts)) addExtracted(r, "extracted");

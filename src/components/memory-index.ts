@@ -280,7 +280,7 @@ export class MemoryIndex {
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
                em.source_timestamp, em.preserve_original, em.emotion_score,
-               em.recall_count, em.relevance_score, rank
+               em.recall_count, em.relevance_score, em.source_message_ids, rank
         FROM extracted_memories em
         JOIN extracted_memories_fts ON extracted_memories_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
@@ -300,6 +300,7 @@ export class MemoryIndex {
         emotion_score: number;
         recall_count: number;
         relevance_score: number;
+        source_message_ids: string | null;
         rank: number;
       }>;
 
@@ -314,6 +315,7 @@ export class MemoryIndex {
           content_original: row.content_original,
           memory_type: row.memory_type,
           source_timestamp: row.source_timestamp,
+          source_message_ids: row.source_message_ids ?? undefined,
           tier: "extracted" as const,
           score: (bm25Score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost),
         };
@@ -357,7 +359,7 @@ export class MemoryIndex {
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
                em.source_timestamp, em.preserve_original, em.emotion_score,
-               em.recall_count, em.relevance_score, rank
+               em.recall_count, em.relevance_score, em.source_message_ids, rank
         FROM extracted_memories em
         JOIN extracted_memories_original_fts ON extracted_memories_original_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
@@ -377,6 +379,7 @@ export class MemoryIndex {
         emotion_score: number;
         recall_count: number;
         relevance_score: number;
+        source_message_ids: string | null;
         rank: number;
       }>;
 
@@ -397,6 +400,7 @@ export class MemoryIndex {
           content_original: row.content_original,
           memory_type: row.memory_type,
           source_timestamp: row.source_timestamp,
+          source_message_ids: row.source_message_ids ?? undefined,
           tier: "extracted" as const,
           score,
         };
