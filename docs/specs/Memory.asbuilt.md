@@ -31,8 +31,8 @@ Every piece of information the agent can store or recall lives in one of these c
 | ID | Name | Medium | What Lives Here | Written By | Read By | Volatility |
 |----|------|--------|----------------|------------|---------|------------|
 | C0 | LLM Context Window | In-memory (prompt) | Raw user message only. Agent loads persona via steering (KB0), searches memories via `agentbridge-recall` tool on demand. No bridge-side context injection. | Bridge (raw pass-through) | LLM (every turn) | Ephemeral — rebuilt each turn |
-| C1 | Consolidated Summaries | Markdown files | `working/{date}/` (intra-day), `daily/` (daily), `weekly/` (weekly rollups), `quarterly/` (quarterly rollups) | Sleep subagent (via template instructions) | ContextAssembler (last session), MemorySearchTool (compaction LIKE), sleep subagent (consolidation source) | Persistent — promoted up tiers, source deleted after rollup |
-| C2 | SQLite + FTS5 | `memory.db` | `messages` + FTS5, `extracted_memories` + dual FTS5, `compactions`, `sessions`, `extraction_watermarks`, `chat_backup` | recordMessage(), MemoryExtractor, agentbridge-store | MemoryIndex, MemorySearchTool, agentbridge-recall, RecallFallbackPipeline | Persistent — pruned by max messages, disk budget, selective forget. chat_backup pruned >7 days on startup |
+| C1 | Consolidated Summaries | Markdown files | `working/{date}/` (intra-day), `daily/` (daily), `weekly/` (weekly rollups), `quarterly/` (quarterly rollups) | Sleep subagent (via template instructions) | ContextAssembler (last session), consolidation-search.ts (file-based keyword search), sleep subagent (consolidation source) | Persistent — promoted up tiers, source deleted after rollup |
+| C2 | SQLite + FTS5 | `memory.db` | `messages` + FTS5, `extracted_memories` + dual FTS5, `sessions`, `extraction_watermarks`, `chat_backup` | recordMessage(), MemoryExtractor, agentbridge-store | MemoryIndex, MemorySearchTool, agentbridge-recall, RecallFallbackPipeline | Persistent — pruned by max messages, disk budget, selective forget. chat_backup pruned >7 days on startup |
 | C3 | JSONL Transcripts | `transcripts/{chatId}/{sessionId}.jsonl` | Raw message-by-message session logs (role, content, timestamp) | TranscriptWriter | TranscriptParser (restore, parseTail), MemoryExtractor (watermark-based) | Persistent — append-only, one file per session |
 | C4 | Markdown Knowledge Files | Flat files | `core/user_profile.md` + `core/agent_notes.md` (agent-maintained), `~/.agentbridge/topics/` (topic summaries) | Agent (proactive writes via steering), topic-save skill (topics) | Sleep subagent (topic reorg) | Persistent — agent-maintained |
 | C5 | Vector Index | `memory.db` (`embeddings`) | ONNX embedding vectors per message, model-version-aware | EmbeddingProvider | VectorIndex (cosine similarity), hybridSearch (RRF fusion with FTS5) | Persistent — optional (`MEMORY_VECTOR_ENABLED`), re-embedded on model swap |
@@ -64,7 +64,7 @@ User Message (raw, no bridge-side injection)
 |          |               +----------+    | C5       |  |
 |          |                     ^         | Vectors  |  |
 |          |                     |         +----------+  |
-|          |              compaction                      |
+|          |            consolidation                      |
 |          |                     |              extraction|
 |          |               +----------+         +--------+-+
 |          |               | C1       |         | Heartbeat |
@@ -145,7 +145,7 @@ Provides the low-level search interfaces that all higher layers query against.
 
 ### Layer 3: Consolidation (Subagent-Driven)
 
-Consolidation is performed by the sleep subagent following instructions in `sleeping_prompt.md`. No dedicated compaction engine — the subagent reads raw transcripts and working-dir files, produces consolidated summaries, and promotes them through tiers.
+Consolidation is performed by the sleep subagent following instructions in `sleeping_prompt.md`. No dedicated consolidation engine — the subagent reads raw transcripts and working-dir files, produces consolidated summaries, and promotes them through tiers.
 
 | Source | Target | Threshold | File Naming | Trigger |
 |--------|--------|-----------|-------------|---------|
@@ -179,7 +179,7 @@ Provides the search interfaces the LLM agent uses to actively retrieve memories 
 | IntentDetector | `intent-detector.ts` | Detects recall intent from cue phrases, extracts temporal ranges |
 
 MemorySearchTool 5-step pipeline:
-1. English FTS5 on `extracted_memories_fts` + compaction LIKE search
+1. English FTS5 on `extracted_memories_fts` + consolidation file search (via consolidation-search.ts)
 2. Original-language FTS5 on `extracted_memories_original_fts` (if `original_keyword` provided)
 3. Merge + deduplicate
 4. Temporal decay: `score *= 2^(-age_days / halflife_days)` (default 30 days)
@@ -192,7 +192,7 @@ agentbridge-recall 8-stage cascade:
 4. Original-language substring
 5. Extracted memories — English FTS5
 6. Extracted memories — original language FTS5
-7. Compaction summary LIKE
+7. Consolidation file keyword search
 8. chat_backup LIKE fallback (immutable safety table)
 
 ### Layer 6: Context Assembly & Prompt Construction
@@ -304,6 +304,7 @@ src/
     reflection-engine.ts   # LLM-generated meta-summaries
     prompt-scanner.ts      # A2A prompt injection scanning (22 patterns)
     recall-fallback-pipeline.ts # Multi-stage search cascade
+    consolidation-search.ts  # File-based search on daily/weekly/quarterly .md files (replaces compactions table)
     intent-detector.ts     # Recall intent + temporal range detection
   cli/
     agentbridge-sleep.ts   # Sleep CLI (overnight maintenance)
@@ -433,8 +434,8 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 
 ### Message Processing Pipeline
 
-1. **Startup**: `main.ts` -> `loadMemoryConfig()` -> `MemoryManager.initialize()` -> opens SQLite, creates schema, optionally loads embedding model, initializes IngestionPipeline + ReflectionEngine
-2. **LLM Callback**: `memory.setLlmCall(...)` wires transport for compaction, context assembly, reflections, extraction
+1. **Startup**: `main.ts` -> `loadMemoryConfig()` -> `MemoryManager.initialize()` -> opens SQLite, creates schema, optionally loads embedding model, initializes IngestionPipeline + ReflectionEngine. Runs `checkTranscriptDbDrift()` to warn if JSONL line count diverges from DB row count (Δ>10).
+2. **LLM Callback**: `memory.setLlmCall(...)` wires transport for context assembly, reflections, extraction
 3. **Heartbeat Start**: `main.ts` creates a unified `HeartbeatSystem` (5-min interval) with 4 tasks: `sleep-trigger`, `cron-checker`, `browse-checker`, `reminder-injector`. Passes reference to memory via `memory.setHeartbeat()`
 4. **Sleep Startup Check**: `SleepTrigger.shouldRunOnStartup()` runs if no audit today (or >25h since last) -> spawns `agentbridge-sleep.js` detached. On exit, reports success/failure back to SleepTrigger for retry logic. During sleep, incoming messages get auto-reply ("waking up") and are queued. After sleep finishes, queued messages are re-injected.
 5. **Message In**: `memory.recordMessage()` -> JSONL append (raw, with emojis) -> `stripEmojis()` on content -> FTS5 index (emoji-free, with `platform_message_id`) -> insert into `chat_backup` (immutable copy) -> optional vector index -> prune -> disk budget check every 100 writes
@@ -443,7 +444,7 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 7. **Instant Storage**: Agent invokes `agentbridge-store` CLI -> validates -> clamps emotion -> inserts `extracted_memories` -> advances watermark
 8. **Prompt Path**: Bridge sends raw user message to kiro-cli (no context injection). Agent reads `memory-search.md` steering, decides if recall is needed, invokes `agentbridge-recall` via `execute_bash` with extracted keywords. ContextAssembler (4-tier) exists but is not used in the main Telegram/Discord prompt path.
 8b. **A2A Prompt Scanning**: Inbound A2A messages pass through `scanPrompt()` before transport spawn. 22 regex patterns + invisible unicode detection. On match: HTTP 200 with graceful refusal, no kiro-cli spawn, no memory recording. Blocked content never enters C2/C3.
-9. **Agent Search**: `agentbridge-recall` -> 8-stage cascade (FTS5 AND -> relaxed OR -> substring -> original-language -> extracted memories EN -> extracted memories original -> compactions -> chat_backup) -> merge + deduplicate -> temporal decay -> MMR re-ranking
+9. **Agent Search**: `agentbridge-recall` -> 8-stage cascade (FTS5 AND -> relaxed OR -> substring -> original-language -> extracted memories EN -> extracted memories original -> consolidation files -> chat_backup) -> merge + deduplicate -> temporal decay -> MMR re-ranking
 10. **Idle Chat Save**: After 10min inactivity, bridge sends `/chat save` to kiro-cli, dumping full conversation (incl. reasoning) to `working/{date}/transcript_{chatId}.chat`. Also triggered before `/reset`. A2A sessions save `transcript_a2a.chat` before idle timeout kill.
 11. **Auto-Compaction**: When context window exceeds `MEMORY_COMPACT_THRESHOLD_PCT` (default 85%), writes safety-net transcript to working dir, sends `/compact` to Kiro CLI
 12. **Consolidation** (sleep subagent): Follows `sleeping_prompt.md` template instructions. Working dirs -> daily, 7 daily -> weekly, 4 weekly -> quarterly. English summaries.
@@ -518,9 +519,8 @@ The sleep cycle is the maintenance routine. It runs via two triggers:
 | `/new`, `/reset` | Reset session, clear buffer |
 | `/status` | Connection status + uptime + context % |
 | `/stop`, `/cancel` | Ctrl+C interrupt |
-| `/compact` | Handled by sleep cycle (returns info message) |
 | `/facts` | Display user core facts |
-| `/memory` | Memory stats (messages, extracted, compactions, disk, heartbeat, NotebookLM) |
+| `/memory` | Memory stats (messages, extracted, consolidation files, disk, heartbeat, NotebookLM) |
 | `/ingest <url>` | Ingest YouTube/PDF/text/markdown |
 | `/ingest list` | List ingested documents |
 | `/reflect [days]` | Generate LLM reflection |
@@ -591,7 +591,7 @@ agentbridge sleep [--dry-run] [--verbose]
 
 ### agentbridge-recall
 
-Agent-initiated memory search across 4 layers + compactions + chat_backup (8-stage cascade).
+Agent-initiated memory search across 4 layers + consolidation files + chat_backup (7-stage cascade).
 
 ### agentbridge-store
 
