@@ -1,0 +1,317 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { MemoryManager } from "./memory-manager.js";
+import { MemoryIndex } from "./memory-index.js";
+import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
+import type { MemoryConfig } from "./memory-config.js";
+import { initializeDatabase } from "./memory-db.js";
+import { parseArgs } from "../cli/agentbridge-store.js";
+
+function makeConfig(tmpDir: string): MemoryConfig {
+  return { ...MEMORY_CONFIG_DEFAULTS, memoryDir: tmpDir };
+}
+
+/** Insert an extracted memory directly and return its id. */
+function insertMemory(
+  db: ReturnType<typeof initializeDatabase>,
+  opts: { contentEn: string; chatId?: number; recallCount?: number; relevanceScore?: number; confidence?: number; sourceMessageIds?: string; createdAt?: number },
+): number {
+  const now = Date.now();
+  const result = db.prepare(`
+    INSERT INTO extracted_memories
+      (chat_id, content_original, content_en, memory_type, source_timestamp,
+       preserve_original, emotion_score, created_at, recall_count, relevance_score, confidence, source_message_ids)
+    VALUES (?, ?, ?, 'fact', ?, 0, 0, ?, ?, ?, ?, ?)
+  `).run(
+    opts.chatId ?? 100,
+    opts.contentEn,
+    opts.contentEn,
+    now,
+    opts.createdAt ?? now,
+    opts.recallCount ?? 0,
+    opts.relevanceScore ?? 0,
+    opts.confidence ?? 3,
+    opts.sourceMessageIds ?? null,
+  );
+  return Number(result.lastInsertRowid);
+}
+
+describe("Memory Darwinism", () => {
+  let tmpDir: string;
+  let db: ReturnType<typeof initializeDatabase>;
+  let index: MemoryIndex;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "darwinism-"));
+    db = initializeDatabase(join(tmpDir, "memory.db"));
+    // Run migrations matching memory-manager.ts initialize()
+    for (const ddl of [
+      "ALTER TABLE extracted_memories ADD COLUMN emotion_score INTEGER DEFAULT 0",
+      "ALTER TABLE extracted_memories ADD COLUMN recall_count INTEGER DEFAULT 0",
+      "ALTER TABLE extracted_memories ADD COLUMN last_recalled_at INTEGER",
+      "ALTER TABLE extracted_memories ADD COLUMN relevance_score INTEGER DEFAULT 0",
+      "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
+      "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
+    ]) {
+      try { db.exec(ddl); } catch { /* already exists */ }
+    }
+    index = new MemoryIndex(db);
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  describe("bumpRecallCount", () => {
+    it("increments recall_count and sets last_recalled_at", () => {
+      const id = insertMemory(db, { contentEn: "user likes dark mode" });
+
+      index.bumpRecallCount([id]);
+
+      const row = db.prepare("SELECT recall_count, last_recalled_at FROM extracted_memories WHERE id = ?").get(id) as { recall_count: number; last_recalled_at: number };
+      expect(row.recall_count).toBe(1);
+      expect(row.last_recalled_at).toBeGreaterThan(0);
+    });
+
+    it("increments multiple times", () => {
+      const id = insertMemory(db, { contentEn: "user likes dark mode" });
+
+      index.bumpRecallCount([id]);
+      index.bumpRecallCount([id]);
+      index.bumpRecallCount([id]);
+
+      const row = db.prepare("SELECT recall_count FROM extracted_memories WHERE id = ?").get(id) as { recall_count: number };
+      expect(row.recall_count).toBe(3);
+    });
+
+    it("handles empty array without error", () => {
+      expect(() => index.bumpRecallCount([])).not.toThrow();
+    });
+
+    it("bumps multiple IDs in one call", () => {
+      const id1 = insertMemory(db, { contentEn: "fact one" });
+      const id2 = insertMemory(db, { contentEn: "fact two" });
+
+      index.bumpRecallCount([id1, id2]);
+
+      const r1 = db.prepare("SELECT recall_count FROM extracted_memories WHERE id = ?").get(id1) as { recall_count: number };
+      const r2 = db.prepare("SELECT recall_count FROM extracted_memories WHERE id = ?").get(id2) as { recall_count: number };
+      expect(r1.recall_count).toBe(1);
+      expect(r2.recall_count).toBe(1);
+    });
+  });
+
+  describe("adjustRelevance", () => {
+    it("boosts relevance_score by +10", async () => {
+      const manager = new MemoryManager(makeConfig(tmpDir));
+      await manager.initialize();
+
+      const id = insertMemory(
+        initializeDatabase(join(tmpDir, "memory.db")),
+        { contentEn: "test fact" },
+      );
+      // Re-open manager's DB has the row
+      manager.close();
+
+      const manager2 = new MemoryManager(makeConfig(tmpDir));
+      await manager2.initialize();
+      manager2.adjustRelevance(id, 10);
+
+      const row = initializeDatabase(join(tmpDir, "memory.db"))
+        .prepare("SELECT relevance_score FROM extracted_memories WHERE id = ?")
+        .get(id) as { relevance_score: number };
+      expect(row.relevance_score).toBe(10);
+      manager2.close();
+    });
+
+    it("demotes relevance_score by -10", async () => {
+      const manager = new MemoryManager(makeConfig(tmpDir));
+      await manager.initialize();
+      manager.adjustRelevance(1, -10); // even if ID doesn't exist, no error
+      manager.close();
+    });
+  });
+
+  describe("mergeMemories", () => {
+    it("keeps newer record, sums recall_count, takes max relevance and confidence", async () => {
+      const olderDir = mkdtempSync(join(tmpdir(), "merge-"));
+      const mgr = new MemoryManager(makeConfig(olderDir));
+      await mgr.initialize();
+
+      const mdb = initializeDatabase(join(olderDir, "memory.db"));
+      for (const ddl of [
+        "ALTER TABLE extracted_memories ADD COLUMN recall_count INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN last_recalled_at INTEGER",
+        "ALTER TABLE extracted_memories ADD COLUMN relevance_score INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
+        "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
+      ]) { try { mdb.exec(ddl); } catch { /* */ } }
+
+      const oldId = insertMemory(mdb, { contentEn: "old fact", recallCount: 5, relevanceScore: 20, confidence: 4, createdAt: 1000 });
+      const newId = insertMemory(mdb, { contentEn: "new fact", recallCount: 3, relevanceScore: 10, confidence: 2, createdAt: 2000 });
+      mdb.close();
+
+      // Re-open manager to pick up the rows
+      mgr.close();
+      const mgr2 = new MemoryManager(makeConfig(olderDir));
+      await mgr2.initialize();
+
+      const result = mgr2.mergeMemories(oldId, newId);
+      expect(result).toHaveProperty("merged", true);
+      expect(result).toHaveProperty("keptId", newId);
+      expect(result).toHaveProperty("deletedId", oldId);
+
+      const mdb2 = initializeDatabase(join(olderDir, "memory.db"));
+      const kept = mdb2.prepare("SELECT recall_count, relevance_score, confidence FROM extracted_memories WHERE id = ?").get(newId) as { recall_count: number; relevance_score: number; confidence: number };
+      expect(kept.recall_count).toBe(8); // 3 + 5
+      expect(kept.relevance_score).toBe(20); // max(10, 20)
+      expect(kept.confidence).toBe(4); // max(2, 4)
+
+      const deleted = mdb2.prepare("SELECT id FROM extracted_memories WHERE id = ?").get(oldId);
+      expect(deleted).toBeUndefined();
+
+      mdb2.close();
+      mgr2.close();
+      rmSync(olderDir, { recursive: true, force: true });
+    });
+
+    it("returns error when IDs not found", async () => {
+      const mgr = new MemoryManager(makeConfig(tmpDir));
+      await mgr.initialize();
+      const result = mgr.mergeMemories(9999, 9998);
+      expect(result).toHaveProperty("merged", false);
+      expect(result).toHaveProperty("error");
+      mgr.close();
+    });
+  });
+
+  describe("instantStore with confidence + sourceMessageIds", () => {
+    it("persists confidence and source_message_ids", async () => {
+      const storeDir = mkdtempSync(join(tmpdir(), "store-conf-"));
+      const mgr = new MemoryManager(makeConfig(storeDir));
+      await mgr.initialize();
+
+      await mgr.instantStore({
+        chatId: 100,
+        contentEn: "test fact",
+        contentOriginal: "teszt tény",
+        memoryType: "fact",
+        emotionScore: 0,
+        confidence: 5,
+        sourceMessageIds: "101,102,103",
+      });
+
+      const sdb = initializeDatabase(join(storeDir, "memory.db"));
+      const row = sdb.prepare("SELECT confidence, source_message_ids FROM extracted_memories WHERE chat_id = 100").get() as { confidence: number; source_message_ids: string };
+      expect(row.confidence).toBe(5);
+      expect(row.source_message_ids).toBe("101,102,103");
+
+      sdb.close();
+      mgr.close();
+      rmSync(storeDir, { recursive: true, force: true });
+    });
+
+    it("defaults confidence to 3 when not provided", async () => {
+      const storeDir = mkdtempSync(join(tmpdir(), "store-def-"));
+      const mgr = new MemoryManager(makeConfig(storeDir));
+      await mgr.initialize();
+
+      await mgr.instantStore({
+        chatId: 100,
+        contentEn: "test fact",
+        contentOriginal: "teszt tény",
+        memoryType: "fact",
+        emotionScore: 0,
+      });
+
+      const sdb = initializeDatabase(join(storeDir, "memory.db"));
+      const row = sdb.prepare("SELECT confidence, source_message_ids FROM extracted_memories WHERE chat_id = 100").get() as { confidence: number; source_message_ids: string | null };
+      expect(row.confidence).toBe(3);
+      expect(row.source_message_ids).toBeNull();
+
+      sdb.close();
+      mgr.close();
+      rmSync(storeDir, { recursive: true, force: true });
+    });
+  });
+
+  describe("searchExtracted ranking boost", () => {
+    it("memory with higher recall_count scores higher than identical content", () => {
+      // Insert two memories with same content but different recall counts
+      const id1 = insertMemory(db, { contentEn: "postgres connection string host port", recallCount: 0 });
+      const id2 = insertMemory(db, { contentEn: "postgres connection config details", recallCount: 10 });
+
+      // Also need to insert into FTS
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id1, "postgres connection string host port");
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id2, "postgres connection config details");
+
+      const results = index.searchExtracted("postgres connection");
+
+      expect(results.length).toBe(2);
+      // The one with recall_count=10 should score higher
+      const highRecall = results.find(r => r.id === id2);
+      const lowRecall = results.find(r => r.id === id1);
+      expect(highRecall).toBeDefined();
+      expect(lowRecall).toBeDefined();
+      expect(highRecall!.score).toBeGreaterThan(lowRecall!.score);
+    });
+
+    it("memory with positive relevance_score gets 1.2x boost", () => {
+      const id1 = insertMemory(db, { contentEn: "dark mode preference setting", relevanceScore: 0 });
+      const id2 = insertMemory(db, { contentEn: "dark mode user interface theme", relevanceScore: 10 });
+
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id1, "dark mode preference setting");
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id2, "dark mode user interface theme");
+
+      const results = index.searchExtracted("dark mode");
+
+      const boosted = results.find(r => r.id === id2);
+      const unboosted = results.find(r => r.id === id1);
+      expect(boosted).toBeDefined();
+      expect(unboosted).toBeDefined();
+      expect(boosted!.score).toBeGreaterThan(unboosted!.score);
+    });
+
+    it("returns source_message_ids in results when present", () => {
+      const id = insertMemory(db, { contentEn: "fact with source links", sourceMessageIds: "55,56" });
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id, "fact with source links");
+
+      const results = index.searchExtracted("source links");
+      expect(results.length).toBe(1);
+      expect(results[0]!.source_message_ids).toBe("55,56");
+    });
+  });
+
+  describe("agentbridge-store parseArgs", () => {
+    it("parses --confidence flag", () => {
+      const args = parseArgs(["node", "store", "--content-en", "test", "--confidence", "4"]);
+      expect(args.confidence).toBe("4");
+    });
+
+    it("parses --source-ids flag", () => {
+      const args = parseArgs(["node", "store", "--source-ids", "10,11,12"]);
+      expect(args.sourceMessageIds).toBe("10,11,12");
+    });
+
+    it("parses --boost flag", () => {
+      const args = parseArgs(["node", "store", "--boost", "--id", "42"]);
+      expect(args.boost).toBe(true);
+      expect(args.id).toBe("42");
+    });
+
+    it("parses --demote flag", () => {
+      const args = parseArgs(["node", "store", "--demote", "--id", "99"]);
+      expect(args.demote).toBe(true);
+      expect(args.id).toBe("99");
+    });
+
+    it("parses --merge and --merge-ids flags", () => {
+      const args = parseArgs(["node", "store", "--merge", "--merge-ids", "5,10"]);
+      expect(args.merge).toBe(true);
+      expect(args.mergeIds).toBe("5,10");
+    });
+  });
+});
