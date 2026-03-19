@@ -3,9 +3,6 @@ import type { MessageRecord, SearchResult } from "../types/index.js";
 import type { ExtractedMemory, MemorySearchResult } from "../types/memory.js";
 import { logWarn } from "./logger.js";
 
-const FTS5_SPECIAL_CHARS = /[",()*^+\-:{}]/g;
-const FTS5_OPERATORS = new Set(["and", "or", "not", "near"]);
-
 /** Weight applied to the log1p emotion boost in search ranking. */
 export const EMOTION_BOOST_WEIGHT = 0.5;
 
@@ -17,20 +14,19 @@ function stripAccents(str: string): string {
 /**
  * Sanitize a raw query string for safe use in an FTS5 MATCH clause.
  *
- * Strips FTS5 special characters, removes operator keywords, and wraps
- * each surviving token in double quotes with a trailing `*` for prefix
- * matching. This is critical for agglutinative languages (e.g. Hungarian)
- * where "jelszó" needs to match "jelszóra", "jelszót", etc.
+ * Wraps each whitespace-delimited token in double quotes (stripping any
+ * internal quotes) with a trailing `*` for prefix matching. Quoting
+ * neutralizes all FTS5 operators (OR, NOT, NEAR, ^, *, :, -, etc.)
+ * without needing a blacklist. Prefix matching is critical for
+ * agglutinative languages (e.g. Hungarian) where "jelszó" needs to
+ * match "jelszóra", "jelszót", etc.
  * Returns empty string if no valid tokens remain.
  */
 export function sanitizeFtsQuery(query: string, mode: "or" | "and" = "and"): string {
-  const stripped = query.replace(FTS5_SPECIAL_CHARS, " ");
-  const tokens = stripped
-    .split(/\s+/)
-    .filter((t) => t.length > 0 && !FTS5_OPERATORS.has(t.toLowerCase()));
+  const tokens = query.split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return "";
   const joiner = mode === "or" ? " OR " : " ";
-  return tokens.map((t) => `"${t}"*`).join(joiner);
+  return tokens.map((t) => `"${t.replace(/"/g, "")}"*`).join(joiner);
 }
 
 /**
