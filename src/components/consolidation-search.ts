@@ -1,6 +1,6 @@
 /**
  * Search daily/weekly/quarterly consolidation .md files directly from disk.
- * Replaces the compactions table LIKE search (L3) — no sync needed.
+ * Replaces the former compactions table LIKE search (L3) — no sync needed.
  */
 
 import { readdirSync, readFileSync } from "node:fs";

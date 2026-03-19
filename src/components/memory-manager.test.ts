@@ -526,13 +526,13 @@ describe("MemoryManager — checkAutoCompact", () => {
       sendCompactCommand: mockSendCompact,
     });
 
-    // No working directory compaction file should exist
+    // No working directory consolidation file should exist
     const today = new Date().toISOString().slice(0, 10);
     const workingDir = join(tmpDir, "working", today);
     expect(existsSync(workingDir)).toBe(false);
   });
 
-  it("triggers compaction when contextPercent meets threshold", async () => {
+  it("triggers consolidation when contextPercent meets threshold", async () => {
     const longContent = "a".repeat(250);
     manager.recordMessage(
       makeRecord({ content: longContent, chatId: 10, sessionId: "s1", timestamp: 1000 }),
@@ -553,7 +553,7 @@ describe("MemoryManager — checkAutoCompact", () => {
 
     expect(compactCalled).toBe(true);
 
-    // A working directory safety-net file should have been created
+    // A working directory consolidation file should have been created
     const today = new Date().toISOString().slice(0, 10);
     const workingDir = join(tmpDir, "working", today);
     expect(existsSync(workingDir)).toBe(true);
@@ -572,7 +572,7 @@ describe("MemoryManager — checkAutoCompact", () => {
       sendCompactCommand: mockSendCompact,
     });
 
-    // No working directory compaction file should exist
+    // No working directory consolidation file should exist
     const today = new Date().toISOString().slice(0, 10);
     const workingDir = join(tmpDir, "working", today);
     expect(existsSync(workingDir)).toBe(false);

@@ -3,7 +3,7 @@
  * agentbridge-recall — standalone CLI for agent-initiated memory search.
  *
  * Uses the existing MemoryIndex (FTS5 + substring) search pipeline.
- * Falls back through: FTS5 → substring LIKE → original-language → compaction LIKE.
+ * Falls back through: FTS5 → substring LIKE → original-language → consolidation file search.
  *
  * Usage:
  *   agentbridge-recall --keywords "kw1,kw2" --chat-id 7773842843

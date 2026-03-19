@@ -218,9 +218,9 @@ describe("MemorySearchController.handle — deduplication and ordering", () => {
   });
 });
 
-// ── L3 compaction search ────────────────────────────────────────────────────
+// ── L3 consolidation file search ────────────────────────────────────────────────────
 
-describe("MemorySearchController.handle — L3 compaction search", () => {
+describe("MemorySearchController.handle — L3 consolidation file search", () => {
   it("searches consolidation files from disk (no DB query)", async () => {
     const db = mockDb();
     const ctrl = new MemorySearchController(makeDeps({ db }));
