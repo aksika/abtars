@@ -38,6 +38,7 @@ import { handleNLMCommand, loadNLMConfig } from "./components/nlm-command-handle
 import { SleepTrigger } from "./components/sleep-trigger.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
+import { interceptLargeMessage } from "./components/message-interceptor.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { detectIngestSourceType } from "./components/ingest-source-detect.js";
 import { BrowserManager } from "./components/browser-manager.js";
@@ -923,6 +924,7 @@ async function main(): Promise<void> {
           memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId: messageId });
         }
 
+        prompt = interceptLargeMessage(prompt).text;
         const responsePromise = transport.sendPrompt(sessionKey, prompt);
 
         if (!isVoiceNote) await react(chatId, messageId, "👀");
@@ -1081,7 +1083,7 @@ async function main(): Promise<void> {
         b2bChannelId: config.discordB2bChannelId!,
         peerBotId: config.discordB2bPeerBotId!,
         rateLimitMs: config.discordB2bRateLimitMs,
-        onPrompt: (sessionKey, text) => transport.sendPrompt(sessionKey, text),
+        onPrompt: (sessionKey, text) => transport.sendPrompt(sessionKey, interceptLargeMessage(text).text),
       });
       logInfo("main", `🤝 B2B router enabled (channel=${config.discordB2bChannelId})`);
     }
@@ -1510,6 +1512,7 @@ async function main(): Promise<void> {
           memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
         }
 
+        prompt = interceptLargeMessage(prompt).text;
         const response = await transport.sendPrompt(sessionKey, prompt);
 
         // Prefer the clean answer-only extract (strips system prompts, memory context, thinking indicators)
