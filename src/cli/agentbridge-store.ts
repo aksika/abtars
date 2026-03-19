@@ -32,6 +32,11 @@ export type RawArgs = {
   emotionScore?: string;
   chatId?: string;
   keyword?: string;
+  confidence?: string;
+  sourceMessageIds?: string;
+  boost?: boolean;
+  demote?: boolean;
+  id?: string;
 };
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -46,6 +51,16 @@ export function parseArgs(argv: string[]): RawArgs {
       case "--emotion-score": parsed.emotionScore = args[++i] ?? ""; break;
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
       case "--keyword": parsed.keyword = args[++i] ?? ""; break;
+      case "--confidence": parsed.confidence = args[++i] ?? ""; break;
+      case "--source-ids": parsed.sourceMessageIds = args[++i] ?? ""; break;
+      case "--boost": parsed.boost = true; break;
+      case "--demote": parsed.demote = true; break;
+      case "--id": parsed.id = args[++i] ?? ""; break;
+      case "--confidence": parsed.confidence = args[++i] ?? ""; break;
+      case "--source-ids": parsed.sourceMessageIds = args[++i] ?? ""; break;
+      case "--boost": parsed.boost = true; break;
+      case "--demote": parsed.demote = true; break;
+      case "--id": parsed.id = args[++i] ?? ""; break;
     }
   }
 
@@ -85,18 +100,33 @@ export function validateArgs(raw: RawArgs): { ok: true; params: InstantStorePara
 
 async function main() {
   const raw = parseArgs(process.argv);
-  const validation = validateArgs(raw);
-
-  if (!validation.ok) {
-    console.log(JSON.stringify({ stored: false, error: validation.error }));
-    process.exit(1);
-  }
 
   const config = loadMemoryConfig();
   const memory = new MemoryManager(config);
 
   try {
     await memory.initialize();
+
+    // --boost/--demote path: adjust relevance_score on existing memory
+    if (raw.boost || raw.demote) {
+      if (!raw.id) {
+        console.log(JSON.stringify({ stored: false, error: "--id is required with --boost/--demote" }));
+        process.exit(1);
+      }
+      const id = parseInt(raw.id, 10);
+      const delta = raw.boost ? 10 : -10;
+      memory.adjustRelevance(id, delta);
+      console.log(JSON.stringify({ stored: true, adjusted: { id, delta } }));
+      return;
+    }
+
+    // Normal store path
+    const validation = validateArgs(raw);
+    if (!validation.ok) {
+      console.log(JSON.stringify({ stored: false, error: validation.error }));
+      process.exit(1);
+    }
+
     const result = await memory.instantStore(validation.params);
     console.log(JSON.stringify(result));
   } catch (err) {

@@ -94,10 +94,12 @@ try {
   }
 
   // Stage 5: Extracted memories — English (L2)
+  const extractedIds: number[] = [];
   const addExtracted = (r: MemorySearchResult, source: string) => {
     const key = `${r.source_timestamp}:${r.content.slice(0, 80)}`;
     if (seen.has(key)) return;
     seen.add(key);
+    if (r.id !== undefined) extractedIds.push(r.id);
     results.push({ content: r.content, date: new Date(r.source_timestamp).toISOString(), source, score: r.score });
   };
 
@@ -135,6 +137,10 @@ try {
   }
 
   results.sort((a, b) => b.score - a.score);
+
+  // Darwinism: bump recall count for extracted memories that made it into results
+  index.bumpRecallCount(extractedIds);
+
   console.log(JSON.stringify(results.slice(0, params.limit), null, 2));
 } finally {
   db.close();

@@ -145,6 +145,7 @@ export type MemorySearchParams = {
 
 /** A single result from the memory search tool. */
 export type MemorySearchResult = {
+  id?: number;
   content: string;
   content_original?: string;
   memory_type?: string;
@@ -167,6 +168,8 @@ export type InstantStoreParams = {
   memoryType: "fact" | "decision" | "preference" | "event";
   emotionScore: number;
   keyword?: string;
+  confidence?: number;
+  sourceMessageIds?: string;
 };
 
 /** Result of an instant memory store operation. */

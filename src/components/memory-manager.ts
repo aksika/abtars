@@ -125,6 +125,17 @@ export class MemoryManager {
         // Column already exists — safe to ignore
       }
 
+      // Idempotent migration: Memory Darwinism + source linking columns
+      for (const ddl of [
+        "ALTER TABLE extracted_memories ADD COLUMN recall_count INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN last_recalled_at INTEGER",
+        "ALTER TABLE extracted_memories ADD COLUMN relevance_score INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
+        "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
+      ]) {
+        try { this.db.exec(ddl); } catch { /* already exists */ }
+      }
+
       // Idempotent migration: add platform_message_id + emotion_score to messages
       try {
         this.db.exec("ALTER TABLE messages ADD COLUMN platform_message_id INTEGER");
@@ -1305,8 +1316,9 @@ export class MemoryManager {
       this.db.prepare(
         `INSERT INTO extracted_memories
            (chat_id, content_original, content_en, memory_type, source_timestamp,
-            preserve_original, preserved_keyword, emotion_score, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            preserve_original, preserved_keyword, emotion_score, created_at,
+            confidence, source_message_ids)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         params.chatId,
         params.contentOriginal.trim(),
@@ -1317,6 +1329,8 @@ export class MemoryManager {
         params.keyword?.trim() || null,
         emotionScore,
         now,
+        params.confidence ?? 3,
+        params.sourceMessageIds?.trim() || null,
       );
 
       // Advance watermark to prevent heartbeat re-extraction
@@ -1333,6 +1347,14 @@ export class MemoryManager {
       logError(TAG, `Instant store failed for chat ${params.chatId}`, err);
       return { stored: false, memoriesCount: 0, error: message };
     }
+  }
+
+  /** Adjust relevance_score on an existing extracted memory (used by sleep feedback pass). */
+  adjustRelevance(id: number, delta: number): void {
+    if (!this.db) return;
+    this.db.prepare(
+      "UPDATE extracted_memories SET relevance_score = relevance_score + ? WHERE id = ?",
+    ).run(delta, id);
   }
 
   /** Close the database connection. */

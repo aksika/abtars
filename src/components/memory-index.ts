@@ -302,6 +302,7 @@ export class MemoryIndex {
         const bm25Score = Math.abs(row.rank);
         const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
         return {
+          id: row.id,
           content: row.content_en,
           content_original: row.content_original,
           memory_type: row.memory_type,
@@ -377,6 +378,7 @@ export class MemoryIndex {
         const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
         score += emotionBoost;
         return {
+          id: row.id,
           content: row.content_en,
           content_original: row.content_original,
           memory_type: row.memory_type,
@@ -388,6 +390,20 @@ export class MemoryIndex {
     } catch (err) {
       logWarn("memory-index", `searchOriginal failed: ${err instanceof Error ? err.message : String(err)}`);
       return [];
+    }
+  }
+
+  /** Bump recall_count and last_recalled_at for the given extracted memory IDs. */
+  bumpRecallCount(ids: number[]): void {
+    if (ids.length === 0) return;
+    try {
+      const now = Date.now();
+      const stmt = this.db.prepare(
+        "UPDATE extracted_memories SET recall_count = recall_count + 1, last_recalled_at = ? WHERE id = ?",
+      );
+      for (const id of ids) stmt.run(now, id);
+    } catch (err) {
+      logWarn("memory-index", `bumpRecallCount failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
