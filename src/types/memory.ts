@@ -104,7 +104,6 @@ export type Reflection = {
 export type ForgetResult = {
   messagesRemoved: number;
   embeddingsRemoved: number;
-  compactionsRemoved: number;
   transcriptEntriesRemoved: number;
 };
 

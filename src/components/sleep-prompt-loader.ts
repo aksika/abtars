@@ -61,7 +61,6 @@ export function loadSleepPrompt(snapshot: StateSnapshot): string {
 function buildSnapshotBlock(s: StateSnapshot): string {
   return [
     `- Messages in DB: ${s.dbStats.messageCount}`,
-    `- Compactions: ${s.dbStats.compactionCount}`,
     `- Extracted memories: ${s.dbStats.extractedMemoryCount}`,
     `- Embeddings: ${s.dbStats.embeddingCount}`,
     `- Sessions: ${s.dbStats.sessionCount}`,

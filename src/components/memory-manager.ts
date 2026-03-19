@@ -67,7 +67,6 @@ export class MemoryManager {
   private heartbeat: HeartbeatSystem | null = null;
   private contextAssembler: ContextAssembler | null = null;
   private memorySearchTool: MemorySearchTool | null = null;
-  private compactionLocks = new Map<number, Promise<void>>();
 
   constructor(config: MemoryConfig) {
     this.config = config;
@@ -107,19 +106,6 @@ export class MemoryManager {
     return this.config;
   }
 
-  /** Acquire a per-chat compaction lock. Returns a release function, or null if already locked. */
-  acquireCompactionLock(chatId: number): Promise<() => void> | null {
-    if (this.compactionLocks.has(chatId)) return null;
-
-    let release!: () => void;
-    const promise = new Promise<void>((resolve) => { release = resolve; });
-    this.compactionLocks.set(chatId, promise);
-
-    return Promise.resolve(() => {
-      this.compactionLocks.delete(chatId);
-      release();
-    });
-  }
 
   /** Initialize database, create directories, and set up sub-components. */
   async initialize(): Promise<void> {
@@ -869,7 +855,7 @@ export class MemoryManager {
    * Cascade deletion through all storage layers for the given message IDs.
    *
    * Deletes from: embeddings table, FTS5 index (via trigger on messages delete),
-   * messages table, compactions table + .md files on disk, and transcript JSONL files.
+   * messages table and transcript JSONL files.
    *
    * Uses a transaction for the SQLite operations. File I/O errors are logged
    * but do not abort the operation — partial cleanup is acceptable.
@@ -880,7 +866,6 @@ export class MemoryManager {
     const result: ForgetResult = {
       messagesRemoved: 0,
       embeddingsRemoved: 0,
-      compactionsRemoved: 0,
       transcriptEntriesRemoved: 0,
     };
 
@@ -888,7 +873,7 @@ export class MemoryManager {
 
     try {
       // 1. Query messages to get session IDs and timestamps before deleting
-      //    (needed for transcript cleanup and compaction lookup)
+      //    (needed for transcript cleanup)
       const placeholders = messageIds.map(() => "?").join(",");
       const messageRows = this.db
         .prepare(
@@ -925,40 +910,7 @@ export class MemoryManager {
         .run(...messageIds);
       result.messagesRemoved = messagesResult.changes;
 
-      // 4. Delete related compactions and their .md files on disk
-      const sessionPlaceholders = Array.from(sessionIds)
-        .map(() => "?")
-        .join(",");
-      const compactionRows = this.db
-        .prepare(
-          `SELECT id, file_path FROM compactions WHERE chat_id = ? AND source_session_id IN (${sessionPlaceholders})`,
-        )
-        .all(chatId, ...sessionIds) as Array<{ id: number; file_path: string }>;
-
-      if (compactionRows.length > 0) {
-        const compactionIds = compactionRows.map((r) => r.id);
-        const compactionPlaceholders = compactionIds.map(() => "?").join(",");
-        const compactionsResult = this.db
-          .prepare(`DELETE FROM compactions WHERE id IN (${compactionPlaceholders})`)
-          .run(...compactionIds);
-        result.compactionsRemoved = compactionsResult.changes;
-
-        // Delete .md files on disk
-        for (const row of compactionRows) {
-          try {
-            if (existsSync(row.file_path)) {
-              unlinkSync(row.file_path);
-            }
-          } catch (fileErr) {
-            logWarn(
-              TAG,
-              `Failed to delete compaction file ${row.file_path}: ${fileErr instanceof Error ? fileErr.message : String(fileErr)}`,
-            );
-          }
-        }
-      }
-
-      // 5. Remove matching entries from transcript JSONL files
+      // 4. Remove matching entries from transcript JSONL files
       if (this.transcriptWriter && this.transcriptParser) {
         for (const sessionId of sessionIds) {
           try {
@@ -988,7 +940,7 @@ export class MemoryManager {
 
       logInfo(
         TAG,
-        `Cascade delete for chat ${chatId}: ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions, ${result.transcriptEntriesRemoved} transcript entries`,
+        `Cascade delete for chat ${chatId}: ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.transcriptEntriesRemoved} transcript entries`,
       );
     } catch (err) {
       logError(TAG, `Cascade delete failed for chat ${chatId}`, err);
@@ -1006,7 +958,6 @@ export class MemoryManager {
     const emptyResult: ForgetResult = {
       messagesRemoved: 0,
       embeddingsRemoved: 0,
-      compactionsRemoved: 0,
       transcriptEntriesRemoved: 0,
     };
 
@@ -1048,13 +999,6 @@ export class MemoryManager {
 
       const result = this.cascadeDelete(messageIds, chatId);
 
-      if (result.compactionsRemoved > 0) {
-        logInfo(
-          TAG,
-          `forgetTopic: ${result.compactionsRemoved} compactions removed for topic "${topic}". ` +
-            `Full compaction regeneration excluding forgotten content is not yet implemented.`,
-        );
-      }
 
       logInfo(TAG, `forgetTopic: removed ${result.messagesRemoved} messages for topic "${topic}" in chat ${chatId}`);
       return result;
@@ -1072,7 +1016,6 @@ export class MemoryManager {
     const emptyResult: ForgetResult = {
       messagesRemoved: 0,
       embeddingsRemoved: 0,
-      compactionsRemoved: 0,
       transcriptEntriesRemoved: 0,
     };
 
@@ -1094,13 +1037,6 @@ export class MemoryManager {
       const messageIds = rows.map((r) => r.id);
       const result = this.cascadeDelete(messageIds, chatId);
 
-      if (result.compactionsRemoved > 0) {
-        logInfo(
-          TAG,
-          `forgetRange: ${result.compactionsRemoved} compactions removed for date range. ` +
-            `Full compaction regeneration excluding forgotten content is not yet implemented.`,
-        );
-      }
 
       logInfo(TAG, `forgetRange: removed ${result.messagesRemoved} messages in range for chat ${chatId}`);
       return result;
@@ -1118,7 +1054,6 @@ export class MemoryManager {
     const emptyResult: ForgetResult = {
       messagesRemoved: 0,
       embeddingsRemoved: 0,
-      compactionsRemoved: 0,
       transcriptEntriesRemoved: 0,
     };
 
@@ -1137,13 +1072,6 @@ export class MemoryManager {
       const messageIds = rows.map((r) => r.id);
       const result = this.cascadeDelete(messageIds, chatId);
 
-      if (result.compactionsRemoved > 0) {
-        logInfo(
-          TAG,
-          `forgetSession: ${result.compactionsRemoved} compactions removed for session ${sessionId}. ` +
-            `Full compaction regeneration excluding forgotten content is not yet implemented.`,
-        );
-      }
 
       logInfo(TAG, `forgetSession: removed ${result.messagesRemoved} messages for session ${sessionId} in chat ${chatId}`);
       return result;
@@ -1239,7 +1167,7 @@ export class MemoryManager {
       totalMessages: number;
       extractedMemories: number;
       extractedByType: Record<string, number>;
-      compactions: { daily: number; weekly: number; quarterly: number };
+      consolidationFiles: { daily: number; weekly: number; quarterly: number };
       ingestedDocuments: number;
       preservedKeywords: number;
       heartbeatRunning: boolean;
@@ -1268,14 +1196,13 @@ export class MemoryManager {
           extractedByType[row.memory_type] = row.cnt;
         }
 
-        const compactionRows = this.db.prepare(
-          `SELECT tier, COUNT(*) as cnt FROM compactions${chatWhere} GROUP BY tier`,
-        ).all(...chatParams) as Array<{ tier: string; cnt: number }>;
-        const compactionCounts = { daily: 0, weekly: 0, quarterly: 0 };
-        for (const row of compactionRows) {
-          if (row.tier in compactionCounts) {
-            compactionCounts[row.tier as keyof typeof compactionCounts] = row.cnt;
-          }
+        // Count consolidation .md files on disk
+        const consolidationFiles = { daily: 0, weekly: 0, quarterly: 0 };
+        for (const tier of ["daily", "weekly", "quarterly"] as const) {
+          try {
+            const dir = join(this.config.memoryDir, tier);
+            consolidationFiles[tier] = readdirSync(dir).filter((f) => f.endsWith(".md")).length;
+          } catch { /* dir doesn't exist yet */ }
         }
 
         const ingestedDocuments = (this.db.prepare(
@@ -1297,7 +1224,7 @@ export class MemoryManager {
           totalMessages,
           extractedMemories,
           extractedByType,
-          compactions: compactionCounts,
+          consolidationFiles,
           ingestedDocuments,
           preservedKeywords,
           heartbeatRunning: this.heartbeat !== null,

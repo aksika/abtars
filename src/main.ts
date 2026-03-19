@@ -326,7 +326,6 @@ async function main(): Promise<void> {
       { command: "short", description: "Clean output mode, TTS on" },
       { command: "memory", description: "Memory system stats" },
       { command: "facts", description: "Show core knowledge" },
-      { command: "compact", description: "Run session compaction" },
       { command: "reflect", description: "Generate a reflection" },
       { command: "ingest", description: "Ingest a document or URL" },
       { command: "forget", description: "Forget topic or date range" },
@@ -583,11 +582,6 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (text === "/compact") {
-        await telegramApi.sendMessage(chatId, "📦 Compaction is now handled by the sleep cycle. Use /sleep to trigger manually.", { message_thread_id: threadId });
-        return;
-      }
-
       if (text === "/facts") {
         if (memory) {
           const facts = memory.readCoreKnowledge();
@@ -629,10 +623,10 @@ async function main(): Promise<void> {
           types,
           `🔑 Preserved keywords: ${stats.preservedKeywords}`,
           "",
-          `📦 Compactions:`,
-          `  daily: ${stats.compactions.daily}`,
-          `  weekly: ${stats.compactions.weekly}`,
-          `  quarterly: ${stats.compactions.quarterly}`,
+          `📄 Consolidations:`,
+          `  daily: ${stats.consolidationFiles.daily}`,
+          `  weekly: ${stats.consolidationFiles.weekly}`,
+          `  quarterly: ${stats.consolidationFiles.quarterly}`,
           "",
           `📄 Ingested documents: ${stats.ingestedDocuments}`,
           `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
@@ -776,7 +770,7 @@ async function main(): Promise<void> {
           }
           try {
             const result = await memory.forgetTopic(chatId, topic);
-            await telegramApi.sendMessage(chatId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions related to "${topic}".`, { message_thread_id: threadId });
+            await telegramApi.sendMessage(chatId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings related to "${topic}".`, { message_thread_id: threadId });
           } catch (err) {
             logError("main", "Forget topic failed", err);
             await telegramApi.sendMessage(chatId, "❌ Forget failed.", { message_thread_id: threadId });
@@ -800,7 +794,7 @@ async function main(): Promise<void> {
           endDate.setHours(23, 59, 59, 999);
           try {
             const result = memory.forgetRange(chatId, startDate, endDate);
-            await telegramApi.sendMessage(chatId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions in date range.`, { message_thread_id: threadId });
+            await telegramApi.sendMessage(chatId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings in date range.`, { message_thread_id: threadId });
           } catch (err) {
             logError("main", "Forget range failed", err);
             await telegramApi.sendMessage(chatId, "❌ Forget failed.", { message_thread_id: threadId });
@@ -816,7 +810,7 @@ async function main(): Promise<void> {
           }
           try {
             const result = memory.forgetSession(chatId, sessionId);
-            await telegramApi.sendMessage(chatId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions for session.`, { message_thread_id: threadId });
+            await telegramApi.sendMessage(chatId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings for session.`, { message_thread_id: threadId });
           } catch (err) {
             logError("main", "Forget session failed", err);
             await telegramApi.sendMessage(chatId, "❌ Forget failed.", { message_thread_id: threadId });
@@ -850,7 +844,6 @@ async function main(): Promise<void> {
           "/status — Show bot status",
           "/stop — Stop current response",
           "/cancel — Cancel current request",
-          "/compact — Trigger memory compaction",
           "/facts — Show core knowledge (user profile + agent notes)",
           "/memory — Memory storage statistics",
           "/cron — System crontab",
@@ -882,7 +875,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/memory", "/cron", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/facts", "/memory", "/cron", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
         if (!known.includes(cmd)) {
           await telegramApi.sendMessage(chatId, `❓ Unknown command: ${cmd}\nType /help for available commands.`, { message_thread_id: threadId });
           return;
@@ -1218,10 +1211,10 @@ async function main(): Promise<void> {
           types,
           `🔑 Preserved keywords: ${stats.preservedKeywords}`,
           "",
-          `📦 Compactions:`,
-          `  daily: ${stats.compactions.daily}`,
-          `  weekly: ${stats.compactions.weekly}`,
-          `  quarterly: ${stats.compactions.quarterly}`,
+          `📄 Consolidations:`,
+          `  daily: ${stats.consolidationFiles.daily}`,
+          `  weekly: ${stats.consolidationFiles.weekly}`,
+          `  quarterly: ${stats.consolidationFiles.quarterly}`,
           "",
           `📄 Ingested documents: ${stats.ingestedDocuments}`,
           `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
@@ -1376,7 +1369,7 @@ async function main(): Promise<void> {
           }
           try {
             const result = await memory.forgetTopic(chatId, topic);
-            await discordApi.sendMessage(message.channelId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions related to "${topic}".`);
+            await discordApi.sendMessage(message.channelId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings related to "${topic}".`);
           } catch (err) {
             logError("main", "Forget topic failed (Discord)", err);
             await discordApi.sendMessage(message.channelId, "❌ Forget failed.");
@@ -1400,7 +1393,7 @@ async function main(): Promise<void> {
           endDate.setHours(23, 59, 59, 999);
           try {
             const result = memory.forgetRange(chatId, startDate, endDate);
-            await discordApi.sendMessage(message.channelId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions in date range.`);
+            await discordApi.sendMessage(message.channelId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings in date range.`);
           } catch (err) {
             logError("main", "Forget range failed (Discord)", err);
             await discordApi.sendMessage(message.channelId, "❌ Forget failed.");
@@ -1416,7 +1409,7 @@ async function main(): Promise<void> {
           }
           try {
             const result = memory.forgetSession(chatId, sessionId);
-            await discordApi.sendMessage(message.channelId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.compactionsRemoved} compactions for session.`);
+            await discordApi.sendMessage(message.channelId, `🗑️ Forgot ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings for session.`);
           } catch (err) {
             logError("main", "Forget session failed (Discord)", err);
             await discordApi.sendMessage(message.channelId, "❌ Forget failed.");
@@ -1450,7 +1443,6 @@ async function main(): Promise<void> {
           "/status — Show bot status",
           "/stop — Stop current response",
           "/cancel — Cancel current request",
-          "/compact — Trigger memory compaction",
           "/facts — Show core knowledge (user profile + agent notes)",
           "/memory — Memory storage statistics",
           "/cron — System crontab",
@@ -1482,7 +1474,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/compact", "/facts", "/memory", "/cron", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/facts", "/memory", "/cron", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
         if (!known.includes(cmd)) {
           await discordApi.sendMessage(message.channelId, `❓ Unknown command: ${cmd}\nType /help for available commands.`);
           return;

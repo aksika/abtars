@@ -73,19 +73,6 @@ export function initializeDatabase(dbPath: string): Database.Database {
       model_version TEXT DEFAULT 'Xenova/all-MiniLM-L6-v2'
     );
 
-    -- Compaction summaries (all tiers)
-    CREATE TABLE IF NOT EXISTS compactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      chat_id INTEGER NOT NULL,
-      source_session_id TEXT NOT NULL,
-      tier TEXT NOT NULL DEFAULT 'daily',
-      timestamp INTEGER NOT NULL,
-      summary TEXT NOT NULL,
-      file_path TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_compactions_chat_tier_ts
-      ON compactions(chat_id, tier, timestamp DESC);
-
     -- Ingested documents metadata (Phase 2)
     CREATE TABLE IF NOT EXISTS ingested_documents (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

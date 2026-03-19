@@ -229,7 +229,7 @@ export class MemorySearchTool {
   /**
    * Search extracted memories and compacted summaries by English keywords.
    * Uses FTS5 OR-style matching on content_en for extracted memories,
-   * and LIKE matching on compactions summary (no FTS5 index for compactions).
+   * and file-based search on consolidation .md files.
    */
   private searchEnglish(
     keywords: string[],

@@ -369,7 +369,7 @@ describe("buildStatusSnapshot — Property 4: Status snapshot completeness", () 
                         extractedMemories: 5,
                         extractedByType: { fact: 3, preference: 2 },
                         preservedKeywords: 1,
-                        compactions: { daily: 1, weekly: 0, quarterly: 0 },
+                        consolidationFiles: { daily: 1, weekly: 0, quarterly: 0 },
                         ingestedDocuments: 0,
                         dbSizeBytes: 4096,
                       }),

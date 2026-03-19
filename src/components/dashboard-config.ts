@@ -84,7 +84,7 @@ export type MemoryStatus = {
     extractedMemories: number;
     extractedByType: Record<string, number>;
     preservedKeywords: number;
-    compactions: { daily: number; weekly: number; quarterly: number };
+    consolidationFiles: { daily: number; weekly: number; quarterly: number };
     ingestedDocuments: number;
     dbSizeBytes: number;
   } | null;
@@ -132,7 +132,7 @@ export type SubsystemRefs = {
       extractedMemories: number;
       extractedByType: Record<string, number>;
       preservedKeywords: number;
-      compactions: { daily: number; weekly: number; quarterly: number };
+      consolidationFiles: { daily: number; weekly: number; quarterly: number };
       ingestedDocuments: number;
       dbSizeBytes: number;
     } | null;

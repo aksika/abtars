@@ -46,7 +46,6 @@ describe("MemoryIndex", () => {
     expect(names).toContain("messages");
     expect(names).toContain("messages_fts");
     expect(names).toContain("embeddings");
-    expect(names).toContain("compactions");
     expect(names).toContain("messages_ai");
     expect(names).toContain("messages_ad");
   });

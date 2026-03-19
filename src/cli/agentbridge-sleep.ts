@@ -126,7 +126,6 @@ export function buildSnapshotSummary(snapshot: StateSnapshot): string {
   return [
     `Working dirs: ${snapshot.workingDirs.length}`,
     `Messages: ${snapshot.dbStats.messageCount}`,
-    `Compactions: ${snapshot.dbStats.compactionCount}`,
     `Embeddings: ${snapshot.dbStats.embeddingCount}`,
     `Sessions: ${snapshot.dbStats.sessionCount}`,
     `Extracted memories: ${snapshot.dbStats.extractedMemoryCount}`,

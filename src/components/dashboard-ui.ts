@@ -646,8 +646,8 @@ function getMemoryCard(): string {
       <span class="stat-value" id="mem-extracted">—</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Compactions (D/W/Q)</span>
-      <span class="stat-value" id="mem-compactions">—</span>
+      <span class="stat-label">Consolidations (D/W/Q)</span>
+      <span class="stat-value" id="mem-consolidations">—</span>
     </div>
     <div class="stat-row">
       <span class="stat-label">Documents</span>
@@ -679,7 +679,7 @@ function getSearchPanel(): string {
       <div class="layer-toggles" id="layer-toggles" style="margin:0;">
         <button class="layer-btn active" data-layer="L1" onclick="toggleLayer(this)">L1:messages</button>
         <button class="layer-btn active" data-layer="L2" onclick="toggleLayer(this)">L2:extracted</button>
-        <button class="layer-btn active" data-layer="L3" onclick="toggleLayer(this)">L3:compactions</button>
+        <button class="layer-btn active" data-layer="L3" onclick="toggleLayer(this)">L3:consolidations</button>
         <button class="layer-btn active" data-layer="L4" onclick="toggleLayer(this)">L4:original</button>
         <button class="layer-btn" data-layer="NLM" onclick="toggleLayer(this)">NLM</button>
       </div>
@@ -851,13 +851,13 @@ function getScript(): string {
         var s = snap.memory.stats;
         setText('mem-messages', s.totalMessages);
         setText('mem-extracted', s.extractedMemories);
-        setText('mem-compactions', s.compactions.daily + ' / ' + s.compactions.weekly + ' / ' + s.compactions.quarterly);
+        setText('mem-consolidations', s.consolidationFiles.daily + ' / ' + s.consolidationFiles.weekly + ' / ' + s.consolidationFiles.quarterly);
         setText('mem-documents', s.ingestedDocuments);
         setText('mem-dbsize', formatBytes(s.dbSizeBytes));
       } else {
         setText('mem-messages', '—');
         setText('mem-extracted', '—');
-        setText('mem-compactions', '—');
+        setText('mem-consolidations', '—');
         setText('mem-documents', '—');
         setText('mem-dbsize', '—');
       }

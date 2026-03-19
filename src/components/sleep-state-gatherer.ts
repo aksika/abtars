@@ -17,7 +17,6 @@ export interface WorkingDirEntry {
 
 export interface DbStats {
   messageCount: number;
-  compactionCount: number;
   embeddingCount: number;
   sessionCount: number;
   extractedMemoryCount: number;
@@ -147,7 +146,6 @@ export class SleepStateGatherer {
 
     return {
       messageCount: count("messages"),
-      compactionCount: count("compactions"),
       embeddingCount: count("embeddings"),
       sessionCount: count("sessions"),
       extractedMemoryCount: count("extracted_memories"),

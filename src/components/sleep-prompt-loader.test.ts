@@ -16,7 +16,7 @@ function makeSnapshot(overrides: Partial<StateSnapshot> = {}): StateSnapshot {
   return {
     timestamp: "2026-03-15T10:00:00Z",
     workingDirs: [],
-    dbStats: { messageCount: 100, compactionCount: 5, extractedMemoryCount: 50, embeddingCount: 0, sessionCount: 2 },
+    dbStats: { messageCount: 100, extractedMemoryCount: 50, embeddingCount: 0, sessionCount: 2 },
     fts5Health: { messages_fts: "ok", extracted_memories_fts: "ok", extracted_memories_original_fts: "ok" },
     diskUsageBytes: 10 * 1024 * 1024,
     diskBudgetBytes: 500 * 1024 * 1024,
