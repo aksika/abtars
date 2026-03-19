@@ -34,7 +34,7 @@ import type {
   InstantStoreResult,
 } from "../types/index.js";
 import { clampEmotionScore } from "./emotion-utils.js";
-import { logError, logInfo, logWarn } from "./logger.js";
+import { logError, logInfo, logWarn, logDebug } from "./logger.js";
 
 const TAG = "memory-manager";
 
@@ -203,6 +203,9 @@ export class MemoryManager {
 
       // Run disk budget enforcement on startup
       this.enforceDiskBudget();
+
+      // Bootstrap reconciliation: warn if JSONL line count drifts from DB row count
+      this.checkTranscriptDbDrift();
 
       // Prune chat_backup entries older than 7 days (wired logic, not LLM-controlled)
       this.pruneBackup();
@@ -612,6 +615,39 @@ export class MemoryManager {
     const result = this.db.prepare("DELETE FROM chat_backup WHERE timestamp < ?").run(cutoff);
     if (result.changes > 0) {
       logInfo(TAG, `Pruned ${result.changes} chat_backup rows older than 7 days`);
+    }
+  }
+
+  /** Warn if JSONL transcript line count diverges from DB message count. */
+  private checkTranscriptDbDrift(): void {
+    if (!this.db) return;
+    try {
+      const transcriptsDir = join(this.config.memoryDir, "transcripts");
+      if (!existsSync(transcriptsDir)) return;
+
+      let jsonlLines = 0;
+      for (const chatDir of readdirSync(transcriptsDir)) {
+        const chatPath = join(transcriptsDir, chatDir);
+        try { if (!statSync(chatPath).isDirectory()) continue; } catch { continue; }
+        for (const f of readdirSync(chatPath)) {
+          if (!f.endsWith(".jsonl")) continue;
+          try {
+            const content = readFileSync(join(chatPath, f), "utf-8");
+            jsonlLines += content.split("\n").filter(l => l.trim()).length;
+          } catch { /* skip unreadable files */ }
+        }
+      }
+
+      const row = this.db.prepare("SELECT COUNT(*) as cnt FROM messages").get() as { cnt: number };
+      const dbRows = row.cnt;
+      const drift = Math.abs(jsonlLines - dbRows);
+      if (drift > 10) {
+        logWarn(TAG, `Transcript/DB drift detected: ${jsonlLines} JSONL lines vs ${dbRows} DB rows (Δ${drift})`);
+      } else {
+        logDebug(TAG, `Transcript/DB reconciliation OK: ${jsonlLines} JSONL, ${dbRows} DB (Δ${drift})`);
+      }
+    } catch (err) {
+      logDebug(TAG, `Transcript/DB reconciliation skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

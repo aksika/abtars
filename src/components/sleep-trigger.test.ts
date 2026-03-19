@@ -87,24 +87,86 @@ describe("SleepTrigger", () => {
     vi.useRealTimers();
   });
 
-  // --- spawnedToday guard ---
+  // --- retry behavior ---
 
-  it("cron: skips after startup already spawned", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-15T10:00:00"));
-    const trigger = new SleepTrigger(auditDir);
-    trigger.shouldRunOnStartup(); // sets spawnedToday
-    expect(trigger.shouldRunFromCron(Date.now() - 15 * 60 * 1000)).toBe(false);
-    vi.useRealTimers();
-  });
-
-  it("cron: skips after cron already spawned", () => {
+  it("cron: retries on next HB after failure (attempt 2)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-15T10:00:00"));
     const trigger = new SleepTrigger(auditDir);
     const lastMsg = Date.now() - 15 * 60 * 1000;
-    trigger.shouldRunFromCron(lastMsg); // first call sets spawnedToday
-    expect(trigger.shouldRunFromCron(lastMsg)).toBe(false); // second call blocked
+
+    expect(trigger.shouldRunFromCron(lastMsg)).toBe(true);  // attempt 1
+    trigger.reportFailure();
+    expect(trigger.shouldRunFromCron(lastMsg)).toBe(true);  // attempt 2 (next HB)
+    vi.useRealTimers();
+  });
+
+  it("cron: attempt 3 requires 1h cooldown after 2nd failure", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-15T10:00:00"));
+    const trigger = new SleepTrigger(auditDir);
+    const lastMsg = Date.now() - 15 * 60 * 1000;
+
+    trigger.shouldRunFromCron(lastMsg);  // attempt 1
+    trigger.reportFailure();
+    trigger.shouldRunFromCron(lastMsg);  // attempt 2
+    trigger.reportFailure();
+
+    // Too soon — should skip
+    expect(trigger.shouldRunFromCron(lastMsg)).toBe(false);
+
+    // Advance 1h
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(trigger.shouldRunFromCron(Date.now() - 15 * 60 * 1000)).toBe(true);  // attempt 3
+    vi.useRealTimers();
+  });
+
+  it("cron: stops after 3 failures (exhausted)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-15T10:00:00"));
+    const trigger = new SleepTrigger(auditDir);
+    const lastMsg = Date.now() - 15 * 60 * 1000;
+
+    trigger.shouldRunFromCron(lastMsg);  // attempt 1
+    trigger.reportFailure();
+    trigger.shouldRunFromCron(lastMsg);  // attempt 2
+    trigger.reportFailure();
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    trigger.shouldRunFromCron(Date.now() - 15 * 60 * 1000);  // attempt 3
+    trigger.reportFailure();
+
+    // Exhausted — no more retries
+    vi.advanceTimersByTime(2 * 60 * 60 * 1000);
+    expect(trigger.shouldRunFromCron(Date.now() - 15 * 60 * 1000)).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("cron: stops retrying after success", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-15T10:00:00"));
+    const trigger = new SleepTrigger(auditDir);
+    const lastMsg = Date.now() - 15 * 60 * 1000;
+
+    trigger.shouldRunFromCron(lastMsg);  // attempt 1
+    trigger.reportFailure();
+    trigger.shouldRunFromCron(lastMsg);  // attempt 2
+    trigger.reportSuccess();
+
+    // Success blocks further attempts
+    expect(trigger.shouldRunFromCron(lastMsg)).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("startup failure allows cron retry", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-15T10:00:00"));
+    const trigger = new SleepTrigger(auditDir);
+
+    trigger.shouldRunOnStartup();  // attempt 1
+    trigger.reportFailure();
+
+    // Cron should pick up retry
+    expect(trigger.shouldRunFromCron(Date.now() - 15 * 60 * 1000)).toBe(true);
     vi.useRealTimers();
   });
 });

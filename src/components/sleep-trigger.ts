@@ -2,28 +2,43 @@ import { readdirSync, existsSync } from "node:fs";
 import { logInfo, logDebug } from "./logger.js";
 
 const TAG = "sleep-trigger";
+const MAX_ATTEMPTS = 3;
+const RETRY_COOLDOWN_MS = 60 * 60 * 1000; // 1h cooldown after 2nd failure
 
 /**
- * Simplified sleep trigger.
- * - Startup: always run
- * - Cron: ≥8am AND 10min idle AND no sleep today
+ * Sleep trigger with retry support.
+ * - Startup: run if no audit today (or >25h since last)
+ * - Cron: ≥8am AND 10min idle AND not exhausted
+ * - On failure: retry on next HB (attempt 2), then after 1h cooldown (attempt 3)
+ * - On success or 3 failures: stop until next 24h cycle
  */
 export class SleepTrigger {
-  private spawnedToday = false;
+  private attempts = 0;
+  private lastFailureTime = 0;
 
   constructor(private auditDir: string) {}
 
-  /** Run on startup if no audit today, or if last audit is >24h old regardless of hour. */
+  /** Report that sleep completed successfully. Stops further retries. */
+  reportSuccess(): void {
+    logInfo(TAG, `Sleep succeeded (attempt ${this.attempts})`);
+    this.attempts = MAX_ATTEMPTS; // block further attempts
+  }
+
+  /** Report that sleep failed. Enables retry on next eligible HB. */
+  reportFailure(): void {
+    this.lastFailureTime = Date.now();
+    logInfo(TAG, `Sleep failed (attempt ${this.attempts}/${MAX_ATTEMPTS}, next retry ${this.attempts < MAX_ATTEMPTS ? (this.attempts === 1 ? "on next HB" : "after 1h cooldown") : "none — exhausted"})`);
+  }
+
   shouldRunOnStartup(): boolean {
     if (this.hasSleepAuditToday()) {
       logDebug(TAG, "Startup: already slept today — skip");
       return false;
     }
-    // If last audit is >24h ago, run immediately regardless of hour
     const lastAuditAge = this.getLastAuditAgeMs();
     if (lastAuditAge > 25 * 60 * 60 * 1000) {
       logInfo(TAG, `Startup sleep triggered (last audit ${Math.round(lastAuditAge / 3600000)}h ago, >25h threshold)`);
-      this.spawnedToday = true;
+      this.attempts = 1;
       return true;
     }
     if (new Date().getHours() < 8) {
@@ -31,43 +46,56 @@ export class SleepTrigger {
       return false;
     }
     logInfo(TAG, "Startup sleep triggered");
-    this.spawnedToday = true;
+    this.attempts = 1;
     return true;
   }
 
   /**
    * Check if sleep should run from heartbeat cron.
-   * Conditions: hour ≥ 8, last message > 10min ago, no audit file today, not already spawned.
+   * Attempt 1: normal trigger (≥8am, 10min idle, no audit today)
+   * Attempt 2: next HB after failure (same conditions minus spawnedToday guard)
+   * Attempt 3: only after 1h cooldown from last failure
    */
   shouldRunFromCron(lastMessageTs: number): boolean {
-    const now = new Date();
+    if (new Date().getHours() < 8) return false;
+    if (Date.now() - lastMessageTs < 10 * 60 * 1000) return false;
 
-    if (now.getHours() < 8) {
-      logDebug(TAG, "Before 8am — skip");
+    // Already succeeded or exhausted retries
+    if (this.attempts >= MAX_ATTEMPTS) {
+      logDebug(TAG, "Exhausted retries — skip until next day");
       return false;
     }
 
-    if (Date.now() - lastMessageTs < 10 * 60 * 1000) {
-      logDebug(TAG, "User active in last 10min — skip");
-      return false;
-    }
-
-    if (this.spawnedToday) {
-      logDebug(TAG, "Already spawned today — skip");
-      return false;
-    }
-
+    // Already have a successful audit today (e.g. from a previous process run)
     if (this.hasSleepAuditToday()) {
       logDebug(TAG, "Already slept today — skip");
       return false;
     }
 
-    logInfo(TAG, "Cron sleep triggered (≥8am, 10min idle, no sleep today)");
-    this.spawnedToday = true;
-    return true;
+    // First attempt — normal trigger
+    if (this.attempts === 0) {
+      logInfo(TAG, "Cron sleep triggered (≥8am, 10min idle, no sleep today)");
+      this.attempts = 1;
+      return true;
+    }
+
+    // Attempt 2: immediate retry on next HB
+    if (this.attempts === 1) {
+      logInfo(TAG, "Cron sleep retry 1 (next HB after failure)");
+      this.attempts = 2;
+      return true;
+    }
+
+    // Attempt 3: only after 1h cooldown
+    if (this.attempts === 2 && Date.now() - this.lastFailureTime >= RETRY_COOLDOWN_MS) {
+      logInfo(TAG, "Cron sleep retry 2 (1h cooldown elapsed)");
+      this.attempts = 3;
+      return true;
+    }
+
+    return false;
   }
 
-  /** Check if a sleep audit file exists for today's date. */
   private hasSleepAuditToday(): boolean {
     if (!existsSync(this.auditDir)) return false;
     const today = new Date();
@@ -82,14 +110,12 @@ export class SleepTrigger {
     }
   }
 
-  /** Get age of the most recent audit file in ms. Returns Infinity if none. */
-  private getLastAuditAgeMs(): number {
+  getLastAuditAgeMs(): number {
     if (!existsSync(this.auditDir)) return Infinity;
     try {
       const files = readdirSync(this.auditDir).filter(f => f.startsWith("sleep_")).sort();
       if (files.length === 0) return Infinity;
       const last = files[files.length - 1]!;
-      // sleep_YYYYMMDD_HHmmss.md → extract timestamp
       const m = last.match(/^sleep_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
       if (!m) return Infinity;
       const ts = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`).getTime();

@@ -207,8 +207,14 @@ async function main(): Promise<void> {
           stdio: "ignore",
           detached: true,
         });
-        sleepChild.on("exit", () => {
-          logInfo("main", "😴 Sleep routine finished");
+        sleepChild.on("exit", (code) => {
+          if (code === 0) {
+            logInfo("main", "😴 Sleep routine finished successfully");
+            sleepTrigger.reportSuccess();
+          } else {
+            logWarn("main", `😴 Sleep routine failed (exit code ${code})`);
+            sleepTrigger.reportFailure();
+          }
           sleepChild = null;
           processPendingMessages();
         });
@@ -1594,10 +1600,18 @@ async function main(): Promise<void> {
       try {
         const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
         const child = spawn(process.execPath, [sleepScript], { stdio: "ignore", detached: true });
+        child.on("exit", (code) => {
+          if (code === 0) {
+            sleepTrigger.reportSuccess();
+          } else {
+            sleepTrigger.reportFailure();
+          }
+        });
         child.unref();
         logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid})`);
       } catch (err) {
         logWarn("main", `sleep-trigger: failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
+        sleepTrigger.reportFailure();
       }
     },
   });
