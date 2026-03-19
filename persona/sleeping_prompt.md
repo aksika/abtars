@@ -19,7 +19,19 @@ ${WORKING_DIRS_SECTION}
 
 ---
 
-## §1 Daily Summary
+## §1 Feedback Pass
+
+Review today's conversations for recalled memories that appeared in agent responses. For each extracted memory that was surfaced via `agentbridge-recall`:
+
+1. Read the transcript around where the memory was used
+2. Check the user's reaction:
+   - **User confirmed or continued the topic** → boost: `agentbridge-store --boost --id <memory_id>`
+   - **User corrected or rejected the memory** → demote: `agentbridge-store --demote --id <memory_id>`
+   - **Ambiguous or no reaction** → skip (no signal is better than noise)
+
+To find which memories were recalled, search transcripts for `agentbridge-recall` invocations and their JSON output. Each result has a `source` field — entries with `source: "extracted"` or `source: "extracted:original"` are extracted memories.
+
+## §2 Daily Summary
 
 Read the JSONL transcript files for the period between the previous sleep audit and now. Each line is a JSON object with `role`, `content`, and `timestamp` fields.
 
@@ -37,7 +49,7 @@ After the daily file is written, check if rollups are needed:
 - Read source files, summarize, write target file
 - Do NOT delete source files
 
-## §2 Reminder & Todo Extraction
+## §3 Reminder & Todo Extraction
 
 Scan the day's transcript for missed reminders and action items. Look for patterns like:
 - "remind me", "tomorrow", "later", "don't forget", "need to", "should do"
@@ -50,7 +62,7 @@ For each found item:
 Current todo list:
 ${TODO_CONTENTS}
 
-## §3 Garbage Collection (Primary Task)
+## §4 Garbage Collection (Primary Task)
 
 This is the most important maintenance task. Scan ALL messages in `~/.agentbridge/memory/memory.db` and clean up noise.
 
@@ -148,7 +160,7 @@ SELECT id, content_en FROM extracted_memories ORDER BY source_timestamp DESC;
 
 2. If an exchange's facts are NOT yet extracted, extract them now using `agentbridge-store`:
 ```bash
-agentbridge-store --content-en "<fact>" --content-original "<original>" --memory-type <TYPE> --emotion-score <SCORE> --chat-id <CHAT_ID> --keyword "<keyword>"
+agentbridge-store --content-en "<fact>" --content-original "<original>" --memory-type <TYPE> --emotion-score <SCORE> --chat-id <CHAT_ID> --keyword "<keyword>" --confidence <1-5> --source-ids "<msg_id1,msg_id2>"
 ```
 
 3. After confirming the facts are stored, garbage-mark the verbose original messages (add to `garbage.json`). Keep 1-2 representative messages if the exchange is historically significant.
@@ -188,22 +200,68 @@ For each table:
 - Delete orphaned embeddings (`message_id` not in `messages`)
 - Delete stale sessions (`is_active = 0` with old `last_activity_at`)
 
-## §4 Cron Verification
+## §5 Cron Verification
 
-Cross-check any time-specific reminders found in §2 against existing cron entries.
+Cross-check any time-specific reminders found in §3 against existing cron entries.
 
 Current cron entries:
 ${CRON_CONTENTS}
 
 If a time-specific reminder was found in the transcript (e.g. "remind me Sunday at 2am") but has no corresponding cron entry, log a warning in your response.
 
-## §5 Topic Reorg
+## §6 Topic Reorg
 
 Review topic files for staleness or merge opportunities:
 
 ${TOPIC_FILES_SECTION}
 
-## §6 Disk Budget
+## §7 Fitness Review
+
+Review extracted memories using Darwinism signals from the state snapshot (`dbStats.darwinism`).
+
+Query the full picture:
+```sql
+SELECT id, substr(content_en,1,80), recall_count, relevance_score, confidence, last_recalled_at, created_at
+FROM extracted_memories ORDER BY recall_count DESC LIMIT 50;
+```
+
+Apply these rules:
+- **High recall + high relevance** → no action needed (search ranking boost handles surfacing)
+- **High recall + negative relevance** → candidate for deletion or rewording. If the fact is wrong, delete it. If it's poorly worded, re-extract with `agentbridge-store` and delete the old one.
+- **Zero recall after 60+ days** → candidate for deletion. Check if the fact is still relevant before deleting.
+- **Low confidence (1-2) + low recall (0)** → first to prune. Delete unless the content is clearly valuable.
+
+Time-decayed fitness: `fitness ≈ Σ(1 / (1 + days_since_recall))` weighted by relevance_score. Memories with fitness near zero are candidates for pruning.
+
+### Core Knowledge Maintenance
+
+Review `~/.agentbridge/memory/core/user_profile.md` and `~/.agentbridge/memory/core/agent_notes.md`:
+- Remove stale or redundant lines
+- Keep each file ≤10 lines of high-signal facts only
+- These files are injected into every context window — brevity is critical
+
+## §8 Memory Merge
+
+Review the top most-recalled extracted memories for near-duplicates:
+
+```sql
+SELECT id, content_en, recall_count, relevance_score
+FROM extracted_memories WHERE recall_count > 0 ORDER BY recall_count DESC LIMIT 30;
+```
+
+For each pair that expresses the same fact in different words:
+```bash
+agentbridge-store --merge --merge-ids <id_A>,<id_B>
+```
+
+This keeps the newer record, sums recall counts, takes the higher relevance and confidence scores, and deletes the older record.
+
+Rules:
+- Max 5 merges per sleep cycle
+- Only merge when you're confident both express the same fact
+- When in doubt, skip — false merges lose information
+
+## §9 Disk Budget
 
 Current usage: ${DISK_USAGE_MB} MB / ${DISK_BUDGET_MB} MB
 

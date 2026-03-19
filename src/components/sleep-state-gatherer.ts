@@ -20,6 +20,13 @@ export interface DbStats {
   embeddingCount: number;
   sessionCount: number;
   extractedMemoryCount: number;
+  compressionRatio: number;
+  darwinism: {
+    avgRecallCount: number;
+    avgRelevanceScore: number;
+    neverRecalled: number;
+    recalledLast30d: number;
+  };
 }
 
 export interface Fts5Health {
@@ -144,11 +151,34 @@ export class SleepStateGatherer {
       }
     };
 
+    const messageCount = count("messages");
+    const extractedMemoryCount = count("extracted_memories");
+
+    // Darwinism stats
+    let darwinism = { avgRecallCount: 0, avgRelevanceScore: 0, neverRecalled: 0, recalledLast30d: 0 };
+    try {
+      const stats = this.db.prepare(`
+        SELECT COALESCE(AVG(recall_count), 0) as avgRecall,
+               COALESCE(AVG(relevance_score), 0) as avgRelevance,
+               SUM(CASE WHEN COALESCE(recall_count, 0) = 0 THEN 1 ELSE 0 END) as neverRecalled,
+               SUM(CASE WHEN last_recalled_at > ? THEN 1 ELSE 0 END) as recalledLast30d
+        FROM extracted_memories
+      `).get(Date.now() - 30 * 86400000) as { avgRecall: number; avgRelevance: number; neverRecalled: number; recalledLast30d: number };
+      darwinism = {
+        avgRecallCount: Math.round(stats.avgRecall * 10) / 10,
+        avgRelevanceScore: Math.round(stats.avgRelevance * 10) / 10,
+        neverRecalled: stats.neverRecalled ?? 0,
+        recalledLast30d: stats.recalledLast30d ?? 0,
+      };
+    } catch { /* columns may not exist yet */ }
+
     return {
-      messageCount: count("messages"),
+      messageCount,
       embeddingCount: count("embeddings"),
       sessionCount: count("sessions"),
-      extractedMemoryCount: count("extracted_memories"),
+      extractedMemoryCount,
+      compressionRatio: messageCount > 0 ? Math.round((extractedMemoryCount / messageCount) * 100) / 100 : 0,
+      darwinism,
     };
   }
 

@@ -279,11 +279,14 @@ export class MemoryIndex {
 
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
-               em.source_timestamp, em.preserve_original, em.emotion_score, rank
+               em.source_timestamp, em.preserve_original, em.emotion_score,
+               em.recall_count, em.relevance_score, rank
         FROM extracted_memories em
         JOIN extracted_memories_fts ON extracted_memories_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
-        ORDER BY rank ASC
+        ORDER BY rank * (1.0 + 0.1 * COALESCE(em.recall_count, 0))
+                      * CASE WHEN COALESCE(em.relevance_score, 0) > 0 THEN 1.2 ELSE 1.0 END
+               ASC
         LIMIT ?
       `;
 
@@ -295,12 +298,16 @@ export class MemoryIndex {
         source_timestamp: number;
         preserve_original: number;
         emotion_score: number;
+        recall_count: number;
+        relevance_score: number;
         rank: number;
       }>;
 
       return rows.map((row) => {
         const bm25Score = Math.abs(row.rank);
         const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
+        const recallBoost = 0.1 * (row.recall_count ?? 0);
+        const relevanceBoost = (row.relevance_score ?? 0) > 0 ? 0.2 : 0;
         return {
           id: row.id,
           content: row.content_en,
@@ -308,7 +315,7 @@ export class MemoryIndex {
           memory_type: row.memory_type,
           source_timestamp: row.source_timestamp,
           tier: "extracted" as const,
-          score: bm25Score + emotionBoost,
+          score: (bm25Score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost),
         };
       });
     } catch (err) {
@@ -349,11 +356,14 @@ export class MemoryIndex {
 
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
-               em.source_timestamp, em.preserve_original, em.emotion_score, rank
+               em.source_timestamp, em.preserve_original, em.emotion_score,
+               em.recall_count, em.relevance_score, rank
         FROM extracted_memories em
         JOIN extracted_memories_original_fts ON extracted_memories_original_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
-        ORDER BY rank ASC
+        ORDER BY rank * (1.0 + 0.1 * COALESCE(em.recall_count, 0))
+                      * CASE WHEN COALESCE(em.relevance_score, 0) > 0 THEN 1.2 ELSE 1.0 END
+               ASC
         LIMIT ?
       `;
 
@@ -365,6 +375,8 @@ export class MemoryIndex {
         source_timestamp: number;
         preserve_original: number;
         emotion_score: number;
+        recall_count: number;
+        relevance_score: number;
         rank: number;
       }>;
 
@@ -376,7 +388,9 @@ export class MemoryIndex {
           score *= 1.5;
         }
         const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
-        score += emotionBoost;
+        const recallBoost = 0.1 * (row.recall_count ?? 0);
+        const relevanceBoost = (row.relevance_score ?? 0) > 0 ? 0.2 : 0;
+        score = (score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost);
         return {
           id: row.id,
           content: row.content_en,

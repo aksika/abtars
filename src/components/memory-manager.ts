@@ -1357,6 +1357,31 @@ export class MemoryManager {
     ).run(delta, id);
   }
 
+  /** Merge two extracted memories: keep newer, combine Darwinism scores, delete older. */
+  mergeMemories(idA: number, idB: number): { merged: boolean; keptId: number; deletedId: number } | { merged: false; error: string } {
+    if (!this.db) return { merged: false, error: "memory disabled" };
+
+    const rows = this.db.prepare(
+      "SELECT id, recall_count, relevance_score, confidence, created_at FROM extracted_memories WHERE id IN (?, ?)",
+    ).all(idA, idB) as Array<{ id: number; recall_count: number; relevance_score: number; confidence: number; created_at: number }>;
+
+    if (rows.length !== 2) return { merged: false, error: "one or both IDs not found" };
+
+    const [older, newer] = rows.sort((a, b) => a.created_at - b.created_at) as [typeof rows[0], typeof rows[0]];
+
+    this.db.prepare(`
+      UPDATE extracted_memories SET
+        recall_count = recall_count + ?,
+        relevance_score = MAX(relevance_score, ?),
+        confidence = MAX(confidence, ?)
+      WHERE id = ?
+    `).run(older!.recall_count ?? 0, older!.relevance_score ?? 0, older!.confidence ?? 3, newer!.id);
+
+    this.db.prepare("DELETE FROM extracted_memories WHERE id = ?").run(older!.id);
+
+    return { merged: true, keptId: newer!.id, deletedId: older!.id };
+  }
+
   /** Close the database connection. */
   close(): void {
     if (!this.db) return;

@@ -37,6 +37,8 @@ export type RawArgs = {
   boost?: boolean;
   demote?: boolean;
   id?: string;
+  merge?: boolean;
+  mergeIds?: string;
 };
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -56,11 +58,15 @@ export function parseArgs(argv: string[]): RawArgs {
       case "--boost": parsed.boost = true; break;
       case "--demote": parsed.demote = true; break;
       case "--id": parsed.id = args[++i] ?? ""; break;
+      case "--merge": parsed.merge = true; break;
+      case "--merge-ids": parsed.mergeIds = args[++i] ?? ""; break;
       case "--confidence": parsed.confidence = args[++i] ?? ""; break;
       case "--source-ids": parsed.sourceMessageIds = args[++i] ?? ""; break;
       case "--boost": parsed.boost = true; break;
       case "--demote": parsed.demote = true; break;
       case "--id": parsed.id = args[++i] ?? ""; break;
+      case "--merge": parsed.merge = true; break;
+      case "--merge-ids": parsed.mergeIds = args[++i] ?? ""; break;
     }
   }
 
@@ -117,6 +123,22 @@ async function main() {
       const delta = raw.boost ? 10 : -10;
       memory.adjustRelevance(id, delta);
       console.log(JSON.stringify({ stored: true, adjusted: { id, delta } }));
+      return;
+    }
+
+    // --merge path: merge two memories into one
+    if (raw.merge) {
+      if (!raw.mergeIds) {
+        console.log(JSON.stringify({ stored: false, error: "--merge-ids is required with --merge" }));
+        process.exit(1);
+      }
+      const ids = raw.mergeIds.split(",").map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n));
+      if (ids.length !== 2) {
+        console.log(JSON.stringify({ stored: false, error: "--merge-ids must be exactly 2 comma-separated IDs" }));
+        process.exit(1);
+      }
+      const result = memory.mergeMemories(ids[0]!, ids[1]!);
+      console.log(JSON.stringify(result));
       return;
     }
 
