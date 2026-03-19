@@ -612,3 +612,9 @@ Agent-initiated instant memory storage with emotion scoring.
 `scripts/test-sleep-gc.sh` — integration test for sleep GC. Copies live DB to `/tmp/agentbridge-gc-test/`, snapshots pre/post, diffs. Two-phase: `bash test-sleep-gc.sh` (copy + pre-snapshot), then `bash test-sleep-gc.sh --diff` (post-snapshot + diff).
 
 `scripts/daily-backup.sh` — daily cron job: zips `memory/`, `topics/`, `.kiro/`, `titok/`, `notebooklm/`, `sleeping_prompt.md`, `browsing_prompt.md` to `~/.backup-agentbridge/agentbridge-YYYYMMDD.zip` (7-day retention), then `git add -A && commit && push` to kiroprof-backup.
+
+---
+
+## Future Ideas
+
+- **Archive DB layer** — if extracted_memories grows to 10K+ and search slows, move zero-recall 60+ day memories to a separate SQLite archive searched as a last-resort fallback after all primary stages.
