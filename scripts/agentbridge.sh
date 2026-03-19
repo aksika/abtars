@@ -61,6 +61,11 @@ else
   sleep 2
 fi
 
+# --- ensure mcporter daemon is running (for MCP servers like pptx) ---
+if command -v mcporter &>/dev/null; then
+  mcporter daemon start 2>/dev/null || true
+fi
+
 # --- start the bridge ---
 echo "🌉 Starting bridge..."
 cd "$PROJECT_DIR"
