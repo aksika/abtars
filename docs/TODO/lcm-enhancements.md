@@ -17,4 +17,8 @@ Source: lossless-claw comparison (github.com/martian-engineering/lossless-claw)
 
 ## Stage 4: Consolidation Source Linking — merge with Darwinism Stage 4 sleep template restructure
 
-## Stage 5: Large Message Interception — ❌ DROPPED (Telegram caps at 4K chars)
+## Stage 5: Large Message Interception — TODO (safety net for A2A / Browsie oversized payloads)
+
+- [ ] Intercept oversized messages before they hit the memory pipeline
+- [ ] Write overflow to file, replace message body with summary + file path reference
+- [ ] Threshold: configurable, default ~8K chars
