@@ -233,7 +233,7 @@ Automated maintenance cycle during user inactivity. Template-driven: the sleep s
 | Component | File | Responsibility |
 |-----------|------|----------------|
 | agentbridge-sleep CLI | `cli/agentbridge-sleep.ts` | Orchestrator: gather state -> load template -> invoke subagent via ACP -> write audit trail |
-| SleepTrigger | `sleep-trigger.ts` | Simplified dual triggers: (1) always on startup, (2) heartbeat cron (≥8am, 10min idle, once/day) |
+| SleepTrigger | `sleep-trigger.ts` | Dual triggers with retry: (1) startup if no audit today, (2) heartbeat cron (≥8am, 10min idle). On failure: retry next HB, then after 1h cooldown. Max 3 attempts/day |
 | SleepStateGatherer | `sleep-state-gatherer.ts` | Produces StateSnapshot: working dirs, DB stats, FTS5 integrity, disk usage, topic files, last sleep audit, wakeup date, todo/cron contents, transcript paths |
 | sleep-prompt-loader | `sleep-prompt-loader.ts` | Reads `sleeping_prompt.md` template, replaces `${VARIABLES}` with StateSnapshot values |
 | sleeping_prompt.md | `persona/sleeping_prompt.md` | Editable template with 7 sections: daily summary, reminder/todo extraction, garbage collection (7-step GC protocol), cron verification, topic reorg, disk budget, audit report |
@@ -372,7 +372,7 @@ src/
 | Component | File | Notes |
 |-----------|------|-------|
 | agentbridge-sleep CLI | `cli/agentbridge-sleep.ts` | Orchestrator: gather state -> load template -> invoke subagent -> audit |
-| SleepTrigger | `components/sleep-trigger.ts` | Always on startup + heartbeat cron (≥8am, 10min idle, once/day) |
+| SleepTrigger | `components/sleep-trigger.ts` | Dual triggers with retry: (1) startup if no audit today, (2) heartbeat cron (≥8am, 10min idle). Max 3 attempts/day, 1h cooldown after 2nd failure |
 | SleepStateGatherer | `components/sleep-state-gatherer.ts` | Scans working dirs, DB stats, FTS5 health, disk usage, topic files, last sleep audit, transcript paths |
 | sleep-prompt-loader | `components/sleep-prompt-loader.ts` | Reads sleeping_prompt.md template, replaces ${VARIABLES} with StateSnapshot values |
 | sleeping_prompt.md | `persona/sleeping_prompt.md` | Editable template: daily summary, reminders, DB maintenance, cron, topics, disk budget |
@@ -436,7 +436,7 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 1. **Startup**: `main.ts` -> `loadMemoryConfig()` -> `MemoryManager.initialize()` -> opens SQLite, creates schema, optionally loads embedding model, initializes IngestionPipeline + ReflectionEngine
 2. **LLM Callback**: `memory.setLlmCall(...)` wires transport for compaction, context assembly, reflections, extraction
 3. **Heartbeat Start**: `main.ts` creates a unified `HeartbeatSystem` (5-min interval) with 4 tasks: `sleep-trigger`, `cron-checker`, `browse-checker`, `reminder-injector`. Passes reference to memory via `memory.setHeartbeat()`
-4. **Sleep Startup Check**: `SleepTrigger.shouldRunOnStartup()` always returns true -> spawns `agentbridge-sleep.js` detached. During sleep, incoming messages get auto-reply ("waking up") and are queued. After sleep finishes, queued messages are re-injected.
+4. **Sleep Startup Check**: `SleepTrigger.shouldRunOnStartup()` runs if no audit today (or >25h since last) -> spawns `agentbridge-sleep.js` detached. On exit, reports success/failure back to SleepTrigger for retry logic. During sleep, incoming messages get auto-reply ("waking up") and are queued. After sleep finishes, queued messages are re-injected.
 5. **Message In**: `memory.recordMessage()` -> JSONL append (raw, with emojis) -> `stripEmojis()` on content -> FTS5 index (emoji-free, with `platform_message_id`) -> insert into `chat_backup` (immutable copy) -> optional vector index -> prune -> disk budget check every 100 writes
 5b. **Telegram Reaction**: Authorized user reacts to message -> `emojiToScore(emoji)` -> `memory.updateEmotionByPlatformId(chatId, messageId, score)` -> updates `messages.emotion_score` on the row matching `platform_message_id`
 6. **Background Extraction** (sleep subagent + instant store): Sleep subagent's §6 (verify-extract-mark) checks if conversation facts exist in `extracted_memories`, extracts missing via `agentbridge-store`. Agent also invokes `agentbridge-store` directly during conversation for instant storage. **Note:** `MemoryExtractor` class exists but is not registered as a heartbeat task — extraction is subagent-driven, not background-driven.
@@ -455,14 +455,14 @@ All env vars with defaults from `memory-config.ts` and `sleep-trigger.ts`:
 The sleep cycle is the maintenance routine. It runs via two triggers:
 
 **Trigger 1 -- Startup** (`main.ts`):
-- `SleepTrigger.shouldRunOnStartup()` always returns true
+- `SleepTrigger.shouldRunOnStartup()` runs if no audit today (or >25h since last)
 - Spawns `agentbridge-sleep.js` as detached child process
 - Sets `sleepChild` — incoming messages during sleep get auto-reply ("Oh good morning, I am just waking up, give me a minute please.. I answer you soon ☕") and are queued in `pendingMessages`
 - On sleep exit, queued messages are re-injected via `telegramPoller.injectUpdate()`
 
 **Trigger 2 -- Heartbeat cron** (`main.ts` heartbeat, `sleep-trigger` task):
 - Registered as heartbeat task in `main.ts`, checked every tick (5min)
-- `SleepTrigger.shouldRunFromCron(lastMessageTs)` checks all three:
+- `SleepTrigger.shouldRunFromCron(lastMessageTs)` checks conditions + retry state:
   - Hour ≥ 8
   - Last message > 10min ago
   - No audit file for today's date
@@ -476,20 +476,28 @@ The sleep cycle is the maintenance routine. It runs via two triggers:
 5. Normal mode: invokes subagent via ACP transport (model priority: Opus 4 -> Sonnet 4 -> Sonnet 3.5)
 6. Writes audit trail to `~/.agentbridge/memory/audit/sleep_YYYYMMDD_HHmmss.md`
 
-**sleeping_prompt.md template sections:**
-- §1 Daily Summary — consolidate working dirs into daily files
-- §2 Reminder & Todo Extraction — extract actionable items
-- §3 Garbage Collection — 7-step GC protocol:
+**sleeping_prompt.md template sections (target state — Memory Darwinism):**
+- §1 Feedback Pass — review today's conversations; for each recalled memory that appeared in context, check user reaction: confirmed → `agentbridge-store --boost`, corrected → `--demote`, ambiguous → skip
+- §2 Daily Summary — consolidate working dirs into daily files, weekly/quarterly rollups
+- §3 Reminder & Todo Extraction — extract actionable items
+- §4 Garbage Collection — 7-step GC protocol:
   - Step 1: Purge expired garbage (>7 days in `garbage.json` → hard DELETE from messages)
   - Step 2: Immediate deletes — dupes (same content/chat within 5min), wrong-chat, STT garbage + paired assistant responses
   - Step 3: Emotion harvest — emotional reactions → update `emotion_score` on nearest extracted_memory, then garbage-mark
   - Step 4: Pure noise — greetings, pings, filler, single chars → garbage-mark (with explicit DO NOT mark list)
   - Step 5: Repeated probes — GROUP BY HAVING cnt≥3, keep first, garbage-mark rest
-  - Step 6: Verify extractions — check if conversation facts exist in `extracted_memories`, extract missing via `agentbridge-store`, then garbage-mark verbose originals
+  - Step 6: Verify extractions — check if conversation facts exist in `extracted_memories`, extract missing via `agentbridge-store --confidence <1-5>`, then garbage-mark verbose originals
   - Step 7: Report — GC summary in sleep audit
-- §4 Cron Verification — check scheduled tasks
-- §5 Topic Reorg — merge duplicates, update stale, delete empty
-- §6 Disk Budget — enforce size limits
+- §5 Cron Verification — check scheduled tasks
+- §6 Topic Reorg — merge duplicates, update stale, delete empty
+- §7 Fitness Review — use recall_count + relevance_score + confidence + last_recalled_at to evaluate extracted memories:
+  - High recall + high relevance → promote to core knowledge
+  - High recall + negative relevance → candidate for deletion or rewording
+  - Zero recall after 60+ days → candidate for archival
+  - Low confidence + low recall → first to prune
+  - Time-decayed fitness: `fitness ≈ Σ(1 / (1 + days_since_recall))` weighted by relevance_score
+- §8 Memory Merge — review top-N most-recalled extracted memories, merge near-duplicates (max 5/cycle, LLM judges similarity, incremental)
+- §9 Disk Budget — enforce size limits
 
 **Garbage collection data:**
 - `garbage.json` at `~/.agentbridge/garbage.json`: `{"<message_id>": "<ISO timestamp when marked>"}`
