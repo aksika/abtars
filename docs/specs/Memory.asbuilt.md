@@ -618,3 +618,4 @@ Agent-initiated instant memory storage with emotion scoring.
 ## Future Ideas
 
 - **Archive DB layer** — if extracted_memories grows to 10K+ and search slows, move zero-recall 60+ day memories to a separate SQLite archive searched as a last-resort fallback after all primary stages.
+- **Entity linking** — tag extracted memories with entity mentions (e.g. `@Peter`, `@agentbridge`), maintain per-entity summary pages, enable "tell me about X" queries via entity filter instead of keyword search. Inspired by LCM/OpenClaw's `bank/entities/*.md` pattern.
