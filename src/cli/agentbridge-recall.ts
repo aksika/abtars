@@ -15,9 +15,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { MemoryIndex } from "../components/memory-index.js";
+import { searchConsolidationFiles } from "../components/consolidation-search.js";
 import type { SearchResult, MemorySearchResult } from "../types/memory.js";
 
-const DB_PATH = join(homedir(), ".agentbridge", "memory", "memory.db");
+const MEMORY_DIR = join(homedir(), ".agentbridge", "memory");
+const DB_PATH = join(MEMORY_DIR, "memory.db");
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 
@@ -106,18 +108,16 @@ try {
     for (const r of index.searchOriginal(params.original, { chatId: params.chatId, limit: params.limit * 3 })) addExtracted(r, "extracted:original");
   }
 
-  // Stage 7: Compaction summaries
+  // Stage 7: Compaction summaries — file-based search
   const allKw = [...params.keywords];
   if (params.original) allKw.push(params.original);
-  const conditions = ["chat_id = ?"];
-  const sqlParams: (string | number)[] = [params.chatId];
-  if (params.timeStart) { conditions.push("timestamp >= ?"); sqlParams.push(params.timeStart); }
-  if (params.timeEnd) { conditions.push("timestamp <= ?"); sqlParams.push(params.timeEnd); }
-  conditions.push(`(${allKw.map(kw => { sqlParams.push(`%${kw}%`); return "summary LIKE ?"; }).join(" OR ")})`);
-  const compactions = db.prepare(`SELECT tier, timestamp, summary FROM compactions WHERE ${conditions.join(" AND ")} ORDER BY timestamp DESC LIMIT 10`).all(...sqlParams) as Array<{ tier: string; timestamp: number; summary: string }>;
-  for (const c of compactions) {
-    const key = `${c.timestamp}:${c.summary.slice(0, 80)}`;
-    if (!seen.has(key)) { seen.add(key); results.push({ content: c.summary, date: new Date(c.timestamp).toISOString(), source: `compaction:${c.tier}`, score: 0.5 }); }
+  const consolidationResults = searchConsolidationFiles(MEMORY_DIR, allKw, {
+    startTime: params.timeStart,
+    endTime: params.timeEnd,
+  });
+  for (const c of consolidationResults) {
+    const key = `${c.timestamp}:${c.content.slice(0, 80)}`;
+    if (!seen.has(key)) { seen.add(key); results.push({ content: c.content, date: new Date(c.timestamp).toISOString(), source: `compaction:${c.tier}`, score: 0.5 }); }
   }
 
   // Stage 8: chat_backup fallback (LIKE search on immutable backup)

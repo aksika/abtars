@@ -12,12 +12,14 @@ import type Database from "better-sqlite3";
 import type { MemoryIndex } from "./memory-index.js";
 import { logWarn } from "./logger.js";
 import type { WebSearchResult, MemorySearchResponse } from "./dashboard-config.js";
+import { searchConsolidationFiles } from "./consolidation-search.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export type MemorySearchDeps = {
   memoryIndex: MemoryIndex;
   db: Database.Database;
+  memoryDir?: string;
 };
 
 const TAG = "memory-search-ctrl";
@@ -30,10 +32,12 @@ const MAX_RESULTS = 10;
 export class MemorySearchController {
   private readonly memoryIndex: MemoryIndex;
   private readonly db: Database.Database;
+  private readonly memoryDir: string | undefined;
 
   constructor(deps: MemorySearchDeps) {
     this.memoryIndex = deps.memoryIndex;
     this.db = deps.db;
+    this.memoryDir = deps.memoryDir;
   }
 
   /** List distinct chat IDs that have stored messages. */
@@ -236,64 +240,24 @@ export class MemorySearchController {
   }
 
   /**
-   * L3: Compaction summary LIKE search on weekly/quarterly tiers.
+   * L3: Search consolidation .md files from disk.
    */
   private searchL3(
     keywords: string[],
-    chatId: number | undefined,
+    _chatId: number | undefined,
     timeStart?: number,
     timeEnd?: number,
-    mode: "or" | "and" = "or",
+    _mode: "or" | "and" = "or",
   ): WebSearchResult[] {
-    const conditions: string[] = ["tier IN ('daily', 'weekly', 'quarterly')"];
-    const params: (string | number)[] = [];
-
-    if (chatId !== undefined) {
-      conditions.push("chat_id = ?");
-      params.push(chatId);
-    }
-
-    if (timeStart !== undefined) {
-      conditions.push("timestamp >= ?");
-      params.push(timeStart);
-    }
-    if (timeEnd !== undefined) {
-      conditions.push("timestamp <= ?");
-      params.push(timeEnd);
-    }
-
-    const likeClauses = keywords
-      .map((kw) => kw.trim())
-      .filter((kw) => kw.length > 0)
-      .map((kw) => {
-        const escaped = kw.replace(/%/g, "\\%").replace(/_/g, "\\_");
-        params.push(`%${escaped}%`);
-        return "summary LIKE ? ESCAPE '\\'";
-      });
-
-    if (likeClauses.length === 0) return [];
-    const joiner = mode === "and" ? " AND " : " OR ";
-    conditions.push(`(${likeClauses.join(joiner)})`);
-
-    const sql = `
-      SELECT id, tier, timestamp, summary
-      FROM compactions
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY timestamp DESC
-      LIMIT 10
-    `;
-
-    const rows = this.db.prepare(sql).all(...params) as Array<{
-      id: number;
-      tier: string;
-      timestamp: number;
-      summary: string;
-    }>;
-
-    return rows.map((row) => ({
-      content: row.summary,
-      date: new Date(row.timestamp).toISOString(),
-      source: `L3:compaction:${row.tier}`,
+    if (!this.memoryDir) return [];
+    const results = searchConsolidationFiles(this.memoryDir, keywords, {
+      startTime: timeStart,
+      endTime: timeEnd,
+    });
+    return results.map((r) => ({
+      content: r.content,
+      date: new Date(r.timestamp).toISOString(),
+      source: `L3:compaction:${r.tier}`,
       score: 1.0,
     }));
   }

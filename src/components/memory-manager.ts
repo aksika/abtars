@@ -12,6 +12,7 @@ import { ContextAssembler } from "./context-assembler.js";
 import { HeartbeatSystem } from "./heartbeat-system.js";
 import { MemorySearchTool } from "./memory-search-tool.js";
 import type { MemorySearchToolConfig } from "./memory-search-tool.js";
+import { getLatestConsolidationFile } from "./consolidation-search.js";
 import { IngestionPipeline } from "./ingestion-pipeline.js";
 import { ReflectionEngine } from "./reflection-engine.js";
 import { IntentDetector, DEFAULT_CUE_PHRASES_EN, DEFAULT_CUE_PHRASES_HU } from "./intent-detector.js";
@@ -1170,8 +1171,9 @@ export class MemoryManager {
       searchTimeoutMs: this.config.searchEnhancements.searchTimeoutMs,
       decayHalflifeDays: this.config.searchEnhancements.decayHalflifeDays,
       mmrLambda: this.config.searchEnhancements.mmrLambda,
+      memoryDir: this.config.memoryDir,
     };
-    this.memorySearchTool = new MemorySearchTool(this.db, this.memoryIndex, searchConfig);
+    this.memorySearchTool = new MemorySearchTool(this.memoryIndex, searchConfig);
   }
 
   /** Set the heartbeat reference (owned by main.ts). */
@@ -1187,17 +1189,11 @@ export class MemoryManager {
   }
 
   /** Get the latest daily compaction for a chat (for session-start injection). */
-  getLatestCompaction(chatId: number): { timestamp: number; summary: string } | null {
-    if (!this.db) return null;
+  getLatestCompaction(_chatId: number): { timestamp: number; summary: string } | null {
     try {
-      const row = this.db
-        .prepare(
-          `SELECT timestamp, summary FROM compactions
-           WHERE chat_id = ? AND tier = 'daily'
-           ORDER BY timestamp DESC LIMIT 1`,
-        )
-        .get(chatId) as { timestamp: number; summary: string } | undefined;
-      return row ?? null;
+      const result = getLatestConsolidationFile(this.config.memoryDir, "daily");
+      if (!result) return null;
+      return { timestamp: result.timestamp, summary: result.content };
     } catch {
       return null;
     }

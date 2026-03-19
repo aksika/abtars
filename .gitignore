@@ -28,3 +28,4 @@ Thumbs.db
 # Kiro specs (local dev artifacts)
 .kiro/*
 !.kiro/steering/
+docs/.obsidian/

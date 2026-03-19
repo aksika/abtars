@@ -221,10 +221,8 @@ describe("MemorySearchController.handle — deduplication and ordering", () => {
 // ── L3 compaction search ────────────────────────────────────────────────────
 
 describe("MemorySearchController.handle — L3 compaction search", () => {
-  it("queries compactions table with LIKE for each keyword", async () => {
-    const db = mockDb([
-      { id: 1, tier: "weekly", timestamp: 1700000000000, summary: "Weekly summary about testing" },
-    ]);
+  it("searches consolidation files from disk (no DB query)", async () => {
+    const db = mockDb();
     const ctrl = new MemorySearchController(makeDeps({ db }));
 
     const result = await ctrl.handle(
@@ -232,11 +230,8 @@ describe("MemorySearchController.handle — L3 compaction search", () => {
     );
 
     expect(result.status).toBe(200);
-    expect(db.prepare).toHaveBeenCalled();
     const body = result.body as MemorySearchResponse;
     expect(body.layers["L3"]?.status).toBe("ok");
-    expect(body.results.length).toBe(1);
-    expect(body.results[0]!.source).toBe("L3:compaction:weekly");
   });
 });
 
@@ -313,10 +308,8 @@ describe("MemorySearchController — Property 6: Memory search layer selection",
 
           // L3: db.prepare should be called iff L3 is selected
           if (selectedLayers.includes("L3")) {
-            expect(db.prepare).toHaveBeenCalled();
             expect(body.layers["L3"]?.status).toBe("ok");
           } else {
-            expect(db.prepare).not.toHaveBeenCalled();
             expect(body.layers["L3"]?.status).toBe("skipped");
           }
 

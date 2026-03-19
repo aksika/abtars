@@ -1,8 +1,7 @@
-import type Database from "better-sqlite3";
-
 import { logDebug, logWarn } from "./logger.js";
 import type { MemoryIndex } from "./memory-index.js";
 import type { MemorySearchParams, MemorySearchResult } from "../types/memory.js";
+import { searchConsolidationFiles } from "./consolidation-search.js";
 
 const TAG = "memory-search-tool";
 const MS_PER_DAY = 86_400_000;
@@ -141,11 +140,11 @@ export type MemorySearchToolConfig = {
   searchTimeoutMs: number;
   decayHalflifeDays: number;
   mmrLambda: number;
+  memoryDir: string;
 };
 
 export class MemorySearchTool {
   constructor(
-    private db: Database.Database,
     private memoryIndex: MemoryIndex,
     private config: MemorySearchToolConfig,
   ) {}
@@ -269,70 +268,32 @@ export class MemorySearchTool {
     // L2: Extracted memories — FTS5
     const extractedResults = this.memoryIndex.searchExtracted(query, searchOpts, "or");
 
-    // L3: Compaction summaries — LIKE matching
-    const compactionResults = this.searchCompactions(keywords, chatId, timeRange);
+    // L3: Compaction summaries — file-based search
+    const compactionResults = this.searchCompactions(keywords, timeRange);
 
     return [...messageResults, ...extractedResults, ...compactionResults];
   }
 
   /**
-   * Search the compactions table for matching summaries using LIKE.
-   * Returns results with appropriate tier labels.
+   * Search consolidation .md files from disk for matching summaries.
    */
   private searchCompactions(
     keywords: string[],
-    chatId: number,
     timeRange?: { start: number; end: number },
   ): MemorySearchResult[] {
     try {
-      const conditions: string[] = ["chat_id = ?", "tier IN ('daily', 'weekly', 'quarterly')"];
-      const params: (string | number)[] = [chatId];
-
-      if (timeRange?.start !== undefined) {
-        conditions.push("timestamp >= ?");
-        params.push(timeRange.start);
-      }
-      if (timeRange?.end !== undefined) {
-        conditions.push("timestamp <= ?");
-        params.push(timeRange.end);
-      }
-
-      // OR-style LIKE matching: any keyword matches
-      const likeClauses = keywords
-        .map((kw) => kw.trim())
-        .filter((kw) => kw.length > 0)
-        .map((kw) => {
-          const escaped = kw.replace(/%/g, "\\%").replace(/_/g, "\\_");
-          params.push(`%${escaped}%`);
-          return "summary LIKE ? ESCAPE '\\'";
-        });
-
-      if (likeClauses.length === 0) return [];
-      conditions.push(`(${likeClauses.join(" OR ")})`);
-
-      const sql = `
-        SELECT id, tier, timestamp, summary
-        FROM compactions
-        WHERE ${conditions.join(" AND ")}
-        ORDER BY timestamp DESC
-        LIMIT 10
-      `;
-
-      const rows = this.db.prepare(sql).all(...params) as Array<{
-        id: number;
-        tier: string;
-        timestamp: number;
-        summary: string;
-      }>;
-
-      return rows.map((row) => ({
-        content: row.summary,
-        source_timestamp: row.timestamp,
-        tier: row.tier as "daily" | "weekly" | "quarterly",
-        score: 1.0, // base score for LIKE matches
+      const results = searchConsolidationFiles(this.config.memoryDir, keywords, {
+        startTime: timeRange?.start,
+        endTime: timeRange?.end,
+      });
+      return results.map((r) => ({
+        content: r.content,
+        source_timestamp: r.timestamp,
+        tier: r.tier,
+        score: 1.0,
       }));
     } catch (err) {
-      logWarn(TAG, `Compaction search failed: ${err}`);
+      logWarn(TAG, `Consolidation file search failed: ${err}`);
       return [];
     }
   }

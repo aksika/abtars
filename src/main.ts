@@ -1731,6 +1731,7 @@ async function main(): Promise<void> {
       ? new MemorySearchController({
           memoryIndex: memory.getMemoryIndex()!,
           db: memory.getDatabase()!,
+          memoryDir: memoryConfig.memoryDir,
         })
       : null;
 
