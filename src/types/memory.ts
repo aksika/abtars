@@ -172,6 +172,9 @@ export type InstantStoreParams = {
   confidence?: number;
   sourceMessageIds?: string;
   classification?: number;
+  trust?: number;
+  integrity?: number;
+  credibility?: number;
 };
 
 /** Result of an instant memory store operation. */

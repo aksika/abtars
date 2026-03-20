@@ -285,7 +285,8 @@ export class MemoryIndex {
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
                em.source_timestamp, em.preserve_original, em.emotion_score,
-               em.recall_count, em.relevance_score, em.source_message_ids, rank
+               em.recall_count, em.relevance_score, em.source_message_ids,
+               em.trust, em.integrity, em.credibility, rank
         FROM extracted_memories em
         JOIN extracted_memories_fts ON extracted_memories_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
@@ -306,6 +307,9 @@ export class MemoryIndex {
         recall_count: number;
         relevance_score: number;
         source_message_ids: string | null;
+        trust: number | null;
+        integrity: number | null;
+        credibility: number | null;
         rank: number;
       }>;
 
@@ -321,6 +325,9 @@ export class MemoryIndex {
           memory_type: row.memory_type,
           source_timestamp: row.source_timestamp,
           source_message_ids: row.source_message_ids ?? undefined,
+          trust: row.trust ?? 2,
+          integrity: row.integrity ?? 2,
+          credibility: row.credibility ?? 6,
           tier: "extracted" as const,
           score: (bm25Score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost),
         };
@@ -369,7 +376,8 @@ export class MemoryIndex {
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
                em.source_timestamp, em.preserve_original, em.emotion_score,
-               em.recall_count, em.relevance_score, em.source_message_ids, rank
+               em.recall_count, em.relevance_score, em.source_message_ids,
+               em.trust, em.integrity, em.credibility, rank
         FROM extracted_memories em
         JOIN extracted_memories_original_fts ON extracted_memories_original_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
@@ -390,6 +398,9 @@ export class MemoryIndex {
         recall_count: number;
         relevance_score: number;
         source_message_ids: string | null;
+        trust: number | null;
+        integrity: number | null;
+        credibility: number | null;
         rank: number;
       }>;
 
@@ -411,6 +422,9 @@ export class MemoryIndex {
           memory_type: row.memory_type,
           source_timestamp: row.source_timestamp,
           source_message_ids: row.source_message_ids ?? undefined,
+          trust: row.trust ?? 2,
+          integrity: row.integrity ?? 2,
+          credibility: row.credibility ?? 6,
           tier: "extracted" as const,
           score,
         };

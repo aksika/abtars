@@ -40,6 +40,9 @@ export type RawArgs = {
   merge?: boolean;
   mergeIds?: string;
   classification?: string;
+  trust?: string;
+  integrity?: string;
+  credibility?: string;
   reclassify?: boolean;
   userOverride?: boolean;
 };
@@ -71,6 +74,9 @@ export function parseArgs(argv: string[]): RawArgs {
       case "--merge": parsed.merge = true; break;
       case "--merge-ids": parsed.mergeIds = args[++i] ?? ""; break;
       case "--classification": parsed.classification = args[++i] ?? ""; break;
+      case "--trust": parsed.trust = args[++i] ?? ""; break;
+      case "--integrity": parsed.integrity = args[++i] ?? ""; break;
+      case "--credibility": parsed.credibility = args[++i] ?? ""; break;
       case "--reclassify": parsed.reclassify = true; break;
       case "--user-override": parsed.userOverride = true; break;
     }
@@ -105,6 +111,9 @@ export function validateArgs(raw: RawArgs): { ok: true; params: InstantStorePara
       emotionScore: parseInt(raw.emotionScore, 10) || 0,
       keyword: raw.keyword,
       classification: raw.classification ? parseInt(raw.classification, 10) : undefined,
+      trust: raw.trust ? parseInt(raw.trust, 10) : undefined,
+      integrity: raw.integrity ? parseInt(raw.integrity, 10) : undefined,
+      credibility: raw.credibility ? parseInt(raw.credibility, 10) : undefined,
     },
   };
 }

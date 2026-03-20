@@ -56,6 +56,9 @@ describe("Memory Darwinism", () => {
       "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
       "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
       "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
+      "ALTER TABLE extracted_memories ADD COLUMN trust INTEGER DEFAULT 2",
+      "ALTER TABLE extracted_memories ADD COLUMN integrity INTEGER DEFAULT 2",
+      "ALTER TABLE extracted_memories ADD COLUMN credibility INTEGER DEFAULT 6",
     ]) {
       try { db.exec(ddl); } catch { /* already exists */ }
     }
@@ -384,6 +387,9 @@ describe("Memory Darwinism", () => {
         "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
         "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
         "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
+      "ALTER TABLE extracted_memories ADD COLUMN trust INTEGER DEFAULT 2",
+      "ALTER TABLE extracted_memories ADD COLUMN integrity INTEGER DEFAULT 2",
+      "ALTER TABLE extracted_memories ADD COLUMN credibility INTEGER DEFAULT 6",
       ]) { try { mdb.exec(ddl); } catch { /* */ } }
       const id = insertMemory(mdb, { contentEn: "test fact", classification: 1 });
       mdb.close();
@@ -413,6 +419,9 @@ describe("Memory Darwinism", () => {
         "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
         "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
         "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
+      "ALTER TABLE extracted_memories ADD COLUMN trust INTEGER DEFAULT 2",
+      "ALTER TABLE extracted_memories ADD COLUMN integrity INTEGER DEFAULT 2",
+      "ALTER TABLE extracted_memories ADD COLUMN credibility INTEGER DEFAULT 6",
       ]) { try { mdb.exec(ddl); } catch { /* */ } }
       const id = insertMemory(mdb, { contentEn: "api key secret", classification: 3 });
       mdb.close();
@@ -443,6 +452,9 @@ describe("Memory Darwinism", () => {
         "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
         "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
         "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
+      "ALTER TABLE extracted_memories ADD COLUMN trust INTEGER DEFAULT 2",
+      "ALTER TABLE extracted_memories ADD COLUMN integrity INTEGER DEFAULT 2",
+      "ALTER TABLE extracted_memories ADD COLUMN credibility INTEGER DEFAULT 6",
       ]) { try { mdb.exec(ddl); } catch { /* */ } }
       const id = insertMemory(mdb, { contentEn: "old secret now public", classification: 3 });
       mdb.close();
@@ -461,6 +473,44 @@ describe("Memory Darwinism", () => {
 
       mgr2.close();
       rmSync(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe("trust + integrity + credibility fields", () => {
+    it("searchExtracted returns trust, integrity, credibility with defaults", () => {
+      insertMemory(db, { contentEn: "user likes cats" });
+      const results = index.searchExtracted("cats");
+      expect(results.length).toBe(1);
+      expect(results[0]!.trust).toBe(2);
+      expect(results[0]!.integrity).toBe(2);
+      expect(results[0]!.credibility).toBe(6);
+    });
+
+    it("instantStore persists trust, integrity, credibility", () => {
+      db.prepare(
+        `INSERT INTO extracted_memories
+           (chat_id, content_original, content_en, memory_type, source_timestamp,
+            preserve_original, emotion_score, created_at, trust, integrity, credibility)
+         VALUES (123, 'teszt', 'test', 'fact', ?, 1, 0, ?, 3, 0, 1)`,
+      ).run(Date.now(), Date.now());
+
+      const row = db.prepare(
+        "SELECT trust, integrity, credibility FROM extracted_memories ORDER BY id DESC LIMIT 1"
+      ).get() as { trust: number; integrity: number; credibility: number };
+      expect(row.trust).toBe(3);
+      expect(row.integrity).toBe(0);
+      expect(row.credibility).toBe(1);
+    });
+
+    it("parseArgs handles --trust --integrity --credibility", () => {
+      const raw = parseArgs(["node", "store",
+        "--content-en", "test", "--content-original", "teszt",
+        "--memory-type", "fact", "--emotion-score", "0", "--chat-id", "123",
+        "--trust", "1", "--integrity", "3", "--credibility", "4",
+      ]);
+      expect(raw.trust).toBe("1");
+      expect(raw.integrity).toBe("3");
+      expect(raw.credibility).toBe("4");
     });
   });
 });

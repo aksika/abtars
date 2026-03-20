@@ -133,6 +133,9 @@ export class MemoryManager {
         "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
         "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
         "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
+        "ALTER TABLE extracted_memories ADD COLUMN trust INTEGER DEFAULT 2",
+        "ALTER TABLE extracted_memories ADD COLUMN integrity INTEGER DEFAULT 2",
+        "ALTER TABLE extracted_memories ADD COLUMN credibility INTEGER DEFAULT 6",
       ]) {
         try { this.db.exec(ddl); } catch { /* already exists */ }
       }
@@ -1318,8 +1321,8 @@ export class MemoryManager {
         `INSERT INTO extracted_memories
            (chat_id, content_original, content_en, memory_type, source_timestamp,
             preserve_original, preserved_keyword, emotion_score, created_at,
-            confidence, source_message_ids, classification)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            confidence, source_message_ids, classification, trust, integrity, credibility)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         params.chatId,
         params.contentOriginal.trim(),
@@ -1333,6 +1336,9 @@ export class MemoryManager {
         params.confidence ?? 3,
         params.sourceMessageIds?.trim() || null,
         params.classification ?? 1,
+        params.trust ?? 2,
+        params.integrity ?? 2,
+        params.credibility ?? 6,
       );
 
       // Advance watermark to prevent heartbeat re-extraction
