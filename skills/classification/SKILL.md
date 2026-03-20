@@ -65,8 +65,11 @@ You **can**:
 ### 5. Context-based disclosure
 When recalling memories in different contexts:
 - **Group chats** (Discord channels with multiple users): only surface public (0) memories
+- **A2A agents** (peer bots, Molty, etc.): only surface public (0) memories — they are internal agents but don't need personal context
 - **Direct messages** (Telegram DM): surface up to confidential (2)
 - **Never** surface restricted (3) in any context
+
+When *storing* memories from A2A conversations, classify as internal (1) — these are operational exchanges between your own agents.
 
 ## Examples
 
