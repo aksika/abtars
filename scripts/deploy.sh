@@ -53,6 +53,7 @@ cp "$PROJECT_DIR/skills/todo/SKILL.md" "$AB_HOME/.kiro/steering/todo.md"
 cp "$PROJECT_DIR/skills/cron/SKILL.md" "$AB_HOME/.kiro/steering/cron.md"
 cp "$PROJECT_DIR/skills/browse-delegate/SKILL.md" "$AB_HOME/.kiro/steering/browse-delegate.md"
 cp "$PROJECT_DIR/skills/troubleshooting/SKILL.md" "$AB_HOME/.kiro/steering/troubleshooting.md"
+cp "$PROJECT_DIR/skills/classification/SKILL.md" "$AB_HOME/.kiro/steering/classification.md"
 cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/sleeping_prompt.md"
 cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/browsing_prompt.md"
 mkdir -p "$AB_HOME/skills/agents"
@@ -118,6 +119,13 @@ echo '#!/usr/bin/env bash' > "$BROWSE_SCRIPT"
 echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-browse.js\" \"\$@\"" >> "$BROWSE_SCRIPT"
 chmod +x "$BROWSE_SCRIPT"
 ln -sf "$BROWSE_SCRIPT" "$HOME/.local/bin/agentbridge-browse"
+
+# Deploy agentbridge-expand CLI (source message lookup)
+EXPAND_SCRIPT="$AB_HOME/agentbridge-expand"
+echo '#!/usr/bin/env bash' > "$EXPAND_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-expand.js\" \"\$@\"" >> "$EXPAND_SCRIPT"
+chmod +x "$EXPAND_SCRIPT"
+ln -sf "$EXPAND_SCRIPT" "$HOME/.local/bin/agentbridge-expand"
 
 # Deploy mcporter CLI (MCP tool access)
 MCPORTER_DIR="$HOME/workspace/mcporter"
