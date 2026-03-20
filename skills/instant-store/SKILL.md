@@ -30,6 +30,12 @@ agentbridge-store --content-en "memory in English" --content-original "memory in
   Example: `--chat-id 7773842843`
 - `--keyword` (optional): A preserved keyword from the user's original message for fallback search.
   Example: `--keyword "dark mode"`
+- `--classification` (optional): Confidentiality level 0-3. Default: 1 (internal).
+  - `0` = public (safe to share anywhere)
+  - `1` = internal (default, normal operational)
+  - `2` = confidential (health, finances, relationships)
+  - `3` = restricted/secret (tokens, credentials — never disclosed)
+  See the classification skill for auto-trigger rules.
 
 ### Emotion Score Scale
 

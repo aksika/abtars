@@ -25,6 +25,10 @@ agentbridge-recall --keywords "keyword1,keyword2" --chat-id <CHAT_ID>
 - `--time-start` (optional): Unix timestamp in milliseconds — start of time range.
 - `--time-end` (optional): Unix timestamp in milliseconds — end of time range.
 - `--chat-id` (required): The Telegram chat ID. Use `7773842843` for the main chat.
+- `--max-classification` (optional): Maximum confidentiality level to return (0-2). Default: 2.
+  - Use `0` in group chats (public only)
+  - Use `2` in direct messages (up to confidential)
+  - Restricted/secret (3) memories are **always excluded** regardless of this value.
 
 ### Output
 
