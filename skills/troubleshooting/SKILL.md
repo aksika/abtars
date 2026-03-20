@@ -21,7 +21,7 @@ pgrep -P $(pgrep -f 'dist/main.js') | xargs ps -p -o pid,stat,etime,cmd
 tail -c 20000 ~/.agentbridge/logs/bridge.log | sed 's/2026-/\n2026-/g' | grep -v 'memory-db.*Database initialized' | tail -50
 
 # Memory DB last activity
-ls -lt ~/.agentbridge/memory/audit/ | head -5
+ls -lt ~/.agentbridge/memory/sleep/ | head -5
 ```
 
 ## Browser Agent
@@ -79,8 +79,8 @@ ls -lh ~/.agentbridge/memory/memory.db
 sqlite3 ~/.agentbridge/memory/memory.db "SELECT COUNT(*) FROM messages; SELECT COUNT(*) FROM extracted_memories;"
 
 # Latest sleep audit
-ls -lt ~/.agentbridge/memory/audit/ | head -3
-cat "$(ls -t ~/.agentbridge/memory/audit/sleep_*.md 2>/dev/null | head -1)" 2>/dev/null | head -30
+ls -lt ~/.agentbridge/memory/sleep/ | head -3
+cat "$(ls -t ~/.agentbridge/memory/sleep/sleep_*.md 2>/dev/null | head -1)" 2>/dev/null | head -30
 
 # Working directories (pending consolidation)
 ls ~/.agentbridge/memory/working/ 2>/dev/null

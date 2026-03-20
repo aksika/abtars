@@ -185,7 +185,7 @@ async function main(): Promise<void> {
   let sleepChild: import("node:child_process").ChildProcess | null = null;
   const pendingMessages: Array<{ chatId: number; text: string; threadId?: number; sessionKey: string }> = [];
   const sleepRepliedChats = new Set<number>();
-  const sleepTrigger = new SleepTrigger(join(memoryConfig.memoryDir, "audit"));
+  const sleepTrigger = new SleepTrigger(join(memoryConfig.memoryDir, "sleep"));
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
   if (memory) {

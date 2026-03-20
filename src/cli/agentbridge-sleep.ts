@@ -19,7 +19,7 @@
  */
 
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { MemoryManager } from "../components/memory-manager.js";
 import { loadMemoryConfig } from "../components/memory-config.js";
 import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
@@ -235,37 +235,50 @@ export function writeAuditLog(
   memoryDir: string,
   entry: AuditLogEntry,
 ): void {
-  const auditDir = join(memoryDir, "audit");
-  mkdirSync(auditDir, { recursive: true });
+  const sleepDir = join(memoryDir, "sleep");
+  mkdirSync(sleepDir, { recursive: true });
 
-  const now = new Date();
-  const dateStr = now.toISOString().slice(0, 10).replace(/-/g, "");
-  const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, "");
-  const filename = `sleep_${dateStr}_${timeStr}.md`;
-  const filePath = join(auditDir, filename);
-
-  const content = [
-    `# Sleep Audit Log`,
+  const suffix = [
+    ``,
+    `---`,
+    ``,
+    `## CLI Wrapper`,
     ``,
     `**Timestamp:** ${entry.timestamp}`,
     `**Model:** ${entry.model}`,
     ``,
-    `## State Snapshot Summary`,
+    `### State Snapshot`,
     `${entry.stateSnapshotSummary}`,
     ``,
-    `## Subagent Response`,
-    entry.error ? `**Error:** ${entry.error}` : entry.subagentResponse,
-    ``,
-    `## Outcomes`,
+    `### Outcomes`,
     `- Files consolidated: ${entry.outcomes.filesConsolidated}`,
     `- Messages pruned: ${entry.outcomes.messagesPruned}`,
     `- Embeddings removed: ${entry.outcomes.embeddingsRemoved}`,
     `- Sessions cleaned: ${entry.outcomes.sessionsCleaned}`,
     `- Topics merged: ${entry.outcomes.topicsMerged}`,
     `- Topics deleted: ${entry.outcomes.topicsDeleted}`,
+    entry.error ? `\n### Error\n${entry.error}` : "",
   ].join("\n");
 
-  writeFileSync(filePath, content, "utf-8");
+  // Find the subagent's audit file and append to it
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  try {
+    const files = readdirSync(sleepDir)
+      .filter(f => f.startsWith(`sleep_${today}`) && f.endsWith(".md"))
+      .sort();
+    if (files.length > 0) {
+      const target = join(sleepDir, files[files.length - 1]!);
+      appendFileSync(target, suffix, "utf-8");
+      return;
+    }
+  } catch { /* fall through to standalone */ }
+
+  // Fallback: no subagent file found — write standalone
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0, 10).replace(/-/g, "");
+  const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, "");
+  const filename = `sleep_${dateStr}_${timeStr}.md`;
+  writeFileSync(join(sleepDir, filename), `# Sleep Audit Log${suffix}`, "utf-8");
 }
 
 // ── Main orchestration ──────────────────────────────────────────────────────

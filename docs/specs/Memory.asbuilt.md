@@ -484,7 +484,7 @@ The sleep cycle is the maintenance routine. It runs via two triggers:
 3. `loadSleepPrompt(snapshot)` -> reads `sleeping_prompt.md` template (from `~/.agentbridge/` deployed or `persona/` dev), replaces `${VARIABLES}` with StateSnapshot values
 4. `--dry-run`: prints prompt to stdout and exits
 5. Normal mode: invokes subagent via ACP transport (model priority: Opus 4 -> Sonnet 4 -> Sonnet 3.5)
-6. Writes audit trail to `~/.agentbridge/memory/audit/sleep_YYYYMMDD_HHmmss.md`
+6. Writes audit trail to `~/.agentbridge/memory/sleep/sleep_YYYYMMDD_HHmmss.md`
 
 **sleeping_prompt.md template sections (target state — Memory Darwinism):**
 - §1 Feedback Pass — review today's conversations; for each recalled memory that appeared in context, check user reaction: confirmed → `agentbridge-store --boost`, corrected → `--demote`, ambiguous → skip
@@ -595,7 +595,7 @@ agentbridge sleep [--dry-run] [--verbose]
 - Always uses ACP transport (never tmux)
 - Model priority: `claude-opus-4-0-20250514` -> `claude-sonnet-4-20250514` -> `claude-sonnet-3-5-20241022`
 - Template: `~/.agentbridge/sleeping_prompt.md` (deployed) or `persona/sleeping_prompt.md` (dev)
-- Audit trail: `~/.agentbridge/memory/audit/sleep_YYYYMMDD_HHmmss.md`
+- Audit trail: `~/.agentbridge/memory/sleep/sleep_YYYYMMDD_HHmmss.md`
 - `package.json` bin: `"agentbridge-sleep": "dist/cli/agentbridge-sleep.js"`
 
 ### agentbridge-recall

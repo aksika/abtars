@@ -1199,7 +1199,7 @@ export class MemoryManager {
 
   /** Get memory storage statistics for a given chat. */
   getCronInfo(): { heartbeatRunning: boolean; intervalMs: number; tasks: string[]; lastSleepAudit: string | null } {
-    const auditDir = join(this.config.memoryDir, "audit");
+    const auditDir = join(this.config.memoryDir, "sleep");
     let lastAudit: string | null = null;
     try {
       const files = readdirSync(auditDir).filter(f => f.startsWith("sleep_")).sort();

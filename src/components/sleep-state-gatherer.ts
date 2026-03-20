@@ -275,7 +275,7 @@ export class SleepStateGatherer {
 
   /** Get ISO timestamp of the most recent sleep audit file. */
   private getLastSleepAudit(): string | null {
-    const auditDir = join(this.config.memoryDir, "audit");
+    const auditDir = join(this.config.memoryDir, "sleep");
     if (!existsSync(auditDir)) return null;
     try {
       const files = readdirSync(auditDir)
