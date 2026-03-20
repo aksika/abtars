@@ -17,11 +17,12 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 const AB_HOME = join(homedir(), ".agentbridge");
-const TWITTER_DIR = join(AB_HOME, "twitter");
+const TWITTER_DIR = join(AB_HOME, "twitterX");
 const COOKIE_PATH = join(AB_HOME, "titok", "cookies", "x-cookies.json");
 const BASE_FOLLOWS = join(TWITTER_DIR, "base.follows.json");
 const MOLTY_FOLLOWS = join(TWITTER_DIR, "molty.follows.json");
 const REPORTS_DIR = join(homedir(), "reports");
+const OUTPUT_DIR = join(TWITTER_DIR, "output");
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -145,41 +146,67 @@ async function fetchUser(handle: string): Promise<void> {
 
 // ── Timeline ───────────────────────────────────────────────────────────────
 
+const GQL_USER_TWEETS = "https://x.com/i/api/graphql/E3opETHurmVJflFsUBVuUQ/UserTweets";
+
 async function fetchTimeline(handle: string, count: number): Promise<RankedTweet[]> {
   const { Rettiwt } = await import("rettiwt-api");
   const r = new Rettiwt();
   const clean = handle.replace(/^@/, "");
 
-  // Need user ID for timeline — get via details
   const user = await r.user.details(clean);
   if (!user) throw new Error(`User @${clean} not found`);
-  const data = await r.user.timeline(user.id, count);
 
+  // Try chronological GraphQL (cookie auth) first, fall back to guest
+  const auth = loadCookieHeader();
+  if (auth) {
+    try {
+      return await fetchTimelineGql(user.id, user.fullName ?? clean, clean, count);
+    } catch { /* fall through to guest */ }
+  }
+
+  // Guest fallback (returns by engagement, not chronological)
+  const data = await r.user.timeline(user.id, count);
   return data.list.map((t: any) => {
     const j = t.toJSON();
     const likes = j.likeCount ?? 0;
     const retweets = j.retweetCount ?? 0;
     const views = j.viewCount ?? 0;
     return {
-      id: j.id,
-      text: j.fullText ?? "",
-      author: user.fullName ?? clean,
-      handle: clean,
-      likes,
-      retweets,
-      views,
-      createdAt: j.createdAt,
+      id: j.id, text: j.fullText ?? "", author: user.fullName ?? clean, handle: clean,
+      likes, retweets, views, createdAt: j.createdAt,
       score: likes + retweets * 3 + (views ? views / 1000 : 0),
     };
   });
 }
 
+async function fetchTimelineGql(userId: string, authorName: string, handle: string, count: number): Promise<RankedTweet[]> {
+  const data = await twitterGql(GQL_USER_TWEETS, {
+    userId, count, includePromotedContent: false,
+    withQuickPromoteEligibilityTweetFields: true, withVoice: true, withV2Timeline: true,
+  });
+  const instructions = data?.data?.user?.result?.timeline_v2?.timeline?.instructions ?? [];
+  const entries = instructions.find((i: any) => i.type === "TimelineAddEntries")?.entries ?? [];
+  const tweets: RankedTweet[] = [];
+  for (const e of entries) {
+    const tw = e.content?.itemContent?.tweet_results?.result;
+    if (!tw?.legacy) continue;
+    const p = parseTweetResult(tw);
+    const likes = p.likes, retweets = p.retweets, views = p.views;
+    tweets.push({
+      id: p.id, text: p.text, author: p.name || authorName, handle: p.handle || handle,
+      likes, retweets, views, createdAt: p.createdAt,
+      score: likes + retweets * 3 + (views ? views / 1000 : 0),
+    });
+  }
+  return tweets;
+}
+
 // ── Feed (all follows) ────────────────────────────────────────────────────
 
-async function runFeed(format: "json" | "md", count: number, topN: number, discover: boolean): Promise<void> {
+async function runFeed(format: "json" | "md", count: number, topN: number, discover: boolean, outputPath?: string): Promise<void> {
   const handles = loadFollows();
   if (handles.length === 0) {
-    console.error("No follows found. Create ~/.agentbridge/twitter/base.follows.json or molty.follows.json");
+    console.error("No follows found. Create ~/.agentbridge/twitterX/base.follows.json or molty.follows.json");
     process.exit(1);
   }
 
@@ -209,18 +236,21 @@ async function runFeed(format: "json" | "md", count: number, topN: number, disco
     candidates = await runDiscover(top.slice(0, 5), handles);
   }
 
-  if (format === "json") {
-    console.log(JSON.stringify({ tweets: top, discover: candidates }, null, 2));
-  } else {
-    const date = new Date().toISOString().slice(0, 10);
-    const md = renderNewsletter(top, candidates, date);
-    console.log(md);
+  // Write raw JSON output (default behavior)
+  const date = new Date().toISOString().slice(0, 10);
+  const outFile = outputPath ?? join(OUTPUT_DIR, `tweets-${date}.json`);
+  mkdirSync(join(outFile, ".."), { recursive: true });
+  const payload = { date, source: "agentbridge-tweet", totalCollected: allTweets.length, tweets: top, discover: candidates };
+  writeFileSync(outFile, JSON.stringify(payload, null, 2), "utf8");
+  console.error(`📄 ${top.length} tweets written to ${outFile}`);
 
-    // Also write to reports
+  // Optional: also render newsletter markdown
+  if (format === "md") {
+    const md = renderNewsletter(top, candidates, date);
     mkdirSync(REPORTS_DIR, { recursive: true });
     const reportPath = join(REPORTS_DIR, `AI-Daily-${date}.md`);
     writeFileSync(reportPath, md, "utf8");
-    console.error(`\n📄 Report written to ${reportPath}`);
+    console.error(`📰 Newsletter written to ${reportPath}`);
   }
 }
 
@@ -480,6 +510,7 @@ function parseArgs() {
   let format: "json" | "md" = "md";
   let discover = false;
   let minLikes = 50;
+  let output: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -494,13 +525,14 @@ function parseArgs() {
       case "--top": topN = parseInt(args[++i] ?? "12", 10); break;
       case "--min-likes": minLikes = parseInt(args[++i] ?? "50", 10); break;
       case "--format": format = (args[++i] ?? "md") as "json" | "md"; break;
+      case "--output": output = args[++i] ?? ""; break;
     }
   }
-  return { command, target, count, topN, format, discover, minLikes };
+  return { command, target, count, topN, format, discover, minLikes, output };
 }
 
 async function main(): Promise<void> {
-  const { command, target, count, topN, format, discover, minLikes } = parseArgs();
+  const { command, target, count, topN, format, discover, minLikes, output } = parseArgs();
 
   switch (command) {
     case "fetch":
@@ -521,7 +553,7 @@ async function main(): Promise<void> {
       await searchTweets(target, count);
       break;
     case "feed":
-      await runFeed(format, count, topN, discover);
+      await runFeed(format, count, topN, discover, output);
       break;
   }
 }

@@ -24,11 +24,11 @@ cron (daily) ──► agentbridge-tweet --feed ──► ~/reports/AI-Daily-YYY
 Two levels, merged at runtime. Read fresh on every run (no caching).
 
 ### Level 1 — `base.follows.json`
-`~/.agentbridge/twitter/base.follows.json`
+`~/.agentbridge/twitterX/base.follows.json`
 Curated list of top AI researchers & key players. Created once via research prompt (see Bootstrap Prompt below), manually maintained afterward.
 
 ### Level 2 — `molty.follows.json`
-`~/.agentbridge/twitter/molty.follows.json`
+`~/.agentbridge/twitterX/molty.follows.json`
 Pulled from the Molty X account's following list via rettiwt-api. Auto-refreshed periodically.
 
 ### Merge logic
@@ -147,7 +147,7 @@ Output: JSON to stdout (for piping) or `--format md` for markdown.
 ### Stage 1 — Foundation
 - [ ] `npm install rettiwt-api`
 - [ ] `src/cli/agentbridge-tweet.ts` — arg parsing, FxTwitter fetch (single tweet)
-- [ ] `~/.agentbridge/twitter/follows.json` — initial follow list
+- [ ] `~/.agentbridge/twitterX/follows.json` — initial follow list
 - [ ] Wire into `package.json` bin
 
 ### Stage 2 — Timelines
