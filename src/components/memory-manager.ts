@@ -133,7 +133,7 @@ export class MemoryManager {
         "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
         "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
         "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
-        "ALTER TABLE extracted_memories ADD COLUMN trust INTEGER DEFAULT 2",
+        "ALTER TABLE extracted_memories ADD COLUMN trust INTEGER DEFAULT 0",
         "ALTER TABLE extracted_memories ADD COLUMN integrity INTEGER DEFAULT 2",
         "ALTER TABLE extracted_memories ADD COLUMN credibility INTEGER DEFAULT 6",
       ]) {
@@ -1336,7 +1336,7 @@ export class MemoryManager {
         params.confidence ?? 3,
         params.sourceMessageIds?.trim() || null,
         params.classification ?? 1,
-        params.trust ?? 2,
+        params.trust ?? 0,
         params.integrity ?? 2,
         params.credibility ?? 6,
       );
