@@ -211,17 +211,17 @@ async function main(): Promise<void> {
         });
         sleepChild.on("exit", (code) => {
           if (code === 0) {
-            logInfo("main", "😴 Sleep routine finished successfully");
+            logInfo("main", `😴 Sleep routine finished successfully at ${new Date().toISOString()}`);
             sleepTrigger.reportSuccess();
           } else {
-            logWarn("main", `😴 Sleep routine failed (exit code ${code})`);
+            logWarn("main", `😴 Sleep routine failed (exit code ${code}) at ${new Date().toISOString()}`);
             sleepTrigger.reportFailure();
           }
           sleepChild = null;
           processPendingMessages();
         });
         sleepChild.unref();
-        logInfo("main", `😴 Sleep routine spawned (pid=${sleepChild.pid})`);
+        logInfo("main", `😴 Sleep routine spawned (pid=${sleepChild.pid}) at ${new Date().toISOString()}`);
       }
     } catch (err) {
       logWarn("main", `Sleep trigger check failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1607,13 +1607,15 @@ async function main(): Promise<void> {
         const child = spawn(process.execPath, [sleepScript], { stdio: "ignore", detached: true });
         child.on("exit", (code) => {
           if (code === 0) {
+            logInfo("main", `😴 Cron sleep routine finished successfully at ${new Date().toISOString()}`);
             sleepTrigger.reportSuccess();
           } else {
+            logWarn("main", `😴 Cron sleep routine failed (exit code ${code}) at ${new Date().toISOString()}`);
             sleepTrigger.reportFailure();
           }
         });
         child.unref();
-        logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid})`);
+        logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid}) at ${new Date().toISOString()}`);
       } catch (err) {
         logWarn("main", `sleep-trigger: failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
         sleepTrigger.reportFailure();
