@@ -81,3 +81,5 @@ On `messages` table: trust is implicit from the source (role + chat_id + channel
 5. **Hearsay vs first-hand** — "Peter mentioned the server is down" (aksika relaying, trust=3 but content is second-hand) vs "I checked and the server responds 200" (KP verified, trust=2 but first-hand). Trust reflects source authority, not content certainty — both are useful but the agent should prefer verified facts when they conflict.
 
 6. **LLM-extracted vs user-stated** — Extracted memories are KP's interpretation (trust=2, self). The original user message is ground truth (trust=3, owner via source_message_ids). If extraction misinterprets sarcasm or Hungarian idioms, the expand workflow lets the agent verify against the higher-trust original.
+
+7. **Original language vs English translation** — `content_original` is what the user actually said; `content_en` is KP's English translation. If they conflict, the original language takes precedence — translation can lose nuance, idioms, or intent. When in doubt, fall back to the original wording.
