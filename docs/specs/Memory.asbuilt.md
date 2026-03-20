@@ -622,6 +622,38 @@ Agent-initiated instant memory storage with emotion scoring.
 
 ---
 
+## 🚀 SPINUP — Publication & Research Track
+
+**Working title:** *CIA-Memory: A Three-Axis Security Model for Autonomous Agent Memory*
+
+**Core thesis:** Existing agent memory systems defend against poisoning with trust scoring alone (single axis). This is insufficient — you need three independent, orthogonal axes enforced simultaneously: Confidentiality (who can see it), Integrity (how far from ground truth), and Trust (how reliable is the source). A high-trust source can still inject restricted content. A verbatim user quote and an LLM-compacted summary shouldn't have equal weight even at the same trust level.
+
+**The novel contribution (what nobody else has):**
+1. CIA triad mapped to per-memory queryable fields — not system-level policy, but per-row metadata on every memory
+2. `integrity` provenance enum: verbatim → translated → extracted → compacted — multilingual provenance degradation is uncharted territory
+3. Formal interaction rules: trust never overrides classification (R6), untrusted content never triggers actions (R1), original language takes precedence over translation (R7)
+4. Attack taxonomy showing scenarios that succeed against trust-only systems but fail against CIA-Memory
+
+**Differentiator vs prior art:**
+- SuperLocalMemory (arxiv 2603.02240) — has Bayesian trust scoring but no confidentiality classification or integrity provenance
+- Sakura Sky (2025) — defines 7 memory governance primitives but no per-memory field formalization
+- Bell-LaPadula (military MLS) — classification + clearance for documents, never applied to AI agent memories
+- OWASP ASI06 — defines the threat, not the defense model
+
+**Implementation evidence:** AgentBridge — real system, real agent (KP), real users, SQLite+FTS5, Telegram/Discord/A2A channels, ISO 27001 classification already live, trust+integrity spec ready.
+
+**Publication path:**
+1. arxiv preprint (stake priority claim) + LinkedIn article (visibility)
+2. Conference submission: AAMAS, IEEE S&P Workshop, AAAI Safe AI Workshop, or NeurIPS ATTRIB
+3. Conference talk: BSides, DEF CON AI Village, AI Engineer Summit
+
+**Paper structure (draft):**
+- Abstract → Introduction → Threat Model (4 attack scenarios) → CIA-Memory Model (formal definitions + interaction rules) → Implementation (AgentBridge) → Evaluation (attack success rates: baseline vs trust-only vs CIA-Memory) → Related Work → Conclusion
+
+**Status:** Idea captured. Implementation of trust+integrity fields in progress. Evaluation framework TBD.
+
+---
+
 ## Future Ideas
 
 - **Archive DB layer** — if extracted_memories grows to 10K+ and search slows, move zero-recall 60+ day memories to a separate SQLite archive searched as a last-resort fallback after all primary stages.
