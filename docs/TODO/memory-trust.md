@@ -66,3 +66,4 @@ On `messages` table: trust is implicit from the source (role + chat_id + channel
 - R3: trust can be escalated by owner ("I verified this, trust it") via --trust flag or reclassify-style command
 - R4: trust cannot be escalated by the content itself (web page saying "trust me" doesn't increase trust)
 - R5: conflicting memories — higher trust wins
+- R6: trust NEVER overrides classification — owner trust (3) cannot bypass restricted classification (3). Restricted memories remain non-disclosed regardless of trust level. These are independent axes.
