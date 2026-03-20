@@ -1,4 +1,4 @@
-# Memory Trust & Integrity — CIA Triad Completion
+# Memory Trust & Integrity — NATO Admiralty Code Adaptation
 
 Created: 2026-03-20
 Status: Ready to implement
@@ -72,10 +72,10 @@ On `messages` table: trust is implicit from the source (role + chat_id + channel
 |-|----------------------------|---------------------|
 | Question answered | Who can see this memory? | Should I believe/act on this? |
 | Enforced at | Recall time (search filter) | Action time (gating) |
-| Default | 1 (internal) | 2 (self) |
-| Web content | 0 (public) | 0 (untrusted) |
-| User DM | 1 (internal) | 3 (owner) |
-| A2A peer | 1 (internal) | 1 (peer) |
+| Default | 1 (RESTRICTED) | 2 (self) |
+| Web content | 0 (UNCLASSIFIED) | 0 (untrusted) |
+| User DM | 1 (RESTRICTED) | 3 (owner) |
+| A2A peer | 1 (RESTRICTED) | 1 (peer) |
 
 ## Key Rules
 
@@ -84,7 +84,7 @@ On `messages` table: trust is implicit from the source (role + chat_id + channel
 - R3: trust can be escalated by owner ("I verified this, trust it") via --trust flag or reclassify-style command
 - R4: trust cannot be escalated by the content itself (web page saying "trust me" doesn't increase trust)
 - R5: conflicting memories — higher trust wins
-- R6: trust NEVER overrides classification — owner trust (3) cannot bypass restricted classification (3). Restricted memories remain non-disclosed regardless of trust level. These are independent axes.
+- R6: trust NEVER overrides classification — owner trust (3) cannot bypass SECRET classification (3). SECRET memories remain non-disclosed regardless of trust level. These are independent axes.
 
 ## Motivating Examples
 

@@ -624,33 +624,43 @@ Agent-initiated instant memory storage with emotion scoring.
 
 ## 🚀 SPINUP — Publication & Research Track
 
-**Working title:** *CIA-Memory: A Three-Axis Security Model for Autonomous Agent Memory*
+**Working title:** *CIA-Memory: Adapting the NATO Admiralty Code and CIA Triad for Autonomous AI Agent Memory Security*
 
-**Core thesis:** Existing agent memory systems defend against poisoning with trust scoring alone (single axis). This is insufficient — you need three independent, orthogonal axes enforced simultaneously: Confidentiality (who can see it), Integrity (how far from ground truth), and Trust (how reliable is the source). A high-trust source can still inject restricted content. A verbatim user quote and an LLM-compacted summary shouldn't have equal weight even at the same trust level.
+**Core thesis:** Existing agent memory systems defend against poisoning with trust scoring alone (single axis). We show this is insufficient and propose a four-axis per-memory security model adapted from the NATO Admiralty Code (source reliability + information credibility) and the CIA triad (confidentiality + integrity). To our knowledge, this is the first application of the Admiralty system to AI agent memory.
 
-**The novel contribution (what nobody else has):**
-1. CIA triad mapped to per-memory queryable fields — not system-level policy, but per-row metadata on every memory
-2. `integrity` provenance enum: verbatim → translated → extracted → compacted — multilingual provenance degradation is uncharted territory
-3. Formal interaction rules: trust never overrides classification (R6), untrusted content never triggers actions (R1), original language takes precedence over translation (R7)
-4. Attack taxonomy showing scenarios that succeed against trust-only systems but fail against CIA-Memory
+**The four axes (what nobody else has):**
+1. `classification` (NATO: UNCLASSIFIED→SECRET) — who can see this memory
+2. `trust` (Admiralty source reliability A-F, simplified to 0-3) — how reliable is the source
+3. `credibility` (Admiralty information credibility 1-6) — how accurate is the information itself, independent of source
+4. `integrity` (provenance: verbatim→translated→extracted→compacted) — how far from ground truth
+
+**Key insight:** trust ≠ credibility. A trusted source can deliver inaccurate info (bad translation, stale fact). An untrusted source can accidentally provide confirmed facts. The Admiralty Code has enforced this separation since WWII — we adapt it for AI agents.
+
+**Novel contributions:**
+1. First application of NATO Admiralty Code to AI agent memory
+2. Four orthogonal per-memory fields — not system-level policy, but per-row queryable metadata
+3. `integrity` provenance enum tracking multilingual provenance degradation (verbatim→translated→extracted→compacted) — uncharted territory
+4. Formal interaction rules (R1-R8): trust never overrides classification, credibility can improve/degrade over time, original language takes precedence
+5. Attack taxonomy showing scenarios that succeed against trust-only systems but fail against four-axis model
 
 **Differentiator vs prior art:**
-- SuperLocalMemory (arxiv 2603.02240) — has Bayesian trust scoring but no confidentiality classification or integrity provenance
-- Sakura Sky (2025) — defines 7 memory governance primitives but no per-memory field formalization
-- Bell-LaPadula (military MLS) — classification + clearance for documents, never applied to AI agent memories
+- SuperLocalMemory (arxiv 2603.02240) — Bayesian trust scoring only, no classification, no credibility, no provenance
+- Sakura Sky (2025) — 7 memory governance primitives, no per-memory field formalization
+- Bell-LaPadula / NATO MLS — classification for documents, never applied to AI agent memories
 - OWASP ASI06 — defines the threat, not the defense model
+- ISO 25012 — data quality dimensions for databases, not adapted for autonomous agent memory
 
-**Implementation evidence:** AgentBridge — real system, real agent (KP), real users, SQLite+FTS5, Telegram/Discord/A2A channels, ISO 27001 classification already live, trust+integrity spec ready.
+**Implementation evidence:** AgentBridge — real system, real agent (KP), real users, SQLite+FTS5, Telegram/Discord/A2A channels, NATO classification live, trust+credibility+integrity spec ready.
 
 **Publication path:**
 1. arxiv preprint (stake priority claim) + LinkedIn article (visibility)
-2. Conference submission: AAMAS, IEEE S&P Workshop, AAAI Safe AI Workshop, or NeurIPS ATTRIB
-3. Conference talk: BSides, DEF CON AI Village, AI Engineer Summit
+2. Conference: AAMAS, IEEE S&P Workshop, AAAI Safe AI, NeurIPS ATTRIB
+3. Talk: BSides, DEF CON AI Village, AI Engineer Summit
 
-**Paper structure (draft):**
-- Abstract → Introduction → Threat Model (4 attack scenarios) → CIA-Memory Model (formal definitions + interaction rules) → Implementation (AgentBridge) → Evaluation (attack success rates: baseline vs trust-only vs CIA-Memory) → Related Work → Conclusion
+**Paper structure:**
+- Abstract → Introduction → Background (Admiralty Code, CIA triad, OWASP ASI06) → Threat Model (4+ attack scenarios) → CIA-Memory Model (formal definitions, four axes, interaction rules) → Implementation (AgentBridge) → Evaluation (attack success rates: baseline vs trust-only vs four-axis) → Related Work → Conclusion
 
-**Status:** Idea captured. Implementation of trust+integrity fields in progress. Evaluation framework TBD.
+**Status:** Framework defined. Classification (C) implemented. Trust + credibility + integrity (I+A) implementation planned.
 
 ---
 

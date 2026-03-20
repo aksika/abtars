@@ -66,7 +66,7 @@ ${TODO_CONTENTS}
 
 This is the most important maintenance task. Scan ALL messages in `~/.agentbridge/memory/memory.db` and clean up noise.
 
-**Classification rule**: Never process or surface restricted (classification=3) memories. Use `--max-classification 2` on all recall commands. When storing new extracted memories, assign the correct classification level (0=public, 1=internal, 2=confidential, 3=restricted/secret). See the classification skill for auto-classification triggers.
+**Classification rule**: Never process or surface SECRET (classification=3) memories. Use `--max-classification 2` on all recall commands. When storing new extracted memories, assign the correct NATO classification level (0=UNCLASSIFIED, 1=RESTRICTED, 2=CONFIDENTIAL, 3=SECRET). See the classification skill for auto-classification triggers.
 
 ### Scan Strategy
 
