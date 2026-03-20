@@ -11,13 +11,14 @@ For ANY task that requires a web browser — navigating websites, checking socia
 ## How to delegate
 
 ```bash
-agentbridge-browse --task "description of what to do" --chat-id <CHAT_ID>
+agentbridge-browse --task "description of what to do" --chat-id <CHAT_ID> --thread-id <THREAD_ID>
 ```
 
 ### Parameters
 
 - `--task` (required): Clear description of the goal. Be specific about what to find, do, or extract.
 - `--chat-id` (required): The chat ID to deliver results to.
+- `--thread-id` (optional): The Telegram thread/topic ID. Pass this when the user's message has a `message_thread_id` so the report arrives in the correct thread.
 - `--timeout` (optional): Timeout in seconds. Default: 300 (5 minutes).
 - `--dry-run` (optional): Print the prompt without spawning.
 

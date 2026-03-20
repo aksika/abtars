@@ -21,6 +21,7 @@ export interface PendingReminder {
   chatId: number;
   message: string;
   createdAt: number;
+  threadId?: number;
 }
 
 function readCron(): CronEntry[] {
@@ -265,6 +266,7 @@ export function checkBrowseTasks(): void {
         chatId: entry.chatId,
         message: `🌐 Browse task complete: ${taskLabel}\nReport: ${reportPath}`,
         createdAt: now,
+        threadId: entry.threadId,
       });
       logInfo(TAG, `🌐 Browse task "${taskLabel}" finished — report: ${reportPath}`);
     } else if (elapsed > entry.timeoutMs) {
@@ -276,6 +278,7 @@ export function checkBrowseTasks(): void {
         chatId: entry.chatId,
         message: `🌐 Browse task timed out (${Math.round(entry.timeoutMs / 1000)}s): ${taskLabel}\nPartial report: ${reportPath}`,
         createdAt: now,
+        threadId: entry.threadId,
       });
       logWarn(TAG, `🌐 Browse task "${taskLabel}" timed out — partial report: ${reportPath}`);
     } else {

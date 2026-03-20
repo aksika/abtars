@@ -23,6 +23,7 @@ import { config as loadDotenv } from "dotenv";
 export interface BrowseArgs {
   task?: string;
   chatId?: string;
+  threadId?: string;
   timeout?: string;
   dryRun: boolean;
 }
@@ -31,6 +32,7 @@ export interface PendingBrowseEntry {
   taskId: string;
   task: string;
   chatId: number;
+  threadId?: number;
   pid: number;
   startedAt: number;
   timeoutMs: number;
@@ -46,6 +48,7 @@ export function parseArgs(argv: string[]): BrowseArgs {
     switch (args[i]) {
       case "--task": parsed.task = args[++i] ?? ""; break;
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
+      case "--thread-id": parsed.threadId = args[++i] ?? ""; break;
       case "--timeout": parsed.timeout = args[++i] ?? ""; break;
       case "--dry-run": parsed.dryRun = true; break;
     }
@@ -53,15 +56,16 @@ export function parseArgs(argv: string[]): BrowseArgs {
   return parsed;
 }
 
-export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId: number; timeoutMs: number } | { ok: false; error: string } {
+export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId: number; threadId?: number; timeoutMs: number } | { ok: false; error: string } {
   if (!args.task) return { ok: false, error: "--task is required" };
   if (!args.chatId) return { ok: false, error: "--chat-id is required" };
   const chatId = parseInt(args.chatId, 10);
   if (!Number.isFinite(chatId)) return { ok: false, error: "invalid --chat-id" };
+  const threadId = args.threadId ? parseInt(args.threadId, 10) : undefined;
   const timeoutMs = args.timeout ? parseInt(args.timeout, 10) * 1000 : 5 * 60 * 1000;
   if (!Number.isFinite(timeoutMs)) return { ok: false, error: "invalid --timeout" };
   const task = args.task.length > 2000 ? args.task.slice(0, 2000) + "…" : args.task;
-  return { ok: true, task, chatId, timeoutMs };
+  return { ok: true, task, chatId, threadId, timeoutMs };
 }
 
 // --- Prompt loading ---
@@ -125,7 +129,7 @@ export function main(argv: string[] = process.argv): void {
     process.exit(1);
   }
 
-  const { task, chatId, timeoutMs } = validation;
+  const { task, chatId, threadId, timeoutMs } = validation;
 
   // Dry-run: print prompt and exit
   if (raw.dryRun) {
@@ -199,7 +203,7 @@ child.on("exit", () => process.exit());
 
   // Record in pending_browse.json
   const entries = readPendingBrowse();
-  entries.push({ taskId, task, chatId, pid: child.pid!, startedAt: Date.now(), timeoutMs, logFile });
+  entries.push({ taskId, task, chatId, threadId, pid: child.pid!, startedAt: Date.now(), timeoutMs, logFile });
   writePendingBrowse(entries);
 
   console.log(JSON.stringify({ ok: true, taskId, status: "spawned", pid: child.pid }));

@@ -417,7 +417,7 @@ async function main(): Promise<void> {
       if (!hasText && !hasVoice) return;
 
       const chatId = message.chat.id;
-      const threadId = undefined; // ignore threads — reply in main chat
+      const threadId = message.message_thread_id;
       const messageId = message.message_id;
       const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
       const senderName = message.from.first_name || message.from.username || `id:${message.from.id}`;
@@ -1659,6 +1659,7 @@ async function main(): Promise<void> {
             chat: { id: r.chatId, type: "private" },
             date: Math.floor(Date.now() / 1000),
             text: `[Scheduled reminder] ${r.message}`,
+            ...(r.threadId ? { message_thread_id: r.threadId } : {}),
           },
         };
         telegramPoller?.injectUpdate(syntheticUpdate);
