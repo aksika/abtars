@@ -162,7 +162,7 @@ SELECT id, content_en FROM extracted_memories ORDER BY source_timestamp DESC;
 
 2. If an exchange's facts are NOT yet extracted, extract them now using `agentbridge-store`:
 ```bash
-agentbridge-store --content-en "<fact>" --content-original "<original>" --memory-type <TYPE> --emotion-score <SCORE> --chat-id <CHAT_ID> --keyword "<keyword>" --confidence <1-5> --source-ids "<msg_id1,msg_id2>"
+agentbridge-store --content-en "<fact>" --content-original "<original>" --memory-type <TYPE> --emotion-score <SCORE> --chat-id <CHAT_ID> --keyword "<keyword>" --confidence <1-5> --source-ids "<msg_id1,msg_id2>" --trust 2 --integrity 2 --credibility 2
 ```
 
 3. After confirming the facts are stored, garbage-mark the verbose original messages (add to `garbage.json`). Keep 1-2 representative messages if the exchange is historically significant.

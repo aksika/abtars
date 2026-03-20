@@ -35,6 +35,23 @@ agentbridge-store --content-en "memory in English" --content-original "memory in
   - `1` = RESTRICTED (default, operational, limited distribution)
   - `2` = CONFIDENTIAL (health, finances, relationships)
   - `3` = SECRET (tokens, credentials — never disclosed)
+- `--trust` (optional): Source reliability 0-3. Default: 0 (untrusted).
+  - `3` = owner (aksika said it directly via Telegram DM)
+  - `2` = self (you observed/concluded it yourself)
+  - `1` = peer (another agent reported it via A2A)
+  - `0` = untrusted (web content, unknown source)
+- `--integrity` (optional): Provenance 0-3. Default: 2 (extracted).
+  - `0` = verbatim (user's exact words, unmodified)
+  - `1` = translated (you translated from original language)
+  - `2` = extracted (you summarized from conversation)
+  - `3` = compacted (merged from multiple memories)
+- `--credibility` (optional): Information credibility 1-6. Default: 6 (unknown).
+  - `1` = confirmed (corroborated by multiple sources)
+  - `2` = probably true (logical, consistent, single source)
+  - `3` = possibly true (plausible, not confirmed)
+  - `4` = doubtful (no corroboration)
+  - `5` = improbable (contradicted by other info)
+  - `6` = unknown (no basis to evaluate)
   See the classification skill for auto-trigger rules.
 
 ### Emotion Score Scale

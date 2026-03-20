@@ -292,6 +292,8 @@ export class MemoryIndex {
         WHERE ${conditions.join(" AND ")}
         ORDER BY rank * (1.0 + 0.1 * COALESCE(em.recall_count, 0))
                       * CASE WHEN COALESCE(em.relevance_score, 0) > 0 THEN 1.2 ELSE 1.0 END
+                      / (0.5 + 0.5 * COALESCE(em.trust, 0) / 3.0)
+                      * CASE WHEN COALESCE(em.credibility, 6) <= 2 THEN 0.8 ELSE 1.0 END
                ASC
         LIMIT ?
       `;
@@ -329,7 +331,7 @@ export class MemoryIndex {
           integrity: row.integrity ?? 2,
           credibility: row.credibility ?? 6,
           tier: "extracted" as const,
-          score: (bm25Score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost),
+          score: (bm25Score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * (0.5 + 0.5 * (row.trust ?? 0) / 3) * (row.credibility !== null && row.credibility <= 2 ? 1.25 : 1),
         };
       });
     } catch (err) {
@@ -383,6 +385,8 @@ export class MemoryIndex {
         WHERE ${conditions.join(" AND ")}
         ORDER BY rank * (1.0 + 0.1 * COALESCE(em.recall_count, 0))
                       * CASE WHEN COALESCE(em.relevance_score, 0) > 0 THEN 1.2 ELSE 1.0 END
+                      / (0.5 + 0.5 * COALESCE(em.trust, 0) / 3.0)
+                      * CASE WHEN COALESCE(em.credibility, 6) <= 2 THEN 0.8 ELSE 1.0 END
                ASC
         LIMIT ?
       `;
@@ -414,7 +418,7 @@ export class MemoryIndex {
         const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
         const recallBoost = 0.1 * (row.recall_count ?? 0);
         const relevanceBoost = (row.relevance_score ?? 0) > 0 ? 0.2 : 0;
-        score = (score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost);
+        score = (score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * (0.5 + 0.5 * (row.trust ?? 0) / 3) * (row.credibility !== null && row.credibility <= 2 ? 1.25 : 1);
         return {
           id: row.id,
           content: row.content_en,

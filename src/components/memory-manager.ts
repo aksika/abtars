@@ -1400,7 +1400,8 @@ export class MemoryManager {
       UPDATE extracted_memories SET
         recall_count = recall_count + ?,
         relevance_score = MAX(relevance_score, ?),
-        confidence = MAX(confidence, ?)
+        confidence = MAX(confidence, ?),
+        integrity = 3
       WHERE id = ?
     `).run(older!.recall_count ?? 0, older!.relevance_score ?? 0, older!.confidence ?? 3, newer!.id);
 

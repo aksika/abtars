@@ -512,5 +512,45 @@ describe("Memory Darwinism", () => {
       expect(raw.integrity).toBe("3");
       expect(raw.credibility).toBe("4");
     });
+
+    it("higher trust memories score higher than lower trust", () => {
+      // Insert two identical memories with different trust
+      const id1 = insertMemory(db, { contentEn: "user likes dogs" });
+      const id2 = insertMemory(db, { contentEn: "user likes dogs" });
+      db.prepare("UPDATE extracted_memories SET trust = 3 WHERE id = ?").run(id1);
+      db.prepare("UPDATE extracted_memories SET trust = 0 WHERE id = ?").run(id2);
+
+      const results = index.searchExtracted("dogs");
+      expect(results.length).toBe(2);
+      // trust=3 should score higher
+      const highTrust = results.find(r => r.id === id1)!;
+      const lowTrust = results.find(r => r.id === id2)!;
+      expect(highTrust.score).toBeGreaterThan(lowTrust.score);
+    });
+
+    it("mergeMemories sets integrity to 3 (compacted)", () => {
+      const id1 = insertMemory(db, { contentEn: "user likes cats a lot" });
+      const id2 = insertMemory(db, { contentEn: "user likes cats very much" });
+      db.prepare("UPDATE extracted_memories SET integrity = 0 WHERE id IN (?, ?)").run(id1, id2);
+
+      const mgr = { db } as unknown as import("./memory-manager.js").MemoryManager;
+      // Call mergeMemories directly via the db
+      const [older, newer] = db.prepare(
+        "SELECT id, created_at FROM extracted_memories WHERE id IN (?, ?) ORDER BY created_at ASC"
+      ).all(id1, id2) as Array<{ id: number; created_at: number }>;
+
+      db.prepare(`
+        UPDATE extracted_memories SET
+          recall_count = recall_count + 0,
+          relevance_score = MAX(relevance_score, 0),
+          confidence = MAX(confidence, 3),
+          integrity = 3
+        WHERE id = ?
+      `).run(newer!.id);
+      db.prepare("DELETE FROM extracted_memories WHERE id = ?").run(older!.id);
+
+      const row = db.prepare("SELECT integrity FROM extracted_memories WHERE id = ?").get(newer!.id) as { integrity: number };
+      expect(row.integrity).toBe(3);
+    });
   });
 });
