@@ -2,7 +2,7 @@
 
 ## Overview
 
-The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, sleep-subagent-driven extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, an automated sleep maintenance cycle with template-based subagent instructions and 7-step garbage collection, immutable chat_backup safety table, emoji stripping before DB indexing, regex-based prompt injection scanning on A2A inbound messages, and Telegram reaction-to-emotion scoring via platform message ID tracking.
+The local memory layer provides SQLite-backed persistence, JSONL transcript files, FTS5 full-text search, optional local-model vector search, external document ingestion, LLM-generated reflections, embedding model hot-swap, selective forgetting, sleep-subagent-driven extraction with English-normalized dual-column storage, agent-initiated memory search with temporal decay and MMR diversity, agent-initiated instant memory storage with emotion scoring, emotion-boosted search ranking, an automated sleep maintenance cycle with template-based subagent instructions and 7-step garbage collection, immutable chat_backup safety table, emoji stripping before DB indexing, regex-based prompt injection scanning on A2A inbound messages, Telegram reaction-to-emotion scoring via platform message ID tracking, Memory Darwinism (recall tracking, relevance scoring, confidence, fitness-based pruning, memory merging), source message linking with expand CLI, large message interception with overflow files, and ISO 27001 memory confidentiality classification (public/internal/confidential/restricted).
 
 **Recall architecture**: The bridge does NOT inject recalled memories or context into the prompt. The LLM agent handles all recall autonomously — it reads the `memory-search.md` steering file, decides when to search, extracts relevant keywords from user input, and invokes `agentbridge-recall` via `execute_bash`. This leverages the LLM's natural language understanding for keyword extraction instead of a heuristic pipeline.
 
@@ -18,6 +18,9 @@ The local memory layer provides SQLite-backed persistence, JSONL transcript file
 | Sleep GC | 7-step garbage collection: purge expired, immediate deletes, emotion harvest, noise mark, repeated probes, verify-extract-mark, audit report | ✅ Complete |
 | Data Integrity | Emoji stripping (DB indexing), A2A prompt injection scanning (22 patterns) | ✅ Complete |
 | Reaction Scoring | Telegram emoji reactions → emotion_score on messages via platform_message_id | ✅ Complete |
+| Memory Darwinism | Recall tracking (recall_count, last_recalled_at), relevance scoring, confidence, ranking boost, memory merging, fitness-based pruning | ✅ Complete |
+| LCM Enhancements | Source message linking (source_message_ids), agentbridge-expand CLI, large message interception (overflow files) | ✅ Complete |
+| Memory Confidentiality | ISO 27001 classification (0=public, 1=internal, 2=confidential, 3=restricted), search filtering, reclassify with restricted guard, A2A recall=public only | ✅ Complete |
 | Phase 3 — Intelligence | Proactive recall, importance scoring, contradiction detection | 📋 Designed |
 
 ---
@@ -310,11 +313,15 @@ src/
     agentbridge-sleep.ts   # Sleep CLI (overnight maintenance)
     agentbridge-recall.ts  # Agent-initiated memory search (8-stage cascade)
     agentbridge-store.ts   # Agent-initiated instant storage
+    agentbridge-expand.ts  # Source message lookup by ID
   persona/
     sleeping_prompt.md     # Editable sleep template with ${VARIABLE} substitution
   skills/
-    memory-search/SKILL.md
-    instant-store/SKILL.md
+    memory-search/SKILL.md   # Recall skill — keywords, source_ids output, expand workflow
+    instant-store/SKILL.md   # Store skill — emotion, confidence, classification
+    classification/SKILL.md  # ISO 27001 auto-trigger rules, context-based disclosure
+  components/
+    message-interceptor.ts   # Large message interception → overflow files
   main.ts                  # Transport wiring, command handlers, sleep trigger
 ```
 
