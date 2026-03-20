@@ -24,6 +24,9 @@
 import { MemoryManager } from "../components/memory-manager.js";
 import { loadMemoryConfig } from "../components/memory-config.js";
 import type { InstantStoreParams } from "../types/index.js";
+import { appendFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export type RawArgs = {
   contentEn?: string;
@@ -176,6 +179,21 @@ async function main() {
     if (!validation.ok) {
       console.log(JSON.stringify({ stored: false, error: validation.error }));
       process.exit(1);
+    }
+
+    // Prompt injection scan for trust < 5
+    const trust = validation.params.trust ?? 0;
+    if (trust < 5) {
+      const { scanPrompt } = await import("../components/prompt-scanner.js");
+      const hit = scanPrompt(validation.params.contentEn)
+        ?? (validation.params.contentOriginal ? scanPrompt(validation.params.contentOriginal) : null);
+      if (hit) {
+        const logLine = `${new Date().toISOString()} BLOCKED patternId=${hit.patternId} matched="${hit.matched}" trust=${trust} content="${validation.params.contentEn.slice(0, 120)}"\n`;
+        const logPath = join(homedir(), ".agentbridge", "logs", "prompt_injection.log");
+        try { appendFileSync(logPath, logLine); } catch { /* best-effort */ }
+        console.log(JSON.stringify({ stored: false, error: `Prompt injection detected (${hit.patternId}): "${hit.matched}"`, blocked: true }));
+        process.exit(1);
+      }
     }
 
     const result = await memory.instantStore(validation.params);

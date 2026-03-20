@@ -521,6 +521,23 @@ The sleep cycle is the maintenance routine. It runs via two triggers:
 - Pruned by wired logic only: `pruneBackup()` deletes rows >7 days on startup
 - Searchable as Stage 8 fallback in `agentbridge-recall` (LIKE search)
 
+**Prompt Injection Scanning (two-tier):**
+
+Tier 1 — Fast regex gate (`prompt-scanner.ts`), runs synchronously at store time:
+- 22 compiled regex patterns + invisible unicode detection (zero-width chars, bidi overrides)
+- Covers: role hijack, system prompt leaks, jailbreak patterns (DAN, dev mode), exfiltration (curl/wget secrets), destructive commands, HTML comment injection
+- Applied to all `agentbridge-store` calls where trust < 5 (i.e. everything except user's own words)
+- On hit: store is blocked, JSON error returned, logged to `~/.agentbridge/logs/prompt_injection.log`
+- Same scanner already protects A2A inbound messages (`agent-api-server.ts`)
+
+Tier 2 — Deep LLM scan during sleep cycle (§ in sleeping_prompt.md):
+- **STATUS: PASSIVE — not yet wired into sleeping_prompt.md**
+- Design: sleep subagent queries all `extracted_memories` stored since last sleep with trust < 5, reads content, applies LLM judgment to detect sophisticated injection (encoded payloads, semantic manipulation, multi-step chains) that regex cannot catch
+- On suspicion: log to `prompt_injection.log`, demote memory, flag for aksika review — do NOT auto-delete
+- Cost: negligible — typically 5-15 new memories/day, ~3k tokens total
+
+Baseline audit (2026-03-20): All 42 existing extracted memories scanned by both Tier 1 (regex) and Tier 2 (Opus manual review). Result: zero hits. All directive-style content ("DO NOT", "STRICTLY FORBIDDEN") confirmed as legitimate user-set policies (trust=3). No external/web-sourced memories (trust=0) exist yet — injection risk is future-facing, primarily from tweet ingestion pipeline.
+
 ### Command Handlers
 
 | Command | Description |
