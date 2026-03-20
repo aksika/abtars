@@ -24,6 +24,7 @@
     "dotenv": "^16.4.7",
     "patchright": "^1.58.2",
     "pdf-parse": "^2.4.5",
+    "rettiwt-api": "^6.2.1",
     "ws": "^8.19.0",
     "youtube-transcript": "^1.2.1"
   },
@@ -41,6 +42,7 @@
     "agentbridge-recall": "dist/cli/agentbridge-recall.js",
     "agentbridge-store": "dist/cli/agentbridge-store.js",
     "agentbridge-sleep": "dist/cli/agentbridge-sleep.js",
-    "agentbridge-browser": "dist/cli/agentbridge-browser.js"
+    "agentbridge-browser": "dist/cli/agentbridge-browser.js",
+    "agentbridge-tweet": "dist/cli/agentbridge-tweet.js"
   }
 }
