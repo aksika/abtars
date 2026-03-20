@@ -417,7 +417,7 @@ async function main(): Promise<void> {
       if (!hasText && !hasVoice) return;
 
       const chatId = message.chat.id;
-      const threadId = message.message_thread_id;
+      const threadId = undefined; // ignore threads — reply in main chat
       const messageId = message.message_id;
       const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
       const senderName = message.from.first_name || message.from.username || `id:${message.from.id}`;
