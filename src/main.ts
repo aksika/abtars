@@ -201,7 +201,7 @@ async function main(): Promise<void> {
     // Run sleep on startup if needed (≥8am, no audit today)
     try {
       if (sleepTrigger.shouldRunOnStartup()) {
-        logInfo("main", "😴 Startup sleep trigger fired — spawning sleep routine in background");
+        logInfo("main", `😴 Startup sleep trigger fired — spawning sleep routine at ${new Date().toISOString()}`);
         sleepTrigger.writeLock();
         const thisDir = dirname(fileURLToPath(import.meta.url));
         const sleepScript = join(thisDir, "cli", "agentbridge-sleep.js");
