@@ -202,6 +202,7 @@ async function main(): Promise<void> {
     try {
       if (sleepTrigger.shouldRunOnStartup()) {
         logInfo("main", "😴 Startup sleep trigger fired — spawning sleep routine in background");
+        sleepTrigger.writeLock();
         const thisDir = dirname(fileURLToPath(import.meta.url));
         const sleepScript = join(thisDir, "cli", "agentbridge-sleep.js");
         sleepChild = spawn(process.execPath, [sleepScript], {
@@ -1600,6 +1601,7 @@ async function main(): Promise<void> {
         lastMessageTs = row?.latest ?? 0;
       } catch { return; }
       if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) return;
+      sleepTrigger.writeLock();
       try {
         const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
         const child = spawn(process.execPath, [sleepScript], { stdio: "ignore", detached: true });

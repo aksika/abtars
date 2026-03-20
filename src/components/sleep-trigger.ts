@@ -1,4 +1,5 @@
-import { readdirSync, existsSync } from "node:fs";
+import { readdirSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { logInfo, logDebug } from "./logger.js";
 
 const TAG = "sleep-trigger";
@@ -94,6 +95,16 @@ export class SleepTrigger {
     }
 
     return false;
+  }
+
+  /** Write a lock file immediately so restarts don't spawn duplicates. */
+  writeLock(): void {
+    try {
+      mkdirSync(this.auditDir, { recursive: true });
+      const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      writeFileSync(join(this.auditDir, `sleep_${today}.lock`), String(process.pid), "utf-8");
+      logInfo(TAG, "Lock file written");
+    } catch { /* best-effort */ }
   }
 
   private hasSleepAuditToday(): boolean {
