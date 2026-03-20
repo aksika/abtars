@@ -1,4 +1,4 @@
-# Memory Trust — Source Reliability Scoring
+# Memory Trust & Integrity — CIA Triad Completion
 
 Created: 2026-03-20
 Status: Ready to implement
@@ -6,9 +6,10 @@ Depends on: Memory Confidentiality (classification) — done
 
 ## Concept
 
-Orthogonal to classification (who can see it), trust answers: **how reliable is this information and should I act on it?**
-
-Classification = visibility. Trust = reliability + authority.
+Completes the CIA triad for the memory system:
+- **Confidentiality** = `classification` (done) — who can see it
+- **Integrity** = `trust` (source reliability) + `integrity` (provenance) — should I believe it, how far from ground truth
+- **Availability** = system-level (recall cascade, backup, archive) — no per-memory field needed
 
 ## Trust Levels
 
@@ -24,19 +25,36 @@ Classification = visibility. Trust = reliability + authority.
 ```sql
 ALTER TABLE extracted_memories ADD COLUMN trust INTEGER DEFAULT 2;
 -- Default 2 (self) because most extracted memories come from KP's own extraction process
+
+ALTER TABLE extracted_memories ADD COLUMN integrity TEXT DEFAULT 'extracted';
+-- Provenance: how far is this content from ground truth
 ```
+
+### Integrity values
+
+| Value | Meaning | Trust implication |
+|-------|---------|-------------------|
+| `verbatim` | User's exact words, unmodified | Highest — ground truth, no interpretation |
+| `translated` | KP translated from user's original language | High — but check `content_original` if ambiguous |
+| `extracted` | KP extracted/summarized from conversation (default) | Medium — agent interpretation, may lose nuance |
+| `compacted` | KP merged/compressed multiple memories | Lower — derived, furthest from source |
 
 On `messages` table: trust is implicit from the source (role + chat_id + channel), no column needed.
 
 ## Implementation Tasks
 
-- [ ] Task 1: Schema — add `trust INTEGER DEFAULT 2` to extracted_memories (idempotent ALTER TABLE)
-- [ ] Task 2: Store CLI — `--trust 0-3` on agentbridge-store, pass through InstantStoreParams
+- [ ] Task 1: Schema — add `trust INTEGER DEFAULT 2` and `integrity TEXT DEFAULT 'extracted'` to extracted_memories (idempotent ALTER TABLE)
+- [ ] Task 2: Store CLI — `--trust 0-3` and `--integrity verbatim|translated|extracted|compacted` on agentbridge-store, pass through InstantStoreParams
 - [ ] Task 3: Auto-assign trust at store time based on source context:
   - Telegram DM from ALLOWED_USER_IDS → trust=3 (owner)
   - KP self-generated (extraction, observation) → trust=2 (self)
   - A2A inbound (b2b-router) → trust=1 (peer)
   - Web/browse results → trust=0 (untrusted)
+- [ ] Task 3b: Auto-assign integrity at store time:
+  - Direct user quote stored verbatim → integrity=verbatim
+  - Sleep extraction with translation → integrity=translated
+  - Sleep extraction summarized → integrity=extracted
+  - mergeMemories() output → integrity=compacted
 - [ ] Task 4: Recall ranking boost — multiply Darwinism score by trust factor (e.g. `* (0.5 + 0.5 * trust/3)`)
 - [ ] Task 5: Action gating skill — rules for what KP can do based on trust level of the triggering information:
   - trust=3: full authority
