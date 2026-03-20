@@ -171,6 +171,7 @@ export type InstantStoreParams = {
   keyword?: string;
   confidence?: number;
   sourceMessageIds?: string;
+  classification?: number;
 };
 
 /** Result of an instant memory store operation. */

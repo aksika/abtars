@@ -66,6 +66,8 @@ ${TODO_CONTENTS}
 
 This is the most important maintenance task. Scan ALL messages in `~/.agentbridge/memory/memory.db` and clean up noise.
 
+**Classification rule**: Never process or surface restricted (classification=3) memories. Use `--max-classification 2` on all recall commands. When storing new extracted memories, assign the correct classification level (0=public, 1=internal, 2=confidential, 3=restricted/secret). See the classification skill for auto-classification triggers.
+
 ### Scan Strategy
 
 First, dump all user messages for review:
@@ -221,8 +223,8 @@ Review extracted memories using Darwinism signals from the state snapshot (`dbSt
 
 Query the full picture:
 ```sql
-SELECT id, substr(content_en,1,80), recall_count, relevance_score, confidence, last_recalled_at, created_at
-FROM extracted_memories ORDER BY recall_count DESC LIMIT 50;
+SELECT id, substr(content_en,1,80), recall_count, relevance_score, confidence, classification, last_recalled_at, created_at
+FROM extracted_memories WHERE classification < 3 ORDER BY recall_count DESC LIMIT 50;
 ```
 
 Apply these rules:

@@ -16,14 +16,14 @@ function makeConfig(tmpDir: string): MemoryConfig {
 /** Insert an extracted memory directly and return its id. */
 function insertMemory(
   db: ReturnType<typeof initializeDatabase>,
-  opts: { contentEn: string; chatId?: number; recallCount?: number; relevanceScore?: number; confidence?: number; sourceMessageIds?: string; createdAt?: number },
+  opts: { contentEn: string; chatId?: number; recallCount?: number; relevanceScore?: number; confidence?: number; sourceMessageIds?: string; createdAt?: number; classification?: number },
 ): number {
   const now = Date.now();
   const result = db.prepare(`
     INSERT INTO extracted_memories
       (chat_id, content_original, content_en, memory_type, source_timestamp,
-       preserve_original, emotion_score, created_at, recall_count, relevance_score, confidence, source_message_ids)
-    VALUES (?, ?, ?, 'fact', ?, 0, 0, ?, ?, ?, ?, ?)
+       preserve_original, emotion_score, created_at, recall_count, relevance_score, confidence, source_message_ids, classification)
+    VALUES (?, ?, ?, 'fact', ?, 0, 0, ?, ?, ?, ?, ?, ?)
   `).run(
     opts.chatId ?? 100,
     opts.contentEn,
@@ -34,6 +34,7 @@ function insertMemory(
     opts.relevanceScore ?? 0,
     opts.confidence ?? 3,
     opts.sourceMessageIds ?? null,
+    opts.classification ?? 1,
   );
   return Number(result.lastInsertRowid);
 }
@@ -54,6 +55,7 @@ describe("Memory Darwinism", () => {
       "ALTER TABLE extracted_memories ADD COLUMN relevance_score INTEGER DEFAULT 0",
       "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
       "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
+      "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
     ]) {
       try { db.exec(ddl); } catch { /* already exists */ }
     }
@@ -312,6 +314,153 @@ describe("Memory Darwinism", () => {
       const args = parseArgs(["node", "store", "--merge", "--merge-ids", "5,10"]);
       expect(args.merge).toBe(true);
       expect(args.mergeIds).toBe("5,10");
+    });
+
+    it("parses --classification flag", () => {
+      const args = parseArgs(["node", "store", "--classification", "3"]);
+      expect(args.classification).toBe("3");
+    });
+
+    it("parses --reclassify with --user-override", () => {
+      const args = parseArgs(["node", "store", "--reclassify", "--id", "7", "--classification", "0", "--user-override"]);
+      expect(args.reclassify).toBe(true);
+      expect(args.id).toBe("7");
+      expect(args.classification).toBe("0");
+      expect(args.userOverride).toBe(true);
+    });
+  });
+
+  describe("classification filtering", () => {
+    it("restricted memories are excluded from searchExtracted", () => {
+      const id1 = insertMemory(db, { contentEn: "public wifi password router", classification: 0 });
+      const id2 = insertMemory(db, { contentEn: "secret api key token router", classification: 3 });
+
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id1, "public wifi password router");
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id2, "secret api key token router");
+
+      const results = index.searchExtracted("router");
+      expect(results.length).toBe(1);
+      expect(results[0]!.id).toBe(id1);
+    });
+
+    it("maxClassification=0 only returns public memories", () => {
+      const id1 = insertMemory(db, { contentEn: "public general knowledge fact", classification: 0 });
+      const id2 = insertMemory(db, { contentEn: "internal operational knowledge fact", classification: 1 });
+
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id1, "public general knowledge fact");
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id2, "internal operational knowledge fact");
+
+      const results = index.searchExtracted("knowledge fact", { maxClassification: 0 });
+      expect(results.length).toBe(1);
+      expect(results[0]!.id).toBe(id1);
+    });
+
+    it("maxClassification cannot exceed 2 even if set to 3", () => {
+      const id1 = insertMemory(db, { contentEn: "normal memory about cats", classification: 1 });
+      const id2 = insertMemory(db, { contentEn: "restricted secret about cats", classification: 3 });
+
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id1, "normal memory about cats");
+      db.prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)").run(id2, "restricted secret about cats");
+
+      // Even passing 3, restricted should still be excluded
+      const results = index.searchExtracted("cats", { maxClassification: 3 });
+      expect(results.length).toBe(1);
+      expect(results[0]!.id).toBe(id1);
+    });
+  });
+
+  describe("reclassifyMemory", () => {
+    it("allows reclassifying between public/internal/confidential", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "reclass-"));
+      const mgr = new MemoryManager(makeConfig(dir));
+      await mgr.initialize();
+
+      const mdb = initializeDatabase(join(dir, "memory.db"));
+      for (const ddl of [
+        "ALTER TABLE extracted_memories ADD COLUMN emotion_score INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN recall_count INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN last_recalled_at INTEGER",
+        "ALTER TABLE extracted_memories ADD COLUMN relevance_score INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
+        "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
+      ]) { try { mdb.exec(ddl); } catch { /* */ } }
+      const id = insertMemory(mdb, { contentEn: "test fact", classification: 1 });
+      mdb.close();
+      mgr.close();
+
+      const mgr2 = new MemoryManager(makeConfig(dir));
+      await mgr2.initialize();
+
+      expect(mgr2.reclassifyMemory(id, 2)).toEqual({ ok: true });
+      expect(mgr2.reclassifyMemory(id, 0)).toEqual({ ok: true });
+
+      mgr2.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("blocks declassifying restricted without user-override", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "reclass-block-"));
+      const mgr = new MemoryManager(makeConfig(dir));
+      await mgr.initialize();
+
+      const mdb = initializeDatabase(join(dir, "memory.db"));
+      for (const ddl of [
+        "ALTER TABLE extracted_memories ADD COLUMN emotion_score INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN recall_count INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN last_recalled_at INTEGER",
+        "ALTER TABLE extracted_memories ADD COLUMN relevance_score INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
+        "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
+      ]) { try { mdb.exec(ddl); } catch { /* */ } }
+      const id = insertMemory(mdb, { contentEn: "api key secret", classification: 3 });
+      mdb.close();
+      mgr.close();
+
+      const mgr2 = new MemoryManager(makeConfig(dir));
+      await mgr2.initialize();
+
+      const result = mgr2.reclassifyMemory(id, 1);
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("cannot declassify");
+
+      mgr2.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("allows declassifying restricted WITH user-override", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "reclass-override-"));
+      const mgr = new MemoryManager(makeConfig(dir));
+      await mgr.initialize();
+
+      const mdb = initializeDatabase(join(dir, "memory.db"));
+      for (const ddl of [
+        "ALTER TABLE extracted_memories ADD COLUMN emotion_score INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN recall_count INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN last_recalled_at INTEGER",
+        "ALTER TABLE extracted_memories ADD COLUMN relevance_score INTEGER DEFAULT 0",
+        "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
+        "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
+      ]) { try { mdb.exec(ddl); } catch { /* */ } }
+      const id = insertMemory(mdb, { contentEn: "old secret now public", classification: 3 });
+      mdb.close();
+      mgr.close();
+
+      const mgr2 = new MemoryManager(makeConfig(dir));
+      await mgr2.initialize();
+
+      const result = mgr2.reclassifyMemory(id, 0, true);
+      expect(result.ok).toBe(true);
+
+      const mdb2 = initializeDatabase(join(dir, "memory.db"));
+      const row = mdb2.prepare("SELECT classification FROM extracted_memories WHERE id = ?").get(id) as { classification: number };
+      expect(row.classification).toBe(0);
+      mdb2.close();
+
+      mgr2.close();
+      rmSync(dir, { recursive: true, force: true });
     });
   });
 });

@@ -249,7 +249,7 @@ export class MemoryIndex {
    */
   searchExtracted(
     query: string,
-    opts?: { chatId?: number; startTime?: number; endTime?: number; limit?: number },
+    opts?: { chatId?: number; startTime?: number; endTime?: number; limit?: number; maxClassification?: number },
     mode: "or" | "and" = "and",
   ): MemorySearchResult[] {
     try {
@@ -260,6 +260,11 @@ export class MemoryIndex {
 
       const conditions: string[] = ["extracted_memories_fts MATCH ?"];
       const params: (string | number)[] = [sanitizedQuery];
+
+      // Classification filter — always exclude restricted (3), cap at maxClassification
+      const maxCls = Math.min(opts?.maxClassification ?? 2, 2);
+      conditions.push("COALESCE(em.classification, 1) <= ?");
+      params.push(maxCls);
 
       if (opts?.chatId !== undefined) {
         conditions.push("em.chat_id = ?");
@@ -336,7 +341,7 @@ export class MemoryIndex {
    */
   searchOriginal(
     query: string,
-    opts?: { chatId?: number; limit?: number; boostPreserved?: boolean },
+    opts?: { chatId?: number; limit?: number; boostPreserved?: boolean; maxClassification?: number },
     mode: "or" | "and" = "and",
   ): MemorySearchResult[] {
     try {
@@ -347,6 +352,11 @@ export class MemoryIndex {
 
       const conditions: string[] = ["extracted_memories_original_fts MATCH ?"];
       const params: (string | number)[] = [sanitizedQuery];
+
+      // Classification filter — always exclude restricted (3)
+      const maxCls = Math.min(opts?.maxClassification ?? 2, 2);
+      conditions.push("COALESCE(em.classification, 1) <= ?");
+      params.push(maxCls);
 
       if (opts?.chatId !== undefined) {
         conditions.push("em.chat_id = ?");

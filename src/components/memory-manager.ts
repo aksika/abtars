@@ -132,6 +132,7 @@ export class MemoryManager {
         "ALTER TABLE extracted_memories ADD COLUMN relevance_score INTEGER DEFAULT 0",
         "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
         "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
       ]) {
         try { this.db.exec(ddl); } catch { /* already exists */ }
       }
@@ -1317,8 +1318,8 @@ export class MemoryManager {
         `INSERT INTO extracted_memories
            (chat_id, content_original, content_en, memory_type, source_timestamp,
             preserve_original, preserved_keyword, emotion_score, created_at,
-            confidence, source_message_ids)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            confidence, source_message_ids, classification)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         params.chatId,
         params.contentOriginal.trim(),
@@ -1331,6 +1332,7 @@ export class MemoryManager {
         now,
         params.confidence ?? 3,
         params.sourceMessageIds?.trim() || null,
+        params.classification ?? 1,
       );
 
       // Advance watermark to prevent heartbeat re-extraction
@@ -1355,6 +1357,25 @@ export class MemoryManager {
     this.db.prepare(
       "UPDATE extracted_memories SET relevance_score = relevance_score + ? WHERE id = ?",
     ).run(delta, id);
+  }
+
+  /**
+   * Reclassify a memory's confidentiality level.
+   * Restricted (3) is permanent — agent cannot lower it without userOverride.
+   */
+  reclassifyMemory(id: number, level: number, userOverride = false): { ok: boolean; error?: string } {
+    if (!this.db) return { ok: false, error: "memory disabled" };
+    if (level < 0 || level > 3) return { ok: false, error: "classification must be 0-3" };
+
+    const row = this.db.prepare("SELECT classification FROM extracted_memories WHERE id = ?").get(id) as { classification: number } | undefined;
+    if (!row) return { ok: false, error: "memory not found" };
+
+    if (row.classification === 3 && level < 3 && !userOverride) {
+      return { ok: false, error: "cannot declassify restricted memory without --user-override" };
+    }
+
+    this.db.prepare("UPDATE extracted_memories SET classification = ? WHERE id = ?").run(level, id);
+    return { ok: true };
   }
 
   /** Merge two extracted memories: keep newer, combine Darwinism scores, delete older. */

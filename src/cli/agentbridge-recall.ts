@@ -31,6 +31,7 @@ function parseArgs() {
   let timeEnd: number | undefined;
   let chatId = 0;
   let limit = DEFAULT_LIMIT;
+  let maxClassification = 2;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -40,6 +41,7 @@ function parseArgs() {
       case "--time-end": timeEnd = parseInt(args[++i] ?? "", 10) || undefined; break;
       case "--chat-id": chatId = parseInt(args[++i] ?? "", 10) || 0; break;
       case "--limit": limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(args[++i] ?? "", 10) || DEFAULT_LIMIT)); break;
+      case "--max-classification": maxClassification = Math.min(2, Math.max(0, parseInt(args[++i] ?? "", 10))); break;
     }
   }
 
@@ -47,7 +49,7 @@ function parseArgs() {
     console.error("Usage: agentbridge-recall --keywords \"kw1,kw2\" --chat-id <id> [--original <kw>] [--limit <N>] [--time-start <ms>] [--time-end <ms>]");
     process.exit(1);
   }
-  return { keywords, original, timeStart, timeEnd, chatId, limit };
+  return { keywords, original, timeStart, timeEnd, chatId, limit, maxClassification };
 }
 
 if (!existsSync(DB_PATH)) {
@@ -60,7 +62,7 @@ const db = new Database(DB_PATH, { readonly: true });
 
 try {
   const index = new MemoryIndex(db);
-  const searchOpts = { chatId: params.chatId, startTime: params.timeStart, endTime: params.timeEnd, limit: params.limit * 3 };
+  const searchOpts = { chatId: params.chatId, startTime: params.timeStart, endTime: params.timeEnd, limit: params.limit * 3, maxClassification: params.maxClassification };
   const query = params.keywords.join(" ");
 
   type Out = { content: string; date: string; source: string; score: number };
@@ -107,7 +109,7 @@ try {
 
   // Stage 6: Extracted memories — original language (L4)
   if (params.original) {
-    for (const r of index.searchOriginal(params.original, { chatId: params.chatId, limit: params.limit * 3 })) addExtracted(r, "extracted:original");
+    for (const r of index.searchOriginal(params.original, { chatId: params.chatId, limit: params.limit * 3, maxClassification: params.maxClassification })) addExtracted(r, "extracted:original");
   }
 
   // Stage 7: Compaction summaries — file-based search

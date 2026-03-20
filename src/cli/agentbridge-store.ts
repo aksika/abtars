@@ -39,6 +39,9 @@ export type RawArgs = {
   id?: string;
   merge?: boolean;
   mergeIds?: string;
+  classification?: string;
+  reclassify?: boolean;
+  userOverride?: boolean;
 };
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -67,6 +70,9 @@ export function parseArgs(argv: string[]): RawArgs {
       case "--id": parsed.id = args[++i] ?? ""; break;
       case "--merge": parsed.merge = true; break;
       case "--merge-ids": parsed.mergeIds = args[++i] ?? ""; break;
+      case "--classification": parsed.classification = args[++i] ?? ""; break;
+      case "--reclassify": parsed.reclassify = true; break;
+      case "--user-override": parsed.userOverride = true; break;
     }
   }
 
@@ -98,6 +104,7 @@ export function validateArgs(raw: RawArgs): { ok: true; params: InstantStorePara
       memoryType: raw.memoryType as InstantStoreParams["memoryType"],
       emotionScore: parseInt(raw.emotionScore, 10) || 0,
       keyword: raw.keyword,
+      classification: raw.classification ? parseInt(raw.classification, 10) : undefined,
     },
   };
 }
@@ -112,6 +119,19 @@ async function main() {
 
   try {
     await memory.initialize();
+
+    // --reclassify path: change classification level on existing memory
+    if (raw.reclassify) {
+      if (!raw.id || !raw.classification) {
+        console.log(JSON.stringify({ stored: false, error: "--id and --classification are required with --reclassify" }));
+        process.exit(1);
+      }
+      const id = parseInt(raw.id, 10);
+      const level = parseInt(raw.classification, 10);
+      const result = memory.reclassifyMemory(id, level, raw.userOverride ?? false);
+      console.log(JSON.stringify(result));
+      return;
+    }
 
     // --boost/--demote path: adjust relevance_score on existing memory
     if (raw.boost || raw.demote) {
