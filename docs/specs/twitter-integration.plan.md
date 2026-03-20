@@ -167,13 +167,11 @@ Output: JSON to stdout (for piping) or `--format md` for markdown.
 - [ ] Cron entry for daily `--feed --discover --format md`
 - [ ] Replace or complement existing AI-news-24h browse task
 
-### Stage 5 — Memory Integration (core, not optional)
-- [ ] Each top tweet → `agentbridge-store` automatically after feed run
-  - `classification=0` (UNCLASSIFIED — public tweet)
-  - `trust=0` (untrusted — open web, prompt injection risk)
-  - `integrity=2` (extracted — API-pulled, not direct user input)
-  - `credibility` = derived from engagement + author verification (1-6 scale)
-- [ ] Discovered people → store as memories ("AI researcher @handle works on X at Y")
-- [ ] KP can recall tweets in conversation, sleep cycle connects dots across days
-- [ ] Darwinism merges/compacts related tweets over time
-- [ ] Newsletter markdown also written to `~/reports/` as human-readable artifact
+### Stage 5 — Memory Integration (agent-gated, not direct)
+- [ ] `agentbridge-tweet --feed` writes ONLY to `~/reports/AI-Daily-YYYY-MM-DD.md`
+- [ ] **Nothing from the internet writes directly to memory** — prompt injection risk
+- [ ] Agent (KP) reads the report during sleep cycle or on-demand
+- [ ] Agent decides what's worth remembering, applies its own judgment
+- [ ] Agent calls `agentbridge-store` with appropriate NATO security fields
+- [ ] Two-stage pipeline: raw data → .md file → agent processes → memory
+- [ ] Same principle applies to Telegram messages in the future: agent is the sole gatekeeper to its own memory
