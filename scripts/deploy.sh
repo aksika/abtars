@@ -128,6 +128,13 @@ echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-expand.js\" \"\$@\"" >> "$EX
 chmod +x "$EXPAND_SCRIPT"
 ln -sf "$EXPAND_SCRIPT" "$HOME/.local/bin/agentbridge-expand"
 
+# Deploy agentbridge-tweet CLI (Twitter feed + discovery)
+TWEET_SCRIPT="$AB_HOME/agentbridge-tweet"
+echo '#!/usr/bin/env bash' > "$TWEET_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-tweet.js\" \"\$@\"" >> "$TWEET_SCRIPT"
+chmod +x "$TWEET_SCRIPT"
+ln -sf "$TWEET_SCRIPT" "$HOME/.local/bin/agentbridge-tweet"
+
 # Deploy mcporter CLI (MCP tool access)
 MCPORTER_DIR="$HOME/workspace/mcporter"
 if [ -f "$MCPORTER_DIR/dist/cli.js" ]; then
