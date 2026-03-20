@@ -28,7 +28,31 @@ agentbridge-recall --keywords "keyword1,keyword2" --chat-id <CHAT_ID>
 
 ### Output
 
-JSON array of results, each with: `content`, `source_timestamp`, `date`, `tier`, `score`.
+JSON array of results, each with: `content`, `date`, `source`, `score`.
+
+Results from extracted memories may also include:
+- `source_ids` — comma-separated original message IDs that this memory was extracted from
+
+When results contain `source_ids`, a stderr hint is printed:
+```
+Hint: 2 result(s) have source message IDs. Expand with:
+  agentbridge-expand --ids 451,452,453
+```
+
+## Expanding source messages
+
+When recall results include `source_ids`, you can look up the original messages:
+
+```bash
+agentbridge-expand --ids 451,452,453
+```
+
+Returns JSON array with: `id`, `role`, `content`, `date`, `chat_id`.
+
+Use this when:
+- You need to verify the context behind an extracted memory
+- The user asks "when did I say that?" or "what was the original message?"
+- A memory seems ambiguous and you want the full original wording
 
 ## When to use
 
