@@ -619,3 +619,4 @@ Agent-initiated instant memory storage with emotion scoring.
 
 - **Archive DB layer** — if extracted_memories grows to 10K+ and search slows, move zero-recall 60+ day memories to a separate SQLite archive searched as a last-resort fallback after all primary stages.
 - **Entity linking** — tag extracted memories with entity mentions (e.g. `@Peter`, `@agentbridge`), maintain per-entity summary pages, enable "tell me about X" queries via entity filter instead of keyword search. Inspired by LCM/OpenClaw's `bank/entities/*.md` pattern.
+- **AES encryption for restricted memories** — encrypt `content_en` and `content_original` columns for `classification=3` rows at rest. Derive key from a user-provided passphrase (PBKDF2/scrypt). Decrypt on read only when needed. Prevents `sqlite3` direct access from exposing secrets.
