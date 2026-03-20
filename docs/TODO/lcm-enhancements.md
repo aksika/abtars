@@ -7,8 +7,8 @@ Source: lossless-claw comparison (github.com/martian-engineering/lossless-claw)
 
 - [ ] Task 1: Add `source_message_ids TEXT` column to `extracted_memories` — **merge with Darwinism Stage 1 schema migration**
 - [ ] Task 2: Wire `--source-ids` param into agentbridge-store CLI — **merge with Darwinism Tasks 4-5 (--confidence, --boost, --demote)**
-- [ ] Task 3: Update agentbridge-recall output to show expand hints when source IDs exist
-- [ ] Task 4: Create `agentbridge-expand --ids 451,452,453` CLI (read-only, JSON output) + steering file
+- [x] Task 3: Update agentbridge-recall output to show expand hints when source IDs exist
+- [x] Task 4: Create `agentbridge-expand --ids 451,452,453` CLI (read-only, JSON output) + steering file
 - [ ] Task 5: Update sleep template to pass `--source-ids` when calling agentbridge-store — **merge with Darwinism Task 11 (--confidence)**
 
 ## Stage 2: Sleep Retry Logic — ✅ DONE (commit d08ba31)

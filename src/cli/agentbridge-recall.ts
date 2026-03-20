@@ -141,7 +141,15 @@ try {
   // Darwinism: bump recall count for extracted memories that made it into results
   index.bumpRecallCount(extractedIds);
 
-  console.log(JSON.stringify(results.slice(0, params.limit), null, 2));
+  const output = results.slice(0, params.limit);
+  console.log(JSON.stringify(output, null, 2));
+
+  // Expand hint: if any results have source_ids, tell the agent how to look them up
+  const expandable = output.filter((r: Record<string, unknown>) => r.source_ids);
+  if (expandable.length) {
+    const allIds = expandable.map((r: Record<string, unknown>) => r.source_ids).join(",");
+    console.error(`\nHint: ${expandable.length} result(s) have source message IDs. Expand with:\n  agentbridge-expand --ids ${allIds}`);
+  }
 } finally {
   db.close();
 }
