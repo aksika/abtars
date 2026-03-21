@@ -1,10 +1,10 @@
 // Feature: instant-memory-store, Property 8: CLI Argument Validation
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fc from "fast-check";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validateArgs, type RawArgs } from "./agentbridge-store.js";
+import { validateArgs, parseArgs, type RawArgs } from "./agentbridge-store.js";
 import { MemoryManager } from "../components/memory-manager.js";
 import { MEMORY_CONFIG_DEFAULTS } from "../components/memory-config.js";
 import type { MemoryConfig } from "../components/memory-config.js";
@@ -118,5 +118,90 @@ describe("agentbridge-store — Property 8: CLI Argument Validation", () => {
       }),
       { numRuns: 100 },
     );
+  });
+});
+
+describe("agentbridge-store --delete-ids", () => {
+  let tmpDir: string;
+  let manager: MemoryManager;
+
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "cli-delete-"));
+    manager = new MemoryManager(makeConfig(tmpDir));
+    await manager.initialize();
+  });
+
+  afterEach(() => {
+    manager.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function seedMessages(chatId: number, count: number): number[] {
+    const db = initializeDatabase(join(tmpDir, "memory.db"));
+    const ids: number[] = [];
+    const now = Date.now();
+    const timestamps: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const ts = now - (count - i) * 1000;
+      timestamps.push(ts);
+      const result = db.prepare(
+        "INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)"
+      ).run(chatId, `session:${chatId}`, i % 2 === 0 ? "user" : "assistant", `msg-${i}`, ts);
+      ids.push(Number(result.lastInsertRowid));
+    }
+    // Write matching JSONL with identical timestamps
+    const transcriptDir = join(tmpDir, "transcripts", String(chatId));
+    mkdirSync(transcriptDir, { recursive: true });
+    const jsonlPath = join(transcriptDir, `session:${chatId}.jsonl`);
+    const lines = ids.map((_, i) =>
+      JSON.stringify({ role: i % 2 === 0 ? "user" : "assistant", content: `msg-${i}`, timestamp: timestamps[i], chatId, sessionId: `session:${chatId}` })
+    );
+    writeFileSync(jsonlPath, lines.join("\n") + "\n");
+    db.close();
+    return ids;
+  }
+
+  it("parseArgs parses --delete-ids and --chat-id", () => {
+    const raw = parseArgs(["node", "store", "--delete-ids", "1,2,3", "--chat-id", "999"]);
+    expect(raw.deleteIds).toBe("1,2,3");
+    expect(raw.chatId).toBe("999");
+  });
+
+  it("cascadeDelete removes messages from DB", () => {
+    const ids = seedMessages(100, 6);
+    const toDelete = ids.slice(0, 3);
+
+    const result = manager.cascadeDelete(toDelete, 100);
+
+    expect(result.messagesRemoved).toBe(3);
+    const db = initializeDatabase(join(tmpDir, "memory.db"));
+    const remaining = db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = 100").get() as { cnt: number };
+    expect(remaining.cnt).toBe(3);
+    db.close();
+  });
+
+  it("cascadeDelete removes matching lines from JSONL transcript", () => {
+    const ids = seedMessages(200, 4);
+    const toDelete = ids.slice(0, 2);
+
+    const result = manager.cascadeDelete(toDelete, 200);
+
+    expect(result.transcriptEntriesRemoved).toBe(2);
+    const jsonlPath = join(tmpDir, "transcripts", "200", "session:200.jsonl");
+    const remaining = readFileSync(jsonlPath, "utf-8").split("\n").filter(l => l.trim());
+    expect(remaining.length).toBe(2);
+  });
+
+  it("cascadeDelete with empty IDs is a no-op", () => {
+    seedMessages(300, 3);
+    const result = manager.cascadeDelete([], 300);
+    expect(result.messagesRemoved).toBe(0);
+    expect(result.transcriptEntriesRemoved).toBe(0);
+  });
+
+  it("cascadeDelete with non-existent IDs is a no-op", () => {
+    seedMessages(400, 3);
+    const result = manager.cascadeDelete([9999, 9998], 400);
+    expect(result.messagesRemoved).toBe(0);
   });
 });

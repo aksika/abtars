@@ -913,7 +913,7 @@ export class MemoryManager {
    *
    * Returns a ForgetResult with counts from each layer.
    */
-  private cascadeDelete(messageIds: number[], chatId: number): ForgetResult {
+  cascadeDelete(messageIds: number[], chatId: number): ForgetResult {
     const result: ForgetResult = {
       messagesRemoved: 0,
       embeddingsRemoved: 0,

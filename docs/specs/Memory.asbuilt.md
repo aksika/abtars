@@ -354,7 +354,7 @@ src/
 | IngestionPipeline | `components/ingestion-pipeline.ts` | YouTube, PDF, text, markdown |
 | ReflectionEngine | `components/reflection-engine.ts` | LLM-generated topic-clustered digests |
 | Embedding Hot-Swap | `components/embedding-provider.ts` | detectModelChange + reembed |
-| Selective Forgetting | `components/memory-manager.ts` | cascadeDelete, forgetTopic/Range/Session |
+| Selective Forgetting | `components/memory-manager.ts` | cascadeDelete (DB + JSONL + embeddings + FTS5), forgetTopic/Range/Session |
 
 ### Search Enhancements
 
@@ -371,7 +371,7 @@ src/
 
 | Component | File | Notes |
 |-----------|------|-------|
-| agentbridge-store CLI | `cli/agentbridge-store.ts` | `--content-en`, `--content-original`, `--memory-type`, `--emotion-score`, `--chat-id`, `--keyword` |
+| agentbridge-store CLI | `cli/agentbridge-store.ts` | `--content-en`, `--content-original`, `--memory-type`, `--emotion-score`, `--chat-id`, `--keyword`, `--boost`/`--demote --id`, `--merge --merge-ids`, `--reclassify --id --classification`, `--delete-ids --chat-id` |
 | MemoryManager.instantStore() | `components/memory-manager.ts` | Validates, clamps emotion, inserts, advances watermark |
 | clampEmotionScore | `components/emotion-utils.ts` | Shared clamping to [-5,+5] |
 | emojiToScore | `components/emotion-utils.ts` | Maps Telegram reaction emojis to [-5,+5] scores |
@@ -511,9 +511,9 @@ The sleep cycle is the maintenance routine. It runs via two triggers:
 
 **Garbage collection data:**
 - `garbage.json` at `~/.agentbridge/garbage.json`: `{"<message_id>": "<ISO timestamp when marked>"}`
-- Messages with timestamp >7 days old get hard-deleted from `messages` table on next sleep cycle (Step 1)
-- Immediate deletes (Step 2) bypass the grace period — dupes, wrong-chat, and STT garbage are deleted directly
+- All deletions (Step 1 expired garbage + Step 2 immediate) use `agentbridge-store --delete-ids <ids> --chat-id <id>`, which calls `cascadeDelete()` — removes from DB, JSONL transcript, embeddings, and FTS5 in one operation
 - Facts are extracted to `extracted_memories` before verbose originals are garbage-marked (Step 6)
+- Transcript/DB drift check on startup warns only when counts diverge (both should stay in sync since cascade delete prunes both)
 
 **chat_backup safety table:**
 - Every message recorded via `recordMessage()` is also inserted into `chat_backup`

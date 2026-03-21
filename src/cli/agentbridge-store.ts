@@ -48,6 +48,7 @@ export type RawArgs = {
   credibility?: string;
   reclassify?: boolean;
   userOverride?: boolean;
+  deleteIds?: string;
 };
 
 export function parseArgs(argv: string[]): RawArgs {
@@ -69,19 +70,13 @@ export function parseArgs(argv: string[]): RawArgs {
       case "--id": parsed.id = args[++i] ?? ""; break;
       case "--merge": parsed.merge = true; break;
       case "--merge-ids": parsed.mergeIds = args[++i] ?? ""; break;
-      case "--confidence": parsed.confidence = args[++i] ?? ""; break;
-      case "--source-ids": parsed.sourceMessageIds = args[++i] ?? ""; break;
-      case "--boost": parsed.boost = true; break;
-      case "--demote": parsed.demote = true; break;
-      case "--id": parsed.id = args[++i] ?? ""; break;
-      case "--merge": parsed.merge = true; break;
-      case "--merge-ids": parsed.mergeIds = args[++i] ?? ""; break;
       case "--classification": parsed.classification = args[++i] ?? ""; break;
       case "--trust": parsed.trust = args[++i] ?? ""; break;
       case "--integrity": parsed.integrity = args[++i] ?? ""; break;
       case "--credibility": parsed.credibility = args[++i] ?? ""; break;
       case "--reclassify": parsed.reclassify = true; break;
       case "--user-override": parsed.userOverride = true; break;
+      case "--delete-ids": parsed.deleteIds = args[++i] ?? ""; break;
     }
   }
 
@@ -131,6 +126,23 @@ async function main() {
 
   try {
     await memory.initialize();
+
+    // --delete-ids path: cascade delete messages from DB + JSONL
+    if (raw.deleteIds) {
+      if (!raw.chatId) {
+        console.log(JSON.stringify({ deleted: false, error: "--chat-id is required with --delete-ids" }));
+        process.exit(1);
+      }
+      const ids = raw.deleteIds.split(",").map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n));
+      if (ids.length === 0) {
+        console.log(JSON.stringify({ deleted: false, error: "no valid IDs in --delete-ids" }));
+        process.exit(1);
+      }
+      const chatId = parseInt(raw.chatId, 10);
+      const result = memory.cascadeDelete(ids, chatId);
+      console.log(JSON.stringify({ deleted: true, ...result }));
+      return;
+    }
 
     // --reclassify path: change classification level on existing memory
     if (raw.reclassify) {

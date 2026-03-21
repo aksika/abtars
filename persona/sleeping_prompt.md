@@ -84,17 +84,17 @@ SELECT id FROM messages WHERE id > <user_msg_id> AND role='assistant' ORDER BY i
 ### Step 1: Purge expired garbage
 
 Read `~/.agentbridge/memory/garbage.json` (create `{}` if missing). Format: `{"<message_id>": "<ISO timestamp>"}`.
-Delete from the `messages` table any entry whose garbage timestamp is older than 7 days:
+Delete any entry whose garbage timestamp is older than 7 days using cascade delete (removes from DB + JSONL transcript):
 
-```sql
-DELETE FROM messages WHERE id IN (<expired_ids>);
+```bash
+agentbridge-store --delete-ids <comma_separated_ids> --chat-id <chat_id>
 ```
 
 Remove those entries from `garbage.json` and write the file back.
 
 ### Step 2: Immediate deletes (no grace period)
 
-Find and delete directly from the `messages` table:
+Find and cascade-delete directly using `agentbridge-store --delete-ids`:
 
 **Duplicates** — find with:
 ```sql
