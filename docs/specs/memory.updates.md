@@ -63,3 +63,18 @@
 **R6: Immediate emotion propagation** (`77edc03`)
 - updateEmotionByPlatformId now propagates score to extracted_memories via source_message_ids LIKE match
 - Sleep harvest becomes verbal-only
+
+**R3: Sleep cycle restructure** (`d215b39`)
+- New 10-step order: retrospective → feedback → todo → GC (7 substeps) → cron → topics → fitness → merge → consolidation → report
+- Retrospective runs FIRST (before GC deletes messages), writes retro file + updates agent_notes
+- Emotion harvest verbal-only (emoji reactions handled at runtime)
+- Message flush step deletes >24h messages after extraction
+- JSONL references replaced with DB queries
+- Added LAST_SLEEP_TS, CURRENT_TS template variables; removed TRANSCRIPT_PATHS
+- Added lastSleepTimestamp to StateSnapshot
+
+**R2: Recall cascade refactor** (`8c208de`)
+- 5-stage extracted-first cascade: extracted EN → extracted original → messages FTS5 OR → consolidation → messages LIKE
+- Short-circuit: ≥10 extracted results skips stages 3-5
+- Removed: strict AND, substring LIKE ×2, chat_backup LIKE
+- DB opened read-write for Darwinism bumps
