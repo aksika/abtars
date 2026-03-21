@@ -2,8 +2,14 @@
 /**
  * agentbridge-recall — standalone CLI for agent-initiated memory search.
  *
- * Uses the existing MemoryIndex (FTS5 + substring) search pipeline.
- * Falls back through: FTS5 → substring LIKE → original-language → consolidation file search.
+ * 5-stage cascade, extracted-first:
+ *   1. extracted_memories_fts (EN, Darwinism-boosted)
+ *   2. extracted_memories_original_fts (original language, Darwinism-boosted)
+ *   3. messages_fts (relaxed OR)
+ *   4. Consolidation file search (daily/weekly/quarterly .md)
+ *   5. messages LIKE (wide net fallback)
+ *
+ * Short-circuit: if stages 1+2 yield ≥10 results, skip 3-5.
  *
  * Usage:
  *   agentbridge-recall --keywords "kw1,kw2" --chat-id 7773842843
@@ -22,6 +28,7 @@ const MEMORY_DIR = join(homedir(), ".agentbridge", "memory");
 const DB_PATH = join(MEMORY_DIR, "memory.db");
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
+const SHORT_CIRCUIT_THRESHOLD = 10;
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -58,45 +65,24 @@ if (!existsSync(DB_PATH)) {
 }
 
 const params = parseArgs();
-const db = new Database(DB_PATH, { readonly: true });
+const db = new Database(DB_PATH);
+
+// Register strip_emojis for FTS5 delete trigger compatibility (content=messages table)
+db.function("strip_emojis", (text: unknown) => {
+  if (typeof text !== "string") return text;
+  return text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").replace(/ {2,}/g, " ").trim();
+});
 
 try {
   const index = new MemoryIndex(db);
   const searchOpts = { chatId: params.chatId, startTime: params.timeStart, endTime: params.timeEnd, limit: params.limit * 3, maxClassification: params.maxClassification };
   const query = params.keywords.join(" ");
 
-  type Out = { content: string; date: string; source: string; score: number };
+  type Out = { content: string; date: string; source: string; score: number; source_ids?: string };
   const results: Out[] = [];
   const seen = new Set<string>();
-
-  const add = (r: SearchResult, source: string) => {
-    const key = `${r.record.timestamp}:${r.record.content.slice(0, 80)}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    results.push({ content: `[${r.record.role}] ${r.record.content}`, date: new Date(r.record.timestamp).toISOString(), source, score: r.score });
-  };
-
-  // Stage 1: FTS5
-  for (const r of index.search(query, searchOpts)) add(r, "fts");
-
-  // Stage 2: Relaxed FTS5 (OR-style, drops short tokens) — always run when limit > 10
-  if (results.length === 0 || params.limit > 10) {
-    const relaxed = query.split(/\s+/).filter(t => t.length >= 3).join(" OR ");
-    if (relaxed && relaxed !== query) {
-      for (const r of index.search(relaxed, searchOpts)) add(r, "relaxed");
-    }
-  }
-
-  // Stage 3: Substring (accent-insensitive, catches compound words)
-  for (const r of index.substringSearch(query, searchOpts)) add(r, "substring");
-
-  // Stage 4: Original-language substring
-  if (params.original && params.original !== query) {
-    for (const r of index.substringSearch(params.original, searchOpts)) add(r, "original");
-  }
-
-  // Stage 5: Extracted memories — English (L2)
   const extractedIds: number[] = [];
+
   const addExtracted = (r: MemorySearchResult, source: string) => {
     const key = `${r.source_timestamp}:${r.content.slice(0, 80)}`;
     if (seen.has(key)) return;
@@ -105,36 +91,57 @@ try {
     results.push({ content: r.content, date: new Date(r.source_timestamp).toISOString(), source, score: r.score, ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}) });
   };
 
+  const addMessage = (r: SearchResult, source: string) => {
+    const key = `${r.record.timestamp}:${r.record.content.slice(0, 80)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    results.push({ content: `[${r.record.role}] ${r.record.content}`, date: new Date(r.record.timestamp).toISOString(), source, score: r.score });
+  };
+
+  // --- Stage 1: Extracted memories — English FTS5 (Darwinism-boosted) ---
   for (const r of index.searchExtracted(query, searchOpts)) addExtracted(r, "extracted");
 
-  // Stage 6: Extracted memories — original language (L4)
+  // --- Stage 2: Extracted memories — original language FTS5 ---
   if (params.original) {
     for (const r of index.searchOriginal(params.original, { chatId: params.chatId, limit: params.limit * 3, maxClassification: params.maxClassification })) addExtracted(r, "extracted:original");
   }
 
-  // Stage 7: Compaction summaries — file-based search
-  const allKw = [...params.keywords];
-  if (params.original) allKw.push(params.original);
-  const consolidationResults = searchConsolidationFiles(MEMORY_DIR, allKw, {
-    startTime: params.timeStart,
-    endTime: params.timeEnd,
-  });
-  for (const c of consolidationResults) {
-    const key = `${c.timestamp}:${c.content.slice(0, 80)}`;
-    if (!seen.has(key)) { seen.add(key); results.push({ content: c.content, date: new Date(c.timestamp).toISOString(), source: `compaction:${c.tier}`, score: 0.5 }); }
-  }
+  // Short-circuit: if extracted memories have enough results, skip fallback stages
+  const shortCircuit = results.length >= SHORT_CIRCUIT_THRESHOLD;
 
-  // Stage 8: chat_backup fallback (LIKE search on immutable backup)
-  if (results.length < params.limit) {
-    const bkConditions = ["chat_id = ?"];
-    const bkParams: (string | number)[] = [params.chatId];
-    if (params.timeStart) { bkConditions.push("timestamp >= ?"); bkParams.push(params.timeStart); }
-    if (params.timeEnd) { bkConditions.push("timestamp <= ?"); bkParams.push(params.timeEnd); }
-    bkConditions.push(`(${allKw.map(kw => { bkParams.push(`%${kw}%`); return "content LIKE ?"; }).join(" OR ")})`);
-    const backupRows = db.prepare(`SELECT role, content, timestamp FROM chat_backup WHERE ${bkConditions.join(" AND ")} ORDER BY timestamp DESC LIMIT 20`).all(...bkParams) as Array<{ role: string; content: string; timestamp: number }>;
-    for (const r of backupRows) {
-      const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
-      if (!seen.has(key)) { seen.add(key); results.push({ content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "backup", score: 0.3 }); }
+  if (!shortCircuit) {
+    // --- Stage 3: messages_fts (relaxed OR) ---
+    const relaxed = query.split(/\s+/).filter(t => t.length >= 2).join(" OR ");
+    if (relaxed) {
+      for (const r of index.search(relaxed, searchOpts)) addMessage(r, "messages_fts");
+    }
+
+    // --- Stage 4: Consolidation file search ---
+    const allKw = [...params.keywords];
+    if (params.original) allKw.push(params.original);
+    const consolidationResults = searchConsolidationFiles(MEMORY_DIR, allKw, {
+      startTime: params.timeStart,
+      endTime: params.timeEnd,
+    });
+    for (const c of consolidationResults) {
+      const key = `${c.timestamp}:${c.content.slice(0, 80)}`;
+      if (!seen.has(key)) { seen.add(key); results.push({ content: c.content, date: new Date(c.timestamp).toISOString(), source: `consolidation:${c.tier}`, score: 0.5 }); }
+    }
+
+    // --- Stage 5: messages LIKE (wide net fallback) ---
+    if (results.length < params.limit) {
+      const allKwLike = [...params.keywords];
+      if (params.original) allKwLike.push(params.original);
+      const conditions = ["chat_id = ?"];
+      const bindParams: (string | number)[] = [params.chatId];
+      if (params.timeStart) { conditions.push("timestamp >= ?"); bindParams.push(params.timeStart); }
+      if (params.timeEnd) { conditions.push("timestamp <= ?"); bindParams.push(params.timeEnd); }
+      conditions.push(`(${allKwLike.map(kw => { bindParams.push(`%${kw}%`); return "content LIKE ?"; }).join(" OR ")})`);
+      const rows = db.prepare(`SELECT role, content, timestamp FROM messages WHERE ${conditions.join(" AND ")} ORDER BY timestamp DESC LIMIT 20`).all(...bindParams) as Array<{ role: string; content: string; timestamp: number }>;
+      for (const r of rows) {
+        const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
+        if (!seen.has(key)) { seen.add(key); results.push({ content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "messages_like", score: 0.3 }); }
+      }
     }
   }
 
@@ -147,9 +154,9 @@ try {
   console.log(JSON.stringify(output, null, 2));
 
   // Expand hint: if any results have source_ids, tell the agent how to look them up
-  const expandable = output.filter((r: Record<string, unknown>) => r.source_ids);
+  const expandable = output.filter(r => r.source_ids);
   if (expandable.length) {
-    const allIds = expandable.map((r: Record<string, unknown>) => r.source_ids).join(",");
+    const allIds = expandable.map(r => r.source_ids).join(",");
     console.error(`\nHint: ${expandable.length} result(s) have source message IDs. Expand with:\n  agentbridge-expand --ids ${allIds}`);
   }
 } finally {
