@@ -1,7 +1,7 @@
 // Feature: instant-memory-store, Property 8: CLI Argument Validation
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fc from "fast-check";
-import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateArgs, parseArgs, type RawArgs } from "./agentbridge-store.js";
@@ -140,23 +140,13 @@ describe("agentbridge-store --delete-ids", () => {
     const db = initializeDatabase(join(tmpDir, "memory.db"));
     const ids: number[] = [];
     const now = Date.now();
-    const timestamps: number[] = [];
     for (let i = 0; i < count; i++) {
       const ts = now - (count - i) * 1000;
-      timestamps.push(ts);
       const result = db.prepare(
         "INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)"
       ).run(chatId, `session:${chatId}`, i % 2 === 0 ? "user" : "assistant", `msg-${i}`, ts);
       ids.push(Number(result.lastInsertRowid));
     }
-    // Write matching JSONL with identical timestamps
-    const transcriptDir = join(tmpDir, "transcripts", String(chatId));
-    mkdirSync(transcriptDir, { recursive: true });
-    const jsonlPath = join(transcriptDir, `session:${chatId}.jsonl`);
-    const lines = ids.map((_, i) =>
-      JSON.stringify({ role: i % 2 === 0 ? "user" : "assistant", content: `msg-${i}`, timestamp: timestamps[i], chatId, sessionId: `session:${chatId}` })
-    );
-    writeFileSync(jsonlPath, lines.join("\n") + "\n");
     db.close();
     return ids;
   }
@@ -180,16 +170,17 @@ describe("agentbridge-store --delete-ids", () => {
     db.close();
   });
 
-  it("cascadeDelete removes matching lines from JSONL transcript", () => {
+  it("cascadeDelete removes messages and FTS entries", () => {
     const ids = seedMessages(200, 4);
     const toDelete = ids.slice(0, 2);
 
     const result = manager.cascadeDelete(toDelete, 200);
 
-    expect(result.transcriptEntriesRemoved).toBe(2);
-    const jsonlPath = join(tmpDir, "transcripts", "200", "session:200.jsonl");
-    const remaining = readFileSync(jsonlPath, "utf-8").split("\n").filter(l => l.trim());
-    expect(remaining.length).toBe(2);
+    expect(result.messagesRemoved).toBe(2);
+    const db = initializeDatabase(join(tmpDir, "memory.db"));
+    const remaining = db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = 200").get() as { cnt: number };
+    expect(remaining.cnt).toBe(2);
+    db.close();
   });
 
   it("cascadeDelete with empty IDs is a no-op", () => {

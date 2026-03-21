@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
@@ -6,8 +6,6 @@ import { initializeDatabase } from "./memory-db.js";
 import { MemoryIndex } from "./memory-index.js";
 import { VectorIndex } from "./vector-index.js";
 import { EmbeddingProvider } from "./embedding-provider.js";
-import { TranscriptWriter } from "./transcript-writer.js";
-import { TranscriptParser } from "./transcript-parser.js";
 import { HeartbeatSystem } from "./heartbeat-system.js";
 import { getLatestConsolidationFile } from "./consolidation-search.js";
 import { IngestionPipeline } from "./ingestion-pipeline.js";
@@ -27,19 +25,14 @@ import type {
   InstantStoreResult,
 } from "../types/index.js";
 import { clampEmotionScore } from "./emotion-utils.js";
-import { logError, logInfo, logWarn, logDebug } from "./logger.js";
+import { logError, logInfo, logWarn } from "./logger.js";
 
 const TAG = "memory-manager";
-
-/** Strip emoji characters from text. Emotion is captured via score, not glyphs. */
-function stripEmojis(text: string): string {
-  return text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").replace(/ {2,}/g, " ").trim();
-}
 
 /**
  * Top-level coordinator for the local memory layer.
  *
- * Owns the SQLite database, transcript I/O, and FTS index.
+ * Owns the SQLite database and FTS index.
  * When `memoryEnabled` is false, all methods are no-ops.
  * All public methods are wrapped in try/catch — they never throw.
  */
@@ -49,8 +42,6 @@ export class MemoryManager {
   private memoryIndex: MemoryIndex | null = null;
   private vectorIndex: VectorIndex | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
-  private transcriptWriter: TranscriptWriter | null = null;
-  private transcriptParser: TranscriptParser | null = null;
   private writeCounter: number = 0;
   private llmCall: ((prompt: string, content: string) => Promise<string>) | null = null;
   private ingestionPipeline: IngestionPipeline | null = null;
@@ -103,7 +94,6 @@ export class MemoryManager {
 
     try {
       mkdirSync(this.config.memoryDir, { recursive: true });
-      mkdirSync(join(this.config.memoryDir, "transcripts"), { recursive: true });
 
       const dbPath = join(this.config.memoryDir, "memory.db");
       this.db = initializeDatabase(dbPath);
@@ -142,8 +132,6 @@ export class MemoryManager {
       } catch { /* already exists */ }
 
       this.memoryIndex = new MemoryIndex(this.db);
-      this.transcriptWriter = new TranscriptWriter(this.config.memoryDir);
-      this.transcriptParser = new TranscriptParser();
 
       // Optionally initialize vector search
       if (this.config.vectorEnabled) {
@@ -178,9 +166,6 @@ export class MemoryManager {
 
       // Run disk budget enforcement on startup
       this.enforceDiskBudget();
-
-      // Bootstrap reconciliation: warn if JSONL line count drifts from DB row count
-      this.checkTranscriptDbDrift();
 
       // Prune chat_backup entries older than 7 days (wired logic, not LLM-controlled)
       this.pruneBackup();
@@ -272,9 +257,9 @@ export class MemoryManager {
   }
 
   /**
-   * Record a conversation message: append to transcript, index in FTS,
-   * optionally index in vector store, enforce message limits, and
-   * periodically enforce disk budget.
+   * Record a conversation message: index in FTS (raw content, emojis stripped
+   * at FTS5 trigger level), optionally index in vector store, enforce message
+   * limits, and periodically enforce disk budget.
    *
    * When `memoryEnabled` is false, this is a no-op.
    * Never throws — all errors are caught and logged.
@@ -283,27 +268,21 @@ export class MemoryManager {
     if (!this.config.memoryEnabled || !this.db) return;
 
     try {
-      // 1. Append to JSONL transcript (raw, with emojis for debug/audit)
-      this.transcriptWriter?.append(record);
+      // Skip empty content after stripping whitespace
+      if (!record.content.trim()) return;
 
-      // 2. Strip emojis before DB indexing — emotion is captured via score
-      const cleaned = { ...record, content: stripEmojis(record.content) };
-
-      // 2b. Skip empty content (e.g. pure emoji messages)
-      if (!cleaned.content) return;
-
-      // 3. Index in FTS (returns the inserted message id)
+      // 1. Index in FTS (raw content — FTS5 trigger strips emojis at index level)
       if (!this.memoryIndex) return;
-      const messageId = this.memoryIndex.index(cleaned);
+      const messageId = this.memoryIndex.index(record);
 
-      // 3b. Immutable backup copy (never touched by LLM/sleep)
+      // 2. Immutable backup copy (never touched by LLM/sleep)
       this.db.prepare(
         "INSERT INTO chat_backup (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
-      ).run(cleaned.chatId, cleaned.sessionId, cleaned.role, cleaned.content, cleaned.timestamp);
+      ).run(record.chatId, record.sessionId, record.role, record.content, record.timestamp);
 
-      // 4. Fire-and-forget vector indexing if available
+      // 3. Fire-and-forget vector indexing if available
       if (this.vectorIndex) {
-        this.vectorIndex.index(messageId, cleaned.content).catch((err) =>
+        this.vectorIndex.index(messageId, record.content).catch((err) =>
           logError(TAG, "Vector indexing failed", err),
         );
       }
@@ -565,132 +544,24 @@ export class MemoryManager {
     }
   }
 
-  /** Warn if JSONL transcript line count diverges from DB message count. */
-  private checkTranscriptDbDrift(): void {
-    if (!this.db) return;
-    try {
-      const transcriptsDir = join(this.config.memoryDir, "transcripts");
-      if (!existsSync(transcriptsDir)) return;
-
-      let jsonlLines = 0;
-      for (const chatDir of readdirSync(transcriptsDir)) {
-        const chatPath = join(transcriptsDir, chatDir);
-        try { if (!statSync(chatPath).isDirectory()) continue; } catch { continue; }
-        for (const f of readdirSync(chatPath)) {
-          if (!f.endsWith(".jsonl")) continue;
-          try {
-            const content = readFileSync(join(chatPath, f), "utf-8");
-            jsonlLines += content.split("\n").filter(l => l.trim()).length;
-          } catch { /* skip unreadable files */ }
-        }
-      }
-
-      const row = this.db.prepare("SELECT COUNT(*) as cnt FROM messages").get() as { cnt: number };
-      const dbRows = row.cnt;
-      const drift = Math.abs(jsonlLines - dbRows);
-      if (drift > 10) {
-        logWarn(TAG, `Transcript/DB drift detected: ${jsonlLines} JSONL lines vs ${dbRows} DB rows (Δ${drift})`);
-      } else {
-        logDebug(TAG, `Transcript/DB reconciliation OK: ${jsonlLines} JSONL, ${dbRows} DB (Δ${drift})`);
-      }
-    } catch (err) {
-      logDebug(TAG, `Transcript/DB reconciliation skipped: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
   /**
-   * Enforce disk budget by deleting oldest transcript files when total size exceeds budget.
+   * Enforce disk budget by checking DB size against configured limit.
    * Runs on startup and after every 100 recordMessage() calls.
    */
   enforceDiskBudget(): void {
     if (!this.config.memoryEnabled) return;
 
     try {
-      const transcriptsDir = join(this.config.memoryDir, "transcripts");
       const dbPath = join(this.config.memoryDir, "memory.db");
-
-      // 1. Collect all .jsonl files with their sizes and mtimes
-      const files: Array<{ path: string; size: number; mtime: number; chatId: number; sessionId: string }> = [];
-
-      if (existsSync(transcriptsDir)) {
-        const chatDirs = readdirSync(transcriptsDir);
-        for (const chatDir of chatDirs) {
-          const chatPath = join(transcriptsDir, chatDir);
-          let chatStat;
-          try {
-            chatStat = statSync(chatPath);
-          } catch {
-            continue;
-          }
-          if (!chatStat.isDirectory()) continue;
-
-          const sessionFiles = readdirSync(chatPath);
-          for (const sessionFile of sessionFiles) {
-            if (!sessionFile.endsWith(".jsonl")) continue;
-
-            const filePath = join(chatPath, sessionFile);
-            let fileStat;
-            try {
-              fileStat = statSync(filePath);
-            } catch {
-              continue;
-            }
-
-            const chatId = Number(chatDir);
-            const sessionId = sessionFile.replace(/\.jsonl$/, "");
-
-            files.push({
-              path: filePath,
-              size: fileStat.size,
-              mtime: fileStat.mtimeMs,
-              chatId,
-              sessionId,
-            });
-          }
-        }
-      }
-
-      // 2. Calculate total size (transcripts + DB)
       let dbSize = 0;
       try {
         if (existsSync(dbPath)) {
           dbSize = statSync(dbPath).size;
         }
-      } catch {
-        // ignore stat errors on DB
-      }
+      } catch { /* ignore stat errors */ }
 
-      let totalSize = dbSize;
-      for (const f of files) {
-        totalSize += f.size;
-      }
-
-      // 3. If under budget, nothing to do
-      if (totalSize <= this.config.diskBudgetBytes) return;
-
-      // 4. Sort by mtime ascending (oldest first)
-      files.sort((a, b) => a.mtime - b.mtime);
-
-      // 5. Delete oldest files until under budget
-      for (const file of files) {
-        if (totalSize <= this.config.diskBudgetBytes) break;
-
-        try {
-          unlinkSync(file.path);
-          totalSize -= file.size;
-
-          // Remove corresponding index entries
-          if (this.memoryIndex) {
-            this.memoryIndex.removeSession(file.chatId, file.sessionId);
-          }
-          if (this.vectorIndex) {
-            this.vectorIndex.removeSession(file.chatId, file.sessionId);
-          }
-
-          logInfo(TAG, `Deleted transcript ${file.path} for disk budget enforcement`);
-        } catch (deleteErr) {
-          logWarn(TAG, `Failed to delete transcript ${file.path}: ${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)}`);
-        }
+      if (dbSize > this.config.diskBudgetBytes) {
+        logWarn(TAG, `DB size ${(dbSize / 1024 / 1024).toFixed(1)}MB exceeds budget ${(this.config.diskBudgetBytes / 1024 / 1024).toFixed(0)}MB`);
       }
     } catch (err) {
       logError(TAG, "Disk budget enforcement failed", err);
@@ -715,7 +586,7 @@ export class MemoryManager {
     contextPercent: number;
     sendCompactCommand: (sessionKey: string, command: string) => Promise<string>;
   }): Promise<void> {
-    if (!this.config.memoryEnabled || !this.transcriptParser) return;
+    if (!this.config.memoryEnabled || !this.db) return;
 
     const threshold = this.config.searchEnhancements.compactThresholdPct;
     if (params.contextPercent < threshold) return;
@@ -726,29 +597,23 @@ export class MemoryManager {
     );
 
     try {
-      // Write raw transcript to working directory as safety net
-      const transcriptPath = join(
-        this.config.memoryDir,
-        "transcripts",
-        String(params.chatId),
-        `${params.sessionId}.jsonl`,
-      );
+      // Write DB messages to working directory as safety net
+      const messages = this.db.prepare(
+        "SELECT role, content FROM messages WHERE chat_id = ? AND session_id = ? ORDER BY timestamp ASC",
+      ).all(params.chatId, params.sessionId) as Array<{ role: string; content: string }>;
 
-      if (existsSync(transcriptPath) && this.transcriptParser) {
-        const messages = this.transcriptParser.parse(transcriptPath);
-        if (messages.length > 0) {
-          const dateStr = new Date().toISOString().slice(0, 10);
-          const workingDir = join(this.config.memoryDir, "working", dateStr);
-          mkdirSync(workingDir, { recursive: true });
-          const safetyPath = join(workingDir, `transcript_${params.chatId}.chat`);
-          const rawContent = messages.map((m) => `[${m.role}] ${m.content}`).join("\n");
-          if (existsSync(safetyPath)) {
-            appendFileSync(safetyPath, `\n---\n\n${rawContent}`);
-          } else {
-            writeFileSync(safetyPath, rawContent);
-          }
-          logInfo(TAG, `Safety-net transcript written to ${safetyPath}`);
+      if (messages.length > 0) {
+        const dateStr = new Date().toISOString().slice(0, 10);
+        const workingDir = join(this.config.memoryDir, "working", dateStr);
+        mkdirSync(workingDir, { recursive: true });
+        const safetyPath = join(workingDir, `transcript_${params.chatId}.chat`);
+        const rawContent = messages.map((m) => `[${m.role}] ${m.content}`).join("\n");
+        if (existsSync(safetyPath)) {
+          appendFileSync(safetyPath, `\n---\n\n${rawContent}`);
+        } else {
+          writeFileSync(safetyPath, rawContent);
         }
+        logInfo(TAG, `Safety-net transcript written to ${safetyPath}`);
       }
 
       // Send /compact to kiro-cli for context window compression
@@ -762,24 +627,17 @@ export class MemoryManager {
 
 
   /**
-   * Load the most recent N messages from a session transcript.
-   * Delegates to TranscriptParser.parseTail().
-   * Returns empty array when memoryEnabled is false, file doesn't exist, or on error.
+   * Load the most recent N messages from a session via DB query.
+   * Returns empty array when memoryEnabled is false or on error.
    */
   loadRecentMessages(chatId: number, sessionId: string, count: number): MessageRecord[] {
-    if (!this.config.memoryEnabled || !this.transcriptParser) return [];
+    if (!this.config.memoryEnabled || !this.db) return [];
 
     try {
-      const filePath = join(
-        this.config.memoryDir,
-        "transcripts",
-        String(chatId),
-        `${sessionId}.jsonl`,
-      );
-
-      if (!existsSync(filePath)) return [];
-
-      return this.transcriptParser.parseTail(filePath, count);
+      const rows = this.db.prepare(
+        "SELECT role, content, timestamp, chat_id AS chatId, session_id AS sessionId FROM messages WHERE chat_id = ? AND session_id = ? ORDER BY timestamp DESC LIMIT ?",
+      ).all(chatId, sessionId, count) as MessageRecord[];
+      return rows.reverse();
     } catch (err) {
       logError(TAG, `Failed to load recent messages for chat ${chatId} session ${sessionId}`, err);
       return [];
@@ -790,10 +648,7 @@ export class MemoryManager {
    * Cascade deletion through all storage layers for the given message IDs.
    *
    * Deletes from: embeddings table, FTS5 index (via trigger on messages delete),
-   * messages table and transcript JSONL files.
-   *
-   * Uses a transaction for the SQLite operations. File I/O errors are logged
-   * but do not abort the operation — partial cleanup is acceptable.
+   * and messages table.
    *
    * Returns a ForgetResult with counts from each layer.
    */
@@ -807,75 +662,24 @@ export class MemoryManager {
     if (!this.db || messageIds.length === 0) return result;
 
     try {
-      // 1. Query messages to get session IDs and timestamps before deleting
-      //    (needed for transcript cleanup)
       const placeholders = messageIds.map(() => "?").join(",");
-      const messageRows = this.db
-        .prepare(
-          `SELECT id, chat_id, session_id, timestamp, content FROM messages WHERE id IN (${placeholders})`,
-        )
-        .all(...messageIds) as Array<{
-        id: number;
-        chat_id: number;
-        session_id: string;
-        timestamp: number;
-        content: string;
-      }>;
 
-      if (messageRows.length === 0) return result;
-
-      // Collect unique session IDs and a set of (timestamp, content) for transcript matching
-      const sessionIds = new Set<string>();
-      const messageSignatures = new Set<string>();
-      for (const row of messageRows) {
-        sessionIds.add(row.session_id);
-        messageSignatures.add(`${row.timestamp}:${row.content}`);
-      }
-
-      // 2. Delete from embeddings table
+      // 1. Delete from embeddings table
       const embeddingsResult = this.db
         .prepare(`DELETE FROM embeddings WHERE message_id IN (${placeholders})`)
         .run(...messageIds);
       result.embeddingsRemoved = embeddingsResult.changes;
 
-      // 3. Delete from messages table (the AFTER DELETE trigger on messages
+      // 2. Delete from messages table (the AFTER DELETE trigger on messages
       //    automatically removes corresponding rows from messages_fts)
       const messagesResult = this.db
         .prepare(`DELETE FROM messages WHERE id IN (${placeholders})`)
         .run(...messageIds);
       result.messagesRemoved = messagesResult.changes;
 
-      // 4. Remove matching entries from transcript JSONL files
-      if (this.transcriptWriter && this.transcriptParser) {
-        for (const sessionId of sessionIds) {
-          try {
-            const transcriptPath = this.transcriptWriter.getPath(chatId, sessionId);
-            if (!existsSync(transcriptPath)) continue;
-
-            const allRecords = this.transcriptParser.parse(transcriptPath);
-            const filtered = allRecords.filter(
-              (r) => !messageSignatures.has(`${r.timestamp}:${r.content}`),
-            );
-            const removed = allRecords.length - filtered.length;
-
-            if (removed > 0) {
-              // Rewrite the file with remaining records
-              const newContent = filtered.map((r) => JSON.stringify(r)).join("\n") + (filtered.length > 0 ? "\n" : "");
-              writeFileSync(transcriptPath, newContent);
-              result.transcriptEntriesRemoved += removed;
-            }
-          } catch (transcriptErr) {
-            logWarn(
-              TAG,
-              `Failed to clean transcript for session ${sessionId}: ${transcriptErr instanceof Error ? transcriptErr.message : String(transcriptErr)}`,
-            );
-          }
-        }
-      }
-
       logInfo(
         TAG,
-        `Cascade delete for chat ${chatId}: ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings, ${result.transcriptEntriesRemoved} transcript entries`,
+        `Cascade delete for chat ${chatId}: ${result.messagesRemoved} messages, ${result.embeddingsRemoved} embeddings`,
       );
     } catch (err) {
       logError(TAG, `Cascade delete failed for chat ${chatId}`, err);

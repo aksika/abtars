@@ -171,6 +171,29 @@ export function initializeDatabase(dbPath: string): Database.Database {
     // Column already exists — safe to ignore
   }
 
+  // Register strip_emojis() scalar function for FTS5 triggers.
+  // Messages store raw content (emojis preserved for retrospective sarcasm detection).
+  // FTS5 index gets emoji-stripped text so search isn't polluted.
+  db.function("strip_emojis", (text: unknown) => {
+    if (typeof text !== "string") return text;
+    return text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").replace(/ {2,}/g, " ").trim();
+  });
+
+  // Migration: recreate FTS5 triggers to use strip_emojis() (R1 — raw content in messages)
+  db.exec(`
+    DROP TRIGGER IF EXISTS messages_ai;
+    DROP TRIGGER IF EXISTS messages_ad;
+
+    CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, content) VALUES (new.id, strip_emojis(new.content));
+    END;
+
+    CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content)
+        VALUES('delete', old.id, strip_emojis(old.content));
+    END;
+  `);
+
   logInfo(TAG, `Database initialized at ${dbPath}`);
   return db;
 }
