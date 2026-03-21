@@ -50,6 +50,7 @@ export interface StateSnapshot {
   diskBudgetBytes: number;
   topicFiles: TopicFileEntry[];
   lastSleepAudit: string | null;
+  lastSleepTimestamp: number | null;
   wakeupDate: string | null;
   todoContents: string | null;
   cronContents: string | null;
@@ -81,6 +82,7 @@ export class SleepStateGatherer {
       diskBudgetBytes: this.config.diskBudgetBytes,
       topicFiles,
       lastSleepAudit: this.getLastSleepAudit(),
+      lastSleepTimestamp: this.getLastSleepTimestamp(),
       wakeupDate: this.getWakeupDate(),
       todoContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "todo.md")),
       cronContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "cron.json")),
@@ -296,6 +298,14 @@ export class SleepStateGatherer {
   private getWakeupDate(): string | null {
     const audit = this.getLastSleepAudit();
     return audit ? audit.slice(0, 10) : null;
+  }
+
+  /** Get last sleep audit as epoch ms (for DB timestamp queries). */
+  private getLastSleepTimestamp(): number | null {
+    const audit = this.getLastSleepAudit();
+    if (!audit) return null;
+    const ts = new Date(audit).getTime();
+    return Number.isFinite(ts) ? ts : null;
   }
 
   /** List transcript files with message counts. */

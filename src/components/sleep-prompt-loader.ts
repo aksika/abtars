@@ -29,6 +29,8 @@ export function loadSleepPrompt(snapshot: StateSnapshot): string {
   const vars: Record<string, string> = {
     TIMESTAMP: snapshot.timestamp,
     LAST_SLEEP_AUDIT: snapshot.lastSleepAudit ?? "none",
+    LAST_SLEEP_TS: snapshot.lastSleepTimestamp ? String(snapshot.lastSleepTimestamp) : "0",
+    CURRENT_TS: String(Date.now()),
     WAKEUP_DATE: snapshot.wakeupDate ?? new Date().toISOString().slice(0, 10),
     STATE_SNAPSHOT: buildSnapshotBlock(snapshot),
     FTS_MESSAGES: snapshot.fts5Health.messages_fts,
@@ -40,7 +42,6 @@ export function loadSleepPrompt(snapshot: StateSnapshot): string {
     CRON_CONTENTS: snapshot.cronContents ?? "No cron entries.",
     TOPIC_FILES_SECTION: buildTopicSection(snapshot),
     WORKING_DIRS_SECTION: buildWorkingDirsSection(snapshot),
-    TRANSCRIPT_PATHS: buildTranscriptSection(snapshot),
   };
 
   // Replace ${VAR} patterns
@@ -80,12 +81,5 @@ function buildWorkingDirsSection(s: StateSnapshot): string {
   if (s.workingDirs.length === 0) return "No working directories.";
   return s.workingDirs
     .map((d) => `- \`${d.date}\` (${d.files.length} files)`)
-    .join("\n");
-}
-
-function buildTranscriptSection(s: StateSnapshot): string {
-  if (!s.transcriptPaths || s.transcriptPaths.length === 0) return "No transcripts.";
-  return s.transcriptPaths
-    .map((t) => `- Chat ${t.chatId}: \`${t.path}\` (${t.messageCount} messages)`)
     .join("\n");
 }
