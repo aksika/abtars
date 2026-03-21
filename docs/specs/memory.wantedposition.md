@@ -263,3 +263,63 @@ New env vars:
 
 Current: 648 tests across 62 files.
 Target: ~550 tests across ~50 files (deleted component tests removed, new retro + flush + cascade tests added).
+
+---
+
+## As-Built vs Wanted Position — Comparison
+
+### Storage Efficiency
+
+| Metric | As-Built | Wanted | Verdict |
+|--------|----------|--------|---------|
+| Writes per message | 3 (SQLite + JSONL + chat_backup) | 1 (SQLite only) | ✅ 3× fewer I/O ops |
+| messages table | Grows continuously, slow GC | Hot buffer, flushed after sleep | ✅ Bounded size |
+| JSONL files | Permanent, cascade-rewritten on delete | Eliminated | ✅ No file rewrites |
+| Emoji data quality | Split (stripped in DB, raw in JSONL) | Unified (raw in DB, stripped at FTS5 index) | ✅ Single source of truth |
+
+### Search Quality
+
+| Metric | As-Built | Wanted | Verdict |
+|--------|----------|--------|---------|
+| Search paths | 3 (agent uses 1) | 1 | ✅ No dead code, no confusion |
+| Recall stages | 8 (noisy raw messages first) | 5 (curated extracted first) | ✅ Better results surface faster |
+| Short-circuit | None | Skip fallback when extracted has enough | ✅ Faster for common case |
+| LIKE substring stages | 2 (expensive, rarely unique) | 0 | ✅ Less CPU, same recall |
+
+### Self-Improvement
+
+| Metric | As-Built | Wanted | Verdict |
+|--------|----------|--------|---------|
+| Self-reflection | None | Daily retrospective with emotional attribution | ✅ New capability |
+| Lesson persistence | Manual agent_notes updates | Retro → agent_notes automatically | ✅ Closes learning loop |
+| Emotion propagation | Sleep-only (12-24h delay) | Immediate for reactions, sleep for verbal | ✅ Faster signal |
+
+### Complexity
+
+| Metric | As-Built | Wanted | Verdict |
+|--------|----------|--------|---------|
+| Source files (memory) | ~30 | ~19 | ✅ 11 fewer files |
+| cascadeDelete | DB + JSONL rewrite + signature matching | DB only | ✅ Simpler, no fragile matching |
+| Drift check | Needed (two stores can desync) | Eliminated | ✅ Can't desync with one store |
+| Sleep GC steps | 9 (no retro, suboptimal order) | 10 (retro + flush, optimized order) | ✅ More capable, better ordered |
+| Config env vars | 28 | 19 (9 removed, 2 added) | ✅ Less to configure |
+
+### Risk
+
+| Concern | Assessment |
+|---------|------------|
+| Recall quality regression | Low — Phase A validates with real queries before removing anything |
+| Data loss from message flush | Low — extraction captures facts, retro captures context, consolidation captures summaries |
+| Retro token cost | ~2-3K tokens/day (one conversation read + 5 questions). Negligible vs existing sleep cost |
+| Emoji in FTS5 | None — stripping moves to trigger, search quality unchanged |
+
+### What doesn't improve
+
+- Consolidation pipeline — unchanged (already working)
+- Security model — unchanged (already designed for paper)
+- Extraction latency — unchanged (sleep + instant store is sufficient)
+- GC location — unchanged (all in sleep, correct decision)
+
+### Conclusion
+
+The refactor enhances the system on every axis that matters: fewer writes, bounded storage, better search ordering, self-reflection capability, simpler deletion logic, less dead code. The only addition in complexity is the retrospective — which is a net-new capability, not overhead. No functionality is lost.
