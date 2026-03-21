@@ -304,14 +304,29 @@ export class MemoryManager {
     }
   }
 
-  /** Update emotion_score on a message identified by platform message ID. Returns true if updated. */
+  /** Update emotion_score on a message identified by platform message ID.
+   *  Propagates to linked extracted_memories immediately.
+   *  Returns true if the message was updated. */
   updateEmotionByPlatformId(chatId: number, platformMessageId: number, score: number): boolean {
     if (!this.db) return false;
     try {
       const result = this.db.prepare(
         "UPDATE messages SET emotion_score = ? WHERE chat_id = ? AND platform_message_id = ?",
       ).run(score, chatId, platformMessageId);
-      return result.changes > 0;
+      if (result.changes === 0) return false;
+
+      // Propagate to extracted_memories that reference this message
+      const msg = this.db.prepare(
+        "SELECT id FROM messages WHERE chat_id = ? AND platform_message_id = ?",
+      ).get(chatId, platformMessageId) as { id: number } | undefined;
+      if (msg) {
+        // source_message_ids is a JSON array of message IDs, e.g. "[1,2,3]"
+        this.db.prepare(
+          `UPDATE extracted_memories SET emotion_score = ?
+           WHERE source_message_ids LIKE '%' || ? || '%'`,
+        ).run(score, String(msg.id));
+      }
+      return true;
     } catch (err) {
       logError(TAG, "Failed to update emotion score", err);
       return false;
