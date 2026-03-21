@@ -275,10 +275,12 @@ export class MemoryManager {
       if (!this.memoryIndex) return;
       const messageId = this.memoryIndex.index(record);
 
-      // 2. Immutable backup copy (never touched by LLM/sleep)
-      this.db.prepare(
-        "INSERT INTO chat_backup (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
-      ).run(record.chatId, record.sessionId, record.role, record.content, record.timestamp);
+      // 2. Immutable backup copy (debug-only — controlled by DEBUG_MODE env var)
+      if (process.env["DEBUG_MODE"] === "true" || process.env["DEBUG_MODE"] === "1") {
+        this.db.prepare(
+          "INSERT INTO chat_backup (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+        ).run(record.chatId, record.sessionId, record.role, record.content, record.timestamp);
+      }
 
       // 3. Fire-and-forget vector indexing if available
       if (this.vectorIndex) {

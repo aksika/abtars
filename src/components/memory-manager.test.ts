@@ -574,8 +574,10 @@ describe("MemoryManager — loadRecentMessages", () => {
 describe("MemoryManager — chat_backup", () => {
   let tmpDir: string;
   let manager: MemoryManager;
+  const origDebugMode = process.env["DEBUG_MODE"];
 
   beforeEach(async () => {
+    process.env["DEBUG_MODE"] = "true";
     tmpDir = mkdtempSync(join(tmpdir(), "mm-backup-"));
     manager = new MemoryManager(makeConfig(tmpDir));
     await manager.initialize();
@@ -584,9 +586,11 @@ describe("MemoryManager — chat_backup", () => {
   afterEach(() => {
     manager.close();
     rmSync(tmpDir, { recursive: true, force: true });
+    if (origDebugMode === undefined) delete process.env["DEBUG_MODE"];
+    else process.env["DEBUG_MODE"] = origDebugMode;
   });
 
-  it("recordMessage inserts a row into chat_backup", () => {
+  it("recordMessage inserts a row into chat_backup when DEBUG_MODE=true", () => {
     manager.recordMessage(
       makeRecord({ content: "backup test", chatId: 42, sessionId: "s1", timestamp: Date.now() }),
     );
