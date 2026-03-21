@@ -8,15 +8,10 @@ import { VectorIndex } from "./vector-index.js";
 import { EmbeddingProvider } from "./embedding-provider.js";
 import { TranscriptWriter } from "./transcript-writer.js";
 import { TranscriptParser } from "./transcript-parser.js";
-import { ContextAssembler } from "./context-assembler.js";
 import { HeartbeatSystem } from "./heartbeat-system.js";
-import { MemorySearchTool } from "./memory-search-tool.js";
-import type { MemorySearchToolConfig } from "./memory-search-tool.js";
 import { getLatestConsolidationFile } from "./consolidation-search.js";
 import { IngestionPipeline } from "./ingestion-pipeline.js";
 import { ReflectionEngine } from "./reflection-engine.js";
-import { IntentDetector, DEFAULT_CUE_PHRASES_EN, DEFAULT_CUE_PHRASES_HU } from "./intent-detector.js";
-import { RecallFallbackPipeline } from "./recall-fallback-pipeline.js";
 import type {
   MessageRecord,
   SessionState,
@@ -28,8 +23,6 @@ import type {
   IngestedDocument,
   Reflection,
   ForgetResult,
-  MemorySearchParams,
-  MemorySearchResult,
   InstantStoreParams,
   InstantStoreResult,
 } from "../types/index.js";
@@ -63,10 +56,7 @@ export class MemoryManager {
   private ingestionPipeline: IngestionPipeline | null = null;
   private browserManager: import("./browser-manager.js").BrowserManager | null = null;
   private reflectionEngine: ReflectionEngine | null = null;
-  private recallPipeline: RecallFallbackPipeline | null = null;
   private heartbeat: HeartbeatSystem | null = null;
-  private contextAssembler: ContextAssembler | null = null;
-  private memorySearchTool: MemorySearchTool | null = null;
 
   constructor(config: MemoryConfig) {
     this.config = config;
@@ -184,36 +174,6 @@ export class MemoryManager {
       if (this.db) {
         this.reflectionEngine = new ReflectionEngine(this.db, this.config);
         logInfo(TAG, "Reflection engine enabled");
-      }
-
-      // Initialize recall fallback pipeline when enabled
-      if (this.config.recallFallback.enabled) {
-        let detectorConfig: { cuePhrasesEn: string[]; cuePhrasesHu: string[] } | undefined;
-        if (this.config.recallFallback.cuePhrases) {
-          try {
-            const parsed = JSON.parse(this.config.recallFallback.cuePhrases);
-            detectorConfig = {
-              cuePhrasesEn: Array.isArray(parsed.en) ? parsed.en : [],
-              cuePhrasesHu: Array.isArray(parsed.hu) ? parsed.hu : [],
-            };
-          } catch {
-            logWarn(TAG, "Invalid cuePhrases JSON in recall fallback config — using defaults");
-          }
-        }
-        const detector = new IntentDetector(
-          detectorConfig ?? {
-            cuePhrasesEn: [...DEFAULT_CUE_PHRASES_EN],
-            cuePhrasesHu: [...DEFAULT_CUE_PHRASES_HU],
-          },
-        );
-        this.recallPipeline = new RecallFallbackPipeline(this, detector, {
-          enabled: true,
-          timeoutMs: this.config.recallFallback.timeoutMs,
-          contextMessages: this.config.recallFallback.contextMessages,
-          minTokenLength: this.config.recallFallback.minTokenLength,
-          vectorEnabled: this.config.vectorEnabled,
-        });
-        logInfo(TAG, "Recall fallback pipeline enabled");
       }
 
       // Run disk budget enforcement on startup
@@ -485,34 +445,6 @@ export class MemoryManager {
   /** Search conversation history (delegates to hybridSearch). */
   async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
     return this.hybridSearch(query, opts);
-  }
-
-  /** Recall memories + core facts for prompt injection. Uses pipeline for keyword extraction. */
-  async recallForPrompt(chatId: number, userInput: string, sessionId?: string): Promise<string> {
-    if (!this.config.memoryEnabled) return "";
-    const parts: string[] = [];
-    try {
-      // Core facts (always injected if non-empty)
-      const facts = this.readCoreKnowledge();
-      if (facts.trim()) parts.push(`[CORE KNOWLEDGE]\n${facts.trim()}`);
-
-      // Recalled memories via pipeline (keyword extraction + intent detection)
-      const workingMemory = sessionId
-        ? this.loadRecentMessages(chatId, sessionId, 6)
-        : [];
-      let results: SearchResult[];
-      if (this.recallPipeline) {
-        const pr = await this.recallPipeline.execute(userInput, chatId, workingMemory, 3);
-        results = pr.results;
-      } else {
-        results = await this.search(userInput, { chatId, limit: 3 });
-      }
-      if (results.length > 0) {
-        const snippets = results.map(r => `- [${r.record.role}] ${r.record.content}`);
-        parts.push(`[RECALLED MEMORIES]\n${snippets.join("\n")}`);
-      }
-    } catch { /* silent */ }
-    return parts.join("\n\n");
   }
 
   /** Substring search using SQL LIKE — catches compound words that FTS5 misses. */
@@ -855,54 +787,6 @@ export class MemoryManager {
   }
 
   /**
-   * Build assembled context for a user message. Called by transport before sending to LLM.
-   * Delegates to ContextAssembler.assemble() with all five tiers
-   * (soul/core facts, recalled memories, working memory, new input).
-   * Falls back to raw userInput if assembly fails, logging a warning.
-   * Returns the assembled context text as a string.
-   */
-  async assembleContext(params: {
-    chatId: number;
-    channelKey?: string;
-    userInput: string;
-    systemPrompt: string;
-    workingMemory?: MessageRecord[];
-    isSessionStart?: boolean;
-  }): Promise<string> {
-    if (!this.config.memoryEnabled) return params.userInput;
-
-    try {
-      // System prompt (SOUL.md + skills) is passed in from main.ts — no longer injected here.
-      const systemPrompt = params.systemPrompt;
-
-      if (!this.contextAssembler) {
-        this.contextAssembler = new ContextAssembler(this, this.config);
-      }
-      const assembler = this.contextAssembler;
-      if (this.recallPipeline) {
-        assembler.setPipeline(this.recallPipeline);
-      }
-      if (this.llmCall) {
-        assembler.setLlmCall(this.llmCall);
-      }
-      const result = await assembler.assemble({
-        chatId: params.chatId,
-        channelKey: params.channelKey ?? String(params.chatId),
-        userInput: params.userInput,
-        systemPrompt,
-        workingMemory: params.workingMemory ?? [],
-        isSessionStart: params.isSessionStart,
-      });
-      return result.text;
-    } catch (err) {
-      logWarn(TAG, `Context assembly failed for chat ${params.chatId}, falling back to raw user input: ${err instanceof Error ? err.message : String(err)}`);
-      return params.userInput;
-    }
-  }
-
-
-
-  /**
    * Cascade deletion through all storage layers for the given message IDs.
    *
    * Deletes from: embeddings table, FTS5 index (via trigger on messages delete),
@@ -1137,23 +1021,12 @@ export class MemoryManager {
    * Initialize and start the heartbeat system for background tasks.
    * Called after initialize() and setLlmCall().
    *
-   * Creates HeartbeatSystem and MemorySearchTool.
+   * Creates HeartbeatSystem.
    * Registers heartbeat tasks:
    *   - sleep-trigger: checks every 5min (≥8am, 10min idle, once/day)
    *
    * On failure, logs a warning and continues without background processing.
    */
-  /** Initialize the MemorySearchTool (called from main.ts before heartbeat start). */
-  initSearchTool(): void {
-    if (!this.config.memoryEnabled || !this.db || !this.memoryIndex) return;
-    const searchConfig: MemorySearchToolConfig = {
-      searchTimeoutMs: this.config.searchEnhancements.searchTimeoutMs,
-      decayHalflifeDays: this.config.searchEnhancements.decayHalflifeDays,
-      mmrLambda: this.config.searchEnhancements.mmrLambda,
-      memoryDir: this.config.memoryDir,
-    };
-    this.memorySearchTool = new MemorySearchTool(this.memoryIndex, searchConfig);
-  }
 
   /** Set the heartbeat reference (owned by main.ts). */
   setHeartbeat(hb: HeartbeatSystem): void { this.heartbeat = hb; }
@@ -1175,25 +1048,6 @@ export class MemoryManager {
       return { timestamp: result.timestamp, summary: result.content };
     } catch {
       return null;
-    }
-  }
-
-  /** Get the memory search tool for agent invocation. */
-  getMemorySearchTool(): MemorySearchTool | null {
-    return this.memorySearchTool;
-  }
-
-  /**
-   * Execute a memory search (delegates to MemorySearchTool).
-   * Returns empty results on error for graceful degradation.
-   */
-  async memorySearch(params: MemorySearchParams, chatId: number): Promise<MemorySearchResult[]> {
-    try {
-      if (!this.memorySearchTool) return [];
-      return await this.memorySearchTool.search(params, chatId);
-    } catch (err) {
-      logWarn(TAG, `Memory search failed for chat ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
-      return [];
     }
   }
 

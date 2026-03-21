@@ -10,7 +10,6 @@ import { join } from "node:path";
 import { TranscriptWriter } from "./transcript-writer.js";
 import { TranscriptParser } from "./transcript-parser.js";
 import { MemoryManager } from "./memory-manager.js";
-import { ContextAssembler } from "./context-assembler.js";
 import { MEMORY_CONFIG_DEFAULTS, type MemoryConfig } from "./memory-config.js";
 import { initializeDatabase } from "./memory-db.js";
 import { MemoryIndex } from "./memory-index.js";
@@ -395,62 +394,6 @@ describe("Property 13: Pruning preserves most recent messages", () => {
           expect(rows[rows.length - 1]!.timestamp).toBe(1000 + total - 1);
 
           db.close();
-        },
-      ),
-      { numRuns: 20 },
-    );
-  });
-});
-
-// --- Property 26: Context Assembly Respects Token Budgets ---
-
-describe("Property 26: Context assembly respects token budgets", () => {
-  it("each tier stays within budget and total = sum of tiers", async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.integer({ min: 10, max: 200 }),
-        fc.integer({ min: 10, max: 200 }),
-        fc.integer({ min: 10, max: 500 }),
-        async (soulBudget, recalledBudget, workingBudget) => {
-          const tmpDir = mkdtempSync(join(tmpdir(), "prop26-"));
-          try {
-            const config = makeConfig(tmpDir, {
-              contextBudget: {
-                soul: soulBudget,
-                recalled: recalledBudget,
-                working: workingBudget,
-              },
-            });
-            const mm = new MemoryManager(config);
-            await mm.initialize();
-
-            // Use ContextAssembler directly to verify per-tier budget enforcement
-            const assembler = new ContextAssembler(mm, config);
-            const result = await assembler.assemble({
-              chatId: 1,
-              userInput: "test input",
-              systemPrompt: "B".repeat(500),
-              workingMemory: Array.from({ length: 10 }, (_, i) => ({
-                role: "user" as const,
-                content: `msg ${i} ${"C".repeat(100)}`,
-                timestamp: 1000 + i,
-                chatId: 1,
-                sessionId: "s1",
-              })),
-            });
-
-            expect(result.usage.soul).toBeLessThanOrEqual(soulBudget);
-            expect(result.usage.recalled).toBeLessThanOrEqual(recalledBudget);
-            expect(result.usage.working).toBeLessThanOrEqual(workingBudget);
-            expect(result.usage.total).toBe(
-              result.usage.soul + result.usage.recalled +
-              result.usage.working + result.usage.input,
-            );
-
-            mm.close();
-          } finally {
-            rmSync(tmpDir, { recursive: true, force: true });
-          }
         },
       ),
       { numRuns: 20 },

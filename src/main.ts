@@ -196,7 +196,6 @@ async function main(): Promise<void> {
     logInfo("main", "🧠 Memory LLM callback registered");
 
     // Unified heartbeat — single 5-min timer for all periodic tasks
-    memory.initSearchTool();
 
     // Run sleep on startup if needed (≥8am, no audit today)
     try {

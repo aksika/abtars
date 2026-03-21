@@ -75,21 +75,9 @@ describe("Memory system — end-to-end smoke test", () => {
     expect(recent[0]!.content).toContain("session2 message 2");
     expect(recent[2]!.content).toContain("session2 message 4");
 
-    // 5. Assemble context — verify tiers present
-    const workingMemory = [
-      makeRecord({ role: "user", content: "Tell me about physics", timestamp: 9000 }),
-      makeRecord({ role: "assistant", content: "Physics is fascinating", timestamp: 9001 }),
-    ];
-    const ctx = await mm.assembleContext({
-      chatId,
-      userInput: "What did we discuss about quantum?",
-      systemPrompt: "You are a helpful assistant.",
-      workingMemory,
-    });
-    expect(typeof ctx).toBe("string");
-    expect(ctx).toContain("[SYSTEM]");
-    expect(ctx).toContain("[INPUT]");
-    expect(ctx).toContain("What did we discuss about quantum?");
+    // 5. Search — verify FTS5 still works after multiple sessions
+    const searchResults2 = await mm.search("quantum", { chatId, limit: 5 });
+    expect(searchResults2.length).toBeGreaterThan(0);
 
     // 4. Session persistence round-trip
     mm.persistSession({
