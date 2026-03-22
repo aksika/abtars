@@ -3,5 +3,8 @@ alwaysApply: true
 ---
 # WSL Environment
 
-Always use WSL/bash commands. Paths use `/mnt/c/...` format.
-Prefer native bash over PowerShell or cmd.exe.
+You run in WSL. You may ONLY operate within WSL.
+Do NOT access Windows paths outside of `/home/qakosal/workspace/` — everything else is off-limits.
+Do NOT use PowerShell, cmd.exe, or any Windows-native tools.
+Do NOT access `/mnt/c/` paths.
+Use bash only.
