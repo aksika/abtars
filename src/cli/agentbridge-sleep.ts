@@ -382,6 +382,34 @@ async function main(): Promise<void> {
       process.exit(1);
     }
 
+    // Phase 5.5: Extract durable facts from retrospective
+    try {
+      const { parseRetro } = await import("./agentbridge-retro-extract.js");
+      const { existsSync, readdirSync: readDir, readFileSync: readFile } = await import("node:fs");
+      const retroDir = join(memoryConfig.memoryDir, "retrospectives");
+      const processedPath = join(retroDir, ".processed.json");
+      const processed: Set<string> = existsSync(processedPath)
+        ? new Set(JSON.parse(readFile(processedPath, "utf-8")))
+        : new Set();
+      if (existsSync(retroDir)) {
+        const files = readDir(retroDir).filter((f: string) => f.startsWith("retro_") && f.endsWith(".md") && !processed.has(f));
+        let stored = 0;
+        for (const file of files) {
+          const items = parseRetro(readFile(join(retroDir, file), "utf-8"));
+          for (const item of items) {
+            const r = await memory.instantStore({ chatId: 0, contentEn: item.content, contentOriginal: item.content, memoryType: item.memoryType, emotionScore: 0, confidence: 3, classification: 0 });
+            if (r.stored) stored++;
+          }
+          processed.add(file);
+        }
+        writeFileSync(processedPath, JSON.stringify([...processed]), "utf-8");
+        if (flags.verbose) logInfo(TAG, `Retro extract: ${stored} facts stored`);
+      }
+    } catch (err) {
+      // Non-fatal
+      if (flags.verbose) logInfo(TAG, `Retro extract failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // Phase 6: Log audit trail
     if (flags.verbose) logInfo(TAG, "Phase 5: Writing audit trail");
     try {

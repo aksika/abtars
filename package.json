@@ -42,6 +42,7 @@
     "agentbridge-recall": "dist/cli/agentbridge-recall.js",
     "agentbridge-store": "dist/cli/agentbridge-store.js",
     "agentbridge-sleep": "dist/cli/agentbridge-sleep.js",
+    "agentbridge-retro-extract": "dist/cli/agentbridge-retro-extract.js",
     "agentbridge-browser": "dist/cli/agentbridge-browser.js",
     "agentbridge-tweet": "dist/cli/agentbridge-tweet.js"
   }
