@@ -63,7 +63,13 @@ fi
 
 # --- ensure mcporter daemon is running (for MCP servers like pptx) ---
 if command -v mcporter &>/dev/null; then
-  mcporter daemon start 2>/dev/null || true
+  mcporter daemon start 2>/dev/null | sed 's/^/   [mcporter] /' || true
+fi
+
+# --- kill any existing bridge process (cold restart) ---
+if pkill -f "node.*dist/main.js" 2>/dev/null; then
+  echo "   Killed old bridge process."
+  sleep 1
 fi
 
 # --- run doctor health check ---
