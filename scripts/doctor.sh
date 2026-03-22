@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
-# doctor.sh — health check and auto-fix for ~/.agentbridge
+# doctor.sh — health check and repair for ~/.agentbridge
 #
 # Usage:
-#   doctor.sh          # diagnose only — prints warnings, changes nothing
-#   doctor.sh --fix    # diagnose + apply fixes
+#   doctor.sh              # diagnose only — prints warnings, changes nothing
+#   doctor.sh --fix        # safe fixes (chmod, mkdir, stale locks, stale sleep locks)
+#   doctor.sh --fix-full   # all safe fixes + FTS rebuild, WAL checkpoint, git push check
 set -uo pipefail
 
 AB="$HOME/.agentbridge"
+DB="$AB/memory/memory.db"
 FIX=false
+FIX_FULL=false
 WARNS=0
 FIXES=0
 
-[[ "${1:-}" == "--fix" ]] && FIX=true
+case "${1:-}" in
+  --fix-full) FIX=true; FIX_FULL=true ;;
+  --fix)      FIX=true ;;
+esac
 
 warn() { echo "[doctor] WARN: $1"; WARNS=$((WARNS + 1)); }
 fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
@@ -34,9 +40,25 @@ while IFS= read -r f; do
   else
     warn "stale lock: $f"
   fi
-done < <(find "$AB" -name "*.lock" -mmin +60 2>/dev/null)
+done < <(find "$AB" -name "*.lock" -not -path "*/sleep/*" -mmin +60 2>/dev/null)
 
-# 3. Stale browse artifacts (older than 3 days)
+# 3. Stale sleep lock (older than 2 hours, no matching audit .md)
+for lockfile in "$AB/memory/sleep"/sleep_*.lock; do
+  [ -f "$lockfile" ] || continue
+  lockage=$(( ($(date +%s) - $(stat -c %Y "$lockfile" 2>/dev/null || echo 0)) / 60 ))
+  if [ "$lockage" -gt 120 ]; then
+    base=$(basename "$lockfile" .lock)
+    if ! ls "$AB/memory/sleep/${base}"_*.md &>/dev/null; then
+      if $FIX; then
+        rm -f "$lockfile"; fix "removed stale sleep lock $lockfile (${lockage}min old, no audit)"
+      else
+        warn "stale sleep lock: $lockfile (${lockage}min old, no audit) — sleep may have hung"
+      fi
+    fi
+  fi
+done
+
+# 4. Stale browse artifacts (older than 3 days)
 STALE_BROWSE=$(find "$AB/logs" -name "browse_*" -mtime +3 2>/dev/null | wc -l)
 if [ "$STALE_BROWSE" -gt 0 ]; then
   if $FIX; then
@@ -47,7 +69,7 @@ if [ "$STALE_BROWSE" -gt 0 ]; then
   fi
 fi
 
-# 4. Cookie file exists and is valid JSON
+# 5. Cookie file exists and is valid JSON
 COOKIE="$AB/titok/cookies/x-cookies.json"
 if [ -f "$COOKIE" ]; then
   if ! python3 -c "import json; json.load(open('$COOKIE'))" 2>/dev/null; then
@@ -57,7 +79,7 @@ else
   warn "no X cookies found — tweet replies/discovery won't work"
 fi
 
-# 5. Required dirs exist
+# 6. Required dirs exist
 for d in "$AB/twitterX" "$AB/twitterX/output" "$AB/skills" "$AB/logs" "$AB/memory/sleep" "$AB/memory/retrospectives"; do
   if [ ! -d "$d" ]; then
     if $FIX; then
@@ -68,12 +90,12 @@ for d in "$AB/twitterX" "$AB/twitterX/output" "$AB/skills" "$AB/logs" "$AB/memor
   fi
 done
 
-# 6. Follows file exists
+# 7. Follows file exists
 if [ ! -f "$AB/twitterX/base.follows.json" ]; then
   warn "base.follows.json missing — tweet feed won't run"
 fi
 
-# 7. Recent backup check
+# 8. Recent backup check
 BACKUP_DIR="$HOME/.backup-agentbridge"
 if [ -d "$BACKUP_DIR" ]; then
   LATEST=$(find "$BACKUP_DIR" -name "agentbridge-*.zip" -mtime -2 2>/dev/null | head -1)
@@ -84,23 +106,19 @@ else
   warn "backup dir $BACKUP_DIR missing — backups never ran"
 fi
 
-# 8. Memory DB health
-DB="$AB/memory/memory.db"
+# 9. Memory DB health
 if [ -f "$DB" ]; then
-  # Integrity check
   INTEGRITY=$(sqlite3 "$DB" "PRAGMA integrity_check;" 2>/dev/null | head -1)
   if [ "$INTEGRITY" != "ok" ]; then
     warn "memory.db integrity check failed: $INTEGRITY"
   fi
 
-  # Size warning (>400MB = 80% of 500MB budget)
   DB_SIZE=$(stat -c %s "$DB" 2>/dev/null || echo 0)
   if [ "$DB_SIZE" -gt 419430400 ]; then
     DB_MB=$((DB_SIZE / 1048576))
     warn "memory.db is ${DB_MB}MB — approaching 500MB disk budget"
   fi
 
-  # Sleep recency — warn if no audit in 3 days
   LATEST_SLEEP=$(find "$AB/memory/sleep" -name "sleep_*.md" -mtime -3 2>/dev/null | head -1)
   if [ -z "$LATEST_SLEEP" ]; then
     warn "no sleep audit in last 3 days — GC/consolidation not running"
@@ -109,18 +127,14 @@ else
   warn "memory.db not found"
 fi
 
-# 9. DB repairs (--fix only)
-if $FIX && [ -f "$DB" ]; then
-  # FTS5 rebuild
+# 10. Full fixes (--fix-full only)
+if $FIX_FULL && [ -f "$DB" ]; then
   sqlite3 "$DB" "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt messages_fts index"
   sqlite3 "$DB" "INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt extracted_memories_fts index"
-
-  # WAL checkpoint
   sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null && fix "WAL checkpoint (truncate)"
 fi
 
-# 10. Git repo health (--fix only, slower checks)
-if $FIX; then
+if $FIX_FULL; then
   cd "$AB"
   if [ -d .git ]; then
     if ! git remote get-url origin &>/dev/null; then
@@ -132,12 +146,12 @@ if $FIX; then
 fi
 
 # Summary
-if $FIX; then
+if $FIX || $FIX_FULL; then
   echo "[doctor] Done. $FIXES fixes applied, $WARNS warnings."
 else
   if [ "$WARNS" -eq 0 ]; then
     echo "[doctor] All clear."
   else
-    echo "[doctor] $WARNS warning(s). Run with --fix to repair."
+    echo "[doctor] $WARNS warning(s). Run with --fix or --fix-full to repair."
   fi
 fi
