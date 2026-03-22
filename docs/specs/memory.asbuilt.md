@@ -11,7 +11,7 @@ SQLite-backed persistence with FTS5 full-text search, optional local-model vecto
 
 **Key difference from as-built:** Single storage path (SQLite only, no JSONL runtime writes), single search path (agentbridge-recall only), messages table as hot buffer (flushed after sleep), retrospective-driven self-improvement loop, heartbeat liveness tracking.
 
-**Recall architecture**: Unchanged — agent-driven via `agentbridge-recall` CLI. No bridge-side context injection.
+**Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext` (see below).
 
 ---
 
@@ -111,6 +111,45 @@ Stages 6-7 are keyword-free and mutually exclusive. They compare timestamps to d
 
 Post-processing: dedup by content hash → temporal decay → MMR re-ranking.
 
+---
+
+## Recall Sovereignty (REQ-1 through REQ-5)
+
+Memory recall is agent-driven only. The bridge never auto-injects recalled memories into prompts. The agent decides when to call `agentbridge-recall` based on conversation context.
+
+### Session-Start Context Injection (REQ-3, REQ-4)
+
+On the first message after startup, `/new`, `/reset`, or `/restart`, the bridge prepends a short context recap to the prompt. This gives the agent enough to continue naturally without blowing up the context window.
+
+**Implementation:** `buildSessionStartContext()` in `src/components/session-context.ts`, called via shared `preparePrompt()` helper in `main.ts` (used by both Telegram and Discord handlers).
+
+**Tracking:** `pendingSessionStart: Set<string>` — added on session reset events, consumed on first message.
+
+**Two paths, same budget (~400 tokens / 2000 chars):**
+
+| Condition | Source | What's injected |
+|-----------|--------|-----------------|
+| Messages newer than latest daily | `messages` table (last 10, since daily timestamp) | `[HH:MM] role: content` lines |
+| No newer messages (overnight) | Latest `daily_*.md` file | Full daily summary (truncated at 2000 chars if needed) |
+| No daily exists at all | `messages` table (last 10) | `[HH:MM] role: content` lines |
+| No daily, no messages | — | Nothing injected (null) |
+
+**Output format (REQ-4 temporal markers):**
+```
+[LAST SESSION SUMMARY — ended 2026-03-22T08:48:41.000Z]
+<body: daily summary or recent messages>
+[SESSION START — 2026-03-22T20:50:00.000Z]
+```
+
+The time gap between "ended" and "SESSION START" tells the agent how stale the context is.
+
+**Deeper recall:** If the user asks for more detail ("What did we talk about yesterday?"), the agent can pull the full daily summary via `agentbridge-recall` stage 4 (consolidation file search) or stages 6-7 (keyword-free fallback).
+
+**Removed (2026-03-22):**
+- `writeStartupGreeting()` from `agentbridge-sleep.ts` — sleep no longer generates greetings
+- `consumeStartupGreeting()` from `main.ts` — no more file-based greeting
+- `[SYSTEM]` inject hack via `telegramPoller.injectUpdate()` — replaced by proper prompt prepend
+
 **Bug fix (2026-03-22):** Stage 3 was broken since inception — `sanitizeFtsQuery` double-processed the OR query, turning `OR` operators into literal `"OR"*` search terms. Fixed by passing `mode: "or"` to `index.search()`.
 
 **Removed stages:** Strict FTS5 AND (merged into relaxed OR), substring LIKE ×2 (redundant), chat_backup LIKE (table is debug-only).
@@ -209,7 +248,8 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 | MemoryIndex | `memory-index.ts` | FTS5 trigger change: strip emojis at index, not storage |
 | agentbridge-recall | `cli/agentbridge-recall.ts` | 7-stage cascade, extracted-first, keyword-free fallback, short-circuit |
 | agentbridge-store | `cli/agentbridge-store.ts` | Unchanged |
-| agentbridge-sleep | `cli/agentbridge-sleep.ts` | Updated template with retro + flush |
+| agentbridge-sleep | `cli/agentbridge-sleep.ts` | Updated template with retro + flush. Removed `writeStartupGreeting` |
+| SessionContext | `components/session-context.ts` | **NEW:** `buildSessionStartContext()` — session-start context injection |
 | SleepTrigger | `sleep-trigger.ts` | Unchanged |
 | SleepStateGatherer | `sleep-state-gatherer.ts` | Unchanged |
 | sleep-prompt-loader | `sleep-prompt-loader.ts` | Unchanged |
@@ -290,10 +330,10 @@ New env vars:
 
 ## Test Coverage
 
-606 tests across 59 files (as of refactor completion).
+621 tests across 60 files (as of 2026-03-22, post recall-sovereignty session context).
 
 ---
 
 ### Conclusion
 
-The refactor eliminated JSONL dual-writes, simplified search to a single 7-stage extracted-first cascade (with keyword-free fallback), added daily retrospective capability, restructured the sleep cycle, removed dead code (-3326 lines), and added immediate emotion propagation. SQLite is the single source of truth.
+The refactor eliminated JSONL dual-writes, simplified search to a single 7-stage extracted-first cascade (with keyword-free fallback), added daily retrospective capability, restructured the sleep cycle, removed dead code (-3326 lines), added immediate emotion propagation, and implemented recall sovereignty with session-start context injection. SQLite is the single source of truth.

@@ -398,40 +398,13 @@ async function main(): Promise<void> {
       process.stderr.write(`Warning: Failed to write audit log — ${err instanceof Error ? err.message : String(err)}\n`);
     }
 
-    // Phase 7: Generate startup greeting for next boot
-    try {
-      writeStartupGreeting(memoryConfig.memoryDir, subagentResponse, snapshot);
-      if (flags.verbose) logInfo(TAG, "Startup greeting written");
-    } catch {
-      // Non-fatal
-    }
-
     logInfo(TAG, "Sleep routine completed successfully");
   } finally {
     memory.close();
   }
 }
 
-/** Generate a 1-line startup greeting from the sleep subagent's response and write to file. */
-function writeStartupGreeting(memoryDir: string, response: string, snapshot: StateSnapshot): void {
-  // Extract first meaningful line from subagent response as greeting seed
-  const lines = response.split("\n").map(l => l.trim()).filter(l => l.length > 10 && !l.startsWith("{") && !l.startsWith("["));
-  const seed = lines[0] ?? "";
 
-  // Build a concise greeting from available data
-  const memCount = snapshot.dbStats.extractedMemoryCount;
-  const today = new Date().toISOString().slice(0, 10);
-  let greeting: string;
-
-  if (seed.length > 15 && seed.length < 300) {
-    // Use the subagent's first line if it's reasonable
-    greeting = seed;
-  } else {
-    greeting = `Back online after sleep maintenance (${today}). ${memCount} memories in the bank.`;
-  }
-
-  writeFileSync(join(memoryDir, "startup-greeting.txt"), greeting, "utf-8");
-}
 
 // Only run when executed as a script, not when imported for testing
 const isDirectRun =

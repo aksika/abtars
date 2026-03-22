@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
@@ -170,44 +170,41 @@ function resetAllCtxStarts(memoryDir: string): void {
   writeFileSync(p, JSON.stringify(data), "utf-8");
 }
 
-/** Read and consume the pre-generated startup greeting (written by sleep cycle). */
-function consumeStartupGreeting(memoryDir: string): string {
-  const p = join(memoryDir, "startup-greeting.txt");
-  if (!existsSync(p)) {
-    // Fallback: last sleep audit date from filename
-    try {
-      const files = readdirSync(join(memoryDir, "sleep")).filter(f => f.startsWith("sleep_")).sort();
-      if (files.length > 0) {
-        const m = files[files.length - 1]!.match(/sleep_(\d{4})(\d{2})(\d{2})/);
-        if (m) return `Back online. Last sleep: ${m[1]}-${m[2]}-${m[3]}.`;
-      }
-    } catch { /* */ }
-    return "Back online.";
-  }
-  try {
-    const msg = readFileSync(p, "utf-8").trim();
-    unlinkSync(p);
-    return msg || "Back online.";
-  } catch { return "Back online."; }
-}
-
-/** Send startup greeting: pre-generated from sleep, or plain "Back online." */
-async function sendStartupGreeting(
-  memoryDir: string,
+/** Send "Back online" notification to all platforms. */
+async function sendBackOnline(
   sendTelegram?: (msg: string) => Promise<void>,
   sendDiscord?: (msg: string) => Promise<void>,
-): Promise<string> {
-  const greeting = consumeStartupGreeting(memoryDir);
-  const msg = `🔄 ${greeting}`;
-  logInfo("main", `Startup greeting: "${greeting}"`);
-  const results = await Promise.allSettled([
-    sendTelegram?.(msg),
-    sendDiscord?.(msg),
-  ]);
+): Promise<void> {
+  const msg = "🔄 Back online.";
+  logInfo("main", "Startup: Back online notification sent");
+  const results = await Promise.allSettled([sendTelegram?.(msg), sendDiscord?.(msg)]);
   for (const r of results) {
-    if (r.status === "rejected") logWarn("main", `Startup greeting send failed: ${r.reason}`);
+    if (r.status === "rejected") logWarn("main", `Back online send failed: ${r.reason}`);
   }
-  return greeting;
+}
+
+import { buildSessionStartContext } from "./components/session-context.js";
+
+/** Prepare prompt for sending: inject session-start context if pending, record message. */
+function preparePrompt(
+  prompt: string,
+  memory: MemoryManager,
+  chatId: number,
+  sessionKey: string,
+  text: string,
+  pending: Set<string>,
+  platformMessageId?: number,
+): string {
+  if (pending.has(sessionKey)) {
+    const ctx = buildSessionStartContext(memory, chatId);
+    if (ctx) {
+      prompt = ctx + "\n\n" + prompt;
+      logInfo("main", `Injected session-start context (${ctx.length} chars)`);
+    }
+  }
+  pending.delete(sessionKey);
+  memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId });
+  return prompt;
 }
 
 /** Send a platform context announcement to the transport so the LLM knows which platform is active. */
@@ -1084,8 +1081,7 @@ async function main(): Promise<void> {
         }
 
         if (memory) {
-          pendingSessionStart.delete(sessionKey);
-          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId: messageId });
+          prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart, messageId);
         }
 
         prompt = interceptLargeMessage(prompt).text;
@@ -1668,8 +1664,7 @@ async function main(): Promise<void> {
 
         if (memory) {
           const chatId = parseInt(message.channelId, 10) || 0;
-          pendingSessionStart.delete(sessionKey);
-          memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey });
+          prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart);
         }
 
         prompt = interceptLargeMessage(prompt).text;
@@ -1750,7 +1745,7 @@ async function main(): Promise<void> {
 
   // --- Unified heartbeat (5-min interval) ---
 
-  // --- Startup greeting (async, non-blocking) ---
+  // --- Startup notification (async, non-blocking) ---
   if (memoryConfig.memoryEnabled) {
     const tgSend = telegramPoller ? async (msg: string): Promise<void> => {
       const chatId = [...config.allowedUserIds][0];
@@ -1760,34 +1755,8 @@ async function main(): Promise<void> {
       const channelId = config.discordAllowedChannelIds ? [...config.discordAllowedChannelIds][0] : undefined;
       if (channelId) await new DiscordApi(config.discordBotToken!).sendMessage(channelId, msg);
     } : undefined;
-    sendStartupGreeting(memoryConfig.memoryDir, tgSend, dcSend).then(async (greeting) => {
-      // Inject greeting into agent so it greets in its own voice
-      if (telegramPoller && greeting) {
-        const chatId = [...config.allowedUserIds][0];
-        if (chatId) {
-          let firstName = "the user";
-          try {
-            const profilePath = join(memoryConfig.memoryDir, "core", "user_profile.md");
-            if (existsSync(profilePath)) {
-              const m = readFileSync(profilePath, "utf-8").match(/^-\s*Name:\s*(.+)/m);
-              if (m) firstName = m[1]!.split(/[,(]/)[0]!.trim();
-            }
-          } catch { /* ok */ }
-          try { firstName = (await new TelegramApi(config.telegramBotToken).getChat(chatId)).first_name || firstName; } catch { /* ok */ }
-          telegramPoller.injectUpdate({
-            update_id: 0,
-            message: {
-              message_id: 0,
-              from: { id: chatId, is_bot: false, first_name: firstName },
-              chat: { id: chatId, type: "private" },
-              date: Math.floor(Date.now() / 1000),
-              text: `[SYSTEM] You just woke up. Greet ${firstName} briefly in your own style. Context: ${greeting}`,
-            },
-          });
-        }
-      }
-    }).catch((err) => {
-      logWarn("main", `Startup greeting error: ${err instanceof Error ? err.message : String(err)}`);
+    sendBackOnline(tgSend, dcSend).catch((err) => {
+      logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
 
