@@ -33,13 +33,10 @@ New CLI `agentbridge-retro-extract`: parses retro markdown, extracts bullets fro
 
 ## 11. Recall Hit-Rate Logging & Validation
 
-**Status:** Not started
-**Priority:** Medium
-**Source:** R2 recall cascade refactor
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `0c18307`
 
-- Add per-stage hit-rate logging to `agentbridge-recall`
-- Watch real sleep cycles to validate the 5-stage extracted-first cascade
-- Confirm short-circuit at ≥10 results is the right threshold
+Per-stage hit-rate logging added to `agentbridge-recall` on stderr. Format: `[recall] query="..." S1:extracted_en=N S2:extracted_orig=N short_circuit=0|1 S3:messages_fts=N S4:consolidation=N S5:messages_like=N total=N returned=N`. Initial observation: extracted memories rarely reach short-circuit threshold (10) — messages_fts carries most searches. Threshold stays at 10 for now; revisit when extraction volume grows.
 
 ## 12. MMR Re-Ranking on Recall Output
 
