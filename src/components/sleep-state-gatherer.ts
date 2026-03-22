@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { logInfo, logWarn, logError, logDebug } from "./logger.js";
+import { logInfo, logWarn, logError } from "./logger.js";
 
 const TAG = "sleep-state-gatherer";
 
@@ -54,7 +54,6 @@ export interface StateSnapshot {
   wakeupDate: string | null;
   todoContents: string | null;
   cronContents: string | null;
-  transcriptPaths: Array<{ chatId: number; path: string; messageCount: number }>;
 }
 
 export class SleepStateGatherer {
@@ -86,7 +85,6 @@ export class SleepStateGatherer {
       wakeupDate: this.getWakeupDate(),
       todoContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "todo.md")),
       cronContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "cron.json")),
-      transcriptPaths: this.listTranscripts(),
     };
 
     logInfo(
@@ -309,31 +307,4 @@ export class SleepStateGatherer {
   }
 
   /** List transcript files with message counts. */
-  private listTranscripts(): Array<{ chatId: number; path: string; messageCount: number }> {
-    const transcriptsDir = join(this.config.memoryDir, "transcripts");
-    if (!existsSync(transcriptsDir)) return [];
-    const results: Array<{ chatId: number; path: string; messageCount: number }> = [];
-    try {
-      for (const chatDir of readdirSync(transcriptsDir, { withFileTypes: true })) {
-        if (!chatDir.isDirectory()) continue;
-        const chatId = parseInt(chatDir.name, 10);
-        if (isNaN(chatId)) continue;
-        const chatPath = join(transcriptsDir, chatDir.name);
-        for (const file of readdirSync(chatPath)) {
-          if (!file.endsWith(".jsonl")) continue;
-          const filePath = join(chatPath, file);
-          try {
-            const content = readFileSync(filePath, "utf-8");
-            const lineCount = content.split("\n").filter((l) => l.trim()).length;
-            results.push({ chatId, path: filePath, messageCount: lineCount });
-          } catch {
-            logDebug(TAG, `Failed to read transcript ${filePath}`);
-          }
-        }
-      }
-    } catch (err) {
-      logWarn(TAG, `Failed to list transcripts: ${err}`);
-    }
-    return results;
-  }
 }

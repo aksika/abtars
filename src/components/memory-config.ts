@@ -2,15 +2,6 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { logWarn } from "./logger.js";
 
-/** Configuration for the recall fallback pipeline. */
-export type RecallFallbackConfig = {
-  enabled: boolean;
-  timeoutMs: number;
-  contextMessages: number;
-  minTokenLength: number;
-  cuePhrases?: string;
-};
-
 /** Configuration for the local memory layer. */
 export type MemoryConfig = {
   memoryEnabled: boolean;
@@ -20,23 +11,12 @@ export type MemoryConfig = {
   vectorEnabled: boolean;
   stalenessThresholdMs: number;
   restoreMessageCount: number;
-  compactOnReset: boolean;
-  autoCompactThreshold: number;
-  contextBudget: {
-    soul: number;
-    recalled: number;
-    working: number;
-  };
-  /** Number of recent messages kept in full detail in the working memory tier. */
-  rollingBufferSize: number;
   /** Maximum token size per ingestion chunk. */
   ingestChunkMaxTokens: number;
   /** Embedding model name for hot-swap detection. */
   embeddingModel: string;
   /** Relevance threshold for topic-based forgetting. */
   forgetThreshold: number;
-  /** Recall fallback pipeline configuration. */
-  recallFallback: RecallFallbackConfig;
   /** Heartbeat system configuration for background processing. */
   heartbeat: {
     enabled: boolean;
@@ -49,8 +29,6 @@ export type MemoryConfig = {
     mmrLambda: number;
     compactThresholdPct: number;
   };
-  /** Inactivity gap in hours after midnight before daily compaction triggers. */
-  dayBoundaryHours: number;
 };
 
 const TAG = "memory-config";
@@ -64,23 +42,9 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
   vectorEnabled: false,
   stalenessThresholdMs: 24 * 3600_000,
   restoreMessageCount: 50,
-  compactOnReset: false,
-  autoCompactThreshold: 3000,
-  contextBudget: {
-    soul: 500,
-    recalled: 600,
-    working: 2000,
-  },
-  rollingBufferSize: 20,
   ingestChunkMaxTokens: 512,
   embeddingModel: "Xenova/all-MiniLM-L6-v2",
   forgetThreshold: 0.8,
-  recallFallback: {
-    enabled: true,
-    timeoutMs: 500,
-    contextMessages: 5,
-    minTokenLength: 3,
-  },
   heartbeat: {
     enabled: true,
     intervalMs: 300000,
@@ -91,7 +55,6 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
     mmrLambda: 0.7,
     compactThresholdPct: 85,
   },
-  dayBoundaryHours: 4,
 };
 
 /**
@@ -144,30 +107,6 @@ export function loadMemoryConfig(): MemoryConfig {
     MEMORY_CONFIG_DEFAULTS.restoreMessageCount,
   );
 
-  const compactOnReset = parseBooleanEnv("MEMORY_COMPACT_ON_RESET", MEMORY_CONFIG_DEFAULTS.compactOnReset);
-
-  const autoCompactThreshold = parseNumberEnvSafe(
-    "MEMORY_AUTO_COMPACT_THRESHOLD",
-    MEMORY_CONFIG_DEFAULTS.autoCompactThreshold,
-  );
-
-  const contextBudget = {
-    soul: parseNumberEnvSafe("MEMORY_CONTEXT_BUDGET_SOUL", MEMORY_CONFIG_DEFAULTS.contextBudget.soul),
-    recalled: parseNumberEnvSafe(
-      "MEMORY_CONTEXT_BUDGET_RECALLED",
-      MEMORY_CONFIG_DEFAULTS.contextBudget.recalled,
-    ),
-    working: parseNumberEnvSafe(
-      "MEMORY_CONTEXT_BUDGET_WORKING",
-      MEMORY_CONFIG_DEFAULTS.contextBudget.working,
-    ),
-  };
-
-  const rollingBufferSize = parseNumberEnvSafe(
-    "MEMORY_ROLLING_BUFFER_SIZE",
-    MEMORY_CONFIG_DEFAULTS.rollingBufferSize,
-  );
-
   const ingestChunkMaxTokens = parseNumberEnvSafe(
     "MEMORY_INGEST_CHUNK_MAX_TOKENS",
     MEMORY_CONFIG_DEFAULTS.ingestChunkMaxTokens,
@@ -177,35 +116,6 @@ export function loadMemoryConfig(): MemoryConfig {
 
   const forgetThreshold = parseNumberEnvSafe("MEMORY_FORGET_THRESHOLD", MEMORY_CONFIG_DEFAULTS.forgetThreshold);
 
-  // Recall fallback pipeline config
-  const recallFallbackEnabled = parseBooleanEnv(
-    "MEMORY_RECALL_FALLBACK_ENABLED",
-    MEMORY_CONFIG_DEFAULTS.recallFallback.enabled,
-  );
-  const recallFallbackTimeoutMs = parseNumberEnvSafe(
-    "MEMORY_RECALL_FALLBACK_TIMEOUT_MS",
-    MEMORY_CONFIG_DEFAULTS.recallFallback.timeoutMs,
-  );
-  const recallContextMessages = parseNumberEnvSafe(
-    "MEMORY_RECALL_CONTEXT_MESSAGES",
-    MEMORY_CONFIG_DEFAULTS.recallFallback.contextMessages,
-  );
-  const recallMinTokenLength = parseNumberEnvSafe(
-    "MEMORY_RECALL_MIN_TOKEN_LENGTH",
-    MEMORY_CONFIG_DEFAULTS.recallFallback.minTokenLength,
-  );
-
-  let recallCuePhrases: string | undefined;
-  const rawCuePhrases = process.env["MEMORY_RECALL_CUE_PHRASES"];
-  if (rawCuePhrases !== undefined && rawCuePhrases !== "") {
-    try {
-      JSON.parse(rawCuePhrases);
-      recallCuePhrases = rawCuePhrases;
-    } catch {
-      logWarn(TAG, `MEMORY_RECALL_CUE_PHRASES is not valid JSON: "${rawCuePhrases}" — using built-in defaults`);
-    }
-  }
-
   return {
     memoryEnabled,
     memoryDir,
@@ -214,20 +124,9 @@ export function loadMemoryConfig(): MemoryConfig {
     vectorEnabled,
     stalenessThresholdMs,
     restoreMessageCount,
-    compactOnReset,
-    autoCompactThreshold,
-    contextBudget,
-    rollingBufferSize,
     ingestChunkMaxTokens,
     embeddingModel,
     forgetThreshold,
-    recallFallback: {
-      enabled: recallFallbackEnabled,
-      timeoutMs: recallFallbackTimeoutMs,
-      contextMessages: recallContextMessages,
-      minTokenLength: recallMinTokenLength,
-      ...(recallCuePhrases !== undefined && { cuePhrases: recallCuePhrases }),
-    },
     heartbeat: {
       enabled: parseBooleanEnv("MEMORY_HEARTBEAT_ENABLED", MEMORY_CONFIG_DEFAULTS.heartbeat.enabled),
       intervalMs: parseNumberEnvSafe("MEMORY_HEARTBEAT_INTERVAL_MS", MEMORY_CONFIG_DEFAULTS.heartbeat.intervalMs),
@@ -238,6 +137,5 @@ export function loadMemoryConfig(): MemoryConfig {
       mmrLambda: parseNumberEnvSafe("MEMORY_MMR_LAMBDA", MEMORY_CONFIG_DEFAULTS.searchEnhancements.mmrLambda),
       compactThresholdPct: parseNumberEnvSafe("MEMORY_COMPACT_THRESHOLD_PCT", MEMORY_CONFIG_DEFAULTS.searchEnhancements.compactThresholdPct),
     },
-    dayBoundaryHours: parseNumberEnvSafe("MEMORY_DAY_BOUNDARY_HOURS", MEMORY_CONFIG_DEFAULTS.dayBoundaryHours),
   };
 }

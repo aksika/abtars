@@ -25,7 +25,6 @@ function makeSnapshot(overrides: Partial<StateSnapshot> = {}): StateSnapshot {
     wakeupDate: "2026-03-15",
     todoContents: "- Buy milk",
     cronContents: "[]",
-    transcriptPaths: [],
     ...overrides,
   };
 }
