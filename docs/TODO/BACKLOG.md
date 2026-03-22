@@ -70,11 +70,10 @@ Add a JSONL export step to `daily-backup.sh` for portable/archival format alongs
 
 ## 14. Translation Quality Prompt Fix
 
-**Status:** Not started
-**Priority:** Medium
-**Source:** aksika's queued enhancement
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `998d93d`
 
-Improve EN translation quality for jokes, idioms, and culturally-specific expressions in memory extraction.
+Improved extraction prompt: meaning-first translation, tone context for jokes/sarcasm, cultural reference annotations. Also manually fixed 5 memories (#24 joke punchline, #33-36 content_original language issues). Decision documented in `memory.decisions.md`.
 
 ## 15. Cron Deduplication
 
@@ -85,10 +84,10 @@ Prevent adding the same recurring schedule+message twice in `cron.json`.
 
 ## 16. Cron Error Retry
 
-**Status:** Not started
-**Priority:** Low
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `2ae7446`
 
-Auto-retry failed script tasks on next cycle instead of just reporting failure.
+Auto-retry failed tasks 2 cycles later (10min). One retry only — no infinite loops. Works for both script and agent executors.
 
 ## 17. Deploy New Skills
 
