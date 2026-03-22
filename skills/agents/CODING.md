@@ -41,3 +41,16 @@ Read the two `.asbuilt.md` files before making changes to understand the current
 
 - Reference project: `/mnt/c/Users/qakosal/workspace/openclaw/openclaw` — use as canonical example for patterns and conventions
 - Screenshots: `/mnt/c/Users/qakosal/Pictures/Screenshots/` — use `ls -t` for most recent
+
+## TypeScript Conventions
+
+- Strict mode, `const` over `let`, no `any`
+- PascalCase classes/interfaces, camelCase functions/variables, UPPER_SNAKE_CASE constants
+- Named exports, return types on all functions
+- Optional chaining (`?.`) and nullish coalescing (`??`)
+
+## Security
+
+- Never hardcode secrets — use env vars
+- Validate all inputs, parameterized queries only
+- No secrets in code, no PII in examples
