@@ -84,7 +84,42 @@ else
   warn "backup dir $BACKUP_DIR missing — backups never ran"
 fi
 
-# 7. Git repo health (--fix only, slower checks)
+# 8. Memory DB health
+DB="$AB/memory/memory.db"
+if [ -f "$DB" ]; then
+  # Integrity check
+  INTEGRITY=$(sqlite3 "$DB" "PRAGMA integrity_check;" 2>/dev/null | head -1)
+  if [ "$INTEGRITY" != "ok" ]; then
+    warn "memory.db integrity check failed: $INTEGRITY"
+  fi
+
+  # Size warning (>400MB = 80% of 500MB budget)
+  DB_SIZE=$(stat -c %s "$DB" 2>/dev/null || echo 0)
+  if [ "$DB_SIZE" -gt 419430400 ]; then
+    DB_MB=$((DB_SIZE / 1048576))
+    warn "memory.db is ${DB_MB}MB — approaching 500MB disk budget"
+  fi
+
+  # Sleep recency — warn if no audit in 3 days
+  LATEST_SLEEP=$(find "$AB/memory/sleep" -name "sleep_*.md" -mtime -3 2>/dev/null | head -1)
+  if [ -z "$LATEST_SLEEP" ]; then
+    warn "no sleep audit in last 3 days — GC/consolidation not running"
+  fi
+else
+  warn "memory.db not found"
+fi
+
+# 9. DB repairs (--fix only)
+if $FIX && [ -f "$DB" ]; then
+  # FTS5 rebuild
+  sqlite3 "$DB" "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt messages_fts index"
+  sqlite3 "$DB" "INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt extracted_memories_fts index"
+
+  # WAL checkpoint
+  sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null && fix "WAL checkpoint (truncate)"
+fi
+
+# 10. Git repo health (--fix only, slower checks)
 if $FIX; then
   cd "$AB"
   if [ -d .git ]; then
