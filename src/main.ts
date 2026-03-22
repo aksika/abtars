@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
@@ -151,7 +151,25 @@ function buildStatusLines(opts: {
   return lines;
 }
 
-/** Read and consume the pre-generated startup greeting (written by sleep cycle). */
+/** Update context-window-start timestamp for a chat. Used by recall fallback stages. */
+function updateCtxStart(memoryDir: string, chatId: number, ts = Date.now()): void {
+  const p = join(memoryDir, "context-window-start.json");
+  let data: Record<string, number> = {};
+  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch { /* new file */ }
+  data[String(chatId)] = ts;
+  writeFileSync(p, JSON.stringify(data), "utf-8");
+}
+
+/** Set all context-window-start entries to now (called after sleep). */
+function resetAllCtxStarts(memoryDir: string): void {
+  const p = join(memoryDir, "context-window-start.json");
+  let data: Record<string, number> = {};
+  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch { return; }
+  const now = Date.now();
+  for (const key of Object.keys(data)) data[key] = now;
+  writeFileSync(p, JSON.stringify(data), "utf-8");
+}
+
 /** Read and consume the pre-generated startup greeting (written by sleep cycle). */
 function consumeStartupGreeting(memoryDir: string): string {
   const p = join(memoryDir, "startup-greeting.txt");
@@ -178,7 +196,7 @@ async function sendStartupGreeting(
   memoryDir: string,
   sendTelegram?: (msg: string) => Promise<void>,
   sendDiscord?: (msg: string) => Promise<void>,
-): Promise<void> {
+): Promise<string> {
   const greeting = consumeStartupGreeting(memoryDir);
   const msg = `🔄 ${greeting}`;
   logInfo("main", `Startup greeting: "${greeting}"`);
@@ -189,6 +207,7 @@ async function sendStartupGreeting(
   for (const r of results) {
     if (r.status === "rejected") logWarn("main", `Startup greeting send failed: ${r.reason}`);
   }
+  return greeting;
 }
 
 /** Send a platform context announcement to the transport so the LLM knows which platform is active. */
@@ -275,6 +294,11 @@ async function main(): Promise<void> {
   }
   await transport.initialize();
   logInfo("main", "✅ Transport ready");
+
+  // Initialize context-window-start for all known chats
+  if (memoryConfig.memoryEnabled) {
+    for (const uid of config.allowedUserIds) updateCtxStart(memoryConfig.memoryDir, uid, startedAt);
+  }
 
   // Sleep state: queue messages during sleep, auto-reply "waking up"
   let sleepChild: import("node:child_process").ChildProcess | null = null;
@@ -612,6 +636,7 @@ async function main(): Promise<void> {
         await transport.resetSession(sessionKey);
         if (isGroup) conversationBuffer.clear(bufKey);
         pendingSessionStart.add(sessionKey);
+        if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
         await telegramApi.sendMessage(chatId, "🔄 New session started.", { message_thread_id: threadId });
         logInfo("main", "Session reset");
         return;
@@ -1104,6 +1129,7 @@ async function main(): Promise<void> {
                 sendCompactCommand: (sk, cmd) => transport.sendPrompt(sk, cmd),
               });
               await telegramApi.sendMessage(chatId, "📦 Auto-compaction complete.", { message_thread_id: threadId });
+              if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
             } catch (err) {
               logError("main", "Auto-compaction failed", err);
             }
@@ -1199,6 +1225,7 @@ async function main(): Promise<void> {
         await transport.resetSession(sessionKey);
         conversationBuffer.clear(bufKey);
         pendingSessionStart.add(sessionKey);
+        if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, discordChatId);
         await discordApi.sendMessage(message.channelId, "🔄 New session started.");
         logInfo("main", `Discord session reset for ${sessionKey}`);
         return;
@@ -1597,6 +1624,7 @@ async function main(): Promise<void> {
                 sendCompactCommand: (sk, cmd) => transport.sendPrompt(sk, cmd),
               });
               await discordApi.sendMessage(message.channelId, "📦 Auto-compaction complete.");
+              if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
             } catch (err) {
               logError("main", "Auto-compaction failed (Discord)", err);
             }
@@ -1638,7 +1666,24 @@ async function main(): Promise<void> {
       const channelId = config.discordAllowedChannelIds ? [...config.discordAllowedChannelIds][0] : undefined;
       if (channelId) await new DiscordApi(config.discordBotToken!).sendMessage(channelId, msg);
     } : undefined;
-    sendStartupGreeting(memoryConfig.memoryDir, tgSend, dcSend).catch((err) => {
+    sendStartupGreeting(memoryConfig.memoryDir, tgSend, dcSend).then((greeting) => {
+      // Inject greeting into agent so it greets in its own voice
+      if (telegramPoller && greeting) {
+        const chatId = [...config.allowedUserIds][0];
+        if (chatId) {
+          telegramPoller.injectUpdate({
+            update_id: 0,
+            message: {
+              message_id: 0,
+              from: { id: chatId, is_bot: false, first_name: "system" },
+              chat: { id: chatId, type: "private" },
+              date: Math.floor(Date.now() / 1000),
+              text: `[SYSTEM] You just woke up. Greet the user briefly in your own style. Context: ${greeting}`,
+            },
+          });
+        }
+      }
+    }).catch((err) => {
       logWarn("main", `Startup greeting error: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
@@ -1663,6 +1708,7 @@ async function main(): Promise<void> {
           if (code === 0) {
             logInfo("main", `😴 Cron sleep routine finished successfully at ${new Date().toISOString()}`);
             sleepTrigger.reportSuccess();
+            if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
           } else {
             logWarn("main", `😴 Cron sleep routine failed (exit code ${code}) at ${new Date().toISOString()}`);
             sleepTrigger.reportFailure();

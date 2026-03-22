@@ -92,17 +92,26 @@ User Message
 
 ---
 
-## Recall Cascade ( 5 stages)
+## Recall Cascade ( 7 stages)
 
 | Stage | What | Source | Short-circuit |
 |-------|------|--------|---------------|
-| 1 | Extracted memories EN FTS5 | `extracted_memories_fts` | If ≥10 results with high Darwinism scores → skip 3-5 |
+| 1 | Extracted memories EN FTS5 | `extracted_memories_fts` | If ≥10 results with high Darwinism scores → skip 3-7 |
 | 2 | Extracted memories original FTS5 | `extracted_memories_original_fts` | Same short-circuit pool as stage 1 |
 | 3 | Raw messages FTS5 (relaxed OR) | `messages_fts` | — |
 | 4 | Consolidation file search | daily/weekly/quarterly .md | — |
 | 5 | Raw messages LIKE (wide net) | `messages` | — |
+| 6-7 | Keyword-free fallback (exclusive) | `messages` or `daily/*.md` | Only if stages 1-5 returned zero results |
+
+Stages 6-7 are keyword-free and mutually exclusive. They compare timestamps to decide which source is fresher:
+- Recent messages (`timestamp < context-window-start`) vs latest daily summary
+- Whichever is fresher wins; the other is not injected (avoids context bloat)
+- Context window boundary tracked in `~/.agentbridge/memory/context-window-start.json` (keyed by chatId)
+- Updated on: bridge startup, `/new`, auto-compaction. Reset to NOW on sleep completion.
 
 Post-processing: dedup by content hash → temporal decay → MMR re-ranking.
+
+**Bug fix (2026-03-22):** Stage 3 was broken since inception — `sanitizeFtsQuery` double-processed the OR query, turning `OR` operators into literal `"OR"*` search terms. Fixed by passing `mode: "or"` to `index.search()`.
 
 **Removed stages:** Strict FTS5 AND (merged into relaxed OR), substring LIKE ×2 (redundant), chat_backup LIKE (table is debug-only).
 

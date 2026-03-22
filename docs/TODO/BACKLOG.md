@@ -91,8 +91,7 @@ Auto-retry failed tasks 2 cycles later (10min). One retry only — no infinite l
 
 ## 17. Deploy New Skills
 
-**Status:** Not started
-**Priority:** High — quick
+**Status:** ✅ Done (2026-03-22)
 
 Run `deploy.sh` to push `healthcheck.md` and updated `cron.md` to live.
 
@@ -116,6 +115,19 @@ Add `/coding` command that routes to Claude Opus as a dedicated coding agent. Se
 **Priority:** Medium
 
 Audit current test coverage (606 tests / 59 files). Identify gaps, redundant tests, and areas where integration tests would add more value than unit tests. Align with the refactored architecture.
+
+## 22. Picture / Media Support
+
+**Status:** Not started
+**Priority:** Medium
+**Source:** OpenClaw media handling study (memory refactor), user request (2026-03-22)
+
+**Problem:**
+AgentBridge is text-only. Users can't send images to the bot (screenshots, diagrams, photos) and the bot can't send images back. This limits usefulness for visual debugging, sharing context, and richer interactions.
+
+**Scope (initial assessment):** `docs/specs/picture-support.assessment.md`
+
+**Reference:** OpenClaw `src/agents/tool-images.ts`, `src/media-understanding/attachments.cache.ts`, `src/web/media.ts` — studied during memory refactor, kept as future reference for big file / media patterns.
 
 ## 21. Improve Security (NemoClaw Ideas)
 

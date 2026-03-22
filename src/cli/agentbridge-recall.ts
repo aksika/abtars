@@ -2,14 +2,16 @@
 /**
  * agentbridge-recall — standalone CLI for agent-initiated memory search.
  *
- * 5-stage cascade, extracted-first:
+ * 7-stage cascade, extracted-first:
  *   1. extracted_memories_fts (EN, Darwinism-boosted)
  *   2. extracted_memories_original_fts (original language, Darwinism-boosted)
  *   3. messages_fts (relaxed OR)
  *   4. Consolidation file search (daily/weekly/quarterly .md)
  *   5. messages LIKE (wide net fallback)
+ *   6-7. Keyword-free fallback (exclusive): recent messages OR latest daily summary
+ *        — whichever is fresher wins, based on context-window-start boundary
  *
- * Short-circuit: if stages 1+2 yield ≥10 results, skip 3-5.
+ * Short-circuit: if stages 1+2 yield ≥10 results, skip 3-7.
  *
  * Usage:
  *   agentbridge-recall --keywords "kw1,kw2" --chat-id 7773842843
@@ -17,18 +19,27 @@
  */
 
 import Database from "better-sqlite3";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { MemoryIndex } from "../components/memory-index.js";
-import { searchConsolidationFiles } from "../components/consolidation-search.js";
+import { searchConsolidationFiles, getLatestConsolidationFile } from "../components/consolidation-search.js";
 import type { SearchResult, MemorySearchResult } from "../types/memory.js";
 
 const MEMORY_DIR = join(homedir(), ".agentbridge", "memory");
 const DB_PATH = join(MEMORY_DIR, "memory.db");
+const CTX_START_PATH = join(MEMORY_DIR, "context-window-start.json");
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 const SHORT_CIRCUIT_THRESHOLD = 10;
+
+/** Read context-window-start timestamp for a given chatId. Returns 0 if unknown. */
+function readCtxStart(chatId: number): number {
+  try {
+    const data = JSON.parse(readFileSync(CTX_START_PATH, "utf-8")) as Record<string, number>;
+    return data[String(chatId)] ?? 0;
+  } catch { return 0; }
+}
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -111,9 +122,8 @@ try {
 
   if (!shortCircuit) {
     // --- Stage 3: messages_fts (relaxed OR) ---
-    const relaxed = query.split(/\s+/).filter(t => t.length >= 2).join(" OR ");
-    if (relaxed) {
-      for (const r of index.search(relaxed, searchOpts)) addMessage(r, "messages_fts");
+    if (query.trim()) {
+      for (const r of index.search(query, searchOpts, "or")) addMessage(r, "messages_fts");
     }
 
     // --- Stage 4: Consolidation file search ---
@@ -141,6 +151,38 @@ try {
       for (const r of rows) {
         const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
         if (!seen.has(key)) { seen.add(key); results.push({ content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "messages_like", score: 0.3 }); }
+      }
+    }
+
+    // --- Stages 6/7: Keyword-free fallback (exclusive — fresher source wins) ---
+    if (results.length === 0) {
+      const ctxStart = readCtxStart(params.chatId);
+
+      // Candidate A: recent messages before context window start
+      const recentRows = db.prepare(
+        `SELECT role, content, timestamp FROM messages WHERE chat_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?`
+      ).all(params.chatId, ctxStart || Date.now(), params.limit) as Array<{ role: string; content: string; timestamp: number }>;
+      const recentTs = recentRows[0]?.timestamp ?? 0;
+
+      // Candidate B: latest daily summary
+      const dailySummary = getLatestConsolidationFile(MEMORY_DIR, "daily");
+      const dailyTs = dailySummary?.timestamp ?? 0;
+
+      if (dailyTs > recentTs && dailySummary) {
+        // Daily summary is fresher — inject it only
+        const key = `${dailySummary.timestamp}:${dailySummary.content.slice(0, 80)}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          results.push({ content: dailySummary.content, date: new Date(dailySummary.timestamp).toISOString(), source: "fallback:daily_summary", score: 0.1 });
+        }
+        console.error("Fallback: injected latest daily summary (fresher than recent messages)");
+      } else if (recentRows.length > 0) {
+        // Recent messages are fresher — inject them only
+        for (const r of recentRows) {
+          const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
+          if (!seen.has(key)) { seen.add(key); results.push({ content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "fallback:recent", score: 0.1 }); }
+        }
+        console.error(`Fallback: injected ${recentRows.length} recent messages (fresher than daily summary)`);
       }
     }
   }

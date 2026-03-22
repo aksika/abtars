@@ -20,10 +20,12 @@ agentbridge-recall --keywords "keyword1,keyword2" --chat-id <CHAT_ID>
 
 - `--keywords` (required): Comma-separated English search terms. Extract key concepts from the user's message.
   Example: `--keywords "project deadline,budget"`
+  **Important:** Keywords must be content words that appear in stored memories, NOT meta-words like "recent", "conversation", "last session", "previous talk". For vague requests like "what did we talk about?", use broad topic words: `--keywords "summary,discussion,update,decision"`. The DB uses FTS5 — only actual content matches.
 - `--original` (optional): A single keyword in the user's original language for fallback search. Use when the user stresses a specific non-English term.
   Example: `--original "kiskutya"`
 - `--time-start` (optional): Unix timestamp in milliseconds — start of time range.
 - `--time-end` (optional): Unix timestamp in milliseconds — end of time range.
+  **For vague recency queries** ("what did we talk about?", "last time", "recently"): use `--time-start` set to 24-48h ago and broad keywords like `"summary,discussion,update,decision"`. The DB has timestamped messages — use time ranges to find recent content instead of relying on keywords alone.
 - `--chat-id` (required): The Telegram chat ID. Use `7773842843` for the main chat.
 - `--max-classification` (optional): Maximum NATO confidentiality level to return (0-2). Default: 2.
   - Use `0` in group chats and A2A (UNCLASSIFIED only)
