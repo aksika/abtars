@@ -37,7 +37,7 @@ describe("SleepTrigger", () => {
   it("startup: skips when audit exists today", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-15T10:00:00"));
-    writeFileSync(join(auditDir, "sleep_20260315_080000.md"), "audit");
+    writeFileSync(join(auditDir, "sleep_20260315_0800.md"), "audit");
     const trigger = new SleepTrigger(auditDir);
     expect(trigger.shouldRunOnStartup()).toBe(false);
     vi.useRealTimers();
@@ -73,7 +73,7 @@ describe("SleepTrigger", () => {
   it("cron: skips when audit exists today", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-15T10:00:00"));
-    writeFileSync(join(auditDir, "sleep_20260315_100000.md"), "audit");
+    writeFileSync(join(auditDir, "sleep_20260315_1000.md"), "audit");
     const trigger = new SleepTrigger(auditDir);
     expect(trigger.shouldRunFromCron(Date.now() - 15 * 60 * 1000)).toBe(false);
     vi.useRealTimers();

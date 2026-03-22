@@ -276,7 +276,7 @@ export function writeAuditLog(
   // Fallback: no subagent file found — write standalone
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10).replace(/-/g, "");
-  const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, "");
+  const timeStr = now.toTimeString().slice(0, 5).replace(/:/g, "");
   const filename = `sleep_${dateStr}_${timeStr}.md`;
   writeFileSync(join(sleepDir, filename), `# Sleep Audit Log${suffix}`, "utf-8");
 }
