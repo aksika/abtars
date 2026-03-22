@@ -123,16 +123,18 @@ On the first message after startup, `/new`, `/reset`, or `/restart`, the bridge 
 
 **Implementation:** `buildSessionStartContext()` in `src/components/session-context.ts`, called via shared `preparePrompt()` helper in `main.ts` (used by both Telegram and Discord handlers).
 
-**Tracking:** `pendingSessionStart: Set<string>` — added on session reset events, consumed on first message.
+**Tracking:** `pendingSessionStart: Set<string>` — added on session reset events. `seenSessions: Set<string>` — tracks sessions that have sent at least one message. First-ever message from any session after bridge restart is treated as session start (catches the startup case, not just `/new`/`/reset`).
 
-**Two paths, same budget (~400 tokens / 2000 chars):**
+**Two paths:**
 
 | Condition | Source | What's injected |
 |-----------|--------|-----------------|
-| Messages newer than latest daily | `messages` table (last 10, since daily timestamp) | `[HH:MM] role: content` lines |
-| No newer messages (overnight) | Latest `daily_*.md` file | Full daily summary (truncated at 2000 chars if needed) |
-| No daily exists at all | `messages` table (last 10) | `[HH:MM] role: content` lines |
+| Messages newer than latest daily | `messages` table (last 12, since daily timestamp) | `[HH:MM] role: content` lines, 2500 char soft cap |
+| No newer messages (overnight) | Latest `daily_*.md` file | Full daily summary (~3000 chars, controlled by sleep prompt) |
+| No daily exists at all | `messages` table (last 12) | `[HH:MM] role: content` lines, 2500 char soft cap |
 | No daily, no messages | — | Nothing injected (null) |
+
+**Recent messages cap:** 12 messages, 2500 char soft limit. Drops oldest messages first — newest message is never truncated. Never cuts mid-message.
 
 **Output format (REQ-4 temporal markers):**
 ```
@@ -149,6 +151,8 @@ The time gap between "ended" and "SESSION START" tells the agent how stale the c
 - `writeStartupGreeting()` from `agentbridge-sleep.ts` — sleep no longer generates greetings
 - `consumeStartupGreeting()` from `main.ts` — no more file-based greeting
 - `[SYSTEM]` inject hack via `telegramPoller.injectUpdate()` — replaced by proper prompt prepend
+
+**Steering:** `session-start.md` instructs the agent to greet the user by name (from `user_profile.md`) and reference the session context naturally.
 
 **Bug fix (2026-03-22):** Stage 3 was broken since inception — `sanitizeFtsQuery` double-processed the OR query, turning `OR` operators into literal `"OR"*` search terms. Fixed by passing `mode: "or"` to `index.search()`.
 
