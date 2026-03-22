@@ -52,19 +52,38 @@ function appendReminder(r: PendingReminder): void {
   writeFileSync(remindersPath(), JSON.stringify(existing, null, 2), "utf-8");
 }
 
-/**
- * Check cron.json for due entries. Fire reminders to pending_reminders.json,
+const MAX_HISTORY = 10;
+const GC_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** Record a run in the entry's history (keeps last MAX_HISTORY). */
+function recordRun(entry: CronEntry, exitCode?: number): void {
+  if (!entry.history) entry.history = [];
+  entry.history.push({ ts: Date.now(), ...(exitCode !== undefined ? { exitCode } : {}) });
+  if (entry.history.length > MAX_HISTORY) entry.history = entry.history.slice(-MAX_HISTORY);
+}
+
 /**
  * Check cron.json for due entries. Fire reminders to pending_reminders.json,
  * spawn tasks as kiro-cli subprocesses. Recurring entries reschedule after firing.
+ * GCs fired one-shots older than 7 days.
  */
 export function checkCron(onTaskComplete?: (chatId: number, message: string, result: string) => void): void {
-  const entries = readCron();
+  let entries = readCron();
   const now = Date.now();
   let changed = false;
 
+  // GC: remove fired one-shots older than 7 days
+  const before = entries.length;
+  entries = entries.filter(e => !(e.fired && !e.schedule && now - e.createdAt > GC_AGE_MS));
+  if (entries.length < before) {
+    changed = true;
+    logInfo(TAG, `🗑️ GC: pruned ${before - entries.length} old fired entries`);
+  }
+
   for (const entry of entries) {
-    if (entry.fired || entry.fireAt > now) continue;
+    if (entry.fired || entry.paused || entry.fireAt > now) continue;
+
+    entry.lastRanAt = now;
 
     // Recurring: compute next fireAt, keep unfired. One-shot: mark fired.
     if (entry.schedule) {
@@ -81,10 +100,12 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
 
     if (entry.type === "reminder") {
       appendReminder({ chatId: entry.chatId, message: entry.message, createdAt: now });
+      recordRun(entry);
       logInfo(TAG, `⏰ Reminder fired: "${entry.message}" → chat ${entry.chatId}`);
     } else if (entry.executor === "script") {
       // Script task: run command directly via bash
       logInfo(TAG, `📜 Script task fired: "${entry.message}"`);
+      const capturedEntry = entry;
       try {
         const child = spawn("bash", ["-c", entry.message], { stdio: ["ignore", "pipe", "pipe"] });
         let output = "";
@@ -93,12 +114,16 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
         child.on("exit", (code) => {
           const summary = output.slice(0, 500) || "(no output)";
           const status = code === 0 ? "✅" : `❌ (exit ${code})`;
-          logInfo(TAG, `📜 Script task ${status}: "${entry.message}"`);
-          onTaskComplete?.(entry.chatId, entry.message, `${status}\n${summary}`);
+          logInfo(TAG, `📜 Script task ${status}: "${capturedEntry.message}"`);
+          recordRun(capturedEntry, code ?? undefined);
+          writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
+          onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, `${status}\n${summary}`);
         });
         child.on("error", (err) => {
           logWarn(TAG, `Script spawn failed: ${err.message}`);
-          onTaskComplete?.(entry.chatId, entry.message, `❌ Failed to execute: ${err.message}`);
+          recordRun(capturedEntry, 1);
+          writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
+          onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, `❌ Failed to execute: ${err.message}`);
         });
       } catch (err) {
         logWarn(TAG, `Script spawn error: ${err instanceof Error ? err.message : String(err)}`);
@@ -106,20 +131,25 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
     } else {
       // Agent task: spawn kiro-cli to execute
       logInfo(TAG, `⚙️ Task fired: "${entry.message}" → spawning subagent`);
+      const capturedEntry = entry;
       try {
         const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "ignore"] });
         let output = "";
         child.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
         child.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "sendPrompt", params: { prompt: entry.message }, id: 1 }) + "\n");
         child.stdin?.end();
-        child.on("exit", () => {
+        child.on("exit", (code) => {
           const summary = output.slice(0, 500) || "(no output)";
-          logInfo(TAG, `⚙️ Task completed: "${entry.message}"`);
-          onTaskComplete?.(entry.chatId, entry.message, summary);
+          logInfo(TAG, `⚙️ Task completed: "${capturedEntry.message}"`);
+          recordRun(capturedEntry, code ?? undefined);
+          writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
+          onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, summary);
         });
         child.on("error", (err) => {
           logWarn(TAG, `Task spawn failed: ${err.message}`);
-          onTaskComplete?.(entry.chatId, entry.message, `❌ Failed to execute: ${err.message}`);
+          recordRun(capturedEntry, 1);
+          writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
+          onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, `❌ Failed to execute: ${err.message}`);
         });
       } catch (err) {
         logWarn(TAG, `Task spawn error: ${err instanceof Error ? err.message : String(err)}`);

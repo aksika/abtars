@@ -39,8 +39,11 @@ agentbridge-cron add --schedule "0 10 * * *" --message "Follow the research prom
 ## Management
 
 ```bash
-agentbridge-cron list              # Show pending/recurring entries
+agentbridge-cron list              # Show pending/recurring entries (with lastRanAt, schedule, executor)
 agentbridge-cron remove <id>       # Cancel entry by 6-char hex ID
+agentbridge-cron pause <id>        # Temporarily disable (keeps config)
+agentbridge-cron resume <id>       # Re-enable paused entry
+agentbridge-cron history <id>      # Show last 10 runs with timestamps and exit codes
 ```
 
 ## How it fires

@@ -93,9 +93,13 @@ Deployed to: `~/.local/bin/agentbridge-cron` (via `scripts/deploy.sh`)
 
 | Command | Description |
 |---------|-------------|
-| `agentbridge-cron add --at <ISO> --message <text> --chat-id <ID> [--type reminder\|task]` | Schedule entry |
-| `agentbridge-cron list` | Show pending (unfired) entries |
+| `agentbridge-cron add --at <ISO> --message <text> --chat-id <ID> [--type reminder\|task] [--executor agent\|script]` | One-shot entry |
+| `agentbridge-cron add --schedule "<cron expr>" --message <text> --chat-id <ID> [--type task] [--executor script]` | Recurring entry |
+| `agentbridge-cron list` | Show active entries (with lastRanAt, schedule, executor) |
 | `agentbridge-cron remove <id>` | Delete entry by 6-char hex ID |
+| `agentbridge-cron pause <id>` | Temporarily disable entry |
+| `agentbridge-cron resume <id>` | Re-enable paused entry |
+| `agentbridge-cron history <id>` | Show last 10 runs with timestamps and exit codes |
 
 Output: JSON on stdout.
 
@@ -120,6 +124,10 @@ Path: `~/.agentbridge/memory/cron.json`
 - `fireAt`: epoch milliseconds (auto-computed from `schedule` for recurring entries)
 - `executor`: `"agent"` (default — spawns kiro-cli) or `"script"` (runs `bash -c` directly). Only meaningful for `type: "task"`.
 - `schedule`: optional cron expression (e.g. `"30 7 * * *"`). When present, entry reschedules after firing instead of being marked `fired: true`.
+- `paused`: optional boolean. When true, entry is skipped by `checkCron()`.
+- `lastRanAt`: epoch ms, updated each time the entry fires.
+- `history`: last 10 runs as `{ ts, exitCode? }[]`. Exit codes recorded for script and agent tasks.
+- Fired one-shot entries (no `schedule`) are GC'd after 7 days.
 - `type`: `"reminder"` (injected into conversation) or `"task"` (spawns subagent)
 - `fired`: set to `true` once processed, entry stays in file for audit
 

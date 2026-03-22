@@ -25,8 +25,11 @@ export interface CronEntry {
   type: "reminder" | "task";
   executor?: "agent" | "script";
   schedule?: string;
+  paused?: boolean;
   fired: boolean;
   createdAt: number;
+  lastRanAt?: number;
+  history?: { ts: number; exitCode?: number }[];
 }
 
 function ensureFile(): void {
@@ -136,6 +139,11 @@ function listEntries(): void {
     message: e.message,
     chatId: e.chatId,
     type: e.type,
+    ...(e.executor ? { executor: e.executor } : {}),
+    ...(e.schedule ? { schedule: e.schedule } : {}),
+    ...(e.paused ? { paused: true } : {}),
+    ...(e.lastRanAt ? { lastRanAt: new Date(e.lastRanAt).toISOString() } : {}),
+    ...(e.history?.length ? { lastExit: e.history[e.history.length - 1]!.exitCode ?? null } : {}),
   }));
   console.log(JSON.stringify({ ok: true, entries: display }));
 }
@@ -147,6 +155,35 @@ function remove(id: string): void {
   entries.splice(idx, 1);
   writeEntries(entries);
   console.log(JSON.stringify({ ok: true, action: "removed", id }));
+}
+
+function pause(id: string): void {
+  const entries = readEntries();
+  const entry = entries.find(e => e.id === id);
+  if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
+  entry.paused = true;
+  writeEntries(entries);
+  console.log(JSON.stringify({ ok: true, action: "paused", id }));
+}
+
+function resume(id: string): void {
+  const entries = readEntries();
+  const entry = entries.find(e => e.id === id);
+  if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
+  delete entry.paused;
+  writeEntries(entries);
+  console.log(JSON.stringify({ ok: true, action: "resumed", id }));
+}
+
+function showHistory(id: string): void {
+  const entries = readEntries();
+  const entry = entries.find(e => e.id === id);
+  if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
+  const runs = (entry.history ?? []).map(h => ({
+    ranAt: new Date(h.ts).toISOString(),
+    ...(h.exitCode !== undefined ? { exitCode: h.exitCode } : {}),
+  }));
+  console.log(JSON.stringify({ ok: true, id, message: entry.message.slice(0, 80), runs }));
 }
 
 // --- CLI entry point ---
@@ -168,8 +205,26 @@ export function main(argv: string[] = process.argv): void {
       remove(id);
       break;
     }
+    case "pause": {
+      const id = args[1];
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron pause <id>" })); process.exit(1); }
+      pause(id);
+      break;
+    }
+    case "resume": {
+      const id = args[1];
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron resume <id>" })); process.exit(1); }
+      resume(id);
+      break;
+    }
+    case "history": {
+      const id = args[1];
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron history <id>" })); process.exit(1); }
+      showHistory(id);
+      break;
+    }
     default:
-      console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron <add|list|remove> [args]" }));
+      console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron <add|list|remove|pause|resume|history> [args]" }));
       process.exit(1);
   }
 }
