@@ -1,8 +1,9 @@
-import { readFileSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import { loadAndValidateConfig } from "./components/config.js";
 import { SecurityGate } from "./components/security-gate.js";
 import { ResponseFormatter } from "./components/response-formatter.js";
@@ -149,6 +150,61 @@ function buildStatusLines(opts: {
     } catch { /* */ }
   }
   return lines;
+}
+
+/** Read the last N extracted memories for startup greeting context. */
+function getRecentMemories(memoryDir: string, limit = 3): string[] {
+  const dbPath = join(memoryDir, "memory.db");
+  if (!existsSync(dbPath)) return [];
+  try {
+    const db = new Database(dbPath, { readonly: true });
+    const rows = db.prepare(
+      "SELECT content_en FROM extracted_memories ORDER BY created_at DESC LIMIT ?",
+    ).all(limit) as Array<{ content_en: string }>;
+    db.close();
+    return rows.map(r => r.content_en);
+  } catch { return []; }
+}
+
+/** Send startup greeting: quick "back online" now, context-aware LLM greeting once transport is ready. */
+async function sendStartupGreeting(
+  transport: IKiroTransport,
+  memoryDir: string,
+  sendTelegram?: (msg: string) => Promise<void>,
+  sendDiscord?: (msg: string) => Promise<void>,
+): Promise<void> {
+  // Phase 1: instant "back online"
+  const quickMsg = "🔄 Back online.";
+  await Promise.all([
+    sendTelegram?.(quickMsg).catch(() => {}),
+    sendDiscord?.(quickMsg).catch(() => {}),
+  ]);
+
+  // Phase 2: context-aware greeting via LLM (async, non-blocking)
+  const memories = getRecentMemories(memoryDir);
+  if (memories.length === 0) return;
+
+  const prompt = [
+    "[SYSTEM] You just rebooted. Send a brief 1-2 sentence greeting proving you remember recent context.",
+    "Do NOT list memories. Just reference something naturally, like a human returning to a conversation.",
+    "Be warm but concise. Use your personality.",
+    "",
+    "Recent memories for context:",
+    ...memories.map((m, i) => `${i + 1}. ${m.slice(0, 200)}`),
+  ].join("\n");
+
+  try {
+    const response = await transport.sendPrompt("system:greeting", prompt);
+    const greeting = response?.trim();
+    if (greeting && greeting.length > 5 && greeting.length < 500) {
+      await Promise.all([
+        sendTelegram?.(greeting).catch(() => {}),
+        sendDiscord?.(greeting).catch(() => {}),
+      ]);
+    }
+  } catch (err) {
+    logDebug("main", `Startup greeting LLM call failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** Send a platform context announcement to the transport so the LLM knows which platform is active. */
@@ -368,9 +424,11 @@ async function main(): Promise<void> {
 
   // --- Telegram wiring (conditional) ---
   let telegramPoller: TelegramPoller | null = null;
+  let telegramApiRef: TelegramApi | null = null;
 
   if (platforms.telegram) {
     const telegramApi = new TelegramApi(config.telegramBotToken);
+    telegramApiRef = telegramApi;
     const securityGate = new SecurityGate(config.allowedUserIds);
 
     const botInfo = await telegramApi.getMe();
@@ -1094,9 +1152,11 @@ async function main(): Promise<void> {
 
   // --- Discord wiring (conditional) ---
   let discordPoller: DiscordPoller | null = null;
+  let discordApiRef: DiscordApi | null = null;
 
   if (platforms.discord && config.discordEnabled) {
     const discordApi = new DiscordApi(config.discordBotToken!);
+    discordApiRef = discordApi;
     const discordSecurityGate = new DiscordSecurityGate(
       config.discordAllowedUserIds!,
       config.discordAllowedChannelIds!,
@@ -1587,6 +1647,20 @@ async function main(): Promise<void> {
   }
 
   // --- Unified heartbeat (5-min interval) ---
+
+  // --- Startup greeting (async, non-blocking) ---
+  if (memoryConfig.memoryEnabled) {
+    const tgSend = telegramApiRef ? async (msg: string): Promise<void> => {
+      const chatId = [...config.allowedUserIds][0];
+      if (chatId) await telegramApiRef!.sendMessage(chatId, msg);
+    } : undefined;
+    const dcSend = discordApiRef ? async (msg: string): Promise<void> => {
+      const channelId = config.discordAllowedChannelIds ? [...config.discordAllowedChannelIds][0] : undefined;
+      if (channelId) await discordApiRef!.sendMessage(channelId, msg);
+    } : undefined;
+    sendStartupGreeting(transport, memoryConfig.memoryDir, tgSend, dcSend).catch(() => {});
+  }
+
   const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: 5 * 60 * 1000 });
 
   heartbeat.registerTask({
