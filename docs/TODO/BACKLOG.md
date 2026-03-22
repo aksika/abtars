@@ -1,5 +1,7 @@
 # Backlog
 
+> ⚠️ **Never delete items from this log.** Completed, cancelled, and closed items stay — they are historical record.
+
 ## 8. Context Compression with Tool-Pair Integrity
 
 **Status:** ✅ Closed — out of scope
