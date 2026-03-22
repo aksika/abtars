@@ -66,6 +66,12 @@ if command -v mcporter &>/dev/null; then
   mcporter daemon start 2>/dev/null || true
 fi
 
+# --- run doctor health check ---
+if [ -x "$AB_HOME/scripts/doctor.sh" ]; then
+  "$AB_HOME/scripts/doctor.sh" 2>&1 | sed 's/^/   /'
+  echo ""
+fi
+
 # --- start the bridge ---
 echo "🌉 Starting bridge..."
 cd "$PROJECT_DIR"
