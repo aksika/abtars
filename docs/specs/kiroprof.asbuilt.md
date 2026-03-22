@@ -359,3 +359,45 @@ Dreamy (the sleep agent) performs garbage collection on every sleep cycle as its
 
 - `rebuild-db.ts` now applies `stripEmojis()` before insert
 - `recordMessage()` skips empty content after emoji stripping (pure emoji messages like "👍" no longer indexed)
+
+---
+
+## Doctor (`scripts/doctor.sh`)
+
+Two-stage health check inspired by OpenClaw's `openclaw doctor` / `openclaw doctor --repair` pattern.
+
+### Usage
+
+```bash
+doctor.sh          # diagnose only — prints warnings, changes nothing (runs on startup)
+doctor.sh --fix    # diagnose + apply repairs
+```
+
+### Diagnose (default, safe for startup)
+
+| # | Check | Warns when |
+|---|-------|------------|
+| 1 | Directory permissions | Sensitive dirs (`titok/`, `cookies/`, `memory/`) not 700 |
+| 2 | Stale locks | `.lock` files older than 1 hour |
+| 3 | Stale browse artifacts | `browse_*` files in `logs/` older than 3 days |
+| 4 | Cookie validity | `x-cookies.json` missing or invalid JSON |
+| 5 | Required dirs | Any of `twitterX/`, `skills/`, `logs/`, `memory/sleep/`, `memory/retrospectives/` missing |
+| 6 | Follows file | `base.follows.json` missing |
+| 7 | Recent backup | No `agentbridge-*.zip` in `~/.backup-agentbridge/` within 2 days |
+| 8 | DB integrity | `PRAGMA integrity_check` fails |
+| 9 | DB size | `memory.db` exceeds 400MB (80% of 500MB budget) |
+| 10 | Sleep recency | No `sleep_*.md` audit in last 3 days |
+
+### Fix (`--fix`, manual only)
+
+All diagnose checks above, plus applies repairs:
+- chmod 700 on sensitive dirs
+- Remove stale locks and browse artifacts
+- Create missing dirs
+- FTS5 rebuild (`messages_fts` + `extracted_memories_fts`)
+- WAL checkpoint (truncate)
+- Git push dry-run (5s timeout) — verifies backup push will work
+
+### Integration
+
+`agentbridge.sh` runs `doctor.sh` (diagnose only) before starting the bridge. No `-e` flag — individual check failures don't block startup.
