@@ -56,17 +56,15 @@ Extract durable facts/patterns from daily retro files into `extracted_memories`.
 
 ## 12. MMR Re-Ranking on Recall Output
 
-**Status:** Not started
-**Priority:** Low
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `2f9d487`
 
-Apply Maximal Marginal Relevance re-ranking on final recall results to reduce redundancy and improve diversity.
+Jaccard token similarity + MMR re-ranking (λ=0.7) applied as post-processing in agentbridge-recall after dedup and sort. New file: `src/components/mmr.ts`. 8 tests added.
 
 ## 13. Daily Backup SQL→JSONL Export
 
-**Status:** Not started
-**Priority:** Low
-
-Add a JSONL export step to `daily-backup.sh` for portable/archival format alongside the zip.
+**Status:** ❌ Cancelled
+**Reason:** JSONL eliminated in R1 refactor. SQLite is the single source of truth; zip backup of memory.db is sufficient.
 
 ## 14. Translation Quality Prompt Fix
 
@@ -77,10 +75,9 @@ Improved extraction prompt: meaning-first translation, tone context for jokes/sa
 
 ## 15. Cron Deduplication
 
-**Status:** Not started
-**Priority:** Low
+**Status:** ✅ Done (2026-03-22)
 
-Prevent adding the same recurring schedule+message twice in `cron.json`.
+Recurring entries with same schedule+message+chatId are rejected on add. Returns `{"ok":false,"error":"duplicate","existing_id":"..."}`. Paused entries are excluded from the check.
 
 ## 16. Cron Error Retry
 
@@ -104,8 +101,8 @@ Modernize the localhost web dashboard — improve UI/UX, add missing panels, mak
 
 ## 19. /coding Command — Opus as Coding Agent
 
-**Status:** Not started
-**Priority:** Medium
+**Status:** ✅ Done
+**Commit:** `816157e`
 
 Add `/coding` command that routes to Claude Opus as a dedicated coding agent. Separate from the default conversational model — optimized for code generation, refactoring, and debugging tasks.
 

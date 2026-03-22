@@ -123,6 +123,13 @@ function add(args: string[]): void {
   };
 
   const entries = readEntries();
+
+  // Dedup: reject if a recurring entry with same schedule+message+chatId already exists
+  if (schedule) {
+    const dup = entries.find(e => e.schedule === schedule && e.message === entry.message && e.chatId === chatId && !e.paused);
+    if (dup) { console.log(JSON.stringify({ ok: false, error: "duplicate", existing_id: dup.id })); process.exit(1); }
+  }
+
   entries.push(entry);
   writeEntries(entries);
   console.log(JSON.stringify({ ok: true, action: "added", id: entry.id, fireAt: new Date(fireAt!).toISOString(), ...(schedule ? { schedule } : {}) }));
