@@ -41,7 +41,7 @@ User Message
 | (agent   |               +----------+
 |  decides |                     ^
 |  when to |                     |
-|  search) |--- recall --------->|  (single path: agentbridge-recall, 5 stages)
+|  search) |--- recall --------->|  (single path: agentbridge-recall, 7 stages)
 |          |                     |
 |          |               +----------+
 |          |               | C1       |  daily/weekly/quarterly summaries
@@ -69,7 +69,7 @@ User Message
 |  Layer 6: REMOVED — ContextAssembler, ContextWindowMonitor deleted   |
 +---------------------------------------------------------------------+
 |  Layer 5: Agent-Initiated Recall (single path)                       |
-|  agentbridge-recall ONLY (5-stage cascade, extracted-first)          |
+|  agentbridge-recall ONLY (7-stage cascade, extracted-first)          |
 |  REMOVED: MemorySearchTool, RecallFallbackPipeline, IntentDetector  |
 +---------------------------------------------------------------------+
 |  Layer 4: Background Extraction & Enrichment                        |
@@ -163,7 +163,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
     │                    └──► chat_backup (DEBUG_MODE only)
     │
     ▼
-[During conversation: searchable via agentbridge-recall stages 3,5]
+[During conversation: searchable via agentbridge-recall stages 3-5]
 [Agent may instant-store important facts via agentbridge-store → extracted_memories]
     │
     ▼
@@ -207,7 +207,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 |-----------|------|--------|
 | MemoryManager | `memory-manager.ts` | Simplified: no JSONL, no drift check, cascadeDelete DB-only |
 | MemoryIndex | `memory-index.ts` | FTS5 trigger change: strip emojis at index, not storage |
-| agentbridge-recall | `cli/agentbridge-recall.ts` | 5-stage cascade, extracted-first, short-circuit |
+| agentbridge-recall | `cli/agentbridge-recall.ts` | 7-stage cascade, extracted-first, keyword-free fallback, short-circuit |
 | agentbridge-store | `cli/agentbridge-store.ts` | Unchanged |
 | agentbridge-sleep | `cli/agentbridge-sleep.ts` | Updated template with retro + flush |
 | SleepTrigger | `sleep-trigger.ts` | Unchanged |
@@ -262,6 +262,7 @@ New env vars:
 ```
 ~/.agentbridge/memory/
   memory.db                    # SQLite: messages (hot buffer) + extracted_memories (permanent)
+  context-window-start.json    # Per-chat session boundary timestamps (for recall fallback)
   .heartbeat                   # Epoch ms — written by HeartbeatSystem on each tick
   cron.json                    # Internal cron entries (one-shot + recurring)
   pending_reminders.json       # File-based IPC: cron → reminder injector
@@ -295,4 +296,4 @@ New env vars:
 
 ### Conclusion
 
-The refactor eliminated JSONL dual-writes, simplified search to a single 5-stage extracted-first cascade, added daily retrospective capability, restructured the sleep cycle, removed dead code (-3326 lines), and added immediate emotion propagation. SQLite is the single source of truth.
+The refactor eliminated JSONL dual-writes, simplified search to a single 7-stage extracted-first cascade (with keyword-free fallback), added daily retrospective capability, restructured the sleep cycle, removed dead code (-3326 lines), and added immediate emotion propagation. SQLite is the single source of truth.

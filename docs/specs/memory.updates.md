@@ -74,7 +74,7 @@
 - Added lastSleepTimestamp to StateSnapshot
 
 **R2: Recall cascade refactor** (`8c208de`)
-- 5-stage extracted-first cascade: extracted EN → extracted original → messages FTS5 OR → consolidation → messages LIKE
-- Short-circuit: ≥10 extracted results skips stages 3-5
+- 7-stage extracted-first cascade: extracted EN → extracted original → messages FTS5 OR → consolidation → messages LIKE → keyword-free fallback (recent messages vs daily summary, exclusive, fresher wins)
+- Short-circuit: ≥10 extracted results skips stages 3-7
 - Removed: strict AND, substring LIKE ×2, chat_backup LIKE
 - DB opened read-write for Darwinism bumps
