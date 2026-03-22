@@ -110,6 +110,103 @@ describe("cron-checker", () => {
     expect(() => checkCron()).not.toThrow();
   });
 
+  it("recurring entry reschedules instead of marking fired", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    writeCron([{
+      id: "rec001", fireAt: Date.now() - 1000, message: "Recurring reminder",
+      chatId: 1, type: "reminder", schedule: "0 10 * * *", fired: false, createdAt: Date.now() - 5000,
+    }]);
+
+    checkCron();
+
+    const entries = readCron();
+    expect(entries[0].fired).toBe(false);
+    expect(entries[0].fireAt).toBeGreaterThan(Date.now());
+    expect(entries[0].lastRanAt).toBeDefined();
+  });
+
+  it("skips paused entries", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    writeCron([{
+      id: "pau001", fireAt: Date.now() - 1000, message: "Paused",
+      chatId: 1, type: "reminder", fired: false, paused: true, createdAt: Date.now(),
+    }]);
+
+    checkCron();
+
+    const reminders = readReminders();
+    expect(reminders).toHaveLength(0);
+    const entries = readCron();
+    expect(entries[0].fired).toBe(false);
+  });
+
+  it("GCs fired one-shots older than 7 days", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
+    writeCron([
+      { id: "old001", fireAt: eightDaysAgo, message: "Ancient", chatId: 1, type: "reminder", fired: true, createdAt: eightDaysAgo },
+      { id: "new001", fireAt: Date.now() + 9999, message: "Keep", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
+    ]);
+
+    checkCron();
+
+    const entries = readCron();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].id).toBe("new001");
+  });
+
+  it("fires entry with retryAfter in the past", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    writeCron([{
+      id: "ret001", fireAt: Date.now() + 999999, message: "Retry me",
+      chatId: 1, type: "reminder", fired: false, createdAt: Date.now() - 5000,
+      retryAfter: Date.now() - 1000,
+    }]);
+
+    checkCron();
+
+    const reminders = readReminders();
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0].message).toBe("Retry me");
+    const entries = readCron();
+    expect(entries[0].retryAfter).toBeUndefined();
+  });
+
+  it("script task sets retryAfter on failure", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    writeCron([{
+      id: "fail01", fireAt: Date.now() - 1000, message: "exit 1",
+      chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() - 5000,
+    }]);
+
+    checkCron();
+
+    // Wait for async child process to finish
+    await new Promise(r => setTimeout(r, 500));
+
+    const entries = readCron();
+    const entry = entries.find(e => e.id === "fail01");
+    expect(entry?.retryAfter).toBeDefined();
+    expect(entry!.retryAfter!).toBeGreaterThan(Date.now());
+  });
+
+  it("does not set retryAfter on retry failure (no infinite loop)", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    writeCron([{
+      id: "fail02", fireAt: Date.now() + 999999, message: "exit 1",
+      chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() - 5000,
+      retryAfter: Date.now() - 1000,
+    }]);
+
+    checkCron();
+
+    await new Promise(r => setTimeout(r, 500));
+
+    const entries = readCron();
+    const entry = entries.find(e => e.id === "fail02");
+    expect(entry?.retryAfter).toBeUndefined();
+  });
+
   it("clearPendingReminders empties the file", async () => {
     const { checkCron, readPendingReminders, clearPendingReminders } = await import("./cron-checker.js");
     writeCron([{
