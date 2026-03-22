@@ -332,13 +332,26 @@ All CLIs, skills, and prompt templates are deployed via `scripts/deploy.sh`:
 - `agentbridge-browse` → `node <project>/dist/cli/agentbridge-browse.js`
 
 **Skill steering** (copied to `~/.agentbridge/.kiro/steering/`):
-- `skills/todo/SKILL.md` → `todo.md`
-- `skills/cron/SKILL.md` → `cron.md`
-- `skills/browse-delegate/SKILL.md` → `browse-delegate.md`
-- `skills/troubleshooting/SKILL.md` → `troubleshooting.md`
+- `skills/*.md` → deployed via glob loop (14 skills including healthcheck, cron, todo, browse-delegate, etc.)
 
 **Prompt templates** (copied to `~/.agentbridge/`):
 - `persona/browsing_prompt.md` → `browsing_prompt.md`
+
+---
+
+## Status & Healthcheck
+
+Two layers of diagnostics:
+
+### `/status` (dumb, hardcoded)
+
+Intercepted in `main.ts` before the message reaches the agent. Works even if the agent/transport is broken. Single `buildStatusLines()` function shared by Telegram and Discord.
+
+Shows: version, model, context window %, uptime, transport status, heartbeat state, last tick age, registered tasks, last sleep audit, cron summary (recurring/pending/paused), last backup filename.
+
+### Healthcheck skill (agent-driven)
+
+`skills/healthcheck.md` — 10-step self-diagnostics guide. Triggered when user asks KP to "do a healthcheck." Goes through the agent, runs bash commands (doctor.sh, sqlite3 queries, log grep, file checks), reports ✅/⚠️/❌ summary.
 
 ---
 
