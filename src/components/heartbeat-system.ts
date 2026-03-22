@@ -1,4 +1,7 @@
 import { logInfo, logWarn, logDebug } from "./logger.js";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type { HeartbeatTask } from "../types/memory.js";
 
 export type HeartbeatConfig = {
@@ -66,5 +69,10 @@ export class HeartbeatSystem {
         logWarn(TAG, `Task "${task.name}" failed: ${msg}`);
       }
     }
+
+    // Write heartbeat timestamp — doctor checks this on startup
+    try {
+      writeFileSync(join(homedir(), ".agentbridge", "memory", ".heartbeat"), String(Date.now()), "utf-8");
+    } catch { /* best-effort */ }
   }
 }

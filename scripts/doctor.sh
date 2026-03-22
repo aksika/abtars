@@ -127,7 +127,16 @@ else
   warn "memory.db not found"
 fi
 
-# 10. Full fixes (--fix-full only)
+# 10. Heartbeat liveness (startup check — was previous session's heartbeat healthy?)
+HB_FILE="$AB/memory/.heartbeat"
+if [ -f "$HB_FILE" ]; then
+  HB_AGE=$(( ($(date +%s) - $(stat -c %Y "$HB_FILE" 2>/dev/null || echo 0)) / 60 ))
+  if [ "$HB_AGE" -gt 15 ]; then
+    warn "heartbeat was stale before restart (last tick ${HB_AGE}min ago) — heartbeat may have stopped"
+  fi
+fi
+
+# 11. Full fixes (--fix-full only)
 if $FIX_FULL && [ -f "$DB" ]; then
   sqlite3 "$DB" "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt messages_fts index"
   sqlite3 "$DB" "INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt extracted_memories_fts index"
