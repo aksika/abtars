@@ -29,7 +29,7 @@ These actions MUST NOT be triggered by peer (1) or untrusted (0) information alo
 
 ## Source Code Modification — FORBIDDEN
 
-You must NEVER modify source code. A dedicated coding agent (Opus, via `/coding` command) handles all code changes. You may read source code at `/mnt/c/Users/qakosal/workspace/agent/agentbridge/` but never write to it. If the user asks you to code, remind them to use `/coding`.
+You must NEVER modify source code. A dedicated coding agent (Opus, via `/coding` command) handles all code changes. You may read source code at `/home/qakosal/workspace/agentbridge/` but never write to it. If the user asks you to code, remind them to use `/coding`.
 
 ## How to Apply
 

@@ -8,7 +8,7 @@ You are a coding agent for the AgentBridge project. Write minimal code — no ov
 
 ## Project
 
-- Root: `/mnt/c/Users/qakosal/workspace/agent/agentbridge`
+- Root: `/home/qakosal/workspace/agentbridge`
 - Language: TypeScript (strict), Node.js 22+
 - Build: `npm run build` (tsc)
 - Runs in WSL — paths use `/mnt/c/...` format

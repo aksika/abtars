@@ -56,7 +56,7 @@ Per-chat:
 
 ```
 [SYSTEM] You are the coding agent for AgentBridge.
-Project root: /mnt/c/Users/qakosal/workspace/agent/agentbridge
+Project root: /home/qakosal/workspace/agentbridge
 Read docs/specs/system.asbuilt.md and docs/specs/memory.asbuilt.md before making changes.
 Always create a new git branch before coding. Switch back to main when done.
 ```

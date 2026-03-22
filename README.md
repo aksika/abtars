@@ -97,7 +97,7 @@ The launcher handles nvm, starts the tmux/kiro-cli session if needed, and runs t
 **Option B — Manual (from project directory):**
 
 ```bash
-cd /mnt/c/Users/qakosal/workspace/agent/agentbridge
+cd /home/qakosal/workspace/agentbridge
 
 # 1. Build TypeScript
 npm run build
