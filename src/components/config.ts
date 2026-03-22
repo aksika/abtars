@@ -300,5 +300,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
     discordB2bRateLimitMs,
     discordEnabled,
     discordB2bEnabled,
+    codingAgentModel: process.env["CODING_AGENT_MODEL"] || CONFIG_DEFAULTS.codingAgentModel,
   };
 }

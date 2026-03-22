@@ -366,6 +366,38 @@ async function main(): Promise<void> {
   const pendingSessionStart = new Set<string>();
   const fullModeChats = new Set<string>();
 
+  // --- Coding agent mode ---
+  const codingMode = new Set<string>(); // sessionKeys currently in coding mode
+  let codingTransport: AcpTransport | null = null;
+
+  async function startCodingMode(sessionKey: string): Promise<void> {
+    if (!codingTransport) {
+      codingTransport = new AcpTransport(config.kiroCLIPath, config.workingDir, {
+        agent: "coding-agent",
+        model: config.codingAgentModel,
+      });
+      await codingTransport.initialize();
+    }
+    codingMode.add(sessionKey);
+    // Inject project facts as first message
+    await codingTransport.sendPrompt(sessionKey, [
+      "[SYSTEM] You are the coding agent for AgentBridge.",
+      `Project root: ${config.workingDir}`,
+      "Read docs/specs/system.asbuilt.md and docs/specs/memory.asbuilt.md before making changes.",
+      "Always create a new git branch before coding. Switch back to main when done.",
+    ].join("\n"));
+  }
+
+  async function stopCodingMode(sessionKey: string): Promise<void> {
+    codingMode.delete(sessionKey);
+    if (codingTransport && codingMode.size === 0) {
+      // Ask it to switch back to main before killing
+      try { await codingTransport.sendPrompt(sessionKey, "Run: git checkout main"); } catch { /* ok */ }
+      codingTransport.destroy();
+      codingTransport = null;
+    }
+  }
+
   // Idle chat-save: after 10min inactivity, save kiro-cli conversation to working dir
   const CHAT_SAVE_IDLE_MS = 10 * 60 * 1000;
   const idleSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -455,6 +487,8 @@ async function main(): Promise<void> {
       { command: "reflect", description: "Generate a reflection" },
       { command: "ingest", description: "Ingest a document or URL" },
       { command: "forget", description: "Forget topic or date range" },
+      { command: "coding", description: "Switch to Opus coding agent" },
+      { command: "default", description: "Switch back to KP" },
     ]).catch((err) => logWarn("main", `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
 
     const react = async (chatId: number, messageId: number, emoji: string): Promise<void> => {
@@ -633,12 +667,48 @@ async function main(): Promise<void> {
         const timer = idleSaveTimers.get(sessionKey);
         if (timer) { clearTimeout(timer); idleSaveTimers.delete(sessionKey); }
         await saveChatToWorking(sessionKey, chatId);
-        await transport.resetSession(sessionKey);
+        if (text === "/reset" && codingMode.has(sessionKey)) {
+          await stopCodingMode(sessionKey);
+        }
+        if (codingMode.has(sessionKey) && codingTransport) {
+          await codingTransport.resetSession(sessionKey);
+        } else {
+          await transport.resetSession(sessionKey);
+        }
         if (isGroup) conversationBuffer.clear(bufKey);
         pendingSessionStart.add(sessionKey);
         if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
-        await telegramApi.sendMessage(chatId, "🔄 New session started.", { message_thread_id: threadId });
-        logInfo("main", "Session reset");
+        const modeLabel = text === "/reset" ? "🔄 Reset to KP." : codingMode.has(sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
+        await telegramApi.sendMessage(chatId, modeLabel, { message_thread_id: threadId });
+        logInfo("main", `Session ${text} (mode=${codingMode.has(sessionKey) ? "coding" : "default"})`);
+        return;
+      }
+
+      if (text === "/coding") {
+        if (codingMode.has(sessionKey)) {
+          await telegramApi.sendMessage(chatId, "Already in coding mode. Use /default to switch back.", { message_thread_id: threadId });
+          return;
+        }
+        await telegramApi.sendMessage(chatId, "🔧 Switching to coding agent (Opus)...", { message_thread_id: threadId });
+        try {
+          await startCodingMode(sessionKey);
+          await telegramApi.sendMessage(chatId, "🔧 Coding agent ready. All messages now go to Opus.\nUse /default to switch back to KP.", { message_thread_id: threadId });
+          logInfo("main", `Coding mode activated for ${sessionKey}`);
+        } catch (err) {
+          await telegramApi.sendMessage(chatId, `❌ Failed to start coding agent: ${err instanceof Error ? err.message : String(err)}`, { message_thread_id: threadId });
+        }
+        return;
+      }
+
+      if (text === "/default") {
+        if (!codingMode.has(sessionKey)) {
+          await telegramApi.sendMessage(chatId, "Already in default mode (KP).", { message_thread_id: threadId });
+          return;
+        }
+        await telegramApi.sendMessage(chatId, "🔄 Switching back to KP...", { message_thread_id: threadId });
+        await stopCodingMode(sessionKey);
+        await telegramApi.sendMessage(chatId, "🔄 Back to KP.", { message_thread_id: threadId });
+        logInfo("main", `Default mode restored for ${sessionKey}`);
         return;
       }
 
@@ -958,6 +1028,8 @@ async function main(): Promise<void> {
           "/full — Raw tmux output, no TTS",
           "/short — Clean responses (default)",
           "/nlm — Knowledge base (list/create/sources/query)",
+          "/coding — Switch to Opus coding agent",
+          "/default — Switch back to KP",
           "/help — Show this help message",
         ].join("\n");
         await telegramApi.sendMessage(chatId, helpText, { message_thread_id: threadId });
@@ -974,7 +1046,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/facts", "/memory", "/cron", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/facts", "/memory", "/cron", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/coding", "/default", "/help"];
         if (!known.includes(cmd)) {
           await telegramApi.sendMessage(chatId, `❓ Unknown command: ${cmd}\nType /help for available commands.`, { message_thread_id: threadId });
           return;
@@ -1017,7 +1089,8 @@ async function main(): Promise<void> {
         }
 
         prompt = interceptLargeMessage(prompt).text;
-        const responsePromise = transport.sendPrompt(sessionKey, prompt);
+        const activeTransport = codingMode.has(sessionKey) && codingTransport ? codingTransport : transport;
+        const responsePromise = activeTransport.sendPrompt(sessionKey, prompt);
 
         if (!isVoiceNote) await react(chatId, messageId, "👀");
         await telegramApi.sendChatAction(chatId, "typing", threadId);
@@ -1222,12 +1295,32 @@ async function main(): Promise<void> {
         if (timer) { clearTimeout(timer); idleSaveTimers.delete(sessionKey); }
         const discordChatId = parseInt(message.channelId, 10) || 0;
         await saveChatToWorking(sessionKey, discordChatId);
-        await transport.resetSession(sessionKey);
+        if (text === "/reset" && codingMode.has(sessionKey)) {
+          await stopCodingMode(sessionKey);
+        }
+        if (codingMode.has(sessionKey) && codingTransport) {
+          await codingTransport.resetSession(sessionKey);
+        } else {
+          await transport.resetSession(sessionKey);
+        }
         conversationBuffer.clear(bufKey);
         pendingSessionStart.add(sessionKey);
         if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, discordChatId);
-        await discordApi.sendMessage(message.channelId, "🔄 New session started.");
-        logInfo("main", `Discord session reset for ${sessionKey}`);
+        const modeLabel = text === "/reset" ? "🔄 Reset to KP." : "🔄 New session started.";
+        await discordApi.sendMessage(message.channelId, modeLabel);
+        logInfo("main", `Discord session ${text} for ${sessionKey}`);
+        return;
+      }
+
+      if (text === "/default") {
+        if (!codingMode.has(sessionKey)) {
+          await discordApi.sendMessage(message.channelId, "Already in default mode (KP).");
+          return;
+        }
+        await discordApi.sendMessage(message.channelId, "🔄 Switching back to KP...");
+        await stopCodingMode(sessionKey);
+        await discordApi.sendMessage(message.channelId, "🔄 Back to KP.");
+        logInfo("main", `Default mode restored for ${sessionKey}`);
         return;
       }
 
@@ -1532,6 +1625,7 @@ async function main(): Promise<void> {
           "/full — Raw tmux output, no TTS",
           "/short — Clean responses (default)",
           "/nlm — Knowledge base (list/create/sources/query)",
+          "/default — Switch back to KP",
           "/help — Show this help message",
         ].join("\n");
         await discordApi.sendMessage(message.channelId, helpText);
@@ -1548,7 +1642,7 @@ async function main(): Promise<void> {
       // Unknown command guard — prevent unrecognized /commands from reaching transport
       if (!passThrough && text.startsWith("/") && /^\/\w+/.test(text)) {
         const cmd = text.split(/\s/)[0]!;
-        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/facts", "/memory", "/cron", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/help"];
+        const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/full", "/short", "/facts", "/memory", "/cron", "/ingest", "/reflect", "/reembed", "/forget", "/nlm", "/default", "/help"];
         if (!known.includes(cmd)) {
           await discordApi.sendMessage(message.channelId, `❓ Unknown command: ${cmd}\nType /help for available commands.`);
           return;

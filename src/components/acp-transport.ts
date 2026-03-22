@@ -39,16 +39,21 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
 
-  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean }) {
+  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean; agent?: string; model?: string }) {
     this.cliPath = cliPath;
     this.workingDir = workingDir;
     this.skipAgent = opts?.skipAgent ?? false;
+    this.agentName = opts?.agent ?? "professor";
+    this.modelId = opts?.model;
   }
 
   private readonly skipAgent: boolean;
+  private readonly agentName: string;
+  private readonly modelId?: string;
 
   async initialize(): Promise<void> {
-    const args = this.skipAgent ? ["acp"] : ["acp", "--agent", "professor"];
+    const args = this.skipAgent ? ["acp"] : ["acp", "--agent", this.agentName];
+    if (this.modelId) args.push("--model", this.modelId);
     this.agent = spawn(this.cliPath, args, {
       cwd: this.workingDir,
       stdio: ["pipe", "pipe", "pipe"],

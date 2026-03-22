@@ -57,6 +57,8 @@ export type Config = {
   discordEnabled: boolean;
   /** Whether B2B features are enabled (derived: true if discordB2bChannelId is set) */
   discordB2bEnabled: boolean;
+  /** Model ID for /coding agent (default: claude-opus-4.6) */
+  codingAgentModel: string;
 };
 
 /** Default values for optional config fields. */
@@ -79,4 +81,5 @@ export const CONFIG_DEFAULTS = {
   discordB2bRateLimitMs: 5000,
   discordEnabled: false,
   discordB2bEnabled: false,
+  codingAgentModel: "claude-opus-4.6",
 } as const satisfies Partial<Config>;
