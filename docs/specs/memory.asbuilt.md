@@ -115,6 +115,46 @@ Post-processing: dedup by content hash → temporal decay → MMR re-ranking.
 
 ---
 
+## Session Context Window
+
+What the agent sees when a new session starts (ACP transport, `professor` agent):
+
+### Layer 1: Agent system prompt
+- `professor.json` → `"You are Kiro Professor. Follow your SOUL.md identity."`
+- All built-in kiro-cli tools available (`"tools": ["*"]`, `"allowedTools": ["@builtin"]`)
+
+### Layer 2: Steering resources (`~/.agentbridge/.kiro/steering/**/*.md`)
+
+| Type | Files | Loading |
+|------|-------|---------|
+| `alwaysApply: true` | `TOOLS.md` (825 bytes) | Always in system prompt |
+| No skill frontmatter | `SOUL.md` (5.4KB), `session-start.md` (577 bytes) | Loaded as resources — always available |
+| Skill files (`name:` frontmatter) | 15 skills (~21KB total) | On-demand — agent sees skill list, invokes when needed |
+
+### Layer 3: Session-start context (first message only)
+
+Prepended to the user's first message by `buildSessionStartContext()`:
+
+```
+[LAST SESSION SUMMARY — ended <timestamp>]
+<last 8 messages OR daily summary>
+[SESSION START — <timestamp>]
+
+<user's actual message>
+```
+
+~2500 chars max for recent messages path. Full daily (~3000 chars) for overnight path.
+
+### Layer 4: User message
+
+The actual message from Telegram/Discord.
+
+### Total first-message budget
+
+~7KB always loaded (SOUL + TOOLS + session-start) + ~2.5KB session context + user message. Skills loaded on-demand as needed.
+
+---
+
 ## Recall Sovereignty (REQ-1 through REQ-5)
 
 Memory recall is agent-driven only. The bridge never auto-injects recalled memories into prompts. The agent decides when to call `agentbridge-recall` based on conversation context.
