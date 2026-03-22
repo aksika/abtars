@@ -111,6 +111,23 @@ Post-processing: dedup by content hash → temporal decay → MMR re-ranking.
 
 ## Sleep Cycle (Wanted — 10 steps)
 
+### Trigger (`SleepTrigger` in `sleep-trigger.ts`)
+
+Registered as `sleep-trigger` task in the unified HeartbeatSystem (5-min interval).
+
+**Startup:** runs if no audit file exists for today AND last audit is >25h old (or ≥8am).
+
+**Cron (heartbeat tick):** runs if ≥8am, 10min idle (no messages), and no audit today.
+
+**Retry on failure:** up to 3 attempts per 24h cycle:
+- Attempt 1: normal trigger (startup or cron)
+- Attempt 2: immediate retry on next heartbeat tick after failure
+- Attempt 3: only after 1h cooldown from last failure
+
+On success or 3 failures: stops until next day. Writes a `.lock` file before spawning to prevent duplicate spawns across restarts.
+
+### Steps
+
 | Step | What | Behavior | Status vs current |
 |------|------|----------|-------------------|
 | 1 | **Retrospective** | Reads full messages table. What went well/wrong, emotional attribution, lessons. Writes retro file + updates agent_notes | **NEW** |

@@ -158,6 +158,16 @@ Triggers: "remind me at 3pm", "Sunday at 2am do X", specific time references
 
 Does NOT trigger for: vague "remind me later" without time (→ todo), immediate actions
 
+### Missed Cron Catch-Up
+
+Source: `checkMissedCrons()` in `src/components/cron-checker.ts`
+
+Tracks host crontab entries tagged with `# agentbridge-managed`. On startup (`catchUp=true`), detects and executes any commands that should have fired while the bridge was down. On heartbeat ticks (`catchUp=false`), just updates tracking without executing.
+
+Tracking file: `~/.agentbridge/memory/cron_runs.json` — maps command hash → `{ lastRun, command }`.
+
+Uses `cron-parser` to compute the previous fire time from the cron schedule and compares against `lastRun`.
+
 ### Shutdown
 
 `cronInterval` is cleared in the `shutdown()` handler in `main.ts`.
@@ -166,6 +176,7 @@ Does NOT trigger for: vague "remind me later" without time (→ todo), immediate
 
 - `src/cli/agentbridge-cron.test.ts` — 7 tests: add, list, remove, error cases, default type
 - `src/components/cron-checker.test.ts` — 6 tests: fire due reminder, skip future, skip fired, fire task, missing file, clear reminders
+- `src/components/missed-cron.test.ts` — missed cron detection and catch-up
 
 ---
 
