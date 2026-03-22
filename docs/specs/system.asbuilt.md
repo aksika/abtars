@@ -118,6 +118,7 @@ Path: `~/.agentbridge/memory/cron.json`
 ```
 
 - `fireAt`: epoch milliseconds
+- `executor`: `"agent"` (default — spawns kiro-cli) or `"script"` (runs `bash -c` directly). Only meaningful for `type: "task"`. Script tasks report exit code + output back to chat.
 - `type`: `"reminder"` (injected into conversation) or `"task"` (spawns subagent)
 - `fired`: set to `true` once processed, entry stays in file for audit
 
