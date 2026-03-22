@@ -94,6 +94,7 @@ try {
   const results: Out[] = [];
   const seen = new Set<string>();
   const extractedIds: number[] = [];
+  const hits: Record<string, number> = {};
 
   const addExtracted = (r: MemorySearchResult, source: string) => {
     const key = `${r.source_timestamp}:${r.content.slice(0, 80)}`;
@@ -111,23 +112,31 @@ try {
   };
 
   // --- Stage 1: Extracted memories — English FTS5 (Darwinism-boosted) ---
-  for (const r of index.searchExtracted(query, searchOpts)) addExtracted(r, "extracted");
+  let stageCount = 0;
+  for (const r of index.searchExtracted(query, searchOpts)) { addExtracted(r, "extracted"); stageCount++; }
+  hits["S1:extracted_en"] = stageCount;
 
   // --- Stage 2: Extracted memories — original language FTS5 ---
+  stageCount = 0;
   if (params.original) {
-    for (const r of index.searchOriginal(params.original, { chatId: params.chatId, limit: params.limit * 3, maxClassification: params.maxClassification })) addExtracted(r, "extracted:original");
+    for (const r of index.searchOriginal(params.original, { chatId: params.chatId, limit: params.limit * 3, maxClassification: params.maxClassification })) { addExtracted(r, "extracted:original"); stageCount++; }
   }
+  hits["S2:extracted_orig"] = stageCount;
 
   // Short-circuit: if extracted memories have enough results, skip fallback stages
   const shortCircuit = results.length >= SHORT_CIRCUIT_THRESHOLD;
+  hits["short_circuit"] = shortCircuit ? 1 : 0;
 
   if (!shortCircuit) {
     // --- Stage 3: messages_fts (relaxed OR) ---
+    stageCount = 0;
     if (query.trim()) {
-      for (const r of index.search(query, searchOpts, "or")) addMessage(r, "messages_fts");
+      for (const r of index.search(query, searchOpts, "or")) { addMessage(r, "messages_fts"); stageCount++; }
     }
+    hits["S3:messages_fts"] = stageCount;
 
     // --- Stage 4: Consolidation file search ---
+    stageCount = 0;
     const allKw = [...params.keywords];
     if (params.original) allKw.push(params.original);
     const consolidationResults = searchConsolidationFiles(MEMORY_DIR, allKw, {
@@ -136,10 +145,12 @@ try {
     });
     for (const c of consolidationResults) {
       const key = `${c.timestamp}:${c.content.slice(0, 80)}`;
-      if (!seen.has(key)) { seen.add(key); results.push({ content: c.content, date: new Date(c.timestamp).toISOString(), source: `consolidation:${c.tier}`, score: 0.5 }); }
+      if (!seen.has(key)) { seen.add(key); results.push({ content: c.content, date: new Date(c.timestamp).toISOString(), source: `consolidation:${c.tier}`, score: 0.5 }); stageCount++; }
     }
+    hits["S4:consolidation"] = stageCount;
 
     // --- Stage 5: messages LIKE (wide net fallback) ---
+    stageCount = 0;
     if (results.length < params.limit) {
       const allKwLike = [...params.keywords];
       if (params.original) allKwLike.push(params.original);
@@ -151,9 +162,10 @@ try {
       const rows = db.prepare(`SELECT role, content, timestamp FROM messages WHERE ${conditions.join(" AND ")} ORDER BY timestamp DESC LIMIT 20`).all(...bindParams) as Array<{ role: string; content: string; timestamp: number }>;
       for (const r of rows) {
         const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
-        if (!seen.has(key)) { seen.add(key); results.push({ content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "messages_like", score: 0.3 }); }
+        if (!seen.has(key)) { seen.add(key); results.push({ content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "messages_like", score: 0.3 }); stageCount++; }
       }
     }
+    hits["S5:messages_like"] = stageCount;
 
     // --- Stages 6/7: Keyword-free fallback (exclusive — fresher source wins) ---
     if (results.length === 0) {
@@ -198,6 +210,10 @@ try {
 
   const output = reranked.slice(0, params.limit);
   console.log(JSON.stringify(output, null, 2));
+
+  // Hit-rate summary (stderr — doesn't affect JSON output)
+  const hitSummary = Object.entries(hits).map(([k, v]) => `${k}=${v}`).join(" ");
+  console.error(`[recall] query="${query}" ${hitSummary} total=${results.length} returned=${output.length}`);
 
   // Expand hint: if any results have source_ids, tell the agent how to look them up
   const expandable = output.filter(r => r.source_ids);
