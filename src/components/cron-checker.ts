@@ -62,6 +62,8 @@ function recordRun(entry: CronEntry, exitCode?: number): void {
   if (entry.history.length > MAX_HISTORY) entry.history = entry.history.slice(-MAX_HISTORY);
 }
 
+const RETRY_DELAY_MS = 10 * 60 * 1000; // 2 heartbeat cycles (10 min)
+
 /**
  * Check cron.json for due entries. Fire reminders to pending_reminders.json,
  * spawn tasks as kiro-cli subprocesses. Recurring entries reschedule after firing.
@@ -81,22 +83,31 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
   }
 
   for (const entry of entries) {
-    if (entry.fired || entry.paused || entry.fireAt > now) continue;
-
-    entry.lastRanAt = now;
-
-    // Recurring: compute next fireAt, keep unfired. One-shot: mark fired.
-    if (entry.schedule) {
-      try {
-        const expr = CronExpressionParser.parse(entry.schedule);
-        entry.fireAt = expr.next().getTime();
-      } catch {
-        entry.fired = true; // bad schedule — retire it
-      }
+    // Check for retry (failed task, 2 cycles later)
+    const isRetry = entry.retryAfter && entry.retryAfter <= now;
+    if (isRetry) {
+      delete entry.retryAfter;
+      changed = true;
+      logInfo(TAG, `🔄 Retrying failed entry: "${entry.message.slice(0, 60)}"`);
+      // fall through to fire
+    } else if (entry.fired || entry.paused || entry.fireAt > now) {
+      continue;
     } else {
-      entry.fired = true;
+      // Normal fire
+      entry.lastRanAt = now;
+
+      if (entry.schedule) {
+        try {
+          const expr = CronExpressionParser.parse(entry.schedule);
+          entry.fireAt = expr.next().getTime();
+        } catch {
+          entry.fired = true;
+        }
+      } else {
+        entry.fired = true;
+      }
+      changed = true;
     }
-    changed = true;
 
     if (entry.type === "reminder") {
       appendReminder({ chatId: entry.chatId, message: entry.message, createdAt: now });
@@ -106,6 +117,7 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
       // Script task: run command directly via bash
       logInfo(TAG, `📜 Script task fired: "${entry.message}"`);
       const capturedEntry = entry;
+      const wasRetry = isRetry;
       try {
         const child = spawn("bash", ["-c", entry.message], { stdio: ["ignore", "pipe", "pipe"] });
         let output = "";
@@ -116,6 +128,10 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
           const status = code === 0 ? "✅" : `❌ (exit ${code})`;
           logInfo(TAG, `📜 Script task ${status}: "${capturedEntry.message}"`);
           recordRun(capturedEntry, code ?? undefined);
+          if (code !== 0 && !wasRetry) {
+            capturedEntry.retryAfter = Date.now() + RETRY_DELAY_MS;
+            logInfo(TAG, `🔄 Will retry in 10min: "${capturedEntry.message.slice(0, 60)}"`);
+          }
           writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
           onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, `${status}\n${summary}`);
         });
@@ -132,6 +148,7 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
       // Agent task: spawn kiro-cli to execute
       logInfo(TAG, `⚙️ Task fired: "${entry.message}" → spawning subagent`);
       const capturedEntry = entry;
+      const wasRetry = isRetry;
       try {
         const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "ignore"] });
         let output = "";
@@ -142,6 +159,10 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
           const summary = output.slice(0, 500) || "(no output)";
           logInfo(TAG, `⚙️ Task completed: "${capturedEntry.message}"`);
           recordRun(capturedEntry, code ?? undefined);
+          if (code !== 0 && !wasRetry) {
+            capturedEntry.retryAfter = Date.now() + RETRY_DELAY_MS;
+            logInfo(TAG, `🔄 Will retry in 10min: "${capturedEntry.message.slice(0, 60)}"`);
+          }
           writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
           onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, summary);
         });
