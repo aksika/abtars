@@ -73,6 +73,18 @@ if [ ! -f "$AB/twitterX/base.follows.json" ]; then
   warn "base.follows.json missing — tweet feed won't run"
 fi
 
+# 7. Git repo health (--fix only, slower checks)
+if $FIX; then
+  cd "$AB"
+  if [ -d .git ]; then
+    if ! git remote get-url origin &>/dev/null; then
+      warn "git remote 'origin' missing — backup push will fail"
+    elif ! timeout 5 git push --dry-run &>/dev/null; then
+      warn "git push would fail — check upstream/auth"
+    fi
+  fi
+fi
+
 # Summary
 if $FIX; then
   echo "[doctor] Done. $FIXES fixes applied, $WARNS warnings."
