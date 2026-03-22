@@ -1137,6 +1137,14 @@ async function main(): Promise<void> {
           return;
         }
 
+        // Reaction-only response: [REACT:emoji] with no other text
+        const reactMatch = userResponse.trim().match(/^\[REACT:(.+)\]$/);
+        if (reactMatch) {
+          await react(chatId, messageId, reactMatch[1]!);
+          logDebug("main", `Reaction-only response: ${reactMatch[1]}`);
+          return;
+        }
+
         // Only send final response if nothing was streamed, or if there's new content
         let lastSentMsgId: number | undefined;
         if (!intermediateDelivered) {
