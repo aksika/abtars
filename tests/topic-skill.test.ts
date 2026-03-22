@@ -376,7 +376,7 @@ describe("Topic Skill — Property Tests", () => {
 // ─── Task 3.8: SKILL.md Content Validation ───────────────────────────────────
 
 describe("Topic Skill — SKILL.md Validation", () => {
-  const skillPath = "skills/topic-save/SKILL.md";
+  const skillPath = "skills/topic-save.md";
   let content: string;
 
   it("SKILL.md file exists", () => {

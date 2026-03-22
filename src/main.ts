@@ -1766,6 +1766,13 @@ async function main(): Promise<void> {
         const chatId = [...config.allowedUserIds][0];
         if (chatId) {
           let firstName = "the user";
+          try {
+            const profilePath = join(memoryConfig.memoryDir, "core", "user_profile.md");
+            if (existsSync(profilePath)) {
+              const m = readFileSync(profilePath, "utf-8").match(/^-\s*Name:\s*(.+)/m);
+              if (m) firstName = m[1]!.split(/[,(]/)[0]!.trim();
+            }
+          } catch { /* ok */ }
           try { firstName = (await new TelegramApi(config.telegramBotToken).getChat(chatId)).first_name || firstName; } catch { /* ok */ }
           telegramPoller.injectUpdate({
             update_id: 0,

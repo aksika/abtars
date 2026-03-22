@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { MemoryIndex } from "../components/memory-index.js";
 import { searchConsolidationFiles, getLatestConsolidationFile } from "../components/consolidation-search.js";
+import { applyMMR } from "../components/mmr.js";
 import type { SearchResult, MemorySearchResult } from "../types/memory.js";
 
 const MEMORY_DIR = join(homedir(), ".agentbridge", "memory");
@@ -189,10 +190,13 @@ try {
 
   results.sort((a, b) => b.score - a.score);
 
+  // MMR re-ranking: balance relevance with diversity (λ=0.7)
+  const reranked = applyMMR(results, 0.7);
+
   // Darwinism: bump recall count for extracted memories that made it into results
   index.bumpRecallCount(extractedIds);
 
-  const output = results.slice(0, params.limit);
+  const output = reranked.slice(0, params.limit);
   console.log(JSON.stringify(output, null, 2));
 
   // Expand hint: if any results have source_ids, tell the agent how to look them up

@@ -1,7 +1,6 @@
 import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
 import type { BrowserSession } from "../types/browser.js";
-import { parseIntEnv } from "./env-utils.js";
 
 // ---------------------------------------------------------------------------
 // Environment variable parsing
@@ -22,16 +21,31 @@ export interface BrowserConfig {
 }
 
 /**
+ * Parse a positive integer from an env var. Warns and returns fallback for
+ * non-numeric, non-integer, zero, or negative values.
+ */
+function parsePositiveIntEnv(envKey: string, fallback: number): number {
+  const raw = process.env[envKey];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    console.warn(`${LOG_PREFIX} Invalid ${envKey}="${raw}", using default ${fallback}`);
+    return fallback;
+  }
+  return n;
+}
+
+/**
  * Read and validate browser-related env vars, returning resolved config.
  * Invalid values trigger a console.warn and fall back to defaults.
  * Exported for testability (Property 16).
  */
 export function parseBrowserConfig(): BrowserConfig {
-  const sessionTimeoutMs = parseIntEnv(
+  const sessionTimeoutMs = parsePositiveIntEnv(
     "BROWSER_SESSION_TIMEOUT_MS",
     DEFAULTS.BROWSER_SESSION_TIMEOUT_MS,
   );
-  const maxSessions = parseIntEnv(
+  const maxSessions = parsePositiveIntEnv(
     "BROWSER_MAX_SESSIONS",
     DEFAULTS.BROWSER_MAX_SESSIONS,
   );
