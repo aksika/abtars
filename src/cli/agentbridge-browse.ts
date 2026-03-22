@@ -71,16 +71,19 @@ export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId
 // --- Prompt loading ---
 
 export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string): string {
-  const deployed = join(homedir(), ".agentbridge", "browsing_prompt.md");
+  const prompts = join(homedir(), ".agentbridge", "prompts", "browsing_prompt.md");
+  const legacy = join(homedir(), ".agentbridge", "browsing_prompt.md");
   const dev = join(process.cwd(), "persona", "browsing_prompt.md");
 
   let template: string;
-  if (existsSync(deployed)) {
-    template = readFileSync(deployed, "utf-8");
+  if (existsSync(prompts)) {
+    template = readFileSync(prompts, "utf-8");
+  } else if (existsSync(legacy)) {
+    template = readFileSync(legacy, "utf-8");
   } else if (existsSync(dev)) {
     template = readFileSync(dev, "utf-8");
   } else {
-    throw new Error(`browsing_prompt.md not found at ${deployed} or ${dev}`);
+    throw new Error(`browsing_prompt.md not found at ${prompts}, ${legacy}, or ${dev}`);
   }
 
   const date = new Date().toISOString().slice(0, 10);

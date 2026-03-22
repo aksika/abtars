@@ -85,7 +85,7 @@ describe("agentbridge-browse", () => {
     });
 
     it("loads from deployed path first", () => {
-      const deployedDir = join(tmpDir, ".agentbridge");
+      const deployedDir = join(tmpDir, ".agentbridge", "prompts");
       mkdirSync(deployedDir, { recursive: true });
       writeFileSync(join(deployedDir, "browsing_prompt.md"), "DEPLOYED: ${TASK}", "utf-8");
 

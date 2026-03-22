@@ -42,6 +42,7 @@ echo "📝 Deploying steering files..."
 mkdir -p "$AB_HOME/.kiro/steering"
 mkdir -p "$AB_HOME/.kiro/agents"
 mkdir -p "$AB_HOME/skills/agents"
+mkdir -p "$AB_HOME/prompts"
 
 # safe_cp: skip if deployed file is newer than source (agent may have modified it)
 safe_cp() {
@@ -58,8 +59,10 @@ safe_cp "$PROJECT_DIR/persona/professor.json" "$AB_HOME/.kiro/agents/professor.j
 for f in "$PROJECT_DIR/skills/"*.md; do
   safe_cp "$f" "$AB_HOME/.kiro/steering/$(basename "$f")"
 done
-safe_cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/sleeping_prompt.md"
-safe_cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/browsing_prompt.md"
+safe_cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/prompts/sleeping_prompt.md"
+chmod 444 "$AB_HOME/prompts/sleeping_prompt.md"
+safe_cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/prompts/browsing_prompt.md"
+chmod 444 "$AB_HOME/prompts/browsing_prompt.md"
 for f in "$PROJECT_DIR/skills/agents/"*.md; do
   safe_cp "$f" "$AB_HOME/skills/agents/$(basename "$f")"
 done
