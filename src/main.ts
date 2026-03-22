@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import { loadAndValidateConfig } from "./components/config.js";
 import { SecurityGate } from "./components/security-gate.js";
 import { ResponseFormatter } from "./components/response-formatter.js";
@@ -162,14 +163,30 @@ function consumeStartupGreeting(memoryDir: string): string | null {
   } catch { return null; }
 }
 
-/** Send startup greeting: quick "back online" now, then pre-generated context greeting if available. */
+/** Metadata-only fallback greeting from DB stats. */
+function buildMetadataGreeting(memoryDir: string): string {
+  const dbPath = join(memoryDir, "memory.db");
+  if (!existsSync(dbPath)) return "Back online.";
+  try {
+    const db = new Database(dbPath, { readonly: true });
+    const row = db.prepare(
+      "SELECT MAX(source_timestamp) as lastTs, COUNT(*) as total FROM extracted_memories",
+    ).get() as { lastTs: number | null; total: number };
+    db.close();
+    if (!row.lastTs) return "Back online.";
+    const lastDate = new Date(row.lastTs).toISOString().slice(0, 10);
+    return `Back online. Last session: ${lastDate} — ${row.total} memories in the bank.`;
+  } catch { return "Back online."; }
+}
+
+/** Send startup greeting: pre-generated from sleep (Option 1), or metadata fallback (Option 2). */
 async function sendStartupGreeting(
   memoryDir: string,
   sendTelegram?: (msg: string) => Promise<void>,
   sendDiscord?: (msg: string) => Promise<void>,
 ): Promise<void> {
-  const greeting = consumeStartupGreeting(memoryDir);
-  const msg = greeting ? `🔄 ${greeting}` : "🔄 Back online.";
+  const greeting = consumeStartupGreeting(memoryDir) ?? buildMetadataGreeting(memoryDir);
+  const msg = `🔄 ${greeting}`;
   await Promise.all([
     sendTelegram?.(msg).catch(() => {}),
     sendDiscord?.(msg).catch(() => {}),
