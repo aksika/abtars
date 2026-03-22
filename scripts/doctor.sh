@@ -73,6 +73,17 @@ if [ ! -f "$AB/twitterX/base.follows.json" ]; then
   warn "base.follows.json missing — tweet feed won't run"
 fi
 
+# 7. Recent backup check
+BACKUP_DIR="$HOME/.backup-agentbridge"
+if [ -d "$BACKUP_DIR" ]; then
+  LATEST=$(find "$BACKUP_DIR" -name "agentbridge-*.zip" -mtime -2 2>/dev/null | head -1)
+  if [ -z "$LATEST" ]; then
+    warn "no backup in last 2 days — check daily-backup.sh cron"
+  fi
+else
+  warn "backup dir $BACKUP_DIR missing — backups never ran"
+fi
+
 # 7. Git repo health (--fix only, slower checks)
 if $FIX; then
   cd "$AB"
