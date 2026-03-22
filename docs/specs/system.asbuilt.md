@@ -332,7 +332,10 @@ All CLIs, skills, and prompt templates are deployed via `scripts/deploy.sh`:
 - `agentbridge-browse` → `node <project>/dist/cli/agentbridge-browse.js`
 
 **Skill steering** (copied to `~/.agentbridge/.kiro/steering/`):
-- `skills/*.md` → deployed via glob loop (14 skills including healthcheck, cron, todo, browse-delegate, etc.)
+- `skills/*.md` → deployed via glob loop
+- `TOOLS.md` (`alwaysApply: true`) — compressed recall syntax, always in agent context (~825 bytes)
+- `session-start.md` — greeting and follow-up recall instructions
+- All skills compressed 2026-03-22: 56KB → 21KB (63% reduction), no information loss
 
 **Prompt templates** (copied to `~/.agentbridge/`):
 - `persona/browsing_prompt.md` → `browsing_prompt.md`

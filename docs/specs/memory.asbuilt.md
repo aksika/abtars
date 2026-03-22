@@ -111,6 +111,8 @@ Stages 6-7 are keyword-free and mutually exclusive. They compare timestamps to d
 
 Post-processing: dedup by content hash → temporal decay → MMR re-ranking.
 
+**Hit-rate logging (2026-03-22):** Per-stage hit counts emitted to stderr on every recall invocation. Format: `[recall] query="..." S1:extracted_en=N S2:extracted_orig=N short_circuit=0|1 S3:messages_fts=N S4:consolidation=N S5:messages_like=N total=N returned=N`. Initial observation: extracted memories rarely reach short-circuit threshold — `messages_fts` carries most searches.
+
 ---
 
 ## Recall Sovereignty (REQ-1 through REQ-5)
@@ -129,12 +131,12 @@ On the first message after startup, `/new`, `/reset`, or `/restart`, the bridge 
 
 | Condition | Source | What's injected |
 |-----------|--------|-----------------|
-| Messages newer than latest daily | `messages` table (last 12, since daily timestamp) | `[HH:MM] role: content` lines, 2500 char soft cap |
+| Messages newer than latest daily | `messages` table (last 8, since daily timestamp) | `[HH:MM] role: content` lines, 2500 char soft cap |
 | No newer messages (overnight) | Latest `daily_*.md` file | Full daily summary (~3000 chars, controlled by sleep prompt) |
-| No daily exists at all | `messages` table (last 12) | `[HH:MM] role: content` lines, 2500 char soft cap |
+| No daily exists at all | `messages` table (last 8) | `[HH:MM] role: content` lines, 2500 char soft cap |
 | No daily, no messages | — | Nothing injected (null) |
 
-**Recent messages cap:** 12 messages, 2500 char soft limit. Drops oldest messages first — newest message is never truncated. Never cuts mid-message.
+**Recent messages cap:** 8 messages, 2500 char soft limit. Drops oldest messages first — newest message is never truncated. Never cuts mid-message.
 
 **Output format (REQ-4 temporal markers):**
 ```
@@ -262,7 +264,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 | VectorIndex | `vector-index.ts` | Unchanged |
 | PromptScanner | `prompt-scanner.ts` | Unchanged |
 | emotion-utils | `emotion-utils.ts` | Unchanged |
-| Reaction handler | `main.ts` | **Enhanced:** immediate propagation to extracted_memories |
+| Reaction handler | `main.ts` | **Enhanced:** immediate propagation to extracted_memories, `[REACT:emoji]` agent response support, skip reactions on synthetic messages (messageId 0) |
 
 ### Deleted Components
 

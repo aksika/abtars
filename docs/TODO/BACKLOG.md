@@ -117,3 +117,48 @@ AgentBridge is text-only. Users can't send images to the bot (screenshots, diagr
 **Reference:** NemoClaw project (NVIDIA)
 
 Review NemoClaw's security patterns and apply relevant ideas to AgentBridge — prompt hardening, input sanitization, permission boundaries, agent isolation, etc.
+
+## 23. TOOLS.md — Always-On Recall Steering
+
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `1890eed`
+
+Created `skills/TOOLS.md` with `alwaysApply: true` containing compressed `agentbridge-recall` syntax. Solves the root cause of KP claiming "no access to recall" — the `memory-search.md` skill was `user-invocable: false` (not always loaded), so KP knew the command name from SOUL.md but not the syntax. TOOLS.md ensures recall instructions are always in context.
+
+## 24. Skill Compression
+
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `7d6664f`
+
+Compressed all 15 skill files from 56KB to 21KB (63% reduction). Removed tables, verbose examples, redundant explanations. All skills remain functional. Reduces token overhead when skills are loaded.
+
+## 25. SOUL.md Rewrite
+
+**Status:** ✅ Done (2026-03-22)
+**Commits:** `2368d0c`, `c468e13`, `530fdd2`, `dc3979d`
+
+- Continuity section rewritten with existential framing ("Saying 'I don't remember' without searching is choosing amnesia over effort")
+- Emotions section added (reactions as non-verbal memory, emotion scores woven into recall)
+- All second-person ("you are") converted to first-person ("I am") — reads as identity, not instructions
+- `<NO_REPLY>` and `[REACT:emoji]` moved to shared section before platform-specific rules
+
+## 26. Agent Emoji Reactions (`[REACT:emoji]`)
+
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `3a1721d`
+
+KP can now send emoji reactions on Telegram messages by responding with `[REACT:emoji]` as a standalone response (no text). Works as an expressive alternative to `<NO_REPLY>`. Bridge parses the tag and calls `setMessageReaction`. Also fixed: reactions on synthetic messages (messageId 0) now silently skipped instead of logging errors.
+
+## 27. Session-Start Steering
+
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `a14620c`
+
+New `skills/session-start.md` — instructs KP to greet user by name (from `user_profile.md`), reference last session context, and use `agentbridge-recall` for follow-up questions. Operational instructions removed from SOUL.md (where they didn't belong).
+
+## 28. Session Context Reduction
+
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `1890eed`
+
+Reduced `RECENT_MSG_LIMIT` from 12 to 8 messages. Combined with TOOLS.md, the trade-off favors always-on recall instructions over more chat history — KP can search for detail on demand.
