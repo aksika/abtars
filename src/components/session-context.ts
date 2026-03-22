@@ -1,6 +1,6 @@
 import type { MemoryManager } from "./memory-manager.js";
 
-export const RECENT_MSG_LIMIT = 12;
+export const RECENT_MSG_LIMIT = 8;
 export const RECENT_MSG_CAP = 2500;
 
 type MsgRow = { role: string; content: string; timestamp: number };
