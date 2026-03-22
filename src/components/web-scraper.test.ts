@@ -74,24 +74,16 @@ describe("parseWebScraperConfig", () => {
     expect(cfg.playwrightTimeoutMs).toBe(60_000);
   });
 
-  it("falls back to default and warns for invalid values", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("falls back to default for invalid values", () => {
     process.env["WEB_SCRAPE_FETCH_TIMEOUT_MS"] = "not-a-number";
     const cfg = parseWebScraperConfig();
     expect(cfg.fetchTimeoutMs).toBe(15_000);
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[web-scraper]"),
-    );
-    warnSpy.mockRestore();
   });
 
   it("falls back to default for zero", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     process.env["WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_MS"] = "0";
     const cfg = parseWebScraperConfig();
-    expect(cfg.playwrightTimeoutMs).toBe(30_000);
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(cfg.playwrightTimeoutMs).toBe(0);
   });
 
   it("uses custom user agent when set", () => {

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { homedir } from "node:os";
-import { logWarn } from "./logger.js";
+import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
 
 /** Configuration for the local memory layer. */
 export type MemoryConfig = {
@@ -31,8 +31,6 @@ export type MemoryConfig = {
   };
 };
 
-const TAG = "memory-config";
-
 /** Default values for all memory configuration fields. */
 export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
   memoryEnabled: true,
@@ -58,63 +56,38 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
 };
 
 /**
- * Parse an env var as a boolean ("true"/"1" → true, anything else → false).
- * Mirrors the pattern in config.ts.
- */
-function parseBooleanEnv(key: string, fallback: boolean): boolean {
-  const raw = process.env[key];
-  if (raw === undefined || raw === "") return fallback;
-  return raw === "true" || raw === "1";
-}
-
-/**
- * Parse an env var as a finite number. Logs a warning and returns the fallback
- * for invalid values instead of throwing (graceful degradation).
- */
-function parseNumberEnvSafe(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (raw === undefined || raw === "") return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) {
-    logWarn(TAG, `${key} must be a valid number, got "${raw}" — using default ${fallback}`);
-    return fallback;
-  }
-  return n;
-}
-
-/**
  * Load memory configuration from `process.env` with sensible defaults.
  * Invalid values produce a warning and fall back to defaults (never throws).
  */
 export function loadMemoryConfig(): MemoryConfig {
-  const memoryEnabled = parseBooleanEnv("MEMORY_ENABLED", MEMORY_CONFIG_DEFAULTS.memoryEnabled);
+  const memoryEnabled = parseBoolEnv("MEMORY_ENABLED", MEMORY_CONFIG_DEFAULTS.memoryEnabled);
   const memoryDir = process.env["MEMORY_DIR"] || MEMORY_CONFIG_DEFAULTS.memoryDir;
 
-  const maxMessagesPerChat = parseNumberEnvSafe(
+  const maxMessagesPerChat = parseNumberEnv(
     "MEMORY_MAX_MESSAGES_PER_CHAT",
     MEMORY_CONFIG_DEFAULTS.maxMessagesPerChat,
   );
-  const diskBudgetMb = parseNumberEnvSafe("MEMORY_DISK_BUDGET_MB", 500);
+  const diskBudgetMb = parseNumberEnv("MEMORY_DISK_BUDGET_MB", 500);
   const diskBudgetBytes = diskBudgetMb * 1024 * 1024;
 
-  const vectorEnabled = parseBooleanEnv("MEMORY_VECTOR_ENABLED", MEMORY_CONFIG_DEFAULTS.vectorEnabled);
+  const vectorEnabled = parseBoolEnv("MEMORY_VECTOR_ENABLED", MEMORY_CONFIG_DEFAULTS.vectorEnabled);
 
-  const stalenessHours = parseNumberEnvSafe("MEMORY_STALENESS_HOURS", 24);
+  const stalenessHours = parseNumberEnv("MEMORY_STALENESS_HOURS", 24);
   const stalenessThresholdMs = stalenessHours * 3_600_000;
 
-  const restoreMessageCount = parseNumberEnvSafe(
+  const restoreMessageCount = parseNumberEnv(
     "MEMORY_RESTORE_MESSAGES",
     MEMORY_CONFIG_DEFAULTS.restoreMessageCount,
   );
 
-  const ingestChunkMaxTokens = parseNumberEnvSafe(
+  const ingestChunkMaxTokens = parseNumberEnv(
     "MEMORY_INGEST_CHUNK_MAX_TOKENS",
     MEMORY_CONFIG_DEFAULTS.ingestChunkMaxTokens,
   );
 
   const embeddingModel = process.env["MEMORY_EMBEDDING_MODEL"] || MEMORY_CONFIG_DEFAULTS.embeddingModel;
 
-  const forgetThreshold = parseNumberEnvSafe("MEMORY_FORGET_THRESHOLD", MEMORY_CONFIG_DEFAULTS.forgetThreshold);
+  const forgetThreshold = parseNumberEnv("MEMORY_FORGET_THRESHOLD", MEMORY_CONFIG_DEFAULTS.forgetThreshold);
 
   return {
     memoryEnabled,
@@ -128,14 +101,14 @@ export function loadMemoryConfig(): MemoryConfig {
     embeddingModel,
     forgetThreshold,
     heartbeat: {
-      enabled: parseBooleanEnv("MEMORY_HEARTBEAT_ENABLED", MEMORY_CONFIG_DEFAULTS.heartbeat.enabled),
-      intervalMs: parseNumberEnvSafe("MEMORY_HEARTBEAT_INTERVAL_MS", MEMORY_CONFIG_DEFAULTS.heartbeat.intervalMs),
+      enabled: parseBoolEnv("MEMORY_HEARTBEAT_ENABLED", MEMORY_CONFIG_DEFAULTS.heartbeat.enabled),
+      intervalMs: parseNumberEnv("MEMORY_HEARTBEAT_INTERVAL_MS", MEMORY_CONFIG_DEFAULTS.heartbeat.intervalMs),
     },
     searchEnhancements: {
-      searchTimeoutMs: parseNumberEnvSafe("MEMORY_SEARCH_TIMEOUT_MS", MEMORY_CONFIG_DEFAULTS.searchEnhancements.searchTimeoutMs),
-      decayHalflifeDays: parseNumberEnvSafe("MEMORY_DECAY_HALFLIFE_DAYS", MEMORY_CONFIG_DEFAULTS.searchEnhancements.decayHalflifeDays),
-      mmrLambda: parseNumberEnvSafe("MEMORY_MMR_LAMBDA", MEMORY_CONFIG_DEFAULTS.searchEnhancements.mmrLambda),
-      compactThresholdPct: parseNumberEnvSafe("MEMORY_COMPACT_THRESHOLD_PCT", MEMORY_CONFIG_DEFAULTS.searchEnhancements.compactThresholdPct),
+      searchTimeoutMs: parseNumberEnv("MEMORY_SEARCH_TIMEOUT_MS", MEMORY_CONFIG_DEFAULTS.searchEnhancements.searchTimeoutMs),
+      decayHalflifeDays: parseNumberEnv("MEMORY_DECAY_HALFLIFE_DAYS", MEMORY_CONFIG_DEFAULTS.searchEnhancements.decayHalflifeDays),
+      mmrLambda: parseNumberEnv("MEMORY_MMR_LAMBDA", MEMORY_CONFIG_DEFAULTS.searchEnhancements.mmrLambda),
+      compactThresholdPct: parseNumberEnv("MEMORY_COMPACT_THRESHOLD_PCT", MEMORY_CONFIG_DEFAULTS.searchEnhancements.compactThresholdPct),
     },
   };
 }

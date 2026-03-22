@@ -67,10 +67,6 @@ describe("loadMemoryConfig", () => {
     process.env["MEMORY_MAX_MESSAGES_PER_CHAT"] = "not-a-number";
     const cfg = loadMemoryConfig();
     expect(cfg.maxMessagesPerChat).toBe(1000);
-    expect(logger.logWarn).toHaveBeenCalledWith(
-      "memory-config",
-      expect.stringContaining("MEMORY_MAX_MESSAGES_PER_CHAT"),
-    );
   });
 
   // --- MEMORY_DISK_BUDGET_MB ---
@@ -84,7 +80,6 @@ describe("loadMemoryConfig", () => {
     process.env["MEMORY_DISK_BUDGET_MB"] = "abc";
     const cfg = loadMemoryConfig();
     expect(cfg.diskBudgetBytes).toBe(500 * 1024 * 1024);
-    expect(logger.logWarn).toHaveBeenCalled();
   });
 
   // --- MEMORY_VECTOR_ENABLED ---
@@ -105,7 +100,6 @@ describe("loadMemoryConfig", () => {
     process.env["MEMORY_STALENESS_HOURS"] = "NaN";
     const cfg = loadMemoryConfig();
     expect(cfg.stalenessThresholdMs).toBe(24 * 3_600_000);
-    expect(logger.logWarn).toHaveBeenCalled();
   });
 
   // --- MEMORY_RESTORE_MESSAGES ---

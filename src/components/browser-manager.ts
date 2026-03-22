@@ -1,6 +1,7 @@
 import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
 import type { BrowserSession } from "../types/browser.js";
+import { parseIntEnv } from "./env-utils.js";
 
 // ---------------------------------------------------------------------------
 // Environment variable parsing
@@ -26,11 +27,11 @@ export interface BrowserConfig {
  * Exported for testability (Property 16).
  */
 export function parseBrowserConfig(): BrowserConfig {
-  const sessionTimeoutMs = parsePositiveInt(
+  const sessionTimeoutMs = parseIntEnv(
     "BROWSER_SESSION_TIMEOUT_MS",
     DEFAULTS.BROWSER_SESSION_TIMEOUT_MS,
   );
-  const maxSessions = parsePositiveInt(
+  const maxSessions = parseIntEnv(
     "BROWSER_MAX_SESSIONS",
     DEFAULTS.BROWSER_MAX_SESSIONS,
   );
@@ -40,19 +41,6 @@ export function parseBrowserConfig(): BrowserConfig {
   );
 
   return { sessionTimeoutMs, maxSessions, userAgent };
-}
-
-function parsePositiveInt(envKey: string, fallback: number): number {
-  const raw = process.env[envKey];
-  if (raw === undefined || raw === "") return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
-    console.warn(
-      `${LOG_PREFIX} Invalid value for ${envKey}: "${raw}". Using default ${fallback}.`,
-    );
-    return fallback;
-  }
-  return n;
 }
 
 function parseStringEnv(envKey: string, fallback: string): string {

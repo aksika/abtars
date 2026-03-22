@@ -234,15 +234,10 @@ export function formatUptime(ms: number): string {
 // ── Internal Helpers ────────────────────────────────────────────────────────
 
 /**
- * Parse a string as a finite positive integer, falling back to `fallback`
- * when the value is missing, empty, or not a valid number.
+ * Parse a string as a finite positive integer, falling back to `fallback`.
  */
-function parseNumericEnv(
-  raw: string | undefined,
-  fallback: number,
-): number {
-  if (raw === undefined || raw.trim() === "") return fallback;
+function parseNumericEnv(raw: string | undefined, fallback: number): number {
+  if (!raw?.trim()) return fallback;
   const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0) return fallback;
-  return Math.floor(n);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }

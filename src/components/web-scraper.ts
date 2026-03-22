@@ -1,11 +1,10 @@
 import type { BrowserManager } from "./browser-manager.js";
 import { extractTextFromHtml, extractTextFromPage } from "./content-extractor.js";
+import { parseIntEnv } from "./env-utils.js";
 
 // ---------------------------------------------------------------------------
 // Constants & env-var parsing
 // ---------------------------------------------------------------------------
-
-const LOG_PREFIX = "[web-scraper]";
 
 /** Minimum trimmed text length to accept the fetch strategy result. */
 const MIN_STATIC_TEXT_LENGTH = 200;
@@ -26,26 +25,13 @@ interface WebScraperConfig {
  */
 export function parseWebScraperConfig(): WebScraperConfig {
   return {
-    fetchTimeoutMs: parsePositiveInt("WEB_SCRAPE_FETCH_TIMEOUT_MS", 15_000),
-    playwrightTimeoutMs: parsePositiveInt("WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_MS", 30_000),
+    fetchTimeoutMs: parseIntEnv("WEB_SCRAPE_FETCH_TIMEOUT_MS", 15_000),
+    playwrightTimeoutMs: parseIntEnv("WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_MS", 30_000),
     userAgent: parseStringEnv(
       "WEB_SCRAPE_USER_AGENT",
       "Mozilla/5.0 (compatible; AgentBridge/1.0)",
     ),
   };
-}
-
-function parsePositiveInt(envKey: string, fallback: number): number {
-  const raw = process.env[envKey];
-  if (raw === undefined || raw === "") return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) {
-    console.warn(
-      `${LOG_PREFIX} Invalid value for ${envKey}: "${raw}". Using default ${fallback}.`,
-    );
-    return fallback;
-  }
-  return n;
 }
 
 function parseStringEnv(envKey: string, fallback: string): string {

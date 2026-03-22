@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { config as loadDotenv } from "dotenv";
 import { type Config, type KiroTransport, CONFIG_DEFAULTS } from "../types/index.js";
+import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
 import type { LogLevel } from "./logger.js";
 
 /** ~/.agentbridge/ is the runtime config/data directory */
@@ -139,7 +140,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- TRUST_MODE (optional boolean, default false) ---
-  const trustMode = parseBooleanEnv(
+  const trustMode = parseBoolEnv(
     "TRUST_MODE",
     CONFIG_DEFAULTS.trustMode,
   );
@@ -187,11 +188,11 @@ export async function loadAndValidateConfig(): Promise<Config> {
 
   // --- GROQ_API_KEY (optional, enables STT) ---
   const groqApiKey = process.env["GROQ_API_KEY"] ?? "";
-  const sttEnabled = parseBooleanEnv("STT_ENABLED", groqApiKey.length > 0);
+  const sttEnabled = parseBoolEnv("STT_ENABLED", groqApiKey.length > 0);
   const sttModel = process.env["STT_MODEL"] || CONFIG_DEFAULTS.sttModel;
 
   // --- TTS (optional, default enabled) ---
-  const ttsEnabled = parseBooleanEnv("TTS_ENABLED", CONFIG_DEFAULTS.ttsEnabled);
+  const ttsEnabled = parseBoolEnv("TTS_ENABLED", CONFIG_DEFAULTS.ttsEnabled);
   const ttsVoice = process.env["TTS_VOICE"] || CONFIG_DEFAULTS.ttsVoice;
 
   // --- DISCORD_BOT_TOKEN (optional — Discord disabled if absent) ---
@@ -300,22 +301,4 @@ export async function loadAndValidateConfig(): Promise<Config> {
     discordEnabled,
     discordB2bEnabled,
   };
-}
-
-/** Parse an env var as a boolean ("true"/"1" → true, anything else → false). */
-function parseBooleanEnv(key: string, fallback: boolean): boolean {
-  const raw = process.env[key];
-  if (raw === undefined || raw === "") return fallback;
-  return raw === "true" || raw === "1";
-}
-
-/** Parse an env var as a finite number. Throws if present but not numeric. */
-function parseNumberEnv(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (raw === undefined || raw === "") return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) {
-    throw new Error(`${key} must be a valid number, got "${raw}"`);
-  }
-  return n;
 }

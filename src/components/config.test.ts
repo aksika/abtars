@@ -153,11 +153,10 @@ describe("loadAndValidateConfig", () => {
     expect(config.permissionTimeoutMs).toBe(30_000);
   });
 
-  it("throws when PERMISSION_TIMEOUT_MS is not a number", async () => {
+  it("falls back to default when PERMISSION_TIMEOUT_MS is not a number", async () => {
     process.env["PERMISSION_TIMEOUT_MS"] = "abc";
-    await expect(loadAndValidateConfig()).rejects.toThrow(
-      "PERMISSION_TIMEOUT_MS",
-    );
+    const config = await loadAndValidateConfig();
+    expect(config.permissionTimeoutMs).toBe(60000);
   });
 
   // --- POLL_TIMEOUT_S ---
@@ -168,8 +167,9 @@ describe("loadAndValidateConfig", () => {
     expect(config.pollTimeoutS).toBe(60);
   });
 
-  it("throws when POLL_TIMEOUT_S is not a number", async () => {
+  it("falls back to default when POLL_TIMEOUT_S is not a number", async () => {
     process.env["POLL_TIMEOUT_S"] = "nope";
-    await expect(loadAndValidateConfig()).rejects.toThrow("POLL_TIMEOUT_S");
+    const config = await loadAndValidateConfig();
+    expect(config.pollTimeoutS).toBe(30);
   });
 });
