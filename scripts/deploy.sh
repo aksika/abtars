@@ -68,6 +68,7 @@ safe_cp "$PROJECT_DIR/skills/troubleshooting/SKILL.md" "$AB_HOME/.kiro/steering/
 safe_cp "$PROJECT_DIR/skills/classification/SKILL.md" "$AB_HOME/.kiro/steering/classification.md"
 safe_cp "$PROJECT_DIR/skills/trust-gating/SKILL.md" "$AB_HOME/.kiro/steering/trust-gating.md"
 safe_cp "$PROJECT_DIR/skills/ai-news-curation/SKILL.md" "$AB_HOME/.kiro/steering/ai-news-curation.md"
+safe_cp "$PROJECT_DIR/skills/fxtwitter/SKILL.md" "$AB_HOME/.kiro/steering/fxtwitter.md"
 safe_cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/sleeping_prompt.md"
 safe_cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/browsing_prompt.md"
 for f in "$PROJECT_DIR/skills/agents/"*.md; do
@@ -84,6 +85,8 @@ chmod +x "$AB_HOME/browser-docker.sh"
 mkdir -p "$AB_HOME/scripts"
 cp "$PROJECT_DIR/scripts/daily-backup.sh" "$AB_HOME/scripts/daily-backup.sh"
 chmod +x "$AB_HOME/scripts/daily-backup.sh"
+cp "$PROJECT_DIR/scripts/doctor.sh" "$AB_HOME/scripts/doctor.sh"
+chmod +x "$AB_HOME/scripts/doctor.sh"
 
 # Deploy agentbridge-recall CLI (agent-callable memory search)
 RECALL_SCRIPT="$AB_HOME/agentbridge-recall"
