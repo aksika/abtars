@@ -96,3 +96,32 @@ Auto-retry failed script tasks on next cycle instead of just reporting failure.
 **Priority:** High — quick
 
 Run `deploy.sh` to push `healthcheck.md` and updated `cron.md` to live.
+
+## 18. Refurbish Web Dashboard
+
+**Status:** Not started
+**Priority:** Medium
+
+Modernize the localhost web dashboard — improve UI/UX, add missing panels, make it more useful for daily ops monitoring.
+
+## 19. /coding Command — Opus as Coding Agent
+
+**Status:** Not started
+**Priority:** Medium
+
+Add `/coding` command that routes to Claude Opus as a dedicated coding agent. Separate from the default conversational model — optimized for code generation, refactoring, and debugging tasks.
+
+## 20. Review Testing Strategy
+
+**Status:** Not started
+**Priority:** Medium
+
+Audit current test coverage (606 tests / 59 files). Identify gaps, redundant tests, and areas where integration tests would add more value than unit tests. Align with the refactored architecture.
+
+## 21. Improve Security (NemoClaw Ideas)
+
+**Status:** Not started
+**Priority:** Medium
+**Reference:** NemoClaw project (NVIDIA)
+
+Review NemoClaw's security patterns and apply relevant ideas to AgentBridge — prompt hardening, input sanitization, permission boundaries, agent isolation, etc.
