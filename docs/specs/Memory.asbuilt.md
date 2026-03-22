@@ -1,8 +1,7 @@
-# Local Memory — Wanted Position (Post-Refactor Target State)
+# Local Memory — As-Built (Post-Refactor)
 
-Created: 2026-03-21
-Baseline: Memory.asbuilt.md (current state)
-Plan: memory-refactor-plan.md (R1-R6)
+Updated: 2026-03-22
+Refactor: R1-R6 complete (see memory-refactor-plan.md)
 
 ---
 
@@ -10,7 +9,7 @@ Plan: memory-refactor-plan.md (R1-R6)
 
 SQLite-backed persistence with FTS5 full-text search, optional local-model vector search, sleep-subagent-driven extraction, agent-initiated instant memory storage with emotion scoring, Memory Darwinism, NATO Admiralty Code security model, daily retrospective with emotional attribution, and immediate emotion propagation.
 
-**Key difference from as-built:** Single storage path (SQLite only, no JSONL runtime writes), single search path (agentbridge-recall only), messages table as hot buffer (flushed after sleep), retrospective-driven self-improvement loop.
+**Key difference from as-built:** Single storage path (SQLite only, no JSONL runtime writes), single search path (agentbridge-recall only), messages table as hot buffer (flushed after sleep), retrospective-driven self-improvement loop, heartbeat liveness tracking.
 
 **Recall architecture**: Unchanged — agent-driven via `agentbridge-recall` CLI. No bridge-side context injection.
 
@@ -28,7 +27,7 @@ SQLite-backed persistence with FTS5 full-text search, optional local-model vecto
 | C5 | Vector Index | `memory.db` (embeddings) | EmbeddingProvider | VectorIndex | Persistent — optional |
 | **C6** | **Retrospectives** | **Markdown files** | **Sleep subagent (step 1)** | **Sleep subagent, agent (via recall)** | **Persistent — NEW** |
 
-### Data Flow (Wanted)
+### Data Flow
 
 ```
 User Message
@@ -58,7 +57,7 @@ User Message
 
 ---
 
-## System Layer Architecture (Wanted)
+## System Layer Architecture
 
 ```
 +---------------------------------------------------------------------+
@@ -93,7 +92,7 @@ User Message
 
 ---
 
-## Recall Cascade (Wanted — 5 stages)
+## Recall Cascade ( 5 stages)
 
 | Stage | What | Source | Short-circuit |
 |-------|------|--------|---------------|
@@ -109,7 +108,7 @@ Post-processing: dedup by content hash → temporal decay → MMR re-ranking.
 
 ---
 
-## Sleep Cycle (Wanted — 10 steps)
+## Sleep Cycle ( 10 steps)
 
 ### Trigger (`SleepTrigger` in `sleep-trigger.ts`)
 
@@ -143,7 +142,7 @@ On success or 3 failures: stops until next day. Writes a `.lock` file before spa
 
 ---
 
-## Message Lifecycle (Wanted)
+## Message Lifecycle
 
 ```
 Message arrives
@@ -191,7 +190,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 
 ---
 
-## Component Inventory (Wanted)
+## Component Inventory
 
 ### Active Components
 
@@ -205,7 +204,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 | SleepTrigger | `sleep-trigger.ts` | Unchanged |
 | SleepStateGatherer | `sleep-state-gatherer.ts` | Unchanged |
 | sleep-prompt-loader | `sleep-prompt-loader.ts` | Unchanged |
-| HeartbeatSystem | `heartbeat-system.ts` | Unchanged |
+| HeartbeatSystem | `heartbeat-system.ts` | Writes `.heartbeat` timestamp on each tick |
 | EmbeddingProvider | `embedding-provider.ts` | Unchanged |
 | VectorIndex | `vector-index.ts` | Unchanged |
 | PromptScanner | `prompt-scanner.ts` | Unchanged |
@@ -230,7 +229,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 
 ---
 
-## Configuration (Wanted)
+## Configuration
 
 Removed env vars:
 - ~~`MEMORY_COMPACT_ON_RESET`~~ — CompactionEngine deleted
@@ -249,11 +248,16 @@ New env vars:
 
 ---
 
-## File System Layout (Wanted)
+## File System Layout
 
 ```
 ~/.agentbridge/memory/
   memory.db                    # SQLite: messages (hot buffer) + extracted_memories (permanent)
+  .heartbeat                   # Epoch ms — written by HeartbeatSystem on each tick
+  cron.json                    # Internal cron entries (one-shot + recurring)
+  pending_reminders.json       # File-based IPC: cron → reminder injector
+  garbage.json                 # GC tracking: message_id → marked timestamp
+  todo.md                      # Agent-managed todo list
   working/
     {YYYY-MM-DD}/              # Intra-day conversation dumps
   daily/
@@ -262,81 +266,24 @@ New env vars:
     YYYY-Wxx.md                # Weekly rollups
   quarterly/
     YYYY-Qn.md                 # Quarterly rollups
-  retrospectives/              # NEW
+  retrospectives/
     retro_YYYYMMDD.md          # Daily self-reflection with emotional attribution
   core/
     user_profile.md            # Who the user is
     agent_notes.md             # Lessons learned (updated by retrospective)
-  audit/
+  sleep/
     sleep_YYYYMMDD_HHmmss.md   # Sleep cycle audit logs
-
-  REMOVED:
-    transcripts/               # JSONL files — eliminated
+    sleep_YYYYMMDD.lock        # Sleep spawn lock (prevents duplicates)
 ```
 
 ---
 
-## Test Coverage (Wanted)
+## Test Coverage
 
-Current: 648 tests across 62 files.
-Target: ~550 tests across ~50 files (deleted component tests removed, new retro + flush + cascade tests added).
+606 tests across 59 files (as of refactor completion).
 
 ---
 
-## As-Built vs Wanted Position — Comparison
-
-### Storage Efficiency
-
-| Metric | As-Built | Wanted | Verdict |
-|--------|----------|--------|---------|
-| Writes per message | 3 (SQLite + JSONL + chat_backup) | 1 (SQLite only) | ✅ 3× fewer I/O ops |
-| messages table | Grows continuously, slow GC | Hot buffer, flushed after sleep | ✅ Bounded size |
-| JSONL files | Permanent, cascade-rewritten on delete | Eliminated | ✅ No file rewrites |
-| Emoji data quality | Split (stripped in DB, raw in JSONL) | Unified (raw in DB, stripped at FTS5 index) | ✅ Single source of truth |
-
-### Search Quality
-
-| Metric | As-Built | Wanted | Verdict |
-|--------|----------|--------|---------|
-| Search paths | 3 (agent uses 1) | 1 | ✅ No dead code, no confusion |
-| Recall stages | 8 (noisy raw messages first) | 5 (curated extracted first) | ✅ Better results surface faster |
-| Short-circuit | None | Skip fallback when extracted has enough | ✅ Faster for common case |
-| LIKE substring stages | 2 (expensive, rarely unique) | 0 | ✅ Less CPU, same recall |
-
-### Self-Improvement
-
-| Metric | As-Built | Wanted | Verdict |
-|--------|----------|--------|---------|
-| Self-reflection | None | Daily retrospective with emotional attribution | ✅ New capability |
-| Lesson persistence | Manual agent_notes updates | Retro → agent_notes automatically | ✅ Closes learning loop |
-| Emotion propagation | Sleep-only (12-24h delay) | Immediate for reactions, sleep for verbal | ✅ Faster signal |
-
-### Complexity
-
-| Metric | As-Built | Wanted | Verdict |
-|--------|----------|--------|---------|
-| Source files (memory) | ~30 | ~19 | ✅ 11 fewer files |
-| cascadeDelete | DB + JSONL rewrite + signature matching | DB only | ✅ Simpler, no fragile matching |
-| Drift check | Needed (two stores can desync) | Eliminated | ✅ Can't desync with one store |
-| Sleep GC steps | 9 (no retro, suboptimal order) | 10 (retro + flush, optimized order) | ✅ More capable, better ordered |
-| Config env vars | 28 | 19 (9 removed, 2 added) | ✅ Less to configure |
-
-### Risk
-
-| Concern | Assessment |
-|---------|------------|
-| Recall quality regression | Low — Phase A validates with real queries before removing anything |
-| Data loss from message flush | Low — extraction captures facts, retro captures context, consolidation captures summaries |
-| Retro token cost | ~2-3K tokens/day (one conversation read + 5 questions). Negligible vs existing sleep cost |
-| Emoji in FTS5 | None — stripping moves to trigger, search quality unchanged |
-
-### What doesn't improve
-
-- Consolidation pipeline — unchanged (already working)
-- Security model — unchanged (already designed for paper)
-- Extraction latency — unchanged (sleep + instant store is sufficient)
-- GC location — unchanged (all in sleep, correct decision)
-
 ### Conclusion
 
-The refactor enhances the system on every axis that matters: fewer writes, bounded storage, better search ordering, self-reflection capability, simpler deletion logic, less dead code. The only addition in complexity is the retrospective — which is a net-new capability, not overhead. No functionality is lost.
+The refactor eliminated JSONL dual-writes, simplified search to a single 5-stage extracted-first cascade, added daily retrospective capability, restructured the sleep cycle, removed dead code (-3326 lines), and added immediate emotion propagation. SQLite is the single source of truth.
