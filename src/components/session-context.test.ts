@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
 import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
 import type { MemoryConfig } from "./memory-config.js";
-import { buildSessionStartContext, SESSION_CONTEXT_CAP } from "./session-context.js";
+import { buildSessionStartContext, RECENT_MSG_CAP } from "./session-context.js";
 
 function makeConfig(dir: string): MemoryConfig {
   return { ...MEMORY_CONFIG_DEFAULTS, memoryDir: dir };
@@ -94,16 +94,21 @@ describe("buildSessionStartContext", () => {
     expect(result).toContain("x".repeat(3500));
   });
 
-  it("caps recent messages at SESSION_CONTEXT_CAP", () => {
+  it("caps recent messages by dropping oldest first", () => {
     const now = Date.now();
-    // Insert many long messages
-    for (let i = 0; i < 10; i++) {
-      insertMessage(manager, "user", "A".repeat(400), now - (10 - i) * 1000);
+    // Insert 12 long messages
+    for (let i = 0; i < 12; i++) {
+      insertMessage(manager, "user", "M" + i + " " + "A".repeat(400), now - (12 - i) * 1000);
     }
 
     const result = buildSessionStartContext(manager, 1)!;
+    // Most recent message must be present
+    expect(result).toContain("M11");
+    // Total body should be under cap (with some slack for timestamps/markers)
     const body = result.split("\n").slice(1, -1).join("\n");
-    expect(body.length).toBeLessThanOrEqual(SESSION_CONTEXT_CAP + 200); // some slack for timestamps
+    expect(body.length).toBeLessThanOrEqual(RECENT_MSG_CAP + 200);
+    // Oldest messages should be dropped
+    expect(result).not.toContain("M0 ");
   });
 
   it("wraps output in REQ-4 temporal markers", () => {
