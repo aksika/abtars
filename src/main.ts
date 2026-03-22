@@ -1,5 +1,6 @@
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
@@ -551,6 +552,22 @@ async function main(): Promise<void> {
             `📋 Tasks: ${cronInfo.tasks.join(", ") || "(none)"}`,
             `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
           );
+          try {
+            const hbTs = parseInt(readFileSync(join(homedir(), ".agentbridge", "memory", ".heartbeat"), "utf-8"), 10);
+            if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);
+          } catch { /* */ }
+          try {
+            const ce = JSON.parse(readFileSync(join(homedir(), ".agentbridge", "memory", "cron.json"), "utf-8")) as Array<{ fired: boolean; schedule?: string; paused?: boolean }>;
+            const r = ce.filter(e => e.schedule && !e.paused).length;
+            const p = ce.filter(e => !e.fired && !e.schedule).length;
+            const pa = ce.filter(e => e.paused).length;
+            lines.push(`⏰ Cron: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
+          } catch { /* */ }
+          try {
+            const bd = join(homedir(), ".backup-agentbridge");
+            const bk = readdirSync(bd).filter(f => f.startsWith("agentbridge-")).sort();
+            if (bk.length > 0) lines.push(`💾 Last backup: ${bk[bk.length - 1]}`);
+          } catch { /* */ }
         }
         await telegramApi.sendMessage(chatId, lines.join("\n"), { message_thread_id: threadId });
         return;
@@ -1166,6 +1183,22 @@ async function main(): Promise<void> {
             `📋 Tasks: ${cronInfo.tasks.join(", ") || "(none)"}`,
             `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
           );
+          try {
+            const hbTs = parseInt(readFileSync(join(homedir(), ".agentbridge", "memory", ".heartbeat"), "utf-8"), 10);
+            if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);
+          } catch { /* */ }
+          try {
+            const ce = JSON.parse(readFileSync(join(homedir(), ".agentbridge", "memory", "cron.json"), "utf-8")) as Array<{ fired: boolean; schedule?: string; paused?: boolean }>;
+            const r = ce.filter(e => e.schedule && !e.paused).length;
+            const p = ce.filter(e => !e.fired && !e.schedule).length;
+            const pa = ce.filter(e => e.paused).length;
+            lines.push(`⏰ Cron: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
+          } catch { /* */ }
+          try {
+            const bd = join(homedir(), ".backup-agentbridge");
+            const bk = readdirSync(bd).filter(f => f.startsWith("agentbridge-")).sort();
+            if (bk.length > 0) lines.push(`💾 Last backup: ${bk[bk.length - 1]}`);
+          } catch { /* */ }
         }
         await discordApi.sendMessage(message.channelId, lines.join("\n"));
         return;
