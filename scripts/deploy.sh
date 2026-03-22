@@ -55,20 +55,9 @@ safe_cp() {
 
 safe_cp "$PROJECT_DIR/persona/SOUL.md" "$AB_HOME/.kiro/steering/SOUL.md"
 safe_cp "$PROJECT_DIR/persona/professor.json" "$AB_HOME/.kiro/agents/professor.json"
-safe_cp "$PROJECT_DIR/skills/memory-search/SKILL.md" "$AB_HOME/.kiro/steering/memory-search.md"
-safe_cp "$PROJECT_DIR/skills/instant-store/SKILL.md" "$AB_HOME/.kiro/steering/instant-store.md"
-safe_cp "$PROJECT_DIR/skills/nlm/SKILL.md" "$AB_HOME/.kiro/steering/nlm.md"
-safe_cp "$PROJECT_DIR/skills/topic-save/SKILL.md" "$AB_HOME/.kiro/steering/topic-save.md"
-safe_cp "$PROJECT_DIR/skills/mcporter/SKILL.md" "$AB_HOME/.kiro/steering/mcporter.md"
-safe_cp "$PROJECT_DIR/skills/browser/SKILL.md" "$AB_HOME/.kiro/steering/browser.md"
-safe_cp "$PROJECT_DIR/skills/todo/SKILL.md" "$AB_HOME/.kiro/steering/todo.md"
-safe_cp "$PROJECT_DIR/skills/cron/SKILL.md" "$AB_HOME/.kiro/steering/cron.md"
-safe_cp "$PROJECT_DIR/skills/browse-delegate/SKILL.md" "$AB_HOME/.kiro/steering/browse-delegate.md"
-safe_cp "$PROJECT_DIR/skills/troubleshooting/SKILL.md" "$AB_HOME/.kiro/steering/troubleshooting.md"
-safe_cp "$PROJECT_DIR/skills/classification/SKILL.md" "$AB_HOME/.kiro/steering/classification.md"
-safe_cp "$PROJECT_DIR/skills/trust-gating/SKILL.md" "$AB_HOME/.kiro/steering/trust-gating.md"
-safe_cp "$PROJECT_DIR/skills/ai-news-curation/SKILL.md" "$AB_HOME/.kiro/steering/ai-news-curation.md"
-safe_cp "$PROJECT_DIR/skills/fxtwitter/SKILL.md" "$AB_HOME/.kiro/steering/fxtwitter.md"
+for f in "$PROJECT_DIR/skills/"*.md; do
+  safe_cp "$f" "$AB_HOME/.kiro/steering/$(basename "$f")"
+done
 safe_cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/sleeping_prompt.md"
 safe_cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/browsing_prompt.md"
 for f in "$PROJECT_DIR/skills/agents/"*.md; do
