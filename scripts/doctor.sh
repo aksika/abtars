@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # doctor.sh — health check and auto-fix for ~/.agentbridge
-set -euo pipefail
+set -uo pipefail
 
 AB="$HOME/.agentbridge"
 FIXES=0
@@ -45,7 +45,7 @@ if [ -d .git ]; then
   if ! git remote get-url origin &>/dev/null; then
     log "WARN: git remote 'origin' missing — backup push will fail"
   fi
-  if ! git push --dry-run &>/dev/null; then
+  if ! timeout 3 git push --dry-run &>/dev/null; then
     log "WARN: git push would fail — check upstream/auth"
   fi
 fi
