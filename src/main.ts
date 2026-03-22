@@ -3,7 +3,6 @@ import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
 import { loadAndValidateConfig } from "./components/config.js";
 import { SecurityGate } from "./components/security-gate.js";
 import { ResponseFormatter } from "./components/response-formatter.js";
@@ -153,40 +152,24 @@ function buildStatusLines(opts: {
 }
 
 /** Read and consume the pre-generated startup greeting (written by sleep cycle). */
-function consumeStartupGreeting(memoryDir: string): string | null {
+/** Read and consume the pre-generated startup greeting (written by sleep cycle). */
+function consumeStartupGreeting(memoryDir: string): string {
   const p = join(memoryDir, "startup-greeting.txt");
-  if (!existsSync(p)) return null;
+  if (!existsSync(p)) return "Back online.";
   try {
     const msg = readFileSync(p, "utf-8").trim();
     unlinkSync(p);
-    return msg || null;
-  } catch { return null; }
-}
-
-/** Metadata-only fallback greeting from DB stats. */
-function buildMetadataGreeting(memoryDir: string): string {
-  const dbPath = join(memoryDir, "memory.db");
-  if (!existsSync(dbPath)) return "Back online.";
-  try {
-    const db = new Database(dbPath, { readonly: true });
-    const row = db.prepare(
-      "SELECT MAX(source_timestamp) as lastTs, COUNT(*) as total FROM extracted_memories",
-    ).get() as { lastTs: number | null; total: number };
-    db.close();
-    if (!row.lastTs) return "Back online.";
-    const lastDate = new Date(row.lastTs).toISOString().slice(0, 10);
-    return `Back online. Last session: ${lastDate} — ${row.total} memories in the bank.`;
+    return msg || "Back online.";
   } catch { return "Back online."; }
 }
 
-/** Send startup greeting: pre-generated from sleep (Option 1), or metadata fallback (Option 2). */
+/** Send startup greeting: pre-generated from sleep, or plain "Back online." */
 async function sendStartupGreeting(
   memoryDir: string,
   sendTelegram?: (msg: string) => Promise<void>,
   sendDiscord?: (msg: string) => Promise<void>,
 ): Promise<void> {
-  const greeting = consumeStartupGreeting(memoryDir) ?? buildMetadataGreeting(memoryDir);
-  const msg = `🔄 ${greeting}`;
+  const msg = `🔄 ${consumeStartupGreeting(memoryDir)}`;
   await Promise.all([
     sendTelegram?.(msg).catch(() => {}),
     sendDiscord?.(msg).catch(() => {}),
@@ -410,11 +393,9 @@ async function main(): Promise<void> {
 
   // --- Telegram wiring (conditional) ---
   let telegramPoller: TelegramPoller | null = null;
-  let telegramApiRef: TelegramApi | null = null;
 
   if (platforms.telegram) {
     const telegramApi = new TelegramApi(config.telegramBotToken);
-    telegramApiRef = telegramApi;
     const securityGate = new SecurityGate(config.allowedUserIds);
 
     const botInfo = await telegramApi.getMe();
@@ -1138,11 +1119,9 @@ async function main(): Promise<void> {
 
   // --- Discord wiring (conditional) ---
   let discordPoller: DiscordPoller | null = null;
-  let discordApiRef: DiscordApi | null = null;
 
   if (platforms.discord && config.discordEnabled) {
     const discordApi = new DiscordApi(config.discordBotToken!);
-    discordApiRef = discordApi;
     const discordSecurityGate = new DiscordSecurityGate(
       config.discordAllowedUserIds!,
       config.discordAllowedChannelIds!,
@@ -1636,13 +1615,13 @@ async function main(): Promise<void> {
 
   // --- Startup greeting (async, non-blocking) ---
   if (memoryConfig.memoryEnabled) {
-    const tgSend = telegramApiRef ? async (msg: string): Promise<void> => {
+    const tgSend = telegramPoller ? async (msg: string): Promise<void> => {
       const chatId = [...config.allowedUserIds][0];
-      if (chatId) await telegramApiRef!.sendMessage(chatId, msg);
+      if (chatId) await new TelegramApi(config.telegramBotToken).sendMessage(chatId, msg);
     } : undefined;
-    const dcSend = discordApiRef ? async (msg: string): Promise<void> => {
+    const dcSend = discordPoller ? async (msg: string): Promise<void> => {
       const channelId = config.discordAllowedChannelIds ? [...config.discordAllowedChannelIds][0] : undefined;
-      if (channelId) await discordApiRef!.sendMessage(channelId, msg);
+      if (channelId) await new DiscordApi(config.discordBotToken!).sendMessage(channelId, msg);
     } : undefined;
     sendStartupGreeting(memoryConfig.memoryDir, tgSend, dcSend).catch(() => {});
   }
