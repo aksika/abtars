@@ -1666,19 +1666,21 @@ async function main(): Promise<void> {
       const channelId = config.discordAllowedChannelIds ? [...config.discordAllowedChannelIds][0] : undefined;
       if (channelId) await new DiscordApi(config.discordBotToken!).sendMessage(channelId, msg);
     } : undefined;
-    sendStartupGreeting(memoryConfig.memoryDir, tgSend, dcSend).then((greeting) => {
+    sendStartupGreeting(memoryConfig.memoryDir, tgSend, dcSend).then(async (greeting) => {
       // Inject greeting into agent so it greets in its own voice
       if (telegramPoller && greeting) {
         const chatId = [...config.allowedUserIds][0];
         if (chatId) {
+          let firstName = "the user";
+          try { firstName = (await new TelegramApi(config.telegramBotToken).getChat(chatId)).first_name || firstName; } catch { /* ok */ }
           telegramPoller.injectUpdate({
             update_id: 0,
             message: {
               message_id: 0,
-              from: { id: chatId, is_bot: false, first_name: "system" },
+              from: { id: chatId, is_bot: false, first_name: firstName },
               chat: { id: chatId, type: "private" },
               date: Math.floor(Date.now() / 1000),
-              text: `[SYSTEM] You just woke up. Greet the user briefly in your own style. Context: ${greeting}`,
+              text: `[SYSTEM] You just woke up. Greet ${firstName} briefly in your own style. Context: ${greeting}`,
             },
           });
         }

@@ -28,6 +28,11 @@ export class TelegramApi {
     return res as { id: number; username?: string };
   }
 
+  async getChat(chatId: number): Promise<{ id: number; first_name?: string; username?: string }> {
+    const res = await this.call("getChat", { chat_id: chatId });
+    return res as { id: number; first_name?: string; username?: string };
+  }
+
   /** Get file path for downloading. */
   async getFile(fileId: string): Promise<{ file_id: string; file_path?: string; file_size?: number }> {
     const res = await this.call("getFile", { file_id: fileId });
