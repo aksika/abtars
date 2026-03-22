@@ -506,9 +506,9 @@ async function main(): Promise<void> {
       if (!hasText && !hasVoice) return;
 
       const chatId = message.chat.id;
-      const threadId = message.message_thread_id;
-      const messageId = message.message_id;
       const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
+      const threadId = isGroup ? message.message_thread_id : undefined;
+      const messageId = message.message_id;
       const senderName = message.from.first_name || message.from.username || `id:${message.from.id}`;
       const bufKey = tgBufferKey(chatId, threadId);
 
