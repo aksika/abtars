@@ -45,7 +45,7 @@ import { BrowserManager } from "./components/browser-manager.js";
 import { BrowserTool } from "./components/browser-tool.js";
 import { BrowserIpcServer } from "./components/browser-ipc-server.js";
 import { DomainAllowlist } from "./components/domain-allowlist.js";
-import { checkCron, checkBrowseTasks, checkMissedCrons, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
+import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
 function stripDiscordMentions(text: string, botAppId: string): string {
@@ -1633,7 +1633,6 @@ async function main(): Promise<void> {
           });
         }
       });
-      checkMissedCrons(false);
     },
   });
 
@@ -1669,7 +1668,6 @@ async function main(): Promise<void> {
   // Run once on startup, then start periodic
   checkCron();
   checkBrowseTasks();
-  checkMissedCrons(true);
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);
   logInfo("main", "💓 Heartbeat started (5-min interval)");

@@ -6,29 +6,26 @@ user-invocable: false
 
 # Cron Skill
 
-Schedule time-based reminders and tasks. Two scheduling methods available depending on recurrence.
+Schedule time-based reminders and tasks. All scheduling goes through the internal `agentbridge-cron` CLI — never use host crontab.
 
-## Method 1: Host Crontab (recurring/daily tasks)
-
-Use real system crontab for anything that runs on a fixed schedule (daily, hourly, weekly).
+## One-shot (specific date/time)
 
 ```bash
-# Add a recurring task (MUST include # agentbridge-managed tag for catch-up)
-(crontab -l 2>/dev/null; echo '0 8 * * * /home/qakosal/.local/bin/agentbridge-browse --task "description" --chat-id <ID> --timeout 600 # agentbridge-managed') | crontab -
-
-# List scheduled tasks
-crontab -l
-
-# Remove a specific task (by grep pattern)
-crontab -l | grep -v 'pattern-to-remove' | crontab -
+agentbridge-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type reminder
+agentbridge-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type task --executor agent
 ```
 
-The 5-min heartbeat checker in the bridge picks up Brownie results from `pending_browse.json` and delivers them to the chat automatically.
+## Recurring (cron schedule)
 
-### Intelligent catch-up
-Entries tagged `# agentbridge-managed` are tracked. If the bridge was down when a job should have fired, it catches up automatically on next startup. The tag is REQUIRED for this to work — always include it.
+```bash
+# Dumb script — runs bash directly, no agent
+agentbridge-cron add --schedule "30 7 * * *" --message "~/.agentbridge/scripts/daily-backup.sh" --chat-id <ID> --type task --executor script
 
-### Crontab format
+# Intelligent task — spawns kiro-cli agent
+agentbridge-cron add --schedule "0 10 * * *" --message "Follow the research prompt..." --chat-id <ID> --type task --executor agent
+```
+
+### Cron schedule format
 ```
 ┌───────── minute (0-59)
 │ ┌─────── hour (0-23)
@@ -36,54 +33,47 @@ Entries tagged `# agentbridge-managed` are tracked. If the bridge was down when 
 │ │ │ ┌─── month (1-12)
 │ │ │ │ ┌─ day of week (0-6, Sun=0)
 │ │ │ │ │
-* * * * * command
+* * * * * 
 ```
 
-### Verify it's scheduled
-```bash
-crontab -l | grep 'keyword'
-```
-
-## Method 2: Internal Cron (one-off reminders/tasks)
-
-Use `agentbridge-cron` for one-time future events — reminders or single tasks at a specific date/time.
+## Management
 
 ```bash
-# Schedule a one-off
-agentbridge-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type reminder|task
-
-# List pending
-agentbridge-cron list
-
-# Cancel
-agentbridge-cron remove <id>
+agentbridge-cron list              # Show pending/recurring entries
+agentbridge-cron remove <id>       # Cancel entry by 6-char hex ID
 ```
+
+## How it fires
 
 The bridge heartbeat checks `cron.json` every 5 minutes. When `fireAt` is past:
-- `reminder` → injected into conversation via pending_reminders.json
-- `task` → spawns a subagent to execute, sends report via Telegram
+- `reminder` → injected into conversation as a synthetic message
+- `task` + `executor: agent` → spawns kiro-cli subagent, sends report via Telegram
+- `task` + `executor: script` → runs `bash -c` directly, reports exit code + output
 
-### Verify the heartbeat picks it up
-```bash
-# Confirm entry exists and is not yet fired
-cat ~/.agentbridge/memory/cron.json | jq '.[] | select(.fired == false) | {id, fireAt: (.fireAt/1000 | todate), message: .message[:80], type}'
-
-# After fire time, check it was delivered
-cat ~/.agentbridge/memory/pending_reminders.json | jq .
-cat ~/.agentbridge/memory/cron.json | jq '.[] | select(.fired == true) | {id, type}'
-```
+Recurring entries automatically reschedule to the next fire time after each execution.
 
 ## Types
 
-- `reminder`: fires as a message through the agent personality (injected into conversation)
-- `task`: spawns a subagent to execute, sends plain report via Telegram
+- `reminder`: fires as a message through the agent personality
+- `task`: executes work — either via agent (intelligent) or script (dumb)
+
+## Executor
+
+- `agent` (default): spawns kiro-cli — use for tasks requiring intelligence
+- `script`: runs bash command directly — use for existing scripts/CLIs
 
 ## When to use which
 
-| Scenario | Method |
-|----------|--------|
-| Daily/weekly/hourly recurring task | Host crontab |
-| "Every day at 8am scan AI news" | Host crontab + agentbridge-browse |
-| "Remind me at 3pm today" | agentbridge-cron (one-off reminder) |
-| "Run this task next Tuesday at noon" | agentbridge-cron (one-off task) |
-| "Remind me later" (no specific time) | agentbridge-todo (not cron) |
+| Scenario | Flags |
+|----------|-------|
+| "Remind me at 3pm today" | `--at ... --type reminder` |
+| "Run this task next Tuesday" | `--at ... --type task` |
+| "Every day at 7:30am run backup" | `--schedule "30 7 * * *" --type task --executor script` |
+| "Every day at 10am scan AI news" | `--schedule "0 10 * * *" --type task --executor agent` |
+| "Remind me later" (no specific time) | Use `agentbridge-todo`, not cron |
+
+## Verify
+
+```bash
+cat ~/.agentbridge/memory/cron.json | jq '.[] | select(.fired == false or .schedule) | {id, fireAt: (.fireAt/1000 | todate), message: .message[:80], type, executor, schedule}'
+```

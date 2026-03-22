@@ -24,6 +24,7 @@ export interface CronEntry {
   chatId: number;
   type: "reminder" | "task";
   executor?: "agent" | "script";
+  schedule?: string;
   fired: boolean;
   createdAt: number;
 }
@@ -53,6 +54,7 @@ interface AddArgs {
   chatId?: string;
   type?: string;
   executor?: string;
+  schedule?: string;
 }
 
 function parseAddArgs(args: string[]): AddArgs {
@@ -64,19 +66,36 @@ function parseAddArgs(args: string[]): AddArgs {
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
       case "--type": parsed.type = args[++i] ?? ""; break;
       case "--executor": parsed.executor = args[++i] ?? ""; break;
+      case "--schedule": parsed.schedule = args[++i] ?? ""; break;
     }
   }
   return parsed;
 }
 
+import { CronExpressionParser } from "cron-parser";
+
 function add(args: string[]): void {
   const parsed = parseAddArgs(args);
-  if (!parsed.at) { console.log(JSON.stringify({ ok: false, error: "--at is required" })); process.exit(1); }
+  if (!parsed.at && !parsed.schedule) { console.log(JSON.stringify({ ok: false, error: "--at or --schedule is required" })); process.exit(1); }
+  if (parsed.at && parsed.schedule) { console.log(JSON.stringify({ ok: false, error: "use --at (one-shot) or --schedule (recurring), not both" })); process.exit(1); }
   if (!parsed.message) { console.log(JSON.stringify({ ok: false, error: "--message is required" })); process.exit(1); }
   if (!parsed.chatId) { console.log(JSON.stringify({ ok: false, error: "--chat-id is required" })); process.exit(1); }
 
-  const fireAt = new Date(parsed.at).getTime();
-  if (!Number.isFinite(fireAt)) { console.log(JSON.stringify({ ok: false, error: "Invalid --at date" })); process.exit(1); }
+  let fireAt: number;
+  let schedule: string | undefined;
+
+  if (parsed.schedule) {
+    try {
+      const expr = CronExpressionParser.parse(parsed.schedule);
+      fireAt = expr.next().getTime();
+      schedule = parsed.schedule;
+    } catch {
+      console.log(JSON.stringify({ ok: false, error: "Invalid --schedule cron expression" })); process.exit(1);
+    }
+  } else {
+    fireAt = new Date(parsed.at!).getTime();
+    if (!Number.isFinite(fireAt)) { console.log(JSON.stringify({ ok: false, error: "Invalid --at date" })); process.exit(1); }
+  }
 
   const chatId = parseInt(parsed.chatId, 10);
   if (!Number.isFinite(chatId)) { console.log(JSON.stringify({ ok: false, error: "Invalid --chat-id" })); process.exit(1); }
@@ -89,11 +108,12 @@ function add(args: string[]): void {
 
   const entry: CronEntry = {
     id: randomBytes(3).toString("hex"),
-    fireAt,
+    fireAt: fireAt!,
     message: parsed.message,
     chatId,
     type,
     executor,
+    ...(schedule ? { schedule } : {}),
     fired: false,
     createdAt: Date.now(),
   };
@@ -101,11 +121,11 @@ function add(args: string[]): void {
   const entries = readEntries();
   entries.push(entry);
   writeEntries(entries);
-  console.log(JSON.stringify({ ok: true, action: "added", id: entry.id, fireAt: new Date(fireAt).toISOString() }));
+  console.log(JSON.stringify({ ok: true, action: "added", id: entry.id, fireAt: new Date(fireAt!).toISOString(), ...(schedule ? { schedule } : {}) }));
 }
 
 function listEntries(): void {
-  const entries = readEntries().filter(e => !e.fired);
+  const entries = readEntries().filter(e => !e.fired || e.schedule);
   if (entries.length === 0) {
     console.log(JSON.stringify({ ok: true, entries: [], message: "No pending cron entries" }));
     return;

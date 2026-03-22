@@ -117,8 +117,9 @@ Path: `~/.agentbridge/memory/cron.json`
 ]
 ```
 
-- `fireAt`: epoch milliseconds
-- `executor`: `"agent"` (default — spawns kiro-cli) or `"script"` (runs `bash -c` directly). Only meaningful for `type: "task"`. Script tasks report exit code + output back to chat.
+- `fireAt`: epoch milliseconds (auto-computed from `schedule` for recurring entries)
+- `executor`: `"agent"` (default — spawns kiro-cli) or `"script"` (runs `bash -c` directly). Only meaningful for `type: "task"`.
+- `schedule`: optional cron expression (e.g. `"30 7 * * *"`). When present, entry reschedules after firing instead of being marked `fired: true`.
 - `type`: `"reminder"` (injected into conversation) or `"task"` (spawns subagent)
 - `fired`: set to `true` once processed, entry stays in file for audit
 
@@ -130,14 +131,17 @@ Wired in: `src/main.ts` — registered as `cron-checker` task in the unified `He
 **Reminder flow:**
 1. `checkCron()` finds entries where `fireAt <= now` and `fired === false`
 2. Writes to `~/.agentbridge/memory/pending_reminders.json`
-3. Marks entry as `fired: true` in `cron.json`
+3. Marks entry as `fired: true` (one-shot) or reschedules next `fireAt` (recurring with `schedule` field)
 4. Same interval reads `pending_reminders.json`, injects each as a synthetic `TelegramUpdate` with `[Scheduled reminder]` prefix via `telegramPoller.injectUpdate()`
 5. Clears `pending_reminders.json`
 
 **Task flow:**
 1. Same trigger as reminders
-2. Spawns `kiro-cli acp --agent professor` with the task message on stdin
-3. On process exit, sends `✅ Cron task completed: <message>\n\n<result>` via `TelegramApi.sendMessage()`
+2. `executor: "agent"` (default) → spawns `kiro-cli acp --agent professor` with the task message on stdin
+3. `executor: "script"` → runs `bash -c <message>` directly, captures stdout+stderr
+4. On process exit, reports result via Telegram
+
+**Recurring entries:** When a `CronEntry` has a `schedule` field (cron expression), after firing it computes the next `fireAt` and stays active. One-shot entries (no `schedule`) are marked `fired: true` permanently.
 
 ### Pending Reminders File
 
@@ -153,21 +157,13 @@ Acts as file-based IPC between the cron checker and the message injection loop. 
 
 ### Skill Steering
 
-File: `skills/cron/SKILL.md` → deployed to `~/.agentbridge/.kiro/steering/cron.md`
+File: `skills/cron.md` → deployed to `~/.agentbridge/.kiro/steering/cron.md`
 
-Triggers: "remind me at 3pm", "Sunday at 2am do X", specific time references
+Triggers: "remind me at 3pm", "Sunday at 2am do X", "every day at 8am run...", specific time references
 
 Does NOT trigger for: vague "remind me later" without time (→ todo), immediate actions
 
-### Missed Cron Catch-Up
-
-Source: `checkMissedCrons()` in `src/components/cron-checker.ts`
-
-Tracks host crontab entries tagged with `# agentbridge-managed`. On startup (`catchUp=true`), detects and executes any commands that should have fired while the bridge was down. On heartbeat ticks (`catchUp=false`), just updates tracking without executing.
-
-Tracking file: `~/.agentbridge/memory/cron_runs.json` — maps command hash → `{ lastRun, command }`.
-
-Uses `cron-parser` to compute the previous fire time from the cron schedule and compares against `lastRun`.
+All scheduling goes through `agentbridge-cron` CLI — never host crontab.
 
 ### Shutdown
 
@@ -177,7 +173,6 @@ Uses `cron-parser` to compute the previous fire time from the cron schedule and 
 
 - `src/cli/agentbridge-cron.test.ts` — 7 tests: add, list, remove, error cases, default type
 - `src/components/cron-checker.test.ts` — 6 tests: fire due reminder, skip future, skip fired, fire task, missing file, clear reminders
-- `src/components/missed-cron.test.ts` — missed cron detection and catch-up
 
 ---
 
