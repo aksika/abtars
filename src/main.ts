@@ -493,6 +493,7 @@ async function main(): Promise<void> {
     ]).catch((err) => logWarn("main", `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
 
     const react = async (chatId: number, messageId: number, emoji: string): Promise<void> => {
+      if (messageId <= 0) return;
       try {
         const reaction = emoji ? [{ type: "emoji" as const, emoji }] : [];
         await telegramApi.setMessageReaction(chatId, messageId, reaction);
