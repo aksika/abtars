@@ -155,7 +155,17 @@ function buildStatusLines(opts: {
 /** Read and consume the pre-generated startup greeting (written by sleep cycle). */
 function consumeStartupGreeting(memoryDir: string): string {
   const p = join(memoryDir, "startup-greeting.txt");
-  if (!existsSync(p)) return "Back online.";
+  if (!existsSync(p)) {
+    // Fallback: last sleep audit date from filename
+    try {
+      const files = readdirSync(join(memoryDir, "sleep")).filter(f => f.startsWith("sleep_")).sort();
+      if (files.length > 0) {
+        const m = files[files.length - 1]!.match(/sleep_(\d{4})(\d{2})(\d{2})/);
+        if (m) return `Back online. Last sleep: ${m[1]}-${m[2]}-${m[3]}.`;
+      }
+    } catch { /* */ }
+    return "Back online.";
+  }
   try {
     const msg = readFileSync(p, "utf-8").trim();
     unlinkSync(p);
