@@ -35,3 +35,64 @@ Reuse `scanPrompt()` from `prompt-scanner.ts` on `--content-en` and `--content-o
 
 **Why low priority:**
 The A2A prompt scanner (22 patterns) catches injection at the entry point. For a poisoned memory to enter the DB, the attacker would need to bypass the prompt scanner AND trick kiro into extracting+storing the payload — double barrier already exists.
+
+## 10. Derived Facts from Retrospective
+
+**Status:** Not started
+**Priority:** Medium
+**Source:** Memory refactor R3 (retrospective capability)
+
+Extract durable facts/patterns from daily retro files into `extracted_memories`. Currently retros are written but not mined for persistent knowledge.
+
+## 11. Recall Hit-Rate Logging & Validation
+
+**Status:** Not started
+**Priority:** Medium
+**Source:** R2 recall cascade refactor
+
+- Add per-stage hit-rate logging to `agentbridge-recall`
+- Watch real sleep cycles to validate the 5-stage extracted-first cascade
+- Confirm short-circuit at ≥10 results is the right threshold
+
+## 12. MMR Re-Ranking on Recall Output
+
+**Status:** Not started
+**Priority:** Low
+
+Apply Maximal Marginal Relevance re-ranking on final recall results to reduce redundancy and improve diversity.
+
+## 13. Daily Backup SQL→JSONL Export
+
+**Status:** Not started
+**Priority:** Low
+
+Add a JSONL export step to `daily-backup.sh` for portable/archival format alongside the zip.
+
+## 14. Translation Quality Prompt Fix
+
+**Status:** Not started
+**Priority:** Medium
+**Source:** aksika's queued enhancement
+
+Improve EN translation quality for jokes, idioms, and culturally-specific expressions in memory extraction.
+
+## 15. Cron Deduplication
+
+**Status:** Not started
+**Priority:** Low
+
+Prevent adding the same recurring schedule+message twice in `cron.json`.
+
+## 16. Cron Error Retry
+
+**Status:** Not started
+**Priority:** Low
+
+Auto-retry failed script tasks on next cycle instead of just reporting failure.
+
+## 17. Deploy New Skills
+
+**Status:** Not started
+**Priority:** High — quick
+
+Run `deploy.sh` to push `healthcheck.md` and updated `cron.md` to live.
