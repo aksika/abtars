@@ -4,79 +4,40 @@ description: Schedule time-based reminders and tasks
 user-invocable: false
 ---
 
-# Cron Skill
+# Cron
 
-Schedule time-based reminders and tasks. All scheduling goes through the internal `agentbridge-cron` CLI — never use host crontab.
+Schedule reminders and tasks via `agentbridge-cron`. Never use host crontab.
 
-## One-shot (specific date/time)
-
+## One-shot
 ```bash
 agentbridge-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type reminder
 agentbridge-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type task --executor agent
 ```
 
-## Recurring (cron schedule)
-
+## Recurring
 ```bash
-# Dumb script — runs bash directly, no agent
-agentbridge-cron add --schedule "30 7 * * *" --message "~/.agentbridge/scripts/daily-backup.sh" --chat-id <ID> --type task --executor script
-
-# Intelligent task — spawns kiro-cli agent
+agentbridge-cron add --schedule "30 7 * * *" --message "command or prompt" --chat-id <ID> --type task --executor script
 agentbridge-cron add --schedule "0 10 * * *" --message "Follow the research prompt..." --chat-id <ID> --type task --executor agent
 ```
 
-### Cron schedule format
-```
-┌───────── minute (0-59)
-│ ┌─────── hour (0-23)
-│ │ ┌───── day of month (1-31)
-│ │ │ ┌─── month (1-12)
-│ │ │ │ ┌─ day of week (0-6, Sun=0)
-│ │ │ │ │
-* * * * * 
-```
+Schedule format: `min hour dom month dow` (standard cron).
 
 ## Management
-
 ```bash
-agentbridge-cron list              # Show pending/recurring entries (with lastRanAt, schedule, executor)
-agentbridge-cron remove <id>       # Cancel entry by 6-char hex ID
-agentbridge-cron pause <id>        # Temporarily disable (keeps config)
-agentbridge-cron resume <id>       # Re-enable paused entry
-agentbridge-cron history <id>      # Show last 10 runs with timestamps and exit codes
+agentbridge-cron list              # show pending/recurring
+agentbridge-cron remove <id>       # cancel by 6-char hex ID
+agentbridge-cron pause <id>        # temporarily disable
+agentbridge-cron resume <id>       # re-enable
+agentbridge-cron history <id>      # last 10 runs
 ```
 
 ## How it fires
+Bridge heartbeat checks every 5 min. When due:
+- `reminder` → injected as message through agent personality
+- `task` + `executor: agent` → spawns kiro-cli subagent, reports via Telegram
+- `task` + `executor: script` → runs `bash -c`, reports exit code + output
 
-The bridge heartbeat checks `cron.json` every 5 minutes. When `fireAt` is past:
-- `reminder` → injected into conversation as a synthetic message
-- `task` + `executor: agent` → spawns kiro-cli subagent, sends report via Telegram
-- `task` + `executor: script` → runs `bash -c` directly, reports exit code + output
-
-Recurring entries automatically reschedule to the next fire time after each execution.
-
-## Types
-
-- `reminder`: fires as a message through the agent personality
-- `task`: executes work — either via agent (intelligent) or script (dumb)
-
-## Executor
-
-- `agent` (default): spawns kiro-cli — use for tasks requiring intelligence
-- `script`: runs bash command directly — use for existing scripts/CLIs
-
-## When to use which
-
-| Scenario | Flags |
-|----------|-------|
-| "Remind me at 3pm today" | `--at ... --type reminder` |
-| "Run this task next Tuesday" | `--at ... --type task` |
-| "Every day at 7:30am run backup" | `--schedule "30 7 * * *" --type task --executor script` |
-| "Every day at 10am scan AI news" | `--schedule "0 10 * * *" --type task --executor agent` |
-| "Remind me later" (no specific time) | Use `agentbridge-todo`, not cron |
-
-## Verify
-
-```bash
-cat ~/.agentbridge/memory/cron.json | jq '.[] | select(.fired == false or .schedule) | {id, fireAt: (.fireAt/1000 | todate), message: .message[:80], type, executor, schedule}'
-```
+## When to use
+- Specific time: `--at` + `--type reminder` or `--type task`
+- Recurring: `--schedule` + appropriate executor
+- No specific time ("remind me later"): use `agentbridge-todo` instead
