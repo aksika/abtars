@@ -7,7 +7,7 @@ import type { StateSnapshot } from "./sleep-state-gatherer.js";
 // Must mock before import
 vi.mock("node:os", async () => {
   const actual = await vi.importActual<typeof import("node:os")>("node:os");
-  return { ...actual, homedir: () => "/nonexistent-home" };
+  return { ...actual, homedir: () => process.env.HOME ?? "/nonexistent-home" };
 });
 
 import { loadSleepPrompt } from "./sleep-prompt-loader.js";
@@ -31,26 +31,26 @@ function makeSnapshot(overrides: Partial<StateSnapshot> = {}): StateSnapshot {
 
 describe("loadSleepPrompt", () => {
   let tmpDir: string;
-  const origCwd = process.cwd;
+  const origHome = process.env.HOME;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "sleep-prompt-"));
+    process.env.HOME = tmpDir;
   });
 
   afterEach(() => {
-    process.cwd = origCwd;
+    process.env.HOME = origHome;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("replaces all ${VARIABLES} with snapshot values", () => {
-    const templateDir = join(tmpDir, "persona");
+    const promptsDir = join(tmpDir, ".agentbridge", "prompts");
     const { mkdirSync } = require("node:fs");
-    mkdirSync(templateDir, { recursive: true });
+    mkdirSync(promptsDir, { recursive: true });
     writeFileSync(
-      join(templateDir, "sleeping_prompt.md"),
+      join(promptsDir, "sleeping_prompt.md"),
       "Date: ${WAKEUP_DATE}\nAudit: ${LAST_SLEEP_AUDIT}\nDisk: ${DISK_USAGE_MB}/${DISK_BUDGET_MB} MB\nTodo: ${TODO_CONTENTS}",
     );
-    process.cwd = () => tmpDir;
 
     const result = loadSleepPrompt(makeSnapshot());
 
@@ -62,19 +62,17 @@ describe("loadSleepPrompt", () => {
   });
 
   it("throws when template file not found", () => {
-    process.cwd = () => tmpDir;
     expect(() => loadSleepPrompt(makeSnapshot())).toThrow("sleeping_prompt.md not found");
   });
 
   it("leaves unknown variables and warns", () => {
-    const templateDir = join(tmpDir, "persona");
+    const promptsDir = join(tmpDir, ".agentbridge", "prompts");
     const { mkdirSync } = require("node:fs");
-    mkdirSync(templateDir, { recursive: true });
+    mkdirSync(promptsDir, { recursive: true });
     writeFileSync(
-      join(templateDir, "sleeping_prompt.md"),
+      join(promptsDir, "sleeping_prompt.md"),
       "Known: ${WAKEUP_DATE} Unknown: ${NONEXISTENT_VAR}",
     );
-    process.cwd = () => tmpDir;
 
     const result = loadSleepPrompt(makeSnapshot());
 

@@ -8,27 +8,14 @@ const TAG = "sleep-prompt-loader";
 
 /**
  * Load sleeping_prompt.md template and inject state snapshot variables.
- * Looks for the template in:
- *   1. ~/.agentbridge/prompts/sleeping_prompt.md (deployed, read-only)
- *   2. ~/.agentbridge/sleeping_prompt.md (legacy location)
- *   3. persona/sleeping_prompt.md (dev fallback)
  */
 export function loadSleepPrompt(snapshot: StateSnapshot): string {
-  const prompts = join(homedir(), ".agentbridge", "prompts", "sleeping_prompt.md");
-  const legacy = join(homedir(), ".agentbridge", "sleeping_prompt.md");
-  const dev = join(process.cwd(), "persona", "sleeping_prompt.md");
+  const path = join(homedir(), ".agentbridge", "prompts", "sleeping_prompt.md");
 
-  let template: string;
-  if (existsSync(prompts)) {
-    template = readFileSync(prompts, "utf-8");
-  } else if (existsSync(legacy)) {
-    logWarn(TAG, `sleeping_prompt.md found at legacy location — move to ${prompts}`);
-    template = readFileSync(legacy, "utf-8");
-  } else if (existsSync(dev)) {
-    template = readFileSync(dev, "utf-8");
-  } else {
-    throw new Error(`sleeping_prompt.md not found at ${prompts}, ${legacy}, or ${dev}`);
+  if (!existsSync(path)) {
+    throw new Error(`sleeping_prompt.md not found at ${path}`);
   }
+  const template = readFileSync(path, "utf-8");
 
   // Build variable map
   const vars: Record<string, string> = {
