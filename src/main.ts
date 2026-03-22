@@ -97,6 +97,60 @@ function formatUptime(ms: number): string {
   return parts.join(" ");
 }
 
+function buildStatusLines(opts: {
+  transport: IKiroTransport;
+  config: { kiroTransport: string };
+  startedAt: number;
+  memory: { getCronInfo: () => { heartbeatRunning: boolean; intervalMs: number; tasks: string[]; lastSleepAudit: string | null } } | null;
+}): string[] {
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  let version = "?";
+  try { version = JSON.parse(readFileSync(join(thisDir, "..", "package.json"), "utf-8")).version; } catch { /* */ }
+  let model = process.env["KIRO_MODEL"] || "";
+  if (!model) {
+    try { model = JSON.parse(execSync("kiro-cli settings list --format json 2>/dev/null", { timeout: 3000, encoding: "utf-8" }))["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
+  }
+  const status = opts.transport.isReady ? "✅ Connected" : "❌ Disconnected";
+  const mode = opts.config.kiroTransport.toUpperCase();
+  const uptime = formatUptime(Date.now() - opts.startedAt);
+  const ctxPct = ("contextPercent" in opts.transport && (opts.transport as TmuxClient).contextPercent >= 0)
+    ? `${(opts.transport as TmuxClient).contextPercent}%`
+    : "n/a";
+  const cronInfo = opts.memory?.getCronInfo();
+  const lines = [
+    `Kiro Professor v${version}`,
+    `🤖 Model: ${model}`,
+    `📊 Context window: ${ctxPct}`,
+    `⏱️ Uptime: ${uptime}`,
+    `🔌 Transport: ${mode} — ${status}`,
+  ];
+  if (cronInfo) {
+    const mins = Math.round(cronInfo.intervalMs / 60000);
+    lines.push(
+      `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
+      `📋 Tasks: ${cronInfo.tasks.join(", ") || "(none)"}`,
+      `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
+    );
+    try {
+      const hbTs = parseInt(readFileSync(join(homedir(), ".agentbridge", "memory", ".heartbeat"), "utf-8"), 10);
+      if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);
+    } catch { /* */ }
+    try {
+      const ce = JSON.parse(readFileSync(join(homedir(), ".agentbridge", "memory", "cron.json"), "utf-8")) as Array<{ fired: boolean; schedule?: string; paused?: boolean }>;
+      const r = ce.filter(e => e.schedule && !e.paused).length;
+      const p = ce.filter(e => !e.fired && !e.schedule).length;
+      const pa = ce.filter(e => e.paused).length;
+      lines.push(`⏰ Cron: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
+    } catch { /* */ }
+    try {
+      const bd = join(homedir(), ".backup-agentbridge");
+      const bk = readdirSync(bd).filter(f => f.startsWith("agentbridge-")).sort();
+      if (bk.length > 0) lines.push(`💾 Last backup: ${bk[bk.length - 1]}`);
+    } catch { /* */ }
+  }
+  return lines;
+}
+
 /** Send a platform context announcement to the transport so the LLM knows which platform is active. */
 async function announcePlatform(
   transport: IKiroTransport,
@@ -524,51 +578,7 @@ async function main(): Promise<void> {
       }
 
       if (text === "/status") {
-        const thisDir = dirname(fileURLToPath(import.meta.url));
-        let version = "?";
-        try { version = JSON.parse(readFileSync(join(thisDir, "..", "package.json"), "utf-8")).version; } catch { /* */ }
-        let model = process.env["KIRO_MODEL"] || "";
-        if (!model) {
-          try { model = JSON.parse(execSync("kiro-cli settings list --format json 2>/dev/null", { timeout: 3000, encoding: "utf-8" }))["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
-        }
-        const status = transport.isReady ? "✅ Connected" : "❌ Disconnected";
-        const mode = config.kiroTransport.toUpperCase();
-        const uptime = formatUptime(Date.now() - startedAt);
-        const ctxPct = ("contextPercent" in transport && (transport as TmuxClient).contextPercent >= 0)
-          ? `${(transport as TmuxClient).contextPercent}%`
-          : "n/a";
-        const cronInfo = memory?.getCronInfo();
-        const lines = [
-          `Kiro Professor v${version}`,
-          `🤖 Model: ${model}`,
-          `📊 Context window: ${ctxPct}`,
-          `⏱️ Uptime: ${uptime}`,
-          `🔌 Transport: ${mode} — ${status}`,
-        ];
-        if (cronInfo) {
-          const mins = Math.round(cronInfo.intervalMs / 60000);
-          lines.push(
-            `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
-            `📋 Tasks: ${cronInfo.tasks.join(", ") || "(none)"}`,
-            `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
-          );
-          try {
-            const hbTs = parseInt(readFileSync(join(homedir(), ".agentbridge", "memory", ".heartbeat"), "utf-8"), 10);
-            if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);
-          } catch { /* */ }
-          try {
-            const ce = JSON.parse(readFileSync(join(homedir(), ".agentbridge", "memory", "cron.json"), "utf-8")) as Array<{ fired: boolean; schedule?: string; paused?: boolean }>;
-            const r = ce.filter(e => e.schedule && !e.paused).length;
-            const p = ce.filter(e => !e.fired && !e.schedule).length;
-            const pa = ce.filter(e => e.paused).length;
-            lines.push(`⏰ Cron: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
-          } catch { /* */ }
-          try {
-            const bd = join(homedir(), ".backup-agentbridge");
-            const bk = readdirSync(bd).filter(f => f.startsWith("agentbridge-")).sort();
-            if (bk.length > 0) lines.push(`💾 Last backup: ${bk[bk.length - 1]}`);
-          } catch { /* */ }
-        }
+        const lines = buildStatusLines({ transport, config, startedAt, memory });
         await telegramApi.sendMessage(chatId, lines.join("\n"), { message_thread_id: threadId });
         return;
       }
@@ -1155,51 +1165,7 @@ async function main(): Promise<void> {
       }
 
       if (text === "/status") {
-        const thisDir = dirname(fileURLToPath(import.meta.url));
-        let version = "?";
-        try { version = JSON.parse(readFileSync(join(thisDir, "..", "package.json"), "utf-8")).version; } catch { /* */ }
-        let model = process.env["KIRO_MODEL"] || "";
-        if (!model) {
-          try { model = JSON.parse(execSync("kiro-cli settings list --format json 2>/dev/null", { timeout: 3000, encoding: "utf-8" }))["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
-        }
-        const status = transport.isReady ? "✅ Connected" : "❌ Disconnected";
-        const mode = config.kiroTransport.toUpperCase();
-        const uptime = formatUptime(Date.now() - startedAt);
-        const ctxPct = ("contextPercent" in transport && (transport as TmuxClient).contextPercent >= 0)
-          ? `${(transport as TmuxClient).contextPercent}%`
-          : "n/a";
-        const cronInfo = memory?.getCronInfo();
-        const lines = [
-          `Kiro Professor v${version}`,
-          `🤖 Model: ${model}`,
-          `📊 Context window: ${ctxPct}`,
-          `⏱️ Uptime: ${uptime}`,
-          `🔌 Transport: ${mode} — ${status}`,
-        ];
-        if (cronInfo) {
-          const mins = Math.round(cronInfo.intervalMs / 60000);
-          lines.push(
-            `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
-            `📋 Tasks: ${cronInfo.tasks.join(", ") || "(none)"}`,
-            `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
-          );
-          try {
-            const hbTs = parseInt(readFileSync(join(homedir(), ".agentbridge", "memory", ".heartbeat"), "utf-8"), 10);
-            if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);
-          } catch { /* */ }
-          try {
-            const ce = JSON.parse(readFileSync(join(homedir(), ".agentbridge", "memory", "cron.json"), "utf-8")) as Array<{ fired: boolean; schedule?: string; paused?: boolean }>;
-            const r = ce.filter(e => e.schedule && !e.paused).length;
-            const p = ce.filter(e => !e.fired && !e.schedule).length;
-            const pa = ce.filter(e => e.paused).length;
-            lines.push(`⏰ Cron: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
-          } catch { /* */ }
-          try {
-            const bd = join(homedir(), ".backup-agentbridge");
-            const bk = readdirSync(bd).filter(f => f.startsWith("agentbridge-")).sort();
-            if (bk.length > 0) lines.push(`💾 Last backup: ${bk[bk.length - 1]}`);
-          } catch { /* */ }
-        }
+        const lines = buildStatusLines({ transport, config, startedAt, memory });
         await discordApi.sendMessage(message.channelId, lines.join("\n"));
         return;
       }
