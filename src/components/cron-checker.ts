@@ -69,8 +69,29 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
     if (entry.type === "reminder") {
       appendReminder({ chatId: entry.chatId, message: entry.message, createdAt: now });
       logInfo(TAG, `⏰ Reminder fired: "${entry.message}" → chat ${entry.chatId}`);
+    } else if (entry.executor === "script") {
+      // Script task: run command directly via bash
+      logInfo(TAG, `📜 Script task fired: "${entry.message}"`);
+      try {
+        const child = spawn("bash", ["-c", entry.message], { stdio: ["ignore", "pipe", "pipe"] });
+        let output = "";
+        child.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
+        child.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
+        child.on("exit", (code) => {
+          const summary = output.slice(0, 500) || "(no output)";
+          const status = code === 0 ? "✅" : `❌ (exit ${code})`;
+          logInfo(TAG, `📜 Script task ${status}: "${entry.message}"`);
+          onTaskComplete?.(entry.chatId, entry.message, `${status}\n${summary}`);
+        });
+        child.on("error", (err) => {
+          logWarn(TAG, `Script spawn failed: ${err.message}`);
+          onTaskComplete?.(entry.chatId, entry.message, `❌ Failed to execute: ${err.message}`);
+        });
+      } catch (err) {
+        logWarn(TAG, `Script spawn error: ${err instanceof Error ? err.message : String(err)}`);
+      }
     } else {
-      // Task: spawn kiro-cli to execute
+      // Agent task: spawn kiro-cli to execute
       logInfo(TAG, `⚙️ Task fired: "${entry.message}" → spawning subagent`);
       try {
         const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "ignore"] });

@@ -23,6 +23,7 @@ export interface CronEntry {
   message: string;
   chatId: number;
   type: "reminder" | "task";
+  executor?: "agent" | "script";
   fired: boolean;
   createdAt: number;
 }
@@ -51,6 +52,7 @@ interface AddArgs {
   message?: string;
   chatId?: string;
   type?: string;
+  executor?: string;
 }
 
 function parseAddArgs(args: string[]): AddArgs {
@@ -61,6 +63,7 @@ function parseAddArgs(args: string[]): AddArgs {
       case "--message": parsed.message = args[++i] ?? ""; break;
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
       case "--type": parsed.type = args[++i] ?? ""; break;
+      case "--executor": parsed.executor = args[++i] ?? ""; break;
     }
   }
   return parsed;
@@ -81,12 +84,16 @@ function add(args: string[]): void {
   const type = (parsed.type ?? "reminder") as CronEntry["type"];
   if (type !== "reminder" && type !== "task") { console.log(JSON.stringify({ ok: false, error: "--type must be reminder or task" })); process.exit(1); }
 
+  const executor = (parsed.executor ?? "agent") as NonNullable<CronEntry["executor"]>;
+  if (executor !== "agent" && executor !== "script") { console.log(JSON.stringify({ ok: false, error: "--executor must be agent or script" })); process.exit(1); }
+
   const entry: CronEntry = {
     id: randomBytes(3).toString("hex"),
     fireAt,
     message: parsed.message,
     chatId,
     type,
+    executor,
     fired: false,
     createdAt: Date.now(),
   };
