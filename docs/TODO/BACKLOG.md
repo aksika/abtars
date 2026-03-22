@@ -38,11 +38,10 @@ The A2A prompt scanner (22 patterns) catches injection at the entry point. For a
 
 ## 10. Derived Facts from Retrospective
 
-**Status:** Not started
-**Priority:** Medium
-**Source:** Memory refactor R3 (retrospective capability)
+**Status:** ✅ Done (2026-03-22)
+**Commit:** `d2e3a75`
 
-Extract durable facts/patterns from daily retro files into `extracted_memories`. Currently retros are written but not mined for persistent knowledge.
+New CLI `agentbridge-retro-extract`: parses retro markdown, extracts bullets from "What did I learn?" (→ fact) and "How can I improve?" (→ decision), stores via `instantStore()`. Wired into sleep cycle as Phase 5.5. Tracks processed files in `.processed.json` (idempotent). 13 items extracted from first retro.
 
 ## 11. Recall Hit-Rate Logging & Validation
 

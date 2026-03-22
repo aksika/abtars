@@ -193,15 +193,18 @@ function preparePrompt(
   sessionKey: string,
   text: string,
   pending: Set<string>,
+  seen: Set<string>,
   platformMessageId?: number,
 ): string {
-  if (pending.has(sessionKey)) {
+  const isSessionStart = pending.has(sessionKey) || !seen.has(sessionKey);
+  if (isSessionStart) {
     const ctx = buildSessionStartContext(memory, chatId);
     if (ctx) {
       prompt = ctx + "\n\n" + prompt;
       logInfo("main", `Injected session-start context (${ctx.length} chars)`);
     }
   }
+  seen.add(sessionKey);
   pending.delete(sessionKey);
   memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId });
   return prompt;
@@ -361,6 +364,7 @@ async function main(): Promise<void> {
 
   const busyChats = new Set<string>();
   const pendingSessionStart = new Set<string>();
+  const seenSessions = new Set<string>(); // tracks sessions that have sent at least one message
   const fullModeChats = new Set<string>();
 
   // --- Coding agent mode ---
@@ -1081,7 +1085,7 @@ async function main(): Promise<void> {
         }
 
         if (memory) {
-          prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart, messageId);
+          prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart, seenSessions, messageId);
         }
 
         prompt = interceptLargeMessage(prompt).text;
@@ -1664,7 +1668,7 @@ async function main(): Promise<void> {
 
         if (memory) {
           const chatId = parseInt(message.channelId, 10) || 0;
-          prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart);
+          prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart, seenSessions);
         }
 
         prompt = interceptLargeMessage(prompt).text;
