@@ -30,6 +30,18 @@ RULES:
   - "preserve_original": boolean, default false
   - "preserved_keyword": string or null
 - If the conversation is already in English, set content_original = content_en (identical values)
+
+TRANSLATION QUALITY (critical for non-English conversations):
+- Translate the MEANING, not the literal words. Idioms must be expressed as their English equivalent or explained.
+  BAD:  "User said it's not their table" (literal translation of "nem az én asztalom")
+  GOOD: "User said it's not their responsibility"
+- For jokes, sarcasm, or irony: prefix with tone context so the memory isn't mistaken for a literal statement.
+  BAD:  "User wants to mass-delete the production database"
+  GOOD: "User joked about mass-deleting the production database"
+- For cultural references (people, shows, events) unknown outside the source culture, add brief context in parentheses.
+  GOOD: "User enjoyed Megasztár (Hungarian talent show similar to X Factor)"
+- Include relevant semantic keywords in content_en that someone would search for later, even if the original didn't use those exact words.
+
 - KEYWORD PRESERVATION: If the user explicitly asks to remember a specific word or phrase in their language (patterns like "remember if I say X it means Y", "if I say X", "jegyezd meg hogy X", "remember that X means"), set preserve_original to true and set preserved_keyword to the specific word/phrase the user wants preserved
 - Return ONLY a valid JSON array of objects. No markdown, no explanation, no wrapping.
 - If there is nothing meaningful to extract, return an empty array: []
