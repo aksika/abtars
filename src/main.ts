@@ -179,11 +179,16 @@ async function sendStartupGreeting(
   sendTelegram?: (msg: string) => Promise<void>,
   sendDiscord?: (msg: string) => Promise<void>,
 ): Promise<void> {
-  const msg = `🔄 ${consumeStartupGreeting(memoryDir)}`;
-  await Promise.all([
-    sendTelegram?.(msg).catch(() => {}),
-    sendDiscord?.(msg).catch(() => {}),
+  const greeting = consumeStartupGreeting(memoryDir);
+  const msg = `🔄 ${greeting}`;
+  logInfo("main", `Startup greeting: "${greeting}"`);
+  const results = await Promise.allSettled([
+    sendTelegram?.(msg),
+    sendDiscord?.(msg),
   ]);
+  for (const r of results) {
+    if (r.status === "rejected") logWarn("main", `Startup greeting send failed: ${r.reason}`);
+  }
 }
 
 /** Send a platform context announcement to the transport so the LLM knows which platform is active. */
@@ -1633,7 +1638,9 @@ async function main(): Promise<void> {
       const channelId = config.discordAllowedChannelIds ? [...config.discordAllowedChannelIds][0] : undefined;
       if (channelId) await new DiscordApi(config.discordBotToken!).sendMessage(channelId, msg);
     } : undefined;
-    sendStartupGreeting(memoryConfig.memoryDir, tgSend, dcSend).catch(() => {});
+    sendStartupGreeting(memoryConfig.memoryDir, tgSend, dcSend).catch((err) => {
+      logWarn("main", `Startup greeting error: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 
   const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: 5 * 60 * 1000 });
