@@ -610,7 +610,7 @@ async function main(): Promise<void> {
           return;
         }
         // Prepend buffered conversation context
-        let prompt = text;
+        let prompt = `[Telegram] ${text}`;
         if (isGroup) {
           const context = conversationBuffer.drain(bufKey);
           if (context) {
@@ -833,7 +833,8 @@ async function main(): Promise<void> {
       if (!text) return;
 
       // Include sender context so Kiro knows who's talking
-      const senderPrefix = `[${message.authorUsername}${message.authorIsBot ? " (bot)" : ""}] in #${message.channelName ?? "unknown"}: `;
+      const channelLabel = message.parentChannelId ? message.channelName ?? "thread" : message.channelName ?? "DM";
+      const senderPrefix = `[Discord] [${message.authorUsername}${message.authorIsBot ? " (bot)" : ""}] in #${channelLabel}: `;
 
       // A2A routing — peer bot messages in the A2A channel go through the A2A router
       if (a2aRouter && message.authorIsBot && effectiveChannelId === config.discordA2aChannelId) {
