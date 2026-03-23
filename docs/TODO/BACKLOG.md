@@ -78,10 +78,10 @@ Run `deploy.sh` to push `healthcheck.md` and updated `cron.md` to live.
 
 ## 18. Refurbish Web Dashboard
 
-**Status:** Not started
-**Priority:** Medium
+**Status:** ✅ Done (2026-03-23)
+**Commit:** `b3c8cf8`
 
-Modernize the localhost web dashboard — improve UI/UX, add missing panels, make it more useful for daily ops monitoring.
+Modernize the localhost web dashboard — improve UI/UX, add missing panels, make it more useful for daily ops monitoring. Added: cron panel (schedule, next fire, pause/resume/trigger), heartbeat task list, log viewer sidebar (24h, level filters, auto-refresh). Layout changed to flex row (cards left, log right).
 
 ## 19. /coding Command — Opus as Coding Agent
 
