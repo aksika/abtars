@@ -149,7 +149,18 @@ done
 # 12. Orphaned kiro-cli processes
 KIRO_PROCS=$(pgrep -f 'kiro-cli acp' 2>/dev/null | wc -l)
 if [ "$KIRO_PROCS" -gt 1 ]; then
-  warn "$KIRO_PROCS kiro-cli acp processes running — likely orphans from previous bridge"
+  if $FIX; then
+    # Keep the newest, kill the rest
+    PIDS=$(pgrep -f 'kiro-cli acp' 2>/dev/null | sort -n)
+    NEWEST=$(echo "$PIDS" | tail -1)
+    for pid in $PIDS; do
+      if [ "$pid" != "$NEWEST" ]; then
+        kill "$pid" 2>/dev/null && fix "killed orphaned kiro-cli acp (pid $pid)"
+      fi
+    done
+  else
+    warn "$KIRO_PROCS kiro-cli acp processes running — likely orphans from previous bridge"
+  fi
 fi
 
 # 13. Full fixes (--fix-full only)
