@@ -67,6 +67,7 @@ export type StatusSnapshot = {
   heartbeat: HeartbeatStatus;
   cron: CronEntryStatus[];
   notebooklm: { enabled: boolean } | null;
+  gwsAuth: boolean;
   agentApi: { traffic: TrafficEntry[] } | null;
 };
 
@@ -224,6 +225,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     heartbeat,
     cron: readCronStatus(),
     notebooklm: refs.notebooklm ? { enabled: true } : null,
+    gwsAuth: existsSync(resolve(homedir(), ".config", "gws", "credentials.enc")),
     agentApi: refs.agentApi ? { traffic: refs.agentApi.getTrafficLog() } : null,
   };
 }

@@ -633,13 +633,6 @@ function getBridgeHealthCard(): string {
         <span class="indicator red"></span> disconnected
       </span>
     </div>
-    <div class="stat-row">
-      <span class="stat-label">Switch Mode</span>
-      <span class="stat-value">
-        <button class="btn-start" style="font-size:0.75rem;padding:3px 10px;" onclick="switchTransport('tmux')" id="btn-switch-tmux">tmux</button>
-        <button class="btn-stop" style="font-size:0.75rem;padding:3px 10px;" onclick="switchTransport('acp')" id="btn-switch-acp">acp</button>
-      </span>
-    </div>
     <div style="margin-top:10px;">
       <span class="stat-label">Context Window</span>
       <div class="progress-bar-bg">
@@ -689,10 +682,9 @@ function getPlatformsCard(agentHtml: string): string {
       <span class="name">LM Notebook</span>
       <span><span class="badge disabled" id="plat-nlm-badge">—</span></span>
     </div>
-    <div class="platform-item">
+    <div class="platform-item" id="plat-keep">
       <span class="name">Keep</span>
-      <span><span class="badge coming" title="coming soon">coming soon</span>
-      <button disabled>Start</button></span>
+      <span><span class="badge disabled" id="plat-keep-badge">—</span></span>
     </div>
   </div>
 
@@ -976,8 +968,20 @@ function getScript(): string {
         nlmBadge.textContent = 'active';
         nlmBadge.className = 'badge running';
       } else {
-        nlmBadge.textContent = 'disabled';
+        nlmBadge.textContent = 'no auth';
         nlmBadge.className = 'badge disabled';
+      }
+    }
+
+    // Keep (gws auth)
+    var keepBadge = document.getElementById('plat-keep-badge');
+    if (keepBadge) {
+      if (snap.gwsAuth) {
+        keepBadge.textContent = 'authenticated';
+        keepBadge.className = 'badge running';
+      } else {
+        keepBadge.textContent = 'no auth';
+        keepBadge.className = 'badge disabled';
       }
     }
 
@@ -1060,20 +1064,6 @@ function getScript(): string {
     fetch('/api/platforms/' + platform + '/' + action, {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + token }
-    }).then(function(r) { return r.json(); }).then(function(data) {
-      if (data.error) alert('Error: ' + data.error);
-    }).catch(function(err) { alert('Request failed: ' + err.message); });
-  };
-
-  // ── Transport Switch API ───────────────────────────────────────────
-  window.switchTransport = function(mode) {
-    fetch('/api/transport/switch', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + token,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ mode: mode })
     }).then(function(r) { return r.json(); }).then(function(data) {
       if (data.error) alert('Error: ' + data.error);
     }).catch(function(err) { alert('Request failed: ' + err.message); });
