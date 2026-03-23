@@ -1195,7 +1195,7 @@ async function main(): Promise<void> {
     const forceTimer = setTimeout(() => {
       logWarn("main", "⚠️  Shutdown timed out — forcing exit");
       process.exit(1);
-    }, 5_000);
+    }, 20_000);
     forceTimer.unref();
 
     if (agentApiServer) {
