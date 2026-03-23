@@ -1,6 +1,6 @@
 # Local Memory — As-Built (Post-Refactor)
 
-Updated: 2026-03-22
+Updated: 2026-03-23
 Refactor: R1-R6 complete (see memory-refactor-plan.md)
 
 ---
@@ -147,11 +147,35 @@ Prepended to the user's first message by `buildSessionStartContext()`:
 
 ### Layer 4: User message
 
-The actual message from Telegram/Discord.
+The actual message from Telegram/Discord, prefixed with platform tag:
+- Telegram: `[Telegram] <message>`
+- Discord: `[Discord] [username] in #channel: <message>` (channel = DM for direct messages)
 
-### Total first-message budget
+---
 
-~7KB always loaded (SOUL + TOOLS + session-start) + ~2.5KB session context + user message. Skills loaded on-demand as needed.
+## Multi-Platform Architecture
+
+The agent operates across Telegram and Discord simultaneously, modeled on how a human handles multiple chat apps:
+
+### Isolation: Separate context windows (C0)
+
+Each platform+channel gets its own ACP session (keyed `telegram:<chatId>` or `discord:<channelId>`). Context windows never mix — a reply on Discord cannot be confused with a Telegram conversation in real-time.
+
+### Shared: One memory (C2, C1, C4, C6)
+
+All platforms write to the same SQLite database and the same consolidation files. The agent has one brain — facts learned on Telegram are recallable from Discord and vice versa. Messages are tagged with `[Telegram]`/`[Discord]` prefixes in the `content` column for attribution.
+
+### Session-start context (Layer 3)
+
+`buildSessionStartContext()` reads ALL recent messages regardless of platform (no `chatId` filter on the `messages` query). This is intentional — when starting a new Discord session, the agent should know what happened on Telegram earlier that day, just as a human would.
+
+### Sleep consolidation (Dreamy)
+
+Daily summaries (`daily_YYYY-MM-DD.md`) cover all platforms in one file. The sleep prompt instructs the subagent to note platform transitions when conversations carry different threads (e.g. "Morning on Telegram: …, Afternoon on Discord: …"). Extracted memories and retrospectives are platform-agnostic — one brain.
+
+### Core files
+
+`~/.agentbridge/memory/core/user_profile.md` and `agent_notes.md` are injected into every session on every platform. Doctor warns if either exceeds 15 non-empty lines (limit: 10).
 
 ---
 
