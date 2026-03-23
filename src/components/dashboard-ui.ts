@@ -1347,7 +1347,8 @@ function getScript(): string {
         if (line.indexOf(' WARN ') !== -1) lvl = 'warn';
         else if (line.indexOf(' ERROR') !== -1) lvl = 'error';
         else if (line.indexOf(' DEBUG') !== -1) lvl = 'debug';
-        return '<div class="log-line ' + lvl + '">' + escHtml(line) + '</div>';
+        var display = line.slice(0, 19).replace('T', ' ') + line.slice(24);
+        return '<div class="log-line ' + lvl + '">' + escHtml(display) + '</div>';
       }).join('');
       if (wasAtBottom) container.scrollTop = container.scrollHeight;
     }).catch(function() { /* silent */ });
