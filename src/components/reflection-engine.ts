@@ -15,7 +15,7 @@ const TIERS = ["daily", "weekly", "quarterly"] as const;
 
 function parseFileTimestamp(tier: string, file: string): number {
   if (tier === "daily") {
-    const m = file.match(/daily_(\d{4})(\d{2})(\d{2})\.md/);
+    const m = file.match(/daily_(\d{4})-(\d{2})-(\d{2})\.md/);
     if (m) return new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`).getTime();
   } else if (tier === "weekly") {
     const m = file.match(/weekly_(\d{4})-W(\d{2})\.md/);

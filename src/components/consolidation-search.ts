@@ -19,7 +19,7 @@ const TIERS: ConsolidationTier[] = ["daily", "weekly", "quarterly"];
 
 function parseTimestamp(tier: ConsolidationTier, filename: string): number {
   if (tier === "daily") {
-    const m = filename.match(/daily_(\d{4})(\d{2})(\d{2})\.md/);
+    const m = filename.match(/daily_(\d{4})-(\d{2})-(\d{2})\.md/);
     if (m) return new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`).getTime();
   } else if (tier === "weekly") {
     const m = filename.match(/weekly_(\d{4})-W(\d{2})\.md/);

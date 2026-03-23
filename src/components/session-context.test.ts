@@ -45,7 +45,7 @@ describe("buildSessionStartContext", () => {
 
   it("returns daily summary when no newer messages exist", () => {
     const dailyContent = "# Daily Summary\n\nDiscussed memory refactor.";
-    writeDaily(tmpDir, "20260321", dailyContent);
+    writeDaily(tmpDir, "2026-03-21", dailyContent);
 
     const result = buildSessionStartContext(manager, 1);
 
@@ -57,7 +57,7 @@ describe("buildSessionStartContext", () => {
 
   it("returns recent messages when they are newer than the daily", () => {
     // Daily from yesterday
-    writeDaily(tmpDir, "20260321", "# Old daily");
+    writeDaily(tmpDir, "2026-03-21", "# Old daily");
 
     // Messages newer than the daily file
     const now = Date.now();
@@ -88,7 +88,7 @@ describe("buildSessionStartContext", () => {
 
   it("injects full daily summary without truncation", () => {
     const longContent = "# Daily\n\n" + "x".repeat(3500);
-    writeDaily(tmpDir, "20260321", longContent);
+    writeDaily(tmpDir, "2026-03-21", longContent);
 
     const result = buildSessionStartContext(manager, 1)!;
     expect(result).toContain("x".repeat(3500));
