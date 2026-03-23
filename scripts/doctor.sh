@@ -146,7 +146,13 @@ for f in "$AB/memory/core/user_profile.md" "$AB/memory/core/agent_notes.md"; do
   fi
 done
 
-# 12. Full fixes (--fix-full only)
+# 12. Orphaned kiro-cli processes
+KIRO_PROCS=$(pgrep -f 'kiro-cli acp' 2>/dev/null | wc -l)
+if [ "$KIRO_PROCS" -gt 1 ]; then
+  warn "$KIRO_PROCS kiro-cli acp processes running — likely orphans from previous bridge"
+fi
+
+# 13. Full fixes (--fix-full only)
 if $FIX_FULL && [ -f "$DB" ]; then
   sqlite3 "$DB" "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt messages_fts index"
   sqlite3 "$DB" "INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt extracted_memories_fts index"
