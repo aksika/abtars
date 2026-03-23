@@ -126,16 +126,34 @@ export class AcpTransport implements IKiroTransport {
 
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.
-    const result = await this.client.prompt({
-      sessionId,
-      prompt: [{ type: "text", text: message }],
-    });
+    const result = await this.promptWithRetry(sessionId, message);
 
     logDebug(TAG, `Prompt complete (stopReason: ${result.stopReason})`);
 
     const chunks = this.responseChunks.get(sessionId) ?? [];
     this.responseChunks.delete(sessionId);
     return chunks.join("") || "(no response)";
+  }
+
+  private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.client!.prompt({
+          sessionId,
+          prompt: [{ type: "text", text: message }],
+        });
+      } catch (err: unknown) {
+        const code = (err as { code?: number }).code;
+        if (code === -32603 && attempt < maxRetries) {
+          logWarn(TAG, `Transient error (code ${code}), retry ${attempt + 1}/${maxRetries}`);
+          this.responseChunks.set(sessionId, []); // reset chunks for retry
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error("unreachable");
   }
 
   async resetSession(_sessionKey: string): Promise<void> {
