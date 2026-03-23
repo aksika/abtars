@@ -162,3 +162,42 @@ New `skills/session-start.md` — instructs KP to greet user by name (from `user
 **Commit:** `1890eed`
 
 Reduced `RECENT_MSG_LIMIT` from 12 to 8 messages. Combined with TOOLS.md, the trade-off favors always-on recall instructions over more chat history — KP can search for detail on demand.
+
+## 29. Heartbeat Heavy-Task Gating + Cron Priority
+
+**Status:** ✅ Done (2026-03-23)
+**Commits:** `0f941b5`, `a3c40f5`
+
+Cold-start stampede fix: all cron tasks + sleep fired simultaneously on first tick. Now:
+- `HeartbeatTask` has `heavy` flag + boolean return. `tick()` skips remaining heavy tasks after one returns true.
+- `CronEntry` has `priority?: "high"` field. Two heartbeat tasks: `cron-priority` (not heavy, fires high-priority entries like backup) and `cron-normal` (heavy, fires 1 task per tick).
+- Registration order: cron-priority → sleep → cron-normal → browse → reminder.
+- Backup runs before sleep, sleep runs before research tasks. No two heavy things overlap.
+- Logger marks test entries with `TEST` prefix to distinguish from production logs.
+
+## 30. Financial AI News Pipeline + agentbridge-rss
+
+**Status:** ✅ Done (2026-03-23)
+**Commit:** `c505ff0`
+
+New `agentbridge-rss` CLI tool — fetches RSS/Atom feeds (SEC EDGAR 8-K, Google News AI Finance, CNBC Tech/Investing, Seeking Alpha per watchlist ticker), outputs JSON to `~/.agentbridge/finance/rss-YYYY-MM-DD.json`. Zero dependencies, regex XML parsing.
+
+Cron entry: weekdays 1pm, agent executor. Pipeline: run agentbridge-rss → read AI-Daily report from morning → cross-reference → rank by market impact → write Finance-AI-Daily report → propose new tickers to watchlist.
+
+Stock watchlist at `~/.agentbridge/finance/stock_watchlist.md` — Active tickers get Seeking Alpha RSS, agent proposes new ones under Proposed section.
+
+## 31. AI News Pipeline Consolidation
+
+**Status:** ✅ Done (2026-03-23)
+**Commit:** `a3c40f5`
+
+Consolidated tweet-feed script + AI-news browse agent into 1 agent cron entry. Pipeline: collect tweets → browse techcrunch/arstechnica/theverge → cross-reference → write report. Retired standalone tweet-feed cron entry.
+
+## 32. Unified Command Handlers
+
+**Status:** ✅ Done (2026-03-23)
+**Commit:** `bf2b42c`
+
+Extracted all chat command handlers from main.ts into `src/components/command-handlers.ts`. Single module for Telegram + Discord — 840 lines removed from main.ts. Platform-specific commands check `ctx.platform` internally.
+
+Removed: /ingest, /reflect, /reembed, /forget (memories only come from conversations/agent work, not manual injection). Merged /mcporter into /status. Renamed /b2b-reset to /a2a-reset. Discord gained /coding, /stop, /cancel, /facts.

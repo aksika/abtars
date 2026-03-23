@@ -348,9 +348,30 @@ Two layers of diagnostics:
 
 ### `/status` (dumb, hardcoded)
 
-Intercepted in `main.ts` before the message reaches the agent. Works even if the agent/transport is broken. Single `buildStatusLines()` function shared by Telegram and Discord.
+Intercepted in `command-handlers.ts` before the message reaches the agent. Works even if the agent/transport is broken. Shows: version, model, context window %, uptime, transport status, heartbeat state, last tick age, registered tasks, last sleep audit, cron summary, last backup, MCP server status.
 
-Shows: version, model, context window %, uptime, transport status, heartbeat state, last tick age, registered tasks, last sleep audit, cron summary (recurring/pending/paused), last backup filename.
+### Chat Commands
+
+All commands handled by `src/components/command-handlers.ts` — single module for both Telegram and Discord. Platform-specific commands check `ctx.platform` internally.
+
+| Command | Platforms | Description |
+|---------|----------|-------------|
+| /new | both | New conversation session |
+| /reset | both | New session + exit coding mode back to KP |
+| /status | both | Bot status, transport, heartbeat, MCP |
+| /stop, /cancel | both | Send Ctrl+C interrupt |
+| /restart | both | Restart Kiro (tmux only) |
+| /memory | both | Memory storage statistics |
+| /cron | both | Scheduled tasks (internal cron.json) |
+| /facts | both | Core knowledge (user profile + agent notes) |
+| /coding | both | Switch to Opus coding agent |
+| /default | both | Switch back to KP |
+| /nlm | both | Knowledge base operations |
+| /full, /short | TG-only | Raw output / clean responses toggle |
+| /a2a-reset | Discord-only | Reset A2A session |
+| /help | both | Auto-generated per platform |
+
+Removed (2026-03-23): `/ingest`, `/reflect`, `/reembed`, `/forget`, `/mcporter` (merged into /status).
 
 ### Healthcheck skill (agent-driven)
 
