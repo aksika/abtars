@@ -462,3 +462,71 @@ Everything in `--fix`, plus:
 - `agentbridge.sh` runs `doctor.sh` (diagnose only) before starting the bridge
 - Internal cron runs `doctor.sh --fix` every 6 hours (safe auto-repair)
 - No `-e` flag — individual check failures don't block startup
+
+---
+
+## Google Workspace CLI (`gws`)
+
+### Overview
+
+KP reads Gmail (and potentially Drive, Calendar, Sheets) via the official `gws` CLI. No wrapper — agent calls `gws gmail` commands directly via `execute_bash`.
+
+### Installation
+
+```bash
+npm install -g @googleworkspace/cli
+gws --version  # verify
+```
+
+### Authentication (one-time)
+
+1. Google Cloud Console → create project (or reuse existing)
+2. Enable Gmail API in [API Library](https://console.cloud.google.com/apis/library)
+3. OAuth consent screen → External → add your email as test user
+4. Credentials → Create OAuth client ID → **Desktop app**
+5. Download `client_secret.json` (or copy client ID + secret)
+
+```bash
+# Option A: place the JSON file
+mkdir -p ~/.config/gws
+cp client_secret_XXX.json ~/.config/gws/client_secret.json
+chmod 600 ~/.config/gws/client_secret.json
+gws auth login
+
+# Option B: env vars (no file needed)
+export GOOGLE_WORKSPACE_CLI_CLIENT_ID="<client-id>"
+export GOOGLE_WORKSPACE_CLI_CLIENT_SECRET="<client-secret>"
+gws auth login
+```
+
+Browser opens for consent. Credentials saved encrypted to `~/.config/gws/credentials.enc`. After login, env vars are no longer needed.
+
+### Verify
+
+```bash
+gws auth status
+gws gmail users messages list --params '{"userId": "me", "q": "is:unread", "maxResults": 3}'
+```
+
+### Cron Entry
+
+Entry `b6c50e` — daily 8:30 Budapest (`30 8 * * *`), agent executor. Reads unread, summarizes to `~/reports/Email-Digest-TODAY.md`.
+
+### Key Commands
+
+```bash
+# List messages
+gws gmail users messages list --params '{"userId": "me", "q": "is:unread", "maxResults": 30}'
+
+# Read metadata only
+gws gmail users messages get --params '{"userId": "me", "id": "MSG_ID", "format": "metadata", "metadataHeaders": ["From","Subject","Date"]}'
+
+# Read full message
+gws gmail users messages get --params '{"userId": "me", "id": "MSG_ID"}'
+```
+
+### Files
+
+- `~/.config/gws/client_secret.json` — OAuth client config (chmod 600)
+- `~/.config/gws/credentials.enc` — encrypted refresh token
+- `~/.config/gws/token_cache.json` — access token cache (auto-refreshed)
