@@ -962,7 +962,8 @@ async function main(): Promise<void> {
     });
   }
 
-  const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: 5 * 60 * 1000 });
+  const hbIntervalMs = parseInt(process.env["HEARTBEAT_INTERVAL_MS"] ?? "", 10) || 5 * 60 * 1000;
+  const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: hbIntervalMs });
 
   const cronCallback = (chatId: number, message: string, result: string): void => {
     if (platforms.telegram) {
