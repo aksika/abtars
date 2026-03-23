@@ -144,6 +144,19 @@ echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-tweet.js\" \"\$@\"" >> "$TWE
 chmod +x "$TWEET_SCRIPT"
 ln -sf "$TWEET_SCRIPT" "$HOME/.local/bin/agentbridge-tweet"
 
+# Deploy agentbridge-rss CLI (RSS feed fetcher for finance pipeline)
+RSS_SCRIPT="$AB_HOME/agentbridge-rss"
+echo '#!/usr/bin/env bash' > "$RSS_SCRIPT"
+echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-rss.js\" \"\$@\"" >> "$RSS_SCRIPT"
+chmod +x "$RSS_SCRIPT"
+ln -sf "$RSS_SCRIPT" "$HOME/.local/bin/agentbridge-rss"
+
+# Deploy stock watchlist (only if not already present — user manages this file)
+mkdir -p "$AB_HOME/finance"
+if [ ! -f "$AB_HOME/finance/stock_watchlist.md" ]; then
+  cp "$PROJECT_DIR/config/stock_watchlist.md" "$AB_HOME/finance/stock_watchlist.md"
+fi
+
 # Deploy mcporter CLI (MCP tool access)
 MCPORTER_DIR="$HOME/workspace/mcporter"
 if [ -f "$MCPORTER_DIR/dist/cli.js" ]; then
