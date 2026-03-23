@@ -41,9 +41,9 @@ function formatBytes(bytes) {
 export function renderDashboardHtml(logoBase64: string, opts?: { agentApi?: { port: number; allowedIps: string[] } }): string {
   const agentHtml = opts?.agentApi
     ? `<div class="platform-item" id="plat-agent-api">
-      <span class="name">Agent API</span>
+      <span class="name">Agent A2A</span>
       <span>
-        <span class="badge disabled" id="plat-agent-api-badge">—</span>
+        <span class="badge disabled clickable" id="plat-agent-api-badge" data-port="${opts.agentApi.port}" onclick="toggleA2APanel()">—</span>
         <button class="btn-start" onclick="togglePlatform('agent-api','start')" id="plat-agent-api-start">Start</button>
         <button class="btn-stop" onclick="togglePlatform('agent-api','stop')" id="plat-agent-api-stop">Stop</button>
       </span>
@@ -197,6 +197,7 @@ header h1 {
 }
 
 .badge.running  { background: rgba(76,175,80,0.2); color: #4caf50; }
+.badge.clickable { cursor: pointer; }
 .badge.clickable { cursor: pointer; transition: background 0.2s; }
 .badge.clickable:hover { background: rgba(76,175,80,0.35); }
 .badge.stopped  { background: rgba(255,152,0,0.2); color: #ff9800; }
@@ -1041,8 +1042,8 @@ function getScript(): string {
     }
 
     if (state.running) {
-      badge.textContent = 'running';
-      badge.className = 'badge running';
+      badge.textContent = name === 'agent-api' ? 'running · port ' + (badge.dataset.port || '?') : 'running';
+      badge.className = name === 'agent-api' ? 'badge running clickable' : 'badge running';
       if (btnStart) btnStart.disabled = true;
       if (btnStop) btnStop.disabled = false;
     } else {
