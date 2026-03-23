@@ -250,11 +250,10 @@ describe("cron-checker", () => {
     expect(reminders).toHaveLength(2); // both reminders fire
 
     const entries = readCron();
-    // First task fires + marks fired; second task's scheduling block also runs (marks fired)
-    // but break prevents it from actually spawning. This is a known quirk —
-    // recurring tasks are fine (they reschedule), one-shots lose the second entry.
+    // First task fires; second task untouched (guard bails before scheduling block)
     const firedTasks = entries.filter(e => e.type === "task" && e.fired);
-    expect(firedTasks).toHaveLength(2);
+    expect(firedTasks).toHaveLength(1);
+    expect(firedTasks[0].id).toBe("tsk01");
   });
 
   it("returns true when a task fired, false otherwise", async () => {

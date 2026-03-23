@@ -92,6 +92,10 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
 
     // Check for retry (failed task, 2 cycles later)
     const isRetry = entry.retryAfter && entry.retryAfter <= now;
+
+    // 1 task per tick — bail before touching the entry (reminders exempt)
+    if (entry.type !== "reminder" && firedTask) break;
+
     if (isRetry) {
       delete entry.retryAfter;
       changed = true;
@@ -121,8 +125,6 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
       recordRun(entry);
       logInfo(TAG, `⏰ Reminder fired: "${entry.message}" → chat ${entry.chatId}`);
       continue; // reminders don't count toward 1-task-per-tick
-    } else if (firedTask) {
-      break; // 1 task per tick — remaining overdue entries wait for next tick
     } else if (entry.executor === "script") {
       // Script task: run command directly via bash
       logInfo(TAG, `📜 Script task fired: "${entry.message}"`);
