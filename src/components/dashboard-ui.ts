@@ -69,7 +69,6 @@ ${getHeaderHtml(logoBase64)}
   ${getPlatformsCard(agentHtml)}
   ${getMemoryCard()}
   ${getCronCard()}
-  ${getHeartbeatCard()}
 </main>
 ${getSearchPanel()}
 ${getA2APanel()}
@@ -615,6 +614,7 @@ function getBridgeHealthCard(): string {
       <span class="stat-label">HB Interval</span>
       <span class="stat-value" id="hb-interval">—</span>
     </div>
+    <div id="hb-tasks" style="margin-top:6px;"></div>
     <div class="stat-row">
       <span class="stat-label">Last Update</span>
       <span class="stat-value" id="health-timestamp">—</span>
@@ -744,16 +744,6 @@ function getMemoryCard(): string {
   </div>
   <hr style="border-color:#0f3460;margin:12px 0;">
   <button class="btn-search-toggle" onclick="toggleSearchPanel()">🔍 Search Memory</button>
-</div>`;
-}
-
-function getHeartbeatCard(): string {
-  return `
-<div class="card" id="card-heartbeat">
-  <h2>Heartbeat Tasks</h2>
-  <div id="hb-tasks">
-    <div style="color:#666;font-size:0.82rem;">Loading...</div>
-  </div>
 </div>`;
 }
 
