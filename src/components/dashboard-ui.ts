@@ -1042,7 +1042,7 @@ function getScript(): string {
     }
 
     if (state.running) {
-      badge.textContent = name === 'agent-api' ? 'running · port ' + (badge.dataset.port || '?') : 'running';
+      badge.textContent = name === 'agent-api' ? '⚠ port ' + (badge.dataset.port || '?') : 'running';
       badge.className = name === 'agent-api' ? 'badge running clickable' : 'badge running';
       if (btnStart) btnStart.disabled = true;
       if (btnStop) btnStop.disabled = false;
