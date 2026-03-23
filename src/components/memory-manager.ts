@@ -883,7 +883,7 @@ export class MemoryManager {
 
     return {
       heartbeatRunning: this.heartbeat !== null,
-      intervalMs: this.config.heartbeat.intervalMs,
+      intervalMs: this.heartbeat?.intervalMs ?? 0,
       tasks: this.heartbeat?.getTaskNames() ?? [],
       lastSleepAudit: lastAudit,
     };

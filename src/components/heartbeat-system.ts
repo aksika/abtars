@@ -52,6 +52,12 @@ export class HeartbeatSystem {
     logInfo(TAG, "Heartbeat stopped");
   }
 
+  /** Whether the heartbeat loop is running. */
+  get isRunning(): boolean { return this.running; }
+
+  /** Configured interval in milliseconds. */
+  get intervalMs(): number { return this.config.intervalMs; }
+
   /** Get registered task names. */
   getTaskNames(): string[] {
     return this.tasks.map(t => t.name);

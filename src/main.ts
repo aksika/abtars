@@ -1104,8 +1104,8 @@ async function main(): Promise<void> {
         heartbeat: memory
           ? {
               running: memory.getStats()?.heartbeatRunning ?? false,
-              intervalMs: memoryConfig.heartbeat.intervalMs,
-              tasks: [],
+              intervalMs: heartbeat.intervalMs,
+              tasks: heartbeat.getTaskNames().map(n => ({ name: n })),
             }
           : null,
         notebooklm: nlmConfig.enabled,

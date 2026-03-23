@@ -17,11 +17,6 @@ export type MemoryConfig = {
   embeddingModel: string;
   /** Relevance threshold for topic-based forgetting. */
   forgetThreshold: number;
-  /** Heartbeat system configuration for background processing. */
-  heartbeat: {
-    enabled: boolean;
-    intervalMs: number;
-  };
   /** Search enhancement configuration for temporal decay, MMR, and timeouts. */
   searchEnhancements: {
     searchTimeoutMs: number;
@@ -43,10 +38,6 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
   ingestChunkMaxTokens: 512,
   embeddingModel: "Xenova/all-MiniLM-L6-v2",
   forgetThreshold: 0.8,
-  heartbeat: {
-    enabled: true,
-    intervalMs: 300000,
-  },
   searchEnhancements: {
     searchTimeoutMs: 1000,
     decayHalflifeDays: 30,
@@ -100,10 +91,6 @@ export function loadMemoryConfig(): MemoryConfig {
     ingestChunkMaxTokens,
     embeddingModel,
     forgetThreshold,
-    heartbeat: {
-      enabled: parseBoolEnv("MEMORY_HEARTBEAT_ENABLED", MEMORY_CONFIG_DEFAULTS.heartbeat.enabled),
-      intervalMs: parseNumberEnv("MEMORY_HEARTBEAT_INTERVAL_MS", MEMORY_CONFIG_DEFAULTS.heartbeat.intervalMs),
-    },
     searchEnhancements: {
       searchTimeoutMs: parseNumberEnv("MEMORY_SEARCH_TIMEOUT_MS", MEMORY_CONFIG_DEFAULTS.searchEnhancements.searchTimeoutMs),
       decayHalflifeDays: parseNumberEnv("MEMORY_DECAY_HALFLIFE_DAYS", MEMORY_CONFIG_DEFAULTS.searchEnhancements.decayHalflifeDays),
