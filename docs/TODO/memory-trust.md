@@ -48,7 +48,7 @@ On `messages` table: trust is implicit from the source (role + chat_id + channel
 - [ ] Task 3: Auto-assign trust at store time based on source context:
   - Telegram DM from ALLOWED_USER_IDS → trust=3 (owner)
   - KP self-generated (extraction, observation) → trust=2 (self)
-  - A2A inbound (b2b-router) → trust=1 (peer)
+  - A2A inbound (a2a-router) → trust=1 (peer)
   - Web/browse results → trust=0 (untrusted)
 - [ ] Task 3b: Auto-assign integrity at store time:
   - Direct user quote stored verbatim → integrity=verbatim

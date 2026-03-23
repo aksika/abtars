@@ -36,9 +36,9 @@ function setValidEnv() {
   delete process.env["DISCORD_BOT_TOKEN"];
   delete process.env["DISCORD_ALLOWED_USER_IDS"];
   delete process.env["DISCORD_ALLOWED_CHANNEL_IDS"];
-  delete process.env["DISCORD_B2B_CHANNEL_ID"];
-  delete process.env["DISCORD_B2B_PEER_BOT_ID"];
-  delete process.env["DISCORD_B2B_RATE_LIMIT_MS"];
+  delete process.env["DISCORD_A2A_CHANNEL_ID"];
+  delete process.env["DISCORD_A2A_PEER_BOT_ID"];
+  delete process.env["DISCORD_A2A_RATE_LIMIT_MS"];
 }
 
 describe("loadAndValidateConfig", () => {

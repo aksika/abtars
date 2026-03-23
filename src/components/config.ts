@@ -235,42 +235,42 @@ export async function loadAndValidateConfig(): Promise<Config> {
     }
   }
 
-  // --- DISCORD_B2B_CHANNEL_ID (optional) ---
-  const rawB2bChannelId = process.env["DISCORD_B2B_CHANNEL_ID"]?.trim() || undefined;
-  let discordB2bChannelId: string | undefined;
-  if (rawB2bChannelId) {
-    if (!isValidSnowflake(rawB2bChannelId)) {
+  // --- DISCORD_A2A_CHANNEL_ID (optional) ---
+  const rawA2aChannelId = process.env["DISCORD_A2A_CHANNEL_ID"]?.trim() || undefined;
+  let discordA2aChannelId: string | undefined;
+  if (rawA2aChannelId) {
+    if (!isValidSnowflake(rawA2aChannelId)) {
       throw new Error(
-        `DISCORD_B2B_CHANNEL_ID "${rawB2bChannelId}" is not a valid Discord snowflake ID — expected 17–20 digits`,
+        `DISCORD_A2A_CHANNEL_ID "${rawA2aChannelId}" is not a valid Discord snowflake ID — expected 17–20 digits`,
       );
     }
-    discordB2bChannelId = rawB2bChannelId;
+    discordA2aChannelId = rawA2aChannelId;
   }
 
-  // --- DISCORD_B2B_PEER_BOT_ID (required when B2B channel is set) ---
-  const rawPeerBotId = process.env["DISCORD_B2B_PEER_BOT_ID"]?.trim() || undefined;
-  let discordB2bPeerBotId: string | undefined;
+  // --- DISCORD_A2A_PEER_BOT_ID (required when A2A channel is set) ---
+  const rawPeerBotId = process.env["DISCORD_A2A_PEER_BOT_ID"]?.trim() || undefined;
+  let discordA2aPeerBotId: string | undefined;
   if (rawPeerBotId) {
     if (!isValidSnowflake(rawPeerBotId)) {
       throw new Error(
-        `DISCORD_B2B_PEER_BOT_ID "${rawPeerBotId}" is not a valid Discord snowflake ID — expected 17–20 digits`,
+        `DISCORD_A2A_PEER_BOT_ID "${rawPeerBotId}" is not a valid Discord snowflake ID — expected 17–20 digits`,
       );
     }
-    discordB2bPeerBotId = rawPeerBotId;
+    discordA2aPeerBotId = rawPeerBotId;
   }
 
-  if (discordB2bChannelId && !discordB2bPeerBotId) {
+  if (discordA2aChannelId && !discordA2aPeerBotId) {
     throw new Error(
-      "DISCORD_B2B_PEER_BOT_ID is required when DISCORD_B2B_CHANNEL_ID is set",
+      "DISCORD_A2A_PEER_BOT_ID is required when DISCORD_A2A_CHANNEL_ID is set",
     );
   }
 
-  const discordB2bEnabled = !!discordB2bChannelId;
+  const discordA2aEnabled = !!discordA2aChannelId;
 
-  // --- DISCORD_B2B_RATE_LIMIT_MS (optional, default 5000) ---
-  const discordB2bRateLimitMs = parseNumberEnv(
-    "DISCORD_B2B_RATE_LIMIT_MS",
-    CONFIG_DEFAULTS.discordB2bRateLimitMs,
+  // --- DISCORD_A2A_RATE_LIMIT_MS (optional, default 5000) ---
+  const discordA2aRateLimitMs = parseNumberEnv(
+    "DISCORD_A2A_RATE_LIMIT_MS",
+    CONFIG_DEFAULTS.discordA2aRateLimitMs,
   );
 
   return {
@@ -295,11 +295,11 @@ export async function loadAndValidateConfig(): Promise<Config> {
     discordAppId,
     discordAllowedUserIds,
     discordAllowedChannelIds,
-    discordB2bChannelId,
-    discordB2bPeerBotId,
-    discordB2bRateLimitMs,
+    discordA2aChannelId,
+    discordA2aPeerBotId,
+    discordA2aRateLimitMs,
     discordEnabled,
-    discordB2bEnabled,
+    discordA2aEnabled,
     codingAgentModel: process.env["CODING_AGENT_MODEL"] || CONFIG_DEFAULTS.codingAgentModel,
   };
 }

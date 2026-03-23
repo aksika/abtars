@@ -47,16 +47,16 @@ export type Config = {
   discordAllowedUserIds?: Set<string>;
   /** Set of allowed Discord channel IDs (snowflake strings) */
   discordAllowedChannelIds?: Set<string>;
-  /** Dedicated B2B Discord channel ID */
-  discordB2bChannelId?: string;
-  /** Molty's bot user ID for B2B communication */
-  discordB2bPeerBotId?: string;
-  /** Min ms between outbound B2B messages (default: 5000) */
-  discordB2bRateLimitMs: number;
+  /** Dedicated A2A Discord channel ID */
+  discordA2aChannelId?: string;
+  /** Molty's bot user ID for A2A communication */
+  discordA2aPeerBotId?: string;
+  /** Min ms between outbound A2A messages (default: 5000) */
+  discordA2aRateLimitMs: number;
   /** Whether Discord features are enabled (derived: true if discordBotToken is set) */
   discordEnabled: boolean;
-  /** Whether B2B features are enabled (derived: true if discordB2bChannelId is set) */
-  discordB2bEnabled: boolean;
+  /** Whether A2A features are enabled (derived: true if discordA2aChannelId is set) */
+  discordA2aEnabled: boolean;
   /** Model ID for /coding agent (default: claude-opus-4.6) */
   codingAgentModel: string;
 };
@@ -78,8 +78,8 @@ export const CONFIG_DEFAULTS = {
   sttModel: "whisper-large-v3",
   ttsEnabled: true,
   ttsVoice: "en-US-AndrewMultilingualNeural",
-  discordB2bRateLimitMs: 5000,
+  discordA2aRateLimitMs: 5000,
   discordEnabled: false,
-  discordB2bEnabled: false,
+  discordA2aEnabled: false,
   codingAgentModel: "claude-opus-4.6",
 } as const satisfies Partial<Config>;

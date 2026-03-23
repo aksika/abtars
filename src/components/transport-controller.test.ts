@@ -28,9 +28,9 @@ function stubConfig(overrides?: Partial<Config>): Config {
     sttModel: "whisper-large-v3",
     ttsEnabled: false,
     ttsVoice: "en-US-AndrewMultilingualNeural",
-    discordB2bRateLimitMs: 5000,
+    discordA2aRateLimitMs: 5000,
     discordEnabled: false,
-    discordB2bEnabled: false,
+    discordA2aEnabled: false,
     ...overrides,
   } as Config;
 }

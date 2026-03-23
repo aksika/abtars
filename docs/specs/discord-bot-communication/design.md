@@ -2,15 +2,15 @@
 
 ## Overview
 
-This design extends AgentBridge to support Discord as a second messaging platform alongside Telegram, and introduces bot-to-bot (B2B) communication with Molty — a remote AgentBridge instance. The design follows the existing architecture patterns: thin API wrappers, event-driven pollers, fail-closed security, and a shared `IKiroTransport` interface.
+This design extends AgentBridge to support Discord as a second messaging platform alongside Telegram, and introduces bot-to-bot (A2A) communication with Molty — a remote AgentBridge instance. The design follows the existing architecture patterns: thin API wrappers, event-driven pollers, fail-closed security, and a shared `IKiroTransport` interface.
 
 Three major capabilities are added:
 
 1. **Discord channel** — A `DiscordApi`, `DiscordPoller`, and `DiscordSecurityGate` that mirror the Telegram equivalents, connecting Discord users to Kiro CLI via the existing transport layer.
 2. **Channel Adapter abstraction** — A `ChannelAdapter` that normalizes inbound/outbound messages across platforms into a common `BridgeMessage` format, making the transport and session layers platform-agnostic.
-3. **Bot-to-Bot (B2B) communication** — A `B2BRouter` that monitors a dedicated Discord channel for messages from Molty, routes them through a dedicated Kiro session, and replies using a simple tag-based protocol (`[REQUEST]`, `[RESPONSE]`, `[STATUS]`).
+3. **Bot-to-Bot (A2A) communication** — A `A2ARouter` that monitors a dedicated Discord channel for messages from Molty, routes them through a dedicated Kiro session, and replies using a simple tag-based protocol (`[REQUEST]`, `[RESPONSE]`, `[STATUS]`).
 
-The existing `ResponseFormatter` is extended to support Discord's 2000-character limit and Discord Markdown. The `SessionManager` is updated to use platform-prefixed session keys (`discord:channelId`, `telegram:chatId`, `b2b:channelId`) for cross-platform isolation. Configuration validation is extended to handle optional Discord env vars at startup.
+The existing `ResponseFormatter` is extended to support Discord's 2000-character limit and Discord Markdown. The `SessionManager` is updated to use platform-prefixed session keys (`discord:channelId`, `telegram:chatId`, `a2a:channelId`) for cross-platform isolation. Configuration validation is extended to handle optional Discord env vars at startup.
 
 ## Architecture
 
@@ -35,7 +35,7 @@ graph TB
         end
 
         CA[ChannelAdapter]
-        B2B[B2BRouter]
+        A2A[A2ARouter]
 
         subgraph "Core"
             MH[MessageHandler]
@@ -55,11 +55,11 @@ graph TB
 
     TP --> TSG
     DP --> DSG
-    DP --> B2B
+    DP --> A2A
 
     TSG --> CA
     DSG --> CA
-    B2B --> CA
+    A2A --> CA
 
     CA --> MH
     MH --> SM
@@ -69,7 +69,7 @@ graph TB
     MH --> RF
     RF -->|Telegram format| TP
     RF -->|Discord format| DP
-    RF -->|B2B format| B2B
+    RF -->|A2A format| A2A
 ```
 
 ### Message Flow
@@ -102,9 +102,9 @@ sequenceDiagram
 
 1. **Discord.js vs raw REST/Gateway**: Use the `discord.js` library. It handles Gateway heartbeat, reconnection, intent management, and rate limiting out of the box — reimplementing these from scratch would be error-prone and wasteful.
 2. **ChannelAdapter as a stateless normalizer**: The adapter is a pure function layer (normalize in, format out) with no state. This keeps it testable and avoids coupling platform logic to session management.
-3. **B2B uses the same transport**: B2B messages go through the same `IKiroTransport` as human messages, using a dedicated session key. This avoids duplicating transport logic.
+3. **A2A uses the same transport**: A2A messages go through the same `IKiroTransport` as human messages, using a dedicated session key. This avoids duplicating transport logic.
 4. **Platform-prefixed session keys**: Session keys become strings like `discord:123456` or `telegram:789`. This replaces the current `number`-typed `chatId` in the transport interface with a `string` session key, providing natural namespace isolation.
-5. **B2B rate limiting in the router**: Rate limiting is applied at the `B2BRouter` level (outbound only) rather than in the transport, since it's specific to the B2B channel's anti-flood requirement.
+5. **A2A rate limiting in the router**: Rate limiting is applied at the `A2ARouter` level (outbound only) rather than in the transport, since it's specific to the A2A channel's anti-flood requirement.
 
 
 ## Components and Interfaces
@@ -211,33 +211,33 @@ export class ChannelAdapter {
 }
 ```
 
-### 5. B2BRouter (`src/components/b2b-router.ts`)
+### 5. A2ARouter (`src/components/a2a-router.ts`)
 
-Monitors the B2B Discord channel for messages from the configured peer bot (Molty). Parses the tag-based protocol, routes requests to the transport, and sends responses back.
+Monitors the A2A Discord channel for messages from the configured peer bot (Molty). Parses the tag-based protocol, routes requests to the transport, and sends responses back.
 
 ```typescript
-export type B2BMessageTag = "REQUEST" | "RESPONSE" | "STATUS";
+export type A2AMessageTag = "REQUEST" | "RESPONSE" | "STATUS";
 
-export class B2BRouter {
+export class A2ARouter {
   constructor(config: {
     discordApi: DiscordApi;
-    b2bChannelId: string;
+    a2aChannelId: string;
     peerBotId: string;
     rateLimitMs: number;
     onPrompt: (sessionKey: string, text: string) => Promise<string>;
   });
 
-  /** Process an inbound Discord message from the B2B channel. */
+  /** Process an inbound Discord message from the A2A channel. */
   async handleMessage(message: DiscordInboundMessage): Promise<void>;
 
-  /** Parse a B2B message tag from the message text. Returns tag and content. */
-  parseTag(text: string): { tag: B2BMessageTag; content: string };
+  /** Parse a A2A message tag from the message text. Returns tag and content. */
+  parseTag(text: string): { tag: A2AMessageTag; content: string };
 
-  /** Format an outbound B2B message with the given tag. */
-  formatOutbound(tag: B2BMessageTag, content: string): string;
+  /** Format an outbound A2A message with the given tag. */
+  formatOutbound(tag: A2AMessageTag, content: string): string;
 
-  /** Send a message to the B2B channel, respecting rate limits. */
-  async sendToB2B(text: string): Promise<void>;
+  /** Send a message to the A2A channel, respecting rate limits. */
+  async sendToA2A(text: string): Promise<void>;
 }
 ```
 
@@ -267,11 +267,11 @@ New optional fields added to the `Config` type:
 discordBotToken?: string;
 discordAllowedUserIds?: Set<string>;    // Discord snowflake IDs (strings)
 discordAllowedChannelIds?: Set<string>;
-discordB2bChannelId?: string;
-discordB2bPeerBotId?: string;
-discordB2bRateLimitMs: number;          // default: 5000
+discordA2aChannelId?: string;
+discordA2aPeerBotId?: string;
+discordA2aRateLimitMs: number;          // default: 5000
 discordEnabled: boolean;                 // derived: true if discordBotToken is set
-discordB2bEnabled: boolean;              // derived: true if b2bChannelId is set
+discordA2aEnabled: boolean;              // derived: true if a2aChannelId is set
 ```
 
 ### 8. Updated IKiroTransport Interface
@@ -293,7 +293,7 @@ export interface IKiroTransport {
 
 The `main()` function is extended to:
 - Load and validate Discord config alongside Telegram config
-- Conditionally create `DiscordApi`, `DiscordPoller`, `DiscordSecurityGate`, and `B2BRouter`
+- Conditionally create `DiscordApi`, `DiscordPoller`, `DiscordSecurityGate`, and `A2ARouter`
 - Wire both pollers through the `ChannelAdapter` to a shared message handler
 - Shut down both pollers on SIGINT/SIGTERM
 - Continue operating if one platform errors while the other is healthy
@@ -331,9 +331,9 @@ type DiscordInboundMessage = {
 };
 ```
 
-### B2B Message Protocol
+### A2A Message Protocol
 
-Messages in the B2B channel use a simple text-based tag protocol:
+Messages in the A2A channel use a simple text-based tag protocol:
 
 | Tag | Direction | Purpose |
 |-----|-----------|---------|
@@ -355,11 +355,11 @@ type Config = {
   discordBotToken?: string;
   discordAllowedUserIds?: Set<string>;
   discordAllowedChannelIds?: Set<string>;
-  discordB2bChannelId?: string;
-  discordB2bPeerBotId?: string;
-  discordB2bRateLimitMs: number;  // default: 5000
+  discordA2aChannelId?: string;
+  discordA2aPeerBotId?: string;
+  discordA2aRateLimitMs: number;  // default: 5000
   discordEnabled: boolean;         // derived
-  discordB2bEnabled: boolean;      // derived
+  discordA2aEnabled: boolean;      // derived
 };
 ```
 
@@ -370,9 +370,9 @@ type Config = {
 | `DISCORD_BOT_TOKEN` | No | String | Discord bot token. Enables Discord features when set. |
 | `DISCORD_ALLOWED_USER_IDS` | If Discord enabled | Comma-separated snowflakes | Allowed Discord user IDs |
 | `DISCORD_ALLOWED_CHANNEL_IDS` | If Discord enabled | Comma-separated snowflakes | Allowed Discord channel IDs |
-| `DISCORD_B2B_CHANNEL_ID` | No | Snowflake | Dedicated B2B channel ID |
-| `DISCORD_B2B_PEER_BOT_ID` | If B2B enabled | Snowflake | Molty's bot user ID |
-| `DISCORD_B2B_RATE_LIMIT_MS` | No | Number | Min ms between outbound B2B messages (default: 5000) |
+| `DISCORD_A2A_CHANNEL_ID` | No | Snowflake | Dedicated A2A channel ID |
+| `DISCORD_A2A_PEER_BOT_ID` | If A2A enabled | Snowflake | Molty's bot user ID |
+| `DISCORD_A2A_RATE_LIMIT_MS` | No | Number | Min ms between outbound A2A messages (default: 5000) |
 
 ### Session Key Format
 
@@ -380,7 +380,7 @@ Session keys are platform-prefixed strings used throughout the transport and ses
 
 - `telegram:<chatId>` — Telegram user/group sessions
 - `discord:<channelId>` — Discord user/channel sessions  
-- `b2b:<channelId>` — Bot-to-bot session (exactly one)
+- `a2a:<channelId>` — Bot-to-bot session (exactly one)
 
 ### Discord Snowflake Validation
 
@@ -401,7 +401,7 @@ This matches Discord's snowflake format — a 64-bit integer represented as a st
 
 ### Property 2: Platform-prefixed session key uniqueness
 
-*For any* two messages from different platforms (Telegram vs Discord vs B2B) that happen to share the same numeric channel/chat ID, the `ChannelAdapter.sessionKey()` function must produce distinct session keys. Conversely, two messages from the same platform and same channel must produce identical session keys.
+*For any* two messages from different platforms (Telegram vs Discord vs A2A) that happen to share the same numeric channel/chat ID, the `ChannelAdapter.sessionKey()` function must produce distinct session keys. Conversely, two messages from the same platform and same channel must produce identical session keys.
 
 **Validates: Requirements 3.1, 5.4, 8.1, 10.2**
 
@@ -429,27 +429,27 @@ This matches Discord's snowflake format — a 64-bit integer represented as a st
 
 **Validates: Requirements 5.1**
 
-### Property 7: B2B peer bot identification
+### Property 7: A2A peer bot identification
 
-*For any* message in the B2B channel, the `B2BRouter` should process it if and only if the author's bot user ID matches the configured `peerBotId`. Messages from any other author (including other bots) must be ignored.
+*For any* message in the A2A channel, the `A2ARouter` should process it if and only if the author's bot user ID matches the configured `peerBotId`. Messages from any other author (including other bots) must be ignored.
 
 **Validates: Requirements 6.2, 6.5**
 
-### Property 8: B2B tag protocol round-trip
+### Property 8: A2A tag protocol round-trip
 
-*For any* B2B message tag (`REQUEST`, `RESPONSE`, `STATUS`) and any content string, formatting with `formatOutbound(tag, content)` then parsing with `parseTag()` must return the original tag and content. Additionally, *for any* string that does not start with a recognized tag prefix, `parseTag()` must return `REQUEST` as the default tag.
+*For any* A2A message tag (`REQUEST`, `RESPONSE`, `STATUS`) and any content string, formatting with `formatOutbound(tag, content)` then parsing with `parseTag()` must return the original tag and content. Additionally, *for any* string that does not start with a recognized tag prefix, `parseTag()` must return `REQUEST` as the default tag.
 
 **Validates: Requirements 7.1, 7.2, 7.3, 7.5**
 
-### Property 9: B2B sequential message processing
+### Property 9: A2A sequential message processing
 
-*For any* sequence of B2B messages arriving while a prompt is being processed, the B2B router must queue them and process them one at a time — no two B2B prompts may be in-flight simultaneously.
+*For any* sequence of A2A messages arriving while a prompt is being processed, the A2A router must queue them and process them one at a time — no two A2A prompts may be in-flight simultaneously.
 
 **Validates: Requirements 8.4**
 
-### Property 10: B2B outbound rate limiting
+### Property 10: A2A outbound rate limiting
 
-*For any* sequence of outbound B2B messages, the elapsed time between consecutive `sendToB2B()` calls must be greater than or equal to the configured `rateLimitMs`.
+*For any* sequence of outbound A2A messages, the elapsed time between consecutive `sendToA2A()` calls must be greater than or equal to the configured `rateLimitMs`.
 
 **Validates: Requirements 8.5**
 
@@ -479,12 +479,12 @@ This matches Discord's snowflake format — a 64-bit integer represented as a st
 | Empty user whitelist at startup | Throw at construction time — Bridge refuses to start with descriptive error. |
 | Unauthorized message | Silently drop. No response, no side effects. Log at debug level only. |
 
-### B2B Communication Errors
+### A2A Communication Errors
 
 | Error | Handling |
 |-------|----------|
-| Transport error during B2B prompt | Send `[STATUS] error: <description>` to B2B channel. Dequeue and continue. |
-| B2B channel not found | Log error at startup. Disable B2B features. Continue with human channels. |
+| Transport error during A2A prompt | Send `[STATUS] error: <description>` to A2A channel. Dequeue and continue. |
+| A2A channel not found | Log error at startup. Disable A2A features. Continue with human channels. |
 | Peer bot sends malformed message | Treat as `[REQUEST]` (default tag). If content is empty, ignore. |
 | Rate limit queue overflow | Cap queue at 50 messages. Drop oldest if exceeded. Log warning. |
 
@@ -494,7 +494,7 @@ This matches Discord's snowflake format — a 64-bit integer represented as a st
 |-------|----------|
 | `DISCORD_BOT_TOKEN` absent | Discord disabled entirely. Bridge runs Telegram-only. No error. |
 | `DISCORD_BOT_TOKEN` present but `DISCORD_ALLOWED_USER_IDS` empty | Bridge refuses to start. Descriptive error logged. |
-| `DISCORD_B2B_CHANNEL_ID` set without `DISCORD_B2B_PEER_BOT_ID` | Bridge refuses to start. Descriptive error logged. |
+| `DISCORD_A2A_CHANNEL_ID` set without `DISCORD_A2A_PEER_BOT_ID` | Bridge refuses to start. Descriptive error logged. |
 | Invalid snowflake format | Bridge refuses to start. Error identifies the invalid value. |
 
 ### Platform Isolation Errors
@@ -521,9 +521,9 @@ Unit tests cover specific examples, edge cases, and integration points:
 - `discord-api.test.ts` — Message sending, connection lifecycle (with mocked discord.js Client)
 - `discord-poller.test.ts` — Start/stop lifecycle, message dispatch to handler
 - `channel-adapter.test.ts` — Specific normalization examples for Telegram and Discord messages, edge cases (missing fields)
-- `b2b-router.test.ts` — Command parsing examples, error message formatting, rate limit edge cases, `/b2b-reset` command handling
+- `a2a-router.test.ts` — Command parsing examples, error message formatting, rate limit edge cases, `/a2a-reset` command handling
 - `response-formatter.test.ts` — Extended with Discord chunking examples, code block boundary splitting examples
-- `config.test.ts` — Extended with Discord config validation examples (missing token, invalid snowflakes, B2B without peer ID)
+- `config.test.ts` — Extended with Discord config validation examples (missing token, invalid snowflakes, A2A without peer ID)
 
 ### Property-Based Tests
 
@@ -540,10 +540,10 @@ Each correctness property is implemented as a single property-based test using `
   - **Feature: discord-bot-communication, Property 4: Platform-aware response chunking**
   - **Feature: discord-bot-communication, Property 5: Response splitting preserves code blocks**
 
-- `b2b-router.property.test.ts`
-  - **Feature: discord-bot-communication, Property 7: B2B peer bot identification**
-  - **Feature: discord-bot-communication, Property 8: B2B tag protocol round-trip**
-  - **Feature: discord-bot-communication, Property 10: B2B outbound rate limiting**
+- `a2a-router.property.test.ts`
+  - **Feature: discord-bot-communication, Property 7: A2A peer bot identification**
+  - **Feature: discord-bot-communication, Property 8: A2A tag protocol round-trip**
+  - **Feature: discord-bot-communication, Property 10: A2A outbound rate limiting**
 
 - `config.property.test.ts`
   - **Feature: discord-bot-communication, Property 11: Discord snowflake validation**

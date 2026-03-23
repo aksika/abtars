@@ -2,24 +2,24 @@ import type { DiscordApi } from "./discord-api.js";
 import type { DiscordInboundMessage } from "../types/discord.js";
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 
-const TAG = "B2BRouter";
+const TAG = "A2ARouter";
 
-export type B2BMessageTag = "REQUEST" | "RESPONSE" | "STATUS";
+export type A2AMessageTag = "REQUEST" | "RESPONSE" | "STATUS";
 
 const TAG_PATTERN = /^\[(REQUEST|RESPONSE|STATUS)\]\s*/;
 const MAX_QUEUE_SIZE = 50;
 
-export interface B2BRouterConfig {
+export interface A2ARouterConfig {
   discordApi: DiscordApi;
-  b2bChannelId: string;
+  a2aChannelId: string;
   peerBotId: string;
   rateLimitMs: number;
   onPrompt: (sessionKey: string, text: string) => Promise<string>;
 }
 
-export class B2BRouter {
+export class A2ARouter {
   private readonly discordApi: DiscordApi;
-  private readonly b2bChannelId: string;
+  private readonly a2aChannelId: string;
   private readonly peerBotId: string;
   private readonly rateLimitMs: number;
   private readonly onPrompt: (sessionKey: string, text: string) => Promise<string>;
@@ -28,16 +28,16 @@ export class B2BRouter {
   private processingChain: Promise<void> = Promise.resolve();
   private queueSize = 0;
 
-  constructor(config: B2BRouterConfig) {
+  constructor(config: A2ARouterConfig) {
     this.discordApi = config.discordApi;
-    this.b2bChannelId = config.b2bChannelId;
+    this.a2aChannelId = config.a2aChannelId;
     this.peerBotId = config.peerBotId;
     this.rateLimitMs = config.rateLimitMs;
     this.onPrompt = config.onPrompt;
-    logInfo(TAG, `Initialized — peer=${this.peerBotId}, channel=${this.b2bChannelId}, rateLimit=${this.rateLimitMs}ms`);
+    logInfo(TAG, `Initialized — peer=${this.peerBotId}, channel=${this.a2aChannelId}, rateLimit=${this.rateLimitMs}ms`);
   }
 
-  /** Process an inbound Discord message from the B2B channel. */
+  /** Process an inbound Discord message from the A2A channel. */
   async handleMessage(message: DiscordInboundMessage): Promise<void> {
     // Only process messages from the configured peer bot
     if (message.authorId !== this.peerBotId) {
@@ -72,23 +72,23 @@ export class B2BRouter {
     this.queueSize++;
     logDebug(TAG, `Queuing REQUEST (queue size: ${this.queueSize})`);
 
-    const sessionKey = `b2b:${this.b2bChannelId}`;
-    // Reply to the originating channel (thread ID if in a thread, otherwise the B2B channel)
+    const sessionKey = `a2a:${this.a2aChannelId}`;
+    // Reply to the originating channel (thread ID if in a thread, otherwise the A2A channel)
     const replyChannelId = message.channelId;
 
     this.processingChain = this.processingChain.then(async () => {
       try {
         logDebug(TAG, `Processing REQUEST: ${content.substring(0, 80)}…`);
         const response = await this.onPrompt(sessionKey, content);
-        await this.sendToB2B(response, replyChannelId);
+        await this.sendToA2A(response, replyChannelId);
       } catch (err) {
         const description = err instanceof Error ? err.message : String(err);
-        logError(TAG, "Transport error during B2B prompt", err);
+        logError(TAG, "Transport error during A2A prompt", err);
         try {
           const statusMsg = this.formatOutbound("STATUS", `error: ${description}`);
-          await this.sendToB2B(statusMsg, replyChannelId);
+          await this.sendToA2A(statusMsg, replyChannelId);
         } catch (sendErr) {
-          logError(TAG, "Failed to send error status to B2B channel", sendErr);
+          logError(TAG, "Failed to send error status to A2A channel", sendErr);
         }
       } finally {
         this.queueSize--;
@@ -98,12 +98,12 @@ export class B2BRouter {
     await this.processingChain;
   }
 
-  /** Parse a B2B message tag from the message text. Returns tag and content. */
-  parseTag(text: string): { tag: B2BMessageTag; content: string } {
+  /** Parse a A2A message tag from the message text. Returns tag and content. */
+  parseTag(text: string): { tag: A2AMessageTag; content: string } {
     const match = TAG_PATTERN.exec(text);
     if (match) {
       return {
-        tag: match[1] as B2BMessageTag,
+        tag: match[1] as A2AMessageTag,
         content: text.slice(match[0].length),
       };
     }
@@ -111,13 +111,13 @@ export class B2BRouter {
     return { tag: "REQUEST", content: text };
   }
 
-  /** Format an outbound B2B message with the given tag. */
-  formatOutbound(tag: B2BMessageTag, content: string): string {
+  /** Format an outbound A2A message with the given tag. */
+  formatOutbound(tag: A2AMessageTag, content: string): string {
     return `[${tag}] ${content}`;
   }
 
-  /** Send a message to a B2B channel (or thread), respecting rate limits. */
-  async sendToB2B(text: string, targetChannelId?: string): Promise<void> {
+  /** Send a message to a A2A channel (or thread), respecting rate limits. */
+  async sendToA2A(text: string, targetChannelId?: string): Promise<void> {
     const now = Date.now();
     const elapsed = now - this.lastSendTime;
     if (elapsed < this.rateLimitMs) {
@@ -125,7 +125,7 @@ export class B2BRouter {
       logDebug(TAG, `Rate limiting: waiting ${delay}ms`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
-    const channelId = targetChannelId ?? this.b2bChannelId;
+    const channelId = targetChannelId ?? this.a2aChannelId;
     await this.discordApi.sendMessage(channelId, text);
     this.lastSendTime = Date.now();
   }

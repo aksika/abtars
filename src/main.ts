@@ -19,7 +19,7 @@ import { DiscordApi } from "./components/discord-api.js";
 import { DiscordPoller } from "./components/discord-poller.js";
 import { DiscordSecurityGate } from "./components/discord-security-gate.js";
 import { ChannelAdapter } from "./components/channel-adapter.js";
-import { B2BRouter } from "./components/b2b-router.js";
+import { A2ARouter } from "./components/a2a-router.js";
 import type { IKiroTransport } from "./components/kiro-transport.js";
 import { formatReactionSignal } from "./components/reaction-signal.js";
 import { routeReaction } from "./components/reaction-router.js";
@@ -781,16 +781,16 @@ async function main(): Promise<void> {
     );
     const channelAdapter = new ChannelAdapter();
 
-    let b2bRouter: B2BRouter | null = null;
-    if (config.discordB2bEnabled) {
-      b2bRouter = new B2BRouter({
+    let a2aRouter: A2ARouter | null = null;
+    if (config.discordA2aEnabled) {
+      a2aRouter = new A2ARouter({
         discordApi,
-        b2bChannelId: config.discordB2bChannelId!,
-        peerBotId: config.discordB2bPeerBotId!,
-        rateLimitMs: config.discordB2bRateLimitMs,
+        a2aChannelId: config.discordA2aChannelId!,
+        peerBotId: config.discordA2aPeerBotId!,
+        rateLimitMs: config.discordA2aRateLimitMs,
         onPrompt: (sessionKey, text) => transport.sendPrompt(sessionKey, interceptLargeMessage(text).text),
       });
-      logInfo("main", `🤝 B2B router enabled (channel=${config.discordB2bChannelId})`);
+      logInfo("main", `🤝 A2A router enabled (channel=${config.discordA2aChannelId})`);
     }
 
     const handleDiscordMessage = async (message: DiscordInboundMessage): Promise<void> => {
@@ -821,10 +821,10 @@ async function main(): Promise<void> {
       // Include sender context so Kiro knows who's talking
       const senderPrefix = `[${message.authorUsername}${message.authorIsBot ? " (bot)" : ""}] in #${message.channelName ?? "unknown"}: `;
 
-      // B2B routing — peer bot messages in the B2B channel go through the B2B router
-      if (b2bRouter && message.authorIsBot && effectiveChannelId === config.discordB2bChannelId) {
+      // A2A routing — peer bot messages in the A2A channel go through the A2A router
+      if (a2aRouter && message.authorIsBot && effectiveChannelId === config.discordA2aChannelId) {
         const cleanedMessage = { ...message, content: text };
-        await b2bRouter.handleMessage(cleanedMessage);
+        await a2aRouter.handleMessage(cleanedMessage);
         return;
       }
 
@@ -833,7 +833,7 @@ async function main(): Promise<void> {
       const dcReply: Reply = (msg) => discordApi.sendMessage(message.channelId, msg);
       const dcCmdCtx: CommandContext = {
         sessionKey, chatId: discordChatId, platform: "discord", reply: dcReply,
-        transport, codingTransport, config: { ...config, discordA2aEnabled: config.discordB2bEnabled, discordA2aChannelId: config.discordB2bChannelId },
+        transport, codingTransport, config: { ...config, discordA2aEnabled: config.discordA2aEnabled, discordA2aChannelId: config.discordA2aChannelId },
         startedAt,
         memory, memoryConfig, nlmConfig,
         busyChats, codingMode, fullModeChats, pendingSessionStart, idleSaveTimers,

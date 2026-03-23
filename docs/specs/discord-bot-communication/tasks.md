@@ -2,7 +2,7 @@
 
 ## Overview
 
-Extend AgentBridge to support Discord as a second messaging platform alongside Telegram, introduce a ChannelAdapter abstraction for platform-agnostic message routing, and add bot-to-bot (B2B) communication with Molty via a dedicated Discord channel. Implementation proceeds bottom-up: shared interfaces first, then Discord components, then B2B, then wiring in main.ts.
+Extend AgentBridge to support Discord as a second messaging platform alongside Telegram, introduce a ChannelAdapter abstraction for platform-agnostic message routing, and add bot-to-bot (A2A) communication with Molty via a dedicated Discord channel. Implementation proceeds bottom-up: shared interfaces first, then Discord components, then A2A, then wiring in main.ts.
 
 ## Tasks
 
@@ -26,9 +26,9 @@ Extend AgentBridge to support Discord as a second messaging platform alongside T
   - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 3. Extend Config for Discord environment variables
-  - [x] 3.1 Add Discord fields to `Config` type in `src/types/config.ts` — add `discordBotToken?`, `discordAllowedUserIds?: Set<string>`, `discordAllowedChannelIds?: Set<string>`, `discordB2bChannelId?`, `discordB2bPeerBotId?`, `discordB2bRateLimitMs: number`, `discordEnabled: boolean`, `discordB2bEnabled: boolean` and update `CONFIG_DEFAULTS`
+  - [x] 3.1 Add Discord fields to `Config` type in `src/types/config.ts` — add `discordBotToken?`, `discordAllowedUserIds?: Set<string>`, `discordAllowedChannelIds?: Set<string>`, `discordA2aChannelId?`, `discordA2aPeerBotId?`, `discordA2aRateLimitMs: number`, `discordEnabled: boolean`, `discordA2aEnabled: boolean` and update `CONFIG_DEFAULTS`
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
-  - [x] 3.2 Add Discord config loading and validation to `loadAndValidateConfig()` in `src/components/config.ts` — parse `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_USER_IDS` (comma-separated snowflakes), `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_B2B_CHANNEL_ID`, `DISCORD_B2B_PEER_BOT_ID`, `DISCORD_B2B_RATE_LIMIT_MS`; validate snowflake format with `/^\d{17,20}$/`; enforce that `DISCORD_ALLOWED_USER_IDS` is non-empty when token is set; enforce `DISCORD_B2B_PEER_BOT_ID` is set when `DISCORD_B2B_CHANNEL_ID` is set; derive `discordEnabled` and `discordB2bEnabled` booleans
+  - [x] 3.2 Add Discord config loading and validation to `loadAndValidateConfig()` in `src/components/config.ts` — parse `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_USER_IDS` (comma-separated snowflakes), `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_A2A_CHANNEL_ID`, `DISCORD_A2A_PEER_BOT_ID`, `DISCORD_A2A_RATE_LIMIT_MS`; validate snowflake format with `/^\d{17,20}$/`; enforce that `DISCORD_ALLOWED_USER_IDS` is non-empty when token is set; enforce `DISCORD_A2A_PEER_BOT_ID` is set when `DISCORD_A2A_CHANNEL_ID` is set; derive `discordEnabled` and `discordA2aEnabled` booleans
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
   - [ ]* 3.3 Write property test for Discord snowflake validation (Property 11)
     - **Property 11: Discord snowflake validation**
@@ -38,7 +38,7 @@ Extend AgentBridge to support Discord as a second messaging platform alongside T
   - [ ]* 3.4 Write unit tests for Discord config validation in `src/components/config.test.ts`
     - Test: Discord disabled when `DISCORD_BOT_TOKEN` absent
     - Test: Startup fails when token present but `DISCORD_ALLOWED_USER_IDS` empty
-    - Test: Startup fails when `DISCORD_B2B_CHANNEL_ID` set without `DISCORD_B2B_PEER_BOT_ID`
+    - Test: Startup fails when `DISCORD_A2A_CHANNEL_ID` set without `DISCORD_A2A_PEER_BOT_ID`
     - Test: Invalid snowflake format causes startup failure
     - Test: Valid full Discord config parses correctly
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
@@ -114,25 +114,25 @@ Extend AgentBridge to support Discord as a second messaging platform alongside T
 - [x] 9. Checkpoint — Ensure all new components compile and tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [x] 10. Implement B2BRouter
-  - [x] 10.1 Create `B2BRouter` class in `src/components/b2b-router.ts` — constructor takes `{ discordApi, b2bChannelId, peerBotId, rateLimitMs, onPrompt }`; implement `handleMessage(message)` that validates author is the peer bot, parses tag, routes `[REQUEST]` to transport, sends `[RESPONSE]` back; implement `parseTag(text)` returning `{ tag, content }` with `REQUEST` as default; implement `formatOutbound(tag, content)` returning `[TAG] content`; implement `sendToB2B(text)` with rate limiting (tracks last send time, delays if needed); implement sequential message queue (no two prompts in-flight simultaneously); send `[STATUS] error: <description>` on transport errors
+- [x] 10. Implement A2ARouter
+  - [x] 10.1 Create `A2ARouter` class in `src/components/a2a-router.ts` — constructor takes `{ discordApi, a2aChannelId, peerBotId, rateLimitMs, onPrompt }`; implement `handleMessage(message)` that validates author is the peer bot, parses tag, routes `[REQUEST]` to transport, sends `[RESPONSE]` back; implement `parseTag(text)` returning `{ tag, content }` with `REQUEST` as default; implement `formatOutbound(tag, content)` returning `[TAG] content`; implement `sendToA2A(text)` with rate limiting (tracks last send time, delays if needed); implement sequential message queue (no two prompts in-flight simultaneously); send `[STATUS] error: <description>` on transport errors
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 7.1, 7.2, 7.3, 7.4, 7.5, 8.4, 8.5_
-  - [ ]* 10.2 Write property test for B2B peer bot identification (Property 7)
-    - **Property 7: B2B peer bot identification**
-    - For any message in the B2B channel, the router processes it iff the author's bot user ID matches `peerBotId`
-    - Create `src/components/b2b-router.property.test.ts`
+  - [ ]* 10.2 Write property test for A2A peer bot identification (Property 7)
+    - **Property 7: A2A peer bot identification**
+    - For any message in the A2A channel, the router processes it iff the author's bot user ID matches `peerBotId`
+    - Create `src/components/a2a-router.property.test.ts`
     - **Validates: Requirements 6.2, 6.5**
-  - [ ]* 10.3 Write property test for B2B tag protocol round-trip (Property 8)
-    - **Property 8: B2B tag protocol round-trip**
+  - [ ]* 10.3 Write property test for A2A tag protocol round-trip (Property 8)
+    - **Property 8: A2A tag protocol round-trip**
     - For any tag and content, `formatOutbound` then `parseTag` returns the original tag and content; untagged messages default to `REQUEST`
-    - Add to `src/components/b2b-router.property.test.ts`
+    - Add to `src/components/a2a-router.property.test.ts`
     - **Validates: Requirements 7.1, 7.2, 7.3, 7.5**
-  - [ ]* 10.4 Write property test for B2B outbound rate limiting (Property 10)
-    - **Property 10: B2B outbound rate limiting**
-    - For any sequence of outbound messages, elapsed time between consecutive `sendToB2B()` calls is >= `rateLimitMs`
-    - Add to `src/components/b2b-router.property.test.ts`
+  - [ ]* 10.4 Write property test for A2A outbound rate limiting (Property 10)
+    - **Property 10: A2A outbound rate limiting**
+    - For any sequence of outbound messages, elapsed time between consecutive `sendToA2A()` calls is >= `rateLimitMs`
+    - Add to `src/components/a2a-router.property.test.ts`
     - **Validates: Requirements 8.5**
-  - [ ]* 10.5 Write unit tests for B2BRouter in `src/components/b2b-router.test.ts`
+  - [ ]* 10.5 Write unit tests for A2ARouter in `src/components/a2a-router.test.ts`
     - Test: Ignores messages from non-peer bots
     - Test: Routes `[REQUEST]` to transport and sends `[RESPONSE]` back
     - Test: Untagged messages treated as `[REQUEST]`
@@ -141,7 +141,7 @@ Extend AgentBridge to support Discord as a second messaging platform alongside T
     - _Requirements: 6.2, 6.5, 7.1, 7.2, 7.3, 7.4, 7.5, 8.4_
 
 - [x] 11. Wire Discord components into main.ts
-  - [x] 11.1 Update `main.ts` to conditionally create Discord components — when `config.discordEnabled`, instantiate `DiscordApi`, `DiscordSecurityGate`, `DiscordPoller`, and `ChannelAdapter`; when `config.discordB2bEnabled`, instantiate `B2BRouter`; wire Discord message handler: DiscordPoller → DiscordSecurityGate → ChannelAdapter → shared message handler (using `BridgeMessage`); wire B2B: DiscordPoller dispatches B2B channel messages to `B2BRouter.handleMessage`; support `/new`, `/reset`, `/status`, `/b2b-reset` commands from Discord; use `ResponseFormatter.chunkForPlatform` for Discord responses; update `busyChats` to use platform-prefixed session keys
+  - [x] 11.1 Update `main.ts` to conditionally create Discord components — when `config.discordEnabled`, instantiate `DiscordApi`, `DiscordSecurityGate`, `DiscordPoller`, and `ChannelAdapter`; when `config.discordA2aEnabled`, instantiate `A2ARouter`; wire Discord message handler: DiscordPoller → DiscordSecurityGate → ChannelAdapter → shared message handler (using `BridgeMessage`); wire A2A: DiscordPoller dispatches A2A channel messages to `A2ARouter.handleMessage`; support `/new`, `/reset`, `/status`, `/a2a-reset` commands from Discord; use `ResponseFormatter.chunkForPlatform` for Discord responses; update `busyChats` to use platform-prefixed session keys
     - _Requirements: 1.1, 1.2, 2.2, 2.3, 3.1, 3.2, 3.3, 3.4, 3.5, 6.1, 8.3, 10.1, 10.3_
   - [x] 11.2 Update shutdown handler in `main.ts` — on SIGINT/SIGTERM, stop both `TelegramPoller` and `DiscordPoller` (if active), then destroy transport
     - _Requirements: 1.4, 10.3_
@@ -152,7 +152,7 @@ Extend AgentBridge to support Discord as a second messaging platform alongside T
   - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 13. Update .env.example and documentation
-  - [x] 13.1 Add Discord environment variables to `.env.example` — add `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_USER_IDS`, `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_B2B_CHANNEL_ID`, `DISCORD_B2B_PEER_BOT_ID`, `DISCORD_B2B_RATE_LIMIT_MS` with descriptive comments
+  - [x] 13.1 Add Discord environment variables to `.env.example` — add `DISCORD_BOT_TOKEN`, `DISCORD_ALLOWED_USER_IDS`, `DISCORD_ALLOWED_CHANNEL_IDS`, `DISCORD_A2A_CHANNEL_ID`, `DISCORD_A2A_PEER_BOT_ID`, `DISCORD_A2A_RATE_LIMIT_MS` with descriptive comments
     - _Requirements: 9.1, 9.2, 9.3, 9.4_
 
 - [x] 14. Final checkpoint — Ensure all tests pass and project compiles cleanly

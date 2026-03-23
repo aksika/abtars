@@ -2,7 +2,7 @@
 
 ## Introduction
 
-This document defines the requirements for adding Discord as a communication channel to AgentBridge, alongside the existing Telegram integration. The feature introduces a Discord bot that receives messages from Discord channels and routes them to Kiro CLI via the existing transport layer (tmux or ACP). Additionally, it enables bot-to-bot (B2B) communication so that this AgentBridge instance can exchange messages with "Molty" — another AgentBridge/openclaw instance running on a separate machine (Mac). Bot-to-bot communication uses a dedicated Discord channel where both bots can read and write, enabling collaborative agent workflows.
+This document defines the requirements for adding Discord as a communication channel to AgentBridge, alongside the existing Telegram integration. The feature introduces a Discord bot that receives messages from Discord channels and routes them to Kiro CLI via the existing transport layer (tmux or ACP). Additionally, it enables bot-to-bot (A2A) communication so that this AgentBridge instance can exchange messages with "Molty" — another AgentBridge/openclaw instance running on a separate machine (Mac). Bot-to-bot communication uses a dedicated Discord channel where both bots can read and write, enabling collaborative agent workflows.
 
 ## Glossary
 
@@ -11,8 +11,8 @@ This document defines the requirements for adding Discord as a communication cha
 - **Discord_Poller**: The component that listens for Discord messages via the Gateway WebSocket connection and dispatches them to the message handler
 - **Discord_Security_Gate**: The component that enforces an allowed-user and allowed-channel whitelist for Discord messages
 - **Session_Manager**: The existing component that maps channel-specific chat identifiers to ACP sessions and manages session lifecycle
-- **B2B_Channel**: A dedicated Discord text channel where two bot instances (this Bridge and Molty) exchange messages for collaborative agent workflows
-- **B2B_Router**: The component that detects inbound bot messages on the B2B_Channel, determines if they require a response, and routes them to the transport layer
+- **A2A_Channel**: A dedicated Discord text channel where two bot instances (this Bridge and Molty) exchange messages for collaborative agent workflows
+- **A2A_Router**: The component that detects inbound bot messages on the A2A_Channel, determines if they require a response, and routes them to the transport layer
 - **Molty**: A remote AgentBridge/openclaw agent instance running on a Mac, identified by its Discord bot user ID
 - **Channel_Adapter**: An abstraction layer that normalizes messages from different platforms (Telegram, Discord) into a common internal format before routing to the transport layer
 - **Response_Formatter**: The existing component that formats Kiro responses for delivery, extended to support Discord's 2000-character message limit and Discord Markdown
@@ -86,11 +86,11 @@ This document defines the requirements for adding Discord as a communication cha
 
 #### Acceptance Criteria
 
-1. WHEN the Bridge starts and `DISCORD_B2B_CHANNEL_ID` is configured, THE B2B_Router SHALL monitor the specified Discord channel for inbound messages from Molty
-2. WHEN Molty sends a message in the B2B_Channel, THE B2B_Router SHALL identify the message as a bot-to-bot message by matching the author's bot user ID against `DISCORD_B2B_PEER_BOT_ID`
-3. WHEN a bot-to-bot message is received from Molty, THE B2B_Router SHALL route the message content to the transport layer using a dedicated B2B session key
-4. WHEN the transport layer returns a response to a B2B prompt, THE B2B_Router SHALL send the response back to the B2B_Channel as a Discord message
-5. THE B2B_Router SHALL ignore messages from bots other than the configured peer bot ID in the B2B_Channel
+1. WHEN the Bridge starts and `DISCORD_A2A_CHANNEL_ID` is configured, THE A2A_Router SHALL monitor the specified Discord channel for inbound messages from Molty
+2. WHEN Molty sends a message in the A2A_Channel, THE A2A_Router SHALL identify the message as a bot-to-bot message by matching the author's bot user ID against `DISCORD_A2A_PEER_BOT_ID`
+3. WHEN a bot-to-bot message is received from Molty, THE A2A_Router SHALL route the message content to the transport layer using a dedicated A2A session key
+4. WHEN the transport layer returns a response to a A2A prompt, THE A2A_Router SHALL send the response back to the A2A_Channel as a Discord message
+5. THE A2A_Router SHALL ignore messages from bots other than the configured peer bot ID in the A2A_Channel
 
 ### Requirement 7: Bot-to-Bot Message Protocol
 
@@ -98,23 +98,23 @@ This document defines the requirements for adding Discord as a communication cha
 
 #### Acceptance Criteria
 
-1. THE B2B_Router SHALL use a simple text-based message protocol where messages are prefixed with a tag: `[REQUEST]`, `[RESPONSE]`, or `[STATUS]`
-2. WHEN a `[REQUEST]` message is received from Molty, THE B2B_Router SHALL extract the request content and route it to the transport layer as a prompt
-3. WHEN the transport layer completes a B2B prompt, THE B2B_Router SHALL prefix the response with `[RESPONSE]` before sending it to the B2B_Channel
-4. WHEN the B2B session encounters an error, THE B2B_Router SHALL send a `[STATUS] error: <description>` message to the B2B_Channel
-5. IF a B2B message does not contain a recognized tag prefix, THEN THE B2B_Router SHALL treat the message as a `[REQUEST]` by default
+1. THE A2A_Router SHALL use a simple text-based message protocol where messages are prefixed with a tag: `[REQUEST]`, `[RESPONSE]`, or `[STATUS]`
+2. WHEN a `[REQUEST]` message is received from Molty, THE A2A_Router SHALL extract the request content and route it to the transport layer as a prompt
+3. WHEN the transport layer completes a A2A prompt, THE A2A_Router SHALL prefix the response with `[RESPONSE]` before sending it to the A2A_Channel
+4. WHEN the A2A session encounters an error, THE A2A_Router SHALL send a `[STATUS] error: <description>` message to the A2A_Channel
+5. IF a A2A message does not contain a recognized tag prefix, THEN THE A2A_Router SHALL treat the message as a `[REQUEST]` by default
 
 ### Requirement 8: Bot-to-Bot Session Management
 
-**User Story:** As a developer, I want B2B conversations to have their own Kiro session, so that bot-to-bot work does not interfere with human user sessions.
+**User Story:** As a developer, I want A2A conversations to have their own Kiro session, so that bot-to-bot work does not interfere with human user sessions.
 
 #### Acceptance Criteria
 
-1. THE Session_Manager SHALL maintain a separate Kiro session for the B2B_Channel, isolated from human user sessions
-2. WHEN the first B2B message is received, THE Session_Manager SHALL create a dedicated ACP session for bot-to-bot communication
-3. WHEN a human user sends `/b2b-reset` in any authorized channel, THE Session_Manager SHALL destroy and recreate the B2B session
-4. WHILE a B2B prompt is being processed, THE B2B_Router SHALL queue subsequent B2B messages and process them sequentially
-5. THE B2B_Router SHALL apply a configurable rate limit (`DISCORD_B2B_RATE_LIMIT_MS`, default 5000ms) between outbound B2B messages to prevent message flooding
+1. THE Session_Manager SHALL maintain a separate Kiro session for the A2A_Channel, isolated from human user sessions
+2. WHEN the first A2A message is received, THE Session_Manager SHALL create a dedicated ACP session for bot-to-bot communication
+3. WHEN a human user sends `/a2a-reset` in any authorized channel, THE Session_Manager SHALL destroy and recreate the A2A session
+4. WHILE a A2A prompt is being processed, THE A2A_Router SHALL queue subsequent A2A messages and process them sequentially
+5. THE A2A_Router SHALL apply a configurable rate limit (`DISCORD_A2A_RATE_LIMIT_MS`, default 5000ms) between outbound A2A messages to prevent message flooding
 
 ### Requirement 9: Discord Configuration
 
@@ -125,7 +125,7 @@ This document defines the requirements for adding Discord as a communication cha
 1. WHEN the Bridge starts, THE Bridge SHALL treat Discord as an optional channel — if `DISCORD_BOT_TOKEN` is not set, Discord features SHALL be disabled and the Bridge SHALL operate with Telegram only
 2. WHEN `DISCORD_BOT_TOKEN` is set, THE Bridge SHALL validate that `DISCORD_ALLOWED_USER_IDS` contains at least one valid Discord user ID (snowflake format)
 3. WHEN `DISCORD_BOT_TOKEN` is set, THE Bridge SHALL validate that `DISCORD_ALLOWED_CHANNEL_IDS` contains at least one valid Discord channel ID
-4. WHEN `DISCORD_B2B_CHANNEL_ID` is set, THE Bridge SHALL validate that `DISCORD_B2B_PEER_BOT_ID` is also set and is a valid Discord snowflake ID
+4. WHEN `DISCORD_A2A_CHANNEL_ID` is set, THE Bridge SHALL validate that `DISCORD_A2A_PEER_BOT_ID` is also set and is a valid Discord snowflake ID
 5. IF any required Discord configuration value is present but invalid, THEN THE Bridge SHALL refuse to start and log a descriptive error identifying the invalid configuration
 
 ### Requirement 10: Multi-Channel Coexistence

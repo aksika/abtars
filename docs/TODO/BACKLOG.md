@@ -200,7 +200,7 @@ Consolidated tweet-feed script + AI-news browse agent into 1 agent cron entry. P
 
 Extracted all chat command handlers from main.ts into `src/components/command-handlers.ts`. Single module for Telegram + Discord — 840 lines removed from main.ts. Platform-specific commands check `ctx.platform` internally.
 
-Removed: /ingest, /reflect, /reembed, /forget (memories only come from conversations/agent work, not manual injection). Merged /mcporter into /status. Renamed /b2b-reset to /a2a-reset. Discord gained /coding, /stop, /cancel, /facts.
+Removed: /ingest, /reflect, /reembed, /forget (memories only come from conversations/agent work, not manual injection). Merged /mcporter into /status. Renamed /a2a-reset to /a2a-reset. Discord gained /coding, /stop, /cancel, /facts.
 
 ## 33. Email Digest via Google Workspace CLI
 
