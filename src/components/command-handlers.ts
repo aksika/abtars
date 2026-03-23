@@ -165,7 +165,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     let listing: string;
     try {
       const raw = execSync("agentbridge-cron list", { timeout: 5000, encoding: "utf-8" }).trim();
-      const entries = JSON.parse(raw);
+      const entries = JSON.parse(raw).entries ?? JSON.parse(raw);
       const active = entries.filter((e: any) => !e.fired && !e.paused);
       const lines = active.map((e: any) => {
         const sched = e.schedule ?? "one-shot";
