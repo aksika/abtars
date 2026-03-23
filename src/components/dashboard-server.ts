@@ -338,6 +338,8 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
     const line = allLines[i]!;
     // Format: 2026-03-23T19:20:10.123Z INFO  [tag] message
     const ts = line.slice(0, 24);
+    // Skip lines that don't start with a timestamp (stack traces, continuations)
+    if (ts.length < 24 || ts[4] !== "-" || ts[10] !== "T") continue;
     if (ts < cutoffIso) break; // lines are chronological, stop early
 
     if (levelFilter.length > 0) {
@@ -346,7 +348,7 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
     }
     filtered.push(line);
   }
-  return filtered.reverse(); // chronological order
+  return filtered.reverse();
 }
 
 // ── Cron Control ────────────────────────────────────────────────────────────
