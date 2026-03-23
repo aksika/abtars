@@ -136,7 +136,17 @@ if [ -f "$HB_FILE" ]; then
   fi
 fi
 
-# 11. Full fixes (--fix-full only)
+# 11. Core files size check (should be ≤10 non-empty lines each)
+for f in "$AB/memory/core/user_profile.md" "$AB/memory/core/agent_notes.md"; do
+  if [ -f "$f" ]; then
+    LINES=$(grep -c '[^[:space:]]' "$f")
+    if [ "$LINES" -gt 15 ]; then
+      warn "$(basename "$f") has $LINES non-empty lines (limit: 10) — Dreamy may have overgrown it"
+    fi
+  fi
+done
+
+# 12. Full fixes (--fix-full only)
 if $FIX_FULL && [ -f "$DB" ]; then
   sqlite3 "$DB" "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt messages_fts index"
   sqlite3 "$DB" "INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt extracted_memories_fts index"
