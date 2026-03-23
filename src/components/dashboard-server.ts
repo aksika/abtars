@@ -7,6 +7,9 @@
  */
 
 import * as http from "node:http";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { homedir } from "node:os";
 import type { Socket } from "node:net";
 import { WebSocketServer } from "ws";
 import type { DashboardConfig, StatusSnapshot } from "./dashboard-config.js";
@@ -20,6 +23,8 @@ import { logInfo, logError } from "./logger.js";
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const TAG = "dashboard-server";
+const LOG_FILE = resolve(homedir(), ".agentbridge", "logs", "bridge.log");
+const CRON_FILE = resolve(homedir(), ".agentbridge", "memory", "cron.json");
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -202,6 +207,42 @@ export class DashboardServer {
         return;
       }
 
+      // GET /api/logs — auth gate → read bridge.log (last 24h, optional level filter)
+      if (method === "GET" && pathname === "/api/logs") {
+        if (!this.deps.authGate.guard(req, res)) return;
+
+        const qIdx = url.indexOf("?");
+        const params = qIdx !== -1 ? new URLSearchParams(url.slice(qIdx)) : new URLSearchParams();
+        const levelFilter = params.get("level")?.split(",") ?? [];
+        const limit = Math.min(parseInt(params.get("limit") ?? "500", 10) || 500, 2000);
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+
+        try {
+          const lines = readLogLines(cutoff, levelFilter, limit);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, lines }));
+        } catch (err) {
+          this.sendError(res, 500, err);
+        }
+        return;
+      }
+
+      // POST /api/cron/:id/pause|resume|trigger — auth gate → cron control
+      const cronMatch = method === "POST" && pathname?.match(/^\/api\/cron\/([^/]+)\/(pause|resume|trigger)$/);
+      if (cronMatch) {
+        if (!this.deps.authGate.guard(req, res)) return;
+
+        const [, id, action] = cronMatch;
+        try {
+          const result = handleCronAction(id!, action!);
+          res.writeHead(result.ok ? 200 : 404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          this.sendError(res, 500, err);
+        }
+        return;
+      }
+
       // Unknown route → 404
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Not found" }));
@@ -282,4 +323,50 @@ export class DashboardServer {
       res.end(JSON.stringify({ error: message }));
     }
   }
+}
+
+// ── Log Reader ──────────────────────────────────────────────────────────────
+
+function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): string[] {
+  if (!existsSync(LOG_FILE)) return [];
+  const content = readFileSync(LOG_FILE, "utf-8");
+  const allLines = content.split("\n").filter((l) => l.length > 0);
+  const cutoffIso = new Date(cutoffMs).toISOString();
+
+  const filtered: string[] = [];
+  for (let i = allLines.length - 1; i >= 0 && filtered.length < limit; i--) {
+    const line = allLines[i]!;
+    // Format: 2026-03-23T19:20:10.123Z INFO  [tag] message
+    const ts = line.slice(0, 24);
+    if (ts < cutoffIso) break; // lines are chronological, stop early
+
+    if (levelFilter.length > 0) {
+      const level = line.slice(25, 30).trim().toLowerCase();
+      if (!levelFilter.includes(level)) continue;
+    }
+    filtered.push(line);
+  }
+  return filtered.reverse(); // chronological order
+}
+
+// ── Cron Control ────────────────────────────────────────────────────────────
+
+function handleCronAction(id: string, action: string): { ok: boolean; error?: string } {
+  if (!existsSync(CRON_FILE)) return { ok: false, error: "cron.json not found" };
+  const entries = JSON.parse(readFileSync(CRON_FILE, "utf-8")) as Array<Record<string, unknown>>;
+  const entry = entries.find((e) => e.id === id);
+  if (!entry) return { ok: false, error: `Entry ${id} not found` };
+
+  if (action === "pause") {
+    entry.paused = true;
+  } else if (action === "resume") {
+    delete entry.paused;
+  } else if (action === "trigger") {
+    entry.fireAt = Date.now() - 1000; // set to past so next cron tick picks it up
+    delete entry.paused;
+    entry.fired = false;
+  }
+
+  writeFileSync(CRON_FILE, JSON.stringify(entries, null, 2), "utf-8");
+  return { ok: true };
 }

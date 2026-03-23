@@ -53,6 +53,9 @@ export function validateDashboardConfig(
 
 // ── Data Models ─────────────────────────────────────────────────────────────
 
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { homedir } from "node:os";
 import type { TrafficEntry } from "./agent-api-server.js";
 
 export type StatusSnapshot = {
@@ -62,8 +65,21 @@ export type StatusSnapshot = {
   transport: TransportStatus;
   memory: MemoryStatus;
   heartbeat: HeartbeatStatus;
+  cron: CronEntryStatus[];
   notebooklm: { enabled: boolean } | null;
   agentApi: { traffic: TrafficEntry[] } | null;
+};
+
+export type CronEntryStatus = {
+  id: string;
+  label: string;
+  schedule: string;
+  executor: "agent" | "script";
+  fireAt: number;
+  paused: boolean;
+  lastRanAt?: number;
+  lastExitCode?: number | null;
+  priority?: "high";
 };
 
 export type PlatformStates = {
@@ -206,9 +222,41 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     transport,
     memory,
     heartbeat,
+    cron: readCronStatus(),
     notebooklm: refs.notebooklm ? { enabled: true } : null,
     agentApi: refs.agentApi ? { traffic: refs.agentApi.getTrafficLog() } : null,
   };
+}
+
+const CRON_FILE = resolve(homedir(), ".agentbridge", "memory", "cron.json");
+
+function readCronStatus(): CronEntryStatus[] {
+  try {
+    if (!existsSync(CRON_FILE)) return [];
+    const raw = JSON.parse(readFileSync(CRON_FILE, "utf-8")) as Array<Record<string, unknown>>;
+    return raw
+      .filter((e) => e.schedule)
+      .map((e) => {
+        const msg = String(e.message ?? "");
+        const firstLine = msg.split("\n")[0] ?? "";
+        const label = firstLine.length > 60 ? firstLine.slice(0, 57) + "..." : firstLine;
+        const hist = Array.isArray(e.history) ? e.history : [];
+        const last = hist.length > 0 ? (hist[hist.length - 1] as { exitCode?: number }) : undefined;
+        return {
+          id: String(e.id),
+          label: label || String(e.id),
+          schedule: String(e.schedule),
+          executor: (e.executor as "agent" | "script") ?? "script",
+          fireAt: Number(e.fireAt ?? 0),
+          paused: Boolean(e.paused),
+          lastRanAt: e.lastRanAt ? Number(e.lastRanAt) : undefined,
+          lastExitCode: last?.exitCode ?? null,
+          ...(e.priority === "high" ? { priority: "high" as const } : {}),
+        };
+      });
+  } catch {
+    return [];
+  }
 }
 
 // ── Utility Functions ───────────────────────────────────────────────────────

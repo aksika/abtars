@@ -63,15 +63,18 @@ ${getHeaderHtml(logoBase64)}
   Connection lost. Reconnecting<span id="reconnect-dots">...</span>
 </div>
 <div class="dashboard-layout">
+<div class="main-area">
 <main class="grid">
   ${getBridgeHealthCard()}
   ${getPlatformsCard(agentHtml)}
-  ${getTransportCard()}
   ${getMemoryCard()}
+  ${getCronCard()}
   ${getHeartbeatCard()}
 </main>
 ${getSearchPanel()}
 ${getA2APanel()}
+</div>
+${getLogPanel()}
 </div>
 <script>
 ${formatBytesHelper()}
@@ -97,8 +100,16 @@ body {
 
 .dashboard-layout {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   height: calc(100vh - 69px);
+}
+
+.main-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
 }
 
 header {
@@ -482,8 +493,85 @@ header h1 {
 .a2a-body .a2a-meta { color: #555; font-size: 0.7rem; }
 .a2a-empty { color: #555; text-align: center; padding: 40px; }
 
+/* Log Panel */
+.log-panel {
+  width: 400px;
+  flex-shrink: 0;
+  background: #16213e;
+  border-left: 1px solid #0f3460;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.log-panel-header {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid #0f3460;
+  flex-shrink: 0;
+}
+.log-panel-header h2 {
+  font-size: 1rem;
+  color: #a0c4ff;
+  margin-bottom: 8px;
+}
+.log-level-filters {
+  display: flex;
+  gap: 6px;
+}
+.log-level-btn {
+  padding: 3px 10px;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  background: transparent;
+  color: #9e9e9e;
+  cursor: pointer;
+  font-size: 0.75rem;
+  transition: all 0.2s;
+}
+.log-level-btn.active { background: #0f3460; color: #a0c4ff; border-color: #a0c4ff; }
+.log-level-btn.lvl-error.active { background: rgba(244,67,54,0.2); color: #f44336; border-color: #f44336; }
+.log-level-btn.lvl-warn.active { background: rgba(255,152,0,0.2); color: #ff9800; border-color: #ff9800; }
+.log-entries {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+.log-line { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
+.log-line.info { color: #9e9e9e; }
+.log-line.warn { color: #ff9800; }
+.log-line.error { color: #f44336; }
+.log-line.debug { color: #666; }
+
+/* Cron Card */
+.cron-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  font-size: 0.82rem;
+}
+.cron-entry .cron-info { flex: 1; min-width: 0; }
+.cron-entry .cron-label { color: #e0e0e0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cron-entry .cron-meta { font-size: 0.7rem; color: #7e7e9e; margin-top: 2px; }
+.cron-entry .cron-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: 8px; }
+.cron-entry .cron-actions button {
+  padding: 3px 8px;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  font-weight: 500;
+}
+.badge.paused { background: rgba(255,152,0,0.2); color: #ff9800; }
+.badge.high { background: rgba(244,67,54,0.15); color: #ff6b6b; font-size: 0.65rem; }
+
 /* Responsive */
 @media (max-width: 768px) {
+  .dashboard-layout { flex-direction: column; }
+  .log-panel { width: 100%; height: 300px; border-left: none; border-top: 1px solid #0f3460; }
   .grid {
     grid-template-columns: 1fr;
     padding: 12px;
@@ -624,10 +712,6 @@ function getPlatformsCard(agentHtml: string): string {
 </div>`;
 }
 
-function getTransportCard(): string {
-  return '';
-}
-
 function getMemoryCard(): string {
   return `
 <div class="card" id="card-memory">
@@ -664,7 +748,39 @@ function getMemoryCard(): string {
 }
 
 function getHeartbeatCard(): string {
-  return '';
+  return `
+<div class="card" id="card-heartbeat">
+  <h2>Heartbeat Tasks</h2>
+  <div id="hb-tasks">
+    <div style="color:#666;font-size:0.82rem;">Loading...</div>
+  </div>
+</div>`;
+}
+
+function getCronCard(): string {
+  return `
+<div class="card" id="card-cron">
+  <h2>Scheduled Tasks</h2>
+  <div id="cron-entries">
+    <div style="color:#666;font-size:0.82rem;">Loading...</div>
+  </div>
+</div>`;
+}
+
+function getLogPanel(): string {
+  return `
+<div class="log-panel">
+  <div class="log-panel-header">
+    <h2>📋 Log (24h)</h2>
+    <div class="log-level-filters">
+      <button class="log-level-btn lvl-info active" onclick="toggleLogLevel('info')">info</button>
+      <button class="log-level-btn lvl-warn active" onclick="toggleLogLevel('warn')">warn</button>
+      <button class="log-level-btn lvl-error active" onclick="toggleLogLevel('error')">error</button>
+      <button class="log-level-btn lvl-debug" onclick="toggleLogLevel('debug')">debug</button>
+    </div>
+  </div>
+  <div class="log-entries" id="log-entries"></div>
+</div>`;
 }
 
 function getSearchPanel(): string {
@@ -888,6 +1004,23 @@ function getScript(): string {
 
       el = document.getElementById('hb-interval');
       if (el) el.textContent = snap.heartbeat.intervalMs ? (snap.heartbeat.intervalMs / 1000) + 's' : '—';
+
+      // Heartbeat task list
+      var hbTasks = document.getElementById('hb-tasks');
+      if (hbTasks && snap.heartbeat.taskNames) {
+        if (snap.heartbeat.taskNames.length === 0) {
+          hbTasks.innerHTML = '<div style="color:#666;font-size:0.82rem;">No tasks registered</div>';
+        } else {
+          hbTasks.innerHTML = snap.heartbeat.taskNames.map(function(name) {
+            return '<div class="stat-row"><span class="stat-label">' + escHtml(name) + '</span><span class="stat-value"><span class="indicator ' + (snap.heartbeat.running ? 'green' : 'yellow') + '"></span></span></div>';
+          }).join('');
+        }
+      }
+    }
+
+    // Cron entries
+    if (snap.cron) {
+      updateCronPanel(snap.cron);
     }
 
     // A2A Traffic
@@ -1152,6 +1285,87 @@ function getScript(): string {
     }
     return selected;
   }
+
+  // ── Cron Panel ──────────────────────────────────────────────────────
+  function updateCronPanel(entries) {
+    var container = document.getElementById('cron-entries');
+    if (!container) return;
+    if (!entries || entries.length === 0) {
+      container.innerHTML = '<div style="color:#666;font-size:0.82rem;">No scheduled tasks</div>';
+      return;
+    }
+    container.innerHTML = entries.map(function(e) {
+      var statusBadge = e.paused
+        ? '<span class="badge paused">paused</span>'
+        : '<span class="badge running">active</span>';
+      var priorityBadge = e.priority === 'high' ? ' <span class="badge high">HIGH</span>' : '';
+      var nextFire = e.paused ? '—' : new Date(e.fireAt).toLocaleString();
+      var lastRan = e.lastRanAt ? new Date(e.lastRanAt).toLocaleString() : 'never';
+      var pauseBtn = e.paused
+        ? '<button class="btn-start" onclick="cronAction(\\'' + e.id + '\\',\\'resume\\')">Resume</button>'
+        : '<button class="btn-stop" onclick="cronAction(\\'' + e.id + '\\',\\'pause\\')">Pause</button>';
+      return '<div class="cron-entry">' +
+        '<div class="cron-info">' +
+          '<div class="cron-label">' + statusBadge + priorityBadge + ' ' + escHtml(e.label) + '</div>' +
+          '<div class="cron-meta">' + escHtml(e.schedule) + ' · ' + e.executor + ' · next: ' + nextFire + ' · last: ' + lastRan + '</div>' +
+        '</div>' +
+        '<div class="cron-actions">' +
+          pauseBtn +
+          '<button class="btn-start" style="background:#0f3460;color:#a0c4ff;" onclick="cronAction(\\'' + e.id + '\\',\\'trigger\\')">▶ Run</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  window.cronAction = function(id, action) {
+    fetch('/api/cron/' + id + '/' + action, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token }
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      if (data.error) alert('Error: ' + data.error);
+    }).catch(function(err) { alert('Request failed: ' + err.message); });
+  };
+
+  // ── Log Panel ──────────────────────────────────────────────────────
+  var logLevels = { info: true, warn: true, error: true, debug: false };
+  var logRefreshTimer = null;
+
+  window.toggleLogLevel = function(level) {
+    logLevels[level] = !logLevels[level];
+    var btns = document.querySelectorAll('.log-level-btn.lvl-' + level);
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('active', logLevels[level]);
+    }
+    fetchLogs();
+  };
+
+  function fetchLogs() {
+    var activeLevels = Object.keys(logLevels).filter(function(k) { return logLevels[k]; });
+    if (activeLevels.length === 0) {
+      var c = document.getElementById('log-entries');
+      if (c) c.innerHTML = '<div style="color:#666;padding:12px;">No levels selected</div>';
+      return;
+    }
+    fetch('/api/logs?level=' + activeLevels.join(',') + '&limit=500', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      var container = document.getElementById('log-entries');
+      if (!container || !data.lines) return;
+      var wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 30;
+      container.innerHTML = data.lines.map(function(line) {
+        var lvl = 'info';
+        if (line.indexOf(' WARN ') !== -1) lvl = 'warn';
+        else if (line.indexOf(' ERROR') !== -1) lvl = 'error';
+        else if (line.indexOf(' DEBUG') !== -1) lvl = 'debug';
+        return '<div class="log-line ' + lvl + '">' + escHtml(line) + '</div>';
+      }).join('');
+      if (wasAtBottom) container.scrollTop = container.scrollHeight;
+    }).catch(function() { /* silent */ });
+  }
+
+  // Fetch logs on load and every 10s
+  fetchLogs();
+  logRefreshTimer = setInterval(fetchLogs, 10000);
 
   // ── Start Connection ───────────────────────────────────────────────
   connect();
