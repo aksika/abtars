@@ -201,3 +201,11 @@ Consolidated tweet-feed script + AI-news browse agent into 1 agent cron entry. P
 Extracted all chat command handlers from main.ts into `src/components/command-handlers.ts`. Single module for Telegram + Discord — 840 lines removed from main.ts. Platform-specific commands check `ctx.platform` internally.
 
 Removed: /ingest, /reflect, /reembed, /forget (memories only come from conversations/agent work, not manual injection). Merged /mcporter into /status. Renamed /b2b-reset to /a2a-reset. Discord gained /coding, /stop, /cancel, /facts.
+
+## 33. Email Digest via Google Workspace CLI
+
+**Status:** ✅ Done (2026-03-23)
+
+KP reads Gmail natively using `gws` CLI (`@googleworkspace/cli`). No wrapper needed — agent calls `gws gmail` commands directly via bash.
+
+Setup: `npm install -g @googleworkspace/cli` + `gws auth login` (one-time OAuth via manual client_secret.json). Cron entry `b6c50e`: daily 8:30 Budapest, agent reads unread, summarizes to `~/reports/Email-Digest-TODAY.md`. Groups by Action Required / FYI / Newsletters, cross-references with AI and Finance reports.
