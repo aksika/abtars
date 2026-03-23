@@ -127,9 +127,9 @@ export class SleepTrigger {
       const files = readdirSync(this.auditDir).filter(f => f.startsWith("sleep_")).sort();
       if (files.length === 0) return Infinity;
       const last = files[files.length - 1]!;
-      const m = last.match(/^sleep_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+      const m = last.match(/^sleep_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})/);
       if (!m) return Infinity;
-      const ts = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`).getTime();
+      const ts = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00`).getTime();
       return Date.now() - ts;
     } catch {
       return Infinity;
