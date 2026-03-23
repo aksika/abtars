@@ -5,7 +5,6 @@ import { AuthGate } from "./auth-gate.js";
 import { DashboardServer } from "./dashboard-server.js";
 import type { DashboardServerDeps } from "./dashboard-server.js";
 import type { PlatformController } from "./platform-controller.js";
-import type { TransportController } from "./transport-controller.js";
 import type { MemorySearchController } from "./memory-search-controller.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -47,20 +46,6 @@ function mockPlatformController(): PlatformController {
   } as unknown as PlatformController;
 }
 
-function mockTransportController(): TransportController {
-  return {
-    handle: vi.fn(async () => ({
-      status: 200,
-      body: { message: "Switched to acp transport", switched: true },
-    })),
-    getTransportStatus: vi.fn(() => ({
-      type: "tmux" as const,
-      ready: true,
-      contextPercent: 42,
-    })),
-  } as unknown as TransportController;
-}
-
 function mockMemorySearchController(): MemorySearchController {
   return {
     handle: vi.fn(async () => ({
@@ -76,7 +61,6 @@ function makeDeps(overrides?: Partial<DashboardServerDeps>): DashboardServerDeps
     authGate: new AuthGate(TEST_TOKEN),
     getStatus: makeSnapshot,
     platformController: mockPlatformController(),
-    transportController: mockTransportController(),
     memorySearchController: mockMemorySearchController(),
     dashboardHtml: TEST_HTML,
     ...overrides,
@@ -265,50 +249,6 @@ describe("DashboardServer", () => {
     });
   });
 
-  // ── Transport controller routes ───────────────────────────────────
-
-  describe("POST /api/transport/switch", () => {
-    it("routes to transport controller with parsed JSON body", async () => {
-      const tc = mockTransportController();
-      server = new DashboardServer(makeDeps({ transportController: tc }));
-      await server.start();
-      const port = getPort(server);
-
-      const res = await request(port, {
-        method: "POST",
-        path: "/api/transport/switch",
-        headers: {
-          Authorization: `Bearer ${TEST_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ mode: "acp" }),
-      });
-
-      expect(res.status).toBe(200);
-      expect(tc.handle).toHaveBeenCalledWith("acp");
-    });
-
-    it("returns 400 for invalid mode", async () => {
-      server = new DashboardServer(makeDeps());
-      await server.start();
-      const port = getPort(server);
-
-      const res = await request(port, {
-        method: "POST",
-        path: "/api/transport/switch",
-        headers: {
-          Authorization: `Bearer ${TEST_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ mode: "invalid" }),
-      });
-
-      expect(res.status).toBe(400);
-      const body = JSON.parse(res.body);
-      expect(body.error).toContain("Invalid mode");
-    });
-  });
-
   // ── Memory search routes ──────────────────────────────────────────
 
   describe("GET /api/memory/search", () => {
@@ -365,30 +305,6 @@ describe("DashboardServer", () => {
       const body = JSON.parse(res.body);
       expect(body.error).toBe("boom");
     });
-
-    it("returns 500 when transport controller throws", async () => {
-      const tc = mockTransportController();
-      (tc.handle as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error("transport fail"),
-      );
-      server = new DashboardServer(makeDeps({ transportController: tc }));
-      await server.start();
-      const port = getPort(server);
-
-      const res = await request(port, {
-        method: "POST",
-        path: "/api/transport/switch",
-        headers: {
-          Authorization: `Bearer ${TEST_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ mode: "tmux" }),
-      });
-
-      expect(res.status).toBe(500);
-      const body = JSON.parse(res.body);
-      expect(body.error).toBe("transport fail");
-    });
   });
 });
 
@@ -408,7 +324,6 @@ describe("DashboardServer — Property 9: Unknown route returns 404", () => {
     /^\/ws$/,                                  // WebSocket upgrade
     /^\/api\/memory\/search/,                  // GET /api/memory/search
     /^\/api\/platforms\/[^/]+\/[^/]+$/,        // POST /api/platforms/:platform/:action
-    /^\/api\/transport\/switch$/,              // POST /api/transport/switch
   ];
 
   function isKnownRoute(path: string): boolean {

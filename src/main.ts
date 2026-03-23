@@ -30,7 +30,6 @@ import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } fro
 import type { SubsystemRefs } from "./components/dashboard-config.js";
 import { AuthGate } from "./components/auth-gate.js";
 import { PlatformController } from "./components/platform-controller.js";
-import { TransportController } from "./components/transport-controller.js";
 import { MemorySearchController } from "./components/memory-search-controller.js";
 import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
@@ -1117,13 +1116,6 @@ async function main(): Promise<void> {
 
     const authGate = new AuthGate(dashConfig.webAuthToken);
     const platformController = new PlatformController({ telegramPoller, discordPoller });
-    const transportController = new TransportController({
-      config,
-      getCurrentTransport: () => transport,
-      setTransport: (t) => { transport = t; },
-      platformRefs: { telegramPoller, discordPoller },
-      memory,
-    });
     const memorySearchController = memory
       ? new MemorySearchController({
           memoryIndex: memory.getMemoryIndex()!,
@@ -1137,7 +1129,6 @@ async function main(): Promise<void> {
       authGate,
       getStatus,
       platformController,
-      transportController,
       memorySearchController,
       dashboardHtml,
     });

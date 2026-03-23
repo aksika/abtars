@@ -16,7 +16,6 @@ import type { DashboardConfig, StatusSnapshot } from "./dashboard-config.js";
 import { AuthGate } from "./auth-gate.js";
 import { StatusBroadcaster } from "./status-broadcaster.js";
 import type { PlatformController } from "./platform-controller.js";
-import type { TransportController } from "./transport-controller.js";
 import type { MemorySearchController } from "./memory-search-controller.js";
 import { logInfo, logError } from "./logger.js";
 
@@ -33,7 +32,6 @@ export type DashboardServerDeps = {
   authGate: AuthGate;
   getStatus: () => StatusSnapshot;
   platformController: PlatformController;
-  transportController: TransportController;
   memorySearchController: MemorySearchController | null;
   dashboardHtml: string;
 };
@@ -181,32 +179,6 @@ export class DashboardServer {
         return;
       }
 
-      // POST /api/transport/switch — auth gate → transport controller
-      if (method === "POST" && pathname === "/api/transport/switch") {
-        if (!this.deps.authGate.guard(req, res)) return;
-
-        this.readJsonBody(req)
-          .then((body) => {
-            const mode = body?.mode;
-            if (mode !== "tmux" && mode !== "acp") {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ error: 'Invalid mode. Expected "tmux" or "acp".' }));
-              return;
-            }
-            return this.deps.transportController.handle(mode);
-          })
-          .then((result) => {
-            if (result) {
-              res.writeHead(result.status, { "Content-Type": "application/json" });
-              res.end(JSON.stringify(result.body));
-            }
-          })
-          .catch((err) => {
-            this.sendError(res, 500, err);
-          });
-        return;
-      }
-
       // GET /api/logs — auth gate → read bridge.log (last 24h, optional level filter)
       if (method === "GET" && pathname === "/api/logs") {
         if (!this.deps.authGate.guard(req, res)) return;
@@ -292,23 +264,6 @@ export class DashboardServer {
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────
-
-  /** Read and parse a JSON request body. */
-  private readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
-    return new Promise((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (chunk: Buffer) => chunks.push(chunk));
-      req.on("end", () => {
-        try {
-          const raw = Buffer.concat(chunks).toString("utf-8");
-          resolve(raw ? JSON.parse(raw) : {});
-        } catch (err) {
-          reject(err);
-        }
-      });
-      req.on("error", reject);
-    });
-  }
 
   /** Send an error response, logging the error. */
   private sendError(
