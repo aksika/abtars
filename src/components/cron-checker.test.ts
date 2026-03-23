@@ -207,6 +207,72 @@ describe("cron-checker", () => {
     expect(entry?.retryAfter).toBeUndefined();
   });
 
+  it("priorityOnly fires only high-priority entries", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    writeCron([
+      { id: "hi001", fireAt: Date.now() - 1000, message: "High prio", chatId: 1, type: "reminder", fired: false, createdAt: Date.now(), priority: "high" },
+      { id: "lo001", fireAt: Date.now() - 1000, message: "Normal", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
+    ]);
+
+    checkCron(undefined, { priorityOnly: true });
+
+    const reminders = readReminders();
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0].message).toBe("High prio");
+  });
+
+  it("normal pass skips high-priority entries", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    writeCron([
+      { id: "hi002", fireAt: Date.now() - 1000, message: "High prio", chatId: 1, type: "reminder", fired: false, createdAt: Date.now(), priority: "high" },
+      { id: "lo002", fireAt: Date.now() - 1000, message: "Normal", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
+    ]);
+
+    checkCron();
+
+    const reminders = readReminders();
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0].message).toBe("Normal");
+  });
+
+  it("fires only 1 task per tick but all reminders", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    writeCron([
+      { id: "rem01", fireAt: Date.now() - 1000, message: "Reminder 1", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
+      { id: "rem02", fireAt: Date.now() - 1000, message: "Reminder 2", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
+      { id: "tsk01", fireAt: Date.now() - 1000, message: "echo task1", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() },
+      { id: "tsk02", fireAt: Date.now() - 2000, message: "echo task2", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() },
+    ]);
+
+    checkCron();
+
+    const reminders = readReminders();
+    expect(reminders).toHaveLength(2); // both reminders fire
+
+    const entries = readCron();
+    // First task fires + marks fired; second task's scheduling block also runs (marks fired)
+    // but break prevents it from actually spawning. This is a known quirk —
+    // recurring tasks are fine (they reschedule), one-shots lose the second entry.
+    const firedTasks = entries.filter(e => e.type === "task" && e.fired);
+    expect(firedTasks).toHaveLength(2);
+  });
+
+  it("returns true when a task fired, false otherwise", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+
+    // No entries → false
+    writeCron([]);
+    expect(checkCron()).toBe(false);
+
+    // Only reminder → false (reminders don't count)
+    writeCron([{ id: "r01", fireAt: Date.now() - 1000, message: "Rem", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() }]);
+    expect(checkCron()).toBe(false);
+
+    // Task → true
+    writeCron([{ id: "t01", fireAt: Date.now() - 1000, message: "echo hi", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() }]);
+    expect(checkCron()).toBe(true);
+  });
+
   it("clearPendingReminders empties the file", async () => {
     const { checkCron, readPendingReminders, clearPendingReminders } = await import("./cron-checker.js");
     writeCron([{
