@@ -38,8 +38,10 @@ function writeToFile(line: string): void {
   }
 }
 
+const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+
 function ts(): string {
-  return new Date().toISOString();
+  return isTest ? `${new Date().toISOString()} TEST` : new Date().toISOString();
 }
 
 /** LOW: operational milestones — startup, connections, errors */

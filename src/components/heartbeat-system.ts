@@ -57,13 +57,19 @@ export class HeartbeatSystem {
     return this.tasks.map(t => t.name);
   }
 
-  /** Execute all registered tasks with error isolation. */
+  /** Execute all registered tasks with error isolation. Heavy-task gating: once a heavy task returns true, remaining heavy tasks are skipped. */
   private async tick(): Promise<void> {
     logDebug(TAG, `Tick — executing ${this.tasks.length} task(s)`);
+    let heavyRan = false;
 
     for (const task of this.tasks) {
       try {
-        await task.execute();
+        if (task.heavy && heavyRan) {
+          logDebug(TAG, `Skipping heavy task "${task.name}" — another heavy task already ran`);
+          continue;
+        }
+        const result = await task.execute();
+        if (task.heavy && result === true) heavyRan = true;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logWarn(TAG, `Task "${task.name}" failed: ${msg}`);

@@ -1776,15 +1776,31 @@ async function main(): Promise<void> {
   const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: 5 * 60 * 1000 });
 
   heartbeat.registerTask({
-    name: "sleep-trigger",
+    name: "cron-checker",
+    heavy: true,
     execute: async () => {
-      if (busyChats.size > 0) return;
+      return checkCron((chatId, message, result) => {
+        if (platforms.telegram) {
+          const api = new TelegramApi(config.telegramBotToken);
+          api.sendMessage(chatId, `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
+            logWarn("main", `Cron task TG report failed: ${err}`);
+          });
+        }
+      });
+    },
+  });
+
+  heartbeat.registerTask({
+    name: "sleep-trigger",
+    heavy: true,
+    execute: async () => {
+      if (busyChats.size > 0) return false;
       let lastMessageTs = 0;
       try {
         const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages").get() as { latest: number | null } | undefined;
         lastMessageTs = row?.latest ?? 0;
-      } catch { return; }
-      if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) return;
+      } catch { return false; }
+      if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) return false;
       sleepTrigger.writeLock();
       try {
         const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
@@ -1801,24 +1817,12 @@ async function main(): Promise<void> {
         });
         child.unref();
         logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid}) at ${new Date().toISOString()}`);
+        return true;
       } catch (err) {
         logWarn("main", `sleep-trigger: failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
         sleepTrigger.reportFailure();
+        return false;
       }
-    },
-  });
-
-  heartbeat.registerTask({
-    name: "cron-checker",
-    execute: async () => {
-      checkCron((chatId, message, result) => {
-        if (platforms.telegram) {
-          const api = new TelegramApi(config.telegramBotToken);
-          api.sendMessage(chatId, `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
-            logWarn("main", `Cron task TG report failed: ${err}`);
-          });
-        }
-      });
     },
   });
 

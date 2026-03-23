@@ -158,7 +158,8 @@ export type MemorySearchResult = {
 /** Heartbeat task definition. */
 export type HeartbeatTask = {
   name: string;
-  execute: () => Promise<void>;
+  heavy?: boolean;
+  execute: () => Promise<boolean | void>;
 };
 
 /** Parameters for the agent-initiated instant memory store tool. */

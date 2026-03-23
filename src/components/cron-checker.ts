@@ -69,10 +69,11 @@ const RETRY_DELAY_MS = 10 * 60 * 1000; // 2 heartbeat cycles (10 min)
  * spawn tasks as kiro-cli subprocesses. Recurring entries reschedule after firing.
  * GCs fired one-shots older than 7 days.
  */
-export function checkCron(onTaskComplete?: (chatId: number, message: string, result: string) => void): void {
+export function checkCron(onTaskComplete?: (chatId: number, message: string, result: string) => void): boolean {
   let entries = readCron();
   const now = Date.now();
   let changed = false;
+  let firedTask = false;
 
   // GC: remove fired one-shots older than 7 days
   const before = entries.length;
@@ -113,6 +114,9 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
       appendReminder({ chatId: entry.chatId, message: entry.message, createdAt: now });
       recordRun(entry);
       logInfo(TAG, `⏰ Reminder fired: "${entry.message}" → chat ${entry.chatId}`);
+      continue; // reminders don't count toward 1-task-per-tick
+    } else if (firedTask) {
+      break; // 1 task per tick — remaining overdue entries wait for next tick
     } else if (entry.executor === "script") {
       // Script task: run command directly via bash
       logInfo(TAG, `📜 Script task fired: "${entry.message}"`);
@@ -176,9 +180,12 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
         logWarn(TAG, `Task spawn error: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+
+    firedTask = true;
   }
 
   if (changed) writeCron(entries);
+  return firedTask;
 }
 
 // --- Browse task checker ---
