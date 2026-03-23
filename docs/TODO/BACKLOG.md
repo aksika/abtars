@@ -208,4 +208,4 @@ Removed: /ingest, /reflect, /reembed, /forget (memories only come from conversat
 
 KP reads Gmail natively using `gws` CLI (`@googleworkspace/cli`). No wrapper needed — agent calls `gws gmail` commands directly via bash.
 
-Setup: `npm install -g @googleworkspace/cli` + `gws auth login` (one-time OAuth via manual client_secret.json). Cron entry `b6c50e`: daily 8:30 Budapest, agent reads unread, summarizes to `~/reports/Email-Digest-TODAY.md`. Groups by Action Required / FYI / Newsletters, cross-references with AI and Finance reports.
+Setup: `npm install -g @googleworkspace/cli` + `gws auth login` (one-time OAuth via manual client_secret.json). Integrated into AI news pipeline (cron `02565e`): agent searches Gmail for AI-related emails from last 24h, reads content, marks as read, and aggregates into the daily AI report.

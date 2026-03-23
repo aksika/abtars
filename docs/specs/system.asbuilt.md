@@ -510,7 +510,7 @@ gws gmail users messages list --params '{"userId": "me", "q": "is:unread", "maxR
 
 ### Cron Entry
 
-Entry `b6c50e` — daily 8:30 Budapest (`30 8 * * *`), agent executor. Reads unread, summarizes to `~/reports/Email-Digest-TODAY.md`.
+Integrated into AI news pipeline (cron `02565e`, 10:00 daily). Agent searches Gmail for AI-related emails from last 24h, reads content, marks as read, aggregates into `~/reports/AI-Daily-TODAY.md`.
 
 ### Key Commands
 
