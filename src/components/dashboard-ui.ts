@@ -40,10 +40,12 @@ function formatBytes(bytes) {
 
 export function renderDashboardHtml(logoBase64: string, opts?: { agentApi?: { port: number; allowedIps: string[] } }): string {
   const agentHtml = opts?.agentApi
-    ? `<div class="platform-item">
+    ? `<div class="platform-item" id="plat-agent-api">
       <span class="name">Agent API</span>
       <span>
-        <span class="badge running clickable" title="Port ${opts.agentApi.port} — allowed: ${opts.agentApi.allowedIps.join(", ")}" onclick="toggleA2APanel()">⚠️ port ${opts.agentApi.port}</span>
+        <span class="badge disabled" id="plat-agent-api-badge">—</span>
+        <button class="btn-start" onclick="togglePlatform('agent-api','start')" id="plat-agent-api-start">Start</button>
+        <button class="btn-stop" onclick="togglePlatform('agent-api','stop')" id="plat-agent-api-stop">Stop</button>
       </span>
     </div>`
     : "";
@@ -889,18 +891,21 @@ function getScript(): string {
     el = document.getElementById('health-timestamp');
     if (el) el.textContent = new Date(snap.timestamp).toLocaleTimeString();
 
+    // Platforms (from services)
+    if (snap.services) {
+      updateServiceRow('telegram', snap.services.telegram);
+      updateServiceRow('discord', snap.services.discord);
+      updateServiceRow('agent-api', snap.services['agent-api']);
+    }
+
     // Enabled platforms count
     var enabledList = [];
-    if (snap.platforms) {
-      if (snap.platforms.telegram && snap.platforms.telegram.configured) enabledList.push('Telegram');
-      if (snap.platforms.discord && snap.platforms.discord.configured) enabledList.push('Discord');
+    if (snap.services) {
+      if (snap.services.telegram && snap.services.telegram.running) enabledList.push('Telegram');
+      if (snap.services.discord && snap.services.discord.running) enabledList.push('Discord');
     }
     el = document.getElementById('health-platforms');
     if (el) el.textContent = enabledList.length > 0 ? enabledList.join(', ') : 'None';
-
-    // Platforms
-    updatePlatformRow('telegram', snap.platforms ? snap.platforms.telegram : null);
-    updatePlatformRow('discord', snap.platforms ? snap.platforms.discord : null);
 
     // Transport
     if (snap.transport) {
@@ -1021,7 +1026,7 @@ function getScript(): string {
     updateA2ATraffic(snap.agentApi);
   }
 
-  function updatePlatformRow(name, state) {
+  function updateServiceRow(name, state) {
     var badge = document.getElementById('plat-' + name + '-badge');
     var btnStart = document.getElementById('plat-' + name + '-start');
     var btnStop = document.getElementById('plat-' + name + '-stop');
@@ -1060,8 +1065,8 @@ function getScript(): string {
   }
 
   // ── Platform Toggle API ────────────────────────────────────────────
-  window.togglePlatform = function(platform, action) {
-    fetch('/api/platforms/' + platform + '/' + action, {
+  window.togglePlatform = function(service, action) {
+    fetch('/api/services/' + service + '/' + action, {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + token }
     }).then(function(r) { return r.json(); }).then(function(data) {

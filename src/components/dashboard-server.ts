@@ -15,7 +15,7 @@ import { WebSocketServer } from "ws";
 import type { DashboardConfig, StatusSnapshot } from "./dashboard-config.js";
 import { AuthGate } from "./auth-gate.js";
 import { StatusBroadcaster } from "./status-broadcaster.js";
-import type { PlatformController } from "./platform-controller.js";
+import type { ServiceRegistry } from "./service-registry.js";
 import type { MemorySearchController } from "./memory-search-controller.js";
 import { logInfo, logError } from "./logger.js";
 
@@ -31,7 +31,7 @@ export type DashboardServerDeps = {
   config: DashboardConfig;
   authGate: AuthGate;
   getStatus: () => StatusSnapshot;
-  platformController: PlatformController;
+  registry: ServiceRegistry;
   memorySearchController: MemorySearchController | null;
   dashboardHtml: string;
 };
@@ -161,17 +161,20 @@ export class DashboardServer {
         return;
       }
 
-      // POST /api/platforms/:platform/:action — auth gate → platform controller
-      const platformMatch = method === "POST" && pathname?.match(/^\/api\/platforms\/([^/]+)\/([^/]+)$/);
-      if (platformMatch) {
+      // POST /api/services/:name/start|stop — auth gate → service registry
+      const svcMatch = method === "POST" && pathname?.match(/^\/api\/services\/([^/]+)\/(start|stop)$/);
+      if (svcMatch) {
         if (!this.deps.authGate.guard(req, res)) return;
 
-        const [, platform, action] = platformMatch;
-        this.deps.platformController
-          .handle(platform!, action!)
+        const [, name, action] = svcMatch;
+        const doAction = action === "start"
+          ? this.deps.registry.start(name!)
+          : Promise.resolve(this.deps.registry.stop(name!));
+
+        doAction
           .then((result) => {
-            res.writeHead(result.status, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(result.body));
+            res.writeHead(result.ok ? 200 : 409, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(result));
           })
           .catch((err) => {
             this.sendError(res, 500, err);

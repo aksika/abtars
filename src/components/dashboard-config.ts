@@ -62,6 +62,7 @@ export type StatusSnapshot = {
   timestamp: string;
   uptimeMs: number;
   platforms: PlatformStates;
+  services: Record<string, { configured: boolean; running: boolean }>;
   transport: TransportStatus;
   memory: MemoryStatus;
   heartbeat: HeartbeatStatus;
@@ -138,6 +139,7 @@ export type SubsystemRefs = {
   startedAt: number;
   telegramPoller: { running: boolean } | null;
   discordPoller: { started: boolean } | null;
+  services: Record<string, { configured: boolean; running: boolean }>;
   transport: {
     type: "tmux" | "acp";
     isReady: boolean;
@@ -220,6 +222,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     timestamp: new Date(now).toISOString(),
     uptimeMs: now - refs.startedAt,
     platforms,
+    services: refs.services,
     transport,
     memory,
     heartbeat,

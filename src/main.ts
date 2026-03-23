@@ -29,7 +29,7 @@ import { parsePlatformFlags } from "./components/cli-flags.js";
 import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard-config.js";
 import type { SubsystemRefs } from "./components/dashboard-config.js";
 import { AuthGate } from "./components/auth-gate.js";
-import { PlatformController } from "./components/platform-controller.js";
+import { ServiceRegistry } from "./components/service-registry.js";
 import { MemorySearchController } from "./components/memory-search-controller.js";
 import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
@@ -364,12 +364,17 @@ async function main(): Promise<void> {
     }
   };
 
-  // --- Telegram wiring (conditional) ---
+  // --- Service Registry ---
+  const registry = new ServiceRegistry();
+
+  // --- Telegram service ---
   let telegramPoller: TelegramPoller | null = null;
 
-  if (platforms.telegram) {
-    const telegramApi = new TelegramApi(config.telegramBotToken);
-    const securityGate = new SecurityGate(config.allowedUserIds);
+  registry.register("telegram", {
+    configured: Boolean(config.telegramBotToken && config.allowedUserIds.size > 0),
+    async create() {
+      const telegramApi = new TelegramApi(config.telegramBotToken);
+      const securityGate = new SecurityGate(config.allowedUserIds);
 
     const botInfo = await telegramApi.getMe();
     const botUsername = botInfo.username?.toLowerCase() ?? "";
@@ -758,26 +763,36 @@ async function main(): Promise<void> {
     };
 
     telegramPoller = new TelegramPoller(telegramApi, config.pollTimeoutS, handleUpdate);
-    try {
-      telegramPoller.start();
+      return {
+        start() { telegramPoller!.start(); },
+        stop() { telegramPoller?.stop(); telegramPoller = null; },
+      };
+    },
+  });
+
+  if (platforms.telegram) {
+    const result = await registry.start("telegram");
+    if (result.ok) {
       logInfo("main", "📡 Telegram polling started");
       announcePlatform(transport, "TELEGRAM").catch(() => {});
-    } catch (err) {
-      logError("main", "Telegram failed to start", err);
+    } else {
+      logError("main", `Telegram failed to start: ${result.error}`);
     }
   } else {
     logInfo("main", "📡 Telegram disabled (no --telegram flag)");
   }
 
-  // --- Discord wiring (conditional) ---
+  // --- Discord service ---
   let discordPoller: DiscordPoller | null = null;
 
-  if (platforms.discord && config.discordEnabled) {
-    const discordApi = new DiscordApi(config.discordBotToken!);
-    const discordSecurityGate = new DiscordSecurityGate(
-      config.discordAllowedUserIds!,
-      config.discordAllowedChannelIds!,
-    );
+  registry.register("discord", {
+    configured: Boolean(config.discordEnabled && config.discordBotToken),
+    async create() {
+      const discordApi = new DiscordApi(config.discordBotToken!);
+      const discordSecurityGate = new DiscordSecurityGate(
+        config.discordAllowedUserIds!,
+        config.discordAllowedChannelIds!,
+      );
     const channelAdapter = new ChannelAdapter();
 
     let a2aRouter: A2ARouter | null = null;
@@ -930,16 +945,23 @@ async function main(): Promise<void> {
     };
 
     discordPoller = new DiscordPoller(discordApi, config.discordAppId!, handleDiscordMessage);
-    try {
-      await discordPoller.start();
+      return {
+        async start() { await discordPoller!.start(); },
+        stop() { discordPoller?.stop(); discordPoller = null; },
+      };
+    },
+  });
+
+  if (platforms.discord) {
+    const result = await registry.start("discord");
+    if (result.ok) {
       logInfo("main", "📡 Discord polling started");
       announcePlatform(transport, "DISCORD").catch(() => {});
-    } catch (err) {
-      logError("main", "Discord failed to start", err);
-      discordPoller = null;
+    } else if (result.error?.includes("not configured")) {
+      logWarn("main", "Discord flag set but not configured — skipping");
+    } else {
+      logError("main", `Discord failed to start: ${result.error}`);
     }
-  } else if (platforms.discord) {
-    logWarn("main", "Discord flag set but DISCORD_BOT_TOKEN not configured — skipping");
   } else {
     logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
   }
@@ -1085,14 +1107,16 @@ async function main(): Promise<void> {
 
     // Build getStatus function that assembles StatusSnapshot from all subsystem refs
     const getStatus = () => {
+      const svcStates = registry.getStates();
       const refs: SubsystemRefs = {
         startedAt,
-        telegramPoller: telegramPoller
-          ? { running: (telegramPoller as unknown as Record<string, boolean>).running ?? false }
-          : null,
-        discordPoller: discordPoller
-          ? { started: (discordPoller as unknown as Record<string, boolean>).started ?? false }
-          : null,
+        telegramPoller: {
+          running: svcStates.telegram?.running ?? false,
+        },
+        discordPoller: {
+          started: svcStates.discord?.running ?? false,
+        },
+        services: svcStates,
         transport: {
           type: config.kiroTransport as "tmux" | "acp",
           isReady: transport.isReady,
@@ -1115,7 +1139,6 @@ async function main(): Promise<void> {
     };
 
     const authGate = new AuthGate(dashConfig.webAuthToken);
-    const platformController = new PlatformController({ telegramPoller, discordPoller });
     const memorySearchController = memory
       ? new MemorySearchController({
           memoryIndex: memory.getMemoryIndex()!,
@@ -1128,7 +1151,7 @@ async function main(): Promise<void> {
       config: dashConfig,
       authGate,
       getStatus,
-      platformController,
+      registry,
       memorySearchController,
       dashboardHtml,
     });
@@ -1137,19 +1160,33 @@ async function main(): Promise<void> {
     logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort} (token: ${dashConfig.webAuthToken})`);
   }
 
-  // --- Agent API wiring (conditional) ---
+  // --- Agent API service ---
   let agentApiServer: AgentApiServer | null = null;
+  const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
+
+  registry.register("agent-api", {
+    configured: Boolean(agentConfig.port),
+    async create() {
+      agentApiServer = new AgentApiServer({
+        config: agentConfig,
+        cliPath: config.kiroCLIPath,
+        workingDir: config.workingDir,
+        memory,
+      });
+      return {
+        async start() { await agentApiServer!.start(); },
+        stop() { agentApiServer?.stop(); agentApiServer = null; },
+      };
+    },
+  });
 
   if (platforms.agent) {
-    const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
-    agentApiServer = new AgentApiServer({
-      config: agentConfig,
-      cliPath: config.kiroCLIPath,
-      workingDir: config.workingDir,
-      memory,
-    });
-    await agentApiServer.start();
-    logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port} (allowed: ${agentConfig.allowedIps.join(", ")})`);
+    const result = await registry.start("agent-api");
+    if (result.ok) {
+      logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port} (allowed: ${agentConfig.allowedIps.join(", ")})`);
+    } else {
+      logError("main", `Agent API failed to start: ${result.error}`);
+    }
   }
 
   async function shutdown(): Promise<void> {
@@ -1166,8 +1203,7 @@ async function main(): Promise<void> {
     if (dashboardServer) {
       try { await dashboardServer.stop(); } catch { /* best-effort */ }
     }
-    if (telegramPoller) telegramPoller.stop();
-    if (discordPoller) discordPoller.stop();
+    registry.stopAll();
     heartbeat.stop();
     try { await browserIpc?.shutdown(); } catch { /* best-effort */ }
     try { await browserManager.shutdown(); } catch { /* best-effort */ }

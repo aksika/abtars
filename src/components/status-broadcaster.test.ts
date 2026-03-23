@@ -15,9 +15,11 @@ function makeSnapshot(overrides?: Partial<StatusSnapshot>): StatusSnapshot {
       telegram: { configured: true, running: false },
       discord: { configured: false, running: false },
     },
+    services: {},
     transport: { type: "tmux", ready: true, contextPercent: 42 },
     memory: { enabled: false, stats: null },
     heartbeat: { running: false, intervalMs: 60000, taskNames: [] },
+    cron: [],
     ...overrides,
   };
 }
@@ -355,6 +357,7 @@ describe("buildStatusSnapshot — Property 4: Status snapshot completeness", () 
             discordPoller: state.discordConfigured
               ? { started: state.discordRunning }
               : null,
+            services: {},
             transport: {
               type: state.transportType,
               isReady: state.transportReady,
@@ -385,6 +388,8 @@ describe("buildStatusSnapshot — Property 4: Status snapshot completeness", () 
                 }
               : null,
             chatId: 1,
+            notebooklm: false,
+            agentApi: null,
           };
 
           const snapshot = buildStatusSnapshot(refs);

@@ -4,7 +4,7 @@ import type { DashboardConfig, StatusSnapshot } from "./dashboard-config.js";
 import { AuthGate } from "./auth-gate.js";
 import { DashboardServer } from "./dashboard-server.js";
 import type { DashboardServerDeps } from "./dashboard-server.js";
-import type { PlatformController } from "./platform-controller.js";
+import type { ServiceRegistry } from "./service-registry.js";
 import type { MemorySearchController } from "./memory-search-controller.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -30,20 +30,25 @@ function makeSnapshot(): StatusSnapshot {
       telegram: { configured: true, running: false },
       discord: { configured: false, running: false },
     },
+    services: {
+      telegram: { configured: true, running: false },
+      discord: { configured: false, running: false },
+    },
     transport: { type: "tmux", ready: true, contextPercent: 42 },
     memory: { enabled: false, stats: null },
     heartbeat: { running: false, intervalMs: 60000, taskNames: [] },
   };
 }
 
-function mockPlatformController(): PlatformController {
+function mockRegistry(): ServiceRegistry {
   return {
-    handle: vi.fn(async () => ({ status: 200, body: { platform: "telegram", running: true } })),
+    start: vi.fn(async () => ({ ok: true })),
+    stop: vi.fn(() => ({ ok: true })),
     getStates: vi.fn(() => ({
       telegram: { configured: true, running: false },
       discord: { configured: false, running: false },
     })),
-  } as unknown as PlatformController;
+  } as unknown as ServiceRegistry;
 }
 
 function mockMemorySearchController(): MemorySearchController {
@@ -60,7 +65,7 @@ function makeDeps(overrides?: Partial<DashboardServerDeps>): DashboardServerDeps
     config: makeConfig(),
     authGate: new AuthGate(TEST_TOKEN),
     getStatus: makeSnapshot,
-    platformController: mockPlatformController(),
+    registry: mockRegistry(),
     memorySearchController: mockMemorySearchController(),
     dashboardHtml: TEST_HTML,
     ...overrides,
@@ -192,7 +197,7 @@ describe("DashboardServer", () => {
 
       const res = await request(port, {
         method: "POST",
-        path: "/api/platforms/telegram/start",
+        path: "/api/services/telegram/start",
       });
 
       expect(res.status).toBe(401);
@@ -205,7 +210,7 @@ describe("DashboardServer", () => {
 
       const res = await request(port, {
         method: "POST",
-        path: "/api/platforms/telegram/start",
+        path: "/api/services/telegram/start",
         headers: { Authorization: "Bearer wrong-token" },
       });
 
@@ -213,39 +218,39 @@ describe("DashboardServer", () => {
     });
   });
 
-  // ── Platform controller routes ────────────────────────────────────
+  // ── Service registry routes ───────────────────────────────────────
 
-  describe("POST /api/platforms/:platform/:action", () => {
-    it("routes to platform controller with auth", async () => {
-      const pc = mockPlatformController();
-      server = new DashboardServer(makeDeps({ platformController: pc }));
+  describe("POST /api/services/:name/:action", () => {
+    it("routes start to service registry with auth", async () => {
+      const reg = mockRegistry();
+      server = new DashboardServer(makeDeps({ registry: reg }));
       await server.start();
       const port = getPort(server);
 
       const res = await request(port, {
         method: "POST",
-        path: "/api/platforms/telegram/start",
+        path: "/api/services/telegram/start",
         headers: { Authorization: `Bearer ${TEST_TOKEN}` },
       });
 
       expect(res.status).toBe(200);
-      expect(pc.handle).toHaveBeenCalledWith("telegram", "start");
+      expect(reg.start).toHaveBeenCalledWith("telegram");
     });
 
-    it("routes discord stop to platform controller", async () => {
-      const pc = mockPlatformController();
-      server = new DashboardServer(makeDeps({ platformController: pc }));
+    it("routes stop to service registry", async () => {
+      const reg = mockRegistry();
+      server = new DashboardServer(makeDeps({ registry: reg }));
       await server.start();
       const port = getPort(server);
 
       const res = await request(port, {
         method: "POST",
-        path: "/api/platforms/discord/stop",
+        path: "/api/services/discord/stop",
         headers: { Authorization: `Bearer ${TEST_TOKEN}` },
       });
 
       expect(res.status).toBe(200);
-      expect(pc.handle).toHaveBeenCalledWith("discord", "stop");
+      expect(reg.stop).toHaveBeenCalledWith("discord");
     });
   });
 
@@ -286,18 +291,18 @@ describe("DashboardServer", () => {
   // ── Error handling ────────────────────────────────────────────────
 
   describe("error handling", () => {
-    it("returns 500 when platform controller throws", async () => {
-      const pc = mockPlatformController();
-      (pc.handle as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    it("returns 500 when service registry throws", async () => {
+      const reg = mockRegistry();
+      (reg.start as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
         new Error("boom"),
       );
-      server = new DashboardServer(makeDeps({ platformController: pc }));
+      server = new DashboardServer(makeDeps({ registry: reg }));
       await server.start();
       const port = getPort(server);
 
       const res = await request(port, {
         method: "POST",
-        path: "/api/platforms/telegram/start",
+        path: "/api/services/telegram/start",
         headers: { Authorization: `Bearer ${TEST_TOKEN}` },
       });
 
@@ -323,7 +328,8 @@ describe("DashboardServer — Property 9: Unknown route returns 404", () => {
     /^\/$/,                                    // GET /
     /^\/ws$/,                                  // WebSocket upgrade
     /^\/api\/memory\/search/,                  // GET /api/memory/search
-    /^\/api\/platforms\/[^/]+\/[^/]+$/,        // POST /api/platforms/:platform/:action
+    /^\/api\/platforms\/[^/]+\/[^/]+$/,        // POST /api/services/:name/:action (legacy pattern)
+    /^\/api\/services\/[^/]+\/[^/]+$/,        // POST /api/services/:name/:action
   ];
 
   function isKnownRoute(path: string): boolean {
