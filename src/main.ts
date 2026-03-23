@@ -1775,19 +1775,18 @@ async function main(): Promise<void> {
 
   const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: 5 * 60 * 1000 });
 
-  heartbeat.registerTask({
-    name: "cron-checker",
-    heavy: true,
-    execute: async () => {
-      return checkCron((chatId, message, result) => {
-        if (platforms.telegram) {
-          const api = new TelegramApi(config.telegramBotToken);
-          api.sendMessage(chatId, `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
-            logWarn("main", `Cron task TG report failed: ${err}`);
-          });
-        }
+  const cronCallback = (chatId: number, message: string, result: string): void => {
+    if (platforms.telegram) {
+      const api = new TelegramApi(config.telegramBotToken);
+      api.sendMessage(chatId, `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
+        logWarn("main", `Cron task TG report failed: ${err}`);
       });
-    },
+    }
+  };
+
+  heartbeat.registerTask({
+    name: "cron-priority",
+    execute: async () => { checkCron(cronCallback, { priorityOnly: true }); },
   });
 
   heartbeat.registerTask({
@@ -1827,6 +1826,12 @@ async function main(): Promise<void> {
   });
 
   heartbeat.registerTask({
+    name: "cron-normal",
+    heavy: true,
+    execute: async () => { return checkCron(cronCallback); },
+  });
+
+  heartbeat.registerTask({
     name: "browse-checker",
     execute: async () => { checkBrowseTasks(); },
   });
@@ -1856,7 +1861,8 @@ async function main(): Promise<void> {
   });
 
   // Run once on startup, then start periodic
-  checkCron();
+  checkCron(cronCallback, { priorityOnly: true });
+  checkCron(cronCallback);
   checkBrowseTasks();
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);

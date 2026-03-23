@@ -69,11 +69,12 @@ const RETRY_DELAY_MS = 10 * 60 * 1000; // 2 heartbeat cycles (10 min)
  * spawn tasks as kiro-cli subprocesses. Recurring entries reschedule after firing.
  * GCs fired one-shots older than 7 days.
  */
-export function checkCron(onTaskComplete?: (chatId: number, message: string, result: string) => void): boolean {
+export function checkCron(onTaskComplete?: (chatId: number, message: string, result: string) => void, opts?: { priorityOnly?: boolean }): boolean {
   let entries = readCron();
   const now = Date.now();
   let changed = false;
   let firedTask = false;
+  const priorityOnly = opts?.priorityOnly ?? false;
 
   // GC: remove fired one-shots older than 7 days
   const before = entries.length;
@@ -84,6 +85,11 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
   }
 
   for (const entry of entries) {
+    // Priority filter: high-priority pass only fires high entries, normal pass skips them
+    const isHigh = entry.priority === "high";
+    if (priorityOnly && !isHigh) continue;
+    if (!priorityOnly && isHigh) continue;
+
     // Check for retry (failed task, 2 cycles later)
     const isRetry = entry.retryAfter && entry.retryAfter <= now;
     if (isRetry) {
