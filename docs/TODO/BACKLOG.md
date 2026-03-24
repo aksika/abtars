@@ -209,3 +209,14 @@ Removed: /ingest, /reflect, /reembed, /forget (memories only come from conversat
 KP reads Gmail natively using `gws` CLI (`@googleworkspace/cli`). No wrapper needed — agent calls `gws gmail` commands directly via bash.
 
 Setup: `npm install -g @googleworkspace/cli` + `gws auth login` (one-time OAuth via manual client_secret.json). Integrated into AI news pipeline (cron `02565e`): agent searches Gmail for AI-related emails from last 24h, reads content, marks as read, and aggregates into the daily AI report.
+
+## 34. A2A Protocol Review — Proper Handshake & Session Lifecycle
+
+**Status:** Not started
+**Priority:** Medium
+
+Review the Agent-to-Agent (A2A) implementation for proper protocol compliance:
+- Hello/Hello handshake on connection establishment
+- Session open/close lifecycle (clean teardown, no dangling sessions)
+- Verify both sides agree on capabilities before exchanging tasks
+- Change A2A message prefix from `[USER]` to `[GUEST-AGENT]` or `[<agent name>]` (use actual agent name from handshake when available)

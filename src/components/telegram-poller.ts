@@ -1,6 +1,6 @@
 import type { TelegramUpdate } from "../types/index.js";
 import type { TelegramApi } from "./telegram-api.js";
-import { logError } from "./logger.js";
+import { logError, logWarn } from "./logger.js";
 
 /**
  * Long-polls the Telegram Bot API for updates. Never self-terminates —
@@ -76,7 +76,8 @@ export class TelegramPoller {
         const baseDelay = Math.min(2 ** failures * 1000, 60_000);
         const jitter = Math.random() * baseDelay;
         const delay = baseDelay + jitter;
-        logError("poller", `Error (attempt ${failures}), retrying in ${Math.round(delay)}ms`, err);
+        const log = failures < 3 ? logWarn : logError;
+        log("poller", `Error (attempt ${failures}), retrying in ${Math.round(delay)}ms`, err);
         await sleep(delay);
       }
     }
