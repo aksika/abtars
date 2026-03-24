@@ -62,7 +62,6 @@ function recordRun(entry: CronEntry, exitCode?: number): void {
   if (entry.history.length > MAX_HISTORY) entry.history = entry.history.slice(-MAX_HISTORY);
 }
 
-const RETRY_DELAY_MS = 10 * 60 * 1000; // 2 heartbeat cycles (10 min)
 
 /**
  * Check cron.json for due entries. Fire reminders to pending_reminders.json,
@@ -99,22 +98,15 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
     if (priorityOnly && !isHigh) continue;
     if (!priorityOnly && isHigh) continue;
 
-    // Check for retry (failed task, 2 cycles later)
-    const isRetry = entry.retryAfter && entry.retryAfter <= now;
-
     // 1 task per tick — bail before touching the entry (reminders exempt)
     if (entry.type !== "reminder" && firedTask) break;
 
-    if (isRetry) {
-      delete entry.retryAfter;
-      changed = true;
-      logInfo(TAG, `🔄 Retrying failed entry: "${entry.message.slice(0, 60)}"`);
-      // fall through to fire
-    } else if (entry.fired || entry.paused || entry.fireAt > now) {
+    if (entry.fired || entry.paused || entry.fireAt > now) {
       continue;
     } else {
-      // Normal fire
+      // Normal fire — advance fireAt optimistically, revert on failure
       entry.lastRanAt = now;
+      entry._prevFireAt = entry.fireAt;
 
       if (entry.schedule) {
         try {
@@ -138,7 +130,6 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
       // Script task: run command directly via bash
       logInfo(TAG, `📜 Script task fired: "${entry.message}"`);
       const capturedEntry = entry;
-      const wasRetry = isRetry;
       try {
         const child = spawn("bash", ["-c", entry.message], { stdio: ["ignore", "pipe", "pipe"] });
         let output = "";
@@ -149,16 +140,19 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
           const status = code === 0 ? "✅" : `❌ (exit ${code})`;
           logInfo(TAG, `📜 Script task ${status}: "${capturedEntry.message}"`);
           recordRun(capturedEntry, code ?? undefined);
-          if (code !== 0 && !wasRetry) {
-            capturedEntry.retryAfter = Date.now() + RETRY_DELAY_MS;
-            logInfo(TAG, `🔄 Will retry in 10min: "${capturedEntry.message.slice(0, 60)}"`);
+          if (code !== 0) {
+            if (capturedEntry._prevFireAt) { capturedEntry.fireAt = capturedEntry._prevFireAt; }
+            delete capturedEntry._prevFireAt;
           }
+          delete capturedEntry._prevFireAt;
           writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
           onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, `${status}\n${summary}`);
         });
         child.on("error", (err) => {
           logWarn(TAG, `Script spawn failed: ${err.message}`);
           recordRun(capturedEntry, 1);
+          if (capturedEntry._prevFireAt) { capturedEntry.fireAt = capturedEntry._prevFireAt; }
+          delete capturedEntry._prevFireAt;
           writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
           onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, `❌ Failed to execute: ${err.message}`);
         });
@@ -169,7 +163,6 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
       // Agent task: spawn kiro-cli to execute
       logInfo(TAG, `⚙️ Task fired: "${entry.message}" → spawning subagent`);
       const capturedEntry = entry;
-      const wasRetry = isRetry;
       try {
         const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "ignore"] });
         let output = "";
@@ -201,10 +194,10 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
           const summary = output.slice(0, 500) || "(no output)";
           logInfo(TAG, `⚙️ Task completed: "${capturedEntry.message}"`);
           recordRun(capturedEntry, code ?? undefined);
-          if (code !== 0 && !wasRetry) {
-            capturedEntry.retryAfter = Date.now() + RETRY_DELAY_MS;
-            logInfo(TAG, `🔄 Will retry in 10min: "${capturedEntry.message.slice(0, 60)}"`);
+          if (code !== 0) {
+            if (capturedEntry._prevFireAt) { capturedEntry.fireAt = capturedEntry._prevFireAt; }
           }
+          delete capturedEntry._prevFireAt;
           writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
           onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, summary);
         });

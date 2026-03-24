@@ -15,6 +15,7 @@ export class HeartbeatSystem {
   private timer: ReturnType<typeof setInterval> | null = null;
   private tasks: HeartbeatTask[] = [];
   private running = false;
+  private firstTick = true;
 
   constructor(private config: HeartbeatConfig) {}
 
@@ -65,6 +66,11 @@ export class HeartbeatSystem {
 
   /** Execute all registered tasks with error isolation. Heavy-task gating: once a heavy task returns true, remaining heavy tasks are skipped. */
   private async tick(): Promise<void> {
+    if (this.firstTick) {
+      this.firstTick = false;
+      logDebug(TAG, "Skipping first tick — letting bridge finish startup");
+      return;
+    }
     logDebug(TAG, `Tick — executing ${this.tasks.length} task(s)`);
     let heavyRan = false;
 

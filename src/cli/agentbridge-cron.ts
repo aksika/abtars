@@ -31,6 +31,7 @@ export interface CronEntry {
   createdAt: number;
   lastRanAt?: number;
   retryAfter?: number;
+  _prevFireAt?: number;
   history?: { ts: number; exitCode?: number }[];
 }
 
