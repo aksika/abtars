@@ -168,18 +168,22 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
         let output = "";
         const send = (obj: unknown): void => { child.stdin?.write(JSON.stringify(obj) + "\n"); };
         let msgId = 0;
-        let phase = 0; // 0=waiting for init response, 1=waiting for session, 2=waiting for prompt
+        let phase = 0; // 0=waiting for init response, 1=waiting for session, 2=prompt sent
+        let buf = "";
 
         // Start handshake immediately
         send({ jsonrpc: "2.0", method: "initialize", params: { protocolVersion: "0.1", clientInfo: { name: "agentbridge-cron", version: "0.1.0" }, capabilities: {} }, id: ++msgId });
 
         child.stdout?.on("data", (d: Buffer) => {
+          buf += d.toString();
           output += d.toString();
-          try {
-            const lines = output.split("\n").filter(Boolean);
-            for (const line of lines) {
+          const lines = buf.split("\n");
+          buf = lines.pop() ?? ""; // keep incomplete last line in buffer
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
               const msg = JSON.parse(line);
-              if (phase === 0 && msg.id === 1) {
+              if (phase === 0 && msg.id) {
                 phase = 1;
                 send({ jsonrpc: "2.0", method: "session/new", params: { cwd: process.env["WORKING_DIR"] || "." }, id: ++msgId });
               } else if (phase === 1 && msg.result?.sessionId) {
@@ -187,8 +191,8 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
                 send({ jsonrpc: "2.0", method: "session/prompt", params: { sessionId: msg.result.sessionId, message: entry.message }, id: ++msgId });
                 child.stdin?.end();
               }
-            }
-          } catch { /* partial JSON, wait for more */ }
+            } catch { /* not valid JSON yet */ }
+          }
         });
         child.on("exit", (code) => {
           const summary = output.slice(0, 500) || "(no output)";

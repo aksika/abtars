@@ -1003,6 +1003,24 @@ async function main(): Promise<void> {
     sendBackOnline(tgSend, dcSend).catch((err) => {
       logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
     });
+
+    // Send greeting prompt to kiro-cli (with session context) so KP greets personally
+    if (telegramPoller) {
+      const chatId = [...config.allowedUserIds][0];
+      if (chatId) {
+        const sessionKey = `telegram:${chatId}`;
+        const greetPrompt = "[Telegram] You just came back online. Greet the user briefly.";
+        const prepared = preparePrompt(greetPrompt, memory!, chatId, sessionKey, greetPrompt, pendingSessionStart, seenSessions);
+        transport.sendPrompt(sessionKey, prepared).then(async (response) => {
+          if (response) {
+            const api = new TelegramApi(config.telegramBotToken);
+            await api.sendMessage(chatId, response);
+          }
+        }).catch((err) => {
+          logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
+    }
   }
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
