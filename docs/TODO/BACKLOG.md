@@ -216,10 +216,27 @@ Setup: `npm install -g @googleworkspace/cli` + `gws auth login` (one-time OAuth 
 **Priority:** Medium
 
 Review the Agent-to-Agent (A2A) implementation for proper protocol compliance:
-- Hello/Hello handshake on connection establishment
-- Session open/close lifecycle (clean teardown, no dangling sessions)
-- Verify both sides agree on capabilities before exchanging tasks
-- Change A2A message prefix from `[USER]` to `[GUEST-AGENT]` or `[<agent name>]` (use actual agent name from handshake when available)
+
+**Hello handshake:**
+- KP always sends hello with his name (`[KP]`) and capabilities on first contact
+- If guest sends hello first → KP responds with hello, normal flow
+- If guest skips hello and sends prompt → KP responds with hello first, then processes the prompt anyway (no blocking). Logs warning about skipped handshake
+- KP asks guest for name/ID. Guest provides → used in all logging and prefixes (truncated to 15 chars). Guest doesn't provide → fallback to `[GUEST]`
+
+**Message prefixes:**
+- `[KP]` for KP's messages (replaces `[ASSISTANT]`)
+- `[<agent name>]` for guest (replaces `[USER]`), e.g. `[Molty]`
+- Truncate agent name to 15 chars max
+
+**Session lifecycle:**
+- Explicit session open/close endpoints
+- `open` — creates session, spawns kiro-cli ACP if needed
+- `close` — saves transcript, cleans up
+- Keep idle timeout as safety net for abandoned sessions
+
+**Backward compat:**
+- Existing clients (Molty) keep working — auto-session on first prompt if no hello
+- No breaking changes to `/api/agent/prompt`
 
 ## 35. Ops Hardening — Cron, Lifecycle, Healthcheck
 
