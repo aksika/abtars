@@ -167,13 +167,33 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       const raw = execSync("agentbridge-cron list", { timeout: 5000, encoding: "utf-8" }).trim();
       const entries = JSON.parse(raw).entries ?? JSON.parse(raw);
       const active = entries.filter((e: any) => !e.fired && !e.paused);
+      const today = new Date();
+      const dow = today.getDay(); // 0=Sun
       const lines = active.map((e: any) => {
         const sched = e.schedule ?? "one-shot";
-        const prio = e.priority === "high" ? " ⚡" : e.priority === "low" ? " 🔽" : "";
-        const exec = e.executor === "script" ? "📜" : "⚙️";
-        return `${exec}${prio} \`${sched}\` — ${e.message.slice(0, 80)}`;
+        // Determine if task runs today based on cron day-of-week field
+        let runsToday = true;
+        if (sched !== "one-shot") {
+          const parts = sched.split(" ");
+          const dowField = parts[4] ?? "*";
+          if (dowField !== "*") {
+            const allowed = new Set<number>();
+            for (const seg of dowField.split(",")) {
+              if (seg.includes("-")) {
+                const [a, b] = seg.split("-").map(Number);
+                for (let i = a; i <= b; i++) allowed.add(i);
+              } else allowed.add(Number(seg));
+            }
+            runsToday = allowed.has(dow);
+          }
+        }
+        const ran = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
+        const tick = !runsToday ? "—" : ran ? "✓" : "○";
+        const prio = (e.priority ?? "medium").toUpperCase().padEnd(6);
+        const label = e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 40);
+        return `${tick}  ${prio}  ${sched.padEnd(15)}  ${label}`;
       });
-      listing = lines.length > 0 ? lines.join("\n\n") : "(no active entries)";
+      listing = lines.length > 0 ? "```\n" + lines.join("\n") + "\n```" : "(no active entries)";
     } catch { listing = "(failed to read cron)"; }
     await ctx.reply(`⏰ ${now}\n\n${listing}`, { parseMode: "Markdown" });
     return true;
