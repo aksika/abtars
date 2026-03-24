@@ -1009,7 +1009,7 @@ async function main(): Promise<void> {
       const chatId = [...config.allowedUserIds][0];
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
-        const greetPrompt = "[Telegram] You just came back online. Greet the user briefly.";
+        const greetPrompt = "[Telegram] You just came back online. Greet the user briefly. Output ONLY the greeting message, no thinking or reasoning.";
         const prepared = preparePrompt(greetPrompt, memory!, chatId, sessionKey, greetPrompt, pendingSessionStart, seenSessions);
         transport.sendPrompt(sessionKey, prepared).then(async (response) => {
           if (response) {
