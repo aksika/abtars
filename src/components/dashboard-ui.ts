@@ -609,13 +609,7 @@ function getBridgeHealthCard(): string {
     </div>
     <div class="stat-row">
       <span class="stat-label">Heartbeat</span>
-      <span class="stat-value" id="hb-status">
-        <span class="indicator red"></span> stopped
-      </span>
-    </div>
-    <div class="stat-row">
-      <span class="stat-label">HB Interval</span>
-      <span class="stat-value" id="hb-interval">—</span>
+      <span class="stat-value" id="hb-status">—</span>
     </div>
     <div id="hb-tasks" style="margin-top:6px;"></div>
     <div class="stat-row">
@@ -996,14 +990,12 @@ function getScript(): string {
       el = document.getElementById('hb-status');
       if (el) {
         if (snap.heartbeat.running) {
-          el.innerHTML = '<span class="indicator green"></span> running';
+          var secs = snap.heartbeat.intervalMs ? (snap.heartbeat.intervalMs / 1000) + 's' : '';
+          el.innerHTML = '<span class="indicator green"></span> ' + secs;
         } else {
-          el.innerHTML = '<span class="indicator yellow"></span> stopped';
+          el.innerHTML = '<span class="indicator red"></span> FAILED';
         }
       }
-
-      el = document.getElementById('hb-interval');
-      if (el) el.textContent = snap.heartbeat.intervalMs ? (snap.heartbeat.intervalMs / 1000) + 's' : '—';
 
       // Heartbeat task list
       var hbTasks = document.getElementById('hb-tasks');
