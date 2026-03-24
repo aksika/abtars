@@ -25,7 +25,7 @@ export interface CronEntry {
   type: "reminder" | "task";
   executor?: "agent" | "script";
   schedule?: string;
-  priority?: "high";
+  priority?: "high" | "medium" | "low";
   paused?: boolean;
   fired: boolean;
   createdAt: number;

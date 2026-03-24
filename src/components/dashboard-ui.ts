@@ -1284,7 +1284,7 @@ function getScript(): string {
       var statusBadge = e.paused
         ? '<span class="badge paused">paused</span>'
         : '<span class="badge running">active</span>';
-      var priorityBadge = e.priority === 'high' ? ' <span class="badge high">HIGH</span>' : '';
+      var priorityBadge = e.priority === 'high' ? ' <span class="badge high">HIGH</span>' : e.priority === 'low' ? ' <span class="badge low">LOW</span>' : '';
       var nextFire = e.paused ? '—' : new Date(e.fireAt).toLocaleString();
       var lastRan = e.lastRanAt ? new Date(e.lastRanAt).toLocaleString() : 'never';
       var pauseBtn = e.paused

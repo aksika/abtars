@@ -1,6 +1,6 @@
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
 import { SecurityGate } from "./components/security-gate.js";
@@ -180,6 +180,27 @@ async function main(): Promise<void> {
 
   // Shared conversation buffer for both platforms
   const conversationBuffer = new ConversationBuffer(50);
+
+  // --- Pre-flight: start external services ---
+  if (config.kiroTransport === "tmux") {
+    logInfo("main", `♻️  Starting tmux session '${config.tmuxSession}'...`);
+    try {
+      execFileSync(join(import.meta.dirname, "..", "scripts", "tmux-session.sh"), { stdio: "pipe" });
+    } catch (err) {
+      logError("main", "tmux session start failed", err);
+    }
+  }
+
+  let mcpDaemonStarted = false;
+  if (config.mcpDaemon) {
+    try {
+      execFileSync("mcporter", ["daemon", "start"], { stdio: "pipe" });
+      mcpDaemonStarted = true;
+      logInfo("main", "🔌 mcporter daemon started");
+    } catch {
+      logWarn("main", "mcporter not found or daemon start failed — skipping");
+    }
+  }
 
   let transport: IKiroTransport;
   if (config.kiroTransport === "tmux") {
@@ -1210,6 +1231,9 @@ async function main(): Promise<void> {
     try { await browserManager.shutdown(); } catch { /* best-effort */ }
     memory?.close();
     transport.destroy();
+    if (mcpDaemonStarted) {
+      try { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); } catch { /* best-effort */ }
+    }
     process.exit(0);
   }
 

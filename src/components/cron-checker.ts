@@ -84,9 +84,18 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
     logInfo(TAG, `🗑️ GC: pruned ${before - entries.length} old fired entries`);
   }
 
+  // Sort for catchup: high→medium→low, latest fireAt first within each tier
+  const prioRank: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  entries.sort((a, b) => {
+    const pa = prioRank[a.priority ?? "medium"] ?? 1;
+    const pb = prioRank[b.priority ?? "medium"] ?? 1;
+    if (pa !== pb) return pa - pb;
+    return (b.fireAt ?? 0) - (a.fireAt ?? 0); // latest first within tier
+  });
+
   for (const entry of entries) {
     // Priority filter: high-priority pass only fires high entries, normal pass skips them
-    const isHigh = entry.priority === "high";
+    const isHigh = (entry.priority ?? "medium") === "high";
     if (priorityOnly && !isHigh) continue;
     if (!priorityOnly && isHigh) continue;
 
@@ -164,9 +173,30 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
       try {
         const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "ignore"] });
         let output = "";
-        child.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
-        child.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "sendPrompt", params: { prompt: entry.message }, id: 1 }) + "\n");
-        child.stdin?.end();
+        const send = (obj: unknown): void => { child.stdin?.write(JSON.stringify(obj) + "\n"); };
+        let msgId = 0;
+        let phase = 0; // 0=waiting for init response, 1=waiting for session, 2=waiting for prompt
+
+        // Start handshake immediately
+        send({ jsonrpc: "2.0", method: "initialize", params: { protocolVersion: "0.1", clientInfo: { name: "agentbridge-cron", version: "0.1.0" }, capabilities: {} }, id: ++msgId });
+
+        child.stdout?.on("data", (d: Buffer) => {
+          output += d.toString();
+          try {
+            const lines = output.split("\n").filter(Boolean);
+            for (const line of lines) {
+              const msg = JSON.parse(line);
+              if (phase === 0 && msg.id === 1) {
+                phase = 1;
+                send({ jsonrpc: "2.0", method: "session/new", params: { cwd: process.env["WORKING_DIR"] || "." }, id: ++msgId });
+              } else if (phase === 1 && msg.result?.sessionId) {
+                phase = 2;
+                send({ jsonrpc: "2.0", method: "session/prompt", params: { sessionId: msg.result.sessionId, message: entry.message }, id: ++msgId });
+                child.stdin?.end();
+              }
+            }
+          } catch { /* partial JSON, wait for more */ }
+        });
         child.on("exit", (code) => {
           const summary = output.slice(0, 500) || "(no output)";
           logInfo(TAG, `⚙️ Task completed: "${capturedEntry.message}"`);

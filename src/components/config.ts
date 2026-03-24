@@ -301,5 +301,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
     discordEnabled,
     discordA2aEnabled,
     codingAgentModel: process.env["CODING_AGENT_MODEL"] || CONFIG_DEFAULTS.codingAgentModel,
+    mcpDaemon: parseBoolEnv("MCPORTER_DAEMON", CONFIG_DEFAULTS.mcpDaemon),
   };
 }

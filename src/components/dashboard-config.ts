@@ -81,7 +81,7 @@ export type CronEntryStatus = {
   paused: boolean;
   lastRanAt?: number;
   lastExitCode?: number | null;
-  priority?: "high";
+  priority?: "high" | "medium" | "low";
 };
 
 export type PlatformStates = {
@@ -256,7 +256,7 @@ function readCronStatus(): CronEntryStatus[] {
           paused: Boolean(e.paused),
           lastRanAt: e.lastRanAt ? Number(e.lastRanAt) : undefined,
           lastExitCode: last?.exitCode ?? null,
-          ...(e.priority === "high" ? { priority: "high" as const } : {}),
+          ...(e.priority ? { priority: e.priority as "high" | "medium" | "low" } : {}),
         };
       });
   } catch {

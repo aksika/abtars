@@ -36,6 +36,10 @@ if [[ " ${ARGS[*]} " == *" stop "* ]]; then
   else
     echo "   tmux session '$SESSION' not running."
   fi
+  # Stop mcporter daemon
+  if command -v mcporter &>/dev/null; then
+    mcporter daemon stop 2>/dev/null && echo "   mcporter daemon stopped." || true
+  fi
   exit 0
 fi
 
@@ -48,24 +52,6 @@ echo "   Args:     ${ARGS[*]}"
 echo "   Node:     $(node --version)"
 echo ""
 
-# --- skip tmux session for ACP transport ---
-if [[ " ${ARGS[*]} " == *" --tmux "* ]]; then
-  echo "♻️  Restarting tmux session '$SESSION'..."
-  "$PROJECT_DIR/scripts/tmux-session.sh"
-  sleep 2
-elif [[ " ${ARGS[*]} " == *" --acp "* ]] || [[ "${KIRO_TRANSPORT:-acp}" == "acp" ]]; then
-  echo "🔌 ACP transport — skipping tmux session"
-else
-  echo "♻️  Restarting tmux session '$SESSION'..."
-  "$PROJECT_DIR/scripts/tmux-session.sh"
-  sleep 2
-fi
-
-# --- ensure mcporter daemon is running (for MCP servers like pptx) ---
-if command -v mcporter &>/dev/null; then
-  mcporter daemon start 2>/dev/null | sed 's/^/   [mcporter] /' || true
-fi
-
 # --- kill any existing bridge process (cold restart) ---
 if pkill -f "node.*dist/main.js" 2>/dev/null; then
   echo "   Killed old bridge process."
@@ -74,7 +60,7 @@ fi
 
 # --- run doctor health check ---
 if [ -x "$AB_HOME/scripts/doctor.sh" ]; then
-  "$AB_HOME/scripts/doctor.sh" 2>&1 | sed 's/^/   /'
+  "$AB_HOME/scripts/doctor.sh" --fix 2>&1 | sed 's/^/   /'
   echo ""
 fi
 

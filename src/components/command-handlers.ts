@@ -169,7 +169,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       const active = entries.filter((e: any) => !e.fired && !e.paused);
       const lines = active.map((e: any) => {
         const sched = e.schedule ?? "one-shot";
-        const prio = e.priority === "high" ? " ⚡" : "";
+        const prio = e.priority === "high" ? " ⚡" : e.priority === "low" ? " 🔽" : "";
         const exec = e.executor === "script" ? "📜" : "⚙️";
         return `${exec}${prio} \`${sched}\` — ${e.message.slice(0, 80)}`;
       });

@@ -59,6 +59,8 @@ export type Config = {
   discordA2aEnabled: boolean;
   /** Model ID for /coding agent (default: claude-opus-4.6) */
   codingAgentModel: string;
+  /** Whether to start mcporter MCP daemon (default: false) */
+  mcpDaemon: boolean;
 };
 
 /** Default values for optional config fields. */
@@ -82,4 +84,5 @@ export const CONFIG_DEFAULTS = {
   discordEnabled: false,
   discordA2aEnabled: false,
   codingAgentModel: "claude-opus-4.6",
+  mcpDaemon: false,
 } as const satisfies Partial<Config>;
