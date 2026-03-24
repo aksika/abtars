@@ -220,3 +220,17 @@ Review the Agent-to-Agent (A2A) implementation for proper protocol compliance:
 - Session open/close lifecycle (clean teardown, no dangling sessions)
 - Verify both sides agree on capabilities before exchanging tasks
 - Change A2A message prefix from `[USER]` to `[GUEST-AGENT]` or `[<agent name>]` (use actual agent name from handshake when available)
+
+## 35. Ops Hardening — Cron, Lifecycle, Healthcheck
+
+**Status:** ✅ Done (2026-03-24/25)
+**Commits:** `b5cfc47`..`39d9c44`
+
+Batch of operational fixes:
+- Cron: 3 priority levels (HIGH/MEDIUM/LOW), catchup sorted by priority then latest-first. Failed tasks revert fireAt (re-fire next tick). ACP handshake fixed (initialize → session/new → session/prompt with incremental line parsing). First heartbeat tick skipped (let bridge finish startup).
+- Lifecycle: tmux session + mcporter daemon managed by bridge (not launcher). `MCPORTER_DAEMON` .env flag. Shutdown timeout 5s→20s. Doctor `--fix` at startup, orphan kiro-cli detection+kill.
+- Dashboard: heartbeat merged to single line, `/cron` clean monospace table with ✓/○/— status.
+- Poller: transient retries downgraded to WARN (ERROR only after 3+).
+- Reports moved inside `~/.agentbridge/reports/`, added to daily backup with `finance/`.
+- Startup greeting prompt to kiro-cli with session context ("You just woke up").
+- Sleep audit filenames normalized to `YYYYMMDD_HHMM`.
