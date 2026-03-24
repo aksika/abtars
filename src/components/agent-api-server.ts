@@ -2,6 +2,7 @@ import { createServer, IncomingMessage, ServerResponse } from "http";
 import { readFileSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { createHmac, randomBytes } from "crypto";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./kiro-transport.js";
 import { AcpTransport } from "./acp-transport.js";
@@ -56,6 +57,9 @@ export class AgentApiServer {
   private logFile: string;
   private agentTransport: AcpTransport | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private guestName = "GUEST";
+  private authenticated = false;
+  private pendingChallenge: string | null = null;
 
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
@@ -130,6 +134,9 @@ export class AgentApiServer {
     this.agentTransport.destroy();
     this.agentTransport = null;
     this.rulesInjected = false;
+    this.guestName = "GUEST";
+    this.authenticated = false;
+    this.pendingChallenge = null;
     this.logFile = this.newLogFile();
   }
 
@@ -153,6 +160,10 @@ export class AgentApiServer {
     appendFileSync(this.logFile, `[${ts}] ${role}: ${content}\n`);
   }
 
+  private hmac(data: string): string {
+    return createHmac("sha256", this.config.token).update(data).digest("hex");
+  }
+
   private handle(req: IncomingMessage, res: ServerResponse): void {
     const ip = normalizeIp(req.socket.remoteAddress ?? "");
     if (ip !== "127.0.0.1" && ip !== "::1" && !this.config.allowedIps.includes(ip)) {
@@ -160,16 +171,12 @@ export class AgentApiServer {
       res.writeHead(403).end();
       return;
     }
-    if (this.config.token && req.headers["authorization"] !== `Bearer ${this.config.token}`) {
-      res.writeHead(401).end();
-      return;
-    }
 
     const url = req.url ?? "";
     const method = req.method ?? "";
 
     if (method === "POST" && url === "/api/agent/prompt") {
-      this.handlePrompt(req, res).catch((err) => {
+      this.handleMessage(req, res).catch((err) => {
         logWarn(TAG, `Prompt error: ${err instanceof Error ? err.message : String(err)}`);
         res.writeHead(500).end(JSON.stringify({ error: "internal" }));
       });
@@ -182,10 +189,82 @@ export class AgentApiServer {
     }
   }
 
-  private async handlePrompt(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleMessage(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = JSON.parse(await readBody(req));
+    const type = body.type as string | undefined;
+
+    if (type === "hello") return this.handleHello(body, res);
+    if (type === "hello-ack") return this.handleHelloAck(body, res);
+    if (type === "close") return this.handleClose(res);
+
+    // Normal prompt — auth required if token is configured
+    if (this.config.token && !this.authenticated) {
+      // Rude guest: respond with KP's hello + challenge, don't process yet
+      const challenge = randomBytes(32).toString("hex");
+      this.pendingChallenge = challenge;
+      logWarn(TAG, `Prompt without hello from unauthenticated guest — sending challenge`);
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+        hello: { name: "KP", challenge },
+        error: "hello_required",
+        message: "Hello, I'm KP. Who are you? Please authenticate.",
+      }));
+      return;
+    }
+    return this.handlePrompt(body, req, res);
+  }
+
+  private handleHello(body: Record<string, unknown>, res: ServerResponse): void {
+    const name = typeof body.name === "string" ? body.name.slice(0, 15) : "GUEST";
+    const guestChallenge = typeof body.challenge === "string" ? body.challenge : null;
+    this.guestName = name;
+
+    if (!this.config.token) {
+      // No auth configured — just exchange names
+      this.authenticated = true;
+      logInfo(TAG, `Hello from [${name}] (no auth required)`);
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+        type: "hello", name: "KP",
+      }));
+      return;
+    }
+
+    // Challenge-response: respond to guest's challenge, send our own
+    const kpChallenge = randomBytes(32).toString("hex");
+    this.pendingChallenge = kpChallenge;
+    const responseHmac = guestChallenge ? this.hmac(guestChallenge) : undefined;
+    logInfo(TAG, `Hello from [${name}] — challenge exchange`);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+      type: "hello", name: "KP",
+      ...(responseHmac ? { response: responseHmac } : {}),
+      challenge: kpChallenge,
+    }));
+  }
+
+  private handleHelloAck(body: Record<string, unknown>, res: ServerResponse): void {
+    const response = typeof body.response === "string" ? body.response : "";
+    if (!this.pendingChallenge || response !== this.hmac(this.pendingChallenge)) {
+      logWarn(TAG, `Hello-ack failed from [${this.guestName}] — bad HMAC`);
+      res.writeHead(401, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "auth_failed" }));
+      return;
+    }
+    this.authenticated = true;
+    this.pendingChallenge = null;
+    logInfo(TAG, `Authenticated: [${this.guestName}]`);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+  }
+
+  private async handleClose(res: ServerResponse): Promise<void> {
+    logInfo(TAG, `Session closed by [${this.guestName}]`);
+    await this.killAgentTransport();
+    this.guestName = "GUEST";
+    this.authenticated = false;
+    this.pendingChallenge = null;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+  }
+
+  private async handlePrompt(body: Record<string, unknown>, req: IncomingMessage, res: ServerResponse): Promise<void> {
     const start = Date.now();
     const ip = normalizeIp(req.socket.remoteAddress ?? "");
-    const body = JSON.parse(await readBody(req));
     const prompt = body.prompt;
     if (!prompt || typeof prompt !== "string") {
       this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt: "", response: "400: prompt required", durationMs: Date.now() - start, status: 400 });
@@ -222,13 +301,13 @@ export class AgentApiServer {
       ? `[AGENT RULES]\n${this.agentRules}\n[END AGENT RULES]\n\n${prompt}`
       : prompt;
     if (this.agentRules && !this.rulesInjected) this.rulesInjected = true;
-    this.log("USER", prompt);
+    this.log(`[${this.guestName}]`, prompt);
     const response = await t.sendPrompt(sessionKey, fullPrompt);
 
     // Record assistant message
     this.memory?.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), chatId, sessionId: sessionKey });
 
-    this.log("ASSISTANT", response);
+    this.log("[KP]", response);
 
     this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt: prompt, response: response, durationMs: Date.now() - start, status: 200 });
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ response, sessionKey }));
