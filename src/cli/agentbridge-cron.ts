@@ -151,6 +151,7 @@ function listEntries(): void {
     type: e.type,
     ...(e.executor ? { executor: e.executor } : {}),
     ...(e.schedule ? { schedule: e.schedule } : {}),
+    ...(e.priority ? { priority: e.priority } : {}),
     ...(e.paused ? { paused: true } : {}),
     ...(e.lastRanAt ? { lastRanAt: new Date(e.lastRanAt).toISOString() } : {}),
     ...(e.history?.length ? { lastExit: e.history[e.history.length - 1]!.exitCode ?? null } : {}),
