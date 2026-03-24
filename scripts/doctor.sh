@@ -58,18 +58,7 @@ for lockfile in "$AB/memory/sleep"/sleep_*.lock; do
   fi
 done
 
-# 4. Stale browse artifacts (older than 3 days)
-STALE_BROWSE=$(find "$AB/logs" -name "browse_*" -mtime +3 2>/dev/null | wc -l)
-if [ "$STALE_BROWSE" -gt 0 ]; then
-  if $FIX; then
-    find "$AB/logs" -name "browse_*" -mtime +3 -delete 2>/dev/null
-    fix "cleaned $STALE_BROWSE stale browse artifacts"
-  else
-    warn "$STALE_BROWSE stale browse artifacts in logs/"
-  fi
-fi
-
-# 5. Cookie file exists and is valid JSON
+# 4. Cookie file exists and is valid JSON
 COOKIE="$AB/titok/cookies/x-cookies.json"
 if [ -f "$COOKIE" ]; then
   if ! python3 -c "import json; json.load(open('$COOKIE'))" 2>/dev/null; then
@@ -79,7 +68,7 @@ else
   warn "no X cookies found — tweet replies/discovery won't work"
 fi
 
-# 6. Required dirs exist
+# 5. Required dirs exist
 for d in "$AB/twitterX" "$AB/twitterX/output" "$AB/skills" "$AB/logs" "$AB/memory/sleep" "$AB/memory/retrospectives"; do
   if [ ! -d "$d" ]; then
     if $FIX; then
@@ -90,12 +79,12 @@ for d in "$AB/twitterX" "$AB/twitterX/output" "$AB/skills" "$AB/logs" "$AB/memor
   fi
 done
 
-# 7. Follows file exists
+# 6. Follows file exists
 if [ ! -f "$AB/twitterX/base.follows.json" ]; then
   warn "base.follows.json missing — tweet feed won't run"
 fi
 
-# 8. Recent backup check
+# 7. Recent backup check
 BACKUP_DIR="$HOME/.backup-agentbridge"
 if [ -d "$BACKUP_DIR" ]; then
   LATEST=$(find "$BACKUP_DIR" -name "agentbridge-*.zip" -mtime -2 2>/dev/null | head -1)
@@ -106,7 +95,7 @@ else
   warn "backup dir $BACKUP_DIR missing — backups never ran"
 fi
 
-# 9. Memory DB health
+# 8. Memory DB health
 if [ -f "$DB" ]; then
   INTEGRITY=$(sqlite3 "$DB" "PRAGMA integrity_check;" 2>/dev/null | head -1)
   if [ "$INTEGRITY" != "ok" ]; then
@@ -127,7 +116,7 @@ else
   warn "memory.db not found"
 fi
 
-# 10. Heartbeat liveness (startup check — was previous session's heartbeat healthy?)
+# 9. Heartbeat liveness (startup check — was previous session's heartbeat healthy?)
 HB_FILE="$AB/memory/.heartbeat"
 if [ -f "$HB_FILE" ]; then
   HB_AGE=$(( ($(date +%s) - $(stat -c %Y "$HB_FILE" 2>/dev/null || echo 0)) / 60 ))
@@ -136,7 +125,7 @@ if [ -f "$HB_FILE" ]; then
   fi
 fi
 
-# 11. Core files size check (should be ≤10 non-empty lines each)
+# 10. Core files size check (should be ≤10 non-empty lines each)
 for f in "$AB/memory/core/user_profile.md" "$AB/memory/core/agent_notes.md"; do
   if [ -f "$f" ]; then
     LINES=$(grep -c '[^[:space:]]' "$f")
@@ -146,7 +135,7 @@ for f in "$AB/memory/core/user_profile.md" "$AB/memory/core/agent_notes.md"; do
   fi
 done
 
-# 12. Orphaned kiro-cli processes
+# 11. Orphaned kiro-cli processes
 KIRO_PROCS=$(pgrep -f 'kiro-cli acp' 2>/dev/null | wc -l)
 if [ "$KIRO_PROCS" -gt 1 ]; then
   if $FIX; then
@@ -163,7 +152,7 @@ if [ "$KIRO_PROCS" -gt 1 ]; then
   fi
 fi
 
-# 13. Full fixes (--fix-full only)
+# 12. Full fixes (--fix-full only)
 if $FIX_FULL && [ -f "$DB" ]; then
   sqlite3 "$DB" "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt messages_fts index"
   sqlite3 "$DB" "INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt extracted_memories_fts index"
