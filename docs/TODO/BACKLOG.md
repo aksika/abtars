@@ -264,3 +264,14 @@ The consolidation pipeline (Dreamy's daily summaries, retrospectives) flattens c
 - For data that exists only in summaries (not in DB): treat as INTERNAL by default — A2A guests don't get it unless explicitly declassified
 - Trust agent judgment as last resort, but only for INTERNAL level — SECRET/CONFIDENTIAL must be enforced programmatically
 - Sleep prompt needs explicit instructions: "Replace any SECRET or CONFIDENTIAL memory content with `<REDACTED>` in daily summaries and retrospectives"
+
+## Task Descriptions — move from skills/ to tasks/
+
+Cron task descriptions (the long message strings that tell the agent what to do) currently live inside `cron.json` as inline text, and their documentation lives in `skills/`. This is wrong — skills are for the agent's conversational abilities, not for scheduled task instructions.
+
+**Proposal:**
+- Create a `tasks/` folder with one `.md` file per cron task (e.g. `tasks/daily-ai-report.md`, `tasks/weekly-ai-report.md`, `tasks/finance-daily.md`)
+- Each file contains the full task description/instructions
+- `cron.json` entries reference the task file path instead of embedding the full message
+- `CronQueue` reads the file content when spawning the agent task
+- Benefits: task descriptions are version-controlled, editable without touching cron.json, not truncated in `/cron` display, and clearly separated from conversational skills
