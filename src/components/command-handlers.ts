@@ -200,7 +200,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
         }
         const succeeded = e.history?.some((h: any) => h.exitCode === 0 && new Date(h.ts).toDateString() === today.toDateString());
         const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
-        const tick = !runsToday ? "—" : succeeded ? "✓" : started ? "▶" : "+";
+        const tick = !runsToday ? "—" : succeeded ? "✓" : started ? "~" : "+";
         const prio = (e.priority ?? "medium").toUpperCase().padEnd(6);
         const label = e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 40);
         return `${tick}  ${prio}  ${sched.padEnd(15)}  ${label}`;
