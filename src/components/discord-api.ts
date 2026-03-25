@@ -3,6 +3,8 @@ import {
   GatewayIntentBits,
   Partials,
   type Message,
+  type MessageReaction,
+  type User,
   type TextChannel,
 } from "discord.js";
 import { logInfo, logError, logDebug } from "./logger.js";
@@ -24,10 +26,11 @@ export class DiscordApi {
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.GuildMessageReactions,
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent,
       ],
-      partials: [Partials.Channel],
+      partials: [Partials.Channel, Partials.Message, Partials.Reaction],
     });
 
     this.client.on("clientReady", () => {
@@ -81,6 +84,22 @@ export class DiscordApi {
       } catch (err) {
         logError(TAG, "Message handler error", err);
       }
+    });
+  }
+
+  /** Register a handler for MESSAGE_REACTION_ADD events. */
+  onReaction(handler: (reaction: MessageReaction, user: User) => void | Promise<void>): void {
+    this.client.on("messageReactionAdd", async (reaction, user) => {
+      if (user.bot) return;
+      // Fetch partial reaction/user if needed
+      try {
+        if (reaction.partial) await reaction.fetch();
+        if (user.partial) await (user as any).fetch();
+      } catch { return; }
+      try {
+        const result = handler(reaction as MessageReaction, user as User);
+        if (result instanceof Promise) result.catch((err: unknown) => logError(TAG, "Reaction handler error", err));
+      } catch (err) { logError(TAG, "Reaction handler error", err); }
     });
   }
 

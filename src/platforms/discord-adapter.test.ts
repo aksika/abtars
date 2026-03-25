@@ -70,6 +70,8 @@ function makeDeps(transport: IKiroTransport): DiscordAdapterDeps {
       updateCtxStart: vi.fn(),
     } as PipelineDeps,
     transport,
+    memory: null,
+    conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() } as any,
   };
 }
 

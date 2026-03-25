@@ -10,11 +10,15 @@ import { DiscordSecurityGate } from "../components/discord-security-gate.js";
 import { ResponseFormatter } from "../components/response-formatter.js";
 import { A2ARouter } from "../components/a2a-router.js";
 import { interceptLargeMessage } from "../components/message-interceptor.js";
+import { formatReactionSignal } from "../components/reaction-signal.js";
+import { emojiToScore } from "../components/emotion-utils.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
 import { handleInboundMessage, type PipelineDeps } from "../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../types/platform.js";
 import type { DiscordInboundMessage } from "../types/index.js";
 import type { IKiroTransport } from "../components/kiro-transport.js";
+import type { MemoryManager } from "../components/memory-manager.js";
+import type { ConversationBuffer } from "../components/conversation-buffer.js";
 
 const TAG = "discord";
 
@@ -32,14 +36,16 @@ export interface DiscordAdapterConfig {
 export interface DiscordAdapterDeps {
   pipeline: PipelineDeps;
   transport: IKiroTransport;
+  memory: MemoryManager | null;
+  conversationBuffer: ConversationBuffer;
 }
 
 export class DiscordAdapter implements PlatformAdapter {
   readonly name = "discord" as const;
   readonly capabilities: PlatformCapabilities = {
     voice: false,
-    reactions: false, // TODO: add Gateway reaction events
-    typing: false,    // Discord typing indicator is per-channel, not useful here
+    reactions: true,
+    typing: false,
     threads: true,
   };
 
@@ -72,6 +78,7 @@ export class DiscordAdapter implements PlatformAdapter {
     }
 
     this.poller = new DiscordPoller(this.api, this.config.appId, (m) => this.handleMessage(m));
+    this.api.onReaction((reaction, user) => this.handleReaction(reaction, user));
     await this.poller.start();
   }
 
@@ -145,5 +152,38 @@ export class DiscordAdapter implements PlatformAdapter {
     };
 
     await handleInboundMessage(inbound, this, this.deps.pipeline);
+  }
+
+  private async handleReaction(
+    reaction: import("discord.js").MessageReaction,
+    user: import("discord.js").User,
+  ): Promise<void> {
+    const channelId = reaction.message.channelId;
+    const messageId = Number(reaction.message.id);
+    const emoji = reaction.emoji.name ?? "";
+    if (!emoji) return;
+
+    const isAuthorized = this.securityGate.authorize(user.id, channelId);
+    const senderName = user.username || `id:${user.id}`;
+    logInfo(TAG, `Reaction ${emoji} from ${senderName} on msg ${reaction.message.id}`);
+
+    // Emotion scoring on authorized reactions
+    if (isAuthorized && this.deps.memory) {
+      const score = emojiToScore(emoji);
+      const chatId = parseInt(channelId, 10) || 0;
+      const updated = this.deps.memory.updateEmotionByPlatformId(chatId, messageId, score);
+      if (updated) logDebug(TAG, `Emotion score ${score} set on msg ${reaction.message.id}`);
+    }
+
+    if (!isAuthorized) {
+      logDebug(TAG, `Unauthorized reaction from ${user.id}, discarding`);
+      return;
+    }
+
+    // Buffer reaction signal for next message context
+    const signal = formatReactionSignal(senderName, [emoji]);
+    const bufKey = `discord:${channelId}`;
+    this.deps.conversationBuffer.push(bufKey, senderName, signal);
+    logDebug(TAG, `Buffered reaction signal for channel ${channelId}`);
   }
 }

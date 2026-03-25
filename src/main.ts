@@ -312,7 +312,7 @@ async function main(): Promise<void> {
           a2aPeerBotId: config.discordA2aPeerBotId,
           a2aRateLimitMs: config.discordA2aRateLimitMs,
         },
-        { pipeline: pipelineDeps, transport },
+        { pipeline: pipelineDeps, transport, memory, conversationBuffer },
       );
       platformAdapters.set("discord", discordAdapter);
       return {
