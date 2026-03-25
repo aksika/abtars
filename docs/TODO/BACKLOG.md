@@ -238,7 +238,7 @@ Batch of operational fixes:
 - Startup greeting prompt to kiro-cli with session context ("You just woke up").
 - Sleep audit filenames normalized to `YYYYMMDD_HHMM`.
 
-## 37. Classification Leak via Consolidation Pipeline
+## 38. Classification Leak via Consolidation Pipeline
 
 **Status:** Not started
 **Priority:** High
@@ -265,7 +265,7 @@ The consolidation pipeline (Dreamy's daily summaries, retrospectives) flattens c
 - Trust agent judgment as last resort, but only for INTERNAL level — SECRET/CONFIDENTIAL must be enforced programmatically
 - Sleep prompt needs explicit instructions: "Replace any SECRET or CONFIDENTIAL memory content with `<REDACTED>` in daily summaries and retrospectives"
 
-## 36. Unified Platform Abstraction + CronQueue
+## 36. Unified Platform Abstraction
 
 **Status:** ✅ Done (2026-03-25)
 **Branch:** `refactor/unified-platform-abstraction` (merged to main)
@@ -279,13 +279,49 @@ Major refactor: extracted Telegram/Discord into a shared PlatformAdapter pattern
 - `SleepQueue`: platform-agnostic sleep message queueing
 - `CodingMode`: coding agent transport lifecycle
 - `IdleSave`: idle chat save timers
-- `CronQueue`: sequential job processor — scripts fire freely, agents 1-at-a-time with 30min timeout, priority-sorted, dedup by entry ID, retry once on failure (skip 1 cycle)
 - Consolidated env-utils, shared test helpers
 - Deleted dead code: PlatformController, TransportController, ChannelAdapter, BridgeMessage
 - main.ts: 1265 → 617 lines (-51%)
-- 642 tests across 65 files
 
-## Task Descriptions — move from skills/ to tasks/
+## 37. CronQueue — Sequential Job Processor
+
+**Status:** ✅ Done (2026-03-25)
+
+Replaced inline task spawning in cron-checker with a proper job queue.
+
+- `checkCron()` is now a pure scanner: returns due tasks, no spawning
+- `CronQueue` processes tasks sequentially: scripts fire freely, agents 1-at-a-time
+- 30-min hard timeout on agent tasks (SIGKILL)
+- Priority-sorted queue: high jobs jump ahead of pending medium/low
+- Duplicate prevention: same entry ID can't be queued or running twice
+- Retry once on failure: skip 1 heartbeat cycle, then retry. If retry fails too, wait for next scheduled time
+- Merged cron-priority/cron-normal into single heartbeat task
+- `/cron` shows running job PID + status icons: + pending, ~ running, ✓ succeeded, — skipped
+- Heartbeat skips ticks until uptime > 3 minutes
+
+## 38. Classification Leak via Consolidation Pipeline
+
+**Status:** Not started
+**Priority:** High
+
+**Problem:**
+Daily summaries and consolidations are plain text — they carry no classification metadata. If a CONFIDENTIAL memory gets summarized into a daily file, the summary has no classification tag. Any agent (including A2A guests) that reads the summary gets the data without a classification check.
+
+**How it was discovered:**
+During A2A security testing (2026-03-25), Molty asked KP about a CONFIDENTIAL memory. KP initially tried to answer from the daily summary (which contained the data in plain text). When challenged, KP checked the DB and found `classification: 2 (CONFIDENTIAL)`. Had the summary said PUBLIC, KP would have leaked it.
+
+**Root cause:**
+The consolidation pipeline (Dreamy's daily summaries, retrospectives) flattens classified memories into unclassified plain text. The classification gate only works on direct DB recall — not on consolidated/summarized content.
+
+**Possible fixes:**
+- Dreamy must REDACT classified content in summaries/retros
+- Classification check at recall output
+- Trust agent judgment as last resort, but only for INTERNAL level
+
+## 39. Task Descriptions — move from skills/ to tasks/
+
+**Status:** Not started
+**Priority:** Medium
 
 Cron task descriptions (the long message strings that tell the agent what to do) currently live inside `cron.json` as inline text, and their documentation lives in `skills/`. This is wrong — skills are for the agent's conversational abilities, not for scheduled task instructions.
 
