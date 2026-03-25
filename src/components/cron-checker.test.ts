@@ -174,32 +174,20 @@ describe("cron-checker", () => {
     expect(entry?.fireAt).toBe(originalFireAt);
   });
 
-  it("priorityOnly fires only high-priority entries", async () => {
+  it("single checkCron fires all priorities in order", async () => {
     const { checkCron } = await import("./cron-checker.js");
     writeCron([
-      { id: "hi001", fireAt: Date.now() - 1000, message: "High prio", chatId: 1, type: "reminder", fired: false, createdAt: Date.now(), priority: "high" },
       { id: "lo001", fireAt: Date.now() - 1000, message: "Normal", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
-    ]);
-
-    checkCron(undefined, { priorityOnly: true });
-
-    const reminders = readReminders();
-    expect(reminders).toHaveLength(1);
-    expect(reminders[0].message).toBe("High prio");
-  });
-
-  it("normal pass skips high-priority entries", async () => {
-    const { checkCron } = await import("./cron-checker.js");
-    writeCron([
-      { id: "hi002", fireAt: Date.now() - 1000, message: "High prio", chatId: 1, type: "reminder", fired: false, createdAt: Date.now(), priority: "high" },
-      { id: "lo002", fireAt: Date.now() - 1000, message: "Normal", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
+      { id: "hi001", fireAt: Date.now() - 1000, message: "High prio", chatId: 1, type: "reminder", fired: false, createdAt: Date.now(), priority: "high" },
     ]);
 
     checkCron();
 
     const reminders = readReminders();
-    expect(reminders).toHaveLength(1);
-    expect(reminders[0].message).toBe("Normal");
+    expect(reminders).toHaveLength(2);
+    // High fires first (sorted by priority)
+    expect(reminders[0].message).toBe("High prio");
+    expect(reminders[1].message).toBe("Normal");
   });
 
   it("fires only 1 agent task per tick but all reminders and scripts", async () => {

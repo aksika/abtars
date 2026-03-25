@@ -383,8 +383,8 @@ async function main(): Promise<void> {
   };
 
   heartbeat.registerTask({
-    name: "cron-priority",
-    execute: async () => { checkCron(cronCallback, { priorityOnly: true }); },
+    name: "cron",
+    execute: async () => { return checkCron(cronCallback); },
   });
 
   heartbeat.registerTask({
@@ -427,12 +427,6 @@ async function main(): Promise<void> {
   });
 
   heartbeat.registerTask({
-    name: "cron-normal",
-    heavy: true,
-    execute: async () => { return checkCron(cronCallback); },
-  });
-
-  heartbeat.registerTask({
     name: "browse-checker",
     execute: async () => { checkBrowseTasks(); },
   });
@@ -464,7 +458,6 @@ async function main(): Promise<void> {
   });
 
   // Run once on startup, then start periodic
-  checkCron(cronCallback, { priorityOnly: true });
   checkCron(cronCallback);
   checkBrowseTasks();
   heartbeat.start();
