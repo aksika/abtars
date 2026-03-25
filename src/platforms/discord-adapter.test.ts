@@ -4,12 +4,15 @@ import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { IKiroTransport } from "../components/kiro-transport.js";
 
 // Mock discord.js client
+let capturedReactionHandler: Function | null = null;
+
 vi.mock("../components/discord-api.js", () => ({
   DiscordApi: vi.fn().mockImplementation(() => ({
     connect: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn(),
     sendMessage: vi.fn().mockResolvedValue(undefined),
     onMessage: vi.fn(),
+    onReaction: vi.fn((handler: Function) => { capturedReactionHandler = handler; }),
     botUserId: null,
   })),
 }));
@@ -110,5 +113,66 @@ describe("DiscordAdapter", () => {
   it("chunkResponse uses Discord chunking", () => {
     const short = adapter.chunkResponse("hello");
     expect(short).toEqual(["hello"]);
+  });
+
+  it("reactions capability is enabled", () => {
+    expect(adapter.capabilities.reactions).toBe(true);
+  });
+
+  describe("reaction handling", () => {
+    let deps: DiscordAdapterDeps;
+
+    beforeEach(async () => {
+      vi.clearAllMocks();
+      capturedReactionHandler = null;
+      transport = mockTransport();
+      deps = makeDeps(transport);
+      adapter = new DiscordAdapter(makeConfig(), deps);
+      await adapter.start();
+    });
+
+    function fakeReaction(emoji: string, channelId = "ch1", messageId = "999") {
+      return {
+        message: { channelId, id: messageId },
+        emoji: { name: emoji },
+        partial: false,
+        fetch: vi.fn(),
+      };
+    }
+
+    function fakeUser(id: string, username = "tester", bot = false) {
+      return { id, username, bot, partial: false, fetch: vi.fn() };
+    }
+
+    it("registers reaction handler on start", () => {
+      expect(capturedReactionHandler).toBeTypeOf("function");
+    });
+
+    it("buffers reaction signal from authorized user", async () => {
+      await capturedReactionHandler!(fakeReaction("👍"), fakeUser("42"));
+      expect(deps.conversationBuffer.push).toHaveBeenCalledWith(
+        "discord:ch1",
+        "tester",
+        expect.stringContaining("👍"),
+      );
+    });
+
+    it("discards reaction from unauthorized user", async () => {
+      await capturedReactionHandler!(fakeReaction("👍"), fakeUser("999"));
+      expect(deps.conversationBuffer.push).not.toHaveBeenCalled();
+    });
+
+    it("scores emotion on authorized reaction when memory is available", async () => {
+      const mockMemory = { updateEmotionByPlatformId: vi.fn().mockReturnValue(true) };
+      deps.memory = mockMemory as any;
+      adapter = new DiscordAdapter(makeConfig(), deps);
+      capturedReactionHandler = null;
+      await adapter.start();
+
+      await capturedReactionHandler!(fakeReaction("❤️", "ch1", "555"), fakeUser("42"));
+      expect(mockMemory.updateEmotionByPlatformId).toHaveBeenCalledWith(
+        expect.any(Number), 555, expect.any(Number),
+      );
+    });
   });
 });
