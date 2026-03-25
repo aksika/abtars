@@ -96,14 +96,19 @@ export function checkCron(): CronEntry[] {
     // Advance fireAt
     entry.lastRanAt = now;
     entry._prevFireAt = entry.fireAt;
-    if (entry.schedule) {
-      try {
-        const expr = CronExpressionParser.parse(entry.schedule);
-        entry.fireAt = expr.next().getTime();
-      } catch { entry.fired = true; }
-    } else {
-      entry.fired = true;
+    if (!entry._retrying) {
+      // Normal run — advance to next schedule
+      if (entry.schedule) {
+        try {
+          const expr = CronExpressionParser.parse(entry.schedule);
+          entry.fireAt = expr.next().getTime();
+        } catch { entry.fired = true; }
+      } else {
+        entry.fired = true;
+      }
     }
+    // Clear retry flag — it was consumed
+    delete entry._retrying;
     changed = true;
 
     if (entry.type === "reminder") {

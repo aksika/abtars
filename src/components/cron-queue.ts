@@ -8,12 +8,40 @@
  */
 
 import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import type { CronEntry } from "../cli/agentbridge-cron.js";
 
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
+const RETRY_DELAY_MS = 10 * 60 * 1000; // skip 1 cycle (2 × 5min)
 const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+
+function cronPath(): string { return join(homedir(), ".agentbridge", "memory", "cron.json"); }
+
+/** Schedule a one-time retry after 1 skipped cycle. Only if entry has a schedule (recurring) and hasn't retried yet. */
+function scheduleRetry(entry: CronEntry): void {
+  if (!entry.schedule || entry._retrying) {
+    logInfo(TAG, `No retry for "${entry.id}" — ${entry._retrying ? "already retried" : "one-shot"}`);
+    return;
+  }
+  try {
+    const raw = readFileSync(cronPath(), "utf-8");
+    const entries: CronEntry[] = JSON.parse(raw);
+    const target = entries.find(e => e.id === entry.id);
+    if (target) {
+      target.fireAt = Date.now() + RETRY_DELAY_MS;
+      target.fired = false;
+      target._retrying = true;
+      writeFileSync(cronPath(), JSON.stringify(entries, null, 2), "utf-8");
+      logInfo(TAG, `Scheduled retry for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
+    }
+  } catch (err) {
+    logWarn(TAG, `Failed to schedule retry: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 export type TaskCompleteCallback = (chatId: number, message: string, result: string) => void;
 
@@ -108,6 +136,7 @@ export class CronQueue {
       child.on("exit", (code) => {
         const status = code === 0 ? "✅" : `❌ (exit ${code})`;
         logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
+        if (code !== 0) scheduleRetry(entry);
         onComplete?.(entry.chatId, entry.message, `${status}\n${(output || "(no output)").slice(0, 500)}`);
         this.clearCurrent();
         this.processNext();
@@ -171,6 +200,7 @@ export class CronQueue {
       child.on("exit", (_code) => {
         const summary = (output || "(no output)").slice(0, 500);
         logInfo(TAG, `■ Agent completed: "${entry.message.slice(0, 60)}"`);
+        if (_code !== 0) scheduleRetry(entry);
         onComplete?.(entry.chatId, entry.message, summary);
         this.clearCurrent();
         this.processNext();
