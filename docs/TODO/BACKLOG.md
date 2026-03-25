@@ -259,7 +259,8 @@ The consolidation pipeline (Dreamy's daily summaries, retrospectives) flattens c
 4. KP reads the daily summary → no classification check → data leaked
 
 **Possible fixes:**
-- Dreamy should never include CONFIDENTIAL/PRIVATE memories in daily summaries
-- Or: tag consolidated content with the highest classification of its source memories
-- Or: classification check at recall output (scan response for known classified content before sending to A2A)
-- The sleep prompt needs explicit instructions: "Do NOT include memories with classification >= 2 in daily summaries"
+- Dreamy must REDACT classified content in summaries/retros: replace SECRET/CONFIDENTIAL data with `<REDACTED>` — the fact that something exists can be mentioned, but not the content
+- Classification check at recall output: scan response for known classified content before sending to A2A
+- For data that exists only in summaries (not in DB): treat as INTERNAL by default — A2A guests don't get it unless explicitly declassified
+- Trust agent judgment as last resort, but only for INTERNAL level — SECRET/CONFIDENTIAL must be enforced programmatically
+- Sleep prompt needs explicit instructions: "Replace any SECRET or CONFIDENTIAL memory content with `<REDACTED>` in daily summaries and retrospectives"
