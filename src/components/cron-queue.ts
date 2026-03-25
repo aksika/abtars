@@ -18,8 +18,22 @@ const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const RETRY_DELAY_MS = 10 * 60 * 1000; // skip 1 cycle (2 × 5min)
 const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+const MAX_HISTORY = 10;
 
 function cronPath(): string { return join(homedir(), ".agentbridge", "memory", "cron.json"); }
+
+function recordRunToFile(entryId: string, exitCode?: number): void {
+  try {
+    const entries: CronEntry[] = JSON.parse(readFileSync(cronPath(), "utf-8"));
+    const target = entries.find(e => e.id === entryId);
+    if (target) {
+      if (!target.history) target.history = [];
+      target.history.push({ ts: Date.now(), ...(exitCode !== undefined ? { exitCode } : {}) });
+      if (target.history.length > MAX_HISTORY) target.history = target.history.slice(-MAX_HISTORY);
+      writeFileSync(cronPath(), JSON.stringify(entries, null, 2), "utf-8");
+    }
+  } catch { /* best effort */ }
+}
 
 /** Schedule a one-time retry after 1 skipped cycle. isRetry=true means this was already a retry — don't retry again. */
 function scheduleRetry(entry: CronEntry, isRetry: boolean): void {
@@ -133,6 +147,7 @@ export class CronQueue {
       child.on("exit", (code) => {
         const status = code === 0 ? "✅" : `❌ (exit ${code})`;
         logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
+        recordRunToFile(entry.id, code ?? undefined);
         if (code !== 0) scheduleRetry(entry, !!entry._retrying);
         onComplete?.(entry.chatId, entry.message, `${status}\n${(output || "(no output)").slice(0, 500)}`);
         this.clearCurrent();
@@ -197,6 +212,7 @@ export class CronQueue {
       child.on("exit", (_code) => {
         const summary = (output || "(no output)").slice(0, 500);
         logInfo(TAG, `■ Agent completed: "${entry.message.slice(0, 60)}"`);
+        recordRunToFile(entry.id, _code ?? undefined);
         if (_code !== 0) scheduleRetry(entry, !!entry._retrying);
         onComplete?.(entry.chatId, entry.message, summary);
         this.clearCurrent();
