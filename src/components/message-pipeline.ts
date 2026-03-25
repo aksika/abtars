@@ -17,6 +17,7 @@ import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 import type { SleepQueue } from "./sleep-queue.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
+import type { RunningJob } from "./cron-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 
 const TAG = "pipeline";
@@ -40,6 +41,7 @@ export interface PipelineDeps {
   pendingSessionStart: Set<string>;
   seenSessions: Set<string>;
   updateCtxStart: (memoryDir: string, chatId: number) => void;
+  cronCurrentJob?: () => RunningJob | null;
 }
 
 /**
@@ -97,6 +99,7 @@ export async function handleInboundMessage(
     codingMode, idleSave,
     busyChats, fullModeChats, pendingSessionStart,
     updateCtxStart,
+    cronCurrentJob: deps.cronCurrentJob?.() ?? null,
     conversationBuffer: isGroup ? conversationBuffer : undefined,
     bufKey: isGroup ? `${msg.platform}:${channelId}` : undefined,
   };

@@ -14,6 +14,7 @@ import { TmuxClient } from "./tmux-client.js";
 import type { MemoryManager } from "./memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
+import type { RunningJob } from "./cron-queue.js";
 
 import type { Platform } from "../types/platform.js";
 export type { Platform };
@@ -35,6 +36,7 @@ export interface CommandContext {
   // Modules
   codingMode: CodingMode;
   idleSave: IdleSave;
+  cronCurrentJob?: RunningJob | null;
   // Mutable state
   busyChats: Set<string>;
   fullModeChats: Set<string>;
@@ -194,7 +196,13 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       });
       listing = lines.length > 0 ? "```\n" + lines.join("\n") + "\n```" : "(no active entries)";
     } catch { listing = "(failed to read cron)"; }
-    await ctx.reply(`⏰ ${now}\n\n${listing}`, { parseMode: "Markdown" });
+    let running = "";
+    if (ctx.cronCurrentJob) {
+      const j = ctx.cronCurrentJob;
+      const ago = Math.round((Date.now() - j.startedAt) / 1000);
+      running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.message}`;
+    }
+    await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "Markdown" });
     return true;
   }
 

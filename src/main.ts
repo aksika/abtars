@@ -262,6 +262,7 @@ async function main(): Promise<void> {
     sleepQueue, idleSave, conversationBuffer, config, startedAt,
     sttConfig, ttsConfig,
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
+    cronCurrentJob: () => cronQueue.currentJob,
   };
 
   // --- Telegram service ---
