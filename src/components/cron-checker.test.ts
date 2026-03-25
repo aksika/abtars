@@ -23,7 +23,6 @@ describe("cron-checker", () => {
 
   afterEach(() => {
     process.env.HOME = originalHome;
-    import("./cron-checker.js").then(m => m._resetActiveAgents());
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -190,75 +189,51 @@ describe("cron-checker", () => {
     expect(reminders[1].message).toBe("Normal");
   });
 
-  it("fires only 1 agent task per tick but all reminders and scripts", async () => {
+  it("returns due tasks for queue (scripts + agents), fires reminders directly", async () => {
     const { checkCron } = await import("./cron-checker.js");
     writeCron([
       { id: "rem01", fireAt: Date.now() - 1000, message: "Reminder 1", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
       { id: "rem02", fireAt: Date.now() - 1000, message: "Reminder 2", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
       { id: "scr01", fireAt: Date.now() - 1000, message: "echo script1", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() },
-      { id: "scr02", fireAt: Date.now() - 1000, message: "echo script2", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() },
       { id: "agt01", fireAt: Date.now() - 1000, message: "agent task 1", chatId: 1, type: "task", executor: "agent", fired: false, createdAt: Date.now() },
-      { id: "agt02", fireAt: Date.now() - 2000, message: "agent task 2", chatId: 1, type: "task", executor: "agent", fired: false, createdAt: Date.now() },
     ]);
 
-    checkCron();
+    const dueTasks = checkCron();
 
+    // Reminders fired directly to file
     const reminders = readReminders();
-    expect(reminders).toHaveLength(2); // both reminders fire
+    expect(reminders).toHaveLength(2);
 
-    const entries = readCron();
-    // Both scripts fire, only 1 agent fires
-    const firedScripts = entries.filter(e => e.executor === "script" && e.lastRanAt);
-    const firedAgents = entries.filter(e => e.executor === "agent" && e.lastRanAt);
-    expect(firedScripts).toHaveLength(2);
-    expect(firedAgents).toHaveLength(1);
+    // Tasks returned for queue
+    expect(dueTasks).toHaveLength(2);
+    expect(dueTasks.map(e => e.id)).toContain("scr01");
+    expect(dueTasks.map(e => e.id)).toContain("agt01");
   });
 
-  it("high priority agent task fires before medium/low when multiple are due", async () => {
+  it("returns tasks sorted by priority (high first)", async () => {
     const { checkCron } = await import("./cron-checker.js");
     const now = Date.now();
     writeCron([
       { id: "low01", fireAt: now - 3000, message: "low task", chatId: 1, type: "task", executor: "agent", fired: false, createdAt: now, priority: "low" },
+      { id: "hi01", fireAt: now - 1000, message: "high task", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now, priority: "high" },
       { id: "med01", fireAt: now - 2000, message: "med task", chatId: 1, type: "task", executor: "agent", fired: false, createdAt: now, priority: "medium" },
     ]);
 
-    // Normal pass skips high, fires first non-high by priority (medium before low)
-    checkCron();
-
-    const entries = readCron();
-    const fired = entries.filter(e => e.lastRanAt && e.lastRanAt >= now);
-    expect(fired).toHaveLength(1);
-    expect(fired[0].id).toBe("med01");
+    const dueTasks = checkCron();
+    expect(dueTasks).toHaveLength(3);
+    expect(dueTasks[0].id).toBe("hi01");
+    expect(dueTasks[1].id).toBe("med01");
+    expect(dueTasks[2].id).toBe("low01");
   });
 
-  it("second tick fires the next agent task after first completed", async () => {
+  it("returns empty array when nothing is due", async () => {
     const { checkCron } = await import("./cron-checker.js");
-    const now = Date.now();
-    writeCron([
-      { id: "t1", fireAt: now - 2000, message: "echo first", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now },
-      { id: "t2", fireAt: now - 1000, message: "echo second", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now },
-    ]);
-
-    checkCron(); // scripts fire freely — both fire in one tick
-
-    const entries = readCron();
-    expect(entries.filter(e => e.fired)).toHaveLength(2);
-  });
-
-  it("returns true when a task fired, false otherwise", async () => {
-    const { checkCron } = await import("./cron-checker.js");
-
-    // No entries → false
     writeCron([]);
-    expect(checkCron()).toBe(false);
+    expect(checkCron()).toHaveLength(0);
 
-    // Only reminder → false (reminders don't count)
+    // Only reminder — returns empty (reminders handled internally)
     writeCron([{ id: "r01", fireAt: Date.now() - 1000, message: "Rem", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() }]);
-    expect(checkCron()).toBe(false);
-
-    // Task → true
-    writeCron([{ id: "t01", fireAt: Date.now() - 1000, message: "echo hi", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() }]);
-    expect(checkCron()).toBe(true);
+    expect(checkCron()).toHaveLength(0);
   });
 
   it("clearPendingReminders empties the file", async () => {

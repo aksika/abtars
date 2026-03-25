@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
-import { TelegramApi } from "./components/telegram-api.js";
+
 import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
 import type { SttConfig } from "./components/stt.js";
@@ -35,6 +35,7 @@ import { IdleSave } from "./components/idle-save.js";
 import { SleepQueue } from "./components/sleep-queue.js";
 import { buildSessionStartContext } from "./components/session-context.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
+import { CronQueue } from "./components/cron-queue.js";
 
 
 /** Update context-window-start timestamp for a chat. Used by recall fallback stages. */
@@ -374,17 +375,21 @@ async function main(): Promise<void> {
   const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: hbIntervalMs });
 
   const cronCallback = (chatId: number, message: string, result: string): void => {
-    if (platforms.telegram) {
-      const api = new TelegramApi(config.telegramBotToken);
-      api.sendMessage(chatId, `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
+    if (platforms.telegram && telegramAdapter) {
+      telegramAdapter.sendMessage(String(chatId), `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
         logWarn("main", `Cron task TG report failed: ${err}`);
       });
     }
   };
 
+  const cronQueue = new CronQueue();
+
   heartbeat.registerTask({
     name: "cron",
-    execute: async () => { return checkCron(cronCallback); },
+    execute: async () => {
+      const dueTasks = checkCron();
+      for (const entry of dueTasks) cronQueue.enqueue(entry, cronCallback);
+    },
   });
 
   heartbeat.registerTask({
@@ -458,7 +463,8 @@ async function main(): Promise<void> {
   });
 
   // Run once on startup, then start periodic
-  checkCron(cronCallback);
+  const startupDue = checkCron();
+  for (const entry of startupDue) cronQueue.enqueue(entry, cronCallback);
   checkBrowseTasks();
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);

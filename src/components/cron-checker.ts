@@ -8,8 +8,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { spawn } from "node:child_process";
-import { logInfo, logWarn, logDebug } from "./logger.js";
+import { logInfo, logWarn } from "./logger.js";
 import { CronExpressionParser } from "cron-parser";
 import type { CronEntry } from "../cli/agentbridge-cron.js";
 
@@ -17,25 +16,6 @@ const TAG = "cron-checker";
 const memoryDir = (): string => join(homedir(), ".agentbridge", "memory");
 const cronPath = (): string => join(memoryDir(), "cron.json");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
-
-/** PIDs of currently running agent subprocesses. */
-const activeAgentPids = new Set<number>();
-
-/** 30-minute hard timeout for agent tasks. */
-const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
-
-/** Returns true if any agent task subprocess is still running. */
-export function hasActiveAgent(): boolean {
-  for (const pid of activeAgentPids) {
-    try { process.kill(pid, 0); } catch { activeAgentPids.delete(pid); }
-  }
-  return activeAgentPids.size > 0;
-}
-
-/** Test-only: clear tracked agent PIDs. */
-export function _resetActiveAgents(): void {
-  activeAgentPids.clear();
-}
 
 export interface PendingReminder {
   chatId: number;
@@ -83,21 +63,15 @@ function recordRun(entry: CronEntry, exitCode?: number): void {
 
 
 /**
- * Check cron.json for due entries. Single call per tick — no split passes.
- *
- * Firing rules:
- * - Reminders: fire all due, no limit
- * - Script tasks: fire all due sequentially
- * - Agent tasks: fire at most 1, and only if no agent is currently running
- *
- * Priority order: high → medium → low.
- * GCs fired one-shots older than 7 days.
+ * Scan cron.json for due entries. Fires reminders directly.
+ * Returns due task entries (script + agent) for the CronQueue to process.
+ * Advances fireAt and writes cron.json.
  */
-export function checkCron(onTaskComplete?: (chatId: number, message: string, result: string) => void): boolean {
+export function checkCron(): CronEntry[] {
   let entries = readCron();
   const now = Date.now();
   let changed = false;
-  let firedTask = false;
+  const dueTasks: CronEntry[] = [];
 
   // GC: remove fired one-shots older than 7 days
   const before = entries.length;
@@ -116,17 +90,10 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
     return (b.fireAt ?? 0) - (a.fireAt ?? 0);
   });
 
-  let agentBusy = hasActiveAgent();
-
   for (const entry of entries) {
     if (entry.fired || entry.paused || entry.fireAt > now) continue;
 
-    const isAgent = entry.type === "task" && entry.executor !== "script";
-    if (isAgent && agentBusy) {
-      logDebug(TAG, `⏸️ Skipping agent task "${entry.id}" — agent already running`);
-      continue;
-    }
-    // Advance fireAt optimistically
+    // Advance fireAt
     entry.lastRanAt = now;
     entry._prevFireAt = entry.fireAt;
     if (entry.schedule) {
@@ -143,117 +110,14 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
       appendReminder({ chatId: entry.chatId, message: entry.message, createdAt: now });
       recordRun(entry);
       logInfo(TAG, `⏰ Reminder fired: "${entry.message}" → chat ${entry.chatId}`);
-      continue; // reminders don't count toward 1-task-per-tick
-    } else if (entry.executor === "script") {
-      // Script task: run command directly via bash
-      logInfo(TAG, `📜 Script task fired: "${entry.message}"`);
-      const capturedEntry = entry;
-      try {
-        const child = spawn("bash", ["-c", entry.message], { stdio: ["ignore", "pipe", "pipe"] });
-        let output = "";
-        child.stdout?.on("data", (d: Buffer) => { output += d.toString(); });
-        child.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
-        child.on("exit", (code) => {
-          const summary = output.slice(0, 500) || "(no output)";
-          const status = code === 0 ? "✅" : `❌ (exit ${code})`;
-          logInfo(TAG, `📜 Script task ${status}: "${capturedEntry.message}"`);
-          recordRun(capturedEntry, code ?? undefined);
-          if (code !== 0) {
-            if (capturedEntry._prevFireAt) { capturedEntry.fireAt = capturedEntry._prevFireAt; }
-            delete capturedEntry._prevFireAt;
-          }
-          delete capturedEntry._prevFireAt;
-          writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
-          onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, `${status}\n${summary}`);
-        });
-        child.on("error", (err) => {
-          logWarn(TAG, `Script spawn failed: ${err.message}`);
-          recordRun(capturedEntry, 1);
-          if (capturedEntry._prevFireAt) { capturedEntry.fireAt = capturedEntry._prevFireAt; }
-          delete capturedEntry._prevFireAt;
-          writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
-          onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, `❌ Failed to execute: ${err.message}`);
-        });
-      } catch (err) {
-        logWarn(TAG, `Script spawn error: ${err instanceof Error ? err.message : String(err)}`);
-      }
     } else {
-      // Agent task: spawn kiro-cli to execute
-      logInfo(TAG, `⚙️ Task fired: "${entry.message}" → spawning subagent`);
-      agentBusy = true;
-      const capturedEntry = entry;
-      try {
-        const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "ignore"] });
-        if (child.pid) activeAgentPids.add(child.pid);
-
-        // 30-min hard timeout
-        const timeout = setTimeout(() => {
-          if (child.pid) {
-            logWarn(TAG, `⏱️ Agent task "${capturedEntry.id}" timed out after 30min — killing pid ${child.pid}`);
-            try { process.kill(child.pid, "SIGKILL"); } catch { /* already dead */ }
-          }
-        }, AGENT_TIMEOUT_MS);
-
-        let output = "";
-        const send = (obj: unknown): void => { child.stdin?.write(JSON.stringify(obj) + "\n"); };
-        let msgId = 0;
-        let phase = 0; // 0=waiting for init response, 1=waiting for session, 2=prompt sent
-        let buf = "";
-
-        // Start handshake immediately
-        send({ jsonrpc: "2.0", method: "initialize", params: { protocolVersion: "0.1", clientInfo: { name: "agentbridge-cron", version: "0.1.0" }, capabilities: {} }, id: ++msgId });
-
-        child.stdout?.on("data", (d: Buffer) => {
-          buf += d.toString();
-          output += d.toString();
-          const lines = buf.split("\n");
-          buf = lines.pop() ?? ""; // keep incomplete last line in buffer
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const msg = JSON.parse(line);
-              if (phase === 0 && msg.id) {
-                phase = 1;
-                send({ jsonrpc: "2.0", method: "session/new", params: { cwd: process.env["WORKING_DIR"] || "." }, id: ++msgId });
-              } else if (phase === 1 && msg.result?.sessionId) {
-                phase = 2;
-                send({ jsonrpc: "2.0", method: "session/prompt", params: { sessionId: msg.result.sessionId, message: entry.message }, id: ++msgId });
-                child.stdin?.end();
-              }
-            } catch { /* not valid JSON yet */ }
-          }
-        });
-        child.on("exit", (code) => {
-          clearTimeout(timeout);
-          if (child.pid) activeAgentPids.delete(child.pid);
-          const summary = output.slice(0, 500) || "(no output)";
-          logInfo(TAG, `⚙️ Task completed: "${capturedEntry.message}"`);
-          recordRun(capturedEntry, code ?? undefined);
-          if (code !== 0) {
-            if (capturedEntry._prevFireAt) { capturedEntry.fireAt = capturedEntry._prevFireAt; }
-          }
-          delete capturedEntry._prevFireAt;
-          writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
-          onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, summary);
-        });
-        child.on("error", (err) => {
-          clearTimeout(timeout);
-          if (child.pid) activeAgentPids.delete(child.pid);
-          logWarn(TAG, `Task spawn failed: ${err.message}`);
-          recordRun(capturedEntry, 1);
-          writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
-          onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, `❌ Failed to execute: ${err.message}`);
-        });
-      } catch (err) {
-        logWarn(TAG, `Task spawn error: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      recordRun(entry);
+      dueTasks.push(entry);
     }
-
-    firedTask = true;
   }
 
   if (changed) writeCron(entries);
-  return firedTask;
+  return dueTasks;
 }
 
 // --- Browse task checker ---
