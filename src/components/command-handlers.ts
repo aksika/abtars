@@ -15,7 +15,8 @@ import type { MemoryManager } from "./memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 
-export type Platform = "telegram" | "discord";
+import type { Platform } from "../types/platform.js";
+export type { Platform };
 export type Reply = (text: string, opts?: { parseMode?: string }) => Promise<unknown>;
 
 export interface CommandContext {
