@@ -237,3 +237,29 @@ Batch of operational fixes:
 - Reports moved inside `~/.agentbridge/reports/`, added to daily backup with `finance/`.
 - Startup greeting prompt to kiro-cli with session context ("You just woke up").
 - Sleep audit filenames normalized to `YYYYMMDD_HHMM`.
+
+## 37. Classification Leak via Consolidation Pipeline
+
+**Status:** Not started
+**Priority:** High
+
+**Problem:**
+Daily summaries and consolidations are plain text — they carry no classification metadata. If a CONFIDENTIAL memory gets summarized into a daily file, the summary has no classification tag. Any agent (including A2A guests) that reads the summary gets the data without a classification check.
+
+**How it was discovered:**
+During A2A security testing (2026-03-25), Molty asked KP about a CONFIDENTIAL memory. KP initially tried to answer from the daily summary (which contained the data in plain text). When challenged, KP checked the DB and found `classification: 2 (CONFIDENTIAL)`. Had the summary said PUBLIC, KP would have leaked it.
+
+**Root cause:**
+The consolidation pipeline (Dreamy's daily summaries, retrospectives) flattens classified memories into unclassified plain text. The classification gate only works on direct DB recall — not on consolidated/summarized content.
+
+**Attack vector:**
+1. User stores a CONFIDENTIAL fact
+2. Dreamy writes it into `daily_YYYY-MM-DD.md` (no classification tag)
+3. A2A guest agent asks about it
+4. KP reads the daily summary → no classification check → data leaked
+
+**Possible fixes:**
+- Dreamy should never include CONFIDENTIAL/PRIVATE memories in daily summaries
+- Or: tag consolidated content with the highest classification of its source memories
+- Or: classification check at recall output (scan response for known classified content before sending to A2A)
+- The sleep prompt needs explicit instructions: "Do NOT include memories with classification >= 2 in daily summaries"
