@@ -82,17 +82,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
 import { MemoryIndex } from "./memory-index.js";
-import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
-import type { MemoryConfig } from "./memory-config.js";
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 import { initializeDatabase } from "./memory-db.js";
-
-function makeConfig(tmpDir: string, overrides: Partial<MemoryConfig> = {}): MemoryConfig {
-  return {
-    ...MEMORY_CONFIG_DEFAULTS,
-    memoryDir: tmpDir,
-    ...overrides,
-  };
-}
 
 describe("Emotion Boost — Property 7: Emotion Score Storage Round-Trip", () => {
   /**
@@ -108,7 +99,7 @@ describe("Emotion Boost — Property 7: Emotion Score Storage Round-Trip", () =>
         fc.integer({ min: 1, max: 999999 }),
         async (emotionScore, chatId) => {
           const iterDir = mkdtempSync(join(tmpdir(), "eb-p7-iter-"));
-          const iterManager = new MemoryManager(makeConfig(iterDir));
+          const iterManager = new MemoryManager(makeMemoryTestConfig(iterDir));
           await iterManager.initialize();
 
           try {

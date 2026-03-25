@@ -1,0 +1,324 @@
+/**
+ * Telegram platform adapter — wraps TelegramApi, TelegramPoller, SecurityGate.
+ * Handles Telegram-specific pre-processing (voice, reactions, groups, mentions)
+ * then delegates to the shared message pipeline.
+ */
+
+import { TelegramApi } from "../components/telegram-api.js";
+import { TelegramPoller } from "../components/telegram-poller.js";
+import { SecurityGate } from "../components/security-gate.js";
+import { ResponseFormatter } from "../components/response-formatter.js";
+import { formatReactionSignal } from "../components/reaction-signal.js";
+import { routeReaction } from "../components/reaction-router.js";
+import { emojiToScore } from "../components/emotion-utils.js";
+import { logInfo, logWarn, logError, logDebug } from "../components/logger.js";
+import { handleInboundMessage, type PipelineDeps } from "../components/message-pipeline.js";
+import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../types/platform.js";
+import type { TelegramUpdate } from "../types/index.js";
+import type { ConversationBuffer } from "../components/conversation-buffer.js";
+import type { IKiroTransport } from "../components/kiro-transport.js";
+import type { MemoryManager } from "../components/memory-manager.js";
+
+const TAG = "telegram";
+
+export interface TelegramAdapterConfig {
+  botToken: string;
+  allowedUserIds: Set<number>;
+  pollTimeoutS: number;
+}
+
+export interface TelegramAdapterDeps {
+  pipeline: PipelineDeps;
+  conversationBuffer: ConversationBuffer;
+  transport: IKiroTransport;
+  memory: MemoryManager | null;
+}
+
+export class TelegramAdapter implements PlatformAdapter {
+  readonly name = "telegram" as const;
+  readonly capabilities: PlatformCapabilities = {
+    voice: true,
+    reactions: true,
+    typing: true,
+    threads: true,
+  };
+
+  private readonly api: TelegramApi;
+  private readonly securityGate: SecurityGate;
+  private readonly formatter = new ResponseFormatter();
+  private readonly config: TelegramAdapterConfig;
+  private readonly deps: TelegramAdapterDeps;
+  private poller: TelegramPoller | null = null;
+  private botUsername = "";
+
+  constructor(config: TelegramAdapterConfig, deps: TelegramAdapterDeps) {
+    this.api = new TelegramApi(config.botToken);
+    this.securityGate = new SecurityGate(config.allowedUserIds);
+    this.config = config;
+    this.deps = deps;
+  }
+
+  async start(): Promise<void> {
+    const botInfo = await this.api.getMe();
+    this.botUsername = botInfo.username?.toLowerCase() ?? "";
+    logInfo(TAG, `🤖 Bot: @${botInfo.username}`);
+
+    await this.api.setMyCommands([
+      { command: "new", description: "Start a fresh session" },
+      { command: "reset", description: "Start a fresh session" },
+      { command: "status", description: "Connection & uptime info" },
+      { command: "stop", description: "Send Ctrl+C to Kiro" },
+      { command: "restart", description: "Restart Kiro (tmux only)" },
+      { command: "full", description: "Raw output mode, TTS off" },
+      { command: "short", description: "Clean output mode, TTS on" },
+      { command: "memory", description: "Memory system stats" },
+      { command: "facts", description: "Show core knowledge" },
+      { command: "reflect", description: "Generate a reflection" },
+      { command: "ingest", description: "Ingest a document or URL" },
+      { command: "forget", description: "Forget topic or date range" },
+      { command: "coding", description: "Switch to Opus coding agent" },
+      { command: "default", description: "Switch back to KP" },
+    ]).catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
+
+    this.poller = new TelegramPoller(this.api, this.config.pollTimeoutS, (u) => this.handleUpdate(u));
+    this.poller.start();
+  }
+
+  stop(): void {
+    this.poller?.stop();
+    this.poller = null;
+  }
+
+  authorize(msg: InboundMessage): boolean {
+    return this.securityGate.authorizeUserId(parseInt(msg.senderId, 10));
+  }
+
+  async sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<number | undefined> {
+    const chatId = parseInt(channelId, 10);
+    const sendOpts: Record<string, unknown> = {};
+    if (opts?.threadId) sendOpts.message_thread_id = parseInt(opts.threadId, 10);
+    if (opts?.parseMode) sendOpts.parse_mode = opts.parseMode;
+    return this.api.sendMessage(chatId, text, sendOpts);
+  }
+
+  chunkResponse(text: string): string[] {
+    return this.formatter.chunkText(text);
+  }
+
+  async sendTyping(channelId: string, threadId?: string): Promise<void> {
+    await this.api.sendChatAction(parseInt(channelId, 10), "typing", threadId ? parseInt(threadId, 10) : undefined);
+  }
+
+  async setReaction(channelId: string, messageId: number, emoji: string): Promise<void> {
+    if (messageId <= 0) return;
+    try {
+      const reaction = emoji ? [{ type: "emoji" as const, emoji }] : [];
+      await this.api.setMessageReaction(parseInt(channelId, 10), messageId, reaction);
+    } catch (err) {
+      logDebug(TAG, `React failed (${emoji || "remove"}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  async downloadVoice(fileId: string): Promise<Buffer> {
+    const fileInfo = await this.api.getFile(fileId);
+    if (!fileInfo.file_path) throw new Error("No file_path returned");
+    return this.api.downloadFile(fileInfo.file_path);
+  }
+
+  async sendVoice(channelId: string, audio: Buffer, opts?: SendOpts): Promise<void> {
+    const sendOpts: Record<string, unknown> = {};
+    if (opts?.threadId) sendOpts.message_thread_id = parseInt(opts.threadId, 10);
+    await this.api.sendVoice(parseInt(channelId, 10), audio, sendOpts);
+  }
+
+  injectMessage(msg: InboundMessage): void {
+    if (!this.poller) return;
+    this.poller.injectUpdate({
+      update_id: 0,
+      message: {
+        message_id: 0,
+        from: { id: parseInt(msg.channelId, 10), is_bot: false, first_name: "queued" },
+        chat: { id: parseInt(msg.channelId, 10), type: "private" },
+        date: Math.floor(Date.now() / 1000),
+        text: msg.text,
+        ...(msg.threadId ? { message_thread_id: parseInt(msg.threadId, 10) } : {}),
+      },
+    });
+  }
+
+  // --- Internal: Telegram update handler ---
+
+  private async handleUpdate(update: TelegramUpdate): Promise<void> {
+    logDebug(TAG, `Update: ${JSON.stringify(update).slice(0, 200)}`);
+
+    if (update.callback_query) {
+      await this.api.answerCallbackQuery(update.callback_query.id);
+      return;
+    }
+
+    if (update.message_reaction) {
+      await this.handleReaction(update);
+      return;
+    }
+
+    const message = update.message;
+    if (!message?.from) return;
+
+    const hasText = Boolean(message.text);
+    const hasVoice = Boolean(message.voice || message.audio);
+    if (!hasText && !hasVoice) return;
+
+    const chatId = message.chat.id;
+    const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
+    const threadId = isGroup ? message.message_thread_id : undefined;
+    const messageId = message.message_id;
+    const senderName = message.from.first_name || message.from.username || `id:${message.from.id}`;
+    const bufKey = threadId != null ? `tg:${chatId}:${threadId}` : `tg:${chatId}`;
+
+    let text = message.text ?? "";
+    let isVoiceNote = false;
+    let voiceFileId: string | undefined;
+
+    // --- Voice note pre-processing ---
+    if (hasVoice && !hasText) {
+      if (!this.deps.pipeline.sttConfig) {
+        if (isGroup) {
+          this.deps.conversationBuffer.push(bufKey, senderName, "[voice note - STT disabled]");
+        } else if (this.securityGate.authorize(message)) {
+          await this.api.sendMessage(chatId, "🎤 Voice notes require STT (set GROQ_API_KEY).", { message_thread_id: threadId });
+        }
+        return;
+      }
+
+      if (!this.securityGate.authorize(message)) {
+        if (isGroup) this.deps.conversationBuffer.push(bufKey, senderName, "[voice note]");
+        return;
+      }
+
+      // For groups: we need to transcribe first to check for bot mention
+      if (isGroup) {
+        try {
+          await this.setReaction(String(chatId), messageId, "👀");
+          const voiceFile = message.voice || message.audio;
+          const audioBuffer = await this.downloadVoice(voiceFile!.file_id);
+          const { transcribeAudio } = await import("../components/stt.js");
+          const transcript = await transcribeAudio(audioBuffer, "voice.ogg", this.deps.pipeline.sttConfig!);
+
+          if (!transcript) {
+            await this.setReaction(String(chatId), messageId, "");
+            this.deps.conversationBuffer.push(bufKey, senderName, "[voice note - empty]");
+            return;
+          }
+
+          const mentionRe = new RegExp(`@?${this.botUsername}\\b`, "i");
+          if (!mentionRe.test(transcript) && !transcript.startsWith("/")) {
+            await this.setReaction(String(chatId), messageId, "");
+            this.deps.conversationBuffer.push(bufKey, senderName, `[voice] ${transcript}`);
+            logDebug(TAG, `Buffered voice transcript: "${transcript.slice(0, 60)}"`);
+            return;
+          }
+          text = transcript.replace(mentionRe, "").trim();
+          isVoiceNote = true;
+          if (!text) { await this.setReaction(String(chatId), messageId, ""); return; }
+        } catch (err) {
+          logError(TAG, "Voice transcription failed", err);
+          await this.setReaction(String(chatId), messageId, "");
+          return;
+        }
+      } else {
+        // DM voice: let pipeline handle STT
+        isVoiceNote = true;
+        voiceFileId = (message.voice || message.audio)!.file_id;
+      }
+    }
+
+    // --- Group text filtering ---
+    if (!isVoiceNote && isGroup) {
+      const mentionRe = new RegExp(`@${this.botUsername}\\b`, "i");
+      const isMention = mentionRe.test(text);
+      const isCommand = text.startsWith("/");
+
+      if (!isMention && !isCommand) {
+        this.deps.conversationBuffer.push(bufKey, senderName, text);
+        logDebug(TAG, `Buffered group msg from ${senderName}: "${text.slice(0, 60)}"`);
+        return;
+      }
+
+      if (isMention) {
+        text = text.replace(mentionRe, "").trim();
+        if (!text) return;
+      }
+    }
+
+    // --- Security ---
+    if (!isVoiceNote && !this.securityGate.authorize(message)) {
+      if (isGroup) this.deps.conversationBuffer.push(bufKey, senderName, text);
+      logWarn(TAG, `Unauthorized user ${message.from.id}`);
+      return;
+    }
+
+    // --- Dispatch to pipeline ---
+    const inbound: InboundMessage = {
+      platform: "telegram",
+      channelId: String(chatId),
+      sessionKey: `telegram:${chatId}`,
+      senderId: String(message.from.id),
+      senderName,
+      text,
+      timestamp: message.date * 1000,
+      threadId: threadId != null ? String(threadId) : undefined,
+      messageId,
+      isGroup,
+      isVoice: isVoiceNote,
+      voiceFileId,
+      rawPlatformData: message,
+    };
+
+    await handleInboundMessage(inbound, this, this.deps.pipeline);
+  }
+
+  private async handleReaction(update: TelegramUpdate): Promise<void> {
+    const reaction = update.message_reaction!;
+    const user = reaction.user;
+    if (!user) { logDebug(TAG, "Reaction update missing user field"); return; }
+    if (user.is_bot) return;
+
+    const oldEmojis = new Set(reaction.old_reaction.map((r) => r.emoji));
+    const added = reaction.new_reaction.filter((r) => !oldEmojis.has(r.emoji));
+    if (added.length === 0) return;
+
+    const senderName = user.first_name || user.username || `id:${user.id}`;
+    const emojis = added.map((r) => r.emoji);
+    logInfo(TAG, `Reaction ${emojis.join("")} from ${senderName} on msg ${reaction.message_id}`);
+
+    const isAuthorized = this.securityGate.authorizeUserId(user.id);
+    const signal = formatReactionSignal(senderName, emojis);
+    const chatId = reaction.chat.id;
+    const route = routeReaction(isAuthorized, reaction.chat.type);
+
+    if (isAuthorized && this.deps.memory) {
+      const score = emojiToScore(emojis[0]!);
+      const updated = this.deps.memory.updateEmotionByPlatformId(chatId, reaction.message_id, score);
+      if (updated) logDebug(TAG, `Emotion score ${score} set on platform msg ${reaction.message_id}`);
+    }
+
+    if (route === "discard") {
+      logDebug(TAG, `Unauthorized reaction from user ${user.id}, discarding`);
+      return;
+    }
+
+    if (route === "buffer") {
+      const bufKey = `tg:${chatId}`;
+      this.deps.conversationBuffer.push(bufKey, senderName, signal);
+      logDebug(TAG, `Buffered reaction signal for group ${chatId}`);
+    } else {
+      const sessionKey = `telegram:${chatId}`;
+      try {
+        await this.deps.transport.sendPrompt(sessionKey, signal);
+        logDebug(TAG, `Sent reaction signal to transport for chat ${chatId}`);
+      } catch (err) {
+        logError(TAG, `Failed to send reaction signal for chat ${chatId}`, err);
+      }
+    }
+  }
+}

@@ -49,10 +49,17 @@ export type {
 } from "./memory.js";
 
 export type {
-  Platform,
-  BridgeMessage,
   DiscordInboundMessage,
 } from "./discord.js";
+
+export type {
+  Platform,
+  PlatformAdapter,
+  PlatformCapabilities,
+  InboundMessage,
+  QueuedMessage,
+  SendOpts,
+} from "./platform.js";
 
 export type {
   BrowserActionType,

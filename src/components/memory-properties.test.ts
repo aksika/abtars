@@ -8,14 +8,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
-import { MEMORY_CONFIG_DEFAULTS, type MemoryConfig } from "./memory-config.js";
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 import { initializeDatabase } from "./memory-db.js";
 import { MemoryIndex } from "./memory-index.js";
 import type { MessageRecord } from "../types/index.js";
-
-function makeConfig(tmpDir: string, overrides: Partial<MemoryConfig> = {}): MemoryConfig {
-  return { ...MEMORY_CONFIG_DEFAULTS, memoryDir: tmpDir, ...overrides };
-}
 
 // --- Generators ---
 

@@ -3,13 +3,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
-import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
-import type { MemoryConfig } from "./memory-config.js";
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 import { buildSessionStartContext, RECENT_MSG_CAP } from "./session-context.js";
-
-function makeConfig(dir: string): MemoryConfig {
-  return { ...MEMORY_CONFIG_DEFAULTS, memoryDir: dir };
-}
 
 function insertMessage(manager: MemoryManager, role: string, content: string, timestamp: number): void {
   const db = manager.getDb()!;
@@ -30,7 +25,7 @@ describe("buildSessionStartContext", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "session-ctx-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 

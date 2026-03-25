@@ -9,14 +9,7 @@ import type { MemoryConfig } from "./memory-config.js";
 import type { SessionState, MessageRecord } from "../types/index.js";
 import { MemoryIndex } from "./memory-index.js";
 import { initializeDatabase } from "./memory-db.js";
-
-function makeConfig(tmpDir: string, overrides: Partial<MemoryConfig> = {}): MemoryConfig {
-  return {
-    ...MEMORY_CONFIG_DEFAULTS,
-    memoryDir: tmpDir,
-    ...overrides,
-  };
-}
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 
 function makeSession(overrides: Partial<SessionState> = {}): SessionState {
   return {
@@ -36,7 +29,7 @@ describe("MemoryManager — session CRUD", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "mm-test-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 
@@ -120,7 +113,7 @@ describe("MemoryManager — session CRUD", () => {
   });
 
   it("all methods are no-ops when memoryEnabled is false", async () => {
-    const disabledManager = new MemoryManager(makeConfig(tmpDir, { memoryEnabled: false }));
+    const disabledManager = new MemoryManager(makeMemoryTestConfig(tmpDir, { memoryEnabled: false }));
     await disabledManager.initialize();
 
     // These should all return without error
@@ -173,7 +166,7 @@ describe("MemoryManager — enforceDiskBudget", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "mm-budget-"));
-    manager = new MemoryManager(makeConfig(tmpDir, { diskBudgetBytes: 1024 }));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir, { diskBudgetBytes: 1024 }));
     await manager.initialize();
   });
 
@@ -188,7 +181,7 @@ describe("MemoryManager — enforceDiskBudget", () => {
 
     tmpDir = mkdtempSync(join(tmpdir(), "mm-budget-under-"));
     const bigBudgetManager = new MemoryManager(
-      makeConfig(tmpDir, { diskBudgetBytes: 100 * 1024 * 1024 }),
+      makeMemoryTestConfig(tmpDir, { diskBudgetBytes: 100 * 1024 * 1024 }),
     );
     await bigBudgetManager.initialize();
     expect(() => bigBudgetManager.enforceDiskBudget()).not.toThrow();
@@ -197,7 +190,7 @@ describe("MemoryManager — enforceDiskBudget", () => {
 
   it("is a no-op when memoryEnabled is false", async () => {
     const disabledManager = new MemoryManager(
-      makeConfig(tmpDir, { memoryEnabled: false, diskBudgetBytes: 1 }),
+      makeMemoryTestConfig(tmpDir, { memoryEnabled: false, diskBudgetBytes: 1 }),
     );
     await disabledManager.initialize();
     expect(() => disabledManager.enforceDiskBudget()).not.toThrow();
@@ -222,7 +215,7 @@ describe("MemoryManager — recordMessage", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "mm-record-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 
@@ -260,7 +253,7 @@ describe("MemoryManager — recordMessage", () => {
     rmSync(tmpDir, { recursive: true, force: true });
 
     tmpDir = mkdtempSync(join(tmpdir(), "mm-prune-"));
-    manager = new MemoryManager(makeConfig(tmpDir, { maxMessagesPerChat: maxMessages }));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir, { maxMessagesPerChat: maxMessages }));
     return manager.initialize().then(() => {
       // Record more messages than the limit
       for (let i = 0; i < maxMessages + 3; i++) {
@@ -298,7 +291,7 @@ describe("MemoryManager — recordMessage", () => {
     rmSync(tmpDir, { recursive: true, force: true });
 
     tmpDir = mkdtempSync(join(tmpdir(), "mm-budget100-"));
-    manager = new MemoryManager(makeConfig(tmpDir, { diskBudgetBytes: 100 * 1024 * 1024 }));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir, { diskBudgetBytes: 100 * 1024 * 1024 }));
     await manager.initialize();
 
     // Write 100 messages — should trigger enforcement without throwing
@@ -321,7 +314,7 @@ describe("MemoryManager — recordMessage", () => {
   });
 
   it("is no-op when memoryEnabled is false", async () => {
-    const disabledManager = new MemoryManager(makeConfig(tmpDir, { memoryEnabled: false }));
+    const disabledManager = new MemoryManager(makeMemoryTestConfig(tmpDir, { memoryEnabled: false }));
     await disabledManager.initialize();
 
     const record = makeRecord({ content: "should not be recorded", chatId: 77, sessionId: "s1" });
@@ -382,7 +375,7 @@ describe("MemoryManager — checkAutoCompact", () => {
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "mm-autocompact-"));
     manager = new MemoryManager(
-      makeConfig(tmpDir, {
+      makeMemoryTestConfig(tmpDir, {
         searchEnhancements: {
           ...MEMORY_CONFIG_DEFAULTS.searchEnhancements,
           compactThresholdPct: 85,
@@ -444,7 +437,7 @@ describe("MemoryManager — checkAutoCompact", () => {
 
   it("is no-op when memoryEnabled is false", async () => {
     const disabledManager = new MemoryManager(
-      makeConfig(tmpDir, { memoryEnabled: false }),
+      makeMemoryTestConfig(tmpDir, { memoryEnabled: false }),
     );
     await disabledManager.initialize();
 
@@ -525,7 +518,7 @@ describe("MemoryManager — loadRecentMessages", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "mm-load-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 
@@ -561,7 +554,7 @@ describe("MemoryManager — loadRecentMessages", () => {
   });
 
   it("returns empty array when memoryEnabled is false", async () => {
-    const disabled = new MemoryManager(makeConfig(tmpDir, { memoryEnabled: false }));
+    const disabled = new MemoryManager(makeMemoryTestConfig(tmpDir, { memoryEnabled: false }));
     await disabled.initialize();
 
     const messages = disabled.loadRecentMessages(1, "s1", 10);
@@ -579,7 +572,7 @@ describe("MemoryManager — chat_backup", () => {
   beforeEach(async () => {
     process.env["DEBUG_MODE"] = "true";
     tmpDir = mkdtempSync(join(tmpdir(), "mm-backup-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 
@@ -618,7 +611,7 @@ describe("MemoryManager — chat_backup", () => {
 
     // Re-initialize triggers pruneBackup
     manager.close();
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
 
     const db2 = initializeDatabase(join(tmpDir, "memory.db"));
@@ -639,7 +632,7 @@ describe("MemoryManager — chat_backup", () => {
 
     // Re-initialize triggers pruneBackup
     manager.close();
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
 
     const db = initializeDatabase(join(tmpDir, "memory.db"));

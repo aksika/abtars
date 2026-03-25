@@ -1,6 +1,6 @@
 import type { BrowserManager } from "./browser-manager.js";
 import { extractTextFromHtml, extractTextFromPage } from "./content-extractor.js";
-import { parseIntEnv } from "./env-utils.js";
+import { parseIntEnv, parseStringEnv } from "./env-utils.js";
 
 // ---------------------------------------------------------------------------
 // Constants & env-var parsing
@@ -32,12 +32,6 @@ export function parseWebScraperConfig(): WebScraperConfig {
       "Mozilla/5.0 (compatible; AgentBridge/1.0)",
     ),
   };
-}
-
-function parseStringEnv(envKey: string, fallback: string): string {
-  const raw = process.env[envKey];
-  if (raw === undefined || raw.trim() === "") return fallback;
-  return raw;
 }
 
 // ---------------------------------------------------------------------------

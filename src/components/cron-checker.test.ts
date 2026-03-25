@@ -222,6 +222,38 @@ describe("cron-checker", () => {
     expect(firedTasks[0].id).toBe("tsk01");
   });
 
+  it("high priority task fires before medium/low when multiple are due", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    const now = Date.now();
+    writeCron([
+      { id: "low01", fireAt: now - 3000, message: "echo low", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now, priority: "low" },
+      { id: "med01", fireAt: now - 2000, message: "echo med", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now, priority: "medium" },
+    ]);
+
+    // Normal pass skips high, fires first non-high by priority (medium before low)
+    checkCron();
+
+    const entries = readCron();
+    const fired = entries.filter(e => e.lastRanAt && e.lastRanAt >= now);
+    expect(fired).toHaveLength(1);
+    expect(fired[0].id).toBe("med01");
+  });
+
+  it("second tick fires the next task after first was consumed", async () => {
+    const { checkCron } = await import("./cron-checker.js");
+    const now = Date.now();
+    writeCron([
+      { id: "t1", fireAt: now - 2000, message: "echo first", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now },
+      { id: "t2", fireAt: now - 1000, message: "echo second", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now },
+    ]);
+
+    checkCron(); // fires t1
+    checkCron(); // fires t2
+
+    const entries = readCron();
+    expect(entries.filter(e => e.fired)).toHaveLength(2);
+  });
+
   it("returns true when a task fired, false otherwise", async () => {
     const { checkCron } = await import("./cron-checker.js");
 

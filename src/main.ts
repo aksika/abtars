@@ -1,30 +1,18 @@
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
-import { SecurityGate } from "./components/security-gate.js";
-import { ResponseFormatter } from "./components/response-formatter.js";
 import { TelegramApi } from "./components/telegram-api.js";
-import { TelegramPoller } from "./components/telegram-poller.js";
 import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
-import { transcribeAudio, type SttConfig } from "./components/stt.js";
-import { synthesizeSpeech, type TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
+import type { SttConfig } from "./components/stt.js";
+import type { TtsConfig } from "./components/tts.js";
+import { setLogLevel, logInfo, logWarn, logError } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
-import { DiscordApi } from "./components/discord-api.js";
-import { DiscordPoller } from "./components/discord-poller.js";
-import { DiscordSecurityGate } from "./components/discord-security-gate.js";
-import { ChannelAdapter } from "./components/channel-adapter.js";
-import { A2ARouter } from "./components/a2a-router.js";
 import type { IKiroTransport } from "./components/kiro-transport.js";
-import { formatReactionSignal } from "./components/reaction-signal.js";
-import { routeReaction } from "./components/reaction-router.js";
-import { emojiToScore } from "./components/emotion-utils.js";
-import type { TelegramUpdate, DiscordInboundMessage } from "./types/index.js";
 import { parsePlatformFlags } from "./components/cli-flags.js";
 import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard-config.js";
 import type { SubsystemRefs } from "./components/dashboard-config.js";
@@ -34,22 +22,19 @@ import { MemorySearchController } from "./components/memory-search-controller.js
 import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
 import { loadNLMConfig } from "./components/nlm-command-handler.js";
-import { handleCommand, type CommandContext, type Reply } from "./components/command-handlers.js";
 import { SleepTrigger } from "./components/sleep-trigger.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
-import { interceptLargeMessage } from "./components/message-interceptor.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { BrowserManager } from "./components/browser-manager.js";
 import { BrowserTool } from "./components/browser-tool.js";
 import { BrowserIpcServer } from "./components/browser-ipc-server.js";
 import { DomainAllowlist } from "./components/domain-allowlist.js";
+import { CodingMode } from "./components/coding-mode.js";
+import { IdleSave } from "./components/idle-save.js";
+import { SleepQueue } from "./components/sleep-queue.js";
+import { buildSessionStartContext } from "./components/session-context.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
-
-/** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
-function stripDiscordMentions(text: string, botAppId: string): string {
-  return text.replace(new RegExp(`<@!?${botAppId}>`, "g"), "").replace(/\s{2,}/g, " ").trim();
-}
 
 
 /** Update context-window-start timestamp for a chat. Used by recall fallback stages. */
@@ -82,33 +67,6 @@ async function sendBackOnline(
   for (const r of results) {
     if (r.status === "rejected") logWarn("main", `Back online send failed: ${r.reason}`);
   }
-}
-
-import { buildSessionStartContext } from "./components/session-context.js";
-
-/** Prepare prompt for sending: inject session-start context if pending, record message. */
-function preparePrompt(
-  prompt: string,
-  memory: MemoryManager,
-  chatId: number,
-  sessionKey: string,
-  text: string,
-  pending: Set<string>,
-  seen: Set<string>,
-  platformMessageId?: number,
-): string {
-  const isSessionStart = pending.has(sessionKey) || !seen.has(sessionKey);
-  if (isSessionStart) {
-    const ctx = buildSessionStartContext(memory, chatId);
-    if (ctx) {
-      prompt = ctx + "\n\n" + prompt;
-      logInfo("main", `Injected session-start context (${ctx.length} chars)`);
-    }
-  }
-  seen.add(sessionKey);
-  pending.delete(sessionKey);
-  memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId });
-  return prompt;
 }
 
 /** Send a platform context announcement to the transport so the LLM knows which platform is active. */
@@ -176,9 +134,6 @@ async function main(): Promise<void> {
     logInfo("main", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
   }
 
-  const formatter = new ResponseFormatter();
-
-  // Shared conversation buffer for both platforms
   const conversationBuffer = new ConversationBuffer(50);
 
   // --- Pre-flight: start external services ---
@@ -224,8 +179,8 @@ async function main(): Promise<void> {
 
   // Sleep state: queue messages during sleep, auto-reply "waking up"
   let sleepChild: import("node:child_process").ChildProcess | null = null;
-  const pendingMessages: Array<{ chatId: number; text: string; threadId?: number; sessionKey: string }> = [];
-  const sleepRepliedChats = new Set<number>();
+  const sleepQueue = new SleepQueue();
+  const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
   const sleepTrigger = new SleepTrigger(join(memoryConfig.memoryDir, "sleep"));
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
@@ -243,6 +198,7 @@ async function main(): Promise<void> {
       if (sleepTrigger.shouldRunOnStartup()) {
         logInfo("main", `😴 Startup sleep trigger fired — spawning sleep routine at ${new Date().toISOString()}`);
         sleepTrigger.writeLock();
+        sleepQueue.activate();
         const thisDir = dirname(fileURLToPath(import.meta.url));
         const sleepScript = join(thisDir, "cli", "agentbridge-sleep.js");
         sleepChild = spawn(process.execPath, [sleepScript], {
@@ -258,7 +214,8 @@ async function main(): Promise<void> {
             sleepTrigger.reportFailure();
           }
           sleepChild = null;
-          processPendingMessages();
+          sleepQueue.deactivate();
+          sleepQueue.replay(platformAdapters);
         });
         sleepChild.unref();
         logInfo("main", `😴 Sleep routine spawned (pid=${sleepChild.pid}) at ${new Date().toISOString()}`);
@@ -290,503 +247,37 @@ async function main(): Promise<void> {
   const fullModeChats = new Set<string>();
 
   // --- Coding agent mode ---
-  const codingMode = new Set<string>(); // sessionKeys currently in coding mode
-  let codingTransport: AcpTransport | null = null;
-
-  async function startCodingMode(sessionKey: string): Promise<void> {
-    if (!codingTransport) {
-      codingTransport = new AcpTransport(config.kiroCLIPath, config.workingDir, {
-        agent: "coding-agent",
-        model: config.codingAgentModel,
-      });
-      await codingTransport.initialize();
-    }
-    codingMode.add(sessionKey);
-    // Inject project facts as first message
-    await codingTransport.sendPrompt(sessionKey, [
-      "[SYSTEM] You are the coding agent for AgentBridge.",
-      `Project root: ${config.workingDir}`,
-      "Read docs/specs/system.asbuilt.md and docs/specs/memory.asbuilt.md before making changes.",
-      "Always create a new git branch before coding. Switch back to main when done.",
-    ].join("\n"));
-  }
-
-  async function stopCodingMode(sessionKey: string): Promise<void> {
-    codingMode.delete(sessionKey);
-    if (codingTransport && codingMode.size === 0) {
-      // Ask it to switch back to main before killing
-      try { await codingTransport.sendPrompt(sessionKey, "Run: git checkout main"); } catch { /* ok */ }
-      codingTransport.destroy();
-      codingTransport = null;
-    }
-  }
+  const codingModeManager = new CodingMode(config.kiroCLIPath, config.workingDir, config.codingAgentModel);
 
   // Idle chat-save: after 10min inactivity, save kiro-cli conversation to working dir
-  const CHAT_SAVE_IDLE_MS = 10 * 60 * 1000;
-  const idleSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-  async function saveChatToWorking(sessionKey: string, chatId: number): Promise<void> {
-    if (!memoryConfig.memoryEnabled) return;
-    const today = new Date().toISOString().slice(0, 10);
-    const dir = join(memoryConfig.memoryDir, "working", today);
-    mkdirSync(dir, { recursive: true });
-    const dest = join(dir, `transcript_${chatId}.chat`);
-    try {
-      await transport.sendPrompt(sessionKey, `/chat save ${dest}`);
-      logInfo("main", `Chat saved to ${dest}`);
-    } catch (e) {
-      logWarn("main", `Chat save failed: ${e}`);
-    }
-  }
-
-  function resetIdleSaveTimer(sessionKey: string, chatId: number): void {
-    const existing = idleSaveTimers.get(sessionKey);
-    if (existing) clearTimeout(existing);
-    idleSaveTimers.set(sessionKey, setTimeout(() => {
-      idleSaveTimers.delete(sessionKey);
-      saveChatToWorking(sessionKey, chatId);
-    }, CHAT_SAVE_IDLE_MS));
-  }
-
-  // Process messages that were queued during sleep
-  const processPendingMessages = (): void => {
-    sleepRepliedChats.clear();
-    if (pendingMessages.length === 0) return;
-    logInfo("main", `Processing ${pendingMessages.length} message(s) queued during sleep`);
-    // Re-inject each pending message by simulating the update flow
-    // We do this asynchronously so the bridge can handle them normally
-    const queued = [...pendingMessages];
-    pendingMessages.length = 0;
-    // Group by sessionKey so multiple messages from the same chat are merged
-    // into one synthetic update, avoiding busyChats collision
-    const grouped = new Map<string, typeof queued>();
-    for (const msg of queued) {
-      const group = grouped.get(msg.sessionKey);
-      if (group) group.push(msg);
-      else grouped.set(msg.sessionKey, [msg]);
-    }
-    for (const msgs of grouped.values()) {
-      const first = msgs[0]!;
-      const combinedText = msgs.map((m) => m.text).join("\n\n");
-      const syntheticUpdate = {
-        update_id: 0,
-        message: {
-          message_id: 0,
-          from: { id: first.chatId, is_bot: false, first_name: "queued" },
-          chat: { id: first.chatId, first_name: "queued", type: "private" as const },
-          date: Math.floor(Date.now() / 1000),
-          text: combinedText,
-          ...(first.threadId ? { message_thread_id: first.threadId } : {}),
-        },
-      };
-      if (telegramPoller) {
-        telegramPoller.injectUpdate(syntheticUpdate);
-      }
-    }
-  };
+  const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
 
   // --- Service Registry ---
   const registry = new ServiceRegistry();
 
+  // --- Build shared pipeline deps ---
+  const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
+    transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
+    sleepQueue, idleSave, conversationBuffer, config, startedAt,
+    sttConfig, ttsConfig,
+    busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
+  };
+
   // --- Telegram service ---
-  let telegramPoller: TelegramPoller | null = null;
+  let telegramAdapter: import("./platforms/telegram-adapter.js").TelegramAdapter | null = null;
 
   registry.register("telegram", {
     configured: Boolean(config.telegramBotToken && config.allowedUserIds.size > 0),
     async create() {
-      const telegramApi = new TelegramApi(config.telegramBotToken);
-      const securityGate = new SecurityGate(config.allowedUserIds);
-
-    const botInfo = await telegramApi.getMe();
-    const botUsername = botInfo.username?.toLowerCase() ?? "";
-    logInfo("main", `🤖 Telegram bot: @${botInfo.username}`);
-
-    // Register command menu so Telegram shows picker when user types /
-    await telegramApi.setMyCommands([
-      { command: "new", description: "Start a fresh session" },
-      { command: "reset", description: "Start a fresh session" },
-      { command: "status", description: "Connection & uptime info" },
-      { command: "stop", description: "Send Ctrl+C to Kiro" },
-      { command: "restart", description: "Restart Kiro (tmux only)" },
-      { command: "full", description: "Raw output mode, TTS off" },
-      { command: "short", description: "Clean output mode, TTS on" },
-      { command: "memory", description: "Memory system stats" },
-      { command: "facts", description: "Show core knowledge" },
-      { command: "reflect", description: "Generate a reflection" },
-      { command: "ingest", description: "Ingest a document or URL" },
-      { command: "forget", description: "Forget topic or date range" },
-      { command: "coding", description: "Switch to Opus coding agent" },
-      { command: "default", description: "Switch back to KP" },
-    ]).catch((err) => logWarn("main", `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
-
-    const react = async (chatId: number, messageId: number, emoji: string): Promise<void> => {
-      if (messageId <= 0) return;
-      try {
-        const reaction = emoji ? [{ type: "emoji" as const, emoji }] : [];
-        await telegramApi.setMessageReaction(chatId, messageId, reaction);
-      } catch (err) {
-        logDebug("main", `React failed (${emoji || "remove"}): ${err instanceof Error ? err.message : String(err)}`);
-      }
-    };
-
-    const tgBufferKey = (chatId: number, threadId?: number): string =>
-      threadId != null ? `tg:${chatId}:${threadId}` : `tg:${chatId}`;
-
-    const handleUpdate = async (update: TelegramUpdate): Promise<void> => {
-      logDebug("main", `Update: ${JSON.stringify(update).slice(0, 200)}`);
-
-      if (update.callback_query) {
-        await telegramApi.answerCallbackQuery(update.callback_query.id);
-        return;
-      }
-
-      if (update.message_reaction) {
-        const reaction = update.message_reaction;
-        const user = reaction.user;
-        if (!user) {
-          logDebug("main", "Reaction update missing user field, ignoring");
-          return;
-        }
-        if (user.is_bot) return;
-
-        const oldEmojis = new Set(reaction.old_reaction.map((r) => r.emoji));
-        const added = reaction.new_reaction.filter((r) => !oldEmojis.has(r.emoji));
-        if (added.length === 0) return;
-
-        const senderName = user.first_name || user.username || `id:${user.id}`;
-        const emojis = added.map((r) => r.emoji);
-        logInfo("main", `Reaction ${emojis.join("")} from ${senderName} on msg ${reaction.message_id}`);
-
-        const isAuthorized = securityGate.authorizeUserId(user.id);
-        const signal = formatReactionSignal(senderName, emojis);
-        const chatId = reaction.chat.id;
-        const route = routeReaction(isAuthorized, reaction.chat.type);
-
-        // Update emotion_score on the reacted message (authorized users only)
-        if (isAuthorized && memory) {
-          const score = emojiToScore(emojis[0]!);
-          const updated = memory.updateEmotionByPlatformId(chatId, reaction.message_id, score);
-          if (updated) logDebug("main", `Emotion score ${score} set on platform msg ${reaction.message_id}`);
-        }
-
-        if (route === "discard") {
-          logDebug("main", `Unauthorized reaction from user ${user.id}, discarding`);
-          return;
-        }
-
-        if (route === "buffer") {
-          const bufKey = tgBufferKey(chatId);
-          conversationBuffer.push(bufKey, senderName, signal);
-          logDebug("main", `Buffered reaction signal for group ${chatId}`);
-        } else {
-          const sessionKey = `telegram:${chatId}`;
-          try {
-            await transport.sendPrompt(sessionKey, signal);
-            logDebug("main", `Sent reaction signal to transport for chat ${chatId}`);
-          } catch (err) {
-            logError("main", `Failed to send reaction signal for chat ${chatId}`, err);
-          }
-        }
-        return;
-      }
-
-      const message = update.message;
-      if (!message?.from) return;
-
-      const hasText = Boolean(message.text);
-      const hasVoice = Boolean(message.voice || message.audio);
-      if (!hasText && !hasVoice) return;
-
-      const chatId = message.chat.id;
-      const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
-      const threadId = isGroup ? message.message_thread_id : undefined;
-      const messageId = message.message_id;
-      const senderName = message.from.first_name || message.from.username || `id:${message.from.id}`;
-      const bufKey = tgBufferKey(chatId, threadId);
-
-      let text = message.text ?? "";
-      let isVoiceNote = false;
-
-      // --- Voice note handling ---
-      if (hasVoice && !hasText) {
-        if (!sttConfig) {
-          if (isGroup) {
-            conversationBuffer.push(bufKey, senderName, "[voice note - STT disabled]");
-          } else if (securityGate.authorize(message)) {
-            await telegramApi.sendMessage(chatId, "🎤 Voice notes require STT (set GROQ_API_KEY).", { message_thread_id: threadId });
-          }
-          return;
-        }
-
-        if (!securityGate.authorize(message)) {
-          if (isGroup) conversationBuffer.push(bufKey, senderName, "[voice note]");
-          return;
-        }
-
-        try {
-          await react(chatId, messageId, "👀");
-          const voiceFile = message.voice || message.audio;
-          const fileInfo = await telegramApi.getFile(voiceFile!.file_id);
-          if (!fileInfo.file_path) throw new Error("No file_path returned");
-          const audioBuffer = await telegramApi.downloadFile(fileInfo.file_path);
-          const transcript = await transcribeAudio(audioBuffer, "voice.ogg", sttConfig);
-
-          if (!transcript) {
-            await react(chatId, messageId, "");
-            if (isGroup) {
-              conversationBuffer.push(bufKey, senderName, "[voice note - empty]");
-            } else {
-              await telegramApi.sendMessage(chatId, "🤷 Couldn't transcribe the voice note.", { message_thread_id: threadId });
-            }
-            return;
-          }
-
-          if (isGroup) {
-            const mentionRe = new RegExp(`@?${botUsername}\\b`, "i");
-            if (!mentionRe.test(transcript) && !transcript.startsWith("/")) {
-              await react(chatId, messageId, "");
-              conversationBuffer.push(bufKey, senderName, `[voice] ${transcript}`);
-              logDebug("main", `Buffered voice transcript: "${transcript.slice(0, 60)}"`);
-              return;
-            }
-            text = transcript.replace(mentionRe, "").trim();
-          } else {
-            text = transcript;
-          }
-
-          isVoiceNote = true;
-          if (!text) { await react(chatId, messageId, ""); return; }
-        } catch (err) {
-          logError("main", "Voice transcription failed", err);
-          await react(chatId, messageId, "");
-          if (!isGroup) {
-            await telegramApi.sendMessage(chatId, "❌ Voice transcription failed.", { message_thread_id: threadId });
-          }
-          return;
-        }
-      }
-
-      // --- Text message group filtering ---
-      if (!isVoiceNote && isGroup) {
-        const mentionRe = new RegExp(`@${botUsername}\\b`, "i");
-        const isMention = mentionRe.test(text);
-        const isCommand = text.startsWith("/");
-
-        if (!isMention && !isCommand) {
-          conversationBuffer.push(bufKey, senderName, text);
-          logDebug("main", `Buffered group msg from ${senderName}: "${text.slice(0, 60)}"`);
-          return;
-        }
-
-        if (isMention) {
-          text = text.replace(mentionRe, "").trim();
-          if (!text) return;
-        }
-      }
-
-      if (!isVoiceNote && !securityGate.authorize(message)) {
-        if (isGroup) conversationBuffer.push(bufKey, senderName, text);
-        logWarn("main", `Unauthorized user ${message.from.id}`);
-        return;
-      }
-
-      const sessionKey = `telegram:${chatId}`;
-
-      // Unified command handler
-      const tgReply: Reply = (msg, opts) => telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId, ...(opts?.parseMode ? { parse_mode: opts.parseMode as "MarkdownV2" | "HTML" } : {}) });
-      const cmdCtx: CommandContext = {
-        sessionKey, chatId, platform: "telegram", reply: tgReply,
-        transport, codingTransport, config, startedAt,
-        memory, memoryConfig, nlmConfig,
-        busyChats, codingMode, fullModeChats, pendingSessionStart, idleSaveTimers,
-        saveChatToWorking, startCodingMode, stopCodingMode, updateCtxStart,
-        conversationBuffer: isGroup ? conversationBuffer : undefined,
-        bufKey: isGroup ? bufKey : undefined,
-      };
-      if (await handleCommand(text, cmdCtx)) return;
-
-      // // prefix → pass-through to Kiro (e.g. //agent → /agent)
-      if (text.startsWith("//")) {
-        text = text.slice(1);
-      }
-
-      if (busyChats.has(sessionKey)) {
-        await telegramApi.sendMessage(chatId, "⏳ Previous request still in progress...", { message_thread_id: threadId });
-        return;
-      }
-
-      let typingInterval: ReturnType<typeof setInterval> | undefined;
-      try {
-        busyChats.add(sessionKey);
-        logInfo("main", `← ${isVoiceNote ? "🎤 " : ""}"${text.slice(0, 60)}"`);
-
-        // Queue message if sleep is in progress
-        if (sleepChild) {
-          if (!sleepRepliedChats.has(chatId)) {
-            await telegramApi.sendMessage(chatId, "Oh good morning, I am just waking up, give me a minute please.. I answer you soon ☕", { message_thread_id: threadId });
-            sleepRepliedChats.add(chatId);
-          }
-          pendingMessages.push({ chatId, text, threadId, sessionKey });
-          busyChats.delete(sessionKey);
-          return;
-        }
-        // Prepend buffered conversation context
-        let prompt = `[Telegram] ${text}`;
-        if (isGroup) {
-          const context = conversationBuffer.drain(bufKey);
-          if (context) {
-            prompt = context + text;
-            logDebug("main", `Prepended group context to prompt`);
-          }
-        }
-
-        if (memory) {
-          prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart, seenSessions, messageId);
-        }
-
-        prompt = interceptLargeMessage(prompt).text;
-        const activeTransport = codingMode.has(sessionKey) && codingTransport ? codingTransport : transport;
-        const responsePromise = activeTransport.sendPrompt(sessionKey, prompt);
-
-        if (!isVoiceNote) await react(chatId, messageId, "👀");
-        await telegramApi.sendChatAction(chatId, "typing", threadId);
-        typingInterval = setInterval(() => {
-          telegramApi.sendChatAction(chatId, "typing", threadId).catch(() => {});
-        }, 8000);
-
-        // Stream intermediate chunks to Telegram as Kiro works
-        let intermediateDelivered = false;
-        if (transport instanceof TmuxClient) {
-          (transport as TmuxClient).onIntermediateResponse = (chunk: string) => {
-            intermediateDelivered = true;
-            const isFullMode = fullModeChats.has(sessionKey);
-            const chunks = formatter.chunkText(isFullMode ? chunk : chunk);
-            for (const c of chunks) {
-              if (c.trim()) {
-                telegramApi.sendChatAction(chatId, "typing", threadId).catch(() => {});
-                telegramApi.sendMessage(chatId, c, { message_thread_id: threadId }).catch(() => {});
-              }
-            }
-          };
-        }
-
-        const response = await responsePromise;
-
-        if (transport instanceof TmuxClient) {
-          (transport as TmuxClient).onIntermediateResponse = undefined;
-        }
-        logDebug("main", `Response (${response.length} chars): "${response.slice(0, 120)}"`);
-
-        // Prefer the clean answer-only extract (strips system prompts, memory context, thinking indicators)
-        const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
-          ? (transport as TmuxClient).answerOnly
-          : "";
-        const userResponse = fullModeChats.has(sessionKey) ? response : (cleanAnswer || response);
-
-        if (!userResponse || !userResponse.trim()) {
-          if (!intermediateDelivered) {
-            logWarn("main", "Empty response from transport");
-            await react(chatId, messageId, "🤷");
-            await telegramApi.sendMessage(chatId, "🤷 Kiro returned an empty response. Try again or /reset.", { message_thread_id: threadId });
-          }
-          return;
-        }
-
-        // Reaction-only response: [REACT:emoji] with no other text
-        const reactMatch = userResponse.trim().match(/^\[REACT:(.+)\]$/);
-        if (reactMatch) {
-          await react(chatId, messageId, reactMatch[1]!);
-          logDebug("main", `Reaction-only response: ${reactMatch[1]}`);
-          return;
-        }
-
-        // Only send final response if nothing was streamed, or if there's new content
-        let lastSentMsgId: number | undefined;
-        if (!intermediateDelivered) {
-          const chunks = formatter.chunkText(userResponse);
-          logDebug("main", `Sending ${chunks.length} chunk(s)`);
-          for (const chunk of chunks) {
-            if (chunk.trim()) {
-              await telegramApi.sendChatAction(chatId, "typing", threadId);
-              lastSentMsgId = await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
-            }
-          }
-        } else if (transport instanceof TmuxClient) {
-          // Intermediate streaming may not have delivered the full answer — send the tail
-          const delivered = (transport as TmuxClient).intermediateDeliveredText;
-          const finalAnswer = cleanAnswer || response;
-          if (delivered && finalAnswer.length > delivered.length && finalAnswer.startsWith(delivered)) {
-            const tail = finalAnswer.slice(delivered.length).trim();
-            if (tail) {
-              logDebug("main", `Sending streamed tail (${tail.length} chars)`);
-              const tailChunks = formatter.chunkText(tail);
-              for (const chunk of tailChunks) {
-                if (chunk.trim()) {
-                  await telegramApi.sendChatAction(chatId, "typing", threadId);
-                  lastSentMsgId = await telegramApi.sendMessage(chatId, chunk, { message_thread_id: threadId });
-                }
-              }
-            }
-          }
-        }
-
-        if (memory) {
-          memory.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId: lastSentMsgId });
-        }
-
-        if (isVoiceNote && ttsConfig && !fullModeChats.has(sessionKey)) {
-          try {
-            await telegramApi.sendChatAction(chatId, "record_voice", threadId);
-            const ttsText = cleanAnswer || response;
-            const audio = await synthesizeSpeech(ttsText, ttsConfig);
-            if (audio) {
-              await telegramApi.sendVoice(chatId, audio, { message_thread_id: threadId });
-              logInfo("main", `🔊 Voice reply sent (${audio.length} bytes)`);
-            }
-          } catch (err) {
-            logWarn("main", `TTS failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-
-        await react(chatId, messageId, "");
-        logInfo("main", `→ Response delivered to chat ${chatId}${intermediateDelivered ? " (streamed)" : ""}`);
-
-        // Auto-compact when context window usage exceeds threshold (percentage-based)
-        if (memory && "contextPercent" in transport) {
-          const pct = (transport as TmuxClient).contextPercent;
-          const threshold = memory.getConfig().searchEnhancements.compactThresholdPct;
-          if (pct >= threshold) {
-            logInfo("main", `⚠️ Context window at ${pct}% (threshold: ${threshold}%) — auto-compacting`);
-            await telegramApi.sendMessage(chatId, `📦 Context window at ${pct}% — auto-compacting...`, { message_thread_id: threadId });
-            try {
-              await memory.checkAutoCompact({
-                chatId,
-                sessionId: sessionKey,
-                contextPercent: pct,
-                sendCompactCommand: (sk, cmd) => transport.sendPrompt(sk, cmd),
-              });
-              await telegramApi.sendMessage(chatId, "📦 Auto-compaction complete.", { message_thread_id: threadId });
-              if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
-            } catch (err) {
-              logError("main", "Auto-compaction failed", err);
-            }
-          }
-        }
-      } catch (err) {
-        logError("main", `Error for chat ${chatId}`, err);
-        await react(chatId, messageId, "");
-        await telegramApi.sendMessage(chatId, "❌ Something went wrong. Try /reset to start fresh.", { message_thread_id: threadId });
-      } finally {
-        clearInterval(typingInterval);
-        busyChats.delete(sessionKey);
-        resetIdleSaveTimer(sessionKey, chatId);
-      }
-    };
-
-    telegramPoller = new TelegramPoller(telegramApi, config.pollTimeoutS, handleUpdate);
+      const { TelegramAdapter } = await import("./platforms/telegram-adapter.js");
+      telegramAdapter = new TelegramAdapter(
+        { botToken: config.telegramBotToken, allowedUserIds: config.allowedUserIds, pollTimeoutS: config.pollTimeoutS },
+        { pipeline: pipelineDeps, conversationBuffer, transport, memory },
+      );
+      platformAdapters.set("telegram", telegramAdapter);
       return {
-        start() { telegramPoller!.start(); },
-        stop() { telegramPoller?.stop(); telegramPoller = null; },
+        async start() { await telegramAdapter!.start(); },
+        stop() { telegramAdapter?.stop(); platformAdapters.delete("telegram"); telegramAdapter = null; },
       };
     },
   });
@@ -804,172 +295,29 @@ async function main(): Promise<void> {
   }
 
   // --- Discord service ---
-  let discordPoller: DiscordPoller | null = null;
+  let discordAdapter: import("./platforms/discord-adapter.js").DiscordAdapter | null = null;
 
   registry.register("discord", {
     configured: Boolean(config.discordEnabled && config.discordBotToken),
     async create() {
-      const discordApi = new DiscordApi(config.discordBotToken!);
-      const discordSecurityGate = new DiscordSecurityGate(
-        config.discordAllowedUserIds!,
-        config.discordAllowedChannelIds!,
+      const { DiscordAdapter } = await import("./platforms/discord-adapter.js");
+      discordAdapter = new DiscordAdapter(
+        {
+          botToken: config.discordBotToken!,
+          appId: config.discordAppId!,
+          allowedUserIds: config.discordAllowedUserIds!,
+          allowedChannelIds: config.discordAllowedChannelIds!,
+          a2aEnabled: config.discordA2aEnabled,
+          a2aChannelId: config.discordA2aChannelId,
+          a2aPeerBotId: config.discordA2aPeerBotId,
+          a2aRateLimitMs: config.discordA2aRateLimitMs,
+        },
+        { pipeline: pipelineDeps, transport, memory, conversationBuffer },
       );
-    const channelAdapter = new ChannelAdapter();
-
-    let a2aRouter: A2ARouter | null = null;
-    if (config.discordA2aEnabled) {
-      a2aRouter = new A2ARouter({
-        discordApi,
-        a2aChannelId: config.discordA2aChannelId!,
-        peerBotId: config.discordA2aPeerBotId!,
-        rateLimitMs: config.discordA2aRateLimitMs,
-        onPrompt: (sessionKey, text) => transport.sendPrompt(sessionKey, interceptLargeMessage(text).text),
-      });
-      logInfo("main", `🤝 A2A router enabled (channel=${config.discordA2aChannelId})`);
-    }
-
-    const handleDiscordMessage = async (message: DiscordInboundMessage): Promise<void> => {
-      logDebug("main", `Discord message from ${message.authorUsername} in ${message.channelId}`);
-
-      const effectiveChannelId = message.parentChannelId ?? message.channelId;
-
-      // Security gate
-      if (!discordSecurityGate.authorize(message.authorId, effectiveChannelId)) {
-        logDebug("main", `Discord: unauthorized user=${message.authorId} channel=${effectiveChannelId}`);
-        return;
-      }
-
-      const bridgeMsg = channelAdapter.fromDiscord(message);
-      const sessionKey = channelAdapter.sessionKey("discord", message.channelId);
-      const bufKey = `discord:${message.channelId}`;
-      const rawText = bridgeMsg.text.trim();
-
-      if (!rawText) return;
-
-      // Pass all messages through — Kiro (the LLM) decides whether to respond
-      // based on the DISCORD_SKILL.md steering file. The bridge only handles
-      // security (allowed users/channels) and transport.
-      // Strip Kiro's own mention tag before forwarding so the model sees clean text.
-      let text = stripDiscordMentions(rawText, config.discordAppId!);
-      if (!text) return;
-
-      // Include sender context so Kiro knows who's talking
-      const channelLabel = message.parentChannelId ? message.channelName ?? "thread" : message.channelName ?? "DM";
-      const senderPrefix = `[Discord] [${message.authorUsername}${message.authorIsBot ? " (bot)" : ""}] in #${channelLabel}: `;
-
-      // A2A routing — peer bot messages in the A2A channel go through the A2A router
-      if (a2aRouter && message.authorIsBot && effectiveChannelId === config.discordA2aChannelId) {
-        const cleanedMessage = { ...message, content: text };
-        await a2aRouter.handleMessage(cleanedMessage);
-        return;
-      }
-
-      // Unified command handler
-      const discordChatId = parseInt(message.channelId, 10) || 0;
-      const dcReply: Reply = (msg) => discordApi.sendMessage(message.channelId, msg);
-      const dcCmdCtx: CommandContext = {
-        sessionKey, chatId: discordChatId, platform: "discord", reply: dcReply,
-        transport, codingTransport, config: { ...config, discordA2aEnabled: config.discordA2aEnabled, discordA2aChannelId: config.discordA2aChannelId },
-        startedAt,
-        memory, memoryConfig, nlmConfig,
-        busyChats, codingMode, fullModeChats, pendingSessionStart, idleSaveTimers,
-        saveChatToWorking, startCodingMode, stopCodingMode, updateCtxStart,
-        conversationBuffer, bufKey,
-      };
-      if (await handleCommand(text, dcCmdCtx)) return;
-
-      // // prefix → pass-through to Kiro (e.g. //agent → /agent)
-      if (text.startsWith("//")) {
-        text = text.slice(1);
-      }
-
-      if (busyChats.has(sessionKey)) {
-        await discordApi.sendMessage(message.channelId, "⏳ Previous request still in progress...");
-        return;
-      }
-
-      try {
-        busyChats.add(sessionKey);
-        logInfo("main", `← Discord: "${text.slice(0, 60)}"`);
-
-        // Build prompt with sender context
-        let prompt = senderPrefix + text;
-        const context = conversationBuffer.drain(bufKey);
-        if (context) {
-          prompt = context + prompt;
-          logDebug("main", `Discord: prepended conversation context to prompt`);
-        }
-
-        if (memory) {
-          const chatId = parseInt(message.channelId, 10) || 0;
-          prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart, seenSessions);
-        }
-
-        prompt = interceptLargeMessage(prompt).text;
-        const response = await transport.sendPrompt(sessionKey, prompt);
-
-        // Prefer the clean answer-only extract (strips system prompts, memory context, thinking indicators)
-        const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
-          ? (transport as TmuxClient).answerOnly
-          : "";
-        const userResponse = fullModeChats.has(sessionKey) ? response : (cleanAnswer || response);
-
-        if (!userResponse || !userResponse.trim()) {
-          logWarn("main", "Empty response from transport (Discord)");
-          await discordApi.sendMessage(message.channelId, "🤷 Kiro returned an empty response. Try again or /reset.");
-          return;
-        }
-
-        // LLM opted out of responding (per CHATS.md steering)
-        if (userResponse.trim() === "<NO_REPLY>") {
-          logDebug("main", "Discord: LLM returned <NO_REPLY>, skipping");
-          return;
-        }
-
-        const chunks = formatter.chunkForPlatform(userResponse, "discord");
-        logDebug("main", `Discord: sending ${chunks.length} chunk(s)`);
-        for (const chunk of chunks) {
-          if (chunk.trim()) {
-            await discordApi.sendMessage(message.channelId, chunk);
-          }
-        }
-        logInfo("main", `→ Discord: sent ${chunks.length} chunk(s) to ${message.channelId}`);
-
-        // Auto-compact when context window usage exceeds threshold (percentage-based)
-        if (memory && "contextPercent" in transport) {
-          const pct = (transport as TmuxClient).contextPercent;
-          const threshold = memory.getConfig().searchEnhancements.compactThresholdPct;
-          if (pct >= threshold) {
-            const chatId = parseInt(message.channelId, 10) || 0;
-            logInfo("main", `⚠️ Context window at ${pct}% (threshold: ${threshold}%) — auto-compacting (Discord)`);
-            await discordApi.sendMessage(message.channelId, `📦 Context window at ${pct}% — auto-compacting...`);
-            try {
-              await memory.checkAutoCompact({
-                chatId,
-                sessionId: sessionKey,
-                contextPercent: pct,
-                sendCompactCommand: (sk, cmd) => transport.sendPrompt(sk, cmd),
-              });
-              await discordApi.sendMessage(message.channelId, "📦 Auto-compaction complete.");
-              if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
-            } catch (err) {
-              logError("main", "Auto-compaction failed (Discord)", err);
-            }
-          }
-        }
-      } catch (err) {
-        logError("main", `Discord error for channel ${message.channelId}`, err);
-        await discordApi.sendMessage(message.channelId, "❌ Something went wrong. Try /reset to start fresh.").catch(() => {});
-      } finally {
-        busyChats.delete(sessionKey);
-        resetIdleSaveTimer(sessionKey, parseInt(message.channelId, 10) || 0);
-      }
-    };
-
-    discordPoller = new DiscordPoller(discordApi, config.discordAppId!, handleDiscordMessage);
+      platformAdapters.set("discord", discordAdapter);
       return {
-        async start() { await discordPoller!.start(); },
-        stop() { discordPoller?.stop(); discordPoller = null; },
+        async start() { await discordAdapter!.start(); },
+        stop() { discordAdapter?.stop(); platformAdapters.delete("discord"); discordAdapter = null; },
       };
     },
   });
@@ -988,33 +336,32 @@ async function main(): Promise<void> {
     logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
   }
 
-  // --- Unified heartbeat (5-min interval) ---
-
   // --- Startup notification (async, non-blocking) ---
   if (memoryConfig.memoryEnabled) {
-    const tgSend = telegramPoller ? async (msg: string): Promise<void> => {
+    const tgSend = telegramAdapter ? async (msg: string): Promise<void> => {
       const chatId = [...config.allowedUserIds][0];
-      if (chatId) await new TelegramApi(config.telegramBotToken).sendMessage(chatId, msg);
+      if (chatId) await telegramAdapter!.sendMessage(String(chatId), msg);
     } : undefined;
-    const dcSend = discordPoller ? async (msg: string): Promise<void> => {
+    const dcSend = discordAdapter ? async (msg: string): Promise<void> => {
       const channelId = config.discordAllowedChannelIds ? [...config.discordAllowedChannelIds][0] : undefined;
-      if (channelId) await new DiscordApi(config.discordBotToken!).sendMessage(channelId, msg);
+      if (channelId) await discordAdapter!.sendMessage(channelId, msg);
     } : undefined;
     sendBackOnline(tgSend, dcSend).catch((err) => {
       logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
     });
 
     // Send greeting prompt to kiro-cli (with session context) so KP greets personally
-    if (telegramPoller) {
+    if (telegramAdapter) {
       const chatId = [...config.allowedUserIds][0];
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
-        const greetPrompt = "[Telegram] You just woke up. Output ONLY a personalized greeting message.";
-        const prepared = preparePrompt(greetPrompt, memory!, chatId, sessionKey, greetPrompt, pendingSessionStart, seenSessions);
-        transport.sendPrompt(sessionKey, prepared).then(async (response) => {
+        let greetPrompt = "[Telegram] You just woke up. Output ONLY a personalized greeting message.";
+        const ctx = buildSessionStartContext(memory!, chatId);
+        if (ctx) greetPrompt = ctx + "\n\n" + greetPrompt;
+        seenSessions.add(sessionKey);
+        transport.sendPrompt(sessionKey, greetPrompt).then(async (response) => {
           if (response) {
-            const api = new TelegramApi(config.telegramBotToken);
-            await api.sendMessage(chatId, response);
+            await telegramAdapter!.sendMessage(String(chatId), response);
           }
         }).catch((err) => {
           logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1052,6 +399,7 @@ async function main(): Promise<void> {
       } catch { return false; }
       if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) return false;
       sleepTrigger.writeLock();
+      sleepQueue.activate();
       try {
         const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
         const child = spawn(process.execPath, [sleepScript], { stdio: "ignore", detached: true });
@@ -1064,6 +412,8 @@ async function main(): Promise<void> {
             logWarn("main", `😴 Cron sleep routine failed (exit code ${code}) at ${new Date().toISOString()}`);
             sleepTrigger.reportFailure();
           }
+          sleepQueue.deactivate();
+          sleepQueue.replay(platformAdapters);
         });
         child.unref();
         logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid}) at ${new Date().toISOString()}`);
@@ -1095,18 +445,20 @@ async function main(): Promise<void> {
       clearPendingReminders();
       for (const r of reminders) {
         logInfo("main", `⏰ Injecting reminder for chat ${r.chatId}: "${r.message}"`);
-        const syntheticUpdate: TelegramUpdate = {
-          update_id: 0,
-          message: {
-            message_id: 0,
-            from: { id: r.chatId, is_bot: false, first_name: "cron" },
-            chat: { id: r.chatId, type: "private" },
-            date: Math.floor(Date.now() / 1000),
+        if (telegramAdapter) {
+          telegramAdapter.injectMessage({
+            platform: "telegram",
+            channelId: String(r.chatId),
+            sessionKey: `telegram:${r.chatId}`,
+            senderId: String(r.chatId),
+            senderName: "cron",
             text: `[Scheduled reminder] ${r.message}`,
-            ...(r.threadId ? { message_thread_id: r.threadId } : {}),
-          },
-        };
-        telegramPoller?.injectUpdate(syntheticUpdate);
+            timestamp: Date.now(),
+            threadId: r.threadId ? String(r.threadId) : undefined,
+            isGroup: false,
+            isVoice: false,
+          });
+        }
       }
     },
   });

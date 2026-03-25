@@ -4,12 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "./session-manager.js";
 import { MemoryManager } from "./memory-manager.js";
-import { MEMORY_CONFIG_DEFAULTS, type MemoryConfig } from "./memory-config.js";
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 import type { AcpClient } from "./acp-client.js";
-
-function makeConfig(tmpDir: string, overrides: Partial<MemoryConfig> = {}): MemoryConfig {
-  return { ...MEMORY_CONFIG_DEFAULTS, memoryDir: tmpDir, ...overrides };
-}
 
 let sessionCounter = 0;
 function makeMockAcpClient(): AcpClient {
@@ -28,7 +24,7 @@ describe("SessionManager + MemoryManager integration", () => {
   beforeEach(async () => {
     sessionCounter = 0;
     tmpDir = mkdtempSync(join(tmpdir(), "sm-int-"));
-    memory = new MemoryManager(makeConfig(tmpDir));
+    memory = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await memory.initialize();
     acpClient = makeMockAcpClient();
     sm = new SessionManager(acpClient, "/tmp/work", memory);

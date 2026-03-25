@@ -7,17 +7,8 @@ import { EmbeddingProvider } from "./embedding-provider.js";
 import { MemoryIndex } from "./memory-index.js";
 import { initializeDatabase } from "./memory-db.js";
 import { MemoryManager } from "./memory-manager.js";
-import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
-import type { MemoryConfig } from "./memory-config.js";
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 import type Database from "better-sqlite3";
-
-function makeConfig(tmpDir: string, overrides: Partial<MemoryConfig> = {}): MemoryConfig {
-  return {
-    ...MEMORY_CONFIG_DEFAULTS,
-    memoryDir: tmpDir,
-    ...overrides,
-  };
-}
 
 describe("cosineSimilarity", () => {
   it("returns 1.0 for identical vectors", () => {
@@ -156,7 +147,7 @@ describe("MemoryManager.hybridSearch — FTS-only mode", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "hybrid-test-"));
-    manager = new MemoryManager(makeConfig(tmpDir, { vectorEnabled: false }));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir, { vectorEnabled: false }));
     await manager.initialize();
   });
 
@@ -181,7 +172,7 @@ describe("MemoryManager.hybridSearch — FTS-only mode", () => {
 
     // Re-initialize manager to pick up the indexed data
     manager.close();
-    manager = new MemoryManager(makeConfig(tmpDir, { vectorEnabled: false }));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir, { vectorEnabled: false }));
     await manager.initialize();
 
     const results = await manager.search("fox");
@@ -195,7 +186,7 @@ describe("MemoryManager.hybridSearch — FTS-only mode", () => {
   });
 
   it("search returns empty when memory is disabled", async () => {
-    const disabledManager = new MemoryManager(makeConfig(tmpDir, { memoryEnabled: false }));
+    const disabledManager = new MemoryManager(makeMemoryTestConfig(tmpDir, { memoryEnabled: false }));
     await disabledManager.initialize();
     const results = await disabledManager.search("anything");
     expect(results).toEqual([]);
