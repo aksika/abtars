@@ -285,7 +285,7 @@ Major refactor: extracted Telegram/Discord into a shared PlatformAdapter pattern
 
 ## 37. CronQueue — Sequential Job Processor
 
-**Status:** ✅ Done (2026-03-25)
+**Status:** ✅ Done (2026-03-25) — needs live testing
 
 Replaced inline task spawning in cron-checker with a proper job queue.
 
@@ -298,6 +298,7 @@ Replaced inline task spawning in cron-checker with a proper job queue.
 - Merged cron-priority/cron-normal into single heartbeat task
 - `/cron` shows running job PID + status icons: + pending, ~ running, ✓ succeeded, — skipped
 - Heartbeat skips ticks until uptime > 3 minutes
+- **Needs live testing:** exit code persistence, retry flow, agent timeout, priority ordering with real tasks
 
 ## 38. Classification Leak via Consolidation Pipeline
 
