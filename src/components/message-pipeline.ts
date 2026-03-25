@@ -203,9 +203,12 @@ export async function handleInboundMessage(
       return;
     }
 
-    // --- <NO_REPLY> ---
+    // --- <NO_REPLY> → react with smile ---
     if (userResponse.trim() === "<NO_REPLY>") {
-      logDebug(TAG, "LLM returned <NO_REPLY>, skipping");
+      logDebug(TAG, "LLM returned <NO_REPLY>, sending smile");
+      if (adapter.setReaction && msg.messageId) {
+        await adapter.setReaction(channelId, msg.messageId, "😊");
+      }
       return;
     }
 
