@@ -23,6 +23,7 @@ describe("cron-checker", () => {
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    import("./cron-checker.js").then(m => m._resetActiveAgents());
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -201,13 +202,15 @@ describe("cron-checker", () => {
     expect(reminders[0].message).toBe("Normal");
   });
 
-  it("fires only 1 task per tick but all reminders", async () => {
+  it("fires only 1 agent task per tick but all reminders and scripts", async () => {
     const { checkCron } = await import("./cron-checker.js");
     writeCron([
       { id: "rem01", fireAt: Date.now() - 1000, message: "Reminder 1", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
       { id: "rem02", fireAt: Date.now() - 1000, message: "Reminder 2", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
-      { id: "tsk01", fireAt: Date.now() - 1000, message: "echo task1", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() },
-      { id: "tsk02", fireAt: Date.now() - 2000, message: "echo task2", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() },
+      { id: "scr01", fireAt: Date.now() - 1000, message: "echo script1", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() },
+      { id: "scr02", fireAt: Date.now() - 1000, message: "echo script2", chatId: 1, type: "task", executor: "script", fired: false, createdAt: Date.now() },
+      { id: "agt01", fireAt: Date.now() - 1000, message: "agent task 1", chatId: 1, type: "task", executor: "agent", fired: false, createdAt: Date.now() },
+      { id: "agt02", fireAt: Date.now() - 2000, message: "agent task 2", chatId: 1, type: "task", executor: "agent", fired: false, createdAt: Date.now() },
     ]);
 
     checkCron();
@@ -216,18 +219,19 @@ describe("cron-checker", () => {
     expect(reminders).toHaveLength(2); // both reminders fire
 
     const entries = readCron();
-    // First task fires; second task untouched (guard bails before scheduling block)
-    const firedTasks = entries.filter(e => e.type === "task" && e.fired);
-    expect(firedTasks).toHaveLength(1);
-    expect(firedTasks[0].id).toBe("tsk01");
+    // Both scripts fire, only 1 agent fires
+    const firedScripts = entries.filter(e => e.executor === "script" && e.lastRanAt);
+    const firedAgents = entries.filter(e => e.executor === "agent" && e.lastRanAt);
+    expect(firedScripts).toHaveLength(2);
+    expect(firedAgents).toHaveLength(1);
   });
 
-  it("high priority task fires before medium/low when multiple are due", async () => {
+  it("high priority agent task fires before medium/low when multiple are due", async () => {
     const { checkCron } = await import("./cron-checker.js");
     const now = Date.now();
     writeCron([
-      { id: "low01", fireAt: now - 3000, message: "echo low", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now, priority: "low" },
-      { id: "med01", fireAt: now - 2000, message: "echo med", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now, priority: "medium" },
+      { id: "low01", fireAt: now - 3000, message: "low task", chatId: 1, type: "task", executor: "agent", fired: false, createdAt: now, priority: "low" },
+      { id: "med01", fireAt: now - 2000, message: "med task", chatId: 1, type: "task", executor: "agent", fired: false, createdAt: now, priority: "medium" },
     ]);
 
     // Normal pass skips high, fires first non-high by priority (medium before low)
@@ -239,7 +243,7 @@ describe("cron-checker", () => {
     expect(fired[0].id).toBe("med01");
   });
 
-  it("second tick fires the next task after first was consumed", async () => {
+  it("second tick fires the next agent task after first completed", async () => {
     const { checkCron } = await import("./cron-checker.js");
     const now = Date.now();
     writeCron([
@@ -247,8 +251,7 @@ describe("cron-checker", () => {
       { id: "t2", fireAt: now - 1000, message: "echo second", chatId: 1, type: "task", executor: "script", fired: false, createdAt: now },
     ]);
 
-    checkCron(); // fires t1
-    checkCron(); // fires t2
+    checkCron(); // scripts fire freely — both fire in one tick
 
     const entries = readCron();
     expect(entries.filter(e => e.fired)).toHaveLength(2);

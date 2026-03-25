@@ -18,6 +18,23 @@ const memoryDir = (): string => join(homedir(), ".agentbridge", "memory");
 const cronPath = (): string => join(memoryDir(), "cron.json");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
 
+/** PIDs of currently running agent subprocesses. */
+const activeAgentPids = new Set<number>();
+
+/** Returns true if any agent task subprocess is still running. */
+export function hasActiveAgent(): boolean {
+  // Clean up dead PIDs
+  for (const pid of activeAgentPids) {
+    try { process.kill(pid, 0); } catch { activeAgentPids.delete(pid); }
+  }
+  return activeAgentPids.size > 0;
+}
+
+/** Test-only: clear tracked agent PIDs. */
+export function _resetActiveAgents(): void {
+  activeAgentPids.clear();
+}
+
 export interface PendingReminder {
   chatId: number;
   message: string;
@@ -73,6 +90,7 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
   const now = Date.now();
   let changed = false;
   let firedTask = false;
+  let firedAgent = false;
   const priorityOnly = opts?.priorityOnly ?? false;
 
   // GC: remove fired one-shots older than 7 days
@@ -98,8 +116,9 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
     if (priorityOnly && !isHigh) continue;
     if (!priorityOnly && isHigh) continue;
 
-    // 1 task per tick — bail before touching the entry (reminders exempt)
-    if (entry.type !== "reminder" && firedTask) break;
+    // Agent tasks: max 1 per tick, and only if no agent is currently running
+    const isAgent = entry.type === "task" && entry.executor !== "script";
+    if (isAgent && (firedAgent || hasActiveAgent())) continue;
 
     if (entry.fired || entry.paused || entry.fireAt > now) {
       continue;
@@ -162,9 +181,11 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
     } else {
       // Agent task: spawn kiro-cli to execute
       logInfo(TAG, `⚙️ Task fired: "${entry.message}" → spawning subagent`);
+      firedAgent = true;
       const capturedEntry = entry;
       try {
         const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "ignore"] });
+        if (child.pid) activeAgentPids.add(child.pid);
         let output = "";
         const send = (obj: unknown): void => { child.stdin?.write(JSON.stringify(obj) + "\n"); };
         let msgId = 0;
@@ -195,6 +216,7 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
           }
         });
         child.on("exit", (code) => {
+          if (child.pid) activeAgentPids.delete(child.pid);
           const summary = output.slice(0, 500) || "(no output)";
           logInfo(TAG, `⚙️ Task completed: "${capturedEntry.message}"`);
           recordRun(capturedEntry, code ?? undefined);
@@ -206,6 +228,7 @@ export function checkCron(onTaskComplete?: (chatId: number, message: string, res
           onTaskComplete?.(capturedEntry.chatId, capturedEntry.message, summary);
         });
         child.on("error", (err) => {
+          if (child.pid) activeAgentPids.delete(child.pid);
           logWarn(TAG, `Task spawn failed: ${err.message}`);
           recordRun(capturedEntry, 1);
           writeCron(readCron().map(e => e.id === capturedEntry.id ? capturedEntry : e));
