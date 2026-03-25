@@ -1,6 +1,7 @@
 /** Discord and cross-platform bridge types. */
 
-export type Platform = "telegram" | "discord";
+import type { Platform } from "./platform.js";
+export type { Platform };
 
 export type BridgeMessage = {
   platform: Platform;

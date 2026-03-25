@@ -1,0 +1,72 @@
+/** Unified platform abstraction — any messaging channel implements this. */
+
+export type Platform = "telegram" | "discord" | (string & {});
+
+export interface SendOpts {
+  threadId?: string;
+  parseMode?: string;
+}
+
+/** Normalized inbound message from any platform. */
+export interface InboundMessage {
+  platform: Platform;
+  channelId: string;         // raw platform channel ID
+  sessionKey: string;        // "telegram:123" / "discord:456"
+  senderId: string;
+  senderName: string;
+  text: string;
+  timestamp: number;
+  threadId?: string;
+  messageId?: number;
+  isGroup: boolean;
+  isVoice: boolean;
+  voiceFileId?: string;      // platform file ID for voice download
+  rawPlatformData?: unknown;
+}
+
+/** Message queued during sleep for later replay. */
+export interface QueuedMessage {
+  sessionKey: string;
+  channelId: string;
+  text: string;
+  threadId?: string;
+  platform: Platform;
+}
+
+/** What a platform adapter can do — pipeline checks these. */
+export interface PlatformCapabilities {
+  voice: boolean;
+  reactions: boolean;
+  typing: boolean;
+  threads: boolean;
+}
+
+/**
+ * Contract every messaging platform must implement.
+ * The message pipeline calls these methods — platform-specific
+ * details stay inside the adapter.
+ */
+export interface PlatformAdapter {
+  readonly name: Platform;
+  readonly capabilities: PlatformCapabilities;
+
+  // Lifecycle
+  start(): Promise<void>;
+  stop(): void;
+
+  // Security
+  authorize(msg: InboundMessage): boolean;
+
+  // Messaging
+  sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<number | undefined>;
+  chunkResponse(text: string): string[];
+
+  // Optional capabilities
+  sendTyping?(channelId: string, threadId?: string): Promise<void>;
+  setReaction?(channelId: string, messageId: number, emoji: string): Promise<void>;
+  downloadVoice?(fileId: string): Promise<Buffer>;
+  sendVoice?(channelId: string, audio: Buffer, opts?: SendOpts): Promise<void>;
+
+  // Re-inject a queued message after sleep wake-up
+  injectMessage?(msg: InboundMessage): void;
+}

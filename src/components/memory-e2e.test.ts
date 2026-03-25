@@ -3,12 +3,9 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
-import { MEMORY_CONFIG_DEFAULTS, type MemoryConfig } from "./memory-config.js";
+import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 import type { MessageRecord } from "../types/index.js";
-
-function makeConfig(tmpDir: string, overrides: Partial<MemoryConfig> = {}): MemoryConfig {
-  return { ...MEMORY_CONFIG_DEFAULTS, memoryDir: tmpDir, ...overrides };
-}
 
 function makeRecord(overrides: Partial<MessageRecord> = {}): MessageRecord {
   return {
@@ -27,7 +24,7 @@ describe("Memory system — end-to-end smoke test", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "e2e-mem-"));
-    mm = new MemoryManager(makeConfig(tmpDir));
+    mm = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await mm.initialize();
   });
 
@@ -94,7 +91,7 @@ describe("Memory system — end-to-end smoke test", () => {
 
     // 8. Close and reinitialize — verify data survives
     mm.close();
-    mm = new MemoryManager(makeConfig(tmpDir));
+    mm = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await mm.initialize();
 
     const restoredAfterRestart = mm.restoreSessions(999_999_999);
@@ -109,7 +106,7 @@ describe("Memory system — end-to-end smoke test", () => {
     mm.close();
     rmSync(tmpDir, { recursive: true, force: true });
     tmpDir = mkdtempSync(join(tmpdir(), "e2e-budget-"));
-    mm = new MemoryManager(makeConfig(tmpDir, { diskBudgetBytes: 1 }));
+    mm = new MemoryManager(makeMemoryTestConfig(tmpDir, { diskBudgetBytes: 1 }));
     await mm.initialize();
 
     // Record enough messages to create transcript files
@@ -134,7 +131,7 @@ describe("Memory system — end-to-end smoke test", () => {
     mm.close();
     rmSync(tmpDir, { recursive: true, force: true });
     tmpDir = mkdtempSync(join(tmpdir(), "e2e-autocompact-"));
-    mm = new MemoryManager(makeConfig(tmpDir, {
+    mm = new MemoryManager(makeMemoryTestConfig(tmpDir, {
       searchEnhancements: {
         ...MEMORY_CONFIG_DEFAULTS.searchEnhancements,
         compactThresholdPct: 85,

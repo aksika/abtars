@@ -5,18 +5,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
-import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
-import type { MemoryConfig } from "./memory-config.js";
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 import type { InstantStoreParams } from "../types/index.js";
 import { initializeDatabase } from "./memory-db.js";
-
-function makeConfig(tmpDir: string, overrides: Partial<MemoryConfig> = {}): MemoryConfig {
-  return {
-    ...MEMORY_CONFIG_DEFAULTS,
-    memoryDir: tmpDir,
-    ...overrides,
-  };
-}
 
 const validMemoryType = fc.oneof(
   fc.constant("fact" as const),
@@ -43,7 +34,7 @@ describe("instantStore — Property 2: Instant Store Persists Valid Memories", (
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "is-prop2-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 
@@ -63,7 +54,7 @@ describe("instantStore — Property 2: Instant Store Persists Valid Memories", (
       fc.asyncProperty(validInstantStoreParams, async (params) => {
         // Re-create DB for each iteration to ensure isolation
         const iterDir = mkdtempSync(join(tmpdir(), "is-p2-iter-"));
-        const iterManager = new MemoryManager(makeConfig(iterDir));
+        const iterManager = new MemoryManager(makeMemoryTestConfig(iterDir));
         await iterManager.initialize();
 
         try {
@@ -109,7 +100,7 @@ describe("instantStore — Property 3: Instant Store Rejects Invalid Inputs", ()
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "is-prop3-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 
@@ -216,7 +207,7 @@ describe("instantStore — Property 4: Watermark Advance Prevents Heartbeat Re-E
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "is-prop4-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 
@@ -238,7 +229,7 @@ describe("instantStore — Property 4: Watermark Advance Prevents Heartbeat Re-E
         fc.string({ minLength: 1 }).filter((s) => s.trim().length > 0),
         async (chatId, content) => {
           const iterDir = mkdtempSync(join(tmpdir(), "is-p4-iter-"));
-          const iterManager = new MemoryManager(makeConfig(iterDir));
+          const iterManager = new MemoryManager(makeMemoryTestConfig(iterDir));
           await iterManager.initialize();
 
           try {

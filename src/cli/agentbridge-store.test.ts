@@ -6,13 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateArgs, parseArgs, type RawArgs } from "./agentbridge-store.js";
 import { MemoryManager } from "../components/memory-manager.js";
-import { MEMORY_CONFIG_DEFAULTS } from "../components/memory-config.js";
-import type { MemoryConfig } from "../components/memory-config.js";
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 import { initializeDatabase } from "../components/memory-db.js";
-
-function makeConfig(tmpDir: string): MemoryConfig {
-  return { ...MEMORY_CONFIG_DEFAULTS, memoryDir: tmpDir };
-}
 
 /** A complete set of valid raw CLI args. */
 const validRawArgs: fc.Arbitrary<RawArgs> = fc.record({
@@ -44,7 +39,7 @@ describe("agentbridge-store — Property 8: CLI Argument Validation", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "cli-prop8-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 
@@ -127,7 +122,7 @@ describe("agentbridge-store --delete-ids", () => {
 
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "cli-delete-"));
-    manager = new MemoryManager(makeConfig(tmpDir));
+    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await manager.initialize();
   });
 

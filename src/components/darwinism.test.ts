@@ -4,14 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
 import { MemoryIndex } from "./memory-index.js";
-import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
-import type { MemoryConfig } from "./memory-config.js";
+import { makeMemoryTestConfig } from "../tests/helpers.js";
 import { initializeDatabase } from "./memory-db.js";
 import { parseArgs } from "../cli/agentbridge-store.js";
-
-function makeConfig(tmpDir: string): MemoryConfig {
-  return { ...MEMORY_CONFIG_DEFAULTS, memoryDir: tmpDir };
-}
 
 /** Insert an extracted memory directly and return its id. */
 function insertMemory(
@@ -111,7 +106,7 @@ describe("Memory Darwinism", () => {
 
   describe("adjustRelevance", () => {
     it("boosts relevance_score by +10", async () => {
-      const manager = new MemoryManager(makeConfig(tmpDir));
+      const manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
       await manager.initialize();
 
       const id = insertMemory(
@@ -121,7 +116,7 @@ describe("Memory Darwinism", () => {
       // Re-open manager's DB has the row
       manager.close();
 
-      const manager2 = new MemoryManager(makeConfig(tmpDir));
+      const manager2 = new MemoryManager(makeMemoryTestConfig(tmpDir));
       await manager2.initialize();
       manager2.adjustRelevance(id, 10);
 
@@ -133,7 +128,7 @@ describe("Memory Darwinism", () => {
     });
 
     it("demotes relevance_score by -10", async () => {
-      const manager = new MemoryManager(makeConfig(tmpDir));
+      const manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
       await manager.initialize();
       manager.adjustRelevance(1, -10); // even if ID doesn't exist, no error
       manager.close();
@@ -143,7 +138,7 @@ describe("Memory Darwinism", () => {
   describe("mergeMemories", () => {
     it("keeps newer record, sums recall_count, takes max relevance and confidence", async () => {
       const olderDir = mkdtempSync(join(tmpdir(), "merge-"));
-      const mgr = new MemoryManager(makeConfig(olderDir));
+      const mgr = new MemoryManager(makeMemoryTestConfig(olderDir));
       await mgr.initialize();
 
       const mdb = initializeDatabase(join(olderDir, "memory.db"));
@@ -161,7 +156,7 @@ describe("Memory Darwinism", () => {
 
       // Re-open manager to pick up the rows
       mgr.close();
-      const mgr2 = new MemoryManager(makeConfig(olderDir));
+      const mgr2 = new MemoryManager(makeMemoryTestConfig(olderDir));
       await mgr2.initialize();
 
       const result = mgr2.mergeMemories(oldId, newId);
@@ -184,7 +179,7 @@ describe("Memory Darwinism", () => {
     });
 
     it("returns error when IDs not found", async () => {
-      const mgr = new MemoryManager(makeConfig(tmpDir));
+      const mgr = new MemoryManager(makeMemoryTestConfig(tmpDir));
       await mgr.initialize();
       const result = mgr.mergeMemories(9999, 9998);
       expect(result).toHaveProperty("merged", false);
@@ -196,7 +191,7 @@ describe("Memory Darwinism", () => {
   describe("instantStore with confidence + sourceMessageIds", () => {
     it("persists confidence and source_message_ids", async () => {
       const storeDir = mkdtempSync(join(tmpdir(), "store-conf-"));
-      const mgr = new MemoryManager(makeConfig(storeDir));
+      const mgr = new MemoryManager(makeMemoryTestConfig(storeDir));
       await mgr.initialize();
 
       await mgr.instantStore({
@@ -221,7 +216,7 @@ describe("Memory Darwinism", () => {
 
     it("defaults confidence to 3 when not provided", async () => {
       const storeDir = mkdtempSync(join(tmpdir(), "store-def-"));
-      const mgr = new MemoryManager(makeConfig(storeDir));
+      const mgr = new MemoryManager(makeMemoryTestConfig(storeDir));
       await mgr.initialize();
 
       await mgr.instantStore({
@@ -375,7 +370,7 @@ describe("Memory Darwinism", () => {
   describe("reclassifyMemory", () => {
     it("allows reclassifying between public/internal/confidential", async () => {
       const dir = mkdtempSync(join(tmpdir(), "reclass-"));
-      const mgr = new MemoryManager(makeConfig(dir));
+      const mgr = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr.initialize();
 
       const mdb = initializeDatabase(join(dir, "memory.db"));
@@ -395,7 +390,7 @@ describe("Memory Darwinism", () => {
       mdb.close();
       mgr.close();
 
-      const mgr2 = new MemoryManager(makeConfig(dir));
+      const mgr2 = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr2.initialize();
 
       expect(mgr2.reclassifyMemory(id, 2)).toEqual({ ok: true });
@@ -407,7 +402,7 @@ describe("Memory Darwinism", () => {
 
     it("blocks declassifying restricted without user-override", async () => {
       const dir = mkdtempSync(join(tmpdir(), "reclass-block-"));
-      const mgr = new MemoryManager(makeConfig(dir));
+      const mgr = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr.initialize();
 
       const mdb = initializeDatabase(join(dir, "memory.db"));
@@ -427,7 +422,7 @@ describe("Memory Darwinism", () => {
       mdb.close();
       mgr.close();
 
-      const mgr2 = new MemoryManager(makeConfig(dir));
+      const mgr2 = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr2.initialize();
 
       const result = mgr2.reclassifyMemory(id, 1);
@@ -440,7 +435,7 @@ describe("Memory Darwinism", () => {
 
     it("allows declassifying restricted WITH user-override", async () => {
       const dir = mkdtempSync(join(tmpdir(), "reclass-override-"));
-      const mgr = new MemoryManager(makeConfig(dir));
+      const mgr = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr.initialize();
 
       const mdb = initializeDatabase(join(dir, "memory.db"));
@@ -460,7 +455,7 @@ describe("Memory Darwinism", () => {
       mdb.close();
       mgr.close();
 
-      const mgr2 = new MemoryManager(makeConfig(dir));
+      const mgr2 = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr2.initialize();
 
       const result = mgr2.reclassifyMemory(id, 0, true);

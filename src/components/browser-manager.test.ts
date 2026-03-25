@@ -40,7 +40,7 @@ describe("parseBrowserConfig", () => {
     const cfg = parseBrowserConfig();
     expect(cfg.maxSessions).toBe(3);
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[browser-manager]"),
+      expect.stringContaining("[env]"),
     );
     warnSpy.mockRestore();
   });

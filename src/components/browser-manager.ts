@@ -1,6 +1,7 @@
 import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
 import type { BrowserSession } from "../types/browser.js";
+import { parsePositiveIntEnv, parseStringEnv } from "./env-utils.js";
 
 // ---------------------------------------------------------------------------
 // Environment variable parsing
@@ -18,21 +19,6 @@ export interface BrowserConfig {
   sessionTimeoutMs: number;
   maxSessions: number;
   userAgent: string;
-}
-
-/**
- * Parse a positive integer from an env var. Warns and returns fallback for
- * non-numeric, non-integer, zero, or negative values.
- */
-function parsePositiveIntEnv(envKey: string, fallback: number): number {
-  const raw = process.env[envKey];
-  if (raw === undefined || raw === "") return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
-    console.warn(`${LOG_PREFIX} Invalid ${envKey}="${raw}", using default ${fallback}`);
-    return fallback;
-  }
-  return n;
 }
 
 /**
@@ -55,12 +41,6 @@ export function parseBrowserConfig(): BrowserConfig {
   );
 
   return { sessionTimeoutMs, maxSessions, userAgent };
-}
-
-function parseStringEnv(envKey: string, fallback: string): string {
-  const raw = process.env[envKey];
-  if (raw === undefined || raw.trim() === "") return fallback;
-  return raw;
 }
 
 // ---------------------------------------------------------------------------
