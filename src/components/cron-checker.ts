@@ -96,18 +96,16 @@ export function checkCron(): CronEntry[] {
     // Advance fireAt
     entry.lastRanAt = now;
     entry._prevFireAt = entry.fireAt;
-    if (!entry._retrying) {
-      // Normal run — advance to next schedule
-      if (entry.schedule) {
-        try {
-          const expr = CronExpressionParser.parse(entry.schedule);
-          entry.fireAt = expr.next().getTime();
-        } catch { entry.fired = true; }
-      } else {
-        entry.fired = true;
-      }
+    // Advance fireAt to next schedule
+    const wasRetry = !!entry._retrying;
+    if (entry.schedule) {
+      try {
+        const expr = CronExpressionParser.parse(entry.schedule);
+        entry.fireAt = expr.next().getTime();
+      } catch { entry.fired = true; }
+    } else {
+      entry.fired = true;
     }
-    // Clear retry flag — it was consumed
     delete entry._retrying;
     changed = true;
 
@@ -117,7 +115,7 @@ export function checkCron(): CronEntry[] {
       logInfo(TAG, `⏰ Reminder fired: "${entry.message}" → chat ${entry.chatId}`);
     } else {
       recordRun(entry);
-      dueTasks.push(entry);
+      dueTasks.push({ ...entry, _retrying: wasRetry || undefined });
     }
   }
 
