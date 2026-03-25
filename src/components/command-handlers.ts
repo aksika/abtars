@@ -12,6 +12,8 @@ import { handleNLMCommand } from "./nlm-command-handler.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { TmuxClient } from "./tmux-client.js";
 import type { MemoryManager } from "./memory-manager.js";
+import type { CodingMode } from "./coding-mode.js";
+import type { IdleSave } from "./idle-save.js";
 
 export type Platform = "telegram" | "discord";
 export type Reply = (text: string, opts?: { parseMode?: string }) => Promise<unknown>;
@@ -23,23 +25,20 @@ export interface CommandContext {
   reply: Reply;
   // Transport
   transport: IKiroTransport;
-  codingTransport: IKiroTransport | null;
   config: { kiroTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
   startedAt: number;
   // Memory
   memory: MemoryManager | null;
   memoryConfig: { memoryEnabled: boolean; memoryDir: string };
   nlmConfig: { enabled: boolean; [k: string]: unknown };
+  // Modules
+  codingMode: CodingMode;
+  idleSave: IdleSave;
   // Mutable state
   busyChats: Set<string>;
-  codingMode: Set<string>;
   fullModeChats: Set<string>;
   pendingSessionStart: Set<string>;
-  idleSaveTimers: Map<string, ReturnType<typeof setTimeout>>;
   // Callbacks
-  saveChatToWorking: (sessionKey: string, chatId: number) => Promise<void>;
-  startCodingMode: (sessionKey: string) => Promise<void>;
-  stopCodingMode: (sessionKey: string) => Promise<void>;
   updateCtxStart: (memoryDir: string, chatId: number) => void;
   // Group/buffer (optional, for group chats)
   conversationBuffer?: { clear: (key: string) => void };
@@ -52,14 +51,13 @@ const TAG = "cmd";
 export async function handleCommand(text: string, ctx: CommandContext): Promise<boolean> {
   // /new, /reset
   if (text === "/new" || text === "/reset") {
-    const timer = ctx.idleSaveTimers.get(ctx.sessionKey);
-    if (timer) { clearTimeout(timer); ctx.idleSaveTimers.delete(ctx.sessionKey); }
-    await ctx.saveChatToWorking(ctx.sessionKey, ctx.chatId);
+    await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
     if (text === "/reset" && ctx.codingMode.has(ctx.sessionKey)) {
-      await ctx.stopCodingMode(ctx.sessionKey);
+      await ctx.codingMode.stop(ctx.sessionKey);
     }
-    if (ctx.codingMode.has(ctx.sessionKey) && ctx.codingTransport) {
-      await ctx.codingTransport.resetSession(ctx.sessionKey);
+    const codingTransport = ctx.codingMode.getTransport();
+    if (ctx.codingMode.has(ctx.sessionKey) && codingTransport) {
+      await codingTransport.resetSession(ctx.sessionKey);
     } else {
       await ctx.transport.resetSession(ctx.sessionKey);
     }
@@ -80,7 +78,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     }
     await ctx.reply("🔧 Switching to coding agent (Opus)...");
     try {
-      await ctx.startCodingMode(ctx.sessionKey);
+      await ctx.codingMode.start(ctx.sessionKey);
       await ctx.reply("🔧 Coding agent ready. All messages now go to Opus.\nUse /default to switch back to KP.");
       logInfo(TAG, `Coding mode activated for ${ctx.sessionKey}`);
     } catch (err) {
@@ -96,7 +94,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       return true;
     }
     await ctx.reply("🔄 Switching back to KP...");
-    await ctx.stopCodingMode(ctx.sessionKey);
+    await ctx.codingMode.stop(ctx.sessionKey);
     await ctx.reply("🔄 Back to KP.");
     logInfo(TAG, `Default mode restored for ${ctx.sessionKey}`);
     return true;

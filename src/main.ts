@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,9 @@ import { BrowserManager } from "./components/browser-manager.js";
 import { BrowserTool } from "./components/browser-tool.js";
 import { BrowserIpcServer } from "./components/browser-ipc-server.js";
 import { DomainAllowlist } from "./components/domain-allowlist.js";
+import { CodingMode } from "./components/coding-mode.js";
+import { IdleSave } from "./components/idle-save.js";
+import { SleepQueue } from "./components/sleep-queue.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 
 /** Strip the bot's own Discord mention tag from text. Other mentions are preserved. */
@@ -224,8 +227,8 @@ async function main(): Promise<void> {
 
   // Sleep state: queue messages during sleep, auto-reply "waking up"
   let sleepChild: import("node:child_process").ChildProcess | null = null;
-  const pendingMessages: Array<{ chatId: number; text: string; threadId?: number; sessionKey: string }> = [];
-  const sleepRepliedChats = new Set<number>();
+  const sleepQueue = new SleepQueue();
+  const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
   const sleepTrigger = new SleepTrigger(join(memoryConfig.memoryDir, "sleep"));
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
@@ -243,6 +246,7 @@ async function main(): Promise<void> {
       if (sleepTrigger.shouldRunOnStartup()) {
         logInfo("main", `😴 Startup sleep trigger fired — spawning sleep routine at ${new Date().toISOString()}`);
         sleepTrigger.writeLock();
+        sleepQueue.activate();
         const thisDir = dirname(fileURLToPath(import.meta.url));
         const sleepScript = join(thisDir, "cli", "agentbridge-sleep.js");
         sleepChild = spawn(process.execPath, [sleepScript], {
@@ -258,7 +262,8 @@ async function main(): Promise<void> {
             sleepTrigger.reportFailure();
           }
           sleepChild = null;
-          processPendingMessages();
+          sleepQueue.deactivate();
+          sleepQueue.replay(platformAdapters);
         });
         sleepChild.unref();
         logInfo("main", `😴 Sleep routine spawned (pid=${sleepChild.pid}) at ${new Date().toISOString()}`);
@@ -290,100 +295,10 @@ async function main(): Promise<void> {
   const fullModeChats = new Set<string>();
 
   // --- Coding agent mode ---
-  const codingMode = new Set<string>(); // sessionKeys currently in coding mode
-  let codingTransport: AcpTransport | null = null;
-
-  async function startCodingMode(sessionKey: string): Promise<void> {
-    if (!codingTransport) {
-      codingTransport = new AcpTransport(config.kiroCLIPath, config.workingDir, {
-        agent: "coding-agent",
-        model: config.codingAgentModel,
-      });
-      await codingTransport.initialize();
-    }
-    codingMode.add(sessionKey);
-    // Inject project facts as first message
-    await codingTransport.sendPrompt(sessionKey, [
-      "[SYSTEM] You are the coding agent for AgentBridge.",
-      `Project root: ${config.workingDir}`,
-      "Read docs/specs/system.asbuilt.md and docs/specs/memory.asbuilt.md before making changes.",
-      "Always create a new git branch before coding. Switch back to main when done.",
-    ].join("\n"));
-  }
-
-  async function stopCodingMode(sessionKey: string): Promise<void> {
-    codingMode.delete(sessionKey);
-    if (codingTransport && codingMode.size === 0) {
-      // Ask it to switch back to main before killing
-      try { await codingTransport.sendPrompt(sessionKey, "Run: git checkout main"); } catch { /* ok */ }
-      codingTransport.destroy();
-      codingTransport = null;
-    }
-  }
+  const codingModeManager = new CodingMode(config.kiroCLIPath, config.workingDir, config.codingAgentModel);
 
   // Idle chat-save: after 10min inactivity, save kiro-cli conversation to working dir
-  const CHAT_SAVE_IDLE_MS = 10 * 60 * 1000;
-  const idleSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-  async function saveChatToWorking(sessionKey: string, chatId: number): Promise<void> {
-    if (!memoryConfig.memoryEnabled) return;
-    const today = new Date().toISOString().slice(0, 10);
-    const dir = join(memoryConfig.memoryDir, "working", today);
-    mkdirSync(dir, { recursive: true });
-    const dest = join(dir, `transcript_${chatId}.chat`);
-    try {
-      await transport.sendPrompt(sessionKey, `/chat save ${dest}`);
-      logInfo("main", `Chat saved to ${dest}`);
-    } catch (e) {
-      logWarn("main", `Chat save failed: ${e}`);
-    }
-  }
-
-  function resetIdleSaveTimer(sessionKey: string, chatId: number): void {
-    const existing = idleSaveTimers.get(sessionKey);
-    if (existing) clearTimeout(existing);
-    idleSaveTimers.set(sessionKey, setTimeout(() => {
-      idleSaveTimers.delete(sessionKey);
-      saveChatToWorking(sessionKey, chatId);
-    }, CHAT_SAVE_IDLE_MS));
-  }
-
-  // Process messages that were queued during sleep
-  const processPendingMessages = (): void => {
-    sleepRepliedChats.clear();
-    if (pendingMessages.length === 0) return;
-    logInfo("main", `Processing ${pendingMessages.length} message(s) queued during sleep`);
-    // Re-inject each pending message by simulating the update flow
-    // We do this asynchronously so the bridge can handle them normally
-    const queued = [...pendingMessages];
-    pendingMessages.length = 0;
-    // Group by sessionKey so multiple messages from the same chat are merged
-    // into one synthetic update, avoiding busyChats collision
-    const grouped = new Map<string, typeof queued>();
-    for (const msg of queued) {
-      const group = grouped.get(msg.sessionKey);
-      if (group) group.push(msg);
-      else grouped.set(msg.sessionKey, [msg]);
-    }
-    for (const msgs of grouped.values()) {
-      const first = msgs[0]!;
-      const combinedText = msgs.map((m) => m.text).join("\n\n");
-      const syntheticUpdate = {
-        update_id: 0,
-        message: {
-          message_id: 0,
-          from: { id: first.chatId, is_bot: false, first_name: "queued" },
-          chat: { id: first.chatId, first_name: "queued", type: "private" as const },
-          date: Math.floor(Date.now() / 1000),
-          text: combinedText,
-          ...(first.threadId ? { message_thread_id: first.threadId } : {}),
-        },
-      };
-      if (telegramPoller) {
-        telegramPoller.injectUpdate(syntheticUpdate);
-      }
-    }
-  };
+  const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
 
   // --- Service Registry ---
   const registry = new ServiceRegistry();
@@ -596,10 +511,11 @@ async function main(): Promise<void> {
       const tgReply: Reply = (msg, opts) => telegramApi.sendMessage(chatId, msg, { message_thread_id: threadId, ...(opts?.parseMode ? { parse_mode: opts.parseMode as "MarkdownV2" | "HTML" } : {}) });
       const cmdCtx: CommandContext = {
         sessionKey, chatId, platform: "telegram", reply: tgReply,
-        transport, codingTransport, config, startedAt,
+        transport, config, startedAt,
         memory, memoryConfig, nlmConfig,
-        busyChats, codingMode, fullModeChats, pendingSessionStart, idleSaveTimers,
-        saveChatToWorking, startCodingMode, stopCodingMode, updateCtxStart,
+        codingMode: codingModeManager, idleSave,
+        busyChats, fullModeChats, pendingSessionStart,
+        updateCtxStart,
         conversationBuffer: isGroup ? conversationBuffer : undefined,
         bufKey: isGroup ? bufKey : undefined,
       };
@@ -622,11 +538,10 @@ async function main(): Promise<void> {
 
         // Queue message if sleep is in progress
         if (sleepChild) {
-          if (!sleepRepliedChats.has(chatId)) {
+          const isFirst = sleepQueue.enqueue({ sessionKey, channelId: String(chatId), text, threadId: threadId != null ? String(threadId) : undefined, platform: "telegram" });
+          if (isFirst) {
             await telegramApi.sendMessage(chatId, "Oh good morning, I am just waking up, give me a minute please.. I answer you soon ☕", { message_thread_id: threadId });
-            sleepRepliedChats.add(chatId);
           }
-          pendingMessages.push({ chatId, text, threadId, sessionKey });
           busyChats.delete(sessionKey);
           return;
         }
@@ -645,7 +560,7 @@ async function main(): Promise<void> {
         }
 
         prompt = interceptLargeMessage(prompt).text;
-        const activeTransport = codingMode.has(sessionKey) && codingTransport ? codingTransport : transport;
+        const activeTransport = codingModeManager.has(sessionKey) && codingModeManager.getTransport() ? codingModeManager.getTransport()! : transport;
         const responsePromise = activeTransport.sendPrompt(sessionKey, prompt);
 
         if (!isVoiceNote) await react(chatId, messageId, "👀");
@@ -779,7 +694,7 @@ async function main(): Promise<void> {
       } finally {
         clearInterval(typingInterval);
         busyChats.delete(sessionKey);
-        resetIdleSaveTimer(sessionKey, chatId);
+        idleSave.reset(sessionKey, chatId);
       }
     };
 
@@ -869,11 +784,12 @@ async function main(): Promise<void> {
       const dcReply: Reply = (msg) => discordApi.sendMessage(message.channelId, msg);
       const dcCmdCtx: CommandContext = {
         sessionKey, chatId: discordChatId, platform: "discord", reply: dcReply,
-        transport, codingTransport, config: { ...config, discordA2aEnabled: config.discordA2aEnabled, discordA2aChannelId: config.discordA2aChannelId },
+        transport, config: { ...config, discordA2aEnabled: config.discordA2aEnabled, discordA2aChannelId: config.discordA2aChannelId },
         startedAt,
         memory, memoryConfig, nlmConfig,
-        busyChats, codingMode, fullModeChats, pendingSessionStart, idleSaveTimers,
-        saveChatToWorking, startCodingMode, stopCodingMode, updateCtxStart,
+        codingMode: codingModeManager, idleSave,
+        busyChats, fullModeChats, pendingSessionStart,
+        updateCtxStart,
         conversationBuffer, bufKey,
       };
       if (await handleCommand(text, dcCmdCtx)) return;
@@ -962,7 +878,7 @@ async function main(): Promise<void> {
         await discordApi.sendMessage(message.channelId, "❌ Something went wrong. Try /reset to start fresh.").catch(() => {});
       } finally {
         busyChats.delete(sessionKey);
-        resetIdleSaveTimer(sessionKey, parseInt(message.channelId, 10) || 0);
+        idleSave.reset(sessionKey, parseInt(message.channelId, 10) || 0);
       }
     };
 
@@ -1052,6 +968,7 @@ async function main(): Promise<void> {
       } catch { return false; }
       if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) return false;
       sleepTrigger.writeLock();
+      sleepQueue.activate();
       try {
         const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
         const child = spawn(process.execPath, [sleepScript], { stdio: "ignore", detached: true });
@@ -1064,6 +981,8 @@ async function main(): Promise<void> {
             logWarn("main", `😴 Cron sleep routine failed (exit code ${code}) at ${new Date().toISOString()}`);
             sleepTrigger.reportFailure();
           }
+          sleepQueue.deactivate();
+          sleepQueue.replay(platformAdapters);
         });
         child.unref();
         logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid}) at ${new Date().toISOString()}`);
