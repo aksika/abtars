@@ -212,31 +212,17 @@ Setup: `npm install -g @googleworkspace/cli` + `gws auth login` (one-time OAuth 
 
 ## 34. A2A Protocol Review — Proper Handshake & Session Lifecycle
 
-**Status:** Not started
-**Priority:** Medium
+**Status:** ✅ Done (2026-03-25)
+**Commits:** `3239745`..`5c9bdc4`
 
-Review the Agent-to-Agent (A2A) implementation for proper protocol compliance:
-
-**Hello handshake:**
-- KP always sends hello with his name (`[KP]`) and capabilities on first contact
-- If guest sends hello first → KP responds with hello, normal flow
-- If guest skips hello and sends prompt → KP responds with hello first, then processes the prompt anyway (no blocking). Logs warning about skipped handshake
-- KP asks guest for name/ID. Guest provides → used in all logging and prefixes (truncated to 15 chars). Guest doesn't provide → fallback to `[GUEST]`
-
-**Message prefixes:**
-- `[KP]` for KP's messages (replaces `[ASSISTANT]`)
-- `[<agent name>]` for guest (replaces `[USER]`), e.g. `[Molty]`
-- Truncate agent name to 15 chars max
-
-**Session lifecycle:**
-- Explicit session open/close endpoints
-- `open` — creates session, spawns kiro-cli ACP if needed
-- `close` — saves transcript, cleans up
-- Keep idle timeout as safety net for abandoned sessions
-
-**Backward compat:**
-- Existing clients (Molty) keep working — auto-session on first prompt if no hello
-- No breaking changes to `/api/agent/prompt`
+Implemented HMAC-SHA256 challenge-response auth on single endpoint (`/api/agent/prompt`):
+- Hello/hello-ack handshake — mutual auth, shared secret never on wire
+- Session lifecycle: explicit close + idle timeout safety net
+- `[KP]` / `[Molty]` (max 15 chars) prefixes in logs and traffic
+- Rude guest handling: KP sends hello+challenge, blocks until authenticated
+- Bearer token header removed
+- OpenClaw plugin updated with handshake support, deployed to Mac, saved in `plugins/openclaw-kiro-professor/`
+- Passed Molty's social engineering security test
 
 ## 35. Ops Hardening — Cron, Lifecycle, Healthcheck
 
