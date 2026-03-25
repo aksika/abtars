@@ -49,7 +49,6 @@ export type {
 } from "./memory.js";
 
 export type {
-  BridgeMessage,
   DiscordInboundMessage,
 } from "./discord.js";
 

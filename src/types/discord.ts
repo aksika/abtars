@@ -1,17 +1,7 @@
-/** Discord and cross-platform bridge types. */
+/** Discord types. */
 
 import type { Platform } from "./platform.js";
 export type { Platform };
-
-export type BridgeMessage = {
-  platform: Platform;
-  channelId: string; // platform-prefixed: "discord:123" or "telegram:456"
-  senderId: string;
-  senderDisplayName: string;
-  text: string;
-  timestamp: number;
-  rawPlatformData?: unknown;
-};
 
 export type DiscordInboundMessage = {
   id: string; // Discord message snowflake ID

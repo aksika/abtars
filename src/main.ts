@@ -69,31 +69,6 @@ async function sendBackOnline(
   }
 }
 
-/** Prepare prompt for sending: inject session-start context if pending, record message. */
-function preparePrompt(
-  prompt: string,
-  memory: MemoryManager,
-  chatId: number,
-  sessionKey: string,
-  text: string,
-  pending: Set<string>,
-  seen: Set<string>,
-  platformMessageId?: number,
-): string {
-  const isSessionStart = pending.has(sessionKey) || !seen.has(sessionKey);
-  if (isSessionStart) {
-    const ctx = buildSessionStartContext(memory, chatId);
-    if (ctx) {
-      prompt = ctx + "\n\n" + prompt;
-      logInfo("main", `Injected session-start context (${ctx.length} chars)`);
-    }
-  }
-  seen.add(sessionKey);
-  pending.delete(sessionKey);
-  memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId });
-  return prompt;
-}
-
 /** Send a platform context announcement to the transport so the LLM knows which platform is active. */
 async function announcePlatform(
   transport: IKiroTransport,
@@ -380,9 +355,11 @@ async function main(): Promise<void> {
       const chatId = [...config.allowedUserIds][0];
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
-        const greetPrompt = "[Telegram] You just woke up. Output ONLY a personalized greeting message.";
-        const prepared = preparePrompt(greetPrompt, memory!, chatId, sessionKey, greetPrompt, pendingSessionStart, seenSessions);
-        transport.sendPrompt(sessionKey, prepared).then(async (response) => {
+        let greetPrompt = "[Telegram] You just woke up. Output ONLY a personalized greeting message.";
+        const ctx = buildSessionStartContext(memory!, chatId);
+        if (ctx) greetPrompt = ctx + "\n\n" + greetPrompt;
+        seenSessions.add(sessionKey);
+        transport.sendPrompt(sessionKey, greetPrompt).then(async (response) => {
           if (response) {
             await telegramAdapter!.sendMessage(String(chatId), response);
           }
