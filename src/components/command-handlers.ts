@@ -168,6 +168,16 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       const raw = execSync("agentbridge-cron list", { timeout: 5000, encoding: "utf-8" }).trim();
       const entries = JSON.parse(raw).entries ?? JSON.parse(raw);
       const active = entries.filter((e: any) => !e.fired && !e.paused);
+      // Sort chronologically by schedule time (hour:minute from cron expr)
+      active.sort((a: any, b: any) => {
+        const timeOf = (e: any): number => {
+          const s = e.schedule;
+          if (!s) return e.fireAt ?? 0;
+          const parts = s.split(" ");
+          return (parseInt(parts[1] ?? "0", 10) * 60) + parseInt(parts[0] ?? "0", 10);
+        };
+        return timeOf(a) - timeOf(b);
+      });
       const today = new Date();
       const dow = today.getDay(); // 0=Sun
       const lines = active.map((e: any) => {
