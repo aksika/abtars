@@ -265,6 +265,26 @@ The consolidation pipeline (Dreamy's daily summaries, retrospectives) flattens c
 - Trust agent judgment as last resort, but only for INTERNAL level — SECRET/CONFIDENTIAL must be enforced programmatically
 - Sleep prompt needs explicit instructions: "Replace any SECRET or CONFIDENTIAL memory content with `<REDACTED>` in daily summaries and retrospectives"
 
+## 36. Unified Platform Abstraction + CronQueue
+
+**Status:** ✅ Done (2026-03-25)
+**Branch:** `refactor/unified-platform-abstraction` (merged to main)
+
+Major refactor: extracted Telegram/Discord into a shared PlatformAdapter pattern with a unified message pipeline. Adding new platforms (Slack, WhatsApp) is now ~100 lines.
+
+- `PlatformAdapter` interface + `InboundMessage` type (`src/types/platform.ts`)
+- `message-pipeline.ts`: shared prompt→transport→response→delivery flow
+- `TelegramAdapter`: voice, reactions, groups, typing, TTS
+- `DiscordAdapter`: A2A, mention stripping, reactions (new)
+- `SleepQueue`: platform-agnostic sleep message queueing
+- `CodingMode`: coding agent transport lifecycle
+- `IdleSave`: idle chat save timers
+- `CronQueue`: sequential job processor — scripts fire freely, agents 1-at-a-time with 30min timeout, priority-sorted, dedup by entry ID, retry once on failure (skip 1 cycle)
+- Consolidated env-utils, shared test helpers
+- Deleted dead code: PlatformController, TransportController, ChannelAdapter, BridgeMessage
+- main.ts: 1265 → 617 lines (-51%)
+- 642 tests across 65 files
+
 ## Task Descriptions — move from skills/ to tasks/
 
 Cron task descriptions (the long message strings that tell the agent what to do) currently live inside `cron.json` as inline text, and their documentation lives in `skills/`. This is wrong — skills are for the agent's conversational abilities, not for scheduled task instructions.
