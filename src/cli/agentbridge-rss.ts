@@ -13,10 +13,10 @@
  * Writes:
  *   ~/.agentbridge/finance/rss-YYYY-MM-DD.json
  */
-
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { localDate } from "../components/env-utils.js";
 
 const FINANCE_DIR = join(homedir(), ".agentbridge", "finance");
 const FEEDS_FILE = join(FINANCE_DIR, "feeds.json");
@@ -209,7 +209,7 @@ async function main(): Promise<void> {
     return true;
   });
 
-  const date = new Date().toISOString().slice(0, 10);
+  const date = localDate();
   const outFile = join(FINANCE_DIR, `rss-${date}.json`);
   const payload = { date, hours, totalFeeds: feeds.length, tickers, totalItems: deduped.length, items: deduped };
   writeFileSync(outFile, JSON.stringify(payload, null, 2), "utf-8");

@@ -11,10 +11,10 @@
  *   agentbridge-tweet --search "query"                 # search X (user auth)
  *   agentbridge-tweet --user <handle>                  # user profile info
  */
-
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { localDate } from "../components/env-utils.js";
 
 const AB_HOME = join(homedir(), ".agentbridge");
 const TWITTER_DIR = join(AB_HOME, "twitterX");
@@ -237,7 +237,7 @@ async function runFeed(format: "json" | "md", count: number, topN: number, disco
   }
 
   // Write raw JSON output (default behavior)
-  const date = new Date().toISOString().slice(0, 10);
+  const date = localDate();
   const outFile = outputPath ?? join(OUTPUT_DIR, `tweets-${date}.json`);
   mkdirSync(join(outFile, ".."), { recursive: true });
   const payload = { date, source: "agentbridge-tweet", totalCollected: allTweets.length, tweets: top, discover: candidates };

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { StateSnapshot } from "./sleep-state-gatherer.js";
 import { logWarn } from "./logger.js";
+import { localDate } from "./env-utils.js";
 
 const TAG = "sleep-prompt-loader";
 
@@ -23,7 +24,7 @@ export function loadSleepPrompt(snapshot: StateSnapshot): string {
     LAST_SLEEP_AUDIT: snapshot.lastSleepAudit ?? "none",
     LAST_SLEEP_TS: snapshot.lastSleepTimestamp ? String(snapshot.lastSleepTimestamp) : "0",
     CURRENT_TS: String(Date.now()),
-    WAKEUP_DATE: snapshot.wakeupDate ?? new Date().toISOString().slice(0, 10),
+    WAKEUP_DATE: snapshot.wakeupDate ?? localDate(),
     STATE_SNAPSHOT: buildSnapshotBlock(snapshot),
     FTS_MESSAGES: snapshot.fts5Health.messages_fts,
     FTS_EXTRACTED: snapshot.fts5Health.extracted_memories_fts,

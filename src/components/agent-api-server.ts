@@ -9,6 +9,8 @@ import { AcpTransport } from "./acp-transport.js";
 import { MemoryManager } from "./memory-manager.js";
 import { scanPrompt } from "./prompt-scanner.js";
 import { logInfo, logWarn } from "./logger.js";
+import { localDate } from "./env-utils.js";
+import { localIso } from "./logger.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
@@ -121,7 +123,7 @@ export class AgentApiServer {
     logInfo(TAG, "A2A idle timeout — saving chat, closing log, killing kiro-cli");
     // Save conversation before destroying
     try {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = localDate();
       const dir = join(this.workingDir, "memory", "working", today);
       mkdirSync(dir, { recursive: true });
       const dest = join(dir, "transcript_a2a.chat");
@@ -150,13 +152,13 @@ export class AgentApiServer {
   }
 
   private newLogFile(): string {
-    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const ts = localIso().replace(/[:.]/g, "-");
     const name = this.config.agentCodename;
     return join(this.logDir, `${name}_${ts}.log`);
   }
 
   private log(role: string, content: string): void {
-    const ts = new Date().toISOString();
+    const ts = localIso();
     appendFileSync(this.logFile, `[${ts}] ${role}: ${content}\n`);
   }
 

@@ -200,7 +200,7 @@ async function main() {
       const hit = scanPrompt(validation.params.contentEn)
         ?? (validation.params.contentOriginal ? scanPrompt(validation.params.contentOriginal) : null);
       if (hit) {
-        const logLine = `${new Date().toISOString()} BLOCKED patternId=${hit.patternId} matched="${hit.matched}" trust=${trust} content="${validation.params.contentEn.slice(0, 120)}"\n`;
+        const logLine = `${new Date().toLocaleString("sv-SE")} BLOCKED patternId=${hit.patternId} matched="${hit.matched}" trust=${trust} content="${validation.params.contentEn.slice(0, 120)}"\n`;
         const logPath = join(homedir(), ".agentbridge", "logs", "prompt_injection.log");
         try { appendFileSync(logPath, logLine); } catch { /* best-effort */ }
         console.log(JSON.stringify({ stored: false, error: `Prompt injection detected (${hit.patternId}): "${hit.matched}"`, blocked: true }));

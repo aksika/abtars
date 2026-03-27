@@ -14,6 +14,8 @@ import { homedir } from "node:os";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import type { CronEntry } from "../cli/agentbridge-cron.js";
 
+import { localDate } from "./env-utils.js";
+
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const RETRY_DELAY_MS = 10 * 60 * 1000; // skip 1 cycle (2 × 5min)
@@ -38,7 +40,7 @@ function recordRunToFile(entryId: string, exitCode?: number): void {
 const DOD_MIN_BYTES = 100;
 
 function todayStr(): string {
-  return new Date().toISOString().slice(0, 10);
+  return localDate();
 }
 
 /** Read task file, substitute {today}, return { prompt, dodPaths }. */

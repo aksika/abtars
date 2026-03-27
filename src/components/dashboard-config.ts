@@ -57,6 +57,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import type { TrafficEntry } from "./agent-api-server.js";
+import { localIso } from "./logger.js";
 
 export type StatusSnapshot = {
   timestamp: string;
@@ -219,7 +220,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     : { running: false, intervalMs: 0, taskNames: [] };
 
   return {
-    timestamp: new Date(now).toISOString(),
+    timestamp: localIso(),
     uptimeMs: now - refs.startedAt,
     platforms,
     services: refs.services,

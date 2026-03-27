@@ -10,10 +10,10 @@
  *
  * File: ~/.agentbridge/memory/todo.md
  */
-
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { localDate } from "../components/env-utils.js";
 
 const todoPath = (): string => join(homedir(), ".agentbridge", "memory", "todo.md");
 const HEADER = "# Todo List\n";
@@ -44,7 +44,7 @@ function itemIndices(lines: string[]): number[] {
 
 function add(description: string): void {
   ensureFile();
-  const date = new Date().toISOString().slice(0, 10);
+  const date = localDate();
   const entry = `- [ ] ${date}: ${description}\n`;
   const content = readFileSync(todoPath(), "utf-8");
   writeFileSync(todoPath(), content.endsWith("\n") ? content + entry : content + "\n" + entry, "utf-8");

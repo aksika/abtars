@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logWarn } from "./logger.js";
 import type { IKiroTransport } from "./kiro-transport.js";
+import { localDate } from "./env-utils.js";
 
 const CHAT_SAVE_IDLE_MS = 10 * 60 * 1000;
 
@@ -36,7 +37,7 @@ export class IdleSave {
 
   async save(sessionKey: string, chatId: number): Promise<void> {
     if (!this.enabled) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDate();
     const dir = join(this.memoryDir, "working", today);
     mkdirSync(dir, { recursive: true });
     const dest = join(dir, `transcript_${chatId}.chat`);

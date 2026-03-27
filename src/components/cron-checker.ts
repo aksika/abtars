@@ -127,6 +127,7 @@ export function checkCron(): CronEntry[] {
 
 import { readPendingBrowse, writePendingBrowse } from "../cli/agentbridge-browse.js";
 import type { PendingBrowseEntry } from "../cli/agentbridge-browse.js";
+import { localDate } from "./env-utils.js";
 
 function isProcessAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
@@ -168,7 +169,7 @@ function ensureReportFile(taskId: string): string {
   // Fallback: extract from log and write
   const logFile = join(homedir(), ".agentbridge", "logs", `browse_${taskId}.log`);
   const text = extractAgentText(logFile);
-  const date = new Date().toISOString().slice(0, 10);
+  const date = localDate();
   const reportPath = join(dir, `browse_${taskId}_${date}.md`);
   writeFileSync(reportPath, text || "(no output captured)", "utf-8");
   return reportPath;

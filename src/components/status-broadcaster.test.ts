@@ -395,7 +395,7 @@ describe("buildStatusSnapshot — Property 4: Status snapshot completeness", () 
           const snapshot = buildStatusSnapshot(refs);
 
           expect(typeof snapshot.timestamp).toBe("string");
-          expect(new Date(snapshot.timestamp).toISOString()).toBe(snapshot.timestamp);
+          expect(snapshot.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
           expect(typeof snapshot.uptimeMs).toBe("number");
           expect(snapshot.uptimeMs).toBeGreaterThanOrEqual(0);
           expect(snapshot.platforms).toBeDefined();

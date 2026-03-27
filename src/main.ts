@@ -8,7 +8,7 @@ import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError } from "./components/logger.js";
+import { setLogLevel, logInfo, logWarn, logError, localIso } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
@@ -77,7 +77,7 @@ async function announcePlatform(
 ): Promise<void> {
   // Skip for ACP — creating a system session wastes the --agent first-session slot
   if (transport instanceof AcpTransport) return;
-  const ts = new Date().toISOString();
+  const ts = localIso();
   const msg = `[SYSTEM] Platform: ${platform} | Connected at: ${ts} | Refer to your CHATS.md steering for ${platform}-specific behavior.`;
   const sessionKey = `system:${platform.toLowerCase()}`;
   try {
@@ -197,7 +197,7 @@ async function main(): Promise<void> {
     // Run sleep on startup if needed (≥8am, no audit today)
     try {
       if (sleepTrigger.shouldRunOnStartup()) {
-        logInfo("main", `😴 Startup sleep trigger fired — spawning sleep routine at ${new Date().toISOString()}`);
+        logInfo("main", `😴 Startup sleep trigger fired — spawning sleep routine at ${localIso()}`);
         sleepTrigger.writeLock();
         sleepQueue.activate();
         const thisDir = dirname(fileURLToPath(import.meta.url));
@@ -208,10 +208,10 @@ async function main(): Promise<void> {
         });
         sleepChild.on("exit", (code) => {
           if (code === 0) {
-            logInfo("main", `😴 Sleep routine finished successfully at ${new Date().toISOString()}`);
+            logInfo("main", `😴 Sleep routine finished successfully at ${localIso()}`);
             sleepTrigger.reportSuccess();
           } else {
-            logWarn("main", `😴 Sleep routine failed (exit code ${code}) at ${new Date().toISOString()}`);
+            logWarn("main", `😴 Sleep routine failed (exit code ${code}) at ${localIso()}`);
             sleepTrigger.reportFailure();
           }
           sleepChild = null;
@@ -219,7 +219,7 @@ async function main(): Promise<void> {
           sleepQueue.replay(platformAdapters);
         });
         sleepChild.unref();
-        logInfo("main", `😴 Sleep routine spawned (pid=${sleepChild.pid}) at ${new Date().toISOString()}`);
+        logInfo("main", `😴 Sleep routine spawned (pid=${sleepChild.pid}) at ${localIso()}`);
       }
     } catch (err) {
       logWarn("main", `Sleep trigger check failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -411,18 +411,18 @@ async function main(): Promise<void> {
         const child = spawn(process.execPath, [sleepScript], { stdio: "ignore", detached: true });
         child.on("exit", (code) => {
           if (code === 0) {
-            logInfo("main", `😴 Cron sleep routine finished successfully at ${new Date().toISOString()}`);
+            logInfo("main", `😴 Cron sleep routine finished successfully at ${localIso()}`);
             sleepTrigger.reportSuccess();
             if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
           } else {
-            logWarn("main", `😴 Cron sleep routine failed (exit code ${code}) at ${new Date().toISOString()}`);
+            logWarn("main", `😴 Cron sleep routine failed (exit code ${code}) at ${localIso()}`);
             sleepTrigger.reportFailure();
           }
           sleepQueue.deactivate();
           sleepQueue.replay(platformAdapters);
         });
         child.unref();
-        logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid}) at ${new Date().toISOString()}`);
+        logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid}) at ${localIso()}`);
         return true;
       } catch (err) {
         logWarn("main", `sleep-trigger: failed to spawn: ${err instanceof Error ? err.message : String(err)}`);

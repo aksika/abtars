@@ -41,7 +41,17 @@ function writeToFile(line: string): void {
 const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 
 function ts(): string {
-  return isTest ? `${new Date().toISOString()} TEST` : new Date().toISOString();
+  const d = new Date();
+  const pad2 = (n: number): string => String(n).padStart(2, "0");
+  const local = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, "0")}`;
+  return isTest ? `${local} TEST` : local;
+}
+
+/** Local ISO-ish timestamp for user-facing messages. */
+export function localIso(): string {
+  const d = new Date();
+  const pad2 = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
 /** LOW: operational milestones — startup, connections, errors */

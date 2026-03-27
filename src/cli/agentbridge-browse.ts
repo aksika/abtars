@@ -10,13 +10,13 @@
  * Returns immediately. The subagent runs detached and results are delivered
  * via pending_reminders.json → bridge picks up → sends to chat.
  */
-
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
+import { localDate } from "../components/env-utils.js";
 
 // --- Types ---
 
@@ -78,7 +78,7 @@ export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string)
   }
   const template = readFileSync(path, "utf-8");
 
-  const date = new Date().toISOString().slice(0, 10);
+  const date = localDate();
   const reportFile = `browse_${taskId ?? "unknown"}_${date}.md`;
 
   const vars: Record<string, string> = {

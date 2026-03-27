@@ -26,6 +26,7 @@ import type {
 } from "../types/index.js";
 import { clampEmotionScore } from "./emotion-utils.js";
 import { logError, logInfo, logWarn } from "./logger.js";
+import { localDate } from "./env-utils.js";
 
 const TAG = "memory-manager";
 
@@ -620,7 +621,7 @@ export class MemoryManager {
       ).all(params.chatId, params.sessionId) as Array<{ role: string; content: string }>;
 
       if (messages.length > 0) {
-        const dateStr = new Date().toISOString().slice(0, 10);
+        const dateStr = localDate();
         const workingDir = join(this.config.memoryDir, "working", dateStr);
         mkdirSync(workingDir, { recursive: true });
         const safetyPath = join(workingDir, `transcript_${params.chatId}.chat`);

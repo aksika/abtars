@@ -26,6 +26,7 @@ import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
 import { loadSleepPrompt } from "../components/sleep-prompt-loader.js";
 import { logInfo, logError, setLogLevel } from "../components/logger.js";
 import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
+import { localDate } from "../components/env-utils.js";
 
 const TAG = "agentbridge-sleep";
 
@@ -261,7 +262,7 @@ export function writeAuditLog(
   ].join("\n");
 
   // Find the subagent's audit file and append to it
-  const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const today = localDate().replace(/-/g, "");
   try {
     const files = readdirSync(sleepDir)
       .filter(f => f.startsWith(`sleep_${today}`) && f.endsWith(".md"))
@@ -275,7 +276,7 @@ export function writeAuditLog(
 
   // Fallback: no subagent file found — write standalone
   const now = new Date();
-  const dateStr = now.toISOString().slice(0, 10).replace(/-/g, "");
+  const dateStr = localDate().replace(/-/g, "");
   const timeStr = now.toTimeString().slice(0, 5).replace(/:/g, "");
   const filename = `sleep_${dateStr}_${timeStr}.md`;
   writeFileSync(join(sleepDir, filename), `# Sleep Audit Log${suffix}`, "utf-8");

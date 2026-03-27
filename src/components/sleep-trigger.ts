@@ -1,6 +1,7 @@
 import { readdirSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logDebug } from "./logger.js";
+import { localDate } from "./env-utils.js";
 
 const TAG = "sleep-trigger";
 const MAX_ATTEMPTS = 3;
@@ -101,7 +102,7 @@ export class SleepTrigger {
   writeLock(): void {
     try {
       mkdirSync(this.auditDir, { recursive: true });
-      const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      const today = localDate().replace(/-/g, "");
       writeFileSync(join(this.auditDir, `sleep_${today}.lock`), String(process.pid), "utf-8");
       logInfo(TAG, "Lock file written");
     } catch { /* best-effort */ }
