@@ -277,6 +277,7 @@ Summarize today's messages into a daily file:
 - The date in the filename is the **wake-up date** (date portion of the previous sleep audit)
 - Include: key topics discussed, decisions made, facts learned, action items, emotional highlights
 - Exclude: routine greetings, tool execution noise, formatting artifacts
+- **Classification**: Before writing any memory into the summary, check its classification level. Replace CONFIDENTIAL (2) and SECRET (3) content with `<REDACTED — classification N>`. The fact that a topic was discussed can be mentioned, but not the content itself.
 - Write in English, concise prose, organized chronologically
 
 Source data — query messages for the sleep window:
