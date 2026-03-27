@@ -332,3 +332,10 @@ Cron task descriptions (the long message strings that tell the agent what to do)
 - `cron.json` entries reference the task file path instead of embedding the full message
 - `CronQueue` reads the file content when spawning the agent task
 - Benefits: task descriptions are version-controlled, editable without touching cron.json, not truncated in `/cron` display, and clearly separated from conversational skills
+
+## 40. NotebookLM binary location
+
+**Status:** Not started
+**Priority:** Medium
+
+NotebookLM binary currently lives in openclaw. Must be standalone in AgentBridge — no cross-repo dependency.
