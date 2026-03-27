@@ -464,8 +464,6 @@ async function main(): Promise<void> {
   });
 
   // Run once on startup, then start periodic
-  const startupDue = checkCron();
-  for (const entry of startupDue) cronQueue.enqueue(entry, cronCallback);
   checkBrowseTasks();
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);
