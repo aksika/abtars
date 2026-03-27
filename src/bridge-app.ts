@@ -102,6 +102,8 @@ export async function startBridge(): Promise<void> {
   ].filter(Boolean).join(", ");
   logInfo("main", `🚀 Bridge starting (platforms=${enabledList}, log=${config.logLevel})`);
 
+  // === CRITICAL PATH: Memory → Transport → Telegram (fastest path to accepting messages) ===
+
   // Initialize memory layer
   const memoryConfig = loadMemoryConfig();
   let memory: MemoryManager | null = null;
@@ -113,29 +115,6 @@ export async function startBridge(): Promise<void> {
     logInfo("main", "🧠 Memory disabled");
   }
 
-  // Initialize NLM (calls `nlm` CLI directly — no wrapper)
-  const nlmConfig = loadNLMConfig();
-  logInfo("main", `📚 NLM Layer 6 ${nlmConfig.enabled ? "enabled" : "disabled"}`);
-
-  // Initialize BrowserManager singleton for browser tool and webpage ingestion
-  const browserManager = new BrowserManager();
-  if (memory) {
-    memory.setBrowserManager(browserManager);
-  }
-  logInfo("main", "🌐 BrowserManager initialized");
-
-  // Start browser IPC server — skip if Docker container owns the socket
-  const allowlist = DomainAllowlist.fromEnv();
-  const browserTool = new BrowserTool(browserManager, allowlist);
-  let browserIpc: BrowserIpcServer | null = null;
-  if (process.env["BROWSER_DOCKER"] === "1") {
-    logInfo("main", "🐳 Browser Docker mode — skipping local IPC server");
-  } else {
-    browserIpc = new BrowserIpcServer(browserTool);
-    await browserIpc.start();
-    logInfo("main", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
-  }
-
   const conversationBuffer = new ConversationBuffer(50);
 
   // --- Pre-flight: start external services ---
@@ -145,17 +124,6 @@ export async function startBridge(): Promise<void> {
       execFileSync(join(import.meta.dirname, "..", "scripts", "tmux-session.sh"), { stdio: "pipe" });
     } catch (err) {
       logError("main", "tmux session start failed", err);
-    }
-  }
-
-  let mcpDaemonStarted = false;
-  if (config.mcpDaemon) {
-    try {
-      execFileSync("mcporter", ["daemon", "start"], { stdio: "pipe" });
-      mcpDaemonStarted = true;
-      logInfo("main", "🔌 mcporter daemon started");
-    } catch {
-      logWarn("main", "mcporter not found or daemon start failed — skipping");
     }
   }
 
@@ -181,11 +149,46 @@ export async function startBridge(): Promise<void> {
     for (const uid of config.allowedUserIds) updateCtxStart(memoryConfig.memoryDir, uid, startedAt);
   }
 
-  // Sleep state: queue messages during sleep, auto-reply "waking up"
+  // Sleep state
   let sleepChild: import("node:child_process").ChildProcess | null = null;
   const sleepQueue = new SleepQueue();
   const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
   const sleepTrigger = new SleepTrigger(join(memoryConfig.memoryDir, "sleep"));
+
+  const busyChats = new Set<string>();
+  const pendingSessionStart = new Set<string>();
+  const seenSessions = new Set<string>();
+  const fullModeChats = new Set<string>();
+  const codingModeManager = new CodingMode(config.kiroCLIPath, config.workingDir, config.codingAgentModel);
+  const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
+  const registry = new ServiceRegistry();
+
+  // STT/TTS config (lightweight — just reads env vars)
+  const sttConfig: SttConfig | null = config.sttEnabled
+    ? { provider: "groq", apiKey: config.groqApiKey, model: config.sttModel }
+    : null;
+  const ttsConfig: TtsConfig | null = config.ttsEnabled
+    ? { voice: config.ttsVoice }
+    : null;
+
+  const nlmConfig = loadNLMConfig();
+
+  // Build pipeline deps (needed before platform start)
+  const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
+    transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
+    sleepQueue, idleSave, conversationBuffer, config, startedAt,
+    sttConfig, ttsConfig,
+    busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
+    cronCurrentJob: () => cronQueue.currentJob,
+    enqueueCron: (entryId: string): string | null => {
+      try {
+        const entry = cronReadEntry(entryId);
+        if (!entry) return `❌ Entry ${entryId} not found`;
+        cronQueue.enqueue(entry, cronCallback);
+        return null;
+      } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
+    },
+  };
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
   if (memory) {
@@ -228,53 +231,6 @@ export async function startBridge(): Promise<void> {
       logWarn("main", `Sleep trigger check failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-
-  // STT config
-  const sttConfig: SttConfig | null = config.sttEnabled
-    ? { provider: "groq", apiKey: config.groqApiKey, model: config.sttModel }
-    : null;
-  if (sttConfig) {
-    logInfo("main", `🎤 STT enabled (${sttConfig.provider}/${sttConfig.model || "whisper-large-v3"})`);
-  }
-
-  // TTS config
-  const ttsConfig: TtsConfig | null = config.ttsEnabled
-    ? { voice: config.ttsVoice }
-    : null;
-  if (ttsConfig) {
-    logInfo("main", `🔊 TTS enabled (Edge TTS / ${ttsConfig.voice})`);
-  }
-
-  const busyChats = new Set<string>();
-  const pendingSessionStart = new Set<string>();
-  const seenSessions = new Set<string>(); // tracks sessions that have sent at least one message
-  const fullModeChats = new Set<string>();
-
-  // --- Coding agent mode ---
-  const codingModeManager = new CodingMode(config.kiroCLIPath, config.workingDir, config.codingAgentModel);
-
-  // Idle chat-save: after 10min inactivity, save kiro-cli conversation to working dir
-  const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
-
-  // --- Service Registry ---
-  const registry = new ServiceRegistry();
-
-  // --- Build shared pipeline deps ---
-  const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
-    transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
-    sleepQueue, idleSave, conversationBuffer, config, startedAt,
-    sttConfig, ttsConfig,
-    busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
-    cronCurrentJob: () => cronQueue.currentJob,
-    enqueueCron: (entryId: string): string | null => {
-      try {
-        const entry = cronReadEntry(entryId);
-        if (!entry) return `❌ Entry ${entryId} not found`;
-        cronQueue.enqueue(entry, cronCallback);
-        return null;
-      } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
-    },
-  };
 
   // --- Telegram service ---
   let telegramAdapter: import("./platforms/telegram-adapter.js").TelegramAdapter | null = null;
@@ -348,6 +304,35 @@ export async function startBridge(): Promise<void> {
   } else {
     logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
   }
+
+  // === DEFERRED INIT: non-critical services (after platforms are accepting messages) ===
+
+  // Browser
+  const browserManager = new BrowserManager();
+  if (memory) memory.setBrowserManager(browserManager);
+  const allowlist = DomainAllowlist.fromEnv();
+  const browserTool = new BrowserTool(browserManager, allowlist);
+  let browserIpc: BrowserIpcServer | null = null;
+  if (process.env["BROWSER_DOCKER"] !== "1") {
+    browserIpc = new BrowserIpcServer(browserTool);
+    await browserIpc.start();
+    logInfo("main", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
+  }
+
+  // MCP daemon
+  let mcpDaemonStarted = false;
+  if (config.mcpDaemon) {
+    try {
+      execFileSync("mcporter", ["daemon", "start"], { stdio: "pipe" });
+      mcpDaemonStarted = true;
+      logInfo("main", "🔌 mcporter daemon started");
+    } catch {
+      logWarn("main", "mcporter not found or daemon start failed — skipping");
+    }
+  }
+
+  if (sttConfig) logInfo("main", `🎤 STT enabled (${sttConfig.provider}/${sttConfig.model || "whisper-large-v3"})`);
+  if (ttsConfig) logInfo("main", `🔊 TTS enabled (Edge TTS / ${ttsConfig.voice})`);
 
   // --- Startup notification (async, non-blocking) ---
   if (memoryConfig.memoryEnabled) {
