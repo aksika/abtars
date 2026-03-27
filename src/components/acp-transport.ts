@@ -114,7 +114,10 @@ export class AcpTransport implements IKiroTransport {
   }
 
   async sendPrompt(sessionKey: string, message: string): Promise<string> {
-    if (!this.client) throw new Error("ACP not initialized");
+    if (!this.client) {
+      logWarn(TAG, "ACP client dead — reinitializing");
+      await this.initialize();
+    }
 
     const sessionId = await this.getOrCreateSession(sessionKey);
     this.responseChunks.set(sessionId, []);
@@ -138,7 +141,8 @@ export class AcpTransport implements IKiroTransport {
   private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        return await this.client!.prompt({
+        if (!this.client) throw new Error("ACP not initialized");
+        return await this.client.prompt({
           sessionId,
           prompt: [{ type: "text", text: message }],
         });
