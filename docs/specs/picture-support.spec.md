@@ -27,7 +27,8 @@ User sends photo/file on TG/Discord
 
 ## File Storage
 
-Path: `~/.agentbridge/media/received/`
+Images: `~/.agentbridge/media/received/`
+Files (non-image + A2A): `~/.agentbridge/media/received/files/`
 
 Filename: `YYYYMMDD_HHMMSS_<chatId>_<6hex>.<ext>`
 - Example: `20260327_211300_7773842843_a3f1b2.jpg`
