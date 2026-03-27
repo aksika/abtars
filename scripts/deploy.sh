@@ -63,6 +63,12 @@ safe_cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/prompts/sleeping_pro
 chmod 444 "$AB_HOME/prompts/sleeping_prompt.md"
 safe_cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/prompts/browsing_prompt.md"
 chmod 444 "$AB_HOME/prompts/browsing_prompt.md"
+
+# Deploy task descriptions
+mkdir -p "$AB_HOME/tasks"
+for f in "$PROJECT_DIR/tasks/"*.md; do
+  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/tasks/$(basename "$f")"
+done
 for f in "$PROJECT_DIR/skills/agents/"*.md; do
   safe_cp "$f" "$AB_HOME/skills/agents/$(basename "$f")"
 done
