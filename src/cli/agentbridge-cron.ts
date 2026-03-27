@@ -10,12 +10,9 @@
  * File: ~/.agentbridge/memory/cron.json
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
+import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbRemoveEntry } from "../components/cron-db.js";
 
-const cronPath = (): string => join(homedir(), ".agentbridge", "memory", "cron.json");
 
 export interface CronEntry {
   id: string;
@@ -37,23 +34,8 @@ export interface CronEntry {
   history?: { ts: number; exitCode?: number }[];
 }
 
-function ensureFile(): void {
-  const dir = join(homedir(), ".agentbridge", "memory");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  if (!existsSync(cronPath())) writeFileSync(cronPath(), "[]", "utf-8");
-}
-
 export function readEntries(): CronEntry[] {
-  ensureFile();
-  try {
-    return JSON.parse(readFileSync(cronPath(), "utf-8")) as CronEntry[];
-  } catch {
-    return [];
-  }
-}
-
-function writeEntries(entries: CronEntry[]): void {
-  writeFileSync(cronPath(), JSON.stringify(entries, null, 2), "utf-8");
+  return dbReadEntries();
 }
 
 interface AddArgs {
@@ -126,7 +108,7 @@ function add(args: string[]): void {
     createdAt: Date.now(),
   };
 
-  const entries = readEntries();
+  const entries = dbReadEntries();
 
   // Dedup: reject if a recurring entry with same schedule+message+chatId already exists
   if (schedule) {
@@ -134,8 +116,7 @@ function add(args: string[]): void {
     if (dup) { console.log(JSON.stringify({ ok: false, error: "duplicate", existing_id: dup.id })); process.exit(1); }
   }
 
-  entries.push(entry);
-  writeEntries(entries);
+  writeEntry(entry);
   console.log(JSON.stringify({ ok: true, action: "added", id: entry.id, fireAt: new Date(fireAt!).toISOString(), ...(schedule ? { schedule } : {}) }));
 }
 
@@ -162,35 +143,28 @@ function listEntries(): void {
 }
 
 function remove(id: string): void {
-  const entries = readEntries();
-  const idx = entries.findIndex(e => e.id === id);
-  if (idx === -1) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
-  entries.splice(idx, 1);
-  writeEntries(entries);
+  if (!dbRemoveEntry(id)) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
   console.log(JSON.stringify({ ok: true, action: "removed", id }));
 }
 
 function pause(id: string): void {
-  const entries = readEntries();
-  const entry = entries.find(e => e.id === id);
+  const entry = readEntry(id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
   entry.paused = true;
-  writeEntries(entries);
+  writeEntry(entry);
   console.log(JSON.stringify({ ok: true, action: "paused", id }));
 }
 
 function resume(id: string): void {
-  const entries = readEntries();
-  const entry = entries.find(e => e.id === id);
+  const entry = readEntry(id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
-  delete entry.paused;
-  writeEntries(entries);
+  entry.paused = false;
+  writeEntry(entry);
   console.log(JSON.stringify({ ok: true, action: "resumed", id }));
 }
 
 function showHistory(id: string): void {
-  const entries = readEntries();
-  const entry = entries.find(e => e.id === id);
+  const entry = readEntry(id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
   const runs = (entry.history ?? []).map(h => ({
     ranAt: new Date(h.ts).toISOString(),

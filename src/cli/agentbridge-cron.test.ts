@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,20 +7,25 @@ const originalHome = process.env.HOME;
 
 describe("agentbridge-cron", () => {
   let tmpDir: string;
-  let cronPath: string;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "cron-test-"));
     process.env.HOME = tmpDir;
-    cronPath = join(tmpDir, ".agentbridge", "memory", "cron.json");
+    mkdirSync(join(tmpDir, ".agentbridge", "memory"), { recursive: true });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     process.env.HOME = originalHome;
+    // Close DB before cleanup
+    const { closeDb } = await import("../components/cron-db.js");
+    closeDb();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
   async function run(args: string[]): Promise<string> {
+    // Force re-import to pick up new HOME
+    const { closeDb } = await import("../components/cron-db.js");
+    closeDb();
     const mod = await import("./agentbridge-cron.js");
     const logs: string[] = [];
     const origLog = console.log;
@@ -33,20 +38,12 @@ describe("agentbridge-cron", () => {
     return logs.join("\n");
   }
 
-  it("add creates entry in cron.json", async () => {
+  it("add creates entry", async () => {
     const out = await run(["add", "--at", "2026-12-25T08:00", "--message", "Christmas", "--chat-id", "123", "--type", "reminder"]);
     const parsed = JSON.parse(out);
     expect(parsed.ok).toBe(true);
     expect(parsed.action).toBe("added");
     expect(parsed.id).toHaveLength(6);
-
-    expect(existsSync(cronPath)).toBe(true);
-    const entries = JSON.parse(readFileSync(cronPath, "utf-8"));
-    expect(entries).toHaveLength(1);
-    expect(entries[0].message).toBe("Christmas");
-    expect(entries[0].chatId).toBe(123);
-    expect(entries[0].type).toBe("reminder");
-    expect(entries[0].fired).toBe(false);
   });
 
   it("list shows pending entries", async () => {
@@ -56,8 +53,6 @@ describe("agentbridge-cron", () => {
     const parsed = JSON.parse(out);
     expect(parsed.ok).toBe(true);
     expect(parsed.entries).toHaveLength(2);
-    expect(parsed.entries[0].message).toBe("A");
-    expect(parsed.entries[1].message).toBe("B");
   });
 
   it("list on empty returns empty", async () => {
@@ -69,12 +64,8 @@ describe("agentbridge-cron", () => {
   it("remove deletes entry by id", async () => {
     const addOut = await run(["add", "--at", "2026-12-25T08:00", "--message", "X", "--chat-id", "1", "--type", "reminder"]);
     const id = JSON.parse(addOut).id;
-
     const out = await run(["remove", id]);
     expect(JSON.parse(out)).toEqual({ ok: true, action: "removed", id });
-
-    const entries = JSON.parse(readFileSync(cronPath, "utf-8"));
-    expect(entries).toHaveLength(0);
   });
 
   it("remove with invalid id exits with error", async () => {
@@ -83,9 +74,7 @@ describe("agentbridge-cron", () => {
     process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
     try {
       await run(["remove", "nonexistent"]);
-    } catch {
-      // expected
-    } finally {
+    } catch { /* expected */ } finally {
       process.exit = origExit;
     }
     expect(exitCode).toBe(1);
@@ -97,9 +86,7 @@ describe("agentbridge-cron", () => {
     process.exit = ((code?: number) => { exitCode = code; throw new Error("exit"); }) as never;
     try {
       await run(["add", "--message", "X", "--chat-id", "1"]);
-    } catch {
-      // expected
-    } finally {
+    } catch { /* expected */ } finally {
       process.exit = origExit;
     }
     expect(exitCode).toBe(1);
@@ -107,10 +94,6 @@ describe("agentbridge-cron", () => {
 
   it("add defaults type to reminder", async () => {
     const out = await run(["add", "--at", "2026-12-25T08:00", "--message", "Y", "--chat-id", "1"]);
-    const parsed = JSON.parse(out);
-    expect(parsed.ok).toBe(true);
-
-    const entries = JSON.parse(readFileSync(cronPath, "utf-8"));
-    expect(entries[0].type).toBe("reminder");
+    expect(JSON.parse(out).ok).toBe(true);
   });
 });

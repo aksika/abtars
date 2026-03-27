@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { readEntry as cronReadEntry } from "./components/cron-db.js";
 import { spawn, execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
@@ -268,8 +268,7 @@ async function main(): Promise<void> {
     cronCurrentJob: () => cronQueue.currentJob,
     enqueueCron: (entryId: string): string | null => {
       try {
-        const entries: import("./cli/agentbridge-cron.js").CronEntry[] = JSON.parse(readFileSync(join(homedir(), ".agentbridge", "memory", "cron.json"), "utf-8"));
-        const entry = entries.find(e => e.id === entryId);
+        const entry = cronReadEntry(entryId);
         if (!entry) return `❌ Entry ${entryId} not found`;
         cronQueue.enqueue(entry, cronCallback);
         return null;

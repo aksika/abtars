@@ -8,34 +8,22 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { AcpTransport } from "./acp-transport.js";
+import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
 import type { CronEntry } from "../cli/agentbridge-cron.js";
-
 import { localDate } from "./env-utils.js";
 
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const RETRY_DELAY_MS = 10 * 60 * 1000; // skip 1 cycle (2 × 5min)
 const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
-const MAX_HISTORY = 10;
-
-function cronPath(): string { return join(homedir(), ".agentbridge", "memory", "cron.json"); }
 
 function recordRunToFile(entryId: string, exitCode?: number): void {
-  try {
-    const entries: CronEntry[] = JSON.parse(readFileSync(cronPath(), "utf-8"));
-    const target = entries.find(e => e.id === entryId);
-    if (target) {
-      if (!target.history) target.history = [];
-      target.history.push({ ts: Date.now(), ...(exitCode !== undefined ? { exitCode } : {}) });
-      if (target.history.length > MAX_HISTORY) target.history = target.history.slice(-MAX_HISTORY);
-      writeFileSync(cronPath(), JSON.stringify(entries, null, 2), "utf-8");
-    }
-  } catch { /* best effort */ }
+  dbRecordRun(entryId, exitCode);
 }
 
 const DOD_MIN_BYTES = 100;
@@ -87,18 +75,16 @@ function checkDoD(paths: string[]): { passed: boolean; details: string } {
   return { passed: allPassed, details: results.join("\n") };
 }
 
-/** Schedule a one-time retry after 1 skipped cycle. isRetry=true means this was already a retry — don't retry again. */
+/** Schedule a one-time retry after 1 skipped cycle. */
 function scheduleRetry(entry: CronEntry, isRetry: boolean): void {
   if (!entry.schedule || isRetry) return;
   try {
-    const raw = readFileSync(cronPath(), "utf-8");
-    const entries: CronEntry[] = JSON.parse(raw);
-    const target = entries.find(e => e.id === entry.id);
+    const target = readEntry(entry.id);
     if (target) {
       target.fireAt = Date.now() + RETRY_DELAY_MS;
       target.fired = false;
       target._retrying = true;
-      writeFileSync(cronPath(), JSON.stringify(entries, null, 2), "utf-8");
+      writeEntry(target);
       logInfo(TAG, `Scheduled retry for "${entry.id}" in ${RETRY_DELAY_MS / 60000}min`);
     }
   } catch (err) {
