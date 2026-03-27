@@ -7,7 +7,7 @@
  */
 
 import * as http from "node:http";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import type { Socket } from "node:net";
@@ -23,7 +23,6 @@ import { logInfo, logError } from "./logger.js";
 
 const TAG = "dashboard-server";
 const LOG_FILE = resolve(homedir(), ".agentbridge", "logs", "bridge.log");
-const CRON_FILE = resolve(homedir(), ".agentbridge", "memory", "cron.json");
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -289,7 +288,7 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
   if (!existsSync(LOG_FILE)) return [];
   const content = readFileSync(LOG_FILE, "utf-8");
   const allLines = content.split("\n").filter((l) => l.length > 0);
-  const cutoffIso = new Date(cutoffMs).toISOString();
+  const cutoffIso = new Date(cutoffMs).toISOString().slice(0, 23);
 
   const filtered: string[] = [];
   for (let i = allLines.length - 1; i >= 0 && filtered.length < limit; i--) {
@@ -311,22 +310,22 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
 
 // ── Cron Control ────────────────────────────────────────────────────────────
 
+import { readEntry as cronReadEntry, writeEntry as cronWriteEntry } from "./cron-db.js";
+
 function handleCronAction(id: string, action: string): { ok: boolean; error?: string } {
-  if (!existsSync(CRON_FILE)) return { ok: false, error: "cron.json not found" };
-  const entries = JSON.parse(readFileSync(CRON_FILE, "utf-8")) as Array<Record<string, unknown>>;
-  const entry = entries.find((e) => e.id === id);
+  const entry = cronReadEntry(id);
   if (!entry) return { ok: false, error: `Entry ${id} not found` };
 
   if (action === "pause") {
     entry.paused = true;
   } else if (action === "resume") {
-    delete entry.paused;
+    entry.paused = false;
   } else if (action === "trigger") {
-    entry.fireAt = Date.now() - 1000; // set to past so next cron tick picks it up
-    delete entry.paused;
+    entry.fireAt = Date.now() - 1000;
+    entry.paused = false;
     entry.fired = false;
   }
 
-  writeFileSync(CRON_FILE, JSON.stringify(entries, null, 2), "utf-8");
+  cronWriteEntry(entry);
   return { ok: true };
 }

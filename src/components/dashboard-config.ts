@@ -53,7 +53,7 @@ export function validateDashboardConfig(
 
 // ── Data Models ─────────────────────────────────────────────────────────────
 
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import type { TrafficEntry } from "./agent-api-server.js";
@@ -234,30 +234,28 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
   };
 }
 
-const CRON_FILE = resolve(homedir(), ".agentbridge", "memory", "cron.json");
+import { readEntries as readCronEntries } from "./cron-db.js";
 
 function readCronStatus(): CronEntryStatus[] {
   try {
-    if (!existsSync(CRON_FILE)) return [];
-    const raw = JSON.parse(readFileSync(CRON_FILE, "utf-8")) as Array<Record<string, unknown>>;
+    const raw = readCronEntries();
     return raw
       .filter((e) => e.schedule)
       .map((e) => {
-        const msg = String(e.message ?? "");
-        const firstLine = msg.split("\n")[0] ?? "";
+        const firstLine = (e.message ?? "").split("\n")[0] ?? "";
         const label = firstLine.length > 60 ? firstLine.slice(0, 57) + "..." : firstLine;
-        const hist = Array.isArray(e.history) ? e.history : [];
-        const last = hist.length > 0 ? (hist[hist.length - 1] as { exitCode?: number }) : undefined;
+        const hist = e.history ?? [];
+        const last = hist.length > 0 ? hist[hist.length - 1] : undefined;
         return {
-          id: String(e.id),
-          label: label || String(e.id),
-          schedule: String(e.schedule),
-          executor: (e.executor as "agent" | "script") ?? "script",
-          fireAt: Number(e.fireAt ?? 0),
+          id: e.id,
+          label: label || e.id,
+          schedule: e.schedule!,
+          executor: e.executor ?? "script",
+          fireAt: e.fireAt,
           paused: Boolean(e.paused),
-          lastRanAt: e.lastRanAt ? Number(e.lastRanAt) : undefined,
+          lastRanAt: e.lastRanAt,
           lastExitCode: last?.exitCode ?? null,
-          ...(e.priority ? { priority: e.priority as "high" | "medium" | "low" } : {}),
+          ...(e.priority ? { priority: e.priority } : {}),
         };
       });
   } catch {
