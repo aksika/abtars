@@ -20,7 +20,7 @@ describe("CronQueue", () => {
   let queue: CronQueue;
 
   beforeEach(() => {
-    queue = new CronQueue();
+    queue = new CronQueue("kiro-cli", ".");
   });
 
   it("starts with no current job and empty queue", () => {

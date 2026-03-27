@@ -396,7 +396,7 @@ async function main(): Promise<void> {
     }
   };
 
-  const cronQueue = new CronQueue();
+  const cronQueue = new CronQueue(config.kiroCLIPath, config.workingDir);
 
   heartbeat.registerTask({
     name: "cron",

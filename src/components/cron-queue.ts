@@ -12,6 +12,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn, logDebug } from "./logger.js";
+import { AcpTransport } from "./acp-transport.js";
 import type { CronEntry } from "../cli/agentbridge-cron.js";
 
 import { localDate } from "./env-utils.js";
@@ -124,6 +125,13 @@ export class CronQueue {
   private queue: QueuedJob[] = [];
   private _current: RunningJob | null = null;
   private timeout: ReturnType<typeof setTimeout> | null = null;
+  private readonly cliPath: string;
+  private readonly workingDir: string;
+
+  constructor(cliPath: string, workingDir: string) {
+    this.cliPath = cliPath;
+    this.workingDir = workingDir;
+  }
 
   /** Currently running job, or null. */
   get currentJob(): RunningJob | null { return this._current; }
@@ -233,50 +241,24 @@ export class CronQueue {
     }
 
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
-    try {
-      const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "ignore"] });
-      
-      this.setCurrent(entry, child.pid ?? 0, "agent");
 
-      // 30-min hard timeout
-      this.timeout = setTimeout(() => {
-        logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min) — killing pid ${child.pid}`);
-        try { child.kill("SIGKILL"); } catch { /* dead */ }
-      }, AGENT_TIMEOUT_MS);
+    const transport = new AcpTransport(this.cliPath, this.workingDir);
+    const sessionKey = `cron:${entry.id}`;
 
-      let output = "";
-      const send = (obj: unknown): void => { child.stdin?.write(JSON.stringify(obj) + "\n"); };
-      let msgId = 0;
-      let phase = 0;
-      let buf = "";
+    // 30-min hard timeout
+    this.timeout = setTimeout(() => {
+      logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min) — destroying transport`);
+      transport.destroy();
+    }, AGENT_TIMEOUT_MS);
 
-      send({ jsonrpc: "2.0", method: "initialize", params: { protocolVersion: "0.1", clientInfo: { name: "agentbridge-cron", version: "0.1.0" }, capabilities: {} }, id: ++msgId });
+    // Use a fake PID — AcpTransport manages the process internally
+    this.setCurrent(entry, 0, "agent");
 
-      child.stdout?.on("data", (d: Buffer) => {
-        buf += d.toString();
-        output += d.toString();
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const msg = JSON.parse(line);
-            if (phase === 0 && msg.id) {
-              phase = 1;
-              send({ jsonrpc: "2.0", method: "session/new", params: { cwd: process.env["WORKING_DIR"] || ".", mcpServers: [] }, id: ++msgId });
-            } else if (phase === 1 && msg.result?.sessionId) {
-              phase = 2;
-              send({ jsonrpc: "2.0", method: "session/prompt", params: { sessionId: msg.result.sessionId, prompt: [{ type: "text", text: prompt }] }, id: ++msgId });
-              child.stdin?.end();
-            }
-          } catch { /* not JSON */ }
-        }
-      });
-
-      child.on("exit", (_code) => {
-        const summary = (output || "(no output)").slice(0, 500);
-        // DoD check for agent tasks
-        let exitCode = _code ?? 0;
+    transport.initialize()
+      .then(() => transport.sendPrompt(sessionKey, prompt))
+      .then((response) => {
+        const summary = (response || "(no output)").slice(0, 500);
+        let exitCode = 0;
         let dodResult = "";
         if (dodPaths.length > 0) {
           const dod = checkDoD(dodPaths);
@@ -289,20 +271,17 @@ export class CronQueue {
         recordRunToFile(entry.id, exitCode);
         if (exitCode !== 0) scheduleRetry(entry, !!entry._retrying);
         onComplete?.(entry.chatId, entry.message, summary + dodResult);
+      })
+      .catch((err) => {
+        logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
+        recordRunToFile(entry.id, 1);
+        scheduleRetry(entry, !!entry._retrying);
+        onComplete?.(entry.chatId, entry.message, `❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+      })
+      .finally(() => {
+        transport.destroy();
         this.clearCurrent();
         this.processNext();
       });
-
-      child.on("error", (err) => {
-        logWarn(TAG, `Agent spawn failed: ${err.message}`);
-        onComplete?.(entry.chatId, entry.message, `❌ Failed: ${err.message}`);
-        this.clearCurrent();
-        this.processNext();
-      });
-    } catch (err) {
-      logWarn(TAG, `Agent error: ${err instanceof Error ? err.message : String(err)}`);
-      this.clearCurrent();
-      this.processNext();
-    }
   }
 }
