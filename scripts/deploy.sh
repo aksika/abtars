@@ -60,9 +60,9 @@ for f in "$PROJECT_DIR/skills/"*.md; do
   safe_cp "$f" "$AB_HOME/.kiro/steering/$(basename "$f")"
 done
 safe_cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/prompts/sleeping_prompt.md"
-chmod 444 "$AB_HOME/prompts/sleeping_prompt.md"
+chmod 644 "$AB_HOME/prompts/sleeping_prompt.md"
 safe_cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/prompts/browsing_prompt.md"
-chmod 444 "$AB_HOME/prompts/browsing_prompt.md"
+chmod 644 "$AB_HOME/prompts/browsing_prompt.md"
 
 # Deploy task descriptions
 mkdir -p "$AB_HOME/tasks"
