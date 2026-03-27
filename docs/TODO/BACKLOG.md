@@ -12,7 +12,7 @@ Auto-compaction already implemented: `checkAutoCompact()` in `memory-manager.ts`
 ## 9. Memory Store Injection Scanning (defense-in-depth)
 
 **Status:** Not started
-**Priority:** Low — A2A prompt scanning already blocks poisoned input at entry point
+**Priority:** Low
 **Source:** Gap review of Hermes study (2026-03-14)
 
 **Problem:**
@@ -238,31 +238,6 @@ Batch of operational fixes:
 - Startup greeting prompt to kiro-cli with session context ("You just woke up").
 - Sleep audit filenames normalized to `YYYYMMDD_HHMM`.
 
-## 38. Classification Leak via Consolidation Pipeline
-
-**Status:** Not started
-**Priority:** High
-
-**Problem:**
-Daily summaries and consolidations are plain text — they carry no classification metadata. If a CONFIDENTIAL memory gets summarized into a daily file, the summary has no classification tag. Any agent (including A2A guests) that reads the summary gets the data without a classification check.
-
-**How it was discovered:**
-During A2A security testing (2026-03-25), Molty asked KP about a CONFIDENTIAL memory. KP initially tried to answer from the daily summary (which contained the data in plain text). When challenged, KP checked the DB and found `classification: 2 (CONFIDENTIAL)`. Had the summary said PUBLIC, KP would have leaked it.
-
-**Root cause:**
-The consolidation pipeline (Dreamy's daily summaries, retrospectives) flattens classified memories into unclassified plain text. The classification gate only works on direct DB recall — not on consolidated/summarized content.
-
-**Attack vector:**
-1. User stores a CONFIDENTIAL fact
-2. Dreamy writes it into `daily_YYYY-MM-DD.md` (no classification tag)
-3. A2A guest agent asks about it
-4. KP reads the daily summary → no classification check → data leaked
-
-**Possible fixes:**
-- Dreamy must REDACT classified content in summaries/retros: replace SECRET/CONFIDENTIAL data with `<REDACTED>` — the fact that something exists can be mentioned, but not the content
-- Classification check at recall output: scan response for known classified content before sending to A2A
-- For data that exists only in summaries (not in DB): treat as INTERNAL by default — A2A guests don't get it unless explicitly declassified
-- Trust agent judgment as last resort, but only for INTERNAL level — SECRET/CONFIDENTIAL must be enforced programmatically
 - Sleep prompt needs explicit instructions: "Replace any SECRET or CONFIDENTIAL memory content with `<REDACTED>` in daily summaries and retrospectives"
 
 ## 36. Unified Platform Abstraction
@@ -303,7 +278,7 @@ Replaced inline task spawning in cron-checker with a proper job queue.
 ## 38. Classification Leak via Consolidation Pipeline
 
 **Status:** Not started
-**Priority:** High
+**Priority:** Low
 
 **Problem:**
 Daily summaries and consolidations are plain text — they carry no classification metadata. If a CONFIDENTIAL memory gets summarized into a daily file, the summary has no classification tag. Any agent (including A2A guests) that reads the summary gets the data without a classification check.
@@ -321,17 +296,11 @@ The consolidation pipeline (Dreamy's daily summaries, retrospectives) flattens c
 
 ## 39. Task Descriptions — move from skills/ to tasks/
 
-**Status:** Not started
-**Priority:** Medium
+**Status:** ✅ Done (2026-03-27)
+
 
 Cron task descriptions (the long message strings that tell the agent what to do) currently live inside `cron.json` as inline text, and their documentation lives in `skills/`. This is wrong — skills are for the agent's conversational abilities, not for scheduled task instructions.
 
-**Proposal:**
-- Create a `tasks/` folder with one `.md` file per cron task (e.g. `tasks/daily-ai-report.md`, `tasks/weekly-ai-report.md`, `tasks/finance-daily.md`)
-- Each file contains the full task description/instructions
-- `cron.json` entries reference the task file path instead of embedding the full message
-- `CronQueue` reads the file content when spawning the agent task
-- Benefits: task descriptions are version-controlled, editable without touching cron.json, not truncated in `/cron` display, and clearly separated from conversational skills
 
 ## 40. NotebookLM binary location
 
