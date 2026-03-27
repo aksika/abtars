@@ -153,6 +153,9 @@ export type MemorySearchResult = {
   source_message_ids?: string;
   tier: "extracted" | "daily" | "weekly" | "quarterly";
   score: number;
+  trust?: number;
+  integrity?: number;
+  credibility?: number;
 };
 
 /** Heartbeat task definition. */

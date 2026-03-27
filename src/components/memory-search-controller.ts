@@ -236,6 +236,11 @@ export class MemorySearchController {
       date: new Date(r.source_timestamp).toISOString(),
       source: "L2:extracted",
       score: r.score,
+      contentOriginal: r.content_original,
+      memoryType: r.memory_type,
+      trust: r.trust,
+      integrity: r.integrity,
+      credibility: r.credibility,
     }));
   }
 
@@ -277,6 +282,11 @@ export class MemorySearchController {
       date: new Date(r.source_timestamp).toISOString(),
       source: "L4:original",
       score: r.score,
+      contentOriginal: r.content_original,
+      memoryType: r.memory_type,
+      trust: r.trust,
+      integrity: r.integrity,
+      credibility: r.credibility,
     }));
   }
 }

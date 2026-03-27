@@ -405,9 +405,20 @@ function formatBytes(bytes) {
       }
 
       container.innerHTML = data.results.map(function(r) {
+        var meta = '<span class="score">' + (r.score != null ? r.score.toFixed(2) : '—') + '</span> ' +
+          '<span class="source">' + escHtml(r.source) + '</span> ' +
+          '<span class="source">' + escHtml(r.date) + '</span>';
+        if (r.memoryType) meta += ' <span class="source">' + r.memoryType + '</span>';
+        if (r.trust != null) meta += ' T:' + r.trust;
+        if (r.credibility != null) meta += ' C:' + r.credibility;
+        if (r.integrity != null) meta += ' I:' + r.integrity;
+        var content = escHtml(r.content.substring(0, 300));
+        if (r.contentOriginal && r.contentOriginal !== r.content) {
+          content += '<div style="color:#888;font-size:11px;margin-top:2px;">' + escHtml(r.contentOriginal.substring(0, 200)) + '</div>';
+        }
         return '<div class="search-result-item">' +
-          '<div class="result-meta"><span class="score">' + (r.score != null ? r.score.toFixed(2) : '—') + '</span> <span class="source">' + escHtml(r.source) + '</span> <span class="source">' + escHtml(r.date) + '</span></div>' +
-          '<div class="result-content">' + escHtml(r.content.substring(0, 200)) + '</div>' +
+          '<div class="result-meta">' + meta + '</div>' +
+          '<div class="result-content">' + content + '</div>' +
           '</div>';
       }).join('');
     }).catch(function(err) {

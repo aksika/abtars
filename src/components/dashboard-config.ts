@@ -123,6 +123,17 @@ export type WebSearchResult = {
   date: string;
   source: string;
   score: number;
+  // Rich attributes (L2 extracted memories only)
+  contentOriginal?: string;
+  memoryType?: string;
+  emotionScore?: number;
+  classification?: number;
+  trust?: number;
+  integrity?: number;
+  credibility?: number;
+  recallCount?: number;
+  relevanceScore?: number;
+  preserveOriginal?: boolean;
 };
 
 export type MemorySearchResponse = {
