@@ -92,10 +92,9 @@ Add `/coding` command that routes to Claude Opus as a dedicated coding agent. Se
 
 ## 20. Review Testing Strategy
 
-**Status:** Not started
-**Priority:** Medium
+**Status:** ✅ Done (2026-03-27)
 
-Audit current test coverage (606 tests / 59 files). Identify gaps, redundant tests, and areas where integration tests would add more value than unit tests. Align with the refactored architecture.
+Covered in system engineering refactor v2: 654 tests across 66 files. Added command-handlers tests, updated cron tests for SQLite. Remaining gaps tracked in REFACTOR-V2-PLAN.md Phase E1.
 
 ## 22. Picture / Media Support
 
