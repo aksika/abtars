@@ -122,10 +122,32 @@ export class DiscordAdapter implements PlatformAdapter {
     }
 
     const rawText = message.content.trim();
-    if (!rawText) return;
+    if (!rawText && !message.attachments?.length) return;
 
     // Strip bot's own mention
     let text = rawText.replace(new RegExp(`<@!?${this.config.appId}>`, "g"), "").replace(/\s{2,}/g, " ").trim();
+
+    // Download attachments
+    let mediaPath: string | undefined;
+    if (message.attachments?.length) {
+      try {
+        const { saveInboundMedia } = await import("../components/media-utils.js");
+        const att = message.attachments[0]!; // handle first attachment
+        const res = await fetch(att.url);
+        if (res.ok) {
+          const buf = Buffer.from(await res.arrayBuffer());
+          const extHint = att.filename ? "." + (att.filename.split(".").pop() ?? "") : undefined;
+          const saved = await saveInboundMedia(buf, parseInt(message.channelId, 10) || 0, { extHint, claimedMime: att.contentType });
+          if (saved) {
+            mediaPath = saved.path;
+            if (!text) text = `User sent a ${saved.isImage ? "photo" : "file"}.`;
+          }
+        }
+      } catch (err) {
+        logWarn(TAG, `Attachment download failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     if (!text) return;
 
     // A2A routing
@@ -146,8 +168,9 @@ export class DiscordAdapter implements PlatformAdapter {
       senderName: message.authorUsername,
       text: senderPrefix + text,
       timestamp: message.timestamp,
-      isGroup: true, // Discord channels are always "group" from pipeline perspective
+      isGroup: true,
       isVoice: false,
+      mediaPath,
       rawPlatformData: message,
     };
 

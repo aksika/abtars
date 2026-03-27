@@ -21,6 +21,7 @@ export interface InboundMessage {
   isGroup: boolean;
   isVoice: boolean;
   voiceFileId?: string;      // platform file ID for voice download
+  mediaPath?: string;         // path to saved media file on disk
   rawPlatformData?: unknown;
 }
 

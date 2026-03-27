@@ -137,6 +137,9 @@ export async function handleInboundMessage(
     // --- Build prompt ---
     const bufKey = `${msg.platform}:${channelId}`;
     let prompt = `[${msg.platform.charAt(0).toUpperCase() + msg.platform.slice(1)}] ${text}`;
+    if (msg.mediaPath) {
+      prompt += `\nFile saved at: ${msg.mediaPath}`;
+    }
     if (isGroup) {
       const context = conversationBuffer.drain(bufKey);
       if (context) {
