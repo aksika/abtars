@@ -27,8 +27,10 @@ User sends photo/file on TG/Discord
 
 ## File Storage
 
-Images: `~/.agentbridge/media/received/`
-Files (non-image + A2A): `~/.agentbridge/media/received/files/`
+- `~/.agentbridge/received/media/` — images and files from Telegram/Discord (user-to-agent)
+- `~/.agentbridge/received/files/` — text files from A2A agents (always `.txt`)
+
+Cleanup: Dreamy checks total size of `~/.agentbridge/received/`. If >100MB, delete oldest files (FIFO) across both subdirs until under 100MB.
 
 Filename: `YYYYMMDD_HHMMSS_<chatId>_<6hex>.<ext>`
 - Example: `20260327_211300_7773842843_a3f1b2.jpg`
