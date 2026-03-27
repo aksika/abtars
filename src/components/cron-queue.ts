@@ -261,10 +261,10 @@ export class CronQueue {
             const msg = JSON.parse(line);
             if (phase === 0 && msg.id) {
               phase = 1;
-              send({ jsonrpc: "2.0", method: "session/new", params: { cwd: process.env["WORKING_DIR"] || "." }, id: ++msgId });
+              send({ jsonrpc: "2.0", method: "session/new", params: { cwd: process.env["WORKING_DIR"] || ".", mcpServers: [] }, id: ++msgId });
             } else if (phase === 1 && msg.result?.sessionId) {
               phase = 2;
-              send({ jsonrpc: "2.0", method: "session/prompt", params: { sessionId: msg.result.sessionId, message: prompt }, id: ++msgId });
+              send({ jsonrpc: "2.0", method: "session/prompt", params: { sessionId: msg.result.sessionId, prompt: [{ type: "text", text: prompt }] }, id: ++msgId });
               child.stdin?.end();
             }
           } catch { /* not JSON */ }
