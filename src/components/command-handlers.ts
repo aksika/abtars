@@ -229,6 +229,20 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     return true;
   }
 
+  // /cron log <id>
+  if (text.startsWith("/cron log ")) {
+    const id = text.slice(10).trim();
+    try {
+      const raw = execSync(`agentbridge-cron history ${id}`, { timeout: 5000, encoding: "utf-8" }).trim();
+      const data = JSON.parse(raw);
+      if (!data.ok) { await ctx.reply(`❌ ${data.error}`); return true; }
+      const runs = (data.runs as { ranAt: string; exitCode?: number }[]).slice(-5);
+      const lines = runs.map(r => `${r.ranAt}  exit=${r.exitCode ?? "?"}`);
+      await ctx.reply(`📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``, { parseMode: "Markdown" });
+    } catch { await ctx.reply("❌ Failed to read history"); }
+    return true;
+  }
+
   // /memory
   if (text === "/memory") {
     if (!ctx.memory) { await ctx.reply("🧠 Memory is disabled."); return true; }
