@@ -19,6 +19,14 @@ nlm notebook create <name> --json           # create notebook
 nlm source list <NOTEBOOK_ID> --json        # list sources
 ```
 
+## Troubleshooting
+
+If `nlm` returns `400 Bad Request` or auth errors, the session has expired. Fix:
+```bash
+nlm login
+```
+This opens a browser for Google re-authentication. Happens periodically when Google rotates session tokens.
+
 Returns JSON: `answer`, `sources_used`.
 
 ## When to use
