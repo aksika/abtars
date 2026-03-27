@@ -480,8 +480,8 @@ function formatBytes(bytes) {
       var nextFire = e.paused ? '—' : new Date(e.fireAt).toLocaleString();
       var lastRan = e.lastRanAt ? new Date(e.lastRanAt).toLocaleString() : 'never';
       var pauseBtn = e.paused
-        ? '<button class="btn-start" onclick="cronAction(\\'' + e.id + '\\',\\'resume\\')">Resume</button>'
-        : '<button class="btn-stop" onclick="cronAction(\\'' + e.id + '\\',\\'pause\\')">Pause</button>';
+        ? '<button class="btn-start" onclick="cronAction(\'' + e.id + '\',\'resume\')">Resume</button>'
+        : '<button class="btn-stop" onclick="cronAction(\'' + e.id + '\',\'pause\')">Pause</button>';
       return '<div class="cron-entry">' +
         '<div class="cron-info">' +
           '<div class="cron-label">' + statusBadge + priorityBadge + ' ' + escHtml(e.label) + '</div>' +
@@ -489,7 +489,7 @@ function formatBytes(bytes) {
         '</div>' +
         '<div class="cron-actions">' +
           pauseBtn +
-          '<button class="btn-start" style="background:#0f3460;color:#a0c4ff;" onclick="cronAction(\\'' + e.id + '\\',\\'trigger\\')">▶ Run</button>' +
+          '<button class="btn-start" style="background:#0f3460;color:#a0c4ff;" onclick="cronAction(\'' + e.id + '\',\'trigger\')">▶ Run</button>' +
         '</div>' +
       '</div>';
     }).join('');
