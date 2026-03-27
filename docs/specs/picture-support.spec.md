@@ -4,6 +4,16 @@
 
 Accept files from Telegram/Discord, validate, save to disk, pass images to KP for analysis. Dreamy handles overnight description extraction and cleanup.
 
+## Inbound Sources
+
+1. **Telegram** — `message.photo`, `message.document`
+2. **Discord** — `message.attachments`
+3. **A2A (Agent API)** — file attachments in agent-to-agent messages
+
+### A2A Security
+
+A2A file transfers are **text-only**. Regardless of detected MIME type, all A2A inbound files are stored as `.txt`. No binary execution, no image rendering. The agent-api-server strips any non-text content before saving.
+
 ## Inbound Flow
 
 ```
