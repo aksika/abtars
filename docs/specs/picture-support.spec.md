@@ -59,10 +59,11 @@ Reference: OpenClaw `src/media/mime.ts` uses `fileTypeFromBuffer` with fallback 
 
 ### Validation Rules
 
-1. **Magic bytes first** — detect MIME from buffer, ignore claimed content-type
-2. **MIME vs claimed mismatch** — log warning, use detected MIME (not claimed)
-3. **Max file size** — 10MB. Reject larger files with user-facing message.
-4. **No path traversal** — filename is generated server-side, never from user input
+1. **Magic bytes first** — detect MIME from buffer using `file-type` package, ignore claimed content-type
+2. **Fallback chain** (like OpenClaw): sniff buffer → if generic (octet-stream/zip), fall back to file extension → fall back to claimed header
+3. **MIME vs claimed mismatch** — log warning, use detected MIME (not claimed)
+4. **Max file size** — 16MB. Reject larger files with user-facing message.
+5. **No path traversal** — filename is generated server-side, never from user input
 
 ## New Files
 
