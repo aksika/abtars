@@ -8,8 +8,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import type { CronEntry } from "../cli/agentbridge-cron.js";
@@ -33,6 +33,55 @@ function recordRunToFile(entryId: string, exitCode?: number): void {
       writeFileSync(cronPath(), JSON.stringify(entries, null, 2), "utf-8");
     }
   } catch { /* best effort */ }
+}
+
+const DOD_MIN_BYTES = 100;
+
+function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** Read task file, substitute {today}, return { prompt, dodPaths }. */
+function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } | null {
+  const filePath = resolve(taskFile.replace(/^~/, homedir()));
+  if (!existsSync(filePath)) { logWarn(TAG, `Task file not found: ${filePath}`); return null; }
+  const raw = readFileSync(filePath, "utf-8");
+  const today = todayStr();
+  const content = raw.replace(/\{today\}/g, today);
+
+  const dodIdx = content.indexOf("## Definition of Done");
+  if (dodIdx === -1) return { prompt: content.trim(), dodPaths: [] };
+
+  const prompt = content.slice(0, dodIdx).trim();
+  const dodSection = content.slice(dodIdx);
+  const dodPaths = dodSection.split("\n")
+    .filter(l => l.match(/^- /))
+    .map(l => l.replace(/^- /, "").trim())
+    .map(p => resolve(p.replace(/^~/, homedir())));
+
+  return { prompt, dodPaths };
+}
+
+/** Check DoD: each path must exist and be >= DOD_MIN_BYTES. Returns pass/fail + details. */
+function checkDoD(paths: string[]): { passed: boolean; details: string } {
+  if (paths.length === 0) return { passed: true, details: "no DoD defined" };
+  const results: string[] = [];
+  let allPassed = true;
+  for (const p of paths) {
+    if (!existsSync(p)) {
+      results.push(`✗ missing: ${p}`);
+      allPassed = false;
+    } else {
+      const size = statSync(p).size;
+      if (size < DOD_MIN_BYTES) {
+        results.push(`✗ too small (${size}B): ${p}`);
+        allPassed = false;
+      } else {
+        results.push(`✓ ${p} (${size}B)`);
+      }
+    }
+  }
+  return { passed: allPassed, details: results.join("\n") };
 }
 
 /** Schedule a one-time retry after 1 skipped cycle. isRetry=true means this was already a retry — don't retry again. */
@@ -168,6 +217,19 @@ export class CronQueue {
   }
 
   private runAgent(entry: CronEntry, onComplete?: TaskCompleteCallback): void {
+    // Read task file if specified, otherwise use inline message
+    let prompt = entry.message;
+    let dodPaths: string[] = [];
+    if (entry.taskFile) {
+      const task = readTaskFile(entry.taskFile);
+      if (task) {
+        prompt = task.prompt;
+        dodPaths = task.dodPaths;
+      } else {
+        logWarn(TAG, `Falling back to inline message for "${entry.id}"`);
+      }
+    }
+
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
     try {
       const child = spawn("kiro-cli", ["acp", "--agent", "professor"], { stdio: ["pipe", "pipe", "ignore"] });
@@ -202,7 +264,7 @@ export class CronQueue {
               send({ jsonrpc: "2.0", method: "session/new", params: { cwd: process.env["WORKING_DIR"] || "." }, id: ++msgId });
             } else if (phase === 1 && msg.result?.sessionId) {
               phase = 2;
-              send({ jsonrpc: "2.0", method: "session/prompt", params: { sessionId: msg.result.sessionId, message: entry.message }, id: ++msgId });
+              send({ jsonrpc: "2.0", method: "session/prompt", params: { sessionId: msg.result.sessionId, message: prompt }, id: ++msgId });
               child.stdin?.end();
             }
           } catch { /* not JSON */ }
@@ -211,10 +273,20 @@ export class CronQueue {
 
       child.on("exit", (_code) => {
         const summary = (output || "(no output)").slice(0, 500);
-        logInfo(TAG, `■ Agent completed: "${entry.message.slice(0, 60)}"`);
-        recordRunToFile(entry.id, _code ?? undefined);
-        if (_code !== 0) scheduleRetry(entry, !!entry._retrying);
-        onComplete?.(entry.chatId, entry.message, summary);
+        // DoD check for agent tasks
+        let exitCode = _code ?? 0;
+        let dodResult = "";
+        if (dodPaths.length > 0) {
+          const dod = checkDoD(dodPaths);
+          exitCode = dod.passed ? 0 : 1;
+          dodResult = `\nDoD: ${dod.passed ? "PASSED" : "FAILED"}\n${dod.details}`;
+          logInfo(TAG, `■ Agent DoD ${dod.passed ? "✅" : "❌"}: "${entry.message.slice(0, 60)}"\n${dod.details}`);
+        } else {
+          logInfo(TAG, `■ Agent completed: "${entry.message.slice(0, 60)}"`);
+        }
+        recordRunToFile(entry.id, exitCode);
+        if (exitCode !== 0) scheduleRetry(entry, !!entry._retrying);
+        onComplete?.(entry.chatId, entry.message, summary + dodResult);
         this.clearCurrent();
         this.processNext();
       });

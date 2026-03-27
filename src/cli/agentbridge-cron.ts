@@ -26,6 +26,7 @@ export interface CronEntry {
   executor?: "agent" | "script";
   schedule?: string;
   priority?: "high" | "medium" | "low";
+  taskFile?: string;
   paused?: boolean;
   fired: boolean;
   createdAt: number;
