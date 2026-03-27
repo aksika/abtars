@@ -54,10 +54,21 @@ export function localIso(): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
+let logFormat: "text" | "json" = (process.env["LOG_FORMAT"] as "json" | undefined) === "json" ? "json" : "text";
+
+export function setLogFormat(fmt: "text" | "json"): void { logFormat = fmt; }
+
+function formatLine(level: string, tag: string, msg: string): string {
+  if (logFormat === "json") {
+    return JSON.stringify({ ts: ts(), level, tag, msg });
+  }
+  return `${ts()} ${level.toUpperCase().padEnd(5)} [${tag}] ${msg}`;
+}
+
 /** LOW: operational milestones — startup, connections, errors */
 export function logInfo(tag: string, msg: string): void {
   if (!shouldLog("low")) return;
-  const line = `${ts()} INFO  [${tag}] ${msg}`;
+  const line = formatLine("info", tag, msg);
   console.log(`[${tag}] ${msg}`);
   writeToFile(line);
 }
@@ -65,7 +76,7 @@ export function logInfo(tag: string, msg: string): void {
 /** LOW: warnings */
 export function logWarn(tag: string, msg: string): void {
   if (!shouldLog("low")) return;
-  const line = `${ts()} WARN  [${tag}] ${msg}`;
+  const line = formatLine("warn", tag, msg);
   console.warn(`[${tag}] ${msg}`);
   writeToFile(line);
 }
@@ -74,7 +85,8 @@ export function logWarn(tag: string, msg: string): void {
 export function logError(tag: string, msg: string, err?: unknown): void {
   if (!shouldLog("low")) return;
   const errStr = err instanceof Error ? err.message : String(err ?? "");
-  const line = `${ts()} ERROR [${tag}] ${msg}${errStr ? " — " + errStr : ""}`;
+  const fullMsg = errStr ? `${msg} — ${errStr}` : msg;
+  const line = formatLine("error", tag, fullMsg);
   if (err) console.error(`[${tag}] ${msg}`, err);
   else console.error(`[${tag}] ${msg}`);
   writeToFile(line);
@@ -83,7 +95,7 @@ export function logError(tag: string, msg: string, err?: unknown): void {
 /** DEBUG: message content, full payloads, verbose tracing */
 export function logDebug(tag: string, msg: string): void {
   if (!shouldLog("debug")) return;
-  const line = `${ts()} DEBUG [${tag}] ${msg}`;
+  const line = formatLine("debug", tag, msg);
   console.log(`[${tag}] ${msg}`);
   writeToFile(line);
 }

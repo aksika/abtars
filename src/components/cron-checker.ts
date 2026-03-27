@@ -10,11 +10,11 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn } from "./logger.js";
 import { CronExpressionParser } from "cron-parser";
+import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./cron-db.js";
 import type { CronEntry } from "../cli/agentbridge-cron.js";
 
 const TAG = "cron-checker";
 const memoryDir = (): string => join(homedir(), ".agentbridge", "memory");
-const cronPath = (): string => join(memoryDir(), "cron.json");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
 
 export interface PendingReminder {
@@ -22,16 +22,6 @@ export interface PendingReminder {
   message: string;
   createdAt: number;
   threadId?: number;
-}
-
-function readCron(): CronEntry[] {
-  if (!existsSync(cronPath())) return [];
-  try { return JSON.parse(readFileSync(cronPath(), "utf-8")) as CronEntry[]; }
-  catch { return []; }
-}
-
-function writeCron(entries: CronEntry[]): void {
-  writeFileSync(cronPath(), JSON.stringify(entries, null, 2), "utf-8");
 }
 
 export function readPendingReminders(): PendingReminder[] {
@@ -68,35 +58,23 @@ function recordRun(entry: CronEntry, exitCode?: number): void {
  * Advances fireAt and writes cron.json.
  */
 export function checkCron(): CronEntry[] {
-  let entries = readCron();
+  let entries = dbReadEntries();
   const now = Date.now();
-  let changed = false;
   const dueTasks: CronEntry[] = [];
 
   // GC: remove fired one-shots older than 7 days
-  const before = entries.length;
-  entries = entries.filter(e => !(e.fired && !e.schedule && now - e.createdAt > GC_AGE_MS));
-  if (entries.length < before) {
-    changed = true;
-    logInfo(TAG, `🗑️ GC: pruned ${before - entries.length} old fired entries`);
+  for (const e of entries) {
+    if (e.fired && !e.schedule && now - e.createdAt > GC_AGE_MS) {
+      dbRemoveEntry(e.id);
+      logInfo(TAG, `🗑️ GC: pruned old fired entry ${e.id}`);
+    }
   }
-
-  // Sort: high → medium → low
-  const prioRank: Record<string, number> = { high: 0, medium: 1, low: 2 };
-  entries.sort((a, b) => {
-    const pa = prioRank[a.priority ?? "medium"] ?? 1;
-    const pb = prioRank[b.priority ?? "medium"] ?? 1;
-    if (pa !== pb) return pa - pb;
-    return (b.fireAt ?? 0) - (a.fireAt ?? 0);
-  });
+  entries = entries.filter(e => !(e.fired && !e.schedule && now - e.createdAt > GC_AGE_MS));
 
   for (const entry of entries) {
     if (entry.fired || entry.paused || entry.fireAt > now) continue;
 
-    // Advance fireAt
     entry.lastRanAt = now;
-    entry._prevFireAt = entry.fireAt;
-    // Advance fireAt to next schedule
     const wasRetry = !!entry._retrying;
     if (entry.schedule) {
       try {
@@ -107,7 +85,6 @@ export function checkCron(): CronEntry[] {
       entry.fired = true;
     }
     delete entry._retrying;
-    changed = true;
 
     if (entry.type === "reminder") {
       appendReminder({ chatId: entry.chatId, message: entry.message, createdAt: now });
@@ -117,9 +94,10 @@ export function checkCron(): CronEntry[] {
       recordRun(entry);
       dueTasks.push({ ...entry, _retrying: wasRetry || undefined });
     }
+
+    writeEntry(entry);
   }
 
-  if (changed) writeCron(entries);
   return dueTasks;
 }
 

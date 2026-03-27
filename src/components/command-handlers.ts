@@ -37,6 +37,7 @@ export interface CommandContext {
   codingMode: CodingMode;
   idleSave: IdleSave;
   cronCurrentJob?: RunningJob | null;
+  enqueueCron?: (entryId: string) => string | null;
   // Mutable state
   busyChats: Set<string>;
   fullModeChats: Set<string>;
@@ -219,6 +220,29 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     return true;
   }
 
+  // /cron trigger <id>
+  if (text.startsWith("/cron trigger ")) {
+    const id = text.slice(14).trim();
+    if (!id) { await ctx.reply("Usage: /trigger <cron-id>"); return true; }
+    const err = ctx.enqueueCron?.(id);
+    await ctx.reply(err ?? `✅ Triggered ${id}`);
+    return true;
+  }
+
+  // /cron log <id>
+  if (text.startsWith("/cron log ")) {
+    const id = text.slice(10).trim();
+    try {
+      const raw = execSync(`agentbridge-cron history ${id}`, { timeout: 5000, encoding: "utf-8" }).trim();
+      const data = JSON.parse(raw);
+      if (!data.ok) { await ctx.reply(`❌ ${data.error}`); return true; }
+      const runs = (data.runs as { ranAt: string; exitCode?: number }[]).slice(-5);
+      const lines = runs.map(r => `${r.ranAt}  exit=${r.exitCode ?? "?"}`);
+      await ctx.reply(`📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``, { parseMode: "Markdown" });
+    } catch { await ctx.reply("❌ Failed to read history"); }
+    return true;
+  }
+
   // /memory
   if (text === "/memory") {
     if (!ctx.memory) { await ctx.reply("🧠 Memory is disabled."); return true; }
@@ -275,6 +299,8 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       "/stop — Stop current response (Ctrl+C)",
       "/memory — Memory storage statistics",
       "/cron — Scheduled tasks",
+      "/cron log <id> — Last 5 runs for a task",
+      "/cron trigger <id> — Manually fire a cron task",
       "/facts — Core knowledge (user profile + agent notes)",
       "/coding — Switch to Opus coding agent",
       "/default — Switch back to KP",

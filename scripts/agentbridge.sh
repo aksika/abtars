@@ -64,7 +64,24 @@ if [ -x "$AB_HOME/scripts/doctor.sh" ]; then
   echo ""
 fi
 
-# --- start the bridge ---
+# --- start the bridge with auto-restart ---
 echo "🌉 Starting bridge..."
 cd "$PROJECT_DIR"
-exec node dist/main.js "${ARGS[@]}"
+MAX_RESTARTS=10
+RESTART_DELAY=5
+restarts=0
+while true; do
+  node dist/main.js "${ARGS[@]}"
+  exit_code=$?
+  if [ $exit_code -eq 0 ]; then
+    echo "Bridge exited cleanly."
+    break
+  fi
+  restarts=$((restarts + 1))
+  if [ $restarts -ge $MAX_RESTARTS ]; then
+    echo "❌ Bridge crashed $MAX_RESTARTS times — giving up."
+    break
+  fi
+  echo "⚠️ Bridge crashed (exit $exit_code) — restarting in ${RESTART_DELAY}s ($restarts/$MAX_RESTARTS)"
+  sleep $RESTART_DELAY
+done

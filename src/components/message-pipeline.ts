@@ -42,6 +42,7 @@ export interface PipelineDeps {
   seenSessions: Set<string>;
   updateCtxStart: (memoryDir: string, chatId: number) => void;
   cronCurrentJob?: () => RunningJob | null;
+  enqueueCron?: (entryId: string) => string | null;
 }
 
 /**
@@ -100,6 +101,7 @@ export async function handleInboundMessage(
     busyChats, fullModeChats, pendingSessionStart,
     updateCtxStart,
     cronCurrentJob: deps.cronCurrentJob?.() ?? null,
+    enqueueCron: deps.enqueueCron,
     conversationBuffer: isGroup ? conversationBuffer : undefined,
     bufKey: isGroup ? `${msg.platform}:${channelId}` : undefined,
   };
