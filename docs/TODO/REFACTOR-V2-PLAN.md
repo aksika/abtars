@@ -3,6 +3,22 @@
 Branch: `refactor/system-engineering-v2`
 Created: 2026-03-27
 
+## Status
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| A1 | `/trigger <id>` command | ✅ Done |
+| A2 | Cron failure notifications | ✅ Done |
+| A3 | Startup orphan kill | ✅ Done |
+| A4 | Auto-restart launcher | ✅ Done |
+| B1 | CronQueue reuses AcpTransport | ✅ Done |
+| C1 | Cron state to SQLite | ✅ Done |
+| C2 | `/cron log <id>` command | ✅ Done |
+| D1 | Extract BridgeApp from main.ts | Deferred |
+| D2 | Structured logging | Deferred |
+| D3 | Dashboard static files | ✅ Done |
+| E1 | Test coverage for critical files | Not started |
+
 ## Execution Order
 
 ### Phase A: Quick Wins (1-2 hours, immediate pain relief)
