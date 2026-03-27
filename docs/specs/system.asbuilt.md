@@ -53,6 +53,34 @@ Telegram/Discord → PlatformAdapter.start() → onMessage callback
 
 All user-facing timestamps use local time (not UTC). `localDate()` in `env-utils.ts` for YYYY-MM-DD, `localIso()` in `logger.ts` for full timestamps. Data storage (memory DB, recall) stays UTC.
 
+### Logging
+
+Source: `src/components/logger.ts`
+
+Centralized logger with `logInfo`, `logWarn`, `logError`, `logDebug`. Console output is always human-readable. File output (`~/.agentbridge/logs/bridge.log`) supports two formats:
+- `LOG_FORMAT=text` (default): `2026-03-27T17:15:56.888 INFO  [tag] message`
+- `LOG_FORMAT=json`: `{"ts":"...","level":"info","tag":"...","msg":"..."}`
+
+### Entry Point
+
+- `src/main.ts` (11 lines) — entry point, calls `startBridge()`
+- `src/bridge-app.ts` (622 lines) — all wiring: config, transport, adapters, heartbeat, dashboard, shutdown
+
+### Dashboard
+
+- `src/components/dashboard-ui.ts` (311 lines) — HTML fragments with dynamic parts
+- `src/public/dashboard.css` (492 lines) — static CSS
+- `src/public/dashboard.js` (552 lines) — static JS
+- Build copies `src/public/` → `dist/public/` automatically
+
+### Startup
+
+1. Kill orphaned `kiro-cli acp` processes from previous runs
+2. Initialize transport (ACP or tmux)
+3. Initialize memory, browser, platforms
+4. Start heartbeat (3-min uptime guard before first tick)
+5. Auto-restart on crash (launcher retries up to 10 times, 5s delay)
+
 ---
 
 ## Todo System
@@ -117,7 +145,7 @@ File: `src/cli/agentbridge-todo.test.ts` — 7 tests covering add, list, done, r
 
 ### Overview
 
-A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. A unified `HeartbeatSystem` (5-min interval, owned by `main.ts`, 3-minute uptime guard) is the single owner of cron scanning — no startup check, no duplicate paths. Due reminders are injected into conversation; due tasks are processed by `CronQueue`.
+A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. A unified `HeartbeatSystem` (5-min interval, owned by `bridge-app.ts`, 3-minute uptime guard) is the single owner of cron scanning — no startup check, no duplicate paths. Due reminders are injected into conversation; due tasks are processed by `CronQueue`.
 
 ### Architecture
 
@@ -125,13 +153,23 @@ A time-based scheduling system for reminders and tasks. The agent creates cron e
 User: "remind me tomorrow at 8am"
   → Agent → execute_bash: agentbridge-cron add --at "2026-03-16T08:00" --message "..." --chat-id 123 --type reminder
                                                         ↓
-                                          ~/.agentbridge/memory/cron.json
+                                          ~/.agentbridge/memory/memory.db (cron_entries table)
 
 Every 5 min (HeartbeatSystem — cron task, skips first 3 min of uptime):
-  → checkCron() reads cron.json, returns due entries
+  → checkCron() reads cron_entries from SQLite, returns due entries
   → Due reminders → pending_reminders.json → injected as synthetic message
   → Due tasks → cronQueue.enqueue(entry) → sequential processing
 ```
+
+### Cron Storage — SQLite
+
+Source: `src/components/cron-db.ts`
+
+Cron entries are stored in the `cron_entries` table in `memory.db` (same database as the memory system). Replaces the old `cron.json` file — eliminates race conditions from concurrent read-modify-write by multiple processes.
+
+**Migration:** On first use, `cron-db.ts` auto-imports `cron.json` → SQLite and renames the file to `cron.json.migrated`.
+
+**Functions:** `readEntries()`, `readEntry(id)`, `writeEntry(e)`, `removeEntry(id)`, `recordRun(id, exitCode)`, `closeDb()`.
 
 ### CronQueue — Sequential Job Processor
 
@@ -145,16 +183,15 @@ Replaces inline task spawning. All task execution goes through the queue.
 - Duplicate prevention: same entry ID can't be queued or running twice
 - 30-min hard timeout on agent tasks (SIGKILL)
 - Retry once on failure: sets `fireAt = now + 10min` + `_retrying = true`. If retry also fails, waits for next scheduled time
-- Exit codes persisted to `cron.json` history via `recordRunToFile()`
+- Exit codes persisted to SQLite history via `cron-db.recordRun()`
 
-**Agent task flow (JSON-RPC over stdio):**
-1. Spawn `kiro-cli acp --agent professor`
-2. `initialize` → wait for response
-3. `session/new` with `{ cwd, mcpServers: [] }` — `mcpServers` is required or kiro-cli hangs
-4. `session/prompt` with `{ sessionId, prompt: [{ type: "text", text }] }`
-5. Close stdin, read output until exit
-6. Run DoD checks if task has `taskFile`
-7. Record exit code to history
+**Agent task flow (via AcpTransport):**
+1. Create fresh `AcpTransport` instance (same pattern as CodingMode)
+2. `transport.initialize()` → spawns `kiro-cli acp --agent professor`
+3. `transport.sendPrompt(sessionKey, prompt)` — handles session creation + prompt
+4. `transport.destroy()` — kills the process
+5. Run DoD checks if task has `taskFile`
+6. Record exit code to history
 
 **Script task flow:**
 1. `spawn("bash", ["-c", entry.message])`
@@ -224,42 +261,26 @@ Deployed to: `~/.local/bin/agentbridge-cron` (via `scripts/deploy.sh`)
 
 Output: JSON on stdout.
 
-### File Format
+### Data Format
 
-Path: `~/.agentbridge/memory/cron.json`
+Stored in `cron_entries` table in `~/.agentbridge/memory/memory.db` (SQLite).
 
-```json
-[
-  {
-    "id": "a1b2c3",
-    "fireAt": 1773580800000,
-    "message": "Remind user about cookies",
-    "chatId": 7773842843,
-    "type": "reminder",
-    "fired": false,
-    "createdAt": 1773535000000
-  }
-]
-```
+Columns: `id`, `fire_at`, `message`, `chat_id`, `type`, `executor`, `schedule`, `priority`, `task_file`, `paused`, `fired`, `created_at`, `last_ran_at`, `retry_after`, `retrying`, `history` (JSON array).
 
-- `fireAt`: epoch milliseconds (auto-computed from `schedule` for recurring entries)
-- `executor`: `"agent"` (default — processed by CronQueue, spawns kiro-cli) or `"script"` (runs `bash -c` directly). Only meaningful for `type: "task"`.
-- `schedule`: optional cron expression (e.g. `"30 7 * * *"`). When present, entry reschedules after firing instead of being marked `fired: true`.
-- `paused`: optional boolean. When true, entry is skipped by `checkCron()`.
-- `lastRanAt`: epoch ms, updated each time the entry fires.
-- `history`: last 10 runs as `{ ts, exitCode? }[]`. Exit codes recorded by CronQueue for script and agent tasks.
-- `taskFile`: optional path to task description `.md` file (agent tasks only).
-- `_retrying`: internal flag for one-time retry tracking.
+- `fire_at`: epoch milliseconds (auto-computed from `schedule` for recurring entries)
+- `executor`: `"agent"` (default — processed by CronQueue via AcpTransport) or `"script"` (runs `bash -c` directly)
+- `schedule`: optional cron expression (e.g. `"30 7 * * *"`). When present, entry reschedules after firing.
+- `task_file`: optional path to task description `.md` file (agent tasks only).
+- `history`: JSON array, last 10 runs as `[{ ts, exitCode? }]`. Exit codes recorded by CronQueue.
+- `retrying`: internal flag for one-time retry tracking.
 - Fired one-shot entries (no `schedule`) are GC'd after 7 days.
-- `type`: `"reminder"` (injected into conversation) or `"task"` (spawns subagent)
-- `fired`: set to `true` once processed, entry stays in file for audit
 
 ### Cron Checker
 
 Source: `src/components/cron-checker.ts`
-Wired in: `src/main.ts` — registered as `cron` task in the unified `HeartbeatSystem` (5-min interval)
+Wired in: `src/bridge-app.ts` — registered as `cron` task in the unified `HeartbeatSystem` (5-min interval)
 
-`checkCron()` is a pure scanner: reads `cron.json`, fires reminders (writes to `pending_reminders.json`), returns due task entries. No spawning — that's CronQueue's job.
+`checkCron()` is a pure scanner: reads `cron_entries` from SQLite, fires reminders, returns due task entries. No spawning — that's CronQueue's job.
 
 **Reminder flow:**
 1. `checkCron()` finds entries where `fireAt <= now` and `fired === false`
@@ -304,8 +325,9 @@ All scheduling goes through `agentbridge-cron` CLI — never host crontab.
 ### Tests
 
 - `src/cli/agentbridge-cron.test.ts` — 7 tests: add, list, remove, error cases, default type
-- `src/components/cron-checker.test.ts` — 6 tests: fire due reminder, skip future, skip fired, fire task, missing file, clear reminders
-- `src/components/cron-queue.test.ts` — tests: enqueue, dedup, priority sort, script execution, timeout
+- `src/components/cron-checker.test.ts` — 14 tests: reminders, tasks, recurring, GC, empty DB
+- `src/components/cron-queue.test.ts` — tests: enqueue, dedup, priority sort, script execution
+- `src/components/command-handlers.test.ts` — 12 tests: /new, /coding, /trigger, /status, /help, etc.
 
 ---
 
@@ -490,7 +512,9 @@ All commands handled by `src/components/command-handlers.ts` — single module f
 | /stop, /cancel | both | Send Ctrl+C interrupt |
 | /restart | both | Restart Kiro (tmux only) |
 | /memory | both | Memory storage statistics |
-| /cron | both | Scheduled tasks (internal cron.json) |
+| /cron | both | Scheduled tasks overview with status icons |
+| /cron log \<id\> | both | Last 5 runs with exit codes for a task |
+| /trigger \<id\> | both | Manually fire a cron task immediately |
 | /facts | both | Core knowledge (user profile + agent notes) |
 | /coding | both | Switch to Opus coding agent |
 | /default | both | Switch back to KP |
