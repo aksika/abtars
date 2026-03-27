@@ -303,7 +303,7 @@ Cron task descriptions (the long message strings that tell the agent what to do)
 
 ## 40. NotebookLM binary location
 
-**Status:** Not started
-**Priority:** Medium
+**Status:** ✅ Closed — already standalone
+**Priority:** N/A
 
-NotebookLM binary currently lives in openclaw. Must be standalone in AgentBridge — no cross-repo dependency.
+Investigated: `nlm` is installed via `pipx` as `notebooklm-mcp-cli 0.4.1` (PyPI package). Symlinked at `~/.local/bin/nlm`. No dependency on openclaw.
