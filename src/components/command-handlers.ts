@@ -299,6 +299,8 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       "/stop — Stop current response (Ctrl+C)",
       "/memory — Memory storage statistics",
       "/cron — Scheduled tasks",
+      "/cron log <id> — Last 5 runs for a task",
+      "/trigger <id> — Manually fire a cron task",
       "/facts — Core knowledge (user profile + agent notes)",
       "/coding — Switch to Opus coding agent",
       "/default — Switch back to KP",
@@ -319,7 +321,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   // Unknown command guard
   if (text.startsWith("/") && /^\/\w+/.test(text) && !text.startsWith("//")) {
     const cmd = text.split(/\s/)[0]!;
-    const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/memory", "/cron", "/facts", "/coding", "/default", "/nlm", "/full", "/short", "/a2a-reset", "/help"];
+    const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/memory", "/cron", "/facts", "/coding", "/default", "/nlm", "/full", "/short", "/a2a-reset", "/help", "/trigger"];
     if (!known.includes(cmd)) {
       await ctx.reply(`❓ Unknown command: ${cmd}\nType /help for available commands.`);
       return true;
