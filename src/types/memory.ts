@@ -156,6 +156,7 @@ export type MemorySearchResult = {
   trust?: number;
   integrity?: number;
   credibility?: number;
+  classification?: number;
 };
 
 /** Heartbeat task definition. */

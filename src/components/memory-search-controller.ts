@@ -241,6 +241,7 @@ export class MemorySearchController {
       trust: r.trust,
       integrity: r.integrity,
       credibility: r.credibility,
+      classification: r.classification,
     }));
   }
 
@@ -287,6 +288,7 @@ export class MemorySearchController {
       trust: r.trust,
       integrity: r.integrity,
       credibility: r.credibility,
+      classification: r.classification,
     }));
   }
 }

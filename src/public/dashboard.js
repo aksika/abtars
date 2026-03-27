@@ -409,6 +409,10 @@ function formatBytes(bytes) {
           '<span class="source">' + escHtml(r.source) + '</span> ' +
           '<span class="source">' + escHtml(r.date) + '</span>';
         if (r.memoryType) meta += ' <span class="source">' + r.memoryType + '</span>';
+        if (r.classification != null && r.classification > 0) {
+          var cls = ['U','R','C','S'][r.classification] || '?';
+          meta += ' <span class="source" style="color:' + (r.classification >= 2 ? '#f44336' : '#aaa') + ';">' + cls + '</span>';
+        }
         if (r.trust != null) meta += ' T:' + r.trust;
         if (r.credibility != null) meta += ' C:' + r.credibility;
         if (r.integrity != null) meta += ' I:' + r.integrity;

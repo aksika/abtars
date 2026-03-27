@@ -286,7 +286,7 @@ export class MemoryIndex {
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
                em.source_timestamp, em.preserve_original, em.emotion_score,
                em.recall_count, em.relevance_score, em.source_message_ids,
-               em.trust, em.integrity, em.credibility, rank
+               em.trust, em.integrity, em.credibility, em.classification, rank
         FROM extracted_memories em
         JOIN extracted_memories_fts ON extracted_memories_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
@@ -312,6 +312,7 @@ export class MemoryIndex {
         trust: number | null;
         integrity: number | null;
         credibility: number | null;
+        classification: number | null;
         rank: number;
       }>;
 
@@ -330,6 +331,7 @@ export class MemoryIndex {
           trust: row.trust ?? 0,
           integrity: row.integrity ?? 2,
           credibility: row.credibility ?? 6,
+          classification: row.classification ?? 1,
           tier: "extracted" as const,
           score: (bm25Score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * (0.5 + 0.5 * (row.trust ?? 0) / 3) * (row.credibility !== null && row.credibility <= 2 ? 1.25 : 1),
         };
@@ -379,7 +381,7 @@ export class MemoryIndex {
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
                em.source_timestamp, em.preserve_original, em.emotion_score,
                em.recall_count, em.relevance_score, em.source_message_ids,
-               em.trust, em.integrity, em.credibility, rank
+               em.trust, em.integrity, em.credibility, em.classification, rank
         FROM extracted_memories em
         JOIN extracted_memories_original_fts ON extracted_memories_original_fts.rowid = em.id
         WHERE ${conditions.join(" AND ")}
@@ -405,6 +407,7 @@ export class MemoryIndex {
         trust: number | null;
         integrity: number | null;
         credibility: number | null;
+        classification: number | null;
         rank: number;
       }>;
 
@@ -429,6 +432,7 @@ export class MemoryIndex {
           trust: row.trust ?? 0,
           integrity: row.integrity ?? 2,
           credibility: row.credibility ?? 6,
+          classification: row.classification ?? 1,
           tier: "extracted" as const,
           score,
         };
