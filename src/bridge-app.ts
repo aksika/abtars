@@ -374,7 +374,8 @@ export async function startBridge(): Promise<void> {
   const cronCallback = (chatId: number, message: string, result: string): void => {
     if (platforms.telegram && telegramAdapter) {
       const icon = result.startsWith("✅") || result.includes("DoD: PASSED") ? "✅" : "❌";
-      telegramAdapter.sendMessage(String(chatId), `${icon} Cron: ${message}\n\n${result}`).catch(err => {
+      const cleanResult = result.replace(/^[✅❌]\s*/, "").trim();
+      telegramAdapter.sendMessage(String(chatId), `${icon} Cron: ${message}\n\n${cleanResult}`).catch(err => {
         logWarn("main", `Cron task TG report failed: ${err}`);
       });
     }
