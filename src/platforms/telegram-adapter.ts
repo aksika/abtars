@@ -166,7 +166,9 @@ export class TelegramAdapter implements PlatformAdapter {
 
     const hasText = Boolean(message.text);
     const hasVoice = Boolean(message.voice || message.audio);
-    if (!hasText && !hasVoice) return;
+    const hasPhoto = Boolean(message.photo?.length);
+    const hasDocument = Boolean(message.document);
+    if (!hasText && !hasVoice && !hasPhoto && !hasDocument) return;
 
     const chatId = message.chat.id;
     const isGroup = message.chat.type === "group" || message.chat.type === "supergroup";
@@ -257,6 +259,40 @@ export class TelegramAdapter implements PlatformAdapter {
       return;
     }
 
+    // --- Photo/document handling ---
+    let mediaPath: string | undefined;
+
+    if ((hasPhoto || hasDocument) && this.securityGate.authorize(message)) {
+      try {
+        const { saveInboundMedia } = await import("../components/media-utils.js");
+        let fileId: string;
+        let extHint: string | undefined;
+        let claimedMime: string | undefined;
+
+        if (hasPhoto) {
+          const photo = message.photo![message.photo!.length - 1]!;
+          fileId = photo.file_id;
+          extHint = ".jpg";
+        } else {
+          fileId = message.document!.file_id;
+          extHint = message.document!.file_name ? "." + (message.document!.file_name.split(".").pop() ?? "") : undefined;
+          claimedMime = message.document!.mime_type;
+        }
+
+        const buf = await this.downloadVoice(fileId); // reuse file download
+        const saved = await saveInboundMedia(buf, chatId, { extHint, claimedMime });
+        if (saved) {
+          mediaPath = saved.path;
+          if (!text) text = message.caption ?? `User sent a ${saved.isImage ? "photo" : "file"}.`;
+        } else {
+          if (!text) text = "⚠️ File too large (max 16MB).";
+        }
+      } catch (err) {
+        logWarn(TAG, `Media download failed: ${err instanceof Error ? err.message : String(err)}`);
+        if (!text) text = "⚠️ Failed to download media.";
+      }
+    }
+
     // --- Dispatch to pipeline ---
     const inbound: InboundMessage = {
       platform: "telegram",
@@ -271,6 +307,7 @@ export class TelegramAdapter implements PlatformAdapter {
       isGroup,
       isVoice: isVoiceNote,
       voiceFileId,
+      mediaPath,
       rawPlatformData: message,
     };
 
