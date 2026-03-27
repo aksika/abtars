@@ -5,7 +5,7 @@ function formatBytes(bytes) {
   var i = Math.floor(Math.log(bytes) / Math.log(k));
   if (i >= sizes.length) i = sizes.length - 1;
   return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
-}`;
+}
 
 (function() {
   // ── Auth Token ──────────────────────────────────────────────────────
