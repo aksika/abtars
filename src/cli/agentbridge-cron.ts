@@ -156,7 +156,7 @@ function listEntries(): void {
     ...(e.priority ? { priority: e.priority } : {}),
     ...(e.paused ? { paused: true } : {}),
     ...(e.lastRanAt ? { lastRanAt: new Date(e.lastRanAt).toISOString() } : {}),
-    ...(e.history?.length ? { lastExit: e.history[e.history.length - 1]!.exitCode ?? null } : {}),
+    ...(e.history?.length ? { history: e.history } : {}),
   }));
   console.log(JSON.stringify({ ok: true, entries: display }));
 }
