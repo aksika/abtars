@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { spawn, execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { spawn, execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
 
@@ -167,6 +168,8 @@ async function main(): Promise<void> {
       config.tmuxMaxWaitSec,
     );
   } else {
+    // Kill orphaned kiro-cli acp processes from previous runs
+    try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
     logInfo("main", "🔌 ACP transport");
     transport = new AcpTransport(config.kiroCLIPath, config.workingDir);
   }
@@ -263,6 +266,15 @@ async function main(): Promise<void> {
     sttConfig, ttsConfig,
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
     cronCurrentJob: () => cronQueue.currentJob,
+    enqueueCron: (entryId: string): string | null => {
+      try {
+        const entries: import("./cli/agentbridge-cron.js").CronEntry[] = JSON.parse(readFileSync(join(homedir(), ".agentbridge", "memory", "cron.json"), "utf-8"));
+        const entry = entries.find(e => e.id === entryId);
+        if (!entry) return `❌ Entry ${entryId} not found`;
+        cronQueue.enqueue(entry, cronCallback);
+        return null;
+      } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
+    },
   };
 
   // --- Telegram service ---
@@ -377,7 +389,8 @@ async function main(): Promise<void> {
 
   const cronCallback = (chatId: number, message: string, result: string): void => {
     if (platforms.telegram && telegramAdapter) {
-      telegramAdapter.sendMessage(String(chatId), `✅ Cron task completed: ${message}\n\n${result}`).catch(err => {
+      const icon = result.startsWith("✅") || result.includes("DoD: PASSED") ? "✅" : "❌";
+      telegramAdapter.sendMessage(String(chatId), `${icon} Cron: ${message}\n\n${result}`).catch(err => {
         logWarn("main", `Cron task TG report failed: ${err}`);
       });
     }

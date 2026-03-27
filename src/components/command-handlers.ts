@@ -37,6 +37,7 @@ export interface CommandContext {
   codingMode: CodingMode;
   idleSave: IdleSave;
   cronCurrentJob?: RunningJob | null;
+  enqueueCron?: (entryId: string) => string | null;
   // Mutable state
   busyChats: Set<string>;
   fullModeChats: Set<string>;
@@ -216,6 +217,15 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.message}`;
     }
     await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "Markdown" });
+    return true;
+  }
+
+  // /trigger <id>
+  if (text.startsWith("/trigger ")) {
+    const id = text.slice(9).trim();
+    if (!id) { await ctx.reply("Usage: /trigger <cron-id>"); return true; }
+    const err = ctx.enqueueCron?.(id);
+    await ctx.reply(err ?? `✅ Triggered ${id}`);
     return true;
   }
 
