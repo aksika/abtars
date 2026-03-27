@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp -r src/public dist/",
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
@@ -22,6 +22,7 @@
     "cron-parser": "^5.5.0",
     "discord.js": "^14.25.1",
     "dotenv": "^16.4.7",
+    "file-type": "^22.0.0",
     "patchright": "^1.58.2",
     "pdf-parse": "^2.4.5",
     "rettiwt-api": "^6.2.1",
