@@ -293,14 +293,13 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
   const filtered: string[] = [];
   for (let i = allLines.length - 1; i >= 0 && filtered.length < limit; i--) {
     const line = allLines[i]!;
-    // Format: 2026-03-23T19:20:10.123Z INFO  [tag] message
-    const ts = line.slice(0, 24);
-    // Skip lines that don't start with a timestamp (stack traces, continuations)
-    if (ts.length < 24 || ts[4] !== "-" || ts[10] !== "T") continue;
-    if (ts < cutoffIso) break; // lines are chronological, stop early
+    // Format: 2026-03-27T23:51:06.548 INFO  [tag] message (local time, no Z)
+    const ts = line.slice(0, 23);
+    if (ts.length < 23 || ts[4] !== "-" || ts[10] !== "T") continue;
+    if (ts < cutoffIso) break;
 
     if (levelFilter.length > 0) {
-      const level = line.slice(25, 30).trim().toLowerCase();
+      const level = line.slice(24, 29).trim().toLowerCase();
       if (!levelFilter.includes(level)) continue;
     }
     filtered.push(line);
