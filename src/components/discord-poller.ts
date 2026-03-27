@@ -90,5 +90,8 @@ function toDiscordInboundMessage(raw: Message, botId: string | null): DiscordInb
     timestamp: raw.createdTimestamp,
     mentionsBotId,
     mentionsEveryone: raw.mentions.everyone,
+    attachments: raw.attachments.size > 0
+      ? [...raw.attachments.values()].map(a => ({ url: a.url, filename: a.name ?? "file", contentType: a.contentType ?? undefined, size: a.size }))
+      : undefined,
   };
 }
