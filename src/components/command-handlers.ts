@@ -204,9 +204,8 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
         const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
         const running = ctx.cronCurrentJob?.entryId === e.id;
         const tick = !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
-        const prio = (e.priority ?? "medium").toUpperCase().padEnd(6);
-        const label = e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 40);
-        return `${tick}  ${prio}  ${sched.padEnd(15)}  ${label}`;
+        const label = e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
+        return `${tick}  ${e.id}  ${sched.padEnd(15)}  ${label}`;
       });
       listing = lines.length > 0 ? "```\n" + lines.join("\n") + "\n```" : "(no active entries)";
     } catch { listing = "(failed to read cron)"; }
