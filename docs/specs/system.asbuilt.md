@@ -8,6 +8,53 @@ For the memory subsystem, see [Memory.asbuilt.md](Memory.asbuilt.md).
 
 ---
 
+## Platform Abstraction
+
+### Overview
+
+All messaging platforms implement the `PlatformAdapter` interface. A shared `handleInboundMessage()` pipeline processes messages identically regardless of source. Adding a new platform (Slack, WhatsApp) is ~100 lines implementing the adapter.
+
+### Architecture
+
+```
+Telegram/Discord → PlatformAdapter.start() → onMessage callback
+  → handleInboundMessage(msg, adapter, deps)
+    → voice STT → command check → sleep queue → prompt build
+    → transport.sendPrompt() → streaming → response delivery
+    → memory persist → TTS → auto-compact
+```
+
+### Key Types (`src/types/platform.ts`)
+
+- `PlatformAdapter`: `name`, `capabilities`, `start()`, `stop()`, `authorize()`, `sendMessage()`, `chunkResponse()`, optional `sendTyping()`, `setReaction()`, `downloadVoice()`, `sendVoice()`, `injectMessage()`
+- `InboundMessage`: `text`, `chatId`, `userId`, `platform`, `messageId`, `isVoice?`, `voiceFileId?`, `isGroup?`
+- `PlatformCapabilities`: `voice`, `reactions`, `typing`, `tts`, `groups`
+
+### Adapters
+
+| Adapter | Source | Capabilities |
+|---------|--------|-------------|
+| `TelegramAdapter` | `src/platforms/telegram-adapter.ts` | voice, reactions, groups, typing, TTS |
+| `DiscordAdapter` | `src/platforms/discord-adapter.ts` | reactions (emoji scoring), A2A, mention stripping |
+
+### Message Pipeline (`src/components/message-pipeline.ts`)
+
+`handleInboundMessage()` — shared flow for all platforms. Dependencies injected via `PipelineDeps`.
+
+### Extracted Components
+
+| Component | Source | Purpose |
+|-----------|--------|---------|
+| `SleepQueue` | `src/components/sleep-queue.ts` | Queue messages during sleep, replay via adapters |
+| `CodingMode` | `src/components/coding-mode.ts` | Lazy AcpTransport lifecycle for coding agent |
+| `IdleSave` | `src/components/idle-save.ts` | Timer management + chat save on idle |
+
+### Timestamps
+
+All user-facing timestamps use local time (not UTC). `localDate()` in `env-utils.ts` for YYYY-MM-DD, `localIso()` in `logger.ts` for full timestamps. Data storage (memory DB, recall) stays UTC.
+
+---
+
 ## Todo System
 
 ### Overview
@@ -70,7 +117,7 @@ File: `src/cli/agentbridge-todo.test.ts` — 7 tests covering add, list, done, r
 
 ### Overview
 
-A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. A unified `HeartbeatSystem` (5-min interval, owned by `main.ts`) fires due entries: reminders are injected into the conversation as synthetic messages; tasks spawn a kiro-cli subprocess and report results via Telegram.
+A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. A unified `HeartbeatSystem` (5-min interval, owned by `main.ts`, 3-minute uptime guard) is the single owner of cron scanning — no startup check, no duplicate paths. Due reminders are injected into conversation; due tasks are processed by `CronQueue`.
 
 ### Architecture
 
@@ -80,11 +127,85 @@ User: "remind me tomorrow at 8am"
                                                         ↓
                                           ~/.agentbridge/memory/cron.json
 
-Every 5 min (main.ts HeartbeatSystem — cron-checker + reminder-injector tasks):
-  → checkCron() reads cron.json
-  → Due reminders → pending_reminders.json → injected as synthetic TelegramUpdate
-  → Due tasks → spawn kiro-cli acp → on exit, send TG report
+Every 5 min (HeartbeatSystem — cron task, skips first 3 min of uptime):
+  → checkCron() reads cron.json, returns due entries
+  → Due reminders → pending_reminders.json → injected as synthetic message
+  → Due tasks → cronQueue.enqueue(entry) → sequential processing
 ```
+
+### CronQueue — Sequential Job Processor
+
+Source: `src/components/cron-queue.ts`
+
+Replaces inline task spawning. All task execution goes through the queue.
+
+**Behavior:**
+- Scripts and agents run sequentially — never concurrent
+- Priority-sorted: high jobs jump ahead of pending medium/low
+- Duplicate prevention: same entry ID can't be queued or running twice
+- 30-min hard timeout on agent tasks (SIGKILL)
+- Retry once on failure: sets `fireAt = now + 10min` + `_retrying = true`. If retry also fails, waits for next scheduled time
+- Exit codes persisted to `cron.json` history via `recordRunToFile()`
+
+**Agent task flow (JSON-RPC over stdio):**
+1. Spawn `kiro-cli acp --agent professor`
+2. `initialize` → wait for response
+3. `session/new` with `{ cwd, mcpServers: [] }` — `mcpServers` is required or kiro-cli hangs
+4. `session/prompt` with `{ sessionId, prompt: [{ type: "text", text }] }`
+5. Close stdin, read output until exit
+6. Run DoD checks if task has `taskFile`
+7. Record exit code to history
+
+**Script task flow:**
+1. `spawn("bash", ["-c", entry.message])`
+2. Capture stdout+stderr
+3. Record exit code to history
+
+### Task Descriptions (`tasks/` folder)
+
+Agent cron tasks reference a `.md` file instead of embedding instructions inline in `cron.json`.
+
+| File | Cron ID | Schedule |
+|------|---------|----------|
+| `tasks/daily-ai-report.md` | `02565e` | `0 10 * * *` |
+| `tasks/weekly-ai-report.md` | `1672b4` | `15 12 * * 0` |
+| `tasks/finance-daily.md` | `7517d6` | `0 13 * * 1-5` |
+
+**CronEntry fields:**
+- `taskFile?: string` — path to `.md` file (relative to WORKING_DIR)
+- `message: string` — short label for display (e.g. "Daily AI report")
+
+**Task file format:**
+```markdown
+# Task Title
+
+Instructions for the agent...
+Uses {today} placeholder → substituted with YYYY-MM-DD local date at runtime.
+
+## Definition of Done
+- ~/.agentbridge/reports/AI-Daily-{today}.md
+```
+
+**DoD checks** (after agent exits):
+- Each line under `## Definition of Done` is a file path
+- `{today}` substituted with local date
+- Check: file exists + size > 100 bytes
+- Pass → exitCode 0, Fail → exitCode 1 + retry
+
+Deploy: `scripts/deploy.sh` copies `tasks/*.md` to `~/.agentbridge/tasks/`.
+
+### `/cron` Display
+
+Source: `src/components/command-handlers.ts`
+
+Status icons per task:
+- `✓` — succeeded (exitCode 0 in today's history)
+- `~` — currently running (checked via `cronCurrentJob`)
+- `✗` — failed or orphaned (started today, no success, not running)
+- `+` — pending, hasn't run yet today
+- `—` — not scheduled today (day-of-week mismatch)
+
+Sorted chronologically by schedule time. Shows running job PID + duration.
 
 ### CLI: `agentbridge-cron`
 
@@ -122,11 +243,13 @@ Path: `~/.agentbridge/memory/cron.json`
 ```
 
 - `fireAt`: epoch milliseconds (auto-computed from `schedule` for recurring entries)
-- `executor`: `"agent"` (default — spawns kiro-cli) or `"script"` (runs `bash -c` directly). Only meaningful for `type: "task"`.
+- `executor`: `"agent"` (default — processed by CronQueue, spawns kiro-cli) or `"script"` (runs `bash -c` directly). Only meaningful for `type: "task"`.
 - `schedule`: optional cron expression (e.g. `"30 7 * * *"`). When present, entry reschedules after firing instead of being marked `fired: true`.
 - `paused`: optional boolean. When true, entry is skipped by `checkCron()`.
 - `lastRanAt`: epoch ms, updated each time the entry fires.
-- `history`: last 10 runs as `{ ts, exitCode? }[]`. Exit codes recorded for script and agent tasks.
+- `history`: last 10 runs as `{ ts, exitCode? }[]`. Exit codes recorded by CronQueue for script and agent tasks.
+- `taskFile`: optional path to task description `.md` file (agent tasks only).
+- `_retrying`: internal flag for one-time retry tracking.
 - Fired one-shot entries (no `schedule`) are GC'd after 7 days.
 - `type`: `"reminder"` (injected into conversation) or `"task"` (spawns subagent)
 - `fired`: set to `true` once processed, entry stays in file for audit
@@ -134,20 +257,21 @@ Path: `~/.agentbridge/memory/cron.json`
 ### Cron Checker
 
 Source: `src/components/cron-checker.ts`
-Wired in: `src/main.ts` — registered as `cron-checker` task in the unified `HeartbeatSystem` (5-min interval) + one startup check
+Wired in: `src/main.ts` — registered as `cron` task in the unified `HeartbeatSystem` (5-min interval)
+
+`checkCron()` is a pure scanner: reads `cron.json`, fires reminders (writes to `pending_reminders.json`), returns due task entries. No spawning — that's CronQueue's job.
 
 **Reminder flow:**
 1. `checkCron()` finds entries where `fireAt <= now` and `fired === false`
-2. Writes to `~/.agentbridge/memory/pending_reminders.json`
-3. Marks entry as `fired: true` (one-shot) or reschedules next `fireAt` (recurring with `schedule` field)
-4. Same interval reads `pending_reminders.json`, injects each as a synthetic `TelegramUpdate` with `[Scheduled reminder]` prefix via `telegramPoller.injectUpdate()`
+2. Reminders → writes to `~/.agentbridge/memory/pending_reminders.json`
+3. Marks entry as `fired: true` (one-shot) or reschedules next `fireAt` (recurring)
+4. `reminder-injector` heartbeat task reads `pending_reminders.json`, injects each as synthetic message
 5. Clears `pending_reminders.json`
 
 **Task flow:**
 1. Same trigger as reminders
-2. `executor: "agent"` (default) → spawns `kiro-cli acp --agent professor` with the task message on stdin
-3. `executor: "script"` → runs `bash -c <message>` directly, captures stdout+stderr
-4. On process exit, reports result via Telegram
+2. Returns due task entries to caller
+3. Caller (`main.ts` heartbeat) enqueues them into `CronQueue`
 
 **Recurring entries:** When a `CronEntry` has a `schedule` field (cron expression), after firing it computes the next `fireAt` and stays active. One-shot entries (no `schedule`) are marked `fired: true` permanently.
 
@@ -181,6 +305,7 @@ All scheduling goes through `agentbridge-cron` CLI — never host crontab.
 
 - `src/cli/agentbridge-cron.test.ts` — 7 tests: add, list, remove, error cases, default type
 - `src/components/cron-checker.test.ts` — 6 tests: fire due reminder, skip future, skip fired, fire task, missing file, clear reminders
+- `src/components/cron-queue.test.ts` — tests: enqueue, dedup, priority sort, script execution, timeout
 
 ---
 
@@ -339,6 +464,9 @@ All CLIs, skills, and prompt templates are deployed via `scripts/deploy.sh`:
 
 **Prompt templates** (copied to `~/.agentbridge/`):
 - `persona/browsing_prompt.md` → `browsing_prompt.md`
+
+**Task descriptions** (copied to `~/.agentbridge/tasks/`):
+- `tasks/*.md` → deployed via glob loop
 
 ---
 
