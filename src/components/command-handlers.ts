@@ -220,9 +220,9 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     return true;
   }
 
-  // /trigger <id>
-  if (text.startsWith("/trigger ")) {
-    const id = text.slice(9).trim();
+  // /cron trigger <id>
+  if (text.startsWith("/cron trigger ")) {
+    const id = text.slice(14).trim();
     if (!id) { await ctx.reply("Usage: /trigger <cron-id>"); return true; }
     const err = ctx.enqueueCron?.(id);
     await ctx.reply(err ?? `✅ Triggered ${id}`);
@@ -300,7 +300,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       "/memory — Memory storage statistics",
       "/cron — Scheduled tasks",
       "/cron log <id> — Last 5 runs for a task",
-      "/trigger <id> — Manually fire a cron task",
+      "/cron trigger <id> — Manually fire a cron task",
       "/facts — Core knowledge (user profile + agent notes)",
       "/coding — Switch to Opus coding agent",
       "/default — Switch back to KP",
@@ -321,7 +321,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   // Unknown command guard
   if (text.startsWith("/") && /^\/\w+/.test(text) && !text.startsWith("//")) {
     const cmd = text.split(/\s/)[0]!;
-    const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/memory", "/cron", "/facts", "/coding", "/default", "/nlm", "/full", "/short", "/a2a-reset", "/help", "/trigger"];
+    const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/memory", "/cron", "/facts", "/coding", "/default", "/nlm", "/full", "/short", "/a2a-reset", "/help"];
     if (!known.includes(cmd)) {
       await ctx.reply(`❓ Unknown command: ${cmd}\nType /help for available commands.`);
       return true;

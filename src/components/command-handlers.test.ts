@@ -78,19 +78,19 @@ describe("command-handlers", () => {
     expect(ctx.fullModeChats.has("telegram:123")).toBe(false);
   });
 
-  it("/trigger calls enqueueCron", async () => {
+  it("/cron trigger calls enqueueCron", async () => {
     const enqueueCron = vi.fn().mockReturnValue(null);
     const ctx = makeCtx({ enqueueCron });
-    const handled = await handleCommand("/trigger abc123", ctx);
+    const handled = await handleCommand("/cron trigger abc123", ctx);
     expect(handled).toBe(true);
     expect(enqueueCron).toHaveBeenCalledWith("abc123");
     expect(ctx.reply).toHaveBeenCalledWith("✅ Triggered abc123");
   });
 
-  it("/trigger shows error on failure", async () => {
+  it("/cron trigger shows error on failure", async () => {
     const enqueueCron = vi.fn().mockReturnValue("❌ Not found");
     const ctx = makeCtx({ enqueueCron });
-    await handleCommand("/trigger bad", ctx);
+    await handleCommand("/cron trigger bad", ctx);
     expect(ctx.reply).toHaveBeenCalledWith("❌ Not found");
   });
 
