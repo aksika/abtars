@@ -276,8 +276,8 @@ Replaced inline task spawning in cron-checker with a proper job queue.
 
 ## 38. Classification Leak via Consolidation Pipeline
 
-**Status:** Not started
-**Priority:** Low
+**Status:** ✅ Done (2026-03-27)
+
 
 **Problem:**
 Daily summaries and consolidations are plain text — they carry no classification metadata. If a CONFIDENTIAL memory gets summarized into a daily file, the summary has no classification tag. Any agent (including A2A guests) that reads the summary gets the data without a classification check.
