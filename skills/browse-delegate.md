@@ -17,7 +17,7 @@ Returns immediately: `{ "ok": true, "taskId": "...", "status": "spawned" }`. Age
 ## When report arrives
 1. Read report from `~/.agentbridge/subagents/browse_<taskId>_<date>.md`
 2. Summarize and send to user
-3. Move to `~/reports/` (research) or delete (quick checks). Never leave orphans.
+3. Move to `~/.agentbridge/reports/` (research) or delete (quick checks). Never leave orphans.
 
 ## Rules
 - **NEVER** run `agentbridge-browser` directly — always use `agentbridge-browse`

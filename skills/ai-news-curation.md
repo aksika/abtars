@@ -15,7 +15,7 @@ Collect tweets, browse web sources, check Gmail, produce AI Daily Brief.
 1. **Collect:** `agentbridge-tweet --feed --discover` → writes `~/.agentbridge/twitterX/output/tweets-YYYY-MM-DD.json`
 2. **Read:** load JSON (fields: `id, text, author, handle, likes, retweets, views, createdAt, score`)
 3. **Curate:** apply rules below
-4. **Write:** output to `~/reports/AI-Daily-YYYY-MM-DD.md`
+4. **Write:** output to `~/.agentbridge/reports/AI-Daily-YYYY-MM-DD.md`
 
 ## Weekly AI Report (cron: 15 12 * * 0)
 
