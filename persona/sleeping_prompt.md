@@ -291,6 +291,23 @@ After the daily file is written, check if rollups are needed:
 - Read source files, summarize, write target file
 - Do NOT delete source files
 
+## §9.5 Media Cleanup
+
+Check `~/.agentbridge/received/` total size:
+```bash
+du -sb ~/.agentbridge/received/ 2>/dev/null | awk '{print $1}'
+```
+
+If total > 100MB (104857600 bytes), delete oldest files first (FIFO by modification time) until under 100MB:
+```bash
+find ~/.agentbridge/received/ -type f -printf '%T@ %p\n' | sort -n | head -20
+```
+Delete from the top of that list until the total is under budget.
+
+For any images in `received/media/` that were received today and not yet described in the transcript:
+- Read the image and generate a brief description
+- Store as extracted memory via `agentbridge-store --content-en "Photo: <description>" --chat-id <chatId> --type fact`
+
 ## §10 Report
 
 In your sleep audit (`~/.agentbridge/memory/audit/sleep_YYYYMMDD_HHmmss.md`), include:
