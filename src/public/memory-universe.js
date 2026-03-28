@@ -182,7 +182,7 @@
         colors[i * 3 + 1] = c[1] * emissive;
         colors[i * 3 + 2] = c[2] * emissive;
 
-        var recallSize = Math.max(0.3, Math.min(2.0, 0.3 + (mem.recall_count || 0) * 0.15));
+        var recallSize = Math.max(0.8, Math.min(4.0, 0.8 + (mem.recall_count || 0) * 0.3));
         sizes[i] = recallSize;
 
         particleData.push({
@@ -204,7 +204,7 @@
         'void main() {',
         '  vColor = color;',
         '  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);',
-        '  gl_PointSize = size * (200.0 / -mvPosition.z);',
+        '  gl_PointSize = size * (400.0 / -mvPosition.z);',
         '  gl_Position = projectionMatrix * mvPosition;',
         '}',
       ].join('\n');
