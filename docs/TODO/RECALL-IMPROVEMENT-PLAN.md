@@ -28,35 +28,79 @@ S5: Raw messages LIKE (wide net fallback)
 S6-7: Keyword-free fallback (if zero results)
 ```
 
-## Proposed Fixes
+## Proposed Pipeline
 
-### Fix 1: Extraction prompt (prevents future bad data)
-- Always translate ALL words to English in `content_en`
-- Format: "English meaning (original word)" when preserving context
-- Never include meta-commentary about tests, verification, or why something was said
-- Cost: 0 (prompt change only)
-
-### Fix 2: LIKE fallback on extracted_memories (new S1.5)
-After S1 FTS5, if results < limit, run LIKE search on `content_en` and `content_original`:
-```sql
-SELECT * FROM extracted_memories
-WHERE content_en LIKE '%keyword%' OR content_original LIKE '%keyword%'
 ```
-- Catches partial matches FTS5 misses
-- Lower score (0.4) than FTS5 results
-- Cost: ~5 lines in agentbridge-recall + memory-index
-
-### Fix 3: Always run S2 (original language search)
-Pass the same keywords to S2 even without `--original`. The original FTS5 index handles both languages — if the keyword is English it just won't match Hungarian text (harmless). If it IS Hungarian, it finds it.
-- Cost: 2 lines in agentbridge-recall (remove the `if (params.original)` guard)
-
-### Fix 4: Manual correction of existing bad memories
-Update the 3 kiskutya memories in the DB to have proper English translations.
-- One-time SQL update
+S1 starts → fire embedding request async (non-blocking)
+  ↓
+S1:   C2 extracted_memories — English FTS5 (content_en)
+S1.5: C2 extracted_memories — English+Original LIKE fallback
+S2:   C2 extracted_memories — Original FTS5 (ALWAYS, not gated by --original)
+  ↓ short-circuit if ≥10 results (discard embedding)
+S3:   C2 messages — FTS5
+S4:   C2 messages — LIKE (was S5, swapped with consolidation)
+S5:   C1 consolidation files (was S4)
+S5.5: C5 vector similarity — cosine search using pre-fired embedding result
+S6-7: Keyword-free fallback
+```
 
 ## Execution Order
-1. Fix 1 (extraction prompt) — prevents future issues
-2. Fix 3 (always run S2) — 2-line change, immediate improvement
-3. Fix 2 (LIKE fallback) — safety net for partial matches
-4. Fix 4 (manual DB correction) — fixes existing data
-5. Update memory.asbuilt.md
+
+### Phase 1: Quick wins (no new dependencies)
+1. Fix extraction prompt — proper English translation, no meta-commentary
+2. Always run S2 — remove `if (params.original)` guard (2 lines)
+3. Add S1.5 — LIKE fallback on extracted_memories (10 lines)
+4. Swap S4/S5 — messages LIKE before consolidation files (reorder)
+5. Manual DB fix — correct the 3 kiskutya memories
+
+### Phase 2: Embeddings (requires ollama)
+6. Install ollama + pull nomic-embed-text
+7. Wire EmbeddingProvider to ollama endpoint
+8. Batch-embed all existing extracted_memories (one-time migration)
+9. Add embed-on-insert to agentbridge-store (or Dreamy overnight)
+10. Add S5.5 to recall — async embedding fired at S1, consumed at S5.5
+11. Update memory.asbuilt.md
+
+## Embedding Architecture
+
+### Model
+- `nomic-embed-text` via ollama (274MB, CPU-only, ~20-50ms/query)
+- 768-dimension vectors
+- Runs locally — zero cost, zero API calls, fully offline
+
+### Storage
+- `embeddings` column already exists in `extracted_memories` table (C5)
+- Stored as BLOB (768 × 4 bytes = 3KB per memory)
+- ~90 memories × 3KB = ~270KB total — negligible
+
+### Embedding lifecycle
+- **New memories:** Dreamy embeds during overnight sleep cycle (batch)
+- **Instant-store:** embed inline on insert (20ms, acceptable)
+- **Migration:** one-time batch embed of all existing memories on first run
+- **Stale check:** if embedding is NULL, skip in similarity search (graceful degradation)
+
+### Search flow (S5.5)
+```
+At S1 start:
+  embeddingPromise = ollama.embed(query)    // async, non-blocking
+
+At S5.5 (after S5):
+  queryVector = await embeddingPromise      // already resolved (200ms+ elapsed)
+  results = cosineSimilarity(queryVector, allStoredVectors)
+  filter: score > 0.7 threshold
+  merge into result pool with source="C5:embedding"
+```
+
+### Decision points
+1. **Short-circuit:** If S1+S2 ≥ 10 results → skip S3-S7 including S5.5. Discard embedding promise.
+2. **Ollama not running:** S5.5 silently skipped. Log warning once. Recall still works via S1-S5.
+3. **No embeddings in DB:** S5.5 returns empty. No error. Dreamy will embed overnight.
+4. **Similarity threshold:** 0.7 cosine similarity. Below = noise. Tunable via env var.
+5. **Embedding model change:** If model changes, all embeddings must be re-generated (dimension mismatch). Track model name in a metadata row.
+
+## What this solves
+- "puppy" finds "kiskutya" (semantic match via embeddings)
+- "car" finds "automobile" (synonym match)
+- Partial words work via LIKE fallback (S1.5)
+- Original language always searched (S2 ungated)
+- Zero added latency (embedding fires async at S1)
