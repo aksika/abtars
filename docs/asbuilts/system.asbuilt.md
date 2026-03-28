@@ -338,6 +338,17 @@ All scheduling goes through `agentbridge-cron` CLI — never host crontab.
 
 ---
 
+## Self-Healing Agent
+
+Heartbeat task (`self-healer`) that scans `bridge.log` for ERROR lines every 5 minutes. When errors are found, injects `[SYSTEM BUG REPORT]` messages to KP via the Telegram pipeline. KP can analyze, attempt fixes, or notify the user.
+
+- Dedup: same error key (tag + message) not reported again for 30 minutes
+- Rate limit: max 3 reports per tick
+- Gated by `SELFHEAL_ENABLED` (default: true)
+- Config: `SELFHEAL_MAX_REPORTS` (default 3), `SELFHEAL_COOLDOWN_MIN` (default 30)
+
+---
+
 ## Browser Agent (Browsie)
 
 ### Overview

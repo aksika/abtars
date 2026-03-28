@@ -317,7 +317,7 @@ Investigated: `nlm` is installed via `pipx` as `notebooklm-mcp-cli 0.4.1` (PyPI 
 Phase 1: recall-engine extraction, S3 LIKE fallback, extraction prompt, --translated, dashboard S1-S7.
 Phase 2: ollama Se sidecar, 93 memories embedded, embed-on-insert.
 
-## 42. Investigator — Heartbeat Error Scanner
+## 42. Self-Healing Agent — Heartbeat Error Scanner
 
 **Status:** Done
 **Priority:** High
@@ -332,7 +332,7 @@ Self-healing agent pattern — the bridge monitors itself and reports issues to 
 
 ```
 Heartbeat tick (every 5 min)
-  → investigator task
+  → self-healer task
   → read bridge.log, find ERROR lines since last check
   → deduplicate (same error within 5 min = 1 report)
   → for each unique error:
@@ -343,8 +343,8 @@ Heartbeat tick (every 5 min)
 
 ### Implementation
 
-- New heartbeat task: `investigator` in bridge-app.ts
-- Track `lastInvestigatorTs` — only scan lines after this timestamp
+- New heartbeat task: `self-healer` in bridge-app.ts
+- Track `lastSelfhealTs` — only scan lines after this timestamp
 - Read log file backwards (same pattern as dashboard log reader)
 - Filter: only `ERROR` level, skip TEST lines
 - Dedup: group by `[tag] message` — report each unique error once per cycle
