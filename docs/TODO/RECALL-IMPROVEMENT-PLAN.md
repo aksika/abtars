@@ -97,7 +97,7 @@ Changes from current:
    - Dashboard: calls with stage filter, uses per-stage breakdown for investigation
    - Return type includes per-stage hits, timing (ms), and short-circuit info
 1. Fix extraction prompt — always translate to English, no meta-commentary
-2. Ungate S2 — search content_original with ALL keywords (main + original combined), not just --original
+2. KP recall skill update — always pass `--keywords` (English) and `--original` (source language) unless they're the same word
 3. Add S3 — LIKE fallback on `content_en` and `content_original`, score = FTS5 score × 0.95
 4. Reorder S4-S6 — messages LIKE before consolidation files
 5. Audit + fix existing bad memories (kiskutya + any others with untranslated content_en)
