@@ -78,7 +78,24 @@ Centralized logger with `logInfo`, `logWarn`, `logError`, `logDebug`. Console ou
 - `src/components/dashboard-ui.ts` (311 lines) — HTML fragments with dynamic parts
 - `src/public/dashboard.css` (492 lines) — static CSS
 - `src/public/dashboard.js` (552 lines) — static JS
+- `src/public/memory-universe.js` — standalone 3D memory visualization (Three.js, lazy-loaded)
 - Build copies `src/public/` → `dist/public/` automatically
+- Static files served from `dist/public/` via dashboard HTTP server
+
+#### Memory Universe (3D visualization)
+
+Standalone module loaded on demand via "🌌 Memory Universe" button. Full-screen Three.js scene with bloom post-processing.
+
+| Visual | Attribute | Mapping |
+|--------|-----------|---------|
+| Color | classification | U=cyan, R=blue, C=amber, S=red |
+| Size | recall_count | More recalled = bigger |
+| Brightness | emotion_score | Positive=bright, negative=dim |
+| Pulse | memory_type | fact=still, decision=slow, preference=medium, event=fast |
+| Opacity | credibility | confirmed=solid, unknown=translucent |
+| Core dot | trust | owner=bright white center, untrusted=none |
+
+Entity clusters: memories sharing entities gravitate together with connecting lines. Starfield background, auto-rotate, orbit controls. Click for detail panel, hover for tooltip. Data from `/api/memory/all` endpoint.
 
 ### Startup
 

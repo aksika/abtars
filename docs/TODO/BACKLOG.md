@@ -400,3 +400,41 @@ Renamed --content-en/--content-original → --translated/--original (legacy alia
 **Plan:** `docs/TODO/SLEEP-SELF-HEALING-PLAN.md`
 
 State gatherer fixed (embedding counts from extracted_memories.embedding). Sleep prompt: DB Maintenance (WAL, FTS rebuild, batch-embed), translation quality check, audit length warning. 8 tests for state gatherer.
+
+## 48. Review A2A Agent Autonomy Model
+
+**Status:** Not started
+**Priority:** High
+**Source:** Memory-edit tool planning discussion (2026-03-28)
+
+**Problem:**
+During design of the memory-edit tool's caller model, the plan repeatedly mischaracterized the KP–Molty relationship. Three wrong framings surfaced:
+1. "KP acting on behalf of Molty" — wrong, KP never acts on behalf of anyone
+2. "Molty calling KP's CLI tools directly" — wrong, Molty has zero access to KP's memory or tools
+3. Treating Molty as a caller in KP's memory-edit permission matrix — wrong, Molty is a consulting peer with no memory access
+
+The correct model: Molty is an OpenClaw agent on the Mac. He communicates with KP via the Agent API strictly for consulting — asking professional opinions, getting help. Molty has NO access to KP's memory system, CLI tools, or database. The A2A relationship is consultative only.
+
+**Action items:**
+- Review `~/.agentbridge/skills/agents/MOLTY.md` — ensure wording reflects consulting-only relationship
+- Review `agent-api-server.ts` — verify no memory mutation paths are exposed via the API
+- Review any steering/prompt that mentions agent interactions — ensure none imply shared memory or tool access
+- Clarify in SOUL.md or a dedicated steering: KP's autonomy and memory are non-negotiable, peer agents are consultants with no access to KP internals
+
+## 49. Digital Signature for Memory Edits
+
+**Status:** Not started
+**Priority:** Medium
+**Source:** Memory-edit tool planning discussion (2026-03-28)
+
+**Problem:**
+The `edited_by` field on extracted_memories currently stores a plain text caller name ("kp", "dreamy"). This is trivially spoofable — any process that calls `agentbridge-store --edit --caller dreamy` can claim to be Dreamy.
+
+**Proposed approach:**
+Replace the plain text `edited_by` with a simple digital signature that proves which caller made the edit. This creates a tamper-evident audit trail — if someone modifies a memory outside the proper tool, the signature won't match.
+
+**Design considerations:**
+- Lightweight — not full PKI, just enough to verify "this edit came from a legitimate caller"
+- Could be HMAC(caller + memory_id + edited_at, shared_secret) stored as a short hex digest
+- Verification: sleep audit can check signatures match expected callers
+- Scope: only for edits, not for initial store (that's covered by trust + integrity fields)
