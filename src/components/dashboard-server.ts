@@ -91,6 +91,11 @@ export class DashboardServer {
     return new Promise<void>((resolve) => {
       this._broadcaster.shutdown();
 
+      // Force-close all WebSocket clients so server.close() doesn't hang
+      for (const client of this.wss.clients) {
+        try { client.terminate(); } catch { /* best-effort */ }
+      }
+
       this.wss.close(() => {
         if (this.server) {
           this.server.close(() => resolve());
