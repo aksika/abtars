@@ -22,7 +22,7 @@ SQLite-backed persistence with FTS5 full-text search, optional local-model vecto
 | C0 | LLM Context Window | In-memory | Bridge (raw pass-through) | LLM | Ephemeral |
 | C1 | Consolidated Summaries | Markdown files | Sleep subagent | Consolidation search, sleep subagent | Persistent — promoted up tiers |
 | C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store | agentbridge-recall | **messages: hot buffer (flushed after sleep). extracted_memories: persistent** |
-| ~~C3~~ | ~~JSONL Transcripts~~ | ~~JSONL files~~ | ~~TranscriptWriter~~ | ~~TranscriptParser~~ | **ELIMINATED — nightly SQL export for backup only** |
+| ~~C3~~ | ~~JSONL Transcripts~~ | — | — | — | **ELIMINATED in R1 refactor** |
 | C4 | Markdown Knowledge Files | Flat files | Agent, retrospective | Sleep subagent | Persistent |
 | C5 | Vector Index | `memory.db` (embeddings) | EmbeddingProvider | VectorIndex | Persistent — optional |
 | **C6** | **Retrospectives** | **Markdown files** | **Sleep subagent (step 1)** | **Sleep subagent, agent (via recall)** | **Persistent — NEW** |
@@ -92,26 +92,47 @@ User Message
 
 ---
 
-## Recall Cascade ( 7 stages)
+## Recall Pipeline (`agentbridge-recall`, 7 stages)
 
-| Stage | What | Source | Short-circuit |
-|-------|------|--------|---------------|
-| 1 | Extracted memories EN FTS5 | `extracted_memories_fts` | If ≥10 results with high Darwinism scores → skip 3-7 |
-| 2 | Extracted memories original FTS5 | `extracted_memories_original_fts` | Same short-circuit pool as stage 1 |
-| 3 | Raw messages FTS5 (relaxed OR) | `messages_fts` | — |
-| 4 | Consolidation file search | daily/weekly/quarterly .md | — |
-| 5 | Raw messages LIKE (wide net) | `messages` | — |
-| 6-7 | Keyword-free fallback (exclusive) | `messages` or `daily/*.md` | Only if stages 1-5 returned zero results |
+Source: `src/cli/agentbridge-recall.ts`
+Called by: KP via `execute_bash: agentbridge-recall --keywords "kw1,kw2" --chat-id <id> [--original <kw>]`
 
-Stages 6-7 are keyword-free and mutually exclusive. They compare timestamps to decide which source is fresher:
-- Recent messages (`timestamp < context-window-start`) vs latest daily summary
-- Whichever is fresher wins; the other is not injected (avoids context bloat)
-- Context window boundary tracked in `~/.agentbridge/memory/context-window-start.json` (keyed by chatId)
-- Updated on: bridge startup, `/new`, auto-compaction. Reset to NOW on sleep completion.
+```
+S1: Extracted memories — English FTS5 (content_en)
+    Uses extracted_memories_fts index. Darwinism-boosted scoring:
+    score = BM25 × emotion_boost × recall_boost × relevance_boost × trust_weight × credibility_weight
 
-Post-processing: dedup by content hash → temporal decay → MMR re-ranking.
+S2: Extracted memories — Original language FTS5 (content_original)
+    Uses extracted_memories_original_fts index. Only runs if --original param provided.
+    Same scoring as S1. Results merge into same pool.
 
-**Hit-rate logging (2026-03-22):** Per-stage hit counts emitted to stderr on every recall invocation. Format: `[recall] query="..." S1:extracted_en=N S2:extracted_orig=N short_circuit=0|1 S3:messages_fts=N S4:consolidation=N S5:messages_like=N total=N returned=N`. Initial observation: extracted memories rarely reach short-circuit threshold — `messages_fts` carries most searches.
+    → Short-circuit: if S1+S2 ≥ 10 results → skip S3-S7
+
+S3: Raw messages FTS5 (relaxed OR mode)
+    Uses messages_fts index. Searches raw conversation transcripts.
+
+S4: Consolidation file search
+    Keyword search in daily/weekly/quarterly .md files on disk.
+
+S5: Raw messages LIKE (wide net fallback)
+    SQL LIKE '%keyword%' on messages table. Only runs if results < limit.
+    Includes both --keywords and --original terms.
+
+S6-S7: Keyword-free fallback (exclusive, only if zero results)
+    Compares timestamps to pick fresher source:
+    - S6: Recent messages before context-window-start
+    - S7: Latest daily summary
+    Whichever is fresher wins. Avoids context bloat.
+```
+
+Post-processing: dedup by content hash → temporal decay → MMR re-ranking (λ=0.7).
+
+**Known gaps (see RECALL-IMPROVEMENT-PLAN.md):**
+- S2 only runs with `--original` — agent must know to pass it
+- No LIKE fallback on extracted_memories (only on raw messages)
+- Extraction quality: `content_en` sometimes contains untranslated foreign words
+
+**Hit-rate logging:** Per-stage hit counts emitted to stderr. Format: `[recall] query="..." S1:extracted_en=N S2:extracted_orig=N short_circuit=0|1 S3:messages_fts=N S4:consolidation=N S5:messages_like=N total=N returned=N`.
 
 ---
 
