@@ -116,7 +116,37 @@ else
   warn "memory.db not found"
 fi
 
-# 9. Heartbeat liveness (startup check — was previous session's heartbeat healthy?)
+# 9. Embedding health (only if EMBEDDING_ENABLED=true)
+if grep -q "^EMBEDDING_ENABLED=true" "$AB/.env" 2>/dev/null; then
+  if ! command -v ollama &>/dev/null; then
+    warn "EMBEDDING_ENABLED but ollama not installed"
+  elif ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
+    if $FIX; then
+      sudo systemctl start ollama 2>/dev/null && sleep 2 && fix "started ollama service"
+    else
+      warn "EMBEDDING_ENABLED but ollama not running"
+    fi
+  elif ! ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
+    if $FIX; then
+      ollama pull nomic-embed-text &>/dev/null && fix "pulled nomic-embed-text model"
+    else
+      warn "EMBEDDING_ENABLED but nomic-embed-text not pulled"
+    fi
+  fi
+
+  if [ -f "$DB" ]; then
+    NULL_EMBEDS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM extracted_memories WHERE embedding IS NULL;" 2>/dev/null || echo 0)
+    if [ "$NULL_EMBEDS" -gt 0 ]; then
+      if $FIX; then
+        EMBEDDING_ENABLED=true node "$(dirname "$0")/../dist/cli/agentbridge-embed.js" 2>/dev/null && fix "batch-embedded $NULL_EMBEDS memories"
+      else
+        warn "$NULL_EMBEDS extracted memories missing embeddings — run: agentbridge-embed"
+      fi
+    fi
+  fi
+fi
+
+# 10. Heartbeat liveness (startup check — was previous session's heartbeat healthy?)
 HB_FILE="$AB/memory/.heartbeat"
 if [ -f "$HB_FILE" ]; then
   HB_AGE=$(( ($(date +%s) - $(stat -c %Y "$HB_FILE" 2>/dev/null || echo 0)) / 60 ))
@@ -125,7 +155,7 @@ if [ -f "$HB_FILE" ]; then
   fi
 fi
 
-# 10. Core files size check (should be ≤10 non-empty lines each)
+# 11. Core files size check (should be ≤10 non-empty lines each)
 for f in "$AB/memory/core/user_profile.md" "$AB/memory/core/agent_notes.md"; do
   if [ -f "$f" ]; then
     LINES=$(grep -c '[^[:space:]]' "$f")
@@ -135,7 +165,7 @@ for f in "$AB/memory/core/user_profile.md" "$AB/memory/core/agent_notes.md"; do
   fi
 done
 
-# 11. Orphaned kiro-cli processes
+# 12. Orphaned kiro-cli processes
 KIRO_PROCS=$(pgrep -f 'kiro-cli acp' 2>/dev/null | wc -l)
 if [ "$KIRO_PROCS" -gt 1 ]; then
   if $FIX; then
@@ -152,7 +182,7 @@ if [ "$KIRO_PROCS" -gt 1 ]; then
   fi
 fi
 
-# 12. Full fixes (--fix-full only)
+# 13. Full fixes (--fix-full only)
 if $FIX_FULL && [ -f "$DB" ]; then
   sqlite3 "$DB" "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt messages_fts index"
   sqlite3 "$DB" "INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt extracted_memories_fts index"
