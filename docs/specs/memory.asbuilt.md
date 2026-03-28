@@ -120,7 +120,9 @@ Return type includes per-stage hits, timing (ms), and short-circuit info. Dashbo
 
 ### Embedding Lifecycle (C5)
 
-Model: `nomic-embed-text` via ollama (768 dimensions, CPU-only, ~20-50ms/query). Gated by `EMBEDDING_ENABLED=true`.
+Embeddings convert text into a 768-dimensional vector where similar meanings are close together in vector space. "puppy" and "kiskutya" have similar vectors because they mean the same thing, even though the words are completely different. This enables semantic search — finding memories by meaning, not just keyword matching.
+
+Model: `nomic-embed-text` via ollama (768 dimensions, CPU-only, ~20-50ms/query, fully local). Gated by `EMBEDDING_ENABLED=true`.
 
 | Event | What happens |
 |-------|-------------|
@@ -128,6 +130,7 @@ Model: `nomic-embed-text` via ollama (768 dimensions, CPU-only, ~20-50ms/query).
 | Dreamy extraction (sleep) | `embedBatch()` — embeds all new memories after INSERT |
 | `agentbridge-embed` CLI | One-time batch embed of all memories with NULL embedding |
 | Recall (Se sidecar) | `embedText(query)` fired async at S1, cosine similarity after S3 |
+| `doctor.sh --fix` | Detects and batch-embeds memories with NULL embedding |
 
 Storage: `embedding` BLOB column on `extracted_memories` (768 × 4 bytes = 3KB per memory). Threshold: 0.5 cosine similarity (configurable via `EMBEDDING_SIMILARITY_THRESHOLD`).
 
