@@ -176,6 +176,28 @@ else
   echo "   ⚠️  mcporter not built — skipping (run: cd ~/workspace/mcporter && npm run build)"
 fi
 
+# Deploy agentbridge-embed CLI + check ollama (only if EMBEDDING_ENABLED=true in .env)
+if grep -q "^EMBEDDING_ENABLED=true" "$AB_HOME/.env" 2>/dev/null; then
+  EMBED_SCRIPT="$AB_HOME/agentbridge-embed"
+  echo '#!/usr/bin/env bash' > "$EMBED_SCRIPT"
+  echo "EMBEDDING_ENABLED=true exec node \"$PROJECT_DIR/dist/cli/agentbridge-embed.js\" \"\$@\"" >> "$EMBED_SCRIPT"
+  chmod +x "$EMBED_SCRIPT"
+  ln -sf "$EMBED_SCRIPT" "$HOME/.local/bin/agentbridge-embed"
+
+  # Check ollama is running and model is pulled
+  if command -v ollama &>/dev/null; then
+    if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
+      echo "   ⚠️  ollama not running — start with: sudo systemctl start ollama"
+    elif ! ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
+      echo "   ⚠️  nomic-embed-text not pulled — run: ollama pull nomic-embed-text"
+    else
+      echo "   ✅ Se pipeline ready (ollama + nomic-embed-text)"
+    fi
+  else
+    echo "   ⚠️  ollama not installed — Se pipeline disabled"
+  fi
+fi
+
 # 5. Done
 echo ""
 echo "✅ Deploy complete."
