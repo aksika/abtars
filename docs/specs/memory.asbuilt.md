@@ -1,16 +1,9 @@
-# Local Memory — As-Built (Post-Refactor)
-
-Updated: 2026-03-23
-Refactor: R1-R6 complete (see memory-refactor-plan.md)
-
+# Local Memory — As-Built
 ---
 
 ## Overview
 
 SQLite-backed persistence with FTS5 full-text search, optional local-model vector search, sleep-subagent-driven extraction, agent-initiated instant memory storage with emotion scoring, Memory Darwinism, NATO Admiralty Code security model, daily retrospective with emotional attribution, and immediate emotion propagation.
-
-**Key difference from as-built:** Single storage path (SQLite only, no JSONL runtime writes), single search path (agentbridge-recall only), messages table as hot buffer (flushed after sleep), retrospective-driven self-improvement loop, heartbeat liveness tracking.
-
 **Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext` (see below).
 
 ---
@@ -21,11 +14,10 @@ SQLite-backed persistence with FTS5 full-text search, optional local-model vecto
 |----|------|--------|------------|---------|------------|
 | C0 | LLM Context Window | In-memory | Bridge (raw pass-through) | LLM | Ephemeral |
 | C1 | Consolidated Summaries | Markdown files | Sleep subagent | Consolidation search, sleep subagent | Persistent — promoted up tiers |
-| C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store | agentbridge-recall | **messages: hot buffer (flushed after sleep). extracted_memories: persistent** |
-| ~~C3~~ | ~~JSONL Transcripts~~ | — | — | — | **ELIMINATED in R1 refactor** |
+| C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store | agentbridge-recall | messages: hot buffer (flushed after sleep). extracted_memories: persistent |
 | C4 | Markdown Knowledge Files | Flat files | Agent, retrospective | Sleep subagent | Persistent |
 | C5 | Vector Index | `memory.db` (embeddings) | EmbeddingProvider | VectorIndex | Persistent — optional |
-| **C6** | **Retrospectives** | **Markdown files** | **Sleep subagent (step 1)** | **Sleep subagent, agent (via recall)** | **Persistent — NEW** |
+| C6 | Retrospectives | Markdown files | Sleep subagent | Sleep subagent, agent (via recall) | Persistent |
 
 ### Data Flow
 
@@ -50,7 +42,7 @@ User Message
 |          |
 |          |               +----------+
 |          |               | C6       |  retrospectives/retro_YYYYMMDD.md
-|          |               | Retros   |  (NEW — daily self-reflection)
+|          |               | Retros   |  (daily self-reflection)
 |          |               +----------+
 +----------+
 ```
@@ -64,18 +56,14 @@ User Message
 |  Layer 7: Overnight Maintenance                                      |
 |  agentbridge-sleep, SleepTrigger, SleepStateGatherer,               |
 |  sleep-prompt-loader, sleeping_prompt.md template                    |
-|  NEW: Retrospective (step 1), Message Flush (step 8)                |
 +---------------------------------------------------------------------+
-|  Layer 6: REMOVED — ContextAssembler, ContextWindowMonitor deleted   |
 +---------------------------------------------------------------------+
 |  Layer 5: Agent-Initiated Recall (single path)                       |
 |  agentbridge-recall ONLY (7-stage cascade, extracted-first)          |
-|  REMOVED: MemorySearchTool, RecallFallbackPipeline, IntentDetector  |
 +---------------------------------------------------------------------+
 |  Layer 4: Background Extraction & Enrichment                        |
 |  HeartbeatSystem, agentbridge-store (Instant Store)                  |
 |  MemoryExtractor (class exists, sleep-driven)                        |
-|  REMOVED: IngestionPipeline, ReflectionEngine stay but unchanged     |
 +---------------------------------------------------------------------+
 |  Layer 3: Consolidation (subagent-driven, unchanged)                |
 |  working → daily → weekly → quarterly                                |
@@ -86,7 +74,6 @@ User Message
 +---------------------------------------------------------------------+
 |  Layer 1: Storage & Persistence                                     |
 |  SQLite ONLY (memory.db), File System                               |
-|  REMOVED: TranscriptWriter, TranscriptParser                        |
 +---------------------------------------------------------------------+
 ```
 
@@ -268,16 +255,16 @@ On success or 3 failures: stops until next day. Writes a `.lock` file before spa
 
 | Step | What | Behavior | Status vs current |
 |------|------|----------|-------------------|
-| 1 | **Retrospective** | Reads full messages table. What went well/wrong, emotional attribution, lessons. Writes retro file + updates agent_notes | **NEW** |
-| 2 | Purge expired garbage (>7d) | cascadeDelete | Unchanged (was step 1) |
-| 3 | Immediate deletes (dupes, wrong-chat, STT) | cascadeDelete | Unchanged (was step 2) |
-| 4 | Repeated probes | Garbage-mark → 7d grace | **Moved earlier** (was step 5) |
-| 5 | Noise marking | Garbage-mark → 7d grace | Unchanged (was step 4) |
-| 6 | Verify-extract-mark | Creates extracted_memories, garbage-marks originals | Unchanged (was step 6) |
+| 1 | **Retrospective** | Reads full messages table. What went well/wrong, emotional attribution, lessons. Writes retro file + updates agent_notes |  |
+| 2 | Purge expired garbage (>7d) | cascadeDelete |
+| 3 | Immediate deletes (dupes, wrong-chat, STT) | cascadeDelete |
+| 4 | Repeated probes | Garbage-mark → 7d grace |  |
+| 5 | Noise marking | Garbage-mark → 7d grace |
+| 6 | Verify-extract-mark | Creates extracted_memories, garbage-marks originals |
 | 7 | Emotion harvest (verbal only) | Updates extracted_memories.emotion_score | **Changed scope** — reactions handled at runtime |
-| 8 | **Flush old messages** | Delete messages older than 24h | **NEW** |
+| 8 | **Flush old messages** | Delete messages older than 24h |  |
 | 9 | Consolidation | working→daily→weekly→quarterly | **Made explicit** (was implicit in §2) |
-| 10 | Report | Audit summary | Unchanged |
+| 10 | Report | Audit summary |
 
 ---
 
@@ -338,17 +325,17 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 | MemoryManager | `memory-manager.ts` | Simplified: no JSONL, no drift check, cascadeDelete DB-only |
 | MemoryIndex | `memory-index.ts` | FTS5 trigger change: strip emojis at index, not storage |
 | agentbridge-recall | `cli/agentbridge-recall.ts` | 7-stage cascade, extracted-first, keyword-free fallback, short-circuit |
-| agentbridge-store | `cli/agentbridge-store.ts` | Unchanged |
+| agentbridge-store | `cli/agentbridge-store.ts` |
 | agentbridge-sleep | `cli/agentbridge-sleep.ts` | Updated template with retro + flush. Removed `writeStartupGreeting` |
-| SessionContext | `components/session-context.ts` | **NEW:** `buildSessionStartContext()` — session-start context injection |
-| SleepTrigger | `sleep-trigger.ts` | Unchanged |
-| SleepStateGatherer | `sleep-state-gatherer.ts` | Unchanged |
-| sleep-prompt-loader | `sleep-prompt-loader.ts` | Unchanged |
+| SessionContext | `components/session-context.ts` | `buildSessionStartContext()` — session-start context injection |
+| SleepTrigger | `sleep-trigger.ts` |
+| SleepStateGatherer | `sleep-state-gatherer.ts` |
+| sleep-prompt-loader | `sleep-prompt-loader.ts` |
 | HeartbeatSystem | `heartbeat-system.ts` | Writes `.heartbeat` timestamp on each tick |
-| EmbeddingProvider | `embedding-provider.ts` | Unchanged |
-| VectorIndex | `vector-index.ts` | Unchanged |
-| PromptScanner | `prompt-scanner.ts` | Unchanged |
-| emotion-utils | `emotion-utils.ts` | Unchanged |
+| EmbeddingProvider | `embedding-provider.ts` |
+| VectorIndex | `vector-index.ts` |
+| PromptScanner | `prompt-scanner.ts` |
+| emotion-utils | `emotion-utils.ts` |
 | Reaction handler | `main.ts` | **Enhanced:** immediate propagation to extracted_memories, `[REACT:emoji]` agent response support, skip reactions on synthetic messages (messageId 0) |
 
 ### Deleted Components
@@ -372,15 +359,6 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 ## Configuration
 
 Removed env vars:
-- ~~`MEMORY_COMPACT_ON_RESET`~~ — CompactionEngine deleted
-- ~~`MEMORY_AUTO_COMPACT_THRESHOLD`~~ — CompactionEngine deleted
-- ~~`MEMORY_COMPACT_THRESHOLD_PCT`~~ — ContextWindowMonitor deleted
-- ~~`MEMORY_CONTEXT_BUDGET_SOUL/RECALLED/WORKING`~~ — ContextAssembler deleted
-- ~~`MEMORY_ROLLING_BUFFER_SIZE`~~ — ContextAssembler deleted
-- ~~`MEMORY_RECALL_FALLBACK_ENABLED/TIMEOUT_MS`~~ — RecallFallbackPipeline deleted
-- ~~`MEMORY_RECALL_CONTEXT_MESSAGES`~~ — IntentDetector deleted
-- ~~`MEMORY_RECALL_CUE_PHRASES`~~ — IntentDetector deleted
-- ~~`MEMORY_DAY_BOUNDARY_HOURS`~~ — legacy, unused
 
 New env vars:
 - `DEBUG_MODE` — enables chat_backup writes

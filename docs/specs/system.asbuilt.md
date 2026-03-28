@@ -482,7 +482,6 @@ All CLIs, skills, and prompt templates are deployed via `scripts/deploy.sh`:
 - `skills/*.md` → deployed via glob loop
 - `TOOLS.md` (`alwaysApply: true`) — compressed recall syntax, always in agent context (~825 bytes)
 - `session-start.md` — greeting and follow-up recall instructions
-- All skills compressed 2026-03-22: 56KB → 21KB (63% reduction), no information loss
 
 **Prompt templates** (copied to `~/.agentbridge/`):
 - `persona/browsing_prompt.md` → `browsing_prompt.md`
@@ -523,7 +522,6 @@ All commands handled by `src/components/command-handlers.ts` — single module f
 | /a2a-reset | Discord-only | Reset A2A session |
 | /help | both | Auto-generated per platform |
 
-Removed (2026-03-23): `/ingest`, `/reflect`, `/reembed`, `/forget`, `/mcporter` (merged into /status).
 
 ### Healthcheck skill (agent-driven)
 
