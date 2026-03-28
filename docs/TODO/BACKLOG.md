@@ -372,13 +372,6 @@ INVESTIGATOR_COOLDOWN_MIN=30       # same error suppressed for N minutes
 
 ~40 lines in bridge-app.ts (heartbeat task registration + log scanner)
 
-## 43. Archive DB layer
-
-**Status:** Not started
-**Priority:** Low
-
-If extracted_memories grows to 10K+ and search slows, move zero-recall 60+ day memories to a separate SQLite archive searched as a last-resort fallback.
-
 ## 44. Entity linking
 
 **Status:** Not started
