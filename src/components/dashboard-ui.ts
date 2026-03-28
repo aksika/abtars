@@ -292,6 +292,7 @@ function getSearchPanel(): string {
     <div class="search-panel-row" style="margin-top:8px;">
       <button class="layer-btn active" id="mode-toggle" onclick="toggleSearchMode()" style="min-width:42px;">OR</button>
       <input type="text" id="mem-keyword-input" class="keyword-input" placeholder="Type keyword + Enter to add filter...">
+      <input type="text" id="mem-entity-input" placeholder="Entity filter" style="width:120px;flex:none;">
       <button class="btn-search" onclick="searchMemory()">Search</button>
     </div>
     <div id="keyword-filters" class="keyword-filters"></div>

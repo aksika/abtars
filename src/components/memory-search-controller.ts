@@ -79,6 +79,8 @@ export class MemorySearchController {
       ? stagesRaw.split(",").map((s) => s.trim()).filter((s) => VALID_STAGES.has(s))
       : undefined;
 
+    const entity = params.get("entity")?.trim() || undefined;
+
     try {
       const result = await recallSearch(
         {
@@ -87,7 +89,7 @@ export class MemorySearchController {
           memoryDir: this.deps.memoryDir ?? "",
           ctxStartPath: this.deps.ctxStartPath ?? "",
         },
-        { translated, original, chatId: chatId ?? 0, limit: 10, timeStart, timeEnd, stages },
+        { translated, original, chatId: chatId ?? 0, limit: 10, timeStart, timeEnd, stages, entity },
       );
 
       // Bump recall count

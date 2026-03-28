@@ -384,7 +384,9 @@ function formatBytes(bytes) {
       return;
     }
     var keywords = keywordFilters.join(',');
+    var entity = (document.getElementById('mem-entity-input') || {}).value || '';
     var url = '/api/memory/search?keywords=' + encodeURIComponent(keywords) + '&original=' + encodeURIComponent(keywords) + '&stages=' + encodeURIComponent(stages.join(',')) + '&mode=' + searchMode;
+    if (entity) url += '&entity=' + encodeURIComponent(entity);
     if (chatId > 0) {
       url += '&chatId=' + chatId;
     }
