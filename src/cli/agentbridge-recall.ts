@@ -33,6 +33,7 @@ function parseArgs() {
   let limit = DEFAULT_LIMIT;
   let maxClassification = 2;
   let stages: string[] | undefined;
+  let entity: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -46,13 +47,15 @@ function parseArgs() {
       case "--limit": limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(args[++i] ?? "", 10) || DEFAULT_LIMIT)); break;
       case "--max-classification": maxClassification = Math.min(2, Math.max(0, parseInt(args[++i] ?? "", 10))); break;
       case "--stages": stages = (args[++i] ?? "").split(",").map(s => s.trim()).filter(Boolean); break;
+      case "--entity": entity = args[++i]; break;
     }
   }
 
-  if (!translated.length || !chatId) {
-    console.error('Usage: agentbridge-recall --translated "kw1,kw2" --chat-id <id> [--original <kw>] [--stages S1,S3] [--limit <N>]');
+  if ((!translated.length && !entity) || !chatId) {
+    console.error('Usage: agentbridge-recall --translated "kw1,kw2" --chat-id <id> [--original <kw>] [--entity "Name"] [--stages S1,S3]');
     process.exit(1);
   }
+  return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages, entity };
   return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages };
 }
 
@@ -83,6 +86,7 @@ try {
       timeStart: params.timeStart,
       timeEnd: params.timeEnd,
       stages: params.stages,
+      entity: params.entity,
     },
   );
 

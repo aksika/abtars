@@ -178,6 +178,23 @@ export function initializeDatabase(dbPath: string): Database.Database {
     // Column already exists — safe to ignore
   }
 
+  // Migration: entity linking tables
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS entities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL DEFAULT 'unknown',
+      summary TEXT,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS memory_entities (
+      memory_id INTEGER NOT NULL,
+      entity_id INTEGER NOT NULL,
+      PRIMARY KEY (memory_id, entity_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id);
+  `);
+
   // Register strip_emojis() scalar function for FTS5 triggers.
   // Messages store raw content (emojis preserved for retrospective sarcasm detection).
   // FTS5 index gets emoji-stripped text so search isn't polluted.

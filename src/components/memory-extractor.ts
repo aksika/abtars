@@ -53,6 +53,8 @@ TRANSLATION QUALITY (critical for non-English conversations):
 - Return ONLY a valid JSON array of objects. No markdown, no explanation, no wrapping.
 - If there is nothing meaningful to extract, return an empty array: []
 
+- ENTITY TAGGING: For each memory, list the named entities mentioned (people, agents, projects, services, places). Use the canonical name (e.g. "Molty" not "the agent on the Mac").
+
 OUTPUT FORMAT (strict JSON array):
 [
   {
@@ -61,7 +63,8 @@ OUTPUT FORMAT (strict JSON array):
     "memory_type": "fact|decision|preference|event",
     "emotion_score": 0,
     "preserve_original": false,
-    "preserved_keyword": null
+    "preserved_keyword": null,
+    "entities": ["EntityName1", "EntityName2"]
   }
 ]`;
 
@@ -222,6 +225,10 @@ export class MemoryExtractor {
         continue;
       }
 
+      const entities = Array.isArray(obj.entities)
+        ? (obj.entities as unknown[]).filter((e): e is string => typeof e === "string" && e.trim().length > 0).map(e => e.trim())
+        : [];
+
       memories.push({
         chat_id: chatId,
         content_original: contentOriginal,
@@ -232,6 +239,7 @@ export class MemoryExtractor {
         preserved_keyword: preserveOriginal ? preservedKeyword : undefined,
         emotion_score: clampEmotionScore(obj.emotion_score),
         created_at: now,
+        entities: entities.length > 0 ? entities : undefined,
       });
     }
 
@@ -251,7 +259,7 @@ export class MemoryExtractor {
 
     const insertAll = this.db.transaction((mems: ExtractedMemory[]) => {
       for (const m of mems) {
-        stmt.run(
+        const info = stmt.run(
           m.chat_id,
           m.content_original,
           m.content_en,
@@ -262,6 +270,9 @@ export class MemoryExtractor {
           m.emotion_score,
           m.created_at,
         );
+        if (m.entities?.length) {
+          this.linkEntities(Number(info.lastInsertRowid), m.entities);
+        }
       }
     });
 
@@ -269,6 +280,23 @@ export class MemoryExtractor {
 
     // Embed new memories for Se sidecar (fire-and-forget)
     this.embedBatch(memories.map(m => m.content_en));
+  }
+
+  /** Upsert entities and link them to a memory. */
+  private linkEntities(memoryId: number, entities: string[]): void {
+    const upsert = this.db.prepare(
+      "INSERT INTO entities (name, type, created_at) VALUES (?, 'unknown', ?) ON CONFLICT(name) DO NOTHING"
+    );
+    const getId = this.db.prepare("SELECT id FROM entities WHERE name = ?");
+    const link = this.db.prepare(
+      "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)"
+    );
+    const now = Date.now();
+    for (const name of entities) {
+      upsert.run(name, now);
+      const row = getId.get(name) as { id: number } | undefined;
+      if (row) link.run(memoryId, row.id);
+    }
   }
 
   /** Embed a batch of content strings (async, non-blocking). */

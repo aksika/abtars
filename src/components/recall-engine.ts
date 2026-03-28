@@ -60,6 +60,7 @@ export type RecallParams = {
   timeEnd?: number;
   stages?: string[];
   shortCircuitThreshold?: number;
+  entity?: string;
 };
 
 export type RecallDeps = {
@@ -116,7 +117,17 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
   const stages: Record<string, StageResult> = {};
   let shortCircuitAfter: string | null = null;
 
+  // Entity pre-filter: if --entity provided, only return memories linked to that entity
+  let entityFilter: Set<number> | null = null;
+  if (params.entity) {
+    const rows = deps.db.prepare(
+      `SELECT me.memory_id FROM memory_entities me JOIN entities e ON e.id = me.entity_id WHERE e.name = ? COLLATE NOCASE`
+    ).all(params.entity) as Array<{ memory_id: number }>;
+    entityFilter = new Set(rows.map(r => r.memory_id));
+  }
+
   const addExtracted = (r: MemorySearchResult, source: string, hits: RecallHit[]): void => {
+    if (entityFilter && r.id !== undefined && !entityFilter.has(r.id)) return;
     const key = `${r.source_timestamp}:${r.content.slice(0, 80)}`;
     if (seen.has(key)) return;
     seen.add(key);

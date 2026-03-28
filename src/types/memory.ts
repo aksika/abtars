@@ -134,6 +134,7 @@ export type ExtractedMemory = {
   preserved_keyword?: string;
   emotion_score: number;
   created_at: number;
+  entities?: string[];
 };
 
 /** Parameters for the agent-initiated memory search tool. */
