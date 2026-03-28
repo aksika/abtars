@@ -196,6 +196,24 @@ sqlite3 ~/.agentbridge/memory/memory.db "DELETE FROM messages WHERE timestamp < 
 
 ### Database Maintenance
 
+Run these maintenance commands:
+
+```bash
+# WAL checkpoint — prevents unbounded WAL growth
+sqlite3 ~/.agentbridge/memory/memory.db "PRAGMA wal_checkpoint(TRUNCATE);"
+```
+
+If any FTS5 index above shows **corrupt**:
+```bash
+# Rebuild the corrupt index (replace TABLE_NAME with the corrupt one)
+sqlite3 ~/.agentbridge/memory/memory.db "INSERT INTO TABLE_NAME(TABLE_NAME) VALUES('rebuild');"
+```
+
+If embeddings show missing count > 0 and `EMBEDDING_ENABLED=true`:
+```bash
+EMBEDDING_ENABLED=true agentbridge-embed
+```
+
 ### FTS5 Integrity Checks
 
 - `messages_fts` — current status: **${FTS_MESSAGES}**
@@ -249,6 +267,22 @@ Review `~/.agentbridge/memory/core/user_profile.md` and `~/.agentbridge/memory/c
 - Remove stale or redundant lines
 - Keep each file ≤10 lines of high-signal facts only
 - These files are injected into every context window — brevity is critical
+
+### Translation Quality Check
+
+Scan for memories where `content_en` contains untranslated foreign words:
+```sql
+SELECT id, substr(content_en,1,100), substr(content_original,1,100)
+FROM extracted_memories
+WHERE content_en != content_original AND content_original IS NOT NULL
+ORDER BY id DESC LIMIT 20;
+```
+
+For each result: if `content_en` contains non-English words that should have been translated, fix with:
+```sql
+UPDATE extracted_memories SET content_en = '<corrected English>', embedding = NULL WHERE id = <N>;
+```
+Setting `embedding = NULL` ensures re-embedding on next batch-embed run.
 
 ## §8 Memory Merge
 

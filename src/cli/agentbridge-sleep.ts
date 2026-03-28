@@ -19,12 +19,12 @@
  */
 
 import { join } from "node:path";
-import { appendFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { MemoryManager } from "../components/memory-manager.js";
 import { loadMemoryConfig } from "../components/memory-config.js";
 import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
 import { loadSleepPrompt } from "../components/sleep-prompt-loader.js";
-import { logInfo, logError, setLogLevel } from "../components/logger.js";
+import { logInfo, logWarn, logError, setLogLevel } from "../components/logger.js";
 import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
 import { localDate } from "../components/env-utils.js";
 
@@ -269,6 +269,10 @@ export function writeAuditLog(
       .sort();
     if (files.length > 0) {
       const target = join(sleepDir, files[files.length - 1]!);
+      const existingLines = readFileSync(target, "utf-8").split("\n").length;
+      if (existingLines < 50) {
+        logWarn(TAG, `Sleep audit suspiciously short (${existingLines} lines) — subagent may have truncated`);
+      }
       appendFileSync(target, suffix, "utf-8");
       return;
     }

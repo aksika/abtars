@@ -56,7 +56,7 @@ function buildSnapshotBlock(s: StateSnapshot): string {
   return [
     `- Messages in DB: ${s.dbStats.messageCount}`,
     `- Extracted memories: ${s.dbStats.extractedMemoryCount}`,
-    `- Embeddings: ${s.dbStats.embeddingCount}`,
+    `- Embeddings: ${s.dbStats.embeddingCount}/${s.dbStats.extractedMemoryCount}${s.dbStats.nullEmbeddingCount > 0 ? ` (${s.dbStats.nullEmbeddingCount} missing)` : ""}`,
     `- Sessions: ${s.dbStats.sessionCount}`,
     `- Working dirs: ${s.workingDirs.length}`,
     `- Disk: ${(s.diskUsageBytes / 1024 / 1024).toFixed(1)} MB / ${(s.diskBudgetBytes / 1024 / 1024).toFixed(0)} MB`,

@@ -18,6 +18,7 @@ export interface WorkingDirEntry {
 export interface DbStats {
   messageCount: number;
   embeddingCount: number;
+  nullEmbeddingCount: number;
   sessionCount: number;
   extractedMemoryCount: number;
   compressionRatio: number;
@@ -151,6 +152,13 @@ export class SleepStateGatherer {
       }
     };
 
+    const countWhere = (table: string, where: string): number => {
+      try {
+        const row = this.db.prepare(`SELECT COUNT(*) as cnt FROM ${table} WHERE ${where}`).get() as { cnt: number };
+        return row.cnt;
+      } catch { return 0; }
+    };
+
     const messageCount = count("messages");
     const extractedMemoryCount = count("extracted_memories");
 
@@ -174,7 +182,8 @@ export class SleepStateGatherer {
 
     return {
       messageCount,
-      embeddingCount: count("embeddings"),
+      embeddingCount: countWhere("extracted_memories", "embedding IS NOT NULL"),
+      nullEmbeddingCount: countWhere("extracted_memories", "embedding IS NULL"),
       sessionCount: count("sessions"),
       extractedMemoryCount,
       compressionRatio: messageCount > 0 ? Math.round((extractedMemoryCount / messageCount) * 100) / 100 : 0,
