@@ -9,11 +9,18 @@ user-invocable: false
 Full documentation for `agentbridge-recall`. See TOOLS.md for quick reference.
 
 ```bash
-agentbridge-recall --keywords "kw1,kw2" --chat-id 7773842843 [--original "szó"] [--time-start <ms>] [--time-end <ms>] [--max-classification 0-2]
+agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"] [--time-start <ms>] [--time-end <ms>] [--max-classification 0-2] [--stages S1,S3]
 ```
 
+## Parameter rules
+- `--translated`: ALWAYS English keywords. Translate the user's words to English.
+- `--original`: If the user spoke in a non-English language, pass the original keyword here. Omit if the conversation is in English.
+  Example: user says "kiskutya" → `--translated "puppy" --original "kiskutya"`
+- `--stages`: Optional. Run only specific stages (S1-S7). Omit to run all.
+- Legacy: `--keywords` is accepted as alias for `--translated`.
+
 ## Keyword rules
-- Use English content words, NOT meta-words ("recent", "last session")
+- Use English content words for --translated, NOT meta-words ("recent", "last session")
 - For vague queries ("what did we talk about?"): use `"summary,discussion,update,decision"` + `--time-start` 24-48h ago
 - DB uses FTS5 — only actual content matches
 

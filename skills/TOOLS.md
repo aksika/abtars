@@ -8,7 +8,7 @@ alwaysApply: true
 Search past conversations, facts, decisions, preferences.
 
 ```bash
-agentbridge-recall --keywords "kw1,kw2" --chat-id 7773842843 [--time-start <ms>] [--time-end <ms>]
+agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"] [--time-start <ms>] [--time-end <ms>]
 ```
 
 - `--keywords`: English content words (NOT meta-words like "recent", "last session"). For vague queries use broad terms: `"summary,discussion,update,decision"`
