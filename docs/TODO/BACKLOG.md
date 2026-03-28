@@ -371,3 +371,24 @@ INVESTIGATOR_COOLDOWN_MIN=30       # same error suppressed for N minutes
 ### Estimated effort
 
 ~40 lines in bridge-app.ts (heartbeat task registration + log scanner)
+
+## 43. Archive DB layer
+
+**Status:** Not started
+**Priority:** Low
+
+If extracted_memories grows to 10K+ and search slows, move zero-recall 60+ day memories to a separate SQLite archive searched as a last-resort fallback.
+
+## 44. Entity linking
+
+**Status:** Not started
+**Priority:** Low
+
+Tag extracted memories with entity mentions (@Peter, @agentbridge), maintain per-entity summary pages, enable "tell me about X" queries via entity filter.
+
+## 45. AES encryption for restricted memories
+
+**Status:** Not started
+**Priority:** Low
+
+Encrypt content_en and content_original for classification=3 rows at rest. Derive key from user passphrase (PBKDF2/scrypt). Prevents sqlite3 direct access from exposing secrets.
