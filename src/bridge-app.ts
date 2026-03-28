@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import { readEntry as cronReadEntry } from "./components/cron-db.js";
 import { spawn, execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -460,6 +461,76 @@ export async function startBridge(): Promise<void> {
       }
     },
   });
+
+  // --- Investigator: self-healing error scanner ---
+  const INVESTIGATOR_MAX = parseInt(process.env["INVESTIGATOR_MAX_REPORTS"] ?? "3", 10);
+  const INVESTIGATOR_COOLDOWN_MS = (parseInt(process.env["INVESTIGATOR_COOLDOWN_MIN"] ?? "30", 10)) * 60 * 1000;
+  let lastInvestigatorTs = "";
+  const investigatorSeen = new Map<string, number>(); // errorKey → lastReportedAt
+
+  if (process.env["INVESTIGATOR_ENABLED"] !== "false") {
+    heartbeat.registerTask({
+      name: "investigator",
+      execute: async () => {
+        const logFile = join(homedir(), ".agentbridge", "logs", "bridge.log");
+        try {
+          const content = readFileSync(logFile, "utf-8");
+          const lines = content.split("\n");
+          const now = Date.now();
+          let reported = 0;
+
+          for (let i = lines.length - 1; i >= 0 && reported < INVESTIGATOR_MAX; i--) {
+            const line = lines[i]!;
+            if (line.length < 24 || !line.includes(" ERROR ")) continue;
+            const ts = line.slice(0, 23);
+            if (ts <= lastInvestigatorTs) break;
+            if (line.includes("TEST ")) continue;
+
+            // Extract tag + message as dedup key
+            const match = line.match(/\[([^\]]+)\] (.+)/);
+            if (!match) continue;
+            const errorKey = `${match[1]}:${match[2]!.slice(0, 80)}`;
+
+            // Cooldown check
+            const lastSeen = investigatorSeen.get(errorKey);
+            if (lastSeen && now - lastSeen < INVESTIGATOR_COOLDOWN_MS) continue;
+            investigatorSeen.set(errorKey, now);
+
+            // Inject to KP
+            if (telegramAdapter) {
+              const chatId = [...config.allowedUserIds][0];
+              if (chatId) {
+                telegramAdapter.injectMessage({
+                  platform: "telegram",
+                  channelId: String(chatId),
+                  sessionKey: `telegram:${chatId}`,
+                  senderId: "system",
+                  senderName: "Investigator",
+                  text: `[SYSTEM BUG REPORT] ${line.slice(0, 500)}`,
+                  timestamp: now,
+                  isGroup: false,
+                  isVoice: false,
+                });
+                reported++;
+                logInfo("investigator", `Reported error to KP: ${errorKey.slice(0, 80)}`);
+              }
+            }
+          }
+
+          // Advance watermark
+          if (lines.length > 1) {
+            const lastLine = lines[lines.length - 2] ?? "";
+            if (lastLine.length >= 23) lastInvestigatorTs = lastLine.slice(0, 23);
+          }
+
+          // Evict old cooldown entries
+          for (const [key, ts] of investigatorSeen) {
+            if (now - ts > INVESTIGATOR_COOLDOWN_MS * 2) investigatorSeen.delete(key);
+          }
+        } catch { /* log file not readable — skip */ }
+      },
+    });
+  }
 
   // Run once on startup, then start periodic
   checkBrowseTasks();
