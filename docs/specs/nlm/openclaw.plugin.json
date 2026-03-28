@@ -1,0 +1,15 @@
+{
+  "id": "notebooklm",
+  "name": "NotebookLM",
+  "version": "1.0.0",
+  "description": "Query and manage Google NotebookLM notebooks — Layer 6 RAG knowledge base.",
+  "main": "index.js",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "nlmPath": { "type": "string", "description": "Path to nlm binary (default: /Users/akos/.local/bin/nlm)" },
+      "profile": { "type": "string", "description": "NotebookLM auth profile name (default: default)" }
+    }
+  }
+}
