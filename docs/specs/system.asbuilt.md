@@ -338,17 +338,17 @@ All scheduling goes through `agentbridge-cron` CLI — never host crontab.
 
 ---
 
-## Browser Agent (Brownie)
+## Browser Agent (Browsie)
 
 ### Overview
 
-A smart, autonomous browser subagent that runs as a detached process. The professor delegates browser tasks to Brownie instead of running browser commands directly, preventing long-running or hanging browser operations from blocking the bridge.
+A smart, autonomous browser subagent that runs as a detached process. The professor delegates browser tasks to Browsie instead of running browser commands directly, preventing long-running or hanging browser operations from blocking the bridge.
 
-Brownie gets a high-level goal (e.g., "check X notifications", "post on FB", "fill out a web form"), autonomously drives a headless Chromium browser inside a Docker container, and returns a summary when done. Same subagent pattern as the Sleep Agent.
+Browsie gets a high-level goal (e.g., "check X notifications", "post on FB", "fill out a web form"), autonomously drives a headless Chromium browser inside a Docker container, and returns a summary when done. Same subagent pattern as the Sleep Agent.
 
 ### Problem Solved
 
-When the professor ran browser commands directly via `execute_bash`, the entire bridge froze — no messages processed, no heartbeat, nothing. The X/Twitter cookie injection hung for 12+ minutes and blocked KP completely. Brownie eliminates this by running in a separate detached process.
+When the professor ran browser commands directly via `execute_bash`, the entire bridge froze — no messages processed, no heartbeat, nothing. The X/Twitter cookie injection hung for 12+ minutes and blocked KP completely. Browsie eliminates this by running in a separate detached process.
 
 ### Architecture
 
