@@ -316,3 +316,58 @@ Investigated: `nlm` is installed via `pipx` as `notebooklm-mcp-cli 0.4.1` (PyPI 
 
 Phase 1: Fix extraction prompt, always run S2, add S3 LIKE fallback, swap S4/S5.
 Phase 2: Embeddings via ollama (Se sidecar, async with S1).
+
+## 42. Investigator — Heartbeat Error Scanner
+
+**Status:** Not started
+**Priority:** High
+
+### Concept
+
+New heartbeat task: scans bridge.log for ERROR lines from the last 5 minutes. If found, injects an internal message to KP via the pipeline: "Bug detected: [error details]". KP can analyze, attempt a fix, or notify the user.
+
+Self-healing agent pattern — the bridge monitors itself and reports issues to the agent running on it.
+
+### Architecture
+
+```
+Heartbeat tick (every 5 min)
+  → investigator task
+  → read bridge.log, find ERROR lines since last check
+  → deduplicate (same error within 5 min = 1 report)
+  → for each unique error:
+      inject internal message to KP via telegramAdapter.injectMessage()
+      prefix: "[SYSTEM BUG REPORT]"
+      content: timestamp, tag, error message, last 3 context lines
+```
+
+### Implementation
+
+- New heartbeat task: `investigator` in bridge-app.ts
+- Track `lastInvestigatorTs` — only scan lines after this timestamp
+- Read log file backwards (same pattern as dashboard log reader)
+- Filter: only `ERROR` level, skip TEST lines
+- Dedup: group by `[tag] message` — report each unique error once per cycle
+- Inject via `telegramAdapter.injectMessage()` with platform="system"
+- KP sees: `[SYSTEM BUG REPORT] 02:15:33 [cron-queue] Agent spawn failed: ENOENT`
+- Rate limit: max 3 bug reports per tick (prevent flood)
+- Cooldown: same error not reported again for 30 min
+
+### What KP can do with it
+
+- Read the error, check related code/logs
+- Attempt a fix if it's a known pattern (e.g. restart transport, kill orphan)
+- Notify user on Telegram if it needs human intervention
+- Store the error pattern in memory for future reference
+
+### Config
+
+```env
+INVESTIGATOR_ENABLED=true          # default true
+INVESTIGATOR_MAX_REPORTS=3         # max errors per tick
+INVESTIGATOR_COOLDOWN_MIN=30       # same error suppressed for N minutes
+```
+
+### Estimated effort
+
+~40 lines in bridge-app.ts (heartbeat task registration + log scanner)
