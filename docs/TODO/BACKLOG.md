@@ -392,3 +392,18 @@ Tag extracted memories with entity mentions (@Peter, @agentbridge), maintain per
 **Priority:** Low
 
 Encrypt content_en and content_original for classification=3 rows at rest. Derive key from user passphrase (PBKDF2/scrypt). Prevents sqlite3 direct access from exposing secrets.
+
+## 46. agentbridge-store Review
+
+**Status:** Not started
+**Priority:** Medium
+
+Review and clean up agentbridge-store CLI.
+
+### Review points
+1. Param naming: `--content-en`/`--content-original` → align with recall's `--translated`/`--original`?
+2. Is `--merge` used by KP? If not, remove dead code
+3. Embed-on-insert only fires on normal store path — should also fire after merge
+4. Confidence default (3) — verify this is correct
+5. Should store validate that content_en is actually English? (prevent bad extraction data)
+6. Test coverage audit
