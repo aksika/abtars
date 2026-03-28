@@ -15,16 +15,44 @@ The recall pipeline has LIKE fallback for raw messages (S5) but not for extracte
 ### 3. S2 only runs when `--original` is provided
 The agent must explicitly pass `--original <keyword>` for original-language search to run. If the agent doesn't know the conversation was in Hungarian, S2 is skipped entirely.
 
-## Two Search Paths
+## Architecture: Single Recall Engine, Two Consumers
 
-There are two independent search implementations:
+Currently two separate implementations exist — this plan unifies them.
 
-| Path | File | Used by | Priority |
-|------|------|---------|----------|
-| `agentbridge-recall` | `src/cli/agentbridge-recall.ts` | KP (agent) | **Primary** — this is how the agent remembers |
-| `MemorySearchController` | `src/components/memory-search-controller.ts` | Dashboard (human) | Secondary — debug/inspection tool |
+```
+src/components/recall-engine.ts    ← single S1-S7 + Se pipeline
+  ↑                        ↑
+agentbridge-recall.ts    memory-search-controller.ts
+  (agent: defaults,        (dashboard: stage filter,
+   merged results only)     per-stage breakdown for investigation)
+```
 
-This plan targets `agentbridge-recall`. Dashboard search can inherit the same fixes later.
+### Recall engine return type
+```ts
+type RecallResult = {
+  results: SearchHit[];           // merged, deduped, scored
+  stages: Record<string, {       // per-stage detail
+    hits: SearchHit[];
+    ms: number;
+  }>;
+  shortCircuitAfter: string | null;
+};
+```
+
+### Recall engine options
+```ts
+recallSearch(query, {
+  chatId, limit, maxClassification,
+  original,                    // original-language keyword
+  enableEmbeddings,            // Se on/off (env-gated)
+  shortCircuitThreshold,       // default 10
+  stages,                      // run specific stages only (dashboard investigation)
+})
+```
+
+- Agent: `recallSearch("puppy", { chatId })` → uses `result.results`
+- Dashboard: `recallSearch("puppy", { stages: ["S1"] })` → inspects `result.stages.S1`
+- Dashboard shows per-stage hit count, timing, which stage short-circuited and why
 
 ## Current Pipeline (agentbridge-recall)
 
@@ -64,6 +92,10 @@ Changes from current:
 ## Execution Order
 
 ### Phase 1: Quick wins (no new dependencies)
+0. Extract recall-engine.ts — single pipeline shared by agent + dashboard
+   - Agent: calls with defaults, uses merged results
+   - Dashboard: calls with stage filter, uses per-stage breakdown for investigation
+   - Return type includes per-stage hits, timing (ms), and short-circuit info
 1. Fix extraction prompt — always translate to English, no meta-commentary
 2. Always run S2 — remove `if (params.original)` guard
 3. Add S3 — LIKE fallback on `content_en` and `content_original`
