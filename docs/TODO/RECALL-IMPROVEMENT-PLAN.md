@@ -31,18 +31,20 @@ S6-7: Keyword-free fallback (if zero results)
 ## Proposed Pipeline
 
 ```
-S1 starts → fire embedding request async (non-blocking)
-  ↓
-S1:   C2 extracted_memories — English FTS5 (content_en)
-S1.5: C2 extracted_memories — English+Original LIKE fallback
-S2:   C2 extracted_memories — Original FTS5 (ALWAYS, not gated by --original)
-  ↓ short-circuit if ≥10 results (discard embedding)
-S3:   C2 messages — FTS5
-S4:   C2 messages — LIKE (was S5, swapped with consolidation)
-S5:   C1 consolidation files (was S4)
-S5.5: C5 vector similarity — cosine search using pre-fired embedding result
-S6-7: Keyword-free fallback
+Se: fires at S1 ──────────────────────────┐
+                                           │ (async, ~20-50ms, ollama)
+S1: Extracted — English FTS5               │
+S2: Extracted — Original FTS5              │
+S3: Extracted — LIKE fallback              │
+  → merge Se results here ◄───────────────┘
+  → short-circuit if ≥10 results
+S4: Messages — FTS5
+S5: Messages — LIKE
+S6: Consolidation files
+S7: Keyword-free fallback
 ```
+
+Se is a sidecar, not a sequential stage. Fires with S1, consumed after S3. If ollama is slow or disabled, Se is simply absent — no impact on S1-S7.
 
 ## Execution Order
 
@@ -91,16 +93,18 @@ All embedding functionality is gated behind `EMBEDDING_ENABLED=true`. When disab
 - **Migration:** one-time batch embed of all existing memories on first run
 - **Stale check:** if embedding is NULL, skip in similarity search (graceful degradation)
 
-### Search flow (S5.5)
+### Search flow (Se sidecar)
 ```
 At S1 start:
-  embeddingPromise = ollama.embed(query)    // async, non-blocking
+  if EMBEDDING_ENABLED:
+    embeddingPromise = ollama.embed(query)    // async, non-blocking
 
-At S5.5 (after S5):
-  queryVector = await embeddingPromise      // already resolved (200ms+ elapsed)
-  results = cosineSimilarity(queryVector, allStoredVectors)
-  filter: score > 0.7 threshold
-  merge into result pool with source="C5:embedding"
+After S3 (before short-circuit check):
+  if embeddingPromise resolved:
+    queryVector = await embeddingPromise
+    results = cosineSimilarity(queryVector, allStoredVectors)
+    filter: score > threshold
+    merge into result pool with source="Se:embedding"
 ```
 
 ### Decision points
