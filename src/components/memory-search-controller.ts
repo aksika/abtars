@@ -47,6 +47,28 @@ export class MemorySearchController {
     }
   }
 
+  /** All extracted memories + entities + links for visualization. */
+  listAll(): { status: number; body: object } {
+    try {
+      const memories = this.deps.db.prepare(
+        `SELECT id, content_en, content_original, memory_type, source_timestamp, emotion_score,
+                recall_count, relevance_score, classification, trust, integrity, credibility, created_at,
+                CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_embedding
+         FROM extracted_memories ORDER BY created_at DESC`
+      ).all() as Array<Record<string, unknown>>;
+
+      const entities = this.deps.db.prepare("SELECT id, name, type, summary FROM entities").all() as Array<Record<string, unknown>>;
+
+      const links = this.deps.db.prepare("SELECT memory_id, entity_id FROM memory_entities").all() as Array<Record<string, unknown>>;
+
+      return { status: 200, body: { memories, entities, links } };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `listAll failed: ${msg}`);
+      return { status: 500, body: { error: msg } };
+    }
+  }
+
   /**
    * Handle `GET /api/memory/search?keywords=...&chatId=...&stages=...&original=...`
    */

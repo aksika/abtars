@@ -575,3 +575,12 @@ function formatBytes(bytes) {
   connect();
 })();
 
+
+  // ── Memory Universe Loader ──────────────────────────────────────────
+  window.loadMemoryUniverse = function() {
+    if (document.getElementById('memory-universe-overlay')) return;
+    var s = document.createElement('script');
+    s.src = '/memory-universe.js';
+    s.onload = function() { if (window.initMemoryUniverse) window.initMemoryUniverse(token); };
+    document.head.appendChild(s);
+  };

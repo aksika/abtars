@@ -165,6 +165,22 @@ export class DashboardServer {
         return;
       }
 
+      // GET /api/memory/all — auth gate → all extracted memories for visualization
+      if (method === "GET" && pathname === "/api/memory/all") {
+        if (!this.deps.authGate.guard(req, res)) return;
+
+        if (!this.deps.memorySearchController) {
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "memory not enabled" }));
+          return;
+        }
+
+        const result = this.deps.memorySearchController.listAll();
+        res.writeHead(result.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result.body));
+        return;
+      }
+
       // POST /api/services/:name/start|stop — auth gate → service registry
       const svcMatch = method === "POST" && pathname?.match(/^\/api\/services\/([^/]+)\/(start|stop)$/);
       if (svcMatch) {
