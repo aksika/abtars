@@ -266,18 +266,20 @@ On success or 3 failures: stops until next day. Writes a `.lock` file before spa
 
 ### Steps
 
-| Step | What | Behavior | Status vs current |
-|------|------|----------|-------------------|
-| 1 | **Retrospective** | Reads full messages table. What went well/wrong, emotional attribution, lessons. Writes retro file + updates agent_notes |  |
-| 2 | Purge expired garbage (>7d) | cascadeDelete |
-| 3 | Immediate deletes (dupes, wrong-chat, STT) | cascadeDelete |
-| 4 | Repeated probes | Garbage-mark → 7d grace |  |
-| 5 | Noise marking | Garbage-mark → 7d grace |
-| 6 | Verify-extract-mark | Creates extracted_memories, garbage-marks originals |
-| 7 | Emotion harvest (verbal only) | Updates extracted_memories.emotion_score | **Changed scope** — reactions handled at runtime |
-| 8 | **Flush old messages** | Delete messages older than 24h |  |
-| 9 | Consolidation | working→daily→weekly→quarterly | **Made explicit** (was implicit in §2) |
-| 10 | Report | Audit summary |
+| Step | What | Behavior |
+|------|------|----------|
+| §1 | Retrospective | Reads full messages table. What went well/wrong, emotional attribution, lessons. Writes retro file + updates agent_notes |
+| §2 | Feedback Pass | Review user reactions, corrections |
+| §3 | Reminder & Todo Extraction | Extract actionable items |
+| §4 | Garbage Collection | 7-step GC: purge expired, immediate deletes, repeated probes, noise marking, verify-extract, emotion harvest, flush old messages |
+| §4+ | Database Maintenance | WAL checkpoint, FTS5 rebuild if corrupt, batch-embed NULL embeddings |
+| §5 | Cron Verification | Check cron jobs are healthy |
+| §6 | Topic Reorg | Reorganize topic files |
+| §7 | Fitness Review | Darwinism review, core knowledge maintenance, translation quality check (detect untranslated content_en) |
+| §8 | Memory Merge | Find and merge near-duplicate memories |
+| §9 | Consolidation | working→daily→weekly→quarterly summaries |
+| §9.5 | Media Cleanup | FIFO 100MB cleanup of received media |
+| §10 | Report | Audit summary (warns if < 50 lines — possible truncation) |
 
 ---
 
