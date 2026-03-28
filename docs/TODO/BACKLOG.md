@@ -319,7 +319,7 @@ Phase 2: ollama Se sidecar, 93 memories embedded, embed-on-insert.
 
 ## 42. Investigator — Heartbeat Error Scanner
 
-**Status:** Not started
+**Status:** Done
 **Priority:** High
 
 ### Concept
