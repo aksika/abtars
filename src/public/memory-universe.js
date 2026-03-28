@@ -14,13 +14,6 @@
     3: [1.0, 0.15, 0.15], // S — red
   };
 
-  var TYPE_EMISSIVE = {
-    fact: 1.0,
-    decision: 1.8,
-    preference: 1.4,
-    event: 2.2,
-  };
-
   window.initMemoryUniverse = function(token) {
     // Create overlay
     var overlay = document.createElement('div');
@@ -144,6 +137,13 @@
       var positions = new Float32Array(count * 3);
       var colors = new Float32Array(count * 3);
       var sizes = new Float32Array(count);
+      var opacities = new Float32Array(count);
+      var pulseRates = new Float32Array(count);
+      var brightnesses = new Float32Array(count);
+      var trustLevels = new Float32Array(count);
+      var hasEmbeddings = new Float32Array(count);
+
+      var PULSE_MAP = { fact: 0.0, decision: 1.5, preference: 3.0, event: 6.0 };
 
       var now = Date.now();
       var oldest = memories.reduce(function(a, m) { return Math.min(a, m.created_at || now); }, now);
@@ -152,7 +152,6 @@
       memories.forEach(function(mem, i) {
         var cls = mem.classification || 0;
         var c = CLASSIFICATION_COLORS[cls] || CLASSIFICATION_COLORS[0];
-        var emissive = TYPE_EMISSIVE[mem.memory_type] || 1.0;
 
         // Position: entity cluster or random sphere
         var px, py, pz;
@@ -178,12 +177,26 @@
         positions[i * 3 + 1] = py;
         positions[i * 3 + 2] = pz;
 
-        colors[i * 3] = c[0] * emissive;
-        colors[i * 3 + 1] = c[1] * emissive;
-        colors[i * 3 + 2] = c[2] * emissive;
+        colors[i * 3] = c[0];
+        colors[i * 3 + 1] = c[1];
+        colors[i * 3 + 2] = c[2];
 
-        var recallSize = Math.max(0.8, Math.min(4.0, 0.8 + (mem.recall_count || 0) * 0.3));
-        sizes[i] = recallSize;
+        sizes[i] = Math.max(0.8, Math.min(4.0, 0.8 + (mem.recall_count || 0) * 0.3));
+
+        // Credibility → opacity: 1=confirmed(1.0), 6=unknown(0.3)
+        opacities[i] = Math.max(0.3, 1.0 - ((mem.credibility || 6) - 1) * 0.14);
+
+        // Type → pulse rate
+        pulseRates[i] = PULSE_MAP[mem.memory_type] || 0.0;
+
+        // Emotion → brightness: -5=0.3, 0=0.7, +5=1.5
+        brightnesses[i] = 0.7 + (mem.emotion_score || 0) * 0.16;
+
+        // Trust → ring: 3=1.0, 0=0.0
+        trustLevels[i] = (mem.trust || 0) / 3.0;
+
+        // Embedding present
+        hasEmbeddings[i] = mem.has_embedding ? 1.0 : 0.0;
 
         particleData.push({
           index: i,
@@ -197,31 +210,58 @@
       geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
       geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
       geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+      geo.setAttribute('opacity', new THREE.BufferAttribute(opacities, 1));
+      geo.setAttribute('pulseRate', new THREE.BufferAttribute(pulseRates, 1));
+      geo.setAttribute('brightness', new THREE.BufferAttribute(brightnesses, 1));
+      geo.setAttribute('trustLevel', new THREE.BufferAttribute(trustLevels, 1));
+      geo.setAttribute('hasEmbed', new THREE.BufferAttribute(hasEmbeddings, 1));
 
       var vertexShader = [
         'attribute float size;',
+        'attribute float opacity;',
+        'attribute float pulseRate;',
+        'attribute float brightness;',
+        'attribute float trustLevel;',
+        'attribute float hasEmbed;',
+        'uniform float uTime;',
         'varying vec3 vColor;',
+        'varying float vOpacity;',
+        'varying float vTrust;',
+        'varying float vHasEmbed;',
         'void main() {',
-        '  vColor = color;',
+        '  float pulse = pulseRate > 0.0 ? 0.85 + 0.15 * sin(uTime * pulseRate + float(gl_VertexID) * 1.7) : 1.0;',
+        '  vColor = color * brightness * pulse;',
+        '  vOpacity = opacity;',
+        '  vTrust = trustLevel;',
+        '  vHasEmbed = hasEmbed;',
         '  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);',
-        '  gl_PointSize = size * (400.0 / -mvPosition.z);',
+        '  gl_PointSize = size * pulse * (400.0 / -mvPosition.z);',
         '  gl_Position = projectionMatrix * mvPosition;',
         '}',
       ].join('\n');
 
       var fragmentShader = [
         'varying vec3 vColor;',
+        'varying float vOpacity;',
+        'varying float vTrust;',
+        'varying float vHasEmbed;',
         'void main() {',
         '  float d = length(gl_PointCoord - vec2(0.5));',
         '  if (d > 0.5) discard;',
         '  float glow = exp(-d * 4.0);',
-        '  gl_FragColor = vec4(vColor * glow, glow);',
+        // Ring for trust
+        '  float ring = smoothstep(0.38, 0.40, d) * smoothstep(0.44, 0.42, d) * vTrust;',
+        // Core dot for embedding
+        '  float core = vHasEmbed * smoothstep(0.08, 0.0, d) * 0.8;',
+        '  vec3 col = vColor * glow + vec3(ring * 0.6) + vec3(core);',
+        '  gl_FragColor = vec4(col, glow * vOpacity + ring * 0.5 + core);',
         '}',
       ].join('\n');
 
       var mat = new THREE.ShaderMaterial({
         vertexShader: vertexShader,
         fragmentShader: fragmentShader,
+        uniforms: { uTime: { value: 0.0 } },
         vertexColors: true,
         transparent: true,
         blending: THREE.AdditiveBlending,
@@ -323,6 +363,7 @@
         }
         posAttr.needsUpdate = true;
 
+        mat.uniforms.uTime.value = t;
         controls.update();
         composer.render();
       }
