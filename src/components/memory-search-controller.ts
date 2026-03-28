@@ -80,7 +80,7 @@ export class MemorySearchController {
       : undefined;
 
     try {
-      const result = recallSearch(
+      const result = await recallSearch(
         {
           db: this.deps.db,
           index: this.deps.memoryIndex,

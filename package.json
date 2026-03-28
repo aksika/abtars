@@ -45,6 +45,7 @@
     "agentbridge-sleep": "dist/cli/agentbridge-sleep.js",
     "agentbridge-retro-extract": "dist/cli/agentbridge-retro-extract.js",
     "agentbridge-browser": "dist/cli/agentbridge-browser.js",
-    "agentbridge-tweet": "dist/cli/agentbridge-tweet.js"
+    "agentbridge-tweet": "dist/cli/agentbridge-tweet.js",
+    "agentbridge-embed": "dist/cli/agentbridge-embed.js"
   }
 }

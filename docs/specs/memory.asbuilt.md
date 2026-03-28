@@ -87,47 +87,36 @@ User Message
 
 ---
 
-## Recall Pipeline (`agentbridge-recall`, 7 stages)
+## Recall Pipeline (`recall-engine.ts`, S1-S7 + Se)
 
-Source: `src/cli/agentbridge-recall.ts`
-Called by: KP via `execute_bash: agentbridge-recall --keywords "kw1,kw2" --chat-id <id> [--original <kw>]`
+Source: `src/components/recall-engine.ts`
+CLI wrapper: `src/cli/agentbridge-recall.ts`
+Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine)
+Called by: KP via `execute_bash: agentbridge-recall --translated "kw1,kw2" --chat-id <id> [--original <kw>] [--stages S1,S3]`
 
 ```
-S1: Extracted memories — English FTS5 (content_en)
-    Uses extracted_memories_fts index. Darwinism-boosted scoring:
-    score = BM25 × emotion_boost × recall_boost × relevance_boost × trust_weight × credibility_weight
+Se: async embedding sidecar ─────────────┐  (fires at S1 start, ollama nomic-embed-text)
+                                           │
+S1: Extracted memories — English FTS5      │  content_en, Darwinism-boosted scoring
+S2: Extracted memories — Original FTS5     │  content_original, only if --original provided
+S3: Extracted memories — LIKE fallback     │  content_en + content_original, score ×0.95
+  → merge Se results here ◄───────────────┘
+  → Short-circuit: if S1+S2+S3+Se ≥ 10 results → skip S4-S7
 
-S2: Extracted memories — Original language FTS5 (content_original)
-    Uses extracted_memories_original_fts index. Only runs if --original param provided.
-    Same scoring as S1. Results merge into same pool.
-
-    → Short-circuit: if S1+S2 ≥ 10 results → skip S3-S7
-
-S3: Raw messages FTS5 (relaxed OR mode)
-    Uses messages_fts index. Searches raw conversation transcripts.
-
-S4: Consolidation file search
-    Keyword search in daily/weekly/quarterly .md files on disk.
-
-S5: Raw messages LIKE (wide net fallback)
-    SQL LIKE '%keyword%' on messages table. Only runs if results < limit.
-    Includes both --keywords and --original terms.
-
-S6-S7: Keyword-free fallback (exclusive, only if zero results)
-    Compares timestamps to pick fresher source:
-    - S6: Recent messages before context-window-start
-    - S7: Latest daily summary
-    Whichever is fresher wins. Avoids context bloat.
+S4: Raw messages — FTS5 (relaxed OR mode)
+S5: Raw messages — LIKE (wide net fallback, only if results < limit)
+S6: Consolidation file search (daily/weekly/quarterly .md on disk)
+S7: Keyword-free fallback (exclusive, only if zero results)
+    Compares timestamps: recent messages vs latest daily summary, fresher wins.
 ```
 
 Post-processing: dedup by content hash → temporal decay → MMR re-ranking (λ=0.7).
 
-**Known gaps (see RECALL-IMPROVEMENT-PLAN.md):**
-- S2 only runs with `--original` — agent must know to pass it
-- No LIKE fallback on extracted_memories (only on raw messages)
-- Extraction quality: `content_en` sometimes contains untranslated foreign words
+Se sidecar: gated by `EMBEDDING_ENABLED=true`. When disabled, Se is absent. Fires async at S1 start (~20-50ms via ollama), result consumed after S3. Zero added latency.
 
-**Hit-rate logging:** Per-stage hit counts emitted to stderr. Format: `[recall] query="..." S1:extracted_en=N S2:extracted_orig=N short_circuit=0|1 S3:messages_fts=N S4:consolidation=N S5:messages_like=N total=N returned=N`.
+Return type includes per-stage hits, timing (ms), and short-circuit info. Dashboard uses this for investigation.
+
+**Hit-rate logging:** Per-stage hit counts emitted to stderr. Format: `[recall] query="..." S1=N S2=N S3=N Se=N S4=N S5=N S6=N short_circuit=S3|none total=N`.
 
 ---
 

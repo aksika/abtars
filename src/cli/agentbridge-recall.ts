@@ -72,7 +72,7 @@ db.function("strip_emojis", (text: unknown) => {
 
 try {
   const index = new MemoryIndex(db);
-  const result = recallSearch(
+  const result = await recallSearch(
     { db, index, memoryDir: MEMORY_DIR, ctxStartPath: CTX_START_PATH },
     {
       translated: params.translated,

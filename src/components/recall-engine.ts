@@ -20,6 +20,7 @@ import type { SearchResult, MemorySearchResult } from "../types/memory.js";
 import { searchConsolidationFiles, getLatestConsolidationFile } from "./consolidation-search.js";
 import { applyMMR } from "./mmr.js";
 import { readFileSync } from "node:fs";
+import { embedText, vectorSearch, loadEmbedConfig } from "./ollama-embed.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -70,7 +71,7 @@ export type RecallDeps = {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const ALL_STAGES = ["S1", "S2", "S3", "S4", "S5", "S6", "S7"];
+const ALL_STAGES = ["S1", "S2", "S3", "Se", "S4", "S5", "S6", "S7"];
 const DEFAULT_LIMIT = 10;
 const DEFAULT_SHORT_CIRCUIT = 10;
 
@@ -89,7 +90,7 @@ function elapsed(start: number): number {
 
 // ── Engine ──────────────────────────────────────────────────────────────────
 
-export function recallSearch(deps: RecallDeps, params: RecallParams): RecallResult {
+export async function recallSearch(deps: RecallDeps, params: RecallParams): Promise<RecallResult> {
   const limit = params.limit ?? DEFAULT_LIMIT;
   const threshold = params.shortCircuitThreshold ?? DEFAULT_SHORT_CIRCUIT;
   const activeStages = new Set(params.stages ?? ALL_STAGES);
@@ -101,6 +102,13 @@ export function recallSearch(deps: RecallDeps, params: RecallParams): RecallResu
     limit: limit * 3,
     maxClassification: params.maxClassification ?? 2,
   };
+
+  // --- Se: fire embedding async at start ---
+  const embedConfig = loadEmbedConfig();
+  let embeddingPromise: Promise<Float32Array | null> | null = null;
+  if (embedConfig.enabled && activeStages.has("Se")) {
+    embeddingPromise = embedText(embedConfig, query);
+  }
 
   const allResults: RecallHit[] = [];
   const seen = new Set<string>();
@@ -190,6 +198,36 @@ export function recallSearch(deps: RecallDeps, params: RecallParams): RecallResu
       allResults.push(hit);
     }
     stages["S3"] = { hits, ms: elapsed(t) };
+  }
+
+  // --- Se: merge embedding results ---
+  if (embeddingPromise) {
+    const t = performance.now();
+    const queryVector = await embeddingPromise;
+    if (queryVector) {
+      const seHits: RecallHit[] = [];
+      const vecResults = vectorSearch(deps.db, queryVector, {
+        chatId: params.chatId, limit: limit * 3, threshold: embedConfig.threshold,
+        maxClassification: params.maxClassification ?? 2,
+      });
+      for (const r of vecResults) {
+        const key = `${r.source_timestamp}:${r.content_en.slice(0, 80)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        extractedIds.push(r.id);
+        const hit: RecallHit = {
+          content: r.content_en, date: new Date(r.source_timestamp).toISOString(),
+          source: "Se:embedding", score: r.score,
+          ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}),
+          contentOriginal: r.content_original ?? undefined, memoryType: r.memory_type ?? undefined,
+          trust: r.trust ?? undefined, integrity: r.integrity ?? undefined,
+          credibility: r.credibility ?? undefined, classification: r.classification ?? undefined,
+        };
+        seHits.push(hit);
+        allResults.push(hit);
+      }
+      stages["Se"] = { hits: seHits, ms: elapsed(t) };
+    }
   }
 
   // --- Short-circuit check ---

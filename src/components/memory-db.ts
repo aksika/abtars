@@ -171,6 +171,13 @@ export function initializeDatabase(dbPath: string): Database.Database {
     // Column already exists — safe to ignore
   }
 
+  // Migration: add embedding column to extracted_memories for vector search (Se sidecar)
+  try {
+    db.exec(`ALTER TABLE extracted_memories ADD COLUMN embedding BLOB`);
+  } catch (_) {
+    // Column already exists — safe to ignore
+  }
+
   // Register strip_emojis() scalar function for FTS5 triggers.
   // Messages store raw content (emojis preserved for retrospective sarcasm detection).
   // FTS5 index gets emoji-stripped text so search isn't polluted.
