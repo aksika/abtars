@@ -1,5 +1,12 @@
 # Kiro Professor — As-Built Documentation
 
+> **Update rules:** This document reflects the CURRENT state of the system. When updating:
+> - Never add historical notes ("was X", "changed from Y", "removed Z")
+> - Never use strikethrough (~~) for deleted components — just remove the row
+> - Never annotate with NEW/REMOVED/Unchanged — every line describes what exists NOW
+> - If a component is deleted, delete its documentation entirely
+> - Refactor history belongs in git commits and backlog, not here
+
 ## Overview
 
 Kiro Professor is a standalone Node.js agent that bridges Telegram (and Discord) to [Kiro CLI](https://kiro.dev). It polls messaging platforms, forwards user messages to a kiro-cli session, and returns responses. Supports tmux and ACP (Agent Client Protocol) transports, an optional localhost web dashboard, a local memory system, a sleep maintenance cycle, and agent-callable CLI tools for memory storage, recall, browser automation, todo management, and scheduled reminders.

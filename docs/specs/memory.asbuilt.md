@@ -1,4 +1,12 @@
 # Local Memory — As-Built
+
+> **Update rules:** This document reflects the CURRENT state of the system. When updating:
+> - Never add historical notes ("was X", "changed from Y", "removed Z")
+> - Never use strikethrough (~~) for deleted components — just remove the row
+> - Never annotate with NEW/REMOVED/Unchanged — every line describes what exists NOW
+> - If a component is deleted, delete its documentation entirely
+> - Refactor history belongs in git commits and backlog, not here
+
 ---
 
 ## Overview
