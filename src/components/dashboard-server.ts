@@ -8,8 +8,9 @@
 
 import * as http from "node:http";
 import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import type { Socket } from "node:net";
 import { WebSocketServer } from "ws";
 import type { DashboardConfig, StatusSnapshot } from "./dashboard-config.js";
@@ -122,6 +123,18 @@ export class DashboardServer {
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(this.deps.dashboardHtml);
         return;
+      }
+
+      // GET /*.js or /*.css — serve static files from dist/public/
+      if (method === "GET" && /^\/([\w-]+)\.(js|css)$/.test(pathname ?? "")) {
+        const filename = pathname!.slice(1);
+        const filePath = join(dirname(fileURLToPath(import.meta.url)), "..", "public", filename);
+        if (existsSync(filePath)) {
+          const ext = filename.endsWith(".css") ? "text/css" : "text/javascript";
+          res.writeHead(200, { "Content-Type": `${ext}; charset=utf-8` });
+          res.end(readFileSync(filePath, "utf-8"));
+          return;
+        }
       }
 
       // GET /api/memory/search — auth gate → memory search controller
