@@ -4,11 +4,13 @@
 (function() {
   'use strict';
 
-  var THREE_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js';
-  var ORBIT_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/controls/OrbitControls.js';
-  var BLOOM_PASS_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/postprocessing/UnrealBloomPass.js';
-  var EFFECT_COMPOSER_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/postprocessing/EffectComposer.js';
-  var RENDER_PASS_CDN = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/postprocessing/RenderPass.js';
+  var THREE_URL = 'https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.min.js';
+  var ORBIT_URL = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/js/controls/OrbitControls.js';
+  var COMPOSER_URL = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/js/postprocessing/EffectComposer.js';
+  var RENDER_PASS_URL = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/js/postprocessing/RenderPass.js';
+  var BLOOM_URL = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/js/postprocessing/UnrealBloomPass.js';
+  var SHADER_URL = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/js/shaders/LuminosityHighPassShader.js';
+  var COPY_URL = 'https://cdn.jsdelivr.net/npm/three@0.170.0/examples/js/shaders/CopyShader.js';
 
   var CLASSIFICATION_COLORS = {
     0: [0.0, 0.9, 0.9],   // U — cyan
@@ -59,27 +61,29 @@
         entities = data.entities || [];
         links = data.links || [];
         document.getElementById('mu-stats').textContent = memories.length + ' memories · ' + entities.length + ' entities';
-        return loadModules();
+        return loadScripts([THREE_URL, ORBIT_URL, COPY_URL, SHADER_URL, COMPOSER_URL, RENDER_PASS_URL, BLOOM_URL]);
       })
-      .then(function(mods) { buildScene(mods); })
+      .then(function() { buildScene(); })
       .catch(function(err) {
         document.getElementById('mu-loading').textContent = 'Error: ' + err.message;
       });
 
-    function loadModules() {
-      return Promise.all([
-        import(THREE_CDN),
-        import(ORBIT_CDN),
-        import(EFFECT_COMPOSER_CDN),
-        import(RENDER_PASS_CDN),
-        import(BLOOM_PASS_CDN),
-      ]).then(function(mods) {
-        return { THREE: mods[0], OrbitControls: mods[1].OrbitControls, EffectComposer: mods[2].EffectComposer, RenderPass: mods[3].RenderPass, UnrealBloomPass: mods[4].UnrealBloomPass };
-      });
+    function loadScripts(urls) {
+      return urls.reduce(function(chain, url) {
+        return chain.then(function() {
+          return new Promise(function(resolve, reject) {
+            var s = document.createElement('script');
+            s.src = url;
+            s.onload = resolve;
+            s.onerror = function() { reject(new Error('Failed to load ' + url)); };
+            document.head.appendChild(s);
+          });
+        });
+      }, Promise.resolve());
     }
 
-    function buildScene(m) {
-      var THREE = m.THREE;
+    function buildScene() {
+      var THREE = window.THREE;
       document.getElementById('mu-loading').style.display = 'none';
 
       var w = window.innerWidth, h = window.innerHeight;
@@ -97,13 +101,13 @@
       overlay.insertBefore(renderer.domElement, overlay.firstChild);
 
       // Post-processing: bloom
-      var composer = new m.EffectComposer(renderer);
-      composer.addPass(new m.RenderPass(scene, camera));
-      var bloom = new m.UnrealBloomPass(new THREE.Vector2(w, h), 1.5, 0.4, 0.2);
+      var composer = new THREE.EffectComposer(renderer);
+      composer.addPass(new THREE.RenderPass(scene, camera));
+      var bloom = new THREE.UnrealBloomPass(new THREE.Vector2(w, h), 1.5, 0.4, 0.2);
       composer.addPass(bloom);
 
       // Controls
-      var controls = new m.OrbitControls(camera, renderer.domElement);
+      var controls = new THREE.OrbitControls(camera, renderer.domElement);
       controls.enableDamping = true;
       controls.dampingFactor = 0.05;
       controls.autoRotate = true;
