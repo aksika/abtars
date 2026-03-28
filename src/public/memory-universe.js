@@ -102,7 +102,7 @@
       // Post-processing: bloom
       var composer = new m.EffectComposer(renderer);
       composer.addPass(new m.RenderPass(scene, camera));
-      var bloom = new m.UnrealBloomPass(new THREE.Vector2(w, h), 1.5, 0.4, 0.2);
+      var bloom = new m.UnrealBloomPass(new THREE.Vector2(w, h), 0.8, 0.3, 0.6);
       composer.addPass(bloom);
 
       // Controls
