@@ -1,93 +1,93 @@
-# Lazydog — Memory System Quick Commands
+# Lazydog — Quick Commands
 
-All commands run from PowerShell. They use WSL because npm/node aren't on the Windows PATH.
+## Tests
 
-## Run Tests
-
-```powershell
-# All tests
-wsl bash -c "cd /mnt/c/Users/qakosal/workspace/openclaw/agentbridge && npx vitest --run"
-
-# Just memory tests
-wsl bash -c "cd /mnt/c/Users/qakosal/workspace/openclaw/agentbridge && npx vitest --run src/components/memory-manager.test.ts src/components/memory-index.test.ts src/components/memory-config.test.ts src/components/memory-e2e.test.ts src/components/memory-properties.test.ts"
-
-# Just integration + e2e
-wsl bash -c "cd /mnt/c/Users/qakosal/workspace/openclaw/agentbridge && npx vitest --run src/components/session-manager.test.ts src/components/memory-e2e.test.ts"
-
-# Single test file
-wsl bash -c "cd /mnt/c/Users/qakosal/workspace/openclaw/agentbridge && npx vitest --run src/components/memory-properties.test.ts"
+```bash
+npx vitest run --silent                    # all tests
+npx vitest run src/components/recall-engine.test.ts  # specific file
+npm run typecheck                          # type check
 ```
 
-## Inspect the SQLite Database
+## Build & Deploy
 
-```powershell
-# Open the memory DB (default location)
-wsl bash -c "sqlite3 ~/.agentbridge/memory/memory.db"
+```bash
+npm run build
+./scripts/deploy.sh          # full deploy
+./scripts/deploy.sh --quick  # skip build + tmux restart
+```
+
+## Memory Search (agentbridge-recall)
+
+```bash
+# Basic search
+agentbridge-recall --translated "puppy" --chat-id 7773842843
+
+# With original language keyword
+agentbridge-recall --translated "puppy" --original "kiskutya" --chat-id 7773842843
+
+# Run specific stages only (dashboard investigation)
+agentbridge-recall --translated "puppy" --chat-id 7773842843 --stages S1,S3
+
+# Se embedding search only
+EMBEDDING_ENABLED=true agentbridge-recall --translated "puppy" --chat-id 7773842843 --stages Se
+
+# Compare FTS5 vs embedding
+EMBEDDING_ENABLED=true agentbridge-recall --translated "dog" --chat-id 7773842843 --stages S1,Se
+```
+
+Stages: S1 (en FTS5), S2 (original FTS5), S3 (LIKE), Se (embedding), S4 (msg FTS5), S5 (msg LIKE), S6 (consolidation), S7 (fallback)
+
+## Embeddings
+
+```bash
+# Setup (one-time)
+./scripts/setup-embeddings.sh
+
+# Batch embed all memories
+EMBEDDING_ENABLED=true agentbridge-embed
+
+# Check ollama status
+curl -s http://localhost:11434/api/tags | python3 -m json.tool
+```
+
+## SQLite Database
+
+```bash
+sqlite3 ~/.agentbridge/memory/memory.db
 
 # Inside sqlite3:
-.tables                                          -- list all tables
-SELECT * FROM sessions;                          -- active/inactive sessions
-SELECT COUNT(*) FROM messages;                   -- total indexed messages
-SELECT * FROM messages ORDER BY timestamp DESC LIMIT 10;  -- recent messages
-SELECT * FROM compactions ORDER BY timestamp DESC LIMIT 5; -- compaction summaries
-SELECT * FROM messages_fts WHERE messages_fts MATCH 'keyword'; -- FTS search
+.tables
+SELECT COUNT(*) FROM messages;
+SELECT COUNT(*) FROM extracted_memories;
+SELECT COUNT(*) FROM extracted_memories WHERE embedding IS NOT NULL;
+SELECT id, substr(content_en,1,80) FROM extracted_memories ORDER BY id DESC LIMIT 10;
+SELECT * FROM messages_fts WHERE messages_fts MATCH 'keyword';
+SELECT * FROM extracted_memories_fts WHERE content_en MATCH 'keyword';
+SELECT id, fire_at, message, paused FROM cron_entries;
 .quit
 ```
 
-## Check Transcript Files
+## Health Check
 
-```powershell
-# List all transcript files
-wsl bash -c "find ~/.agentbridge/memory/transcripts -name '*.jsonl' -ls"
-
-# Read a specific transcript (last 5 lines)
-wsl bash -c "tail -5 ~/.agentbridge/memory/transcripts/<chatId>/<sessionId>.jsonl"
-
-# Pretty-print a transcript
-wsl bash -c "cat ~/.agentbridge/memory/transcripts/<chatId>/<sessionId>.jsonl | python3 -m json.tool --json-lines"
-
-# Count messages per chat
-wsl bash -c "for f in ~/.agentbridge/memory/transcripts/*/*.jsonl; do echo \"\$f: \$(wc -l < \$f) lines\"; done"
+```bash
+~/.agentbridge/scripts/doctor.sh           # diagnose
+~/.agentbridge/scripts/doctor.sh --fix     # safe fixes
+~/.agentbridge/scripts/doctor.sh --fix-full  # + FTS rebuild, WAL checkpoint
 ```
 
-## Check Memory Archive (Compaction Files)
+## Bridge Control
 
-```powershell
-# List daily/weekly/monthly/yearly summaries
-wsl bash -c "find ~/.agentbridge/memory/memory -name '*.md' -ls"
-
-# Read a daily summary
-wsl bash -c "cat ~/.agentbridge/memory/memory/daily/<chatId>/<date>.md"
-```
-
-## Check Scratchpad & Core Facts
-
-```powershell
-# Read scratchpad for a chat
-wsl bash -c "cat ~/.agentbridge/memory/scratchpads/<chatId>/scratchpad.md"
-
-# Read user core facts
-wsl bash -c "cat ~/.agentbridge/memory/core/<chatId>/user_core_facts.md"
+```bash
+~/.agentbridge/agentbridge.sh              # start (discord default)
+~/.agentbridge/agentbridge.sh --telegram   # telegram only
+~/.agentbridge/agentbridge.sh --all --web  # both + dashboard
+~/.agentbridge/agentbridge.sh stop         # stop
 ```
 
 ## Disk Usage
 
-```powershell
-# Total memory layer disk usage
-wsl bash -c "du -sh ~/.agentbridge/memory/"
-
-# Breakdown by component
-wsl bash -c "du -sh ~/.agentbridge/memory/transcripts/ ~/.agentbridge/memory/memory.db ~/.agentbridge/memory/memory/ ~/.agentbridge/memory/scratchpads/ ~/.agentbridge/memory/core/ 2>/dev/null"
-```
-
-## Build & Type Check
-
-```powershell
-wsl bash -c "cd /mnt/c/Users/qakosal/workspace/openclaw/agentbridge && npx tsc --noEmit"
-```
-
-## Git
-
-```powershell
-git add -A; git commit -m "test: add memory system integration, e2e, and property tests"; git push
+```bash
+du -sh ~/.agentbridge/memory/
+du -sh ~/.agentbridge/memory/memory.db
+du -sh ~/.agentbridge/logs/
 ```
