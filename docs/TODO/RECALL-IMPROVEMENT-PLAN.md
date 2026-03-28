@@ -96,6 +96,8 @@ Changes from current:
    - Agent: calls with defaults, uses merged results
    - Dashboard: calls with stage filter, uses per-stage breakdown for investigation
    - Return type includes per-stage hits, timing (ms), and short-circuit info
+   - Rename CLI params: `--keywords` → `--translated`, keep `--original` as-is
+   - Update KP recall skill to use new param names
 1. Fix extraction prompt — always translate to English, no meta-commentary
 2. KP recall skill update — always pass `--keywords` (English) and `--original` (source language) unless they're the same word
 3. Add S3 — LIKE fallback on `content_en` and `content_original`, score = FTS5 score × 0.95
