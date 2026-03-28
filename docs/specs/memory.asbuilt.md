@@ -11,7 +11,7 @@
 
 ## Overview
 
-SQLite-backed persistence with FTS5 full-text search, optional local-model vector search, sleep-subagent-driven extraction, agent-initiated instant memory storage with emotion scoring, Memory Darwinism, NATO Admiralty Code security model, daily retrospective with emotional attribution, and immediate emotion propagation.
+SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), sleep-subagent-driven extraction, agent-initiated instant memory storage with emotion scoring, Memory Darwinism, NATO Admiralty Code security model, daily retrospective with emotional attribution, and immediate emotion propagation.
 **Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext` (see below).
 
 ---
@@ -24,7 +24,7 @@ SQLite-backed persistence with FTS5 full-text search, optional local-model vecto
 | C1 | Consolidated Summaries | Markdown files | Sleep subagent | Consolidation search, sleep subagent | Persistent — promoted up tiers |
 | C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store | agentbridge-recall | messages: hot buffer (flushed after sleep). extracted_memories: persistent |
 | C4 | Markdown Knowledge Files | Flat files | Agent, retrospective | Sleep subagent | Persistent |
-| C5 | Vector Index | `memory.db` (embeddings) | EmbeddingProvider | VectorIndex | Persistent — optional |
+| C5 | Embeddings | `memory.db` (`extracted_memories.embedding` BLOB) | ollama nomic-embed-text (on insert + batch) | recall-engine Se sidecar | Persistent — gated by `EMBEDDING_ENABLED` |
 | C6 | Retrospectives | Markdown files | Sleep subagent | Sleep subagent, agent (via recall) | Persistent |
 
 ### Data Flow
@@ -117,6 +117,19 @@ Se sidecar: gated by `EMBEDDING_ENABLED=true`. When disabled, Se is absent. Fire
 Return type includes per-stage hits, timing (ms), and short-circuit info. Dashboard uses this for investigation.
 
 **Hit-rate logging:** Per-stage hit counts emitted to stderr. Format: `[recall] query="..." S1=N S2=N S3=N Se=N S4=N S5=N S6=N short_circuit=S3|none total=N`.
+
+### Embedding Lifecycle (C5)
+
+Model: `nomic-embed-text` via ollama (768 dimensions, CPU-only, ~20-50ms/query). Gated by `EMBEDDING_ENABLED=true`.
+
+| Event | What happens |
+|-------|-------------|
+| `agentbridge-store` (instant) | `embedNewMemory()` — fire-and-forget after INSERT |
+| Dreamy extraction (sleep) | `embedBatch()` — embeds all new memories after INSERT |
+| `agentbridge-embed` CLI | One-time batch embed of all memories with NULL embedding |
+| Recall (Se sidecar) | `embedText(query)` fired async at S1, cosine similarity after S3 |
+
+Storage: `embedding` BLOB column on `extracted_memories` (768 × 4 bytes = 3KB per memory). Threshold: 0.5 cosine similarity (configurable via `EMBEDDING_SIMILARITY_THRESHOLD`).
 
 ---
 
