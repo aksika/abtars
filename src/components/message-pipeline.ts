@@ -231,9 +231,13 @@ export async function handleInboundMessage(
           "😤": "😡", "😠": "😡", "💪": "👏", "🤞": "🙏", "✅": "👍",
           "❌": "👎", "😬": "🙈", "🫣": "🙈", "🤭": "🙊", "💀": "👻",
         };
-        const fallback = TELEGRAM_ALLOWED.has(emoji) ? emoji : (FALLBACK_MAP[emoji] ?? "👍");
-        await adapter.setReaction(channelId, msg.messageId, fallback);
-        logDebug(TAG, `Reaction-only response: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);
+        const fallback = TELEGRAM_ALLOWED.has(emoji) ? emoji : (FALLBACK_MAP[emoji] ?? null);
+        if (fallback) {
+          await adapter.setReaction(channelId, msg.messageId, fallback);
+        } else {
+          await adapter.sendMessage(channelId, emoji, { threadId: msg.threadId });
+        }
+        logDebug(TAG, `Reaction-only response: ${emoji}${fallback && emoji !== fallback ? ` → ${fallback}` : ""}${!fallback ? " (sent as message)" : ""}`);
         return;
       }
     }
