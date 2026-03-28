@@ -169,3 +169,40 @@ describe("recallSearch — S3 LIKE fallback", () => {
     expect(prepareCall).toContain("LIKE");
   });
 });
+
+describe("recallSearch — entity filter", () => {
+  it("filters results by entity when --entity provided", async () => {
+    const idx = mockIndex({
+      searchExtracted: vi.fn(() => [
+        { id: 1, content: "about Molty", source_timestamp: 1000, score: 5.0, tier: "extracted" as const },
+        { id: 2, content: "about pizza", source_timestamp: 2000, score: 4.0, tier: "extracted" as const },
+      ]),
+    });
+    // Mock DB: entity filter query returns only memory_id=1
+    const db = mockDb();
+    (db.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => ({
+      all: vi.fn(() => {
+        if (sql.includes("memory_entities")) return [{ memory_id: 1 }];
+        return [];
+      }),
+    }));
+    const result = await recallSearch(
+      makeDeps({ index: idx, db }),
+      baseParams({ entity: "Molty", stages: ["S1"] }),
+    );
+    // Only memory id=1 should pass the entity filter
+    expect(result.results.length).toBe(1);
+    expect(result.results[0]!.content).toBe("about Molty");
+  });
+
+  it("returns all results when --entity not provided", async () => {
+    const idx = mockIndex({
+      searchExtracted: vi.fn(() => [
+        { id: 1, content: "a", source_timestamp: 1000, score: 5.0, tier: "extracted" as const },
+        { id: 2, content: "b", source_timestamp: 2000, score: 4.0, tier: "extracted" as const },
+      ]),
+    });
+    const result = await recallSearch(makeDeps({ index: idx }), baseParams({ stages: ["S1"] }));
+    expect(result.results.length).toBe(2);
+  });
+});
