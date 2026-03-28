@@ -97,10 +97,12 @@ Changes from current:
    - Dashboard: calls with stage filter, uses per-stage breakdown for investigation
    - Return type includes per-stage hits, timing (ms), and short-circuit info
 1. Fix extraction prompt — always translate to English, no meta-commentary
-2. Always run S2 — remove `if (params.original)` guard
-3. Add S3 — LIKE fallback on `content_en` and `content_original`
+2. Ungate S2 — search content_original with ALL keywords (main + original combined), not just --original
+3. Add S3 — LIKE fallback on `content_en` and `content_original`, score = FTS5 score × 0.95
 4. Reorder S4-S6 — messages LIKE before consolidation files
 5. Audit + fix existing bad memories (kiskutya + any others with untranslated content_en)
+6. Tests for recall-engine.ts
+7. Dashboard UI — replace L1-L4 layer selectors with S1-S7+Se stage selectors
 
 ### Phase 2: Embeddings (requires ollama)
 6. Install ollama + pull nomic-embed-text
