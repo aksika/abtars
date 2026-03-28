@@ -603,6 +603,7 @@ export async function startBridge(): Promise<void> {
           memoryIndex: memory.getMemoryIndex()!,
           db: memory.getDatabase()!,
           memoryDir: memoryConfig.memoryDir,
+          ctxStartPath: join(memoryConfig.memoryDir, "context-window-start.json"),
         })
       : null;
 

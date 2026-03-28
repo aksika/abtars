@@ -138,7 +138,7 @@ export type WebSearchResult = {
 
 export type MemorySearchResponse = {
   results: WebSearchResult[];
-  layers: Record<string, { status: "ok" | "not_implemented" | "skipped" }>;
+  layers: Record<string, { status: string; hits?: number; ms?: number }>;
 };
 
 // ── Snapshot Builder ────────────────────────────────────────────────────────

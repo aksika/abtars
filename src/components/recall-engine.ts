@@ -1,0 +1,303 @@
+/**
+ * recall-engine — single recall pipeline shared by agentbridge-recall CLI and dashboard.
+ *
+ * Stages:
+ *   S1: Extracted memories — English FTS5 (Darwinism-boosted)
+ *   S2: Extracted memories — Original language FTS5
+ *   S3: Extracted memories — LIKE fallback (content_en + content_original)
+ *   S4: Messages — FTS5 (relaxed OR)
+ *   S5: Messages — LIKE (wide net)
+ *   S6: Consolidation file search (daily/weekly/quarterly .md)
+ *   S7: Keyword-free fallback (exclusive: recent messages OR latest daily summary)
+ *   Se: Embedding sidecar (async, future — gated by EMBEDDING_ENABLED)
+ *
+ * Short-circuit: if S1+S2+S3 ≥ threshold → skip S4-S7.
+ */
+
+import type Database from "better-sqlite3";
+import type { MemoryIndex } from "./memory-index.js";
+import type { SearchResult, MemorySearchResult } from "../types/memory.js";
+import { searchConsolidationFiles, getLatestConsolidationFile } from "./consolidation-search.js";
+import { applyMMR } from "./mmr.js";
+import { readFileSync } from "node:fs";
+
+// ── Types ───────────────────────────────────────────────────────────────────
+
+export type RecallHit = {
+  content: string;
+  date: string;
+  source: string;
+  score: number;
+  source_ids?: string;
+  contentOriginal?: string;
+  memoryType?: string;
+  trust?: number;
+  integrity?: number;
+  credibility?: number;
+  classification?: number;
+};
+
+export type StageResult = {
+  hits: RecallHit[];
+  ms: number;
+};
+
+export type RecallResult = {
+  results: RecallHit[];
+  stages: Record<string, StageResult>;
+  shortCircuitAfter: string | null;
+  extractedIds: number[];
+};
+
+export type RecallParams = {
+  translated: string[];
+  original?: string;
+  chatId: number;
+  limit?: number;
+  maxClassification?: number;
+  timeStart?: number;
+  timeEnd?: number;
+  stages?: string[];
+  shortCircuitThreshold?: number;
+};
+
+export type RecallDeps = {
+  db: Database.Database;
+  index: MemoryIndex;
+  memoryDir: string;
+  ctxStartPath: string;
+};
+
+// ── Constants ───────────────────────────────────────────────────────────────
+
+const ALL_STAGES = ["S1", "S2", "S3", "S4", "S5", "S6", "S7"];
+const DEFAULT_LIMIT = 10;
+const DEFAULT_SHORT_CIRCUIT = 10;
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function readCtxStart(path: string, chatId: number): number {
+  try {
+    const data = JSON.parse(readFileSync(path, "utf-8")) as Record<string, number>;
+    return data[String(chatId)] ?? 0;
+  } catch { return 0; }
+}
+
+function elapsed(start: number): number {
+  return Math.round(performance.now() - start);
+}
+
+// ── Engine ──────────────────────────────────────────────────────────────────
+
+export function recallSearch(deps: RecallDeps, params: RecallParams): RecallResult {
+  const limit = params.limit ?? DEFAULT_LIMIT;
+  const threshold = params.shortCircuitThreshold ?? DEFAULT_SHORT_CIRCUIT;
+  const activeStages = new Set(params.stages ?? ALL_STAGES);
+  const query = params.translated.join(" ");
+  const searchOpts = {
+    chatId: params.chatId,
+    startTime: params.timeStart,
+    endTime: params.timeEnd,
+    limit: limit * 3,
+    maxClassification: params.maxClassification ?? 2,
+  };
+
+  const allResults: RecallHit[] = [];
+  const seen = new Set<string>();
+  const extractedIds: number[] = [];
+  const stages: Record<string, StageResult> = {};
+  let shortCircuitAfter: string | null = null;
+
+  const addExtracted = (r: MemorySearchResult, source: string, hits: RecallHit[]): void => {
+    const key = `${r.source_timestamp}:${r.content.slice(0, 80)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (r.id !== undefined) extractedIds.push(r.id);
+    const hit: RecallHit = {
+      content: r.content, date: new Date(r.source_timestamp).toISOString(), source, score: r.score,
+      ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}),
+      contentOriginal: r.content_original, memoryType: r.memory_type,
+      trust: r.trust, integrity: r.integrity, credibility: r.credibility, classification: r.classification,
+    };
+    hits.push(hit);
+    allResults.push(hit);
+  };
+
+  const addMessage = (r: SearchResult, source: string, hits: RecallHit[]): void => {
+    const key = `${r.record.timestamp}:${r.record.content.slice(0, 80)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const hit: RecallHit = {
+      content: `[${r.record.role}] ${r.record.content}`,
+      date: new Date(r.record.timestamp).toISOString(), source, score: r.score,
+    };
+    hits.push(hit);
+    allResults.push(hit);
+  };
+
+  // --- S1: Extracted memories — English FTS5 ---
+  if (activeStages.has("S1")) {
+    const t = performance.now();
+    const hits: RecallHit[] = [];
+    for (const r of deps.index.searchExtracted(query, searchOpts)) addExtracted(r, "S1:extracted_en", hits);
+    stages["S1"] = { hits, ms: elapsed(t) };
+  }
+
+  // --- S2: Extracted memories — Original language FTS5 ---
+  if (activeStages.has("S2") && params.original) {
+    const t = performance.now();
+    const hits: RecallHit[] = [];
+    for (const r of deps.index.searchOriginal(params.original, { chatId: params.chatId, limit: limit * 3, maxClassification: params.maxClassification ?? 2 })) {
+      addExtracted(r, "S2:extracted_orig", hits);
+    }
+    stages["S2"] = { hits, ms: elapsed(t) };
+  }
+
+  // --- S3: Extracted memories — LIKE fallback ---
+  if (activeStages.has("S3")) {
+    const t = performance.now();
+    const hits: RecallHit[] = [];
+    const allKw = [...params.translated];
+    if (params.original) allKw.push(params.original);
+    const conditions = ["1=1"];
+    const bindParams: (string | number)[] = [];
+    if (params.chatId) { conditions.push("chat_id = ?"); bindParams.push(params.chatId); }
+    if (params.timeStart) { conditions.push("source_timestamp >= ?"); bindParams.push(params.timeStart); }
+    if (params.timeEnd) { conditions.push("source_timestamp <= ?"); bindParams.push(params.timeEnd); }
+    if (params.maxClassification !== undefined) { conditions.push("COALESCE(classification, 0) <= ?"); bindParams.push(params.maxClassification); }
+    conditions.push(`(${allKw.map(kw => { bindParams.push(`%${kw}%`, `%${kw}%`); return "(content_en LIKE ? OR content_original LIKE ?)"; }).join(" OR ")})`);
+    const rows = deps.db.prepare(
+      `SELECT id, content_en, content_original, memory_type, source_timestamp, source_message_ids, trust, integrity, credibility, classification FROM extracted_memories WHERE ${conditions.join(" AND ")} ORDER BY source_timestamp DESC LIMIT ?`
+    ).all(...bindParams, limit * 3) as Array<{
+      id: number; content_en: string; content_original: string | null; memory_type: string | null;
+      source_timestamp: number; source_message_ids: string | null;
+      trust: number | null; integrity: number | null; credibility: number | null; classification: number | null;
+    }>;
+    for (const r of rows) {
+      const key = `${r.source_timestamp}:${r.content_en.slice(0, 80)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (r.id !== undefined) extractedIds.push(r.id);
+      const hit: RecallHit = {
+        content: r.content_en, date: new Date(r.source_timestamp).toISOString(),
+        source: "S3:extracted_like", score: 0.95,
+        ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}),
+        contentOriginal: r.content_original ?? undefined, memoryType: r.memory_type ?? undefined,
+        trust: r.trust ?? undefined, integrity: r.integrity ?? undefined,
+        credibility: r.credibility ?? undefined, classification: r.classification ?? undefined,
+      };
+      hits.push(hit);
+      allResults.push(hit);
+    }
+    stages["S3"] = { hits, ms: elapsed(t) };
+  }
+
+  // --- Short-circuit check ---
+  if (allResults.length >= threshold) {
+    shortCircuitAfter = "S3";
+  }
+
+  if (!shortCircuitAfter) {
+    // --- S4: Messages — FTS5 ---
+    if (activeStages.has("S4") && query.trim()) {
+      const t = performance.now();
+      const hits: RecallHit[] = [];
+      for (const r of deps.index.search(query, searchOpts, "or")) addMessage(r, "S4:messages_fts", hits);
+      stages["S4"] = { hits, ms: elapsed(t) };
+    }
+
+    // --- S5: Messages — LIKE ---
+    if (activeStages.has("S5") && allResults.length < limit) {
+      const t = performance.now();
+      const hits: RecallHit[] = [];
+      const allKw = [...params.translated];
+      if (params.original) allKw.push(params.original);
+      const conditions = ["chat_id = ?"];
+      const bindParams: (string | number)[] = [params.chatId];
+      if (params.timeStart) { conditions.push("timestamp >= ?"); bindParams.push(params.timeStart); }
+      if (params.timeEnd) { conditions.push("timestamp <= ?"); bindParams.push(params.timeEnd); }
+      conditions.push(`(${allKw.map(kw => { bindParams.push(`%${kw}%`); return "content LIKE ?"; }).join(" OR ")})`);
+      const rows = deps.db.prepare(
+        `SELECT role, content, timestamp FROM messages WHERE ${conditions.join(" AND ")} ORDER BY timestamp DESC LIMIT 20`
+      ).all(...bindParams) as Array<{ role: string; content: string; timestamp: number }>;
+      for (const r of rows) {
+        const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          const hit: RecallHit = { content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "S5:messages_like", score: 0.3 };
+          hits.push(hit);
+          allResults.push(hit);
+        }
+      }
+      stages["S5"] = { hits, ms: elapsed(t) };
+    }
+
+    // --- S6: Consolidation files ---
+    if (activeStages.has("S6")) {
+      const t = performance.now();
+      const hits: RecallHit[] = [];
+      const allKw = [...params.translated];
+      if (params.original) allKw.push(params.original);
+      const consolidationResults = searchConsolidationFiles(deps.memoryDir, allKw, {
+        startTime: params.timeStart, endTime: params.timeEnd,
+      });
+      for (const c of consolidationResults) {
+        const key = `${c.timestamp}:${c.content.slice(0, 80)}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          const hit: RecallHit = { content: c.content, date: new Date(c.timestamp).toISOString(), source: `S6:consolidation:${c.tier}`, score: 0.5 };
+          hits.push(hit);
+          allResults.push(hit);
+        }
+      }
+      stages["S6"] = { hits, ms: elapsed(t) };
+    }
+
+    // --- S7: Keyword-free fallback ---
+    if (activeStages.has("S7") && allResults.length === 0) {
+      const t = performance.now();
+      const hits: RecallHit[] = [];
+      const ctxStart = readCtxStart(deps.ctxStartPath, params.chatId);
+
+      const recentRows = deps.db.prepare(
+        `SELECT role, content, timestamp FROM messages WHERE chat_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?`
+      ).all(params.chatId, ctxStart || Date.now(), limit) as Array<{ role: string; content: string; timestamp: number }>;
+      const recentTs = recentRows[0]?.timestamp ?? 0;
+
+      const dailySummary = getLatestConsolidationFile(deps.memoryDir, "daily");
+      const dailyTs = dailySummary?.timestamp ?? 0;
+
+      if (dailyTs > recentTs && dailySummary) {
+        const key = `${dailySummary.timestamp}:${dailySummary.content.slice(0, 80)}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          const hit: RecallHit = { content: dailySummary.content, date: new Date(dailySummary.timestamp).toISOString(), source: "S7:fallback:daily", score: 0.1 };
+          hits.push(hit);
+          allResults.push(hit);
+        }
+      } else {
+        for (const r of recentRows) {
+          const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            const hit: RecallHit = { content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "S7:fallback:recent", score: 0.1 };
+            hits.push(hit);
+            allResults.push(hit);
+          }
+        }
+      }
+      stages["S7"] = { hits, ms: elapsed(t) };
+    }
+  }
+
+  // --- Post-processing ---
+  allResults.sort((a, b) => b.score - a.score);
+  const reranked = applyMMR(allResults, 0.7);
+
+  return {
+    results: reranked.slice(0, limit),
+    stages,
+    shortCircuitAfter,
+    extractedIds,
+  };
+}
