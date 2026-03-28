@@ -8,6 +8,7 @@ import { VectorIndex } from "./vector-index.js";
 import { EmbeddingProvider } from "./embedding-provider.js";
 import { HeartbeatSystem } from "./heartbeat-system.js";
 import { getLatestConsolidationFile } from "./consolidation-search.js";
+import { loadEmbedConfig, embedText } from "./ollama-embed.js";
 import { IngestionPipeline } from "./ingestion-pipeline.js";
 import { ReflectionEngine } from "./reflection-engine.js";
 import type {
@@ -1024,6 +1025,9 @@ export class MemoryManager {
          ON CONFLICT(chat_id) DO UPDATE SET last_processed_timestamp = excluded.last_processed_timestamp`,
       ).run(params.chatId, now);
 
+      // Embed for Se sidecar (async, non-blocking — failure is OK)
+      this.embedNewMemory(params.contentEn.trim());
+
       logInfo(TAG, `Instant store: persisted memory for chat ${params.chatId} (type=${params.memoryType}, emotion=${emotionScore})`);
       return { stored: true, memoriesCount: 1 };
     } catch (err) {
@@ -1098,5 +1102,17 @@ export class MemoryManager {
     } catch (err) {
       logError(TAG, "Failed to close database", err);
     }
+  }
+
+  /** Embed a newly inserted memory (fire-and-forget). */
+  private embedNewMemory(contentEn: string): void {
+    const cfg = loadEmbedConfig();
+    if (!cfg.enabled || !this.db) return;
+    embedText(cfg, contentEn).then(vec => {
+      if (!vec || !this.db) return;
+      this.db.prepare(
+        "UPDATE extracted_memories SET embedding = ? WHERE content_en = ? AND embedding IS NULL"
+      ).run(Buffer.from(vec.buffer), contentEn);
+    }).catch(() => {});
   }
 }

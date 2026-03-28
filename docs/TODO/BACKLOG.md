@@ -310,12 +310,12 @@ Investigated: `nlm` is installed via `pipx` as `notebooklm-mcp-cli 0.4.1` (PyPI 
 
 ## 41. Recall Pipeline Improvement
 
-**Status:** Not started
+**Status:** Done
 **Priority:** High
 **Plan:** `docs/TODO/RECALL-IMPROVEMENT-PLAN.md`
 
-Phase 1: Fix extraction prompt, always run S2, add S3 LIKE fallback, swap S4/S5.
-Phase 2: Embeddings via ollama (Se sidecar, async with S1).
+Phase 1: recall-engine extraction, S3 LIKE fallback, extraction prompt, --translated, dashboard S1-S7.
+Phase 2: ollama Se sidecar, 93 memories embedded, embed-on-insert.
 
 ## 42. Investigator — Heartbeat Error Scanner
 

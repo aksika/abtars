@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { ExtractedMemory } from "../types/memory.js";
 import { clampEmotionScore } from "./emotion-utils.js";
 import { logDebug, logError, logWarn } from "./logger.js";
+import { loadEmbedConfig, embedText } from "./ollama-embed.js";
 
 const TAG = "memory-extractor";
 
@@ -265,6 +266,24 @@ export class MemoryExtractor {
     });
 
     insertAll(memories);
+
+    // Embed new memories for Se sidecar (fire-and-forget)
+    this.embedBatch(memories.map(m => m.content_en));
+  }
+
+  /** Embed a batch of content strings (async, non-blocking). */
+  private embedBatch(contents: string[]): void {
+    const cfg = loadEmbedConfig();
+    if (!cfg.enabled) return;
+    const update = this.db.prepare("UPDATE extracted_memories SET embedding = ? WHERE content_en = ? AND embedding IS NULL");
+    (async () => {
+      for (const text of contents) {
+        try {
+          const vec = await embedText(cfg, text);
+          if (vec) update.run(Buffer.from(vec.buffer), text);
+        } catch { /* skip */ }
+      }
+    })();
   }
 
   /** Get the watermark (last processed timestamp) for a chat. Returns 0 if no watermark exists. */

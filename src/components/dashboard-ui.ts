@@ -285,6 +285,7 @@ function getSearchPanel(): string {
         <button class="layer-btn active" data-layer="S5" onclick="toggleLayer(this)">S5:msg-like</button>
         <button class="layer-btn active" data-layer="S6" onclick="toggleLayer(this)">S6:consol</button>
         <button class="layer-btn active" data-layer="S7" onclick="toggleLayer(this)">S7:fallback</button>
+        <button class="layer-btn active" data-layer="Se" onclick="toggleLayer(this)">Se:embed</button>
         <button class="layer-btn" data-layer="NLM" onclick="toggleLayer(this)">NLM</button>
       </div>
     </div>
