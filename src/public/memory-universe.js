@@ -22,7 +22,7 @@
     overlay.innerHTML = '<div id="mu-loading" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#0ff;font-family:monospace;font-size:18px;">Loading Memory Universe...</div>' +
       '<div id="mu-info" style="display:none;position:absolute;right:0;top:0;width:340px;height:100%;background:rgba(0,0,0,0.85);border-left:1px solid #0ff3;padding:20px;overflow-y:auto;font-family:monospace;color:#e0e0e0;font-size:13px;"></div>' +
       '<div id="mu-tooltip" style="display:none;position:absolute;pointer-events:none;background:rgba(0,10,20,0.9);border:1px solid #0ff5;padding:8px 12px;border-radius:4px;color:#e0e0e0;font-family:monospace;font-size:12px;max-width:300px;"></div>' +
-      '<button id="mu-close" style="position:absolute;top:16px;left:16px;z-index:10001;background:none;border:1px solid #0ff5;color:#0ff;font-size:20px;cursor:pointer;padding:6px 14px;border-radius:4px;font-family:monospace;">✕ ESC</button>' +
+      '<button id="mu-close" style="position:absolute;top:16px;left:16px;z-index:10001;background:none;border:none;color:#0ff6;font-size:16px;cursor:pointer;padding:6px 10px;font-family:monospace;">← back</button>' +
       '<div id="mu-stats" style="position:absolute;bottom:16px;left:16px;color:#0ff8;font-family:monospace;font-size:12px;"></div>';
     document.body.appendChild(overlay);
 
@@ -114,7 +114,11 @@
         starPos[i * 3 + 2] = (Math.random() - 0.5) * 200;
       }
       starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
-      var starMat = new THREE.PointsMaterial({ color: 0x334466, size: 0.15, sizeAttenuation: true });
+      var starMat = new THREE.ShaderMaterial({
+        vertexShader: 'void main() { vec4 mv = modelViewMatrix * vec4(position,1.0); gl_PointSize = 1.5; gl_Position = projectionMatrix * mv; }',
+        fragmentShader: 'void main() { float d = length(gl_PointCoord-vec2(0.5)); if(d>0.5) discard; gl_FragColor = vec4(0.2,0.27,0.4, 1.0-d*2.0); }',
+        transparent: true, depthWrite: false,
+      });
       scene.add(new THREE.Points(starGeo, starMat));
 
       // Build entity clusters — assign positions
@@ -142,7 +146,7 @@
       var brightnesses = new Float32Array(count);
       var hasEmbeddings = new Float32Array(count);
 
-      var PULSE_MAP = { fact: 0.0, decision: 1.5, preference: 3.0, event: 6.0 };
+      var PULSE_MAP = { fact: 0.0, decision: 0.75, preference: 1.5, event: 3.0 };
 
       var now = Date.now();
       var oldest = memories.reduce(function(a, m) { return Math.min(a, m.created_at || now); }, now);
