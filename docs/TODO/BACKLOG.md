@@ -374,10 +374,10 @@ INVESTIGATOR_COOLDOWN_MIN=30       # same error suppressed for N minutes
 
 ## 44. Entity linking
 
-**Status:** Not started
+**Status:** Done
 **Priority:** Low
 
-Tag extracted memories with entity mentions (@Peter, @agentbridge), maintain per-entity summary pages, enable "tell me about X" queries via entity filter.
+Entities table + memory_entities junction. Extraction prompt tags entities per memory. Recall --entity filter. New memories auto-tagged, existing memories tagged on next Dreamy run.
 
 ## 45. AES encryption for restricted memories
 

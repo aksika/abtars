@@ -134,6 +134,14 @@ Model: `nomic-embed-text` via ollama (768 dimensions, CPU-only, ~20-50ms/query, 
 
 Storage: `embedding` BLOB column on `extracted_memories` (768 × 4 bytes = 3KB per memory). Threshold: 0.5 cosine similarity (configurable via `EMBEDDING_SIMILARITY_THRESHOLD`).
 
+### Entity Linking
+
+Tables: `entities` (name, type, summary) + `memory_entities` (memory_id, entity_id junction).
+
+Entities are tagged during extraction — the LLM identifies named entities (people, agents, projects, services, places) per memory. Stored via upsert on insert.
+
+Recall supports `--entity "Name"` filter — pre-filters extracted memory results to only those linked to the entity. Works with or without keyword search.
+
 ---
 
 ## Session Context Window

@@ -37,6 +37,16 @@ EMBEDDING_ENABLED=true agentbridge-recall --translated "dog" --chat-id 777384284
 
 Stages: S1 (en FTS5), S2 (original FTS5), S3 (LIKE), Se (embedding), S4 (msg FTS5), S5 (msg LIKE), S6 (consolidation), S7 (fallback)
 
+## Recall — Entity Filter
+
+```bash
+# All memories linked to an entity
+agentbridge-recall --entity "Molty" --chat-id 7773842843
+
+# Combined: entity + keyword
+agentbridge-recall --translated "email" --entity "Molty" --chat-id 7773842843
+```
+
 ## Embeddings
 
 ```bash
