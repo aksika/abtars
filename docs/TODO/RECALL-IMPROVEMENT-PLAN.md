@@ -63,6 +63,18 @@ S6-7: Keyword-free fallback
 
 ## Embedding Architecture
 
+### Configuration (env vars)
+```env
+# Embedding search — disabled by default, requires ollama
+EMBEDDING_ENABLED=false
+EMBEDDING_PROVIDER=ollama
+EMBEDDING_MODEL=nomic-embed-text
+EMBEDDING_URL=http://localhost:11434
+EMBEDDING_SIMILARITY_THRESHOLD=0.7
+```
+
+All embedding functionality is gated behind `EMBEDDING_ENABLED=true`. When disabled, S5.5 is skipped entirely — no ollama dependency, no errors, recall works via S1-S5.
+
 ### Model
 - `nomic-embed-text` via ollama (274MB, CPU-only, ~20-50ms/query)
 - 768-dimension vectors
