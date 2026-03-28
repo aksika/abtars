@@ -140,7 +140,6 @@
       var opacities = new Float32Array(count);
       var pulseRates = new Float32Array(count);
       var brightnesses = new Float32Array(count);
-      var trustLevels = new Float32Array(count);
       var hasEmbeddings = new Float32Array(count);
 
       var PULSE_MAP = { fact: 0.0, decision: 1.5, preference: 3.0, event: 6.0 };
@@ -192,11 +191,8 @@
         // Emotion → brightness: -5=0.3, 0=0.7, +5=1.5
         brightnesses[i] = 0.7 + (mem.emotion_score || 0) * 0.16;
 
-        // Trust → ring: 3=1.0, 0=0.0
-        trustLevels[i] = (mem.trust || 0) / 3.0;
-
-        // Embedding present
-        hasEmbeddings[i] = mem.has_embedding ? 1.0 : 0.0;
+        // Trust → core dot: 3=bright, 0=none
+        hasEmbeddings[i] = (mem.trust || 0) / 3.0;
 
         particleData.push({
           index: i,
@@ -213,7 +209,6 @@
       geo.setAttribute('opacity', new THREE.BufferAttribute(opacities, 1));
       geo.setAttribute('pulseRate', new THREE.BufferAttribute(pulseRates, 1));
       geo.setAttribute('brightness', new THREE.BufferAttribute(brightnesses, 1));
-      geo.setAttribute('trustLevel', new THREE.BufferAttribute(trustLevels, 1));
       geo.setAttribute('hasEmbed', new THREE.BufferAttribute(hasEmbeddings, 1));
 
       var vertexShader = [
@@ -221,18 +216,15 @@
         'attribute float opacity;',
         'attribute float pulseRate;',
         'attribute float brightness;',
-        'attribute float trustLevel;',
         'attribute float hasEmbed;',
         'uniform float uTime;',
         'varying vec3 vColor;',
         'varying float vOpacity;',
-        'varying float vTrust;',
         'varying float vHasEmbed;',
         'void main() {',
         '  float pulse = pulseRate > 0.0 ? 0.85 + 0.15 * sin(uTime * pulseRate + float(gl_VertexID) * 1.7) : 1.0;',
         '  vColor = color * brightness * pulse;',
         '  vOpacity = opacity;',
-        '  vTrust = trustLevel;',
         '  vHasEmbed = hasEmbed;',
         '  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);',
         '  gl_PointSize = size * pulse * (400.0 / -mvPosition.z);',
@@ -243,18 +235,15 @@
       var fragmentShader = [
         'varying vec3 vColor;',
         'varying float vOpacity;',
-        'varying float vTrust;',
         'varying float vHasEmbed;',
         'void main() {',
         '  float d = length(gl_PointCoord - vec2(0.5));',
         '  if (d > 0.5) discard;',
         '  float glow = exp(-d * 4.0);',
-        // Ring for trust
-        '  float ring = smoothstep(0.38, 0.40, d) * smoothstep(0.44, 0.42, d) * vTrust;',
-        // Core dot for embedding
+        // Core dot for trust
         '  float core = vHasEmbed * smoothstep(0.08, 0.0, d) * 0.8;',
-        '  vec3 col = vColor * glow + vec3(ring * 0.6) + vec3(core);',
-        '  gl_FragColor = vec4(col, glow * vOpacity + ring * 0.5 + core);',
+        '  vec3 col = vColor * glow + vec3(core);',
+        '  gl_FragColor = vec4(col, glow * vOpacity + core);',
         '}',
       ].join('\n');
 
