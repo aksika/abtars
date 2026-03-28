@@ -407,3 +407,11 @@ Review and clean up agentbridge-store CLI.
 4. Confidence default (3) — verify this is correct
 5. Should store validate that content_en is actually English? (prevent bad extraction data)
 6. Test coverage audit
+
+## 47. Sleep Self-Healing
+
+**Status:** Not started
+**Priority:** High
+**Plan:** `docs/TODO/SLEEP-SELF-HEALING-PLAN.md`
+
+Dreamy can detect issues but can't heal most of them. Fix state gatherer (wrong embedding count), add DB maintenance (FTS rebuild, WAL checkpoint, batch-embed), content_en quality check, audit length validation.
