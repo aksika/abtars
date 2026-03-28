@@ -224,7 +224,14 @@ export async function handleInboundMessage(
         const emoji = reactMatch[1]!;
         // Telegram only allows specific reactions — map unsupported to closest allowed
         const TELEGRAM_ALLOWED = new Set(["👍","👎","❤","🔥","🥰","👏","😁","🤔","🤯","😱","🤬","😢","🎉","🤩","🤮","💩","🙏","👌","🕊","🤡","🥱","🥴","😍","🐳","❤‍🔥","🌚","🌭","💯","🤣","⚡","🍌","🏆","💔","🤨","😐","🍓","🍾","💋","🖕","😈","😴","😭","🤓","👻","👨‍💻","👀","🎃","🙈","😇","😨","🤝","✍","🤗","🫡","🎅","🎄","☃","💅","🤪","🗿","🆒","💘","🙉","🦄","😘","💊","🙊","😎","👾","🤷‍♂","🤷","🤷‍♀","😡"]);
-        const fallback = TELEGRAM_ALLOWED.has(emoji) ? emoji : "👍";
+        const FALLBACK_MAP: Record<string, string> = {
+          "😅": "🤣", "😂": "🤣", "😆": "😁", "😄": "😁", "😃": "😁",
+          "🙂": "😁", "😊": "😁", "☺": "😁", "😉": "😁", "🫠": "🤪",
+          "😞": "😢", "😔": "😢", "😟": "😢", "😕": "🤔", "🫤": "🤨",
+          "😤": "😡", "😠": "😡", "💪": "👏", "🤞": "🙏", "✅": "👍",
+          "❌": "👎", "😬": "🙈", "🫣": "🙈", "🤭": "🙊", "💀": "👻",
+        };
+        const fallback = TELEGRAM_ALLOWED.has(emoji) ? emoji : (FALLBACK_MAP[emoji] ?? "👍");
         await adapter.setReaction(channelId, msg.messageId, fallback);
         logDebug(TAG, `Reaction-only response: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);
         return;
