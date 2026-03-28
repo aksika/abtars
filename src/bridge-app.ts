@@ -654,23 +654,25 @@ export async function startBridge(): Promise<void> {
     const forceTimer = setTimeout(() => {
       logWarn("main", "⚠️  Shutdown timed out — forcing exit");
       process.exit(1);
-    }, 20_000);
+    }, 15_000);
     forceTimer.unref();
 
-    if (agentApiServer) {
-      try { await agentApiServer.stop(); } catch { /* best-effort */ }
-    }
-    if (dashboardServer) {
-      try { await dashboardServer.stop(); } catch { /* best-effort */ }
-    }
-    registry.stopAll();
-    heartbeat.stop();
-    try { await browserIpc?.shutdown(); } catch { /* best-effort */ }
-    try { await browserManager.shutdown(); } catch { /* best-effort */ }
-    memory?.close();
-    transport.destroy();
+    const step = (name: string, fn: () => Promise<void> | void, ms = 3000): Promise<void> =>
+      Promise.race([
+        Promise.resolve(fn()).catch(() => {}),
+        new Promise<void>(r => { const t = setTimeout(() => { logWarn("main", `Shutdown step '${name}' timed out (${ms}ms) — skipping`); r(); }, ms); (t as any).unref?.(); }),
+      ]);
+
+    await step("agent-api", () => agentApiServer?.stop());
+    await step("dashboard", () => dashboardServer?.stop());
+    await step("services", () => registry.stopAll());
+    await step("heartbeat", () => heartbeat.stop());
+    await step("browser-ipc", () => browserIpc?.shutdown());
+    await step("browser", () => browserManager.shutdown(), 5000);
+    await step("memory", () => memory?.close());
+    await step("transport", () => transport.destroy());
     if (mcpDaemonStarted) {
-      try { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); } catch { /* best-effort */ }
+      await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
     }
     process.exit(0);
   }
