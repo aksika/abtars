@@ -308,17 +308,18 @@ export async function startBridge(): Promise<void> {
 
   // === DEFERRED INIT: non-critical services (after platforms are accepting messages) ===
 
-  // Browser
+  // Browser (lazy — IPC starts on first browse task)
   const browserManager = new BrowserManager();
   if (memory) memory.setBrowserManager(browserManager);
   const allowlist = DomainAllowlist.fromEnv();
   const browserTool = new BrowserTool(browserManager, allowlist);
   let browserIpc: BrowserIpcServer | null = null;
-  if (process.env["BROWSER_DOCKER"] !== "1") {
+  const ensureBrowserIpc = async (): Promise<void> => {
+    if (browserIpc || process.env["BROWSER_DOCKER"] === "1") return;
     browserIpc = new BrowserIpcServer(browserTool);
     await browserIpc.start();
     logInfo("main", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
-  }
+  };
 
   // MCP daemon
   let mcpDaemonStarted = false;
@@ -433,7 +434,7 @@ export async function startBridge(): Promise<void> {
 
   heartbeat.registerTask({
     name: "browse-checker",
-    execute: async () => { checkBrowseTasks(); },
+    execute: async () => { await ensureBrowserIpc(); checkBrowseTasks(); },
   });
 
   heartbeat.registerTask({
