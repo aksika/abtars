@@ -7,12 +7,12 @@ user-invocable: false
 # Instant Store
 
 ```bash
-agentbridge-store --content-en "English" --content-original "original language" --memory-type <TYPE> --emotion-score <SCORE> --chat-id 7773842843
+agentbridge-store --translated "English" --original "original language" --memory-type <TYPE> --emotion-score <SCORE> --chat-id 7773842843
 ```
 
 ## Required params
-- `--content-en`: memory in English
-- `--content-original`: memory in user's original language
+- `--translated`: memory in English (always translate to English)
+- `--original`: memory in user's original language (same as --translated if English)
 - `--memory-type`: `fact`, `decision`, `preference`, `event`
 - `--emotion-score`: -5 (angry) to +5 (happy). 0 = neutral.
 - `--chat-id`: `7773842843` (main chat)

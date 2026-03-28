@@ -157,7 +157,7 @@ SELECT id, content_en FROM extracted_memories ORDER BY source_timestamp DESC;
 
 2. If NOT yet extracted, extract now:
 ```bash
-agentbridge-store --content-en "<fact>" --content-original "<original>" --memory-type <TYPE> --emotion-score <SCORE> --chat-id <CHAT_ID> --keyword "<keyword>" --confidence <1-5> --source-ids "<msg_id1,msg_id2>" --trust 2 --integrity 2 --credibility 2
+agentbridge-store --translated "<fact>" --original "<original>" --memory-type <TYPE> --emotion-score <SCORE> --chat-id <CHAT_ID> --keyword "<keyword>" --confidence <1-5> --source-ids "<msg_id1,msg_id2>" --trust 2 --integrity 2 --credibility 2
 ```
 
 3. After confirming facts are stored, garbage-mark the verbose original messages.
@@ -306,7 +306,7 @@ Delete from the top of that list until the total is under budget.
 
 For any images in `received/media/` that were received today and not yet described in the transcript:
 - Read the image and generate a brief description
-- Store as extracted memory via `agentbridge-store --content-en "Photo: <description>" --chat-id <chatId> --type fact`
+- Store as extracted memory via `agentbridge-store --translated "Photo: <description>" --chat-id <chatId> --type fact`
 
 ## §10 Report
 

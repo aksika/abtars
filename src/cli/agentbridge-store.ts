@@ -7,12 +7,14 @@
  *
  * Usage:
  *   agentbridge-store \
- *     --content-en "User prefers dark mode" \
- *     --content-original "A user dark mode-ot preferálja" \
+ *     --translated "User prefers dark mode" \
+ *     --original "A user dark mode-ot preferálja" \
  *     --memory-type preference \
  *     --emotion-score 0 \
  *     --chat-id 7773842843 \
  *     --keyword "dark mode"
+ *
+ * Legacy aliases: --content-en (→ --translated), --content-original (→ --original)
  *
  * Output (success):
  *   { "stored": true, "memoriesCount": 1 }
@@ -57,7 +59,9 @@ export function parseArgs(argv: string[]): RawArgs {
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
+      case "--translated":
       case "--content-en": parsed.contentEn = args[++i] ?? ""; break;
+      case "--original":
       case "--content-original": parsed.contentOriginal = args[++i] ?? ""; break;
       case "--memory-type": parsed.memoryType = args[++i] ?? ""; break;
       case "--emotion-score": parsed.emotionScore = args[++i] ?? ""; break;

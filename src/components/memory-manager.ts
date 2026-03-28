@@ -1087,6 +1087,10 @@ export class MemoryManager {
 
     this.db.prepare("DELETE FROM extracted_memories WHERE id = ?").run(older!.id);
 
+    // Re-embed the kept memory (its content may have changed context)
+    const kept = this.db.prepare("SELECT content_en FROM extracted_memories WHERE id = ?").get(newer!.id) as { content_en: string } | undefined;
+    if (kept) this.embedNewMemory(kept.content_en);
+
     return { merged: true, keptId: newer!.id, deletedId: older!.id };
   }
 
