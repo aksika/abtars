@@ -278,10 +278,13 @@ function getSearchPanel(): string {
         <button onclick="listChatIds()">LIST</button>
       </div>
       <div class="layer-toggles" id="layer-toggles" style="margin:0;">
-        <button class="layer-btn active" data-layer="L1" onclick="toggleLayer(this)">L1:messages</button>
-        <button class="layer-btn active" data-layer="L2" onclick="toggleLayer(this)">L2:extracted</button>
-        <button class="layer-btn active" data-layer="L3" onclick="toggleLayer(this)">L3:consolidations</button>
-        <button class="layer-btn active" data-layer="L4" onclick="toggleLayer(this)">L4:original</button>
+        <button class="layer-btn active" data-layer="S1" onclick="toggleLayer(this)">S1:en-fts</button>
+        <button class="layer-btn active" data-layer="S2" onclick="toggleLayer(this)">S2:orig-fts</button>
+        <button class="layer-btn active" data-layer="S3" onclick="toggleLayer(this)">S3:like</button>
+        <button class="layer-btn active" data-layer="S4" onclick="toggleLayer(this)">S4:msg-fts</button>
+        <button class="layer-btn active" data-layer="S5" onclick="toggleLayer(this)">S5:msg-like</button>
+        <button class="layer-btn active" data-layer="S6" onclick="toggleLayer(this)">S6:consol</button>
+        <button class="layer-btn active" data-layer="S7" onclick="toggleLayer(this)">S7:fallback</button>
         <button class="layer-btn" data-layer="NLM" onclick="toggleLayer(this)">NLM</button>
       </div>
     </div>

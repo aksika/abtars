@@ -378,13 +378,13 @@ function formatBytes(bytes) {
     var chatIdVal = chatIdInput ? chatIdInput.value.trim() : '0';
     var chatId = parseInt(chatIdVal, 10) || 0;
 
-    var layers = getSelectedLayers();
-    if (layers.length === 0) {
-      if (container) container.innerHTML = '<div style="color:#666;padding:6px 0;">No layers selected</div>';
+    var stages = getSelectedStages();
+    if (stages.length === 0) {
+      if (container) container.innerHTML = '<div style="color:#666;padding:6px 0;">No stages selected</div>';
       return;
     }
     var keywords = keywordFilters.join(',');
-    var url = '/api/memory/search?keywords=' + encodeURIComponent(keywords) + '&original=' + encodeURIComponent(keywords) + '&layers=' + encodeURIComponent(layers.join(',')) + '&mode=' + searchMode;
+    var url = '/api/memory/search?keywords=' + encodeURIComponent(keywords) + '&original=' + encodeURIComponent(keywords) + '&stages=' + encodeURIComponent(stages.join(',')) + '&mode=' + searchMode;
     if (chatId > 0) {
       url += '&chatId=' + chatId;
     }
@@ -404,7 +404,16 @@ function formatBytes(bytes) {
         return;
       }
 
-      container.innerHTML = data.results.map(function(r) {
+      var stageInfo = '';
+      if (data.layers) {
+        stageInfo = '<div style="color:#888;font-size:11px;margin-bottom:6px;">' +
+          Object.keys(data.layers).map(function(k) {
+            var s = data.layers[k];
+            return k + ':' + (s.hits || 0) + ' (' + (s.ms || 0) + 'ms)';
+          }).join(' | ') + '</div>';
+      }
+
+      container.innerHTML = stageInfo + data.results.map(function(r) {
         var meta = '<span class="score">' + (r.score != null ? r.score.toFixed(2) : '—') + '</span> ' +
           '<span class="source">' + escHtml(r.source) + '</span> ' +
           '<span class="source">' + escHtml(r.date) + '</span>';
@@ -460,20 +469,19 @@ function formatBytes(bytes) {
     });
   };
 
-  // ── Layer Toggles ──────────────────────────────────────────────────
+  // ── Stage Toggles ──────────────────────────────────────────────────
   window.toggleLayer = function(btn) {
     if (btn.disabled) return;
     btn.classList.toggle('active');
     searchMemory();
   };
 
-  function getSelectedLayers() {
+  function getSelectedStages() {
     var btns = document.querySelectorAll('#layer-toggles .layer-btn');
     var selected = [];
     for (var i = 0; i < btns.length; i++) {
       if (btns[i].classList.contains('active') && !btns[i].disabled) {
-        var layer = btns[i].getAttribute('data-layer');
-        if (layer !== 'NLM') selected.push(layer);
+        selected.push(btns[i].getAttribute('data-layer'));
       }
     }
     return selected;
