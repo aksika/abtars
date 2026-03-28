@@ -221,8 +221,12 @@ export async function handleInboundMessage(
     if (adapter.setReaction && msg.messageId) {
       const reactMatch = userResponse.trim().match(/^\[REACT:(.+)\]$/);
       if (reactMatch) {
-        await adapter.setReaction(channelId, msg.messageId, reactMatch[1]!);
-        logDebug(TAG, `Reaction-only response: ${reactMatch[1]}`);
+        const emoji = reactMatch[1]!;
+        // Telegram only allows specific reactions — map unsupported to closest allowed
+        const TELEGRAM_ALLOWED = new Set(["👍","👎","❤","🔥","🥰","👏","😁","🤔","🤯","😱","🤬","😢","🎉","🤩","🤮","💩","🙏","👌","🕊","🤡","🥱","🥴","😍","🐳","❤‍🔥","🌚","🌭","💯","🤣","⚡","🍌","🏆","💔","🤨","😐","🍓","🍾","💋","🖕","😈","😴","😭","🤓","👻","👨‍💻","👀","🎃","🙈","😇","😨","🤝","✍","🤗","🫡","🎅","🎄","☃","💅","🤪","🗿","🆒","💘","🙉","🦄","😘","💊","🙊","😎","👾","🤷‍♂","🤷","🤷‍♀","😡"]);
+        const fallback = TELEGRAM_ALLOWED.has(emoji) ? emoji : "👍";
+        await adapter.setReaction(channelId, msg.messageId, fallback);
+        logDebug(TAG, `Reaction-only response: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);
         return;
       }
     }
