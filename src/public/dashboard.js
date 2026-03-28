@@ -573,8 +573,6 @@ function formatBytes(bytes) {
 
   // ── Start Connection ───────────────────────────────────────────────
   connect();
-})();
-
 
   // ── Memory Universe Loader ──────────────────────────────────────────
   window.loadMemoryUniverse = function() {
@@ -584,3 +582,4 @@ function formatBytes(bytes) {
     s.onload = function() { if (window.initMemoryUniverse) window.initMemoryUniverse(token); };
     document.head.appendChild(s);
   };
+})();
