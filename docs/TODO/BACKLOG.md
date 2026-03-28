@@ -395,23 +395,15 @@ Encrypt content_en and content_original for classification=3 rows at rest. Deriv
 
 ## 46. agentbridge-store Review
 
-**Status:** Not started
+**Status:** Done
 **Priority:** Medium
 
-Review and clean up agentbridge-store CLI.
-
-### Review points
-1. Param naming: `--content-en`/`--content-original` → align with recall's `--translated`/`--original`?
-2. Is `--merge` used by KP? If not, remove dead code
-3. Embed-on-insert only fires on normal store path — should also fire after merge
-4. Confidence default (3) — verify this is correct
-5. Should store validate that content_en is actually English? (prevent bad extraction data)
-6. Test coverage audit
+Renamed --content-en/--content-original → --translated/--original (legacy aliases kept). Embed-on-merge added. 12 new tests (19 total).
 
 ## 47. Sleep Self-Healing
 
-**Status:** Not started
+**Status:** Done
 **Priority:** High
 **Plan:** `docs/TODO/SLEEP-SELF-HEALING-PLAN.md`
 
-Dreamy can detect issues but can't heal most of them. Fix state gatherer (wrong embedding count), add DB maintenance (FTS rebuild, WAL checkpoint, batch-embed), content_en quality check, audit length validation.
+State gatherer fixed (embedding counts from extracted_memories.embedding). Sleep prompt: DB Maintenance (WAL, FTS rebuild, batch-embed), translation quality check, audit length warning. 8 tests for state gatherer.
