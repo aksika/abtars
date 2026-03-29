@@ -66,7 +66,8 @@ Options:
   --memory-type <type>    fact | decision | preference | event
   --emotion-score <n>     Emotion score
   --chat-id <id>          Chat ID (required)
-  --keyword <kw>          Keyword tag
+  --keyword <kw>          Keyword tag (legacy alias: --tags)
+  --tags <tags>           Comma-separated tags
   --confidence <n>        Confidence score
   --source-ids <ids>      Source message IDs
   --classification <n>    Classification level
@@ -95,7 +96,8 @@ Options:
       case "--memory-type": parsed.memoryType = args[++i] ?? ""; break;
       case "--emotion-score": parsed.emotionScore = args[++i] ?? ""; break;
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
-      case "--keyword": parsed.keyword = args[++i] ?? ""; break;
+      case "--keyword":
+      case "--tags": parsed.keyword = args[++i] ?? ""; break;
       case "--confidence": parsed.confidence = args[++i] ?? ""; break;
       case "--source-ids": parsed.sourceMessageIds = args[++i] ?? ""; break;
       case "--boost": parsed.boost = true; break;

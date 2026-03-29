@@ -56,7 +56,8 @@ Options:
   --chat-id <id>          Required with --message-id
   --translated <text>     New English content (alias: --content-en)
   --original <text>       New original content (alias: --content-original)
-  --keyword <kw>          Update keyword
+  --keyword <kw>          Update tags (legacy alias: --tags)
+  --tags <tags>           Comma-separated tags
   --memory-type <type>    Update memory type
   --emotion-score <n>     Update emotion score
   --confidence <n>        Update confidence
@@ -81,7 +82,8 @@ Options:
       case "--content-en": parsed.contentEn = args[++i] ?? ""; break;
       case "--original":
       case "--content-original": parsed.contentOriginal = args[++i] ?? ""; break;
-      case "--keyword": parsed.keyword = args[++i] ?? ""; break;
+      case "--keyword":
+      case "--tags": parsed.keyword = args[++i] ?? ""; break;
       case "--memory-type": parsed.memoryType = args[++i] ?? ""; break;
       case "--emotion-score": parsed.emotionScore = args[++i] ?? ""; break;
       case "--confidence": parsed.confidence = args[++i] ?? ""; break;
