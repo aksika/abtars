@@ -14,9 +14,6 @@ import type {
   StoredSession,
   SearchResult,
   SearchOptions,
-  IngestionSource,
-  IngestionResult,
-  IngestedDocument,
   Reflection,
   ForgetResult,
   InstantStoreParams,
@@ -373,18 +370,6 @@ export class MemoryManager {
       }
     }
     return parts.join("\n\n");
-  }
-
-  /** Ingest an external document (not available — requires future implementation). */
-  async ingestDocument(_source: IngestionSource, _chatId: number): Promise<IngestionResult> {
-    throw new Error("Ingestion not available.");
-  }
-
-  /** List previously ingested documents. */
-  listIngestedDocuments(_chatId?: number): IngestedDocument[] {
-    if (!this.db) return [];
-    const rows = this.db.prepare("SELECT * FROM ingested_documents" + (_chatId !== undefined ? " WHERE chat_id = ?" : "")).all(...(_chatId !== undefined ? [_chatId] : [])) as IngestedDocument[];
-    return rows;
   }
 
   /** Generate a reflection for the given channel over a time window. */
