@@ -4,24 +4,19 @@ alwaysApply: true
 # Tools
 
 ## Memory Recall
-
-Search past conversations, facts, decisions, preferences.
-
-```bash
+```
 agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"] [--time-start <ms>] [--time-end <ms>]
 ```
+Keywords: English content words, not meta-words. `--max-classification`: 0 in groups, 2 in DMs.
 
-- `--keywords`: English content words (NOT meta-words like "recent", "last session"). For vague queries use broad terms: `"summary,discussion,update,decision"`
-- `--original "szó"`: optional fallback in user's language
-- `--time-start`/`--time-end`: epoch ms. Use for recency queries (24-48h ago)
-- `--max-classification`: 0 in group chats, 2 in DMs (default)
-
-Returns JSON: `content`, `date`, `source`, `score`. Some results include `source_ids`.
-
-### Expand source messages
-
-```bash
+## Expand Source
+```
 agentbridge-expand --ids 451,452,453
 ```
 
-Use when recall results have `source_ids` and you need original context.
+## Memory Edit
+```
+agentbridge-edit --memory-id <N> [--translated "..." | --emotion-score N | --credibility N | --classification N | --relevance-score +N] [--caller kp] [--dry-run]
+agentbridge-edit --message-id <N> --chat-id 7773842843 [field flags]
+```
+Attributes: free. Content: user must request (translation fixes exempt). See `instant-store` skill.
