@@ -631,3 +631,29 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 ## Test Coverage
 
 727 tests across 71 files.
+
+### Test Categories
+
+| Category | Files | Tests | What they cover |
+|----------|-------|-------|-----------------|
+| Unit tests | ~55 files | ~690 | Individual components: FTS5 indexing, emotion utils, MMR, config parsing, formatters, security gate, session manager, etc. |
+| Property-based tests | 8 files | ~40 | Invariant verification with randomized inputs: browser IPC, domain allowlist, content extractor, web scraper, browser tool. |
+| Integration tests | 2 files | ~17 | Multi-component flows with real SQLite: memory lifecycle (record→search→restore→context), recall pipeline S1-S7+Se. |
+| CLI tests | 6 files | ~35 | Arg parsing + validation for agentbridge-store, recall, cron, todo, browse, expand. |
+
+### Recall Pipeline Integration (`recall-integration.test.ts`)
+
+14 tests covering every search stage with a real SQLite DB:
+- S1: English FTS5 (keyword match, accent normalization, classification filter)
+- S2: Original-language FTS5
+- S3: LIKE fallback (partial match, preserved_keyword tags, accent-stripped)
+- S4: Message FTS5
+- S5: Message LIKE
+- S6: Consolidation file search
+- S7: Keyword-free fallback
+- Se: Semantic embedding search (optional — requires ollama, skips if unavailable)
+- Full pipeline: merged results + deduplication
+
+### Optional Tests
+
+Se (embedding) tests require a running ollama instance with `nomic-embed-text`. They gracefully skip when ollama is unavailable — CI runs without them, local dev includes them.
