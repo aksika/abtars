@@ -55,6 +55,35 @@ export type RawArgs = {
 
 export function parseArgs(argv: string[]): RawArgs {
   const args = argv.slice(2);
+
+  if (args.includes('--help')) {
+    console.log(`Usage:
+  agentbridge-store --translated <text> --original <text> --memory-type <type> --emotion-score <n> --chat-id <id>
+
+Options:
+  --translated <text>     English content (alias: --content-en)
+  --original <text>       Original content (alias: --content-original)
+  --memory-type <type>    fact | decision | preference | event
+  --emotion-score <n>     Emotion score
+  --chat-id <id>          Chat ID (required)
+  --keyword <kw>          Keyword tag
+  --confidence <n>        Confidence score
+  --source-ids <ids>      Source message IDs
+  --classification <n>    Classification level
+  --trust <n>             Trust score
+  --integrity <n>         Integrity score
+  --credibility <n>       Credibility score
+  --boost                 Boost relevance (+10) for --id
+  --demote                Demote relevance (-10) for --id
+  --id <id>               Memory ID (for boost/demote/reclassify)
+  --merge                 Merge two memories
+  --merge-ids <a,b>       Two IDs to merge
+  --reclassify            Reclassify memory (requires --id, --classification)
+  --user-override         Flag as user override
+  --delete-ids <ids>      Cascade delete by message IDs (requires --chat-id)`);
+    process.exit(0);
+  }
+
   const parsed: RawArgs = {};
 
   for (let i = 0; i < args.length; i++) {

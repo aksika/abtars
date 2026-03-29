@@ -532,6 +532,20 @@ function parseArgs() {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--help')) {
+    console.log(`agentbridge-tweet — fetch tweets via rettiwt-api + FxTwitter.
+
+Usage:
+  agentbridge-tweet --fetch <tweet-url>              # single tweet via FxTwitter
+  agentbridge-tweet --timeline <handle> [--count N]  # user timeline
+  agentbridge-tweet --feed [--format md]             # all followed handles → ranked output
+  agentbridge-tweet --feed --discover                # feed + reply analysis for new follows
+  agentbridge-tweet --replies <tweet-id>             # replies on a tweet
+  agentbridge-tweet --search "query"                 # search X
+  agentbridge-tweet --user <handle>                  # user profile info`);
+    process.exit(0);
+  }
+
   const { command, target, count, topN, format, discover, minLikes, output } = parseArgs();
 
   switch (command) {

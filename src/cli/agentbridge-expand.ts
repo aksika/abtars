@@ -19,6 +19,16 @@ const DB_PATH = join(MEMORY_DIR, "memory.db");
 
 export function parseArgs(argv = process.argv): { ids: number[] } {
   const args = argv.slice(2);
+
+  if (args.includes('--help')) {
+    console.log(`Usage:
+  agentbridge-expand --ids <id1,id2,...>
+
+Options:
+  --ids <ids>    Comma-separated message IDs to expand`);
+    process.exit(0);
+  }
+
   let ids: number[] = [];
 
   for (let i = 0; i < args.length; i++) {

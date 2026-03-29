@@ -115,6 +115,16 @@ export function writePendingBrowse(entries: PendingBrowseEntry[]): void {
 // --- Main ---
 
 export function main(argv: string[] = process.argv): void {
+  if (argv.includes('--help')) {
+    console.log(`agentbridge-browse — spawn a browser subagent for autonomous web tasks.
+
+Usage:
+  agentbridge-browse --task "check X notifications" --chat-id ID
+  agentbridge-browse --task "post on FB" --chat-id ID --timeout 600
+  agentbridge-browse --task "research topic" --chat-id ID --dry-run`);
+    process.exit(0);
+  }
+
   loadDotenv({ path: join(homedir(), ".agentbridge", ".env") });
   const raw = parseArgs(argv);
   const validation = validateArgs(raw);

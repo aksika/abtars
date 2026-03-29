@@ -92,6 +92,18 @@ function remove(lineNum: number): void {
 
 export function main(argv: string[] = process.argv): void {
   const args = argv.slice(2);
+
+  if (args.includes('--help')) {
+    console.log(`Usage:
+  agentbridge-todo add "description"
+  agentbridge-todo list
+  agentbridge-todo done <number>
+  agentbridge-todo remove <number>
+
+File: ~/.agentbridge/memory/todo.md`);
+    process.exit(0);
+  }
+
   const command = args[0];
 
   switch (command) {

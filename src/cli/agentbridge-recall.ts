@@ -25,6 +25,27 @@ const MAX_LIMIT = 50;
 
 function parseArgs() {
   const args = process.argv.slice(2);
+
+  if (args.includes('--help')) {
+    console.log(`Usage:
+  agentbridge-recall --translated "kw1,kw2" --chat-id <id>
+  agentbridge-recall --translated "kw" --original "kw" --chat-id <id>
+  agentbridge-recall --translated "kw" --chat-id <id> --stages S1,S3
+  agentbridge-recall --entity "Name" --chat-id <id>
+
+Options:
+  --translated <kw>       Comma-separated keywords (alias: --keywords)
+  --original <kw>         Original-language keyword
+  --chat-id <id>          Chat ID (required)
+  --entity <name>         Entity name to search
+  --stages <S1,S3>        Comma-separated stages to search
+  --limit <n>             Max results (default: 10, max: 50)
+  --max-classification <n> Max classification level (default: 2)
+  --time-start <epoch>    Filter by start time
+  --time-end <epoch>      Filter by end time`);
+    process.exit(0);
+  }
+
   let translated: string[] = [];
   let original: string | undefined;
   let timeStart: number | undefined;

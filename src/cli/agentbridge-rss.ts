@@ -154,6 +154,15 @@ function filterByKeywords(items: RssItem[], keywords: string[]): RssItem[] {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--help')) {
+    console.log(`agentbridge-rss — fetch RSS/Atom feeds, output JSON.
+
+Usage:
+  agentbridge-rss                          # fetch all feeds, output today's JSON
+  agentbridge-rss --hours 48               # look back 48h instead of 24`);
+    process.exit(0);
+  }
+
   const hours = parseInt(process.argv.find((_, i, a) => a[i - 1] === "--hours") ?? "24", 10);
 
   mkdirSync(FINANCE_DIR, { recursive: true });

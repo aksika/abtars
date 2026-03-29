@@ -43,6 +43,34 @@ export type RawEditArgs = {
 
 export function parseEditArgs(argv: string[]): RawEditArgs {
   const args = argv.slice(2);
+
+  if (args.includes('--help')) {
+    console.log(`Usage:
+  agentbridge-edit --memory-id <id> --translated "corrected" --caller <name>
+  agentbridge-edit --message-id <id> --chat-id <id> --emotion-score <n>
+  agentbridge-edit --memory-id <id> --translated "test" --dry-run
+
+Options:
+  --memory-id <id>        Lookup by memory ID
+  --message-id <id>       Lookup by platform message ID
+  --chat-id <id>          Required with --message-id
+  --translated <text>     New English content (alias: --content-en)
+  --original <text>       New original content (alias: --content-original)
+  --keyword <kw>          Update keyword
+  --memory-type <type>    Update memory type
+  --emotion-score <n>     Update emotion score
+  --confidence <n>        Update confidence
+  --trust <n>             Update trust score
+  --integrity <n>         Update integrity score
+  --credibility <n>       Update credibility score
+  --classification <n>    Update classification level
+  --relevance-score <v>   Update relevance score
+  --caller <name>         Caller identifier
+  --user-override         Flag as user override
+  --dry-run               Preview changes without writing`);
+    process.exit(0);
+  }
+
   const parsed: RawEditArgs = {};
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {

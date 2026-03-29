@@ -176,6 +176,20 @@ function showHistory(id: string): void {
 // --- CLI entry point ---
 
 export function main(argv: string[] = process.argv): void {
+  if (argv.includes('--help')) {
+    console.log(`agentbridge-cron — schedule time-based reminders and tasks.
+
+Usage:
+  agentbridge-cron add --at "2026-03-16T08:00" --message "..." --chat-id ID --type reminder
+  agentbridge-cron add --schedule "0 9 * * *" --message "..." --chat-id ID --type task
+  agentbridge-cron list
+  agentbridge-cron remove <id>
+  agentbridge-cron pause <id>
+  agentbridge-cron resume <id>
+  agentbridge-cron history <id>`);
+    process.exit(0);
+  }
+
   const args = argv.slice(2);
   const command = args[0];
 
