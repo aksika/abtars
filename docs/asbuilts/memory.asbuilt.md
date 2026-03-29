@@ -11,7 +11,7 @@
 
 ## Overview
 
-SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), sleep-subagent-driven extraction, agent-initiated instant memory storage with emotion scoring, Memory Darwinism, NATO Admiralty Code security model, daily retrospective with emotional attribution, and immediate emotion propagation.
+SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), sleep-subagent-driven extraction, agent-initiated instant memory storage with emotion scoring, unified memory editing (`agentbridge-edit`), Memory Darwinism, NATO Admiralty Code security model, daily retrospective with emotional attribution, and immediate emotion propagation.
 **Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext` (see below).
 
 ---
@@ -70,7 +70,8 @@ User Message
 |  agentbridge-recall ONLY (7-stage cascade, extracted-first)          |
 +---------------------------------------------------------------------+
 |  Layer 4: Background Extraction & Enrichment                        |
-|  HeartbeatSystem, agentbridge-store (Instant Store)                  |
+|  HeartbeatSystem, agentbridge-store (Instant Store),                 |
+|  agentbridge-edit (Unified Memory Mutation),                         |
 |  MemoryExtractor (class exists, sleep-driven)                        |
 +---------------------------------------------------------------------+
 |  Layer 3: Consolidation (subagent-driven, unchanged)                |
@@ -78,7 +79,7 @@ User Message
 +---------------------------------------------------------------------+
 |  Layer 2: Indexing & Search Primitives                              |
 |  MemoryIndex (FTS5), VectorIndex, EmbeddingProvider                 |
-|  CHANGED: FTS5 trigger strips emojis, not storage layer             |
+|  FTS5 triggers: INSERT, DELETE, UPDATE (content_en + content_original)|
 +---------------------------------------------------------------------+
 |  Layer 1: Storage & Persistence                                     |
 |  SQLite ONLY (memory.db), File System                               |
@@ -141,6 +142,61 @@ Tables: `entities` (name, type, summary) + `memory_entities` (memory_id, entity_
 Entities are tagged during extraction — the LLM identifies named entities (people, agents, projects, services, places) per memory. Stored via upsert on insert.
 
 Recall supports `--entity "Name"` filter — pre-filters extracted memory results to only those linked to the entity. Works with or without keyword search.
+
+---
+
+## Memory Edit Tool (`agentbridge-edit`)
+
+Source: `src/cli/agentbridge-edit.ts`
+Method: `MemoryManager.editMemory()` — single unified mutation path for all extracted_memory field updates.
+
+### Lookup modes
+
+- `--memory-id N` — direct extracted_memory ID
+- `--message-id N --chat-id C` — find memories linked via `source_message_ids`, edit all matches
+
+### Two-tier usage for KP
+
+| Tier | Fields | When to use |
+|------|--------|-------------|
+| Attribute edits (free) | trust, credibility, classification, integrity, confidence, emotion_score, relevance_score, keyword, memory_type | Whenever evidence supports it |
+| Content edits (restricted) | content_en, content_original | Only when user explicitly stresses immediate correction |
+
+Default for wrong content: store corrected version as new memory, let Darwinism fade the old one.
+
+### Attribute editing rules (CIA-AAA model)
+
+- **classification**: escalate freely. Declassify only 2→1. SECRET (3) locked without `--user-override`.
+- **trust**: set 0-2 freely. Set 3 only when user explicitly stated the fact.
+- **credibility**: 1 (confirmed) needs corroboration from user + independent source.
+- **integrity**: one-way toward compacted (higher number). Exception: translation fix → set to 1 (translated).
+- **relevance_score**: supports relative delta (`+10`, `-10`) and absolute values.
+
+### Audit fields (set automatically, not editable, not in recall output)
+
+- `edited_at` — timestamp of last edit (NULL = never edited)
+- `edited_by` — caller name ("kp" or "dreamy"), last edit overwrites
+
+### Safety
+
+- Prompt injection scan on content edits (same as instantStore)
+- `--dry-run` previews changes without committing
+- Content change → embedding nulled automatically (re-embed on next batch)
+
+### Callers
+
+- `kp` — direct user conversation
+- `dreamy` — sleep maintenance mode
+
+No external agents have access to KP's memory system.
+
+### Internal routing
+
+`adjustRelevance()`, `reclassifyMemory()`, and `updateEmotionByPlatformId()` delegate to `editMemory()` internally. Sleep prompt §6 (emotion harvest) and §7 (translation fix, fitness rewording) use `agentbridge-edit` CLI instead of raw SQL.
+
+### Timestamp consolidation
+
+`source_timestamp` consolidated into `created_at` — single creation timestamp. The `source_timestamp` column remains in the schema (SQLite can't drop columns) but is no longer read by application code. Migration copies values on first startup.
 
 ---
 
@@ -279,11 +335,11 @@ On success or 3 failures: stops until next day. Writes a `.lock` file before spa
 | §1 | Retrospective | Reads full messages table. What went well/wrong, emotional attribution, lessons. Writes retro file + updates agent_notes |
 | §2 | Feedback Pass | Review user reactions, corrections |
 | §3 | Reminder & Todo Extraction | Extract actionable items |
-| §4 | Garbage Collection | 7-step GC: purge expired, immediate deletes, repeated probes, noise marking, verify-extract, emotion harvest, flush old messages |
+| §4 | Garbage Collection | 7-step GC: purge expired, immediate deletes, repeated probes, noise marking, verify-extract, emotion harvest (via `agentbridge-edit`), flush old messages |
 | §4+ | Database Maintenance | WAL checkpoint, FTS5 rebuild if corrupt, batch-embed NULL embeddings |
 | §5 | Cron Verification | Check cron jobs are healthy |
 | §6 | Topic Reorg | Reorganize topic files |
-| §7 | Fitness Review | Darwinism review, core knowledge maintenance, translation quality check (detect untranslated content_en) |
+| §7 | Fitness Review | Darwinism review, core knowledge maintenance, translation quality check via `agentbridge-edit` (detect and fix untranslated content_en) |
 | §8 | Memory Merge | Find and merge near-duplicate memories |
 | §9 | Consolidation | working→daily→weekly→quarterly summaries |
 | §9.5 | Media Cleanup | FIFO 100MB cleanup of received media |
@@ -307,7 +363,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 [Agent may instant-store important facts via agentbridge-store → extracted_memories]
     │
     ▼
-[Reaction arrives → messages.emotion_score updated → propagated to extracted_memory immediately]
+[Reaction arrives → messages.emotion_score updated → propagated to extracted_memory via editMemory]
     │
     ▼
 [Sleep cycle]
@@ -349,6 +405,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 | MemoryIndex | `memory-index.ts` | FTS5 trigger change: strip emojis at index, not storage |
 | agentbridge-recall | `cli/agentbridge-recall.ts` | 7-stage cascade, extracted-first, keyword-free fallback, short-circuit |
 | agentbridge-store | `cli/agentbridge-store.ts` |
+| agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation: edit by `--memory-id` or `--message-id`, attribute + content edits, classification guards, dry-run, prompt injection scan. Routes through `editMemory()`. `adjustRelevance`, `reclassifyMemory`, `updateEmotionByPlatformId` delegate to it. |
 | agentbridge-sleep | `cli/agentbridge-sleep.ts` | Updated template with retro + flush. Removed `writeStartupGreeting` |
 | SessionContext | `components/session-context.ts` | `buildSessionStartContext()` — session-start context injection |
 | SleepTrigger | `sleep-trigger.ts` |
@@ -359,7 +416,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 | VectorIndex | `vector-index.ts` |
 | PromptScanner | `prompt-scanner.ts` |
 | emotion-utils | `emotion-utils.ts` |
-| Reaction handler | `main.ts` | **Enhanced:** immediate propagation to extracted_memories, `[REACT:emoji]` agent response support, skip reactions on synthetic messages (messageId 0) |
+| Reaction handler | `main.ts` | Immediate propagation to extracted_memories via `editMemory()`, `[REACT:emoji]` agent response support, skip reactions on synthetic messages (messageId 0) |
 
 ### Deleted Components
 
@@ -422,7 +479,7 @@ New env vars:
 
 ## Test Coverage
 
-621 tests across 60 files (as of 2026-03-22, post recall-sovereignty session context).
+729 tests across 73 files.
 
 ---
 
