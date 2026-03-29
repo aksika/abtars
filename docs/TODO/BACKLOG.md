@@ -501,3 +501,17 @@ See: instant-store skill for full rules.
 - Reduce each tool entry to 1-2 lines (command + minimal flags)
 - Move detailed rules to the relevant skill files
 - Verify KP can still invoke tools correctly with minimal syntax
+
+## 52. Multi-Turn Sleep Cycle Refactor
+
+**Status:** ✅ Done (2026-03-29)
+**Commits:** `6af57c9`..`ff8908c`
+
+Replaced monolith `sleeping_prompt.md` with 15 focused step files in `persona/sleep/`. Sleep cycle is now a multi-turn conversation — each step is a separate prompt sent into the same kiro-cli session. Per-step retry (3 attempts, 5min timeout), conditional skip logic in TypeScript, structured audit. New: §7.5 Memory Anomaly Audit (daily CIA-AAA attribute health check), §5.5 Retro Extract as Dreamy step (replaces regex hack), unsupervised rules + Flagged for Review convention. Monolith kept as fallback. 6 new tests, 735 total passing.
+
+## 53. Memory Edit Tool (`agentbridge-edit`)
+
+**Status:** ✅ Done (2026-03-29)
+**Commits:** `69a6486`..`7e16c04`
+
+New CLI for modifying existing extracted memories. Lookup by `--memory-id` or `--message-id`. Two-tier usage: attribute edits free, content edits require user request (translation fixes exempt). CIA-AAA attribute rules enforced. Classification guards (SECRET locked, CONFIDENTIAL only 2→1). FTS5 UPDATE triggers. `edited_at`/`edited_by` audit fields. `source_timestamp` consolidated into `created_at`. Existing methods (`adjustRelevance`, `reclassifyMemory`, `updateEmotionByPlatformId`) routed through `editMemory()`. Sleep prompt §6/§7 use `agentbridge-edit`. 11 new tests, 729→735 total.
