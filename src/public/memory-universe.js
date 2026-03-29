@@ -184,7 +184,7 @@
         colors[i * 3 + 1] = c[1];
         colors[i * 3 + 2] = c[2];
 
-        sizes[i] = Math.max(0.8, Math.min(4.0, 0.8 + (mem.recall_count || 0) * 0.3));
+        sizes[i] = Math.max(1.6, Math.min(8.0, 1.6 + (mem.recall_count || 0) * 0.3));
 
         // Credibility → opacity: 1=confirmed(1.0), 6=unknown(0.3)
         opacities[i] = Math.max(0.3, 1.0 - ((mem.credibility || 6) - 1) * 0.14);
@@ -231,7 +231,7 @@
         '  vOpacity = opacity;',
         '  vHasEmbed = hasEmbed;',
         '  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);',
-        '  gl_PointSize = size * pulse * (400.0 / -mvPosition.z);',
+        '  gl_PointSize = size * pulse * (800.0 / -mvPosition.z);',
         '  gl_Position = projectionMatrix * mvPosition;',
         '}',
       ].join('\n');
