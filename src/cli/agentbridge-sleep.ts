@@ -23,7 +23,7 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } f
 import { MemoryManager } from "../components/memory-manager.js";
 import { loadMemoryConfig } from "../components/memory-config.js";
 import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
-import { loadSleepPrompt } from "../components/sleep-prompt-loader.js";
+import { loadSleepPrompt, loadSleepSteps } from "../components/sleep-prompt-loader.js";
 import { logInfo, logWarn, logError, setLogLevel } from "../components/logger.js";
 import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
 import { localDate } from "../components/env-utils.js";
@@ -84,40 +84,41 @@ export interface AuditLogEntry {
  * The subagent is granted AgentBridge tools access through the transport's
  * session mechanism — the Kiro CLI agent has full tool access.
  */
-async function invokeSubagent(
-  prompt: string,
-  verbose: boolean,
-): Promise<{ response: string; model: string }> {
-  // Sleep CLI always uses ACP transport — it spawns its own Kiro CLI process
-  // with a dedicated session so it never conflicts with the user's tmux session.
-
+/** Create a reusable ACP transport for the sleep session. */
+async function createSleepTransport(verbose: boolean): Promise<{ transport: import("../components/acp-transport.js").AcpTransport; model: string }> {
   const { loadAndValidateConfig } = await import("../components/config.js");
   const config = await loadAndValidateConfig();
-
   const { AcpTransport } = await import("../components/acp-transport.js");
   const transport = new AcpTransport(config.kiroCLIPath, config.workingDir);
+  const model = process.env.MEMORY_SUBAGENT_MODEL || process.env.KIRO_MODEL || "unknown";
+  await transport.initialize();
+  if (verbose) logInfo(TAG, `ACP transport initialized (model=${model})`);
+  return { transport, model };
+}
 
-  const usedModel = process.env.MEMORY_SUBAGENT_MODEL || process.env.KIRO_MODEL || "unknown";
+const MAX_RETRIES = 3;
 
-  try {
-    await transport.initialize();
-    if (verbose) logInfo(TAG, "ACP transport initialized");
-
-    // The session key "system:sleep" isolates this from user conversations
-    if (verbose) logInfo(TAG, `Invoking subagent with model preference: ${usedModel}`);
-
-    const response = await transport.sendPrompt("system:sleep", prompt);
-
-    return { response, model: usedModel };
-  } catch (err) {
-    throw err instanceof Error ? err : new Error(String(err));
-  } finally {
+/** Send a prompt with retry logic. Returns response or null on exhaustion. */
+async function sendWithRetry(
+  transport: import("../components/acp-transport.js").AcpTransport,
+  prompt: string,
+  stepName: string,
+  _verbose: boolean,
+): Promise<string | null> {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      transport.destroy();
-    } catch {
-      // best-effort cleanup
+      const response = await transport.sendPrompt("system:sleep", prompt);
+      return response;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `Step ${stepName} attempt ${attempt}/${MAX_RETRIES} failed: ${msg}`);
+      if (attempt === MAX_RETRIES) {
+        logError(TAG, `Step ${stepName} failed after ${MAX_RETRIES} attempts, skipping`);
+        return null;
+      }
     }
   }
+  return null;
 }
 
 
@@ -296,142 +297,135 @@ async function main(): Promise<void> {
     logInfo(TAG, "Verbose mode enabled");
   }
 
-  // Phase 1: Initialize MemoryManager
-  if (flags.verbose) logInfo(TAG, "Phase 1: Initializing MemoryManager");
   const memoryConfig = loadMemoryConfig();
   const memory = new MemoryManager(memoryConfig);
 
   try {
     await memory.initialize();
-    if (flags.verbose) logInfo(TAG, "MemoryManager initialized successfully");
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`Fatal: Failed to initialize MemoryManager — ${msg}\n`);
+    process.stderr.write(`Fatal: Failed to initialize MemoryManager — ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   }
 
   try {
     const db = memory.getDatabase();
-    if (!db) {
-      process.stderr.write("Fatal: Database not available after initialization\n");
-      process.exit(1);
-    }
+    if (!db) { process.stderr.write("Fatal: Database not available\n"); process.exit(1); }
 
-    // Phase 2: Gather state
-    if (flags.verbose) logInfo(TAG, "Phase 2: Gathering system state");
+    // Gather state
     const gatherer = new SleepStateGatherer(db, memoryConfig);
-    let snapshot: StateSnapshot;
-    try {
-      snapshot = await gatherer.gather();
-      if (flags.verbose) logInfo(TAG, `State gathered: ${buildSnapshotSummary(snapshot)}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`Fatal: State gathering failed — ${msg}\n`);
-      process.exit(1);
-    }
+    const snapshot = await gatherer.gather();
+    if (flags.verbose) logInfo(TAG, `State gathered: ${buildSnapshotSummary(snapshot)}`);
 
-    // Phase 3: Build prompt
-    if (flags.verbose) logInfo(TAG, "Phase 3: Building sleep prompt");
-    let prompt: string;
+    // Load step files
+    let steps: import("../components/sleep-prompt-loader.js").SleepStep[];
     try {
-      prompt = loadSleepPrompt(snapshot);
-      if (flags.verbose) logInfo(TAG, `Prompt built (${prompt.length} chars)`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`Fatal: Prompt construction failed — ${msg}\n`);
-      process.exit(1);
-    }
-
-    // Phase 4: Dry-run or invoke subagent
-    if (flags.dryRun) {
-      if (flags.verbose) logInfo(TAG, "Dry-run mode — printing prompt to stdout");
-      process.stdout.write(prompt + "\n");
+      steps = loadSleepSteps(snapshot);
+      if (flags.verbose) logInfo(TAG, `Loaded ${steps.length} sleep steps`);
+    } catch {
+      // Fallback to monolith if step files not deployed yet
+      logWarn(TAG, "Sleep step files not found, falling back to monolith prompt");
+      const prompt = loadSleepPrompt(snapshot);
+      if (flags.dryRun) { process.stdout.write(prompt + "\n"); return; }
+      const { transport, model } = await createSleepTransport(flags.verbose);
+      try {
+        const response = await transport.sendPrompt("system:sleep", prompt);
+        writeAuditLog(memoryConfig.memoryDir, {
+          timestamp: new Date().toISOString(), model,
+          stateSnapshotSummary: buildSnapshotSummary(snapshot),
+          subagentResponse: response,
+          outcomes: parseOutcomesFromResponse(response),
+        });
+      } finally { try { transport.destroy(); } catch { /* */ } }
+      logInfo(TAG, "Sleep routine completed (monolith fallback)");
       return;
     }
 
-    // Phase 5: Invoke subagent
-    if (flags.verbose) logInfo(TAG, "Phase 4: Invoking subagent");
-    let subagentResponse: string;
-    let modelUsed: string;
-    try {
-      const result = await invokeSubagent(prompt, flags.verbose);
-      subagentResponse = result.response;
-      modelUsed = result.model;
-      if (flags.verbose) logInfo(TAG, `Subagent completed (model=${modelUsed}, response=${subagentResponse.length} chars)`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logError(TAG, "Subagent invocation failed", err);
-
-      // Write failure audit
-      try {
-        writeAuditLog(memoryConfig.memoryDir, {
-          timestamp: new Date().toISOString(),
-          model: "none",
-          stateSnapshotSummary: buildSnapshotSummary(snapshot),
-          subagentResponse: "",
-          outcomes: {
-            filesConsolidated: 0,
-            messagesPruned: 0,
-            embeddingsRemoved: 0,
-            sessionsCleaned: 0,
-            topicsMerged: 0,
-            topicsDeleted: 0,
-          },
-          error: msg,
-        });
-      } catch (auditErr) {
-        process.stderr.write(`Warning: Failed to write failure audit — ${auditErr instanceof Error ? auditErr.message : String(auditErr)}\n`);
+    // Dry-run: print all prompts
+    if (flags.dryRun) {
+      for (const step of steps) {
+        process.stdout.write(`\n--- ${step.filename} ---\n${step.prompt}\n`);
       }
-
-      process.stderr.write(`Fatal: Subagent invocation failed — ${msg}\n`);
-      process.exit(1);
+      return;
     }
 
-    // Phase 5.5: Extract durable facts from retrospective
+    // Skip logic based on state snapshot
+    const skipSet = new Set<string>();
+    // Skip feedback if no recall invocations today
     try {
-      const { parseRetro } = await import("./agentbridge-retro-extract.js");
-      const { existsSync, readdirSync: readDir, readFileSync: readFile } = await import("node:fs");
-      const retroDir = join(memoryConfig.memoryDir, "retrospectives");
-      const processedPath = join(retroDir, ".processed.json");
-      const processed: Set<string> = existsSync(processedPath)
-        ? new Set(JSON.parse(readFile(processedPath, "utf-8")))
-        : new Set();
-      if (existsSync(retroDir)) {
-        const files = readDir(retroDir).filter((f: string) => f.startsWith("retro_") && f.endsWith(".md") && !processed.has(f));
-        let stored = 0;
-        for (const file of files) {
-          const items = parseRetro(readFile(join(retroDir, file), "utf-8"));
-          for (const item of items) {
-            const r = await memory.instantStore({ chatId: 0, contentEn: item.content, contentOriginal: item.content, memoryType: item.memoryType, emotionScore: 0, confidence: 3, classification: 0 });
-            if (r.stored) stored++;
-          }
-          processed.add(file);
+      const recallCount = (db.prepare(
+        "SELECT COUNT(*) as cnt FROM messages WHERE content LIKE '%agentbridge-recall%' AND timestamp > ?",
+      ).get(snapshot.lastSleepTimestamp ?? 0) as { cnt: number }).cnt;
+      if (recallCount === 0) skipSet.add("feedback");
+    } catch { /* don't skip on error */ }
+    if (snapshot.fts5Health.messages_fts === "ok" && snapshot.fts5Health.extracted_memories_fts === "ok"
+        && snapshot.fts5Health.extracted_memories_original_fts === "ok" && snapshot.dbStats.nullEmbeddingCount === 0) {
+      skipSet.add("db-maintenance");
+    }
+    if (snapshot.topicFiles.length === 0) skipSet.add("topic-reorg");
+    if (snapshot.dbStats.extractedMemoryCount < 10) skipSet.add("merge");
+    // media-cleanup: check received dir
+    try {
+      const { existsSync: ex } = await import("node:fs");
+      if (!ex(join(memoryConfig.memoryDir, "..", "received"))) skipSet.add("media-cleanup");
+    } catch { /* don't skip on error */ }
+
+    // Create transport (one kiro-cli spawn for entire session)
+    const { transport, model: modelUsed } = await createSleepTransport(flags.verbose);
+    const stepResults: Array<{ step: string; duration: number; attempts: number; status: "ok" | "failed" | "skipped"; responseLen: number }> = [];
+
+    try {
+      for (const step of steps) {
+        // Check skip
+        if (step.skippable && skipSet.has(step.name)) {
+          if (flags.verbose) logInfo(TAG, `Skipping ${step.name}`);
+          stepResults.push({ step: step.name, duration: 0, attempts: 0, status: "skipped", responseLen: 0 });
+          continue;
         }
-        writeFileSync(processedPath, JSON.stringify([...processed]), "utf-8");
-        if (flags.verbose) logInfo(TAG, `Retro extract: ${stored} facts stored`);
+
+        const start = Date.now();
+        if (flags.verbose) logInfo(TAG, `→ ${step.name}`);
+
+        const response = await sendWithRetry(transport, step.prompt, step.name, flags.verbose);
+        const duration = Date.now() - start;
+        const attempts = response ? 1 : MAX_RETRIES; // approximate
+
+        stepResults.push({
+          step: step.name,
+          duration,
+          attempts,
+          status: response ? "ok" : "failed",
+          responseLen: response?.length ?? 0,
+        });
+
+        if (flags.verbose) {
+          logInfo(TAG, `  ${step.name}: ${response ? "ok" : "FAILED"} (${(duration / 1000).toFixed(1)}s, ${response?.length ?? 0} chars)`);
+        }
       }
-    } catch (err) {
-      // Non-fatal
-      if (flags.verbose) logInfo(TAG, `Retro extract failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      try { transport.destroy(); } catch { /* */ }
     }
 
-    // Phase 6: Log audit trail
-    if (flags.verbose) logInfo(TAG, "Phase 5: Writing audit trail");
+    // Write structured audit
+    const allResponses = stepResults.map(r => `[${r.step}] ${r.status} (${(r.duration / 1000).toFixed(1)}s)`).join("\n");
     try {
       writeAuditLog(memoryConfig.memoryDir, {
         timestamp: new Date().toISOString(),
         model: modelUsed,
         stateSnapshotSummary: buildSnapshotSummary(snapshot),
-        subagentResponse,
-        outcomes: parseOutcomesFromResponse(subagentResponse),
+        subagentResponse: allResponses,
+        outcomes: {
+          filesConsolidated: 0, messagesPruned: 0, embeddingsRemoved: 0,
+          sessionsCleaned: 0, topicsMerged: 0, topicsDeleted: 0,
+        },
       });
-      if (flags.verbose) logInfo(TAG, "Audit trail written successfully");
     } catch (err) {
-      // Audit failure is non-fatal — maintenance still succeeded
-      process.stderr.write(`Warning: Failed to write audit log — ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`Warning: Failed to write audit — ${err instanceof Error ? err.message : String(err)}\n`);
     }
 
-    logInfo(TAG, "Sleep routine completed successfully");
+    const okCount = stepResults.filter(r => r.status === "ok").length;
+    const failCount = stepResults.filter(r => r.status === "failed").length;
+    const skipCount = stepResults.filter(r => r.status === "skipped").length;
+    logInfo(TAG, `Sleep routine completed: ${okCount} ok, ${failCount} failed, ${skipCount} skipped`);
   } finally {
     memory.close();
   }

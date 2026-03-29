@@ -61,6 +61,13 @@ for f in "$PROJECT_DIR/skills/"*.md; do
 done
 safe_cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/prompts/sleeping_prompt.md"
 chmod 644 "$AB_HOME/prompts/sleeping_prompt.md"
+
+# Deploy sleep step files (multi-turn)
+mkdir -p "$AB_HOME/prompts/sleep"
+for f in "$PROJECT_DIR/persona/sleep/"*.md; do
+  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/prompts/sleep/$(basename "$f")"
+done
+
 safe_cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/prompts/browsing_prompt.md"
 chmod 644 "$AB_HOME/prompts/browsing_prompt.md"
 
