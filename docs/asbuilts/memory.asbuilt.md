@@ -365,7 +365,31 @@ All platforms write to the same SQLite database. Facts learned on Telegram are r
 
 ## Sleep Cycle — Dreamy
 
-The sleep agent (Dreamy) is KP running with `sleeping_prompt.md` as a dedicated maintenance subagent. Spawned as a detached `kiro-cli acp` process. Performs 10 steps of memory maintenance, garbage collection, consolidation, and self-reflection.
+The sleep agent (Dreamy) is KP running as a dedicated maintenance subagent. Spawned as a detached `kiro-cli acp` process. The sleep cycle is a **multi-turn conversation** — a series of focused prompts sent sequentially into the same session, each handling one maintenance task.
+
+### Architecture
+
+```
+Transport spawns → Session created (one kiro-cli process)
+
+Prompt 0:  Identity + rules + state snapshot
+Prompt 1:  §1 Retrospective
+Prompt 2:  §2 Feedback pass
+...
+Prompt 14: §10 Report (self-review + write audit)
+
+Transport destroyed → Wake-up prompt to KP
+```
+
+Same session, same context window. Each step's response accumulates in context, so later steps know what earlier steps did. Zero extra kiro-cli spawns. Monolith `sleeping_prompt.md` kept as fallback if step files not deployed.
+
+### Unsupervised Rules
+
+Established in the identity prompt (00-identity.md):
+- No human in the conversation — do not ask questions or wait for confirmation
+- Act on best judgment
+- If unsure about destructive actions → skip and flag
+- Accumulate "Flagged for Review" items throughout all steps → KP picks up on wake-up
 
 ### Trigger (`SleepTrigger` in `sleep-trigger.ts`)
 
@@ -377,55 +401,80 @@ Registered as `sleep-trigger` task in HeartbeatSystem (5-min interval).
 
 **Retry on failure:** up to 3 attempts per 24h cycle. Writes `.lock` file to prevent duplicate spawns.
 
+### Per-Step Retry
+
+Each step gets up to 3 attempts with 5-min timeout. Failed steps are logged but don't kill the cycle — the orchestrator moves to the next step. This is the key improvement over the monolith where a timeout at step 3 meant steps 4-14 never happened.
+
+### Conditional Skip Logic (TypeScript)
+
+The CLI decides which steps to skip based on the state snapshot:
+
+| Step | Skip condition |
+|------|---------------|
+| §2 Feedback | No `agentbridge-recall` invocations in today's messages |
+| §4+ DB Maintenance | FTS healthy AND no NULL embeddings |
+| §6 Topic Reorg | No topic files exist |
+| §8 Merge | <10 extracted memories |
+| §9.5 Media Cleanup | No `received/` directory |
+
 ### State Snapshot
 
-Before sleep starts, `SleepStateGatherer` collects system state and injects it into the prompt template:
+Before sleep starts, `SleepStateGatherer` collects system state and injects it into the identity prompt:
 - DB stats: message count, extracted memory count, embedding coverage, compression ratio
 - Darwinism stats: avg recall count, avg relevance, never-recalled count, recalled-last-30d
 - FTS5 health: integrity-check on all 3 FTS tables
 - Disk usage vs budget
-- Working directory contents
-- Topic files list
-- Last sleep audit timestamp
-- Todo and cron contents
+- Working directory contents, topic files, todo and cron contents
 
 ### Steps
 
-| Step | What | Behavior |
-|------|------|----------|
-| §1 | Retrospective | Reads full messages table. What went well/wrong, emotional attribution, lessons. Writes `retrospectives/retro_YYYYMMDD.md` + updates `core/agent_notes.md` |
-| §2 | Feedback Pass | Reviews recalled memories from today's conversations. User confirmed → `agentbridge-edit --memory-id N --relevance-score +10 --caller dreamy`. User corrected → `--relevance-score -10`. |
-| §3 | Reminder & Todo Extraction | Scans for missed "remind me" / "ne felejtsd" patterns. Adds to todo via `agentbridge-todo`. |
-| §4 | Garbage Collection | 7-step GC (see below) |
-| §4+ | Database Maintenance | WAL checkpoint, FTS5 rebuild if corrupt, batch-embed NULL embeddings |
-| §5 | Cron Verification | Cross-check time-specific reminders against cron entries |
-| §6 | Topic Reorg | Review topic files for staleness or merge opportunities |
-| §7 | Fitness Review | Darwinism review, core knowledge maintenance, translation quality check via `agentbridge-edit` |
-| §8 | Memory Merge | Find and merge near-duplicate memories (max 5 per cycle) via `agentbridge-store --merge` |
-| §9 | Consolidation | working→daily→weekly→quarterly summaries. Classification-aware: CONFIDENTIAL/SECRET content redacted. |
-| §9.5 | Media Cleanup | FIFO 100MB cleanup of `~/.agentbridge/received/` |
-| §10 | Report | Audit summary written to `sleep/sleep_YYYYMMDD_HHmm.md` |
+| # | File | Step | Behavior |
+|---|------|------|----------|
+| 0 | `00-identity.md` | Identity | Who Dreamy is, rules, tools, state snapshot |
+| 1 | `01-retrospective.md` | §1 Retrospective | Read messages, write retro, emotional attribution, update agent_notes |
+| 2 | `02-feedback.md` | §2 Feedback | Boost/demote recalled memories via `agentbridge-edit` |
+| 3 | `03-reminders.md` | §3 Reminders | Extract todos via `agentbridge-todo` |
+| 4 | `04-gc.md` | §4 GC | 7-step garbage collection (see below) |
+| 5 | `05-db-maintenance.md` | §4+ DB Maintenance | WAL checkpoint, FTS rebuild, batch embed |
+| 6 | `06-cron-verify.md` | §5 Cron Verify | Cross-check reminders against cron entries |
+| 7 | `07-topic-reorg.md` | §6 Topic Reorg | Topic file maintenance |
+| 8 | `08-fitness.md` | §7 Fitness | Darwinism review, core knowledge, translation fixes |
+| 9 | `09-anomaly-audit.md` | §7.5 Anomaly Audit | CIA-AAA attribute audit (daily) |
+| 10 | `10-retro-extract.md` | §5.5 Retro Extract | Extract durable facts from retro (replaces regex hack) |
+| 11 | `11-merge.md` | §8 Merge | Near-duplicate memory merge (max 5) |
+| 12 | `12-consolidation.md` | §9 Consolidation | daily→weekly→quarterly summaries, classification-aware |
+| 13 | `13-media-cleanup.md` | §9.5 Media Cleanup | FIFO 100MB cleanup |
+| 14 | `14-report.md` | §10 Report | Self-review, fix missed items, write audit, append flagged items to retro |
 
 ### Garbage Collection (§4)
 
 Dreamy scans all messages in the DB and cleans up noise while preserving emotional signals.
 
-**Step 1 — Purge expired garbage:** Read `garbage.json`, delete messages marked >7 days ago via `agentbridge-store --delete-ids`.
+**Step 1 — Purge expired garbage:** Read `garbage.json`, delete messages marked >7 days ago.
 
 **Step 2 — Immediate deletes (no grace period):**
 - Duplicates: same content, same chat, within 5 minutes → keep first, delete rest
-- Wrong-chat messages: user says "wrong chat" / "rossz chat" → delete message + the one before it + both responses
-- Whisper/STT garbage: garbled transcriptions that make no sense in any language
+- Wrong-chat messages → delete message + the one before it + both responses
+- Whisper/STT garbage: garbled transcriptions
 
-**Step 3 — Repeated probes:** Same question 3+ times → keep first occurrence + response, mark rest as garbage.
+**Step 3 — Repeated probes:** Same question 3+ times → keep first + response, mark rest as garbage.
 
-**Step 4 — Noise marking (7-day grace period):** Single-word greetings, pings, filler acknowledgments → mark in `garbage.json`. Does NOT mark action confirmations, instructions, or questions with real content.
+**Step 4 — Noise marking (7-day grace period):** Greetings, pings, filler → `garbage.json`. Does NOT mark action confirmations, instructions, or questions with content.
 
-**Step 5 — Verify extractions:** Scan messages not yet captured in `extracted_memories`. Extract missing facts via `agentbridge-store`. After confirming facts are stored, garbage-mark the verbose originals.
+**Step 5 — Verify extractions:** Extract missing facts via `agentbridge-store`. Garbage-mark verbose originals.
 
-**Step 6 — Emotion harvest (verbal only):** Scan for verbal emotional reactions ("fasza!", "goddamn it!"). Update nearest relevant memory's `emotion_score` via `agentbridge-edit --memory-id N --emotion-score N --caller dreamy`. Mark the emotional message as garbage. (Emoji reactions are already handled at runtime.)
+**Step 6 — Emotion harvest (verbal only):** Update nearest memory's `emotion_score` via `agentbridge-edit`. Mark emotional message as garbage.
 
-**Step 7 — Flush old messages:** Delete all messages older than 24 hours. By this point, all valuable content has been extracted, summarized, and captured in the retrospective.
+**Step 7 — Flush old messages:** Delete all messages older than 24 hours.
+
+### Memory Anomaly Audit (§7.5)
+
+Daily CIA-AAA attribute health check. Auto-fixes confident cases, flags uncertain ones.
+
+**Auto-fix:** decisions at classification=0, KP decisions at trust<2, stale credibility=6, NULL embeddings.
+**Flag for review:** personal content at low classification, conflicting attributes (trust=3 + credibility≥5).
+
+See `skills/memory-anomalies.md` for full anomaly definitions.
 
 ### Safety
 
@@ -435,30 +484,22 @@ Dreamy scans all messages in the DB and cleans up noise while preserving emotion
 - Emotion scores are harvested before deletion — no signal loss
 - Classification-aware: SECRET/CONFIDENTIAL content redacted in summaries
 
-### Fitness Review (§7)
-
-Darwinism-based memory health check:
-- **High recall + high relevance** → no action
-- **High recall + negative relevance** → candidate for rewording via `agentbridge-edit`
-- **Zero recall after 60+ days** → candidate for deletion
-- **Low confidence (1-2) + zero recall** → first to prune
-- **Translation quality check:** Scan for `content_en` containing untranslated foreign words → fix via `agentbridge-edit --memory-id N --translated "..." --integrity 1 --caller dreamy`
-- **Core knowledge maintenance:** Review `user_profile.md` and `agent_notes.md`, keep each ≤10 lines
-
 ### Post-Sleep Wake-Up
 
-After successful sleep (both startup and cron-triggered), the bridge injects a wake-up prompt to KP via Telegram: "You just woke up.. how did you sleep buddy?" — KP responds naturally, referencing the sleep audit and retro.
+After successful sleep, the bridge injects "You just woke up.. how did you sleep buddy?" to KP via Telegram. KP responds naturally, referencing the sleep audit, retro, and any flagged items.
 
 ### Key Files
 
 | File | Purpose |
 |------|---------|
-| `persona/sleeping_prompt.md` | Full sleep prompt template (10 steps) |
+| `persona/sleep/*.md` | 15 step prompt files (multi-turn) |
+| `persona/sleeping_prompt.md` | Monolith fallback (legacy) |
+| `skills/memory-anomalies.md` | Anomaly definitions for Dreamy + KP |
+| `src/cli/agentbridge-sleep.ts` | CLI orchestrator: step loop, retry, skip logic |
+| `src/components/sleep-prompt-loader.ts` | Load step files + variable substitution |
 | `src/components/sleep-trigger.ts` | Heartbeat task, trigger logic, retry |
-| `src/components/sleep-state-gatherer.ts` | Collects system state for prompt |
-| `src/components/sleep-prompt-loader.ts` | Template variable substitution |
-| `src/cli/agentbridge-sleep.ts` | CLI entry point, spawns kiro-cli |
-| `~/.agentbridge/memory/garbage.json` | GC tracking: `{"<msg_id>": "<ISO timestamp>"}` |
+| `src/components/sleep-state-gatherer.ts` | Collects system state for identity prompt |
+| `~/.agentbridge/memory/garbage.json` | GC tracking |
 | `~/.agentbridge/memory/sleep/` | Audit logs + lock files |
 | `~/.agentbridge/memory/retrospectives/` | Daily self-reflections |
 
