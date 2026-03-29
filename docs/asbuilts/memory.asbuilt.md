@@ -228,27 +228,39 @@ Source: `src/components/recall-engine.ts`
 CLI wrapper: `src/cli/agentbridge-recall.ts`
 Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine)
 
+### Design Philosophy
+
+The pipeline is layered from conservative (high-precision, few false positives) to broad (high-recall, tolerates false positives). Earlier stages produce higher-scored results; later stages are safety nets.
+
+### Stages
+
+| Stage | Source | Method | Precision | Score | Description |
+|-------|--------|--------|-----------|-------|-------------|
+| S1 | extracted_memories.content_en | FTS5 (porter + unicode61) | Conservative — token match, stemmed | Darwinism-boosted | Primary search. Handles accents via unicode61 normalization. Prefers false negatives over false positives. |
+| S2 | extracted_memories.content_original | FTS5 (unicode61) | Conservative | Darwinism-boosted | Original-language search. Only fires when `--original` provided. Only indexes `preserve_original=1` memories. |
+| S3 | extracted_memories (both columns) | SQL LIKE `%kw%` | Broad — substring match | 0.95 (fixed) | Safety net for compound words, partial matches FTS5 misses. Tolerates false positives. |
+| Se | extracted_memories.embedding | Cosine similarity (ollama) | Broadest — semantic | 0.0-1.0 (similarity) | Handles typos, synonyms, paraphrasing, cross-language meaning. Async, merged after S3. |
+| S4 | messages | FTS5 (relaxed OR) | Conservative | FTS5 rank | Raw message search. Falls through to messages when extracted memories don't cover it. |
+| S5 | messages | SQL LIKE `%kw%` | Broad | 0.9 (fixed) | Wide net on messages. Only fires if results < limit. |
+| S6 | daily/weekly/quarterly .md files | Substring match on file content | Broad | 0.5 (fixed) | Searches consolidation summaries on disk. |
+| S7 | messages or latest daily | No keyword — returns recent | Fallback | 0.1 (fixed) | Only fires when ALL other stages return zero results. Returns recent messages or latest daily summary. |
+
 ```
 Se: async embedding sidecar ─────────────┐  (fires at S1 start, ollama nomic-embed-text)
                                            │
-S1: Extracted memories — English FTS5      │  content_en, Darwinism-boosted scoring
-S2: Extracted memories — Original FTS5     │  content_original, only if --original provided
-S3: Extracted memories — LIKE fallback     │  content_en + content_original, score ×0.95
+S1: Extracted — English FTS5 (conservative)│
+S2: Extracted — Original FTS5 (conserv.)   │
+S3: Extracted — LIKE (broad safety net)    │
   → merge Se results here ◄───────────────┘
   → Short-circuit: if S1+S2+S3+Se ≥ 10 results → skip S4-S7
 
-S4: Raw messages — FTS5 (relaxed OR mode)
-S5: Raw messages — LIKE (wide net fallback, only if results < limit)
-S6: Consolidation file search (daily/weekly/quarterly .md on disk)
-S7: Keyword-free fallback (exclusive, only if zero results)
-    Compares timestamps: recent messages vs latest daily summary, fresher wins.
+S4: Messages — FTS5 (conservative)
+S5: Messages — LIKE (broad)
+S6: Consolidation files (broad)
+S7: Keyword-free fallback (last resort, zero results only)
 ```
 
 Post-processing: dedup by content hash → temporal decay → MMR re-ranking (λ=0.7).
-
-Se sidecar: gated by `EMBEDDING_ENABLED=true`. Fires async at S1 start (~20-50ms via ollama), result consumed after S3. Zero added latency.
-
-**Hit-rate logging:** Per-stage hit counts emitted to stderr.
 
 ### Embedding Lifecycle (C5)
 
