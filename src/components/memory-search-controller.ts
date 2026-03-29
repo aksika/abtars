@@ -51,8 +51,8 @@ export class MemorySearchController {
   listAll(): { status: number; body: object } {
     try {
       const memories = this.deps.db.prepare(
-        `SELECT id, content_en, content_original, memory_type, source_timestamp, emotion_score,
-                recall_count, relevance_score, classification, trust, integrity, credibility, created_at,
+        `SELECT id, content_en, content_original, memory_type, created_at, emotion_score,
+                recall_count, relevance_score, classification, trust, integrity, credibility,
                 CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_embedding
          FROM extracted_memories ORDER BY created_at DESC`
       ).all() as Array<Record<string, unknown>>;

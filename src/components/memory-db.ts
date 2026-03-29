@@ -122,6 +122,13 @@ export function initializeDatabase(dbPath: string): Database.Database {
         VALUES('delete', old.id, old.content_en);
     END;
 
+    -- FTS5 UPDATE trigger for content_en (memory edit tool)
+    CREATE TRIGGER IF NOT EXISTS extracted_memories_au AFTER UPDATE OF content_en ON extracted_memories BEGIN
+      INSERT INTO extracted_memories_fts(extracted_memories_fts, rowid, content_en)
+        VALUES('delete', old.id, old.content_en);
+      INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (new.id, new.content_en);
+    END;
+
     -- FTS5 index for original-language content (only for preserve_original memories)
     CREATE VIRTUAL TABLE IF NOT EXISTS extracted_memories_original_fts USING fts5(
       content_original,
@@ -142,6 +149,16 @@ export function initializeDatabase(dbPath: string): Database.Database {
     BEGIN
       INSERT INTO extracted_memories_original_fts(extracted_memories_original_fts, rowid, content_original)
         VALUES('delete', old.id, old.content_original);
+    END;
+
+    -- FTS5 UPDATE trigger for content_original (memory edit tool)
+    CREATE TRIGGER IF NOT EXISTS extracted_memories_orig_au AFTER UPDATE OF content_original ON extracted_memories
+      WHEN new.preserve_original = 1
+    BEGIN
+      INSERT INTO extracted_memories_original_fts(extracted_memories_original_fts, rowid, content_original)
+        VALUES('delete', old.id, old.content_original);
+      INSERT INTO extracted_memories_original_fts(rowid, content_original)
+        VALUES (new.id, new.content_original);
     END;
 
     -- Extraction watermark table (tracks last processed timestamp per chat)

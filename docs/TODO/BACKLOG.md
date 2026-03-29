@@ -438,3 +438,41 @@ Replace the plain text `edited_by` with a simple digital signature that proves w
 - Could be HMAC(caller + memory_id + edited_at, shared_secret) stored as a short hex digest
 - Verification: sleep audit can check signatures match expected callers
 - Scope: only for edits, not for initial store (that's covered by trust + integrity fields)
+
+## 50. Decouple Memory System from Bridge
+
+**Status:** Not started
+**Priority:** Medium
+**Source:** Memory-edit tool planning discussion (2026-03-28)
+
+**Goal:**
+Extract the memory system into a standalone module/package, decoupled from the bridge. Similar to how lossless-claw (`/home/qakosal/workspace/lossless-claw`) is a standalone plugin that handles context management independently of OpenClaw's core.
+
+**Reference architecture:** lossless-claw
+- Standalone SQLite-based persistence
+- Clean interface boundary (ContextEngine interface)
+- Own tools (lcm_grep, lcm_describe, lcm_expand)
+- Own CLI (lcm-tui)
+- Pluggable into a host system without tight coupling
+
+**Current coupling points — direct SQL UPDATEs on extracted_memories:**
+
+| # | Location | SQL | Status after edit tool |
+|---|----------|-----|----------------------|
+| 1 | `adjustRelevance()` | `SET relevance_score += ?` | → routed through editMemory |
+| 2 | `reclassifyMemory()` | `SET classification = ?` | → routed through editMemory |
+| 3 | `updateEmotionByPlatformId()` | `SET emotion_score = ? WHERE source_message_ids LIKE ...` | → routed through editMemory |
+| 4 | `mergeMemories()` | multi-field merge + DELETE | stays — different operation |
+| 5 | `embedNewMemory()` | `SET embedding = ?` | stays — internal pipeline |
+| 6 | `memory-extractor.ts` | `SET embedding = ?` | stays — internal pipeline (deduplicate with #5) |
+| 7 | `ollama-embed.ts` | `SET embedding = ?` | stays — batch embedding |
+| 8 | `memory-index.ts` bumpRecallCount | `SET recall_count += 1, last_recalled_at = ?` | stays — automatic bookkeeping |
+
+**Decoupling steps (future):**
+- All mutations go through a clean API (editMemory, instantStore, merge, delete)
+- No raw SQL outside the memory module
+- Embedding pipeline internalized (5-7 become private implementation detail)
+- Recall bookkeeping (8) internalized
+- Memory module exposes: store, edit, recall, merge, delete, stats
+- Bridge consumes the module via interface, not direct DB access
+- Standalone CLI tools (agentbridge-store, agentbridge-edit, agentbridge-recall) become the public API

@@ -66,16 +66,16 @@ export function vectorSearch(
   db: Database.Database,
   queryVector: Float32Array,
   opts: { chatId?: number; limit?: number; threshold: number; maxClassification?: number },
-): Array<{ id: number; content_en: string; content_original: string | null; source_timestamp: number; memory_type: string | null; score: number; trust: number | null; integrity: number | null; credibility: number | null; classification: number | null; source_message_ids: string | null }> {
+): Array<{ id: number; content_en: string; content_original: string | null; created_at: number; memory_type: string | null; score: number; trust: number | null; integrity: number | null; credibility: number | null; classification: number | null; source_message_ids: string | null }> {
   const conditions = ["embedding IS NOT NULL"];
   const params: (number)[] = [];
   if (opts.chatId) { conditions.push("chat_id = ?"); params.push(opts.chatId); }
   if (opts.maxClassification !== undefined) { conditions.push("COALESCE(classification, 0) <= ?"); params.push(opts.maxClassification); }
 
   const rows = db.prepare(
-    `SELECT id, content_en, content_original, source_timestamp, memory_type, embedding, trust, integrity, credibility, classification, source_message_ids FROM extracted_memories WHERE ${conditions.join(" AND ")}`
+    `SELECT id, content_en, content_original, created_at, memory_type, embedding, trust, integrity, credibility, classification, source_message_ids FROM extracted_memories WHERE ${conditions.join(" AND ")}`
   ).all(...params) as Array<{
-    id: number; content_en: string; content_original: string | null; source_timestamp: number;
+    id: number; content_en: string; content_original: string | null; created_at: number;
     memory_type: string | null; embedding: Buffer; trust: number | null; integrity: number | null;
     credibility: number | null; classification: number | null; source_message_ids: string | null;
   }>;

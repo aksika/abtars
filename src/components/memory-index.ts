@@ -271,11 +271,11 @@ export class MemoryIndex {
         params.push(opts.chatId);
       }
       if (opts?.startTime !== undefined) {
-        conditions.push("em.source_timestamp >= ?");
+        conditions.push("em.created_at >= ?");
         params.push(opts.startTime);
       }
       if (opts?.endTime !== undefined) {
-        conditions.push("em.source_timestamp <= ?");
+        conditions.push("em.created_at <= ?");
         params.push(opts.endTime);
       }
 
@@ -284,7 +284,7 @@ export class MemoryIndex {
 
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
-               em.source_timestamp, em.preserve_original, em.emotion_score,
+               em.created_at, em.preserve_original, em.emotion_score,
                em.recall_count, em.relevance_score, em.source_message_ids,
                em.trust, em.integrity, em.credibility, em.classification, rank
         FROM extracted_memories em
@@ -303,7 +303,7 @@ export class MemoryIndex {
         content_en: string;
         content_original: string;
         memory_type: string;
-        source_timestamp: number;
+        created_at: number;
         preserve_original: number;
         emotion_score: number;
         recall_count: number;
@@ -326,7 +326,7 @@ export class MemoryIndex {
           content: row.content_en,
           content_original: row.content_original,
           memory_type: row.memory_type,
-          source_timestamp: row.source_timestamp,
+          created_at: row.created_at,
           source_message_ids: row.source_message_ids ?? undefined,
           trust: row.trust ?? 0,
           integrity: row.integrity ?? 2,
@@ -379,7 +379,7 @@ export class MemoryIndex {
 
       const sql = `
         SELECT em.id, em.content_en, em.content_original, em.memory_type,
-               em.source_timestamp, em.preserve_original, em.emotion_score,
+               em.created_at, em.preserve_original, em.emotion_score,
                em.recall_count, em.relevance_score, em.source_message_ids,
                em.trust, em.integrity, em.credibility, em.classification, rank
         FROM extracted_memories em
@@ -398,7 +398,7 @@ export class MemoryIndex {
         content_en: string;
         content_original: string;
         memory_type: string;
-        source_timestamp: number;
+        created_at: number;
         preserve_original: number;
         emotion_score: number;
         recall_count: number;
@@ -427,7 +427,7 @@ export class MemoryIndex {
           content: row.content_en,
           content_original: row.content_original,
           memory_type: row.memory_type,
-          source_timestamp: row.source_timestamp,
+          created_at: row.created_at,
           source_message_ids: row.source_message_ids ?? undefined,
           trust: row.trust ?? 0,
           integrity: row.integrity ?? 2,

@@ -46,6 +46,8 @@ export type {
   HeartbeatTask,
   InstantStoreParams,
   InstantStoreResult,
+  EditMemoryParams,
+  EditMemoryResult,
 } from "./memory.js";
 
 export type {

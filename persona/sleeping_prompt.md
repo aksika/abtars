@@ -175,7 +175,7 @@ Scan remaining messages for verbal emotional reactions with no informational con
 
 For each:
 1. Identify the nearest relevant message or extracted_memory that the emotion refers to
-2. Update its `emotion_score` via `agentbridge-store` (positive: +1 to +3, negative: -1 to -3)
+2. Update its `emotion_score` via `agentbridge-edit --memory-id <N> --emotion-score <score> --caller dreamy` (positive: +1 to +3, negative: -1 to -3)
 3. Add the message ID (and its paired assistant response ID) to `garbage.json`
 
 ### Step 7: Flush old messages
@@ -279,10 +279,10 @@ ORDER BY id DESC LIMIT 20;
 ```
 
 For each result: if `content_en` contains non-English words that should have been translated, fix with:
-```sql
-UPDATE extracted_memories SET content_en = '<corrected English>', embedding = NULL WHERE id = <N>;
+```bash
+agentbridge-edit --memory-id <N> --translated "<corrected English>" --caller dreamy
 ```
-Setting `embedding = NULL` ensures re-embedding on next batch-embed run.
+The edit tool nulls the embedding automatically — re-embedding happens on next batch-embed run.
 
 ## §8 Memory Merge
 

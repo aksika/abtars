@@ -48,8 +48,8 @@ describe("vectorSearch", () => {
   it("returns results above threshold sorted by score", () => {
     const query = new Float32Array([1, 0, 0]);
     const db = mockDb([
-      { id: 1, content_en: "close", content_original: null, source_timestamp: 1000, memory_type: "fact", embedding: makeVec(0.9, 0.1, 0), trust: 5, integrity: 5, credibility: 5, classification: 0, source_message_ids: null },
-      { id: 2, content_en: "far", content_original: null, source_timestamp: 2000, memory_type: "fact", embedding: makeVec(0, 1, 0), trust: 5, integrity: 5, credibility: 5, classification: 0, source_message_ids: null },
+      { id: 1, content_en: "close", content_original: null, created_at: 1000, memory_type: "fact", embedding: makeVec(0.9, 0.1, 0), trust: 5, integrity: 5, credibility: 5, classification: 0, source_message_ids: null },
+      { id: 2, content_en: "far", content_original: null, created_at: 2000, memory_type: "fact", embedding: makeVec(0, 1, 0), trust: 5, integrity: 5, credibility: 5, classification: 0, source_message_ids: null },
     ]);
     const results = vectorSearch(db, query, { threshold: 0.5 });
     expect(results.length).toBe(1);
@@ -60,7 +60,7 @@ describe("vectorSearch", () => {
   it("returns empty when no results above threshold", () => {
     const query = new Float32Array([1, 0]);
     const db = mockDb([
-      { id: 1, content_en: "x", content_original: null, source_timestamp: 1000, memory_type: "fact", embedding: makeVec(0, 1), trust: null, integrity: null, credibility: null, classification: null, source_message_ids: null },
+      { id: 1, content_en: "x", content_original: null, created_at: 1000, memory_type: "fact", embedding: makeVec(0, 1), trust: null, integrity: null, credibility: null, classification: null, source_message_ids: null },
     ]);
     const results = vectorSearch(db, query, { threshold: 0.9 });
     expect(results.length).toBe(0);
@@ -69,7 +69,7 @@ describe("vectorSearch", () => {
   it("respects limit", () => {
     const query = new Float32Array([1, 0]);
     const rows = Array.from({ length: 20 }, (_, i) => ({
-      id: i, content_en: `m${i}`, content_original: null, source_timestamp: i * 1000,
+      id: i, content_en: `m${i}`, content_original: null, created_at: i * 1000,
       memory_type: "fact", embedding: makeVec(1, 0.01 * i), trust: null, integrity: null,
       credibility: null, classification: null, source_message_ids: null,
     }));

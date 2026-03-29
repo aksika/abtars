@@ -198,7 +198,6 @@ export class MemoryExtractor {
       throw new Error("LLM response is not an array");
     }
 
-    const now = Date.now();
     const validTypes = new Set(["fact", "decision", "preference", "event"]);
     const memories: ExtractedMemory[] = [];
 
@@ -234,11 +233,10 @@ export class MemoryExtractor {
         content_original: contentOriginal,
         content_en: contentEn,
         memory_type: memoryType as ExtractedMemory["memory_type"],
-        source_timestamp: timestamp,
+        created_at: timestamp,
         preserve_original: preserveOriginal,
         preserved_keyword: preserveOriginal ? preservedKeyword : undefined,
         emotion_score: clampEmotionScore(obj.emotion_score),
-        created_at: now,
         entities: entities.length > 0 ? entities : undefined,
       });
     }
@@ -253,7 +251,7 @@ export class MemoryExtractor {
   private insertMemories(memories: ExtractedMemory[]): void {
     const stmt = this.db.prepare(
       `INSERT INTO extracted_memories
-         (chat_id, content_original, content_en, memory_type, source_timestamp, preserve_original, preserved_keyword, emotion_score, created_at)
+         (chat_id, content_original, content_en, memory_type, source_timestamp, created_at, preserve_original, preserved_keyword, emotion_score)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
@@ -264,11 +262,11 @@ export class MemoryExtractor {
           m.content_original,
           m.content_en,
           m.memory_type,
-          m.source_timestamp,
+          m.created_at,
+          m.created_at,
           m.preserve_original ? 1 : 0,
           m.preserved_keyword ?? null,
           m.emotion_score,
-          m.created_at,
         );
         if (m.entities?.length) {
           this.linkEntities(Number(info.lastInsertRowid), m.entities);

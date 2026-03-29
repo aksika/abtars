@@ -128,12 +128,12 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
 
   const addExtracted = (r: MemorySearchResult, source: string, hits: RecallHit[]): void => {
     if (entityFilter && r.id !== undefined && !entityFilter.has(r.id)) return;
-    const key = `${r.source_timestamp}:${r.content.slice(0, 80)}`;
+    const key = `${r.created_at}:${r.content.slice(0, 80)}`;
     if (seen.has(key)) return;
     seen.add(key);
     if (r.id !== undefined) extractedIds.push(r.id);
     const hit: RecallHit = {
-      content: r.content, date: new Date(r.source_timestamp).toISOString(), source, score: r.score,
+      content: r.content, date: new Date(r.created_at).toISOString(), source, score: r.score,
       ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}),
       contentOriginal: r.content_original, memoryType: r.memory_type,
       trust: r.trust, integrity: r.integrity, credibility: r.credibility, classification: r.classification,
@@ -181,24 +181,24 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
     const conditions = ["1=1"];
     const bindParams: (string | number)[] = [];
     if (params.chatId) { conditions.push("chat_id = ?"); bindParams.push(params.chatId); }
-    if (params.timeStart) { conditions.push("source_timestamp >= ?"); bindParams.push(params.timeStart); }
-    if (params.timeEnd) { conditions.push("source_timestamp <= ?"); bindParams.push(params.timeEnd); }
+    if (params.timeStart) { conditions.push("created_at >= ?"); bindParams.push(params.timeStart); }
+    if (params.timeEnd) { conditions.push("created_at <= ?"); bindParams.push(params.timeEnd); }
     if (params.maxClassification !== undefined) { conditions.push("COALESCE(classification, 0) <= ?"); bindParams.push(params.maxClassification); }
     conditions.push(`(${allKw.map(kw => { bindParams.push(`%${kw}%`, `%${kw}%`); return "(content_en LIKE ? OR content_original LIKE ?)"; }).join(" OR ")})`);
     const rows = deps.db.prepare(
-      `SELECT id, content_en, content_original, memory_type, source_timestamp, source_message_ids, trust, integrity, credibility, classification FROM extracted_memories WHERE ${conditions.join(" AND ")} ORDER BY source_timestamp DESC LIMIT ?`
+      `SELECT id, content_en, content_original, memory_type, created_at, source_message_ids, trust, integrity, credibility, classification FROM extracted_memories WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC LIMIT ?`
     ).all(...bindParams, limit * 3) as Array<{
       id: number; content_en: string; content_original: string | null; memory_type: string | null;
-      source_timestamp: number; source_message_ids: string | null;
+      created_at: number; source_message_ids: string | null;
       trust: number | null; integrity: number | null; credibility: number | null; classification: number | null;
     }>;
     for (const r of rows) {
-      const key = `${r.source_timestamp}:${r.content_en.slice(0, 80)}`;
+      const key = `${r.created_at}:${r.content_en.slice(0, 80)}`;
       if (seen.has(key)) continue;
       seen.add(key);
       if (r.id !== undefined) extractedIds.push(r.id);
       const hit: RecallHit = {
-        content: r.content_en, date: new Date(r.source_timestamp).toISOString(),
+        content: r.content_en, date: new Date(r.created_at).toISOString(),
         source: "S3:extracted_like", score: 0.95,
         ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}),
         contentOriginal: r.content_original ?? undefined, memoryType: r.memory_type ?? undefined,
@@ -222,12 +222,12 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
         maxClassification: params.maxClassification ?? 2,
       });
       for (const r of vecResults) {
-        const key = `${r.source_timestamp}:${r.content_en.slice(0, 80)}`;
+        const key = `${r.created_at}:${r.content_en.slice(0, 80)}`;
         if (seen.has(key)) continue;
         seen.add(key);
         extractedIds.push(r.id);
         const hit: RecallHit = {
-          content: r.content_en, date: new Date(r.source_timestamp).toISOString(),
+          content: r.content_en, date: new Date(r.created_at).toISOString(),
           source: "Se:embedding", score: r.score,
           ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}),
           contentOriginal: r.content_original ?? undefined, memoryType: r.memory_type ?? undefined,

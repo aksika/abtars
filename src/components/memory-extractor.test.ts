@@ -15,7 +15,7 @@ describe("MemoryExtractor", () => {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id INTEGER, content_en TEXT, content_original TEXT,
         memory_type TEXT, emotion_score INTEGER DEFAULT 0,
-        source_timestamp INTEGER, source_message_ids TEXT,
+        source_timestamp INTEGER NOT NULL, source_message_ids TEXT,
         preserve_original INTEGER DEFAULT 0, preserved_keyword TEXT,
         classification INTEGER DEFAULT 0, created_at INTEGER
       );

@@ -77,7 +77,7 @@ describe("recallSearch — stage execution", () => {
 describe("recallSearch — short-circuit", () => {
   it("short-circuits after S3 when enough results", async () => {
     const hits = Array.from({ length: 12 }, (_, i) => ({
-      id: i, content: `memory ${i}`, source_timestamp: i * 1000,
+      id: i, content: `memory ${i}`, created_at: i * 1000,
       score: 5.0, tier: "extracted" as const,
     }));
     const idx = mockIndex({ searchExtracted: vi.fn(() => hits) });
@@ -88,7 +88,7 @@ describe("recallSearch — short-circuit", () => {
 
   it("does not short-circuit with few results", async () => {
     const idx = mockIndex({
-      searchExtracted: vi.fn(() => [{ id: 1, content: "one", source_timestamp: 1000, score: 5.0, tier: "extracted" as const }]),
+      searchExtracted: vi.fn(() => [{ id: 1, content: "one", created_at: 1000, score: 5.0, tier: "extracted" as const }]),
     });
     const result = await recallSearch(makeDeps({ index: idx }), baseParams());
     expect(result.shortCircuitAfter).toBeNull();
@@ -102,7 +102,7 @@ describe("recallSearch — per-stage results", () => {
   it("returns per-stage hits and timing", async () => {
     const idx = mockIndex({
       searchExtracted: vi.fn(() => [
-        { id: 1, content: "test", source_timestamp: 1000, score: 5.0, tier: "extracted" as const },
+        { id: 1, content: "test", created_at: 1000, score: 5.0, tier: "extracted" as const },
       ]),
     });
     const result = await recallSearch(makeDeps({ index: idx }), baseParams({ stages: ["S1"] }));
@@ -114,7 +114,7 @@ describe("recallSearch — per-stage results", () => {
   it("collects extractedIds for recall count bumping", async () => {
     const idx = mockIndex({
       searchExtracted: vi.fn(() => [
-        { id: 42, content: "test", source_timestamp: 1000, score: 5.0, tier: "extracted" as const },
+        { id: 42, content: "test", created_at: 1000, score: 5.0, tier: "extracted" as const },
       ]),
     });
     const result = await recallSearch(makeDeps({ index: idx }), baseParams({ stages: ["S1"] }));
@@ -126,7 +126,7 @@ describe("recallSearch — per-stage results", () => {
 
 describe("recallSearch — deduplication", () => {
   it("deduplicates by timestamp:content prefix across stages", async () => {
-    const hit = { id: 1, content: "same memory", source_timestamp: 1000, score: 5.0, tier: "extracted" as const };
+    const hit = { id: 1, content: "same memory", created_at: 1000, score: 5.0, tier: "extracted" as const };
     const idx = mockIndex({
       searchExtracted: vi.fn(() => [hit]),
       searchOriginal: vi.fn(() => [hit]),
@@ -143,7 +143,7 @@ describe("recallSearch — deduplication", () => {
 describe("recallSearch — limit", () => {
   it("respects limit parameter", async () => {
     const hits = Array.from({ length: 20 }, (_, i) => ({
-      id: i, content: `memory ${i}`, source_timestamp: i * 1000,
+      id: i, content: `memory ${i}`, created_at: i * 1000,
       score: 20 - i, tier: "extracted" as const,
     }));
     const idx = mockIndex({ searchExtracted: vi.fn(() => hits) });
@@ -174,8 +174,8 @@ describe("recallSearch — entity filter", () => {
   it("filters results by entity when --entity provided", async () => {
     const idx = mockIndex({
       searchExtracted: vi.fn(() => [
-        { id: 1, content: "about Molty", source_timestamp: 1000, score: 5.0, tier: "extracted" as const },
-        { id: 2, content: "about pizza", source_timestamp: 2000, score: 4.0, tier: "extracted" as const },
+        { id: 1, content: "about Molty", created_at: 1000, score: 5.0, tier: "extracted" as const },
+        { id: 2, content: "about pizza", created_at: 2000, score: 4.0, tier: "extracted" as const },
       ]),
     });
     // Mock DB: entity filter query returns only memory_id=1
@@ -198,8 +198,8 @@ describe("recallSearch — entity filter", () => {
   it("returns all results when --entity not provided", async () => {
     const idx = mockIndex({
       searchExtracted: vi.fn(() => [
-        { id: 1, content: "a", source_timestamp: 1000, score: 5.0, tier: "extracted" as const },
-        { id: 2, content: "b", source_timestamp: 2000, score: 4.0, tier: "extracted" as const },
+        { id: 1, content: "a", created_at: 1000, score: 5.0, tier: "extracted" as const },
+        { id: 2, content: "b", created_at: 2000, score: 4.0, tier: "extracted" as const },
       ]),
     });
     const result = await recallSearch(makeDeps({ index: idx }), baseParams({ stages: ["S1"] }));

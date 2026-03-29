@@ -393,8 +393,9 @@ describe("Memory Darwinism", () => {
       const mgr2 = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr2.initialize();
 
-      expect(mgr2.reclassifyMemory(id, 2)).toEqual({ ok: true });
-      expect(mgr2.reclassifyMemory(id, 0)).toEqual({ ok: true });
+      expect(mgr2.reclassifyMemory(id, 2)).toMatchObject({ ok: true });
+      expect(mgr2.reclassifyMemory(id, 1)).toMatchObject({ ok: true });
+      expect(mgr2.reclassifyMemory(id, 0)).toMatchObject({ ok: true });
 
       mgr2.close();
       rmSync(dir, { recursive: true, force: true });

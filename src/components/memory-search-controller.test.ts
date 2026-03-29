@@ -133,7 +133,7 @@ describe("MemorySearchController.handle — results", () => {
     const mi = mockMemoryIndex({
       searchExtracted: vi.fn(() => [{
         id: 1, content: "puppy info", content_original: "kiskutya info",
-        memory_type: "fact", source_timestamp: 1000, score: 5.0,
+        memory_type: "fact", created_at: 1000, score: 5.0,
         trust: 5, integrity: 5, credibility: 5, classification: 0,
         tier: "extracted" as const,
       }]),
@@ -149,7 +149,7 @@ describe("MemorySearchController.handle — results", () => {
 
   it("limits results to 10", async () => {
     const results = Array.from({ length: 25 }, (_, i) => ({
-      id: i, content: `memory ${i}`, source_timestamp: i * 1000,
+      id: i, content: `memory ${i}`, created_at: i * 1000,
       memory_type: "fact", score: 25 - i, tier: "extracted" as const,
     }));
     const mi = mockMemoryIndex({ searchExtracted: vi.fn(() => results) });
@@ -162,7 +162,7 @@ describe("MemorySearchController.handle — results", () => {
   it("bumps recall count for returned extracted memories", async () => {
     const mi = mockMemoryIndex({
       searchExtracted: vi.fn(() => [{
-        id: 42, content: "test", source_timestamp: 1000, score: 5.0, tier: "extracted" as const,
+        id: 42, content: "test", created_at: 1000, score: 5.0, tier: "extracted" as const,
       }]),
     });
     const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));

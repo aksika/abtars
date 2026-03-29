@@ -129,11 +129,10 @@ export type ExtractedMemory = {
   content_original: string;
   content_en: string;
   memory_type: "fact" | "decision" | "preference" | "event";
-  source_timestamp: number;
+  created_at: number;
   preserve_original: boolean;
   preserved_keyword?: string;
   emotion_score: number;
-  created_at: number;
   entities?: string[];
 };
 
@@ -150,7 +149,7 @@ export type MemorySearchResult = {
   content: string;
   content_original?: string;
   memory_type?: string;
-  source_timestamp: number;
+  created_at: number;
   source_message_ids?: string;
   tier: "extracted" | "daily" | "weekly" | "quarterly";
   score: number;
@@ -187,6 +186,43 @@ export type InstantStoreParams = {
 export type InstantStoreResult = {
   stored: boolean;
   memoriesCount: number;
+  error?: string;
+};
+
+/** Parameters for the memory edit tool. */
+export type EditMemoryParams = {
+  /** Lookup by memory ID (direct). */
+  memoryId?: number;
+  /** Lookup by platform message ID (finds linked memories). Requires chatId. */
+  messageId?: number;
+  chatId?: number;
+  /** Editable fields — only provided fields are updated. */
+  contentEn?: string;
+  contentOriginal?: string;
+  keyword?: string;
+  memoryType?: "fact" | "decision" | "preference" | "event";
+  emotionScore?: number;
+  confidence?: number;
+  trust?: number;
+  integrity?: number;
+  credibility?: number;
+  classification?: number;
+  /** Relevance: absolute number or string "+N"/"-N" for relative delta. */
+  relevanceScore?: number | string;
+  /** Caller for audit trail. */
+  caller?: string;
+  /** Declassify SECRET requires this. */
+  userOverride?: boolean;
+  /** Preview changes without committing. */
+  dryRun?: boolean;
+};
+
+/** Result of a memory edit operation. */
+export type EditMemoryResult = {
+  ok: boolean;
+  memoriesUpdated?: number;
+  ids?: number[];
+  fieldsUpdated?: string[];
   error?: string;
 };
 

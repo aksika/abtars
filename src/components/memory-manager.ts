@@ -24,6 +24,8 @@ import type {
   ForgetResult,
   InstantStoreParams,
   InstantStoreResult,
+  EditMemoryParams,
+  EditMemoryResult,
 } from "../types/index.js";
 import { clampEmotionScore } from "./emotion-utils.js";
 import { logError, logInfo, logWarn } from "./logger.js";
@@ -121,6 +123,26 @@ export class MemoryManager {
       ]) {
         try { this.db.exec(ddl); } catch { /* already exists */ }
       }
+
+      // Idempotent migration: edited_at + edited_by for memory edit tool
+      for (const ddl of [
+        "ALTER TABLE extracted_memories ADD COLUMN edited_at INTEGER",
+        "ALTER TABLE extracted_memories ADD COLUMN edited_by TEXT",
+      ]) {
+        try { this.db.exec(ddl); } catch { /* already exists */ }
+      }
+
+      // Idempotent migration: consolidate source_timestamp into created_at
+      // Copy source_timestamp values to created_at where they differ, then use created_at everywhere.
+      // source_timestamp column stays in schema (SQLite can't drop columns) but is no longer written/read.
+      try {
+        this.db.exec("UPDATE extracted_memories SET created_at = source_timestamp WHERE created_at != source_timestamp");
+      } catch { /* safe to ignore */ }
+
+      // Idempotent migration: add index on created_at (replaces source_timestamp index for queries)
+      try {
+        this.db.exec("CREATE INDEX IF NOT EXISTS idx_extracted_memories_chat_created ON extracted_memories(chat_id, created_at DESC)");
+      } catch { /* already exists */ }
 
       // Idempotent migration: add platform_message_id + emotion_score to messages
       try {
@@ -317,17 +339,8 @@ export class MemoryManager {
       ).run(score, chatId, platformMessageId);
       if (result.changes === 0) return false;
 
-      // Propagate to extracted_memories that reference this message
-      const msg = this.db.prepare(
-        "SELECT id FROM messages WHERE chat_id = ? AND platform_message_id = ?",
-      ).get(chatId, platformMessageId) as { id: number } | undefined;
-      if (msg) {
-        // source_message_ids is a JSON array of message IDs, e.g. "[1,2,3]"
-        this.db.prepare(
-          `UPDATE extracted_memories SET emotion_score = ?
-           WHERE source_message_ids LIKE '%' || ? || '%'`,
-        ).run(score, String(msg.id));
-      }
+      // Cascade to extracted_memories via editMemory
+      this.editMemory({ messageId: platformMessageId, chatId, emotionScore: score });
       return true;
     } catch (err) {
       logError(TAG, "Failed to update emotion score", err);
@@ -965,6 +978,136 @@ export class MemoryManager {
     }
 
   /**
+   * Edit an existing extracted memory. Unified mutation path for all field updates.
+   * Supports lookup by memory ID or platform message ID.
+   */
+  editMemory(params: EditMemoryParams): EditMemoryResult {
+    if (!this.db) return { ok: false, error: "memory disabled" };
+
+    try {
+      // Resolve target memory IDs
+      let targetIds: number[];
+      if (params.memoryId != null) {
+        targetIds = [params.memoryId];
+      } else if (params.messageId != null && params.chatId != null) {
+        const msg = this.db.prepare(
+          "SELECT id FROM messages WHERE chat_id = ? AND platform_message_id = ?",
+        ).get(params.chatId, params.messageId) as { id: number } | undefined;
+        if (!msg) return { ok: false, error: "message not found" };
+        const rows = this.db.prepare(
+          "SELECT id FROM extracted_memories WHERE source_message_ids LIKE '%' || ? || '%'",
+        ).all(String(msg.id)) as Array<{ id: number }>;
+        if (rows.length === 0) return { ok: false, error: "no memories linked to this message" };
+        targetIds = rows.map(r => r.id);
+      } else {
+        return { ok: false, error: "--memory-id or --message-id + --chat-id required" };
+      }
+
+      // Build SET clauses from provided fields
+      const sets: string[] = [];
+      const values: unknown[] = [];
+      const fieldsUpdated: string[] = [];
+
+      if (params.contentEn != null) { sets.push("content_en = ?"); values.push(params.contentEn.trim()); fieldsUpdated.push("content_en"); }
+      if (params.contentOriginal != null) { sets.push("content_original = ?"); values.push(params.contentOriginal.trim()); fieldsUpdated.push("content_original"); }
+      if (params.keyword !== undefined) { sets.push("preserved_keyword = ?"); values.push(params.keyword?.trim() || null); fieldsUpdated.push("keyword"); }
+      if (params.memoryType != null) {
+        const valid = new Set(["fact", "decision", "preference", "event"]);
+        if (!valid.has(params.memoryType)) return { ok: false, error: "invalid memory_type" };
+        sets.push("memory_type = ?"); values.push(params.memoryType); fieldsUpdated.push("memory_type");
+      }
+      if (params.emotionScore != null) { sets.push("emotion_score = ?"); values.push(clampEmotionScore(params.emotionScore)); fieldsUpdated.push("emotion_score"); }
+      if (params.confidence != null) { sets.push("confidence = ?"); values.push(params.confidence); fieldsUpdated.push("confidence"); }
+      if (params.trust != null) {
+        if (params.trust < 0 || params.trust > 3) return { ok: false, error: "trust must be 0-3" };
+        sets.push("trust = ?"); values.push(params.trust); fieldsUpdated.push("trust");
+      }
+      if (params.integrity != null) {
+        if (params.integrity < 0 || params.integrity > 3) return { ok: false, error: "integrity must be 0-3" };
+        sets.push("integrity = ?"); values.push(params.integrity); fieldsUpdated.push("integrity");
+      }
+      if (params.credibility != null) {
+        if (params.credibility < 1 || params.credibility > 6) return { ok: false, error: "credibility must be 1-6" };
+        sets.push("credibility = ?"); values.push(params.credibility); fieldsUpdated.push("credibility");
+      }
+      if (params.classification != null) {
+        if (params.classification < 0 || params.classification > 3) return { ok: false, error: "classification must be 0-3" };
+        fieldsUpdated.push("classification");
+      }
+
+      // Relevance: support relative (+N/-N) and absolute
+      if (params.relevanceScore != null) {
+        const raw = params.relevanceScore;
+        if (typeof raw === "string" && /^[+-]\d+$/.test(raw)) {
+          sets.push("relevance_score = relevance_score + ?"); values.push(parseInt(raw, 10));
+        } else {
+          sets.push("relevance_score = ?"); values.push(typeof raw === "string" ? parseInt(raw, 10) : raw);
+        }
+        fieldsUpdated.push("relevance_score");
+      }
+
+      if (sets.length === 0 && params.classification == null) return { ok: false, error: "no fields to update" };
+
+      // Dry run: return what would change
+      if (params.dryRun) {
+        return { ok: true, memoriesUpdated: targetIds.length, ids: targetIds, fieldsUpdated };
+      }
+
+      // Apply edits per target
+      const now = Date.now();
+      const editedBy = params.caller ?? null;
+      const contentChanged = params.contentEn != null;
+
+      for (const id of targetIds) {
+        // Classification guard: check per-memory
+        if (params.classification != null) {
+          const row = this.db.prepare("SELECT classification FROM extracted_memories WHERE id = ?").get(id) as { classification: number } | undefined;
+          if (!row) continue;
+          const oldLevel = row.classification;
+          const newLevel = params.classification;
+          // SECRET (3) can't be declassified without userOverride
+          if (oldLevel === 3 && newLevel < 3 && !params.userOverride) {
+            return { ok: false, error: "cannot declassify SECRET without --user-override" };
+          }
+          // CONFIDENTIAL (2) can only go to 1, not to 0
+          if (oldLevel === 2 && newLevel < oldLevel && newLevel !== 1) {
+            return { ok: false, error: "CONFIDENTIAL can only be declassified to RESTRICTED (1)" };
+          }
+        }
+
+        // Verify memory exists
+        const exists = this.db.prepare("SELECT id FROM extracted_memories WHERE id = ?").get(id);
+        if (!exists) continue;
+
+        // Build final SET with classification + audit fields
+        const finalSets = [...sets];
+        const finalValues = [...values];
+        if (params.classification != null) { finalSets.push("classification = ?"); finalValues.push(params.classification); }
+        finalSets.push("edited_at = ?", "edited_by = ?");
+        finalValues.push(now, editedBy);
+
+        // Null embedding if content changed
+        if (contentChanged) { finalSets.push("embedding = NULL"); }
+
+        finalValues.push(id);
+        this.db.prepare(`UPDATE extracted_memories SET ${finalSets.join(", ")} WHERE id = ?`).run(...finalValues);
+
+        // Re-embed if content changed
+        if (contentChanged && params.contentEn) {
+          this.embedNewMemory(params.contentEn.trim());
+        }
+      }
+
+      logInfo(TAG, `editMemory: updated ${targetIds.length} memories [${fieldsUpdated.join(",")}] caller=${editedBy}`);
+      return { ok: true, memoriesUpdated: targetIds.length, ids: targetIds, fieldsUpdated };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logError(TAG, "editMemory failed", err);
+      return { ok: false, error: message };
+    }
+  }
+
+  /**
    * Immediately persist a memory from the agent's instant_store tool.
    * Validates inputs, inserts into extracted_memories, and advances the watermark.
    */
@@ -1039,10 +1182,7 @@ export class MemoryManager {
 
   /** Adjust relevance_score on an existing extracted memory (used by sleep feedback pass). */
   adjustRelevance(id: number, delta: number): void {
-    if (!this.db) return;
-    this.db.prepare(
-      "UPDATE extracted_memories SET relevance_score = relevance_score + ? WHERE id = ?",
-    ).run(delta, id);
+    this.editMemory({ memoryId: id, relevanceScore: `${delta >= 0 ? "+" : ""}${delta}` });
   }
 
   /**
@@ -1050,18 +1190,7 @@ export class MemoryManager {
    * Restricted (3) is permanent — agent cannot lower it without userOverride.
    */
   reclassifyMemory(id: number, level: number, userOverride = false): { ok: boolean; error?: string } {
-    if (!this.db) return { ok: false, error: "memory disabled" };
-    if (level < 0 || level > 3) return { ok: false, error: "classification must be 0-3" };
-
-    const row = this.db.prepare("SELECT classification FROM extracted_memories WHERE id = ?").get(id) as { classification: number } | undefined;
-    if (!row) return { ok: false, error: "memory not found" };
-
-    if (row.classification === 3 && level < 3 && !userOverride) {
-      return { ok: false, error: "cannot declassify restricted memory without --user-override" };
-    }
-
-    this.db.prepare("UPDATE extracted_memories SET classification = ? WHERE id = ?").run(level, id);
-    return { ok: true };
+    return this.editMemory({ memoryId: id, classification: level, userOverride });
   }
 
   /** Merge two extracted memories: keep newer, combine Darwinism scores, delete older. */
