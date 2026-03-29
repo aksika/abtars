@@ -11,8 +11,9 @@
 
 ## Overview
 
-SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), sleep-subagent-driven extraction, agent-initiated instant memory storage with emotion scoring, unified memory editing (`agentbridge-edit`), Memory Darwinism, NATO Admiralty Code security model, daily retrospective with emotional attribution, and immediate emotion propagation.
-**Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext` (see below).
+SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), sleep-subagent-driven extraction, agent-initiated instant memory storage, unified memory editing (`agentbridge-edit`), Memory Darwinism, NATO Admiralty Code security model (CIA + AAA), emotion scoring with immediate propagation, daily retrospective with emotional attribution, and post-sleep wake-up prompt.
+
+**Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext`.
 
 ---
 
@@ -22,7 +23,7 @@ SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (
 |----|------|--------|------------|---------|------------|
 | C0 | LLM Context Window | In-memory | Bridge (raw pass-through) | LLM | Ephemeral |
 | C1 | Consolidated Summaries | Markdown files | Sleep subagent | Consolidation search, sleep subagent | Persistent — promoted up tiers |
-| C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store | agentbridge-recall | messages: hot buffer (flushed after sleep). extracted_memories: persistent |
+| C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store, agentbridge-edit | agentbridge-recall | messages: hot buffer (flushed after sleep). extracted_memories: persistent |
 | C4 | Markdown Knowledge Files | Flat files | Agent, retrospective | Sleep subagent | Persistent |
 | C5 | Embeddings | `memory.db` (`extracted_memories.embedding` BLOB) | ollama nomic-embed-text (on insert + batch) | recall-engine Se sidecar | Persistent — gated by `EMBEDDING_ENABLED` |
 | C6 | Retrospectives | Markdown files | Sleep subagent | Sleep subagent, agent (via recall) | Persistent |
@@ -57,6 +58,140 @@ User Message
 
 ---
 
+## extracted_memories Schema
+
+The core knowledge table. Each row is a permanent fact, decision, preference, or event.
+
+### Content fields
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK | Auto-increment |
+| `chat_id` | INTEGER | Source chat |
+| `content_original` | TEXT | Memory in user's original language |
+| `content_en` | TEXT | Memory translated to English |
+| `memory_type` | TEXT | `fact`, `decision`, `preference`, `event` |
+| `preserve_original` | INTEGER | 1 = instant-stored (preserve original wording) |
+| `preserved_keyword` | TEXT | Original-language keyword for search |
+| `source_message_ids` | TEXT | JSON array of message IDs this memory was extracted from |
+
+### Timestamps
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `created_at` | INTEGER | When the memory was created (epoch ms). Canonical timestamp. |
+| `source_timestamp` | INTEGER | Legacy column (NOT NULL). Same value as `created_at`. Not read by code. |
+| `edited_at` | INTEGER | Last edit timestamp (NULL = never edited). Internal only, not in recall output. |
+| `edited_by` | TEXT | Last editor ("kp" or "dreamy"). Internal only, not in recall output. |
+
+### CIA-AAA Security Attributes
+
+Based on the NATO Admiralty Code. See `docs/TODO/cia-aaa-memory-model.md` for full spec.
+
+| Column | Type | Default | Scale | Description |
+|--------|------|---------|-------|-------------|
+| `classification` | INTEGER | 1 | 0-3 | **Confidentiality.** NATO classification level. |
+| `trust` | INTEGER | 0 | 0-3 | **Authentication.** Source reliability (Admiralty A-F adapted). |
+| `integrity` | INTEGER | 2 | 0-3 | **Provenance.** How far from ground truth. |
+| `credibility` | INTEGER | 6 | 1-6 | **Information credibility.** Admiralty 1-6 scale. |
+
+#### Classification (Confidentiality — who can see this?)
+
+| Level | Label | Meaning |
+|-------|-------|---------|
+| 0 | UNCLASSIFIED | Safe anywhere — general facts, preferences |
+| 1 | RESTRICTED | Default — operational memories |
+| 2 | CONFIDENTIAL | Personal/sensitive — health, finances, relationships |
+| 3 | SECRET | Tokens, credentials — NEVER disclosed, permanent |
+
+Enforced at recall: `classification <= maxClassification`. SECRET (3) always excluded (hard cap at 2). Context-based: DM = up to CONFIDENTIAL, group/A2A = UNCLASSIFIED only.
+
+#### Trust (Authentication — who created this?)
+
+| Level | Label | Meaning |
+|-------|-------|---------|
+| 3 | owner | aksika via Telegram DM — `ALLOWED_USER_IDS` whitelist |
+| 2 | self | KP's own extraction/observation |
+| 1 | peer | A2A agents — known but autonomous |
+| 0 | untrusted | Open web — no authentication |
+
+Action gating: trust=0 never triggers autonomous actions. trust=1 non-destructive only. trust≥2 act freely. trust=3 full authority.
+
+#### Integrity (Provenance — how far from source?)
+
+| Level | Label | Meaning |
+|-------|-------|---------|
+| 0 | verbatim | User's exact words, unmodified |
+| 1 | translated | KP translated from original language |
+| 2 | extracted | KP summarized from conversation |
+| 3 | compacted | KP merged multiple memories |
+
+One-way chain: can only move toward compacted (higher number). Exception: translation fix can set to 1.
+
+#### Credibility (Information accuracy)
+
+| Level | Label | Meaning |
+|-------|-------|---------|
+| 1 | Confirmed | Corroborated by multiple sources |
+| 2 | Probably true | Logical, consistent, not confirmed |
+| 3 | Possibly true | Reasonable, single source |
+| 4 | Doubtful | Possible but no corroboration |
+| 5 | Improbable | Contradicted by other memories |
+| 6 | Unknown | No basis to evaluate (default) |
+
+Conflict resolution: higher trust wins → higher credibility wins → more recent wins → ask aksika.
+
+### Emotion Score
+
+| Column | Type | Default | Scale | Description |
+|--------|------|---------|-------|-------------|
+| `emotion_score` | INTEGER | 0 | -5 to +5 | Emotional weight. Negative = frustration/anger, positive = satisfaction/joy. |
+
+#### How emotions enter the system
+
+| Source | Path | When |
+|--------|------|------|
+| Emoji reactions | `updateEmotionByPlatformId()` → `editMemory()` | Runtime — user reacts on Telegram/Discord |
+| Instant store | `agentbridge-store --emotion-score N` | Runtime — agent stores emotionally significant memory |
+| Extraction | LLM assigns emotion during `MemoryExtractor` | Heartbeat/sleep extraction |
+| Verbal harvest | `agentbridge-edit --memory-id N --emotion-score N --caller dreamy` | Sleep §6 — Dreamy scans for verbal emotional reactions |
+
+Emoji reactions propagate immediately: message table updated → cascade to linked extracted_memories via `editMemory()`. Verbal emotions (e.g. "fasza!", "goddamn it!") are harvested during sleep and applied to the nearest relevant memory.
+
+### Memory Darwinism
+
+Survival-of-the-fittest for memories. Frequently recalled memories get stronger; unused ones fade and get pruned.
+
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `recall_count` | INTEGER | 0 | Incremented on every recall hit |
+| `last_recalled_at` | INTEGER | NULL | Timestamp of last recall |
+| `relevance_score` | INTEGER | 0 | Boosted/demoted by feedback, affects recall ranking |
+| `confidence` | INTEGER | 3 | 1-5, adjusted based on evidence |
+
+**Recall scoring boost:** `base_score × (1 + recall_count × 0.1) × (relevance > 0 ? 1.2 : 1.0)`.
+
+**Sleep §2 feedback pass:** If a recalled memory was confirmed by user → boost (+10 relevance). If corrected/rejected → demote (-10 relevance).
+
+**Sleep §7 fitness review:** Zero recall after 60+ days → candidate for deletion. Low confidence + zero recall → first to prune. High recall + negative relevance → candidate for rewording.
+
+### Embedding
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `embedding` | BLOB | 768-dim float32 vector (nomic-embed-text via ollama). NULL until embedded. |
+
+Nulled automatically on content edit (re-embedded on next batch run).
+
+### FTS5 Indexes
+
+| Table | Indexed column | Tokenizer | Triggers |
+|-------|---------------|-----------|----------|
+| `extracted_memories_fts` | `content_en` | porter unicode61 | INSERT, DELETE, UPDATE |
+| `extracted_memories_original_fts` | `content_original` | unicode61 | INSERT, DELETE, UPDATE (preserve_original=1 only) |
+
+---
+
 ## System Layer Architecture
 
 ```
@@ -65,16 +200,15 @@ User Message
 |  agentbridge-sleep, SleepTrigger, SleepStateGatherer,               |
 |  sleep-prompt-loader, sleeping_prompt.md template                    |
 +---------------------------------------------------------------------+
-+---------------------------------------------------------------------+
 |  Layer 5: Agent-Initiated Recall (single path)                       |
 |  agentbridge-recall ONLY (7-stage cascade, extracted-first)          |
 +---------------------------------------------------------------------+
 |  Layer 4: Background Extraction & Enrichment                        |
 |  HeartbeatSystem, agentbridge-store (Instant Store),                 |
 |  agentbridge-edit (Unified Memory Mutation),                         |
-|  MemoryExtractor (class exists, sleep-driven)                        |
+|  MemoryExtractor (sleep-driven)                                      |
 +---------------------------------------------------------------------+
-|  Layer 3: Consolidation (subagent-driven, unchanged)                |
+|  Layer 3: Consolidation (subagent-driven)                           |
 |  working → daily → weekly → quarterly                                |
 +---------------------------------------------------------------------+
 |  Layer 2: Indexing & Search Primitives                              |
@@ -93,7 +227,6 @@ User Message
 Source: `src/components/recall-engine.ts`
 CLI wrapper: `src/cli/agentbridge-recall.ts`
 Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine)
-Called by: KP via `execute_bash: agentbridge-recall --translated "kw1,kw2" --chat-id <id> [--original <kw>] [--stages S1,S3]`
 
 ```
 Se: async embedding sidecar ─────────────┐  (fires at S1 start, ollama nomic-embed-text)
@@ -113,35 +246,29 @@ S7: Keyword-free fallback (exclusive, only if zero results)
 
 Post-processing: dedup by content hash → temporal decay → MMR re-ranking (λ=0.7).
 
-Se sidecar: gated by `EMBEDDING_ENABLED=true`. When disabled, Se is absent. Fires async at S1 start (~20-50ms via ollama), result consumed after S3. Zero added latency.
+Se sidecar: gated by `EMBEDDING_ENABLED=true`. Fires async at S1 start (~20-50ms via ollama), result consumed after S3. Zero added latency.
 
-Return type includes per-stage hits, timing (ms), and short-circuit info. Dashboard uses this for investigation.
-
-**Hit-rate logging:** Per-stage hit counts emitted to stderr. Format: `[recall] query="..." S1=N S2=N S3=N Se=N S4=N S5=N S6=N short_circuit=S3|none total=N`.
+**Hit-rate logging:** Per-stage hit counts emitted to stderr.
 
 ### Embedding Lifecycle (C5)
-
-Embeddings convert text into a 768-dimensional vector where similar meanings are close together in vector space. "puppy" and "kiskutya" have similar vectors because they mean the same thing, even though the words are completely different. This enables semantic search — finding memories by meaning, not just keyword matching.
 
 Model: `nomic-embed-text` via ollama (768 dimensions, CPU-only, ~20-50ms/query, fully local). Gated by `EMBEDDING_ENABLED=true`.
 
 | Event | What happens |
 |-------|-------------|
 | `agentbridge-store` (instant) | `embedNewMemory()` — fire-and-forget after INSERT |
+| `agentbridge-edit` (content change) | Embedding nulled → re-embedded on next batch |
 | Dreamy extraction (sleep) | `embedBatch()` — embeds all new memories after INSERT |
 | `agentbridge-embed` CLI | One-time batch embed of all memories with NULL embedding |
 | Recall (Se sidecar) | `embedText(query)` fired async at S1, cosine similarity after S3 |
-| `doctor.sh --fix` | Detects and batch-embeds memories with NULL embedding |
 
-Storage: `embedding` BLOB column on `extracted_memories` (768 × 4 bytes = 3KB per memory). Threshold: 0.5 cosine similarity (configurable via `EMBEDDING_SIMILARITY_THRESHOLD`).
+Storage: `embedding` BLOB column on `extracted_memories` (768 × 4 bytes = 3KB per memory). Threshold: 0.5 cosine similarity.
 
 ### Entity Linking
 
 Tables: `entities` (name, type, summary) + `memory_entities` (memory_id, entity_id junction).
 
-Entities are tagged during extraction — the LLM identifies named entities (people, agents, projects, services, places) per memory. Stored via upsert on insert.
-
-Recall supports `--entity "Name"` filter — pre-filters extracted memory results to only those linked to the entity. Works with or without keyword search.
+Entities are tagged during extraction — the LLM identifies named entities per memory. Recall supports `--entity "Name"` filter.
 
 ---
 
@@ -161,15 +288,14 @@ Method: `MemoryManager.editMemory()` — single unified mutation path for all ex
 |------|--------|-------------|
 | Attribute edits (free) | trust, credibility, classification, integrity, confidence, emotion_score, relevance_score, keyword, memory_type | Whenever evidence supports it |
 | Content edits (restricted) | content_en, content_original | Only when user explicitly stresses immediate correction |
+| Translation fixes (free) | content_en + integrity=1 | When content_en is clearly a bad translation but the fact is correct |
 
-Default for wrong content: store corrected version as new memory, let Darwinism fade the old one.
-
-### Attribute editing rules (CIA-AAA model)
+### Attribute editing rules (CIA-AAA)
 
 - **classification**: escalate freely. Declassify only 2→1. SECRET (3) locked without `--user-override`.
 - **trust**: set 0-2 freely. Set 3 only when user explicitly stated the fact.
-- **credibility**: 1 (confirmed) needs corroboration from user + independent source.
-- **integrity**: one-way toward compacted (higher number). Exception: translation fix → set to 1 (translated).
+- **credibility**: improve/degrade based on evidence. 1 (confirmed) needs corroboration.
+- **integrity**: one-way toward compacted. Exception: translation fix → 1 (translated).
 - **relevance_score**: supports relative delta (`+10`, `-10`) and absolute values.
 
 ### Audit fields (set automatically, not editable, not in recall output)
@@ -179,171 +305,96 @@ Default for wrong content: store corrected version as new memory, let Darwinism 
 
 ### Safety
 
-- Prompt injection scan on content edits (same as instantStore)
+- Prompt injection scan on content edits
 - `--dry-run` previews changes without committing
-- Content change → embedding nulled automatically (re-embed on next batch)
-
-### Callers
-
-- `kp` — direct user conversation
-- `dreamy` — sleep maintenance mode
-
-No external agents have access to KP's memory system.
+- Content change → embedding nulled automatically
 
 ### Internal routing
 
-`adjustRelevance()`, `reclassifyMemory()`, and `updateEmotionByPlatformId()` delegate to `editMemory()` internally. Sleep prompt §6 (emotion harvest) and §7 (translation fix, fitness rewording) use `agentbridge-edit` CLI instead of raw SQL.
-
-### Timestamp consolidation
-
-`source_timestamp` consolidated into `created_at` — single creation timestamp. The `source_timestamp` column remains in the schema (SQLite can't drop columns) but is no longer read by application code. Migration copies values on first startup.
+`adjustRelevance()`, `reclassifyMemory()`, `updateEmotionByPlatformId()` delegate to `editMemory()` internally. Sleep §6 (emotion harvest) and §7 (translation fix) use `agentbridge-edit` CLI.
 
 ---
 
 ## Session Context Window
 
-What the agent sees when a new session starts (ACP transport, `professor` agent):
+What the agent sees when a new session starts:
 
 ### Layer 1: Agent system prompt
 - `professor.json` → `"You are Kiro Professor. Follow your SOUL.md identity."`
-- All built-in kiro-cli tools available (`"tools": ["*"]`, `"allowedTools": ["@builtin"]`)
+- All built-in kiro-cli tools available
 
 ### Layer 2: Steering resources (`~/.agentbridge/.kiro/steering/**/*.md`)
 
 | Type | Files | Loading |
 |------|-------|---------|
-| `alwaysApply: true` | `TOOLS.md` (825 bytes) | Always in system prompt |
-| No skill frontmatter | `SOUL.md` (5.4KB), `session-start.md` (577 bytes) | Loaded as resources — always available |
-| Skill files (`name:` frontmatter) | 15 skills (~21KB total) | On-demand — agent sees skill list, invokes when needed |
+| `alwaysApply: true` | `TOOLS.md` | Always in system prompt |
+| No skill frontmatter | `SOUL.md`, `session-start.md` | Loaded as resources — always available |
+| Skill files (`name:` frontmatter) | ~15 skills | On-demand — agent sees skill list, invokes when needed |
 
 ### Layer 3: Session-start context (first message only)
 
 Prepended to the user's first message by `buildSessionStartContext()`:
 
-```
-[LAST SESSION SUMMARY — ended <timestamp>]
-<last 8 messages OR daily summary>
-[SESSION START — <timestamp>]
-
-<user's actual message>
-```
-
-~2500 chars max for recent messages path. Full daily (~3000 chars) for overnight path.
+| Condition | Source | What's injected |
+|-----------|--------|-----------------|
+| Messages newer than latest daily | `messages` table (last 8) | `[HH:MM] role: content` lines, 2500 char soft cap |
+| No newer messages (overnight) | Latest `daily_*.md` file | Full daily summary (~3000 chars) |
+| No daily, no messages | — | Nothing injected |
 
 ### Layer 4: User message
 
-The actual message from Telegram/Discord, prefixed with platform tag:
-- Telegram: `[Telegram] <message>`
-- Discord: `[Discord] [username] in #channel: <message>` (channel = DM for direct messages)
+Prefixed with platform tag: `[Telegram] <message>` or `[Discord] [username] in #channel: <message>`.
 
 ---
 
 ## Multi-Platform Architecture
 
-The agent operates across Telegram and Discord simultaneously, modeled on how a human handles multiple chat apps:
-
 ### Isolation: Separate context windows (C0)
 
-Each platform+channel gets its own ACP session (keyed `telegram:<chatId>` or `discord:<channelId>`). Context windows never mix — a reply on Discord cannot be confused with a Telegram conversation in real-time.
+Each platform+channel gets its own ACP session (keyed `telegram:<chatId>` or `discord:<channelId>`). Context windows never mix.
 
 ### Shared: One memory (C2, C1, C4, C6)
 
-All platforms write to the same SQLite database and the same consolidation files. The agent has one brain — facts learned on Telegram are recallable from Discord and vice versa. Messages are tagged with `[Telegram]`/`[Discord]` prefixes in the `content` column for attribution.
-
-### Session-start context (Layer 3)
-
-`buildSessionStartContext()` reads ALL recent messages regardless of platform (no `chatId` filter on the `messages` query). This is intentional — when starting a new Discord session, the agent should know what happened on Telegram earlier that day, just as a human would.
-
-### Sleep consolidation (Dreamy)
-
-Daily summaries (`daily_YYYY-MM-DD.md`) cover all platforms in one file. The sleep prompt instructs the subagent to note platform transitions when conversations carry different threads (e.g. "Morning on Telegram: …, Afternoon on Discord: …"). Extracted memories and retrospectives are platform-agnostic — one brain.
+All platforms write to the same SQLite database. Facts learned on Telegram are recallable from Discord and vice versa. Messages tagged with `[Telegram]`/`[Discord]` prefixes.
 
 ### Core files
 
-`~/.agentbridge/memory/core/user_profile.md` and `agent_notes.md` are injected into every session on every platform. Doctor warns if either exceeds 15 non-empty lines (limit: 10).
+`~/.agentbridge/memory/core/user_profile.md` and `agent_notes.md` are injected into every session on every platform.
 
 ---
 
-## Recall Sovereignty (REQ-1 through REQ-5)
-
-Memory recall is agent-driven only. The bridge never auto-injects recalled memories into prompts. The agent decides when to call `agentbridge-recall` based on conversation context.
-
-### Session-Start Context Injection (REQ-3, REQ-4)
-
-On the first message after startup, `/new`, `/reset`, or `/restart`, the bridge prepends a short context recap to the prompt. This gives the agent enough to continue naturally without blowing up the context window.
-
-**Implementation:** `buildSessionStartContext()` in `src/components/session-context.ts`, called via shared `preparePrompt()` helper in `main.ts` (used by both Telegram and Discord handlers).
-
-**Tracking:** `pendingSessionStart: Set<string>` — added on session reset events. `seenSessions: Set<string>` — tracks sessions that have sent at least one message. First-ever message from any session after bridge restart is treated as session start (catches the startup case, not just `/new`/`/reset`).
-
-**Two paths:**
-
-| Condition | Source | What's injected |
-|-----------|--------|-----------------|
-| Messages newer than latest daily | `messages` table (last 8, since daily timestamp) | `[HH:MM] role: content` lines, 2500 char soft cap |
-| No newer messages (overnight) | Latest `daily_*.md` file | Full daily summary (~3000 chars, controlled by sleep prompt) |
-| No daily exists at all | `messages` table (last 8) | `[HH:MM] role: content` lines, 2500 char soft cap |
-| No daily, no messages | — | Nothing injected (null) |
-
-**Recent messages cap:** 8 messages, 2500 char soft limit. Drops oldest messages first — newest message is never truncated. Never cuts mid-message.
-
-**Output format (REQ-4 temporal markers):**
-```
-[LAST SESSION SUMMARY — ended 2026-03-22T08:48:41.000Z]
-<body: daily summary or recent messages>
-[SESSION START — 2026-03-22T20:50:00.000Z]
-```
-
-The time gap between "ended" and "SESSION START" tells the agent how stale the context is.
-
-**Deeper recall:** If the user asks for more detail ("What did we talk about yesterday?"), the agent can pull the full daily summary via `agentbridge-recall` stage 4 (consolidation file search) or stages 6-7 (keyword-free fallback).
-
-**Removed (2026-03-22):**
-- `writeStartupGreeting()` from `agentbridge-sleep.ts` — sleep no longer generates greetings
-- `consumeStartupGreeting()` from `main.ts` — no more file-based greeting
-- `[SYSTEM]` inject hack via `telegramPoller.injectUpdate()` — replaced by proper prompt prepend
-
-**Steering:** `session-start.md` instructs the agent to greet the user by name (from `user_profile.md`) and reference the session context naturally.
-
-**Bug fix (2026-03-22):** Stage 3 was broken since inception — `sanitizeFtsQuery` double-processed the OR query, turning `OR` operators into literal `"OR"*` search terms. Fixed by passing `mode: "or"` to `index.search()`.
-
-**Removed stages:** Strict FTS5 AND (merged into relaxed OR), substring LIKE ×2 (redundant), chat_backup LIKE (table is debug-only).
-
----
-
-## Sleep Cycle ( 10 steps)
+## Sleep Cycle (10 steps)
 
 ### Trigger (`SleepTrigger` in `sleep-trigger.ts`)
 
-Registered as `sleep-trigger` task in the unified HeartbeatSystem (5-min interval).
+Registered as `sleep-trigger` task in HeartbeatSystem (5-min interval).
 
 **Startup:** runs if no audit file exists for today AND last audit is >25h old (or ≥8am).
 
-**Cron (heartbeat tick):** runs if ≥8am, 10min idle (no messages), and no audit today.
+**Cron (heartbeat tick):** runs if ≥8am, 10min idle, and no audit today.
 
-**Retry on failure:** up to 3 attempts per 24h cycle:
-- Attempt 1: normal trigger (startup or cron)
-- Attempt 2: immediate retry on next heartbeat tick after failure
-- Attempt 3: only after 1h cooldown from last failure
-
-On success or 3 failures: stops until next day. Writes a `.lock` file before spawning to prevent duplicate spawns across restarts.
+**Retry on failure:** up to 3 attempts per 24h cycle. Writes `.lock` file to prevent duplicate spawns.
 
 ### Steps
 
 | Step | What | Behavior |
 |------|------|----------|
 | §1 | Retrospective | Reads full messages table. What went well/wrong, emotional attribution, lessons. Writes retro file + updates agent_notes |
-| §2 | Feedback Pass | Review user reactions, corrections |
+| §2 | Feedback Pass | Review user reactions/corrections. Boost/demote recalled memories via `agentbridge-edit`. |
 | §3 | Reminder & Todo Extraction | Extract actionable items |
 | §4 | Garbage Collection | 7-step GC: purge expired, immediate deletes, repeated probes, noise marking, verify-extract, emotion harvest (via `agentbridge-edit`), flush old messages |
 | §4+ | Database Maintenance | WAL checkpoint, FTS5 rebuild if corrupt, batch-embed NULL embeddings |
 | §5 | Cron Verification | Check cron jobs are healthy |
 | §6 | Topic Reorg | Reorganize topic files |
-| §7 | Fitness Review | Darwinism review, core knowledge maintenance, translation quality check via `agentbridge-edit` (detect and fix untranslated content_en) |
+| §7 | Fitness Review | Darwinism review, core knowledge maintenance, translation quality check via `agentbridge-edit` |
 | §8 | Memory Merge | Find and merge near-duplicate memories |
 | §9 | Consolidation | working→daily→weekly→quarterly summaries |
 | §9.5 | Media Cleanup | FIFO 100MB cleanup of received media |
-| §10 | Report | Audit summary (warns if < 50 lines — possible truncation) |
+| §10 | Report | Audit summary |
+
+### Post-Sleep Wake-Up
+
+After successful sleep (both startup and cron-triggered), the bridge injects a wake-up prompt to KP via Telegram: "You just woke up.. how did you sleep buddy?" — KP responds naturally, referencing the sleep audit and retro.
 
 ---
 
@@ -368,81 +419,56 @@ recordMessage() ──► messages table (raw content, emojis preserved)
     ▼
 [Sleep cycle]
     │
-    ├── Step 1: Retrospective reads full messages (raw + emotion_score)
-    ├── Steps 2-5: GC (some messages deleted/marked)
-    ├── Step 6: Extraction → facts move to extracted_memories
-    ├── Step 7: Verbal emotion harvest → extracted_memories.emotion_score
-    ├── Step 8: Flush messages older than 24h
+    ├── §1: Retrospective reads full messages (raw + emotion_score)
+    ├── §2: Feedback pass — boost/demote recalled memories
+    ├── §4: GC — noise marking, emotion harvest, flush >24h messages
+    ├── §4+: Verify extractions → facts move to extracted_memories
+    ├── §7: Fitness — prune weak memories, fix translations
     │
     ▼
 [After sleep: messages table is compact (today only)]
-[extracted_memories has all permanent knowledge]
+[extracted_memories has all permanent knowledge with CIA-AAA attributes]
 [retrospectives/ has daily self-reflection]
 [daily/weekly/quarterly/ has consolidated summaries]
+[Wake-up prompt sent to KP]
 ```
-
----
-
-## Writes Per Message
-
-| Store | Current | Wanted |
-|-------|---------|--------|
-| SQLite `messages` | ✅ (emoji-stripped content) | ✅ (raw content, emojis preserved) |
-| SQLite `chat_backup` | ✅ (always) | Debug-only |
-| JSONL transcript | ✅ (always) | ❌ Eliminated |
-| FTS5 `messages_fts` | Via trigger (stripped content) | Via trigger (strips at index level) |
-| **Total writes** | **3 stores + trigger** | **1 store + trigger** |
 
 ---
 
 ## Component Inventory
 
-### Active Components
-
-| Component | File | Change |
-|-----------|------|--------|
-| MemoryManager | `memory-manager.ts` | Simplified: no JSONL, no drift check, cascadeDelete DB-only |
-| MemoryIndex | `memory-index.ts` | FTS5 trigger change: strip emojis at index, not storage |
-| agentbridge-recall | `cli/agentbridge-recall.ts` | 7-stage cascade, extracted-first, keyword-free fallback, short-circuit |
-| agentbridge-store | `cli/agentbridge-store.ts` |
-| agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation: edit by `--memory-id` or `--message-id`, attribute + content edits, classification guards, dry-run, prompt injection scan. Routes through `editMemory()`. `adjustRelevance`, `reclassifyMemory`, `updateEmotionByPlatformId` delegate to it. |
-| agentbridge-sleep | `cli/agentbridge-sleep.ts` | Updated template with retro + flush. Removed `writeStartupGreeting` |
-| SessionContext | `components/session-context.ts` | `buildSessionStartContext()` — session-start context injection |
-| SleepTrigger | `sleep-trigger.ts` |
-| SleepStateGatherer | `sleep-state-gatherer.ts` |
-| sleep-prompt-loader | `sleep-prompt-loader.ts` |
-| HeartbeatSystem | `heartbeat-system.ts` | Writes `.heartbeat` timestamp on each tick |
-| EmbeddingProvider | `embedding-provider.ts` |
-| VectorIndex | `vector-index.ts` |
-| PromptScanner | `prompt-scanner.ts` |
-| emotion-utils | `emotion-utils.ts` |
-| Reaction handler | `main.ts` | Immediate propagation to extracted_memories via `editMemory()`, `[REACT:emoji]` agent response support, skip reactions on synthetic messages (messageId 0) |
-
-### Deleted Components
-
-| Component | File | Reason |
-|-----------|------|--------|
-| TranscriptWriter | `transcript-writer.ts` | R1: JSONL eliminated |
-| TranscriptParser | `transcript-parser.ts` | R1: JSONL eliminated |
-| MemorySearchTool | `memory-search-tool.ts` | R2: single search path |
-| RecallFallbackPipeline | `recall-fallback-pipeline.ts` | R2: single search path |
-| IntentDetector | `intent-detector.ts` | R2: single search path |
-| ContextAssembler | `context-assembler.ts` | R5: not in active path |
-| ContextWindowMonitor | `context-window-monitor.ts` | R5: not in active path |
-| CompactionEngine | `compaction-engine.ts` | R5: replaced by sleep subagent |
-| DailyCompactionTask | `daily-compaction-task.ts` | R5: replaced by sleep subagent |
-| SleepCycleRunner | `sleep-cycle-runner.ts` | R5: replaced by sleep subagent |
-| SleepPromptBuilder | `sleep-prompt-builder.ts` | R5: replaced by template loader |
+| Component | File | Description |
+|-----------|------|-------------|
+| MemoryManager | `memory-manager.ts` | Top-level coordinator. Owns SQLite DB, FTS index, editMemory(), instantStore(), merge, cascadeDelete. |
+| MemoryIndex | `memory-index.ts` | FTS5 search + Darwinism recall counting. Emoji-stripped at index level. |
+| MemoryExtractor | `memory-extractor.ts` | LLM-driven extraction from conversations. Entity tagging. Sleep-driven. |
+| agentbridge-recall | `cli/agentbridge-recall.ts` | 7-stage cascade recall, extracted-first, keyword-free fallback, short-circuit. |
+| agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Prompt injection scan. Boost/demote/reclassify/merge/delete (legacy, delegating to editMemory). |
+| agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run, prompt injection scan. |
+| agentbridge-sleep | `cli/agentbridge-sleep.ts` | Sleep cycle orchestrator. Spawns kiro-cli with sleeping_prompt.md template. |
+| SessionContext | `session-context.ts` | `buildSessionStartContext()` — session-start context injection. |
+| SleepTrigger | `sleep-trigger.ts` | Heartbeat task. Startup + cron trigger with retry logic. |
+| SleepStateGatherer | `sleep-state-gatherer.ts` | Gathers DB stats, FTS5 health, disk usage for sleep prompt. |
+| HeartbeatSystem | `heartbeat-system.ts` | 5-min tick. Runs sleep-trigger, cron, self-healer, reminder-injector. |
+| EmbeddingProvider | `embedding-provider.ts` | ollama nomic-embed-text wrapper. |
+| VectorIndex | `vector-index.ts` | Cosine similarity search over embedded memories. |
+| PromptScanner | `prompt-scanner.ts` | 22-pattern prompt injection detector. Used by store, edit, A2A. |
+| emotion-utils | `emotion-utils.ts` | `clampEmotionScore()` — clamps to -5..+5 range. |
 
 ---
 
 ## Configuration
 
-Removed env vars:
-
-New env vars:
-- `DEBUG_MODE` — enables chat_backup writes
-- `MEMORY_RECALL_SHORT_CIRCUIT` — toggle short-circuit in recall cascade
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMORY_ENABLED` | `true` | Enable/disable memory system |
+| `MEMORY_DIR` | `~/.agentbridge/memory` | Memory storage directory |
+| `EMBEDDING_ENABLED` | `false` | Enable ollama vector embeddings |
+| `EMBEDDING_SIMILARITY_THRESHOLD` | `0.5` | Cosine similarity threshold for Se sidecar |
+| `DEBUG_MODE` | `false` | Enables chat_backup writes |
+| `MEMORY_RECALL_SHORT_CIRCUIT` | `true` | Toggle short-circuit in recall cascade |
+| `MEMORY_DISK_BUDGET_MB` | `500` | Disk budget for memory directory |
+| `MEMORY_FORGET_THRESHOLD` | `0.8` | Relevance threshold for topic-based forgetting |
 
 ---
 
@@ -451,10 +477,8 @@ New env vars:
 ```
 ~/.agentbridge/memory/
   memory.db                    # SQLite: messages (hot buffer) + extracted_memories (permanent)
-  context-window-start.json    # Per-chat session boundary timestamps (for recall fallback)
+  context-window-start.json    # Per-chat session boundary timestamps
   .heartbeat                   # Epoch ms — written by HeartbeatSystem on each tick
-  cron.json                    # Internal cron entries (one-shot + recurring)
-  pending_reminders.json       # File-based IPC: cron → reminder injector
   garbage.json                 # GC tracking: message_id → marked timestamp
   todo.md                      # Agent-managed todo list
   working/
@@ -468,10 +492,10 @@ New env vars:
   retrospectives/
     retro_YYYYMMDD.md          # Daily self-reflection with emotional attribution
   core/
-    user_profile.md            # Who the user is
+    user_profile.md            # Who the user is (injected every session)
     agent_notes.md             # Lessons learned (updated by retrospective)
   sleep/
-    sleep_YYYYMMDD_HHmmss.md   # Sleep cycle audit logs
+    sleep_YYYYMMDD_HHmm.md    # Sleep cycle audit logs
     sleep_YYYYMMDD.lock        # Sleep spawn lock (prevents duplicates)
 ```
 
@@ -480,9 +504,3 @@ New env vars:
 ## Test Coverage
 
 729 tests across 73 files.
-
----
-
-### Conclusion
-
-The refactor eliminated JSONL dual-writes, simplified search to a single 7-stage extracted-first cascade (with keyword-free fallback), added daily retrospective capability, restructured the sleep cycle, removed dead code (-3326 lines), added immediate emotion propagation, and implemented recall sovereignty with session-start context injection. SQLite is the single source of truth.
