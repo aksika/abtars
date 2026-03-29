@@ -212,7 +212,7 @@ Nulled automatically on content edit (re-embedded on next batch run).
 |  working → daily → weekly → quarterly                                |
 +---------------------------------------------------------------------+
 |  Layer 2: Indexing & Search Primitives                              |
-|  MemoryIndex (FTS5), VectorIndex, EmbeddingProvider                 |
+|  MemoryIndex (FTS5), ollama-embed (Se sidecar)                      |
 |  FTS5 triggers: INSERT, DELETE, UPDATE (content_en + content_original)|
 +---------------------------------------------------------------------+
 |  Layer 1: Storage & Persistence                                     |
@@ -549,18 +549,24 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 | MemoryManager | `memory-manager.ts` | Top-level coordinator. Owns SQLite DB, FTS index, editMemory(), instantStore(), merge, cascadeDelete. |
 | MemoryIndex | `memory-index.ts` | FTS5 search + Darwinism recall counting. Emoji-stripped at index level. |
 | MemoryExtractor | `memory-extractor.ts` | LLM-driven extraction from conversations. Entity tagging. Sleep-driven. |
-| agentbridge-recall | `cli/agentbridge-recall.ts` | 7-stage cascade recall, extracted-first, keyword-free fallback, short-circuit. |
-| agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Prompt injection scan. Boost/demote/reclassify/merge/delete (legacy, delegating to editMemory). |
-| agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run, prompt injection scan. |
-| agentbridge-sleep | `cli/agentbridge-sleep.ts` | Sleep cycle orchestrator. Spawns kiro-cli with sleeping_prompt.md template. |
+| memory-db | `memory-db.ts` | Schema creation, migrations, FTS5 triggers (INSERT, DELETE, UPDATE). |
+| memory-config | `memory-config.ts` | Env var loading + defaults for all memory settings. |
+| ollama-embed | `ollama-embed.ts` | Embedding via ollama API: embedText(), vectorSearch(), batch embed. Se sidecar for recall. |
+| recall-engine | `recall-engine.ts` | 7-stage cascade (S1-S7 + Se), extracted-first, short-circuit, MMR post-processing. |
+| consolidation-search | `consolidation-search.ts` | Search daily/weekly/quarterly .md consolidation files on disk. |
+| reflection-engine | `reflection-engine.ts` | Generates meta-summaries (reflections) from consolidation files via LLM. |
+| mmr | `mmr.ts` | Maximal Marginal Relevance re-ranking (λ=0.7) for recall post-processing. |
+| emotion-utils | `emotion-utils.ts` | `clampEmotionScore()` — clamps to -5..+5 range. |
+| sleep-queue | `sleep-queue.ts` | Queue messages during sleep, replay via platform adapters on wake. |
+| PromptScanner | `prompt-scanner.ts` | 22-pattern prompt injection detector. Used by store, edit, A2A. |
 | SessionContext | `session-context.ts` | `buildSessionStartContext()` — session-start context injection. |
 | SleepTrigger | `sleep-trigger.ts` | Heartbeat task. Startup + cron trigger with retry logic. |
 | SleepStateGatherer | `sleep-state-gatherer.ts` | Gathers DB stats, FTS5 health, disk usage for sleep prompt. |
-| HeartbeatSystem | `heartbeat-system.ts` | 5-min tick. Runs sleep-trigger, cron, self-healer, reminder-injector. |
-| EmbeddingProvider | `embedding-provider.ts` | ollama nomic-embed-text wrapper. |
-| VectorIndex | `vector-index.ts` | Cosine similarity search over embedded memories. |
-| PromptScanner | `prompt-scanner.ts` | 22-pattern prompt injection detector. Used by store, edit, A2A. |
-| emotion-utils | `emotion-utils.ts` | `clampEmotionScore()` — clamps to -5..+5 range. |
+| agentbridge-recall | `cli/agentbridge-recall.ts` | CLI wrapper for recall-engine. |
+| agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete (legacy, delegating to editMemory). |
+| agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run. |
+| agentbridge-sleep | `cli/agentbridge-sleep.ts` | Sleep cycle orchestrator. Multi-turn conversation with Dreamy. |
+| agentbridge-embed | `cli/agentbridge-embed.ts` | Batch embed all memories with NULL embedding via ollama. |
 
 ---
 
@@ -570,7 +576,9 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 |----------|---------|-------------|
 | `MEMORY_ENABLED` | `true` | Enable/disable memory system |
 | `MEMORY_DIR` | `~/.agentbridge/memory` | Memory storage directory |
-| `EMBEDDING_ENABLED` | `false` | Enable ollama vector embeddings |
+| `EMBEDDING_ENABLED` | `true` | Enable ollama vector embeddings (Se sidecar) |
+| `EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model |
+| `EMBEDDING_URL` | `http://localhost:11434` | Ollama API endpoint |
 | `EMBEDDING_SIMILARITY_THRESHOLD` | `0.5` | Cosine similarity threshold for Se sidecar |
 | `DEBUG_MODE` | `false` | Enables chat_backup writes |
 | `MEMORY_RECALL_SHORT_CIRCUIT` | `true` | Toggle short-circuit in recall cascade |
@@ -610,4 +618,4 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 
 ## Test Coverage
 
-729 tests across 73 files.
+713 tests across 70 files.
