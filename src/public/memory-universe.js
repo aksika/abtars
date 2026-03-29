@@ -20,7 +20,7 @@
     overlay.id = 'memory-universe-overlay';
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:10000;background:#000;';
     overlay.innerHTML = '<div id="mu-loading" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#0ff;font-family:monospace;font-size:18px;">Loading Memory Universe...</div>' +
-      '<div id="mu-info" style="display:none;position:absolute;right:0;top:0;width:340px;height:100%;background:rgba(0,0,0,0.85);border-left:1px solid #0ff3;padding:20px;overflow-y:auto;font-family:monospace;color:#e0e0e0;font-size:15px;"></div>' +
+      '<div id="mu-info" style="display:none;position:absolute;right:0;top:0;width:340px;height:100%;background:rgba(0,0,0,0.85);border-left:1px solid #0ff3;padding:20px;overflow-y:auto;font-family:monospace;color:#e0e0e0;font-size:13px;"></div>' +
       '<div id="mu-tooltip" style="display:none;position:absolute;pointer-events:none;background:rgba(0,10,20,0.9);border:1px solid #0ff5;padding:8px 12px;border-radius:4px;color:#e0e0e0;font-family:monospace;font-size:12px;max-width:300px;"></div>' +
       '<button id="mu-close" style="position:absolute;top:16px;left:16px;z-index:10001;background:none;border:none;color:#0ff6;font-size:16px;cursor:pointer;padding:6px 10px;font-family:monospace;">← back</button>' +
       '<div id="mu-stats" style="position:absolute;bottom:16px;left:16px;color:#0ff8;font-family:monospace;font-size:12px;"></div>';
