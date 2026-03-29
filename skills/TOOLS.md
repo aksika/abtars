@@ -3,7 +3,17 @@ alwaysApply: true
 ---
 # Tools
 
-Run any tool with `--help` for full usage.
+Run any tool with `--help` for full usage. See linked skill for behavioral rules.
+
+## Essential (90% of usage)
+
+```
+agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"]
+agentbridge-store --translated "English" --original "eredeti" --memory-type fact --emotion-score 0 --chat-id 7773842843
+agentbridge-edit --memory-id <N> [--credibility N | --classification N | --translated "..." | --relevance-score +N] [--caller kp]
+```
+
+## All tools
 
 | Tool | Purpose | Skill |
 |------|---------|-------|
