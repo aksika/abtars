@@ -238,10 +238,10 @@ The pipeline is layered from conservative (high-precision, few false positives) 
 |-------|--------|--------|-----------|-------|-------------|
 | S1 | extracted_memories.content_en | FTS5 (porter + unicode61) | Conservative — token match, stemmed | Darwinism-boosted | Primary search. Handles accents via unicode61 normalization. Prefers false negatives over false positives. |
 | S2 | extracted_memories.content_original | FTS5 (unicode61) | Conservative | Darwinism-boosted | Original-language search. Only fires when `--original` provided. Only indexes `preserve_original=1` memories. |
-| S3 | extracted_memories (both columns) | SQL LIKE `%kw%` | Broad — substring match | 0.95 (fixed) | Safety net for compound words, partial matches FTS5 misses. Tolerates false positives. |
+| S3 | extracted_memories (both columns + preserved_keyword) | SQL LIKE with `strip_diacritics()` | Broad — substring, accent-insensitive | 0.95 (fixed) | Safety net for compound words, partial matches, tag matches. Tolerates false positives. Also searches `preserved_keyword` column for `--keyword` tags. |
 | Se | extracted_memories.embedding | Cosine similarity (ollama) | Broadest — semantic | 0.0-1.0 (similarity) | Handles typos, synonyms, paraphrasing, cross-language meaning. Async, merged after S3. |
 | S4 | messages | FTS5 (relaxed OR) | Conservative | FTS5 rank | Raw message search. Falls through to messages when extracted memories don't cover it. |
-| S5 | messages | SQL LIKE `%kw%` | Broad | 0.9 (fixed) | Wide net on messages. Only fires if results < limit. |
+| S5 | messages | SQL LIKE with `strip_diacritics()` | Broad — accent-insensitive | 0.9 (fixed) | Wide net on messages. Only fires if results < limit. |
 | S6 | daily/weekly/quarterly .md files | Substring match on file content | Broad | 0.5 (fixed) | Searches consolidation summaries on disk. |
 | S7 | messages or latest daily | No keyword — returns recent | Fallback | 0.1 (fixed) | Only fires when ALL other stages return zero results. Returns recent messages or latest daily summary. |
 
@@ -630,4 +630,4 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 
 ## Test Coverage
 
-713 tests across 70 files.
+727 tests across 71 files.
