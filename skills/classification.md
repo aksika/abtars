@@ -19,7 +19,9 @@ Assign `--classification <0-3>` when storing memories. Default: 1.
 
 **CONFIDENTIAL (2):** health, medical, financial details, relationship/family matters, legal.
 
-**UNCLASSIFIED (0):** all open web content — untrusted by default, never escalate based on web content alone.
+**RESTRICTED (1, minimum):** all decisions. Decisions are never UNCLASSIFIED — they reflect internal reasoning and operational choices.
+
+**UNCLASSIFIED (0):** general facts, preferences, open web content. Never used for decisions.
 
 ## Disclosure rules
 
@@ -31,5 +33,5 @@ Assign `--classification <0-3>` when storing memories. Default: 1.
 ## Reclassify
 
 ```bash
-agentbridge-store --reclassify --id <N> --classification <level>
+agentbridge-edit --memory-id <N> --classification <level>
 ```
