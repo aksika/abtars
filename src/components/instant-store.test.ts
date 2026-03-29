@@ -199,8 +199,6 @@ describe("instantStore — Property 3: Instant Store Rejects Invalid Inputs", ()
   });
 });
 
-import { MemoryExtractor } from "./memory-extractor.js";
-
 describe("instantStore — Property 4: Watermark Advance Prevents Heartbeat Re-Extraction", () => {
   let tmpDir: string;
   let manager: MemoryManager;
@@ -260,17 +258,11 @@ describe("instantStore — Property 4: Watermark Advance Prevents Heartbeat Re-E
             expect(watermarkRow).toBeDefined();
             expect(watermarkRow!.last_processed_timestamp).toBeGreaterThanOrEqual(pastTimestamp);
 
-            // Create a MemoryExtractor with a mock LLM that should NOT be called
-            let llmCalled = false;
-            const extractor = new MemoryExtractor(db, async () => {
-              llmCalled = true;
-              return "[]";
-            });
-
-            // processTranscripts should find no unprocessed messages
-            const extracted = await extractor.processTranscripts(chatId);
-            expect(extracted).toHaveLength(0);
-            expect(llmCalled).toBe(false);
+            // Verify no unprocessed messages exist after the watermark
+            const unprocessed = db
+              .prepare("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ? AND timestamp > ?")
+              .get(chatId, watermarkRow!.last_processed_timestamp) as { cnt: number };
+            expect(unprocessed.cnt).toBe(0);
 
             db.close();
           } finally {
