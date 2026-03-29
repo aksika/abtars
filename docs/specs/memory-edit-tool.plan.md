@@ -70,6 +70,9 @@ All fields except content_en and content_original.
 **Tier 2 — Content edits (user must explicitly stress):**
 content_en, content_original. Default for wrong content: store corrected version as new memory, let Darwinism fade the old.
 
+**Exception — Translation fixes (free to use):**
+If content_en is clearly a bad translation (untranslated words, wrong meaning, garbled output) but the original fact is correct, KP/Dreamy can fix it freely with `--integrity 1` (translated). This is a quality correction, not a content change.
+
 ## Attribute editing rules (from CIA-AAA)
 
 - **classification**: escalate freely, declassify only 2→1, SECRET (3) locked without `--user-override`
