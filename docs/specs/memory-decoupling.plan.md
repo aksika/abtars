@@ -6,7 +6,15 @@
 
 ## Vision
 
-Extract the memory system into a standalone `@agentbridge/memory` package — like lossless-claw is to OpenClaw. Any agent framework could use it. Own CLIs, own types, own DB, clean interface.
+Extract the memory system into a standalone `@agentbridge/memory` package — like lossless-claw is to OpenClaw. The concrete goal: make KP's memory system reusable as an OpenClaw plugin so any OpenClaw agent can have persistent memory with CIA-AAA security, Darwinism, emotion scoring, and sleep maintenance.
+
+## Complexity Assessment
+
+Phases 1-3 add ~50 lines net (one interface file). No new behavior, no new dependencies, no operational changes. The system works identically before and after — it's a structural cleanup.
+
+Phase 4 (standalone package) is the only phase that adds real operational complexity: two build systems, version management, publishing workflow. Only worth doing when actively building the OpenClaw plugin.
+
+**Recommendation:** Phases 1-3 when there's a quiet afternoon. Phase 4 when the OpenClaw plugin work begins.
 
 ## Current State
 
