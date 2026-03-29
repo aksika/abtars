@@ -89,13 +89,13 @@
       renderer.setSize(w, h);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 0.9;
+      renderer.toneMappingExposure = 1.2;
       overlay.insertBefore(renderer.domElement, overlay.firstChild);
 
       // Post-processing: bloom
       var composer = new m.EffectComposer(renderer);
       composer.addPass(new m.RenderPass(scene, camera));
-      var bloom = new m.UnrealBloomPass(new THREE.Vector2(w, h), 0.5, 0.2, 0.75);
+      var bloom = new m.UnrealBloomPass(new THREE.Vector2(w, h), 0.8, 0.3, 0.6);
       composer.addPass(bloom);
 
       // Controls
@@ -193,7 +193,7 @@
         pulseRates[i] = PULSE_MAP[mem.memory_type] || 0.0;
 
         // Emotion → brightness: -5=0.3, 0=0.7, +5=1.5
-        brightnesses[i] = 0.5 + (mem.emotion_score || 0) * 0.1;
+        brightnesses[i] = 0.7 + (mem.emotion_score || 0) * 0.16;
 
         // Trust → core dot: 3=bright, 0=none
         hasEmbeddings[i] = (mem.trust || 0) / 3.0;
@@ -243,11 +243,11 @@
         'void main() {',
         '  float d = length(gl_PointCoord - vec2(0.5));',
         '  if (d > 0.5) discard;',
-        '  float glow = exp(-d * 6.0);',
+        '  float glow = exp(-d * 4.0);',
         // Core dot for trust
-        '  float core = vHasEmbed * smoothstep(0.06, 0.0, d) * 0.6;',
-        '  vec3 col = vColor * glow * 0.7 + vec3(core);',
-        '  gl_FragColor = vec4(col, glow * vOpacity * 0.8 + core);',
+        '  float core = vHasEmbed * smoothstep(0.08, 0.0, d) * 0.8;',
+        '  vec3 col = vColor * glow + vec3(core);',
+        '  gl_FragColor = vec4(col, glow * vOpacity + core);',
         '}',
       ].join('\n');
 
