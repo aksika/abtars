@@ -480,9 +480,8 @@ Extract the memory system into a standalone module/package, decoupled from the b
 
 ## 51. TOOLS.md — Minimize to References Only
 
-**Status:** Not started
-**Priority:** High
-**Source:** Memory-edit tool discussion (2026-03-29)
+**Status:** ✅ Done (2026-03-29)
+**Commits:** `530aaa8`..`8722471`
 
 **Problem:**
 TOOLS.md has `alwaysApply: true` — it's injected into every context window. Currently it contains full syntax examples and inline rules, which wastes tokens. As more tools are added (agentbridge-edit, future tools), this file will keep growing and eating context budget.
