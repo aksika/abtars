@@ -8,7 +8,6 @@ export type MemoryConfig = {
   memoryDir: string;
   maxMessagesPerChat: number;
   diskBudgetBytes: number;
-  vectorEnabled: boolean;
   stalenessThresholdMs: number;
   restoreMessageCount: number;
   /** Maximum token size per ingestion chunk. */
@@ -32,11 +31,10 @@ export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
   memoryDir: resolve(homedir(), ".agentbridge", "memory"),
   maxMessagesPerChat: 1000,
   diskBudgetBytes: 500 * 1024 * 1024,
-  vectorEnabled: false,
   stalenessThresholdMs: 24 * 3600_000,
   restoreMessageCount: 50,
   ingestChunkMaxTokens: 512,
-  embeddingModel: "Xenova/all-MiniLM-L6-v2",
+  embeddingModel: "nomic-embed-text",
   forgetThreshold: 0.8,
   searchEnhancements: {
     searchTimeoutMs: 1000,
@@ -61,8 +59,6 @@ export function loadMemoryConfig(): MemoryConfig {
   const diskBudgetMb = parseNumberEnv("MEMORY_DISK_BUDGET_MB", 500);
   const diskBudgetBytes = diskBudgetMb * 1024 * 1024;
 
-  const vectorEnabled = parseBoolEnv("MEMORY_VECTOR_ENABLED", MEMORY_CONFIG_DEFAULTS.vectorEnabled);
-
   const stalenessHours = parseNumberEnv("MEMORY_STALENESS_HOURS", 24);
   const stalenessThresholdMs = stalenessHours * 3_600_000;
 
@@ -85,7 +81,6 @@ export function loadMemoryConfig(): MemoryConfig {
     memoryDir,
     maxMessagesPerChat,
     diskBudgetBytes,
-    vectorEnabled,
     stalenessThresholdMs,
     restoreMessageCount,
     ingestChunkMaxTokens,

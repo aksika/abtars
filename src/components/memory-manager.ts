@@ -4,12 +4,9 @@ import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
 import { initializeDatabase } from "./memory-db.js";
 import { MemoryIndex } from "./memory-index.js";
-import { VectorIndex } from "./vector-index.js";
-import { EmbeddingProvider } from "./embedding-provider.js";
+import { loadEmbedConfig, embedText } from "./ollama-embed.js";
 import { HeartbeatSystem } from "./heartbeat-system.js";
 import { getLatestConsolidationFile } from "./consolidation-search.js";
-import { loadEmbedConfig, embedText } from "./ollama-embed.js";
-import { IngestionPipeline } from "./ingestion-pipeline.js";
 import { ReflectionEngine } from "./reflection-engine.js";
 import type {
   MessageRecord,
@@ -44,12 +41,8 @@ export class MemoryManager {
   private readonly config: MemoryConfig;
   private db: Database.Database | null = null;
   private memoryIndex: MemoryIndex | null = null;
-  private vectorIndex: VectorIndex | null = null;
-  private embeddingProvider: EmbeddingProvider | null = null;
   private writeCounter: number = 0;
   private llmCall: ((prompt: string, content: string) => Promise<string>) | null = null;
-  private ingestionPipeline: IngestionPipeline | null = null;
-  private browserManager: import("./browser-manager.js").BrowserManager | null = null;
   private reflectionEngine: ReflectionEngine | null = null;
   private heartbeat: HeartbeatSystem | null = null;
 
@@ -77,8 +70,8 @@ export class MemoryManager {
   }
 
   /** Register the BrowserManager for webpage ingestion. Called from main.ts after BrowserManager is created. */
-  setBrowserManager(bm: import("./browser-manager.js").BrowserManager): void {
-    this.browserManager = bm;
+  setBrowserManager(_bm: import("./browser-manager.js").BrowserManager): void {
+    // Reserved for future ingestion pipeline
   }
 
   /** Expose the underlying database for direct query access (used by MemorySearchController). */
@@ -157,26 +150,25 @@ export class MemoryManager {
 
       this.memoryIndex = new MemoryIndex(this.db);
 
-      // Optionally initialize vector search
-      if (this.config.vectorEnabled) {
-        this.embeddingProvider = new EmbeddingProvider();
-        await this.embeddingProvider.initialize();
-        if (this.embeddingProvider.isReady) {
-          this.vectorIndex = new VectorIndex(this.db, this.embeddingProvider);
-          logInfo(TAG, "Vector search enabled");
-
-          // Initialize ingestion pipeline when vector search is available
-          this.ingestionPipeline = new IngestionPipeline(
-            this.db,
-            this.embeddingProvider,
-            this.vectorIndex,
-            this.config,
-            this.browserManager ?? undefined,
-          );
-          logInfo(TAG, "Ingestion pipeline enabled");
-        } else {
-          logWarn(TAG, "Embedding model not available — vector search disabled");
-          this.embeddingProvider = null;
+      // Ollama embedding health check (Se sidecar for recall)
+      const embedConfig = loadEmbedConfig();
+      if (embedConfig.enabled) {
+        try {
+          const res = await fetch(`${embedConfig.url}/api/tags`);
+          if (res.ok) {
+            const data = await res.json() as { models?: Array<{ name: string }> };
+            const models = data.models?.map(m => m.name) ?? [];
+            const hasModel = models.some(m => m.startsWith(embedConfig.model));
+            if (hasModel) {
+              logInfo(TAG, `Embedding enabled: ${embedConfig.model} via ollama (Se sidecar ready)`);
+            } else {
+              logWarn(TAG, `Embedding model '${embedConfig.model}' not found in ollama (available: ${models.join(", ")})`);
+            }
+          } else {
+            logWarn(TAG, `Ollama health check failed (HTTP ${res.status}) — Se sidecar will fail at recall time`);
+          }
+        } catch (err) {
+          logWarn(TAG, `Ollama unreachable at ${embedConfig.url} — Se sidecar disabled`);
         }
       }
 
@@ -297,20 +289,13 @@ export class MemoryManager {
 
       // 1. Index in FTS (raw content — FTS5 trigger strips emojis at index level)
       if (!this.memoryIndex) return;
-      const messageId = this.memoryIndex.index(record);
+      this.memoryIndex.index(record);
 
       // 2. Immutable backup copy (debug-only — controlled by DEBUG_MODE env var)
       if (process.env["DEBUG_MODE"] === "true" || process.env["DEBUG_MODE"] === "1") {
         this.db.prepare(
           "INSERT INTO chat_backup (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
         ).run(record.chatId, record.sessionId, record.role, record.content, record.timestamp);
-      }
-
-      // 3. Fire-and-forget vector indexing if available
-      if (this.vectorIndex) {
-        this.vectorIndex.index(messageId, record.content).catch((err) =>
-          logError(TAG, "Vector indexing failed", err),
-        );
       }
 
       // 5. Prune if chat exceeds maxMessagesPerChat
@@ -349,113 +334,15 @@ export class MemoryManager {
   }
 
 
-  /**
-   * Combine FTS and vector search results using reciprocal rank fusion.
-   * When vector search is disabled, returns FTS results only.
-   */
-  async hybridSearch(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
+  /** Search conversation history via FTS5. */
+  async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
     if (!this.config.memoryEnabled || !this.memoryIndex) return [];
-
     try {
-      // 1. Get FTS results
-      const ftsResults = this.memoryIndex.search(query, opts);
-
-      // 2. If vector search is not available, return FTS results only
-      if (!this.vectorIndex || !this.embeddingProvider?.isReady) {
-        return ftsResults;
-      }
-
-      // 3. Get vector results
-      const vectorResults = await this.vectorIndex.search(query, {
-        chatId: opts?.chatId,
-        limit: opts?.limit ?? 20,
-      });
-
-      // 4. Build rank maps (1-indexed ranks)
-      const k = 60;
-      const ftsRankMap = new Map<number, number>(); // messageId → rank
-      // We need message IDs from FTS results — re-query to get them
-      const ftsMessageIds = this.getFtsMessageIds(ftsResults);
-      for (let i = 0; i < ftsMessageIds.length; i++) {
-        ftsRankMap.set(ftsMessageIds[i]!, i + 1);
-      }
-
-      const vectorRankMap = new Map<number, number>();
-      for (let i = 0; i < vectorResults.length; i++) {
-        vectorRankMap.set(vectorResults[i]!.messageId, i + 1);
-      }
-
-      // 5. Collect all unique message IDs
-      const allIds = new Set<number>([...ftsRankMap.keys(), ...vectorRankMap.keys()]);
-
-      // 6. Compute RRF scores
-      const scored: Array<{ messageId: number; score: number }> = [];
-      for (const id of allIds) {
-        const ftsRank = ftsRankMap.get(id);
-        const vecRank = vectorRankMap.get(id);
-        let score = 0;
-        if (ftsRank !== undefined) score += 1 / (k + ftsRank);
-        if (vecRank !== undefined) score += 1 / (k + vecRank);
-        scored.push({ messageId: id, score });
-      }
-
-      // 7. Sort by descending fused score
-      scored.sort((a, b) => b.score - a.score);
-
-      // 8. Map back to SearchResult format
-      const limit = opts?.limit ?? 20;
-      const ftsResultMap = new Map<string, SearchResult>();
-      for (const r of ftsResults) {
-        const key = `${r.record.chatId}:${r.record.sessionId}:${r.record.timestamp}`;
-        ftsResultMap.set(key, r);
-      }
-
-      const results: SearchResult[] = [];
-      for (const item of scored.slice(0, limit)) {
-        // Try to find the matching FTS result first
-        const ftsMatch = ftsResults.find((_, idx) => ftsMessageIds[idx] === item.messageId);
-        if (ftsMatch) {
-          results.push({ record: ftsMatch.record, score: item.score });
-        } else {
-          // Load from DB for vector-only results
-          const row = this.db
-            ?.prepare(
-              "SELECT chat_id, session_id, role, content, timestamp FROM messages WHERE id = ?",
-            )
-            .get(item.messageId) as
-            | {
-                chat_id: number;
-                session_id: string;
-                role: string;
-                content: string;
-                timestamp: number;
-              }
-            | undefined;
-          if (row) {
-            results.push({
-              record: {
-                role: row.role as "user" | "assistant" | "compaction",
-                content: row.content,
-                timestamp: row.timestamp,
-                chatId: row.chat_id,
-                sessionId: row.session_id,
-              },
-              score: item.score,
-            });
-          }
-        }
-      }
-
-      return results;
+      return this.memoryIndex.search(query, opts);
     } catch (err) {
-      logError(TAG, "Hybrid search failed", err);
+      logError(TAG, "Search failed", err);
       return [];
     }
-  }
-
-  /** Search conversation history (delegates to hybridSearch). */
-  async search(query: string, opts?: SearchOptions): Promise<SearchResult[]> {
-    return this.hybridSearch(query, opts);
   }
 
   /** Substring search using SQL LIKE — catches compound words that FTS5 misses. */
@@ -467,30 +354,6 @@ export class MemoryManager {
       logError(TAG, "Substring search failed", err);
       return [];
     }
-  }
-
-  /**
-   * Get message IDs corresponding to FTS search results.
-   * Looks up by matching chat_id, session_id, role, and timestamp.
-   */
-  private getFtsMessageIds(results: SearchResult[]): number[] {
-    if (!this.db || results.length === 0) return [];
-
-    const stmt = this.db.prepare(
-      `SELECT id FROM messages
-       WHERE chat_id = ? AND session_id = ? AND role = ? AND timestamp = ?
-       LIMIT 1`,
-    );
-
-    return results.map((r) => {
-      const row = stmt.get(
-        r.record.chatId,
-        r.record.sessionId,
-        r.record.role,
-        r.record.timestamp,
-      ) as { id: number } | undefined;
-      return row?.id ?? -1;
-    });
   }
 
   /** Read user profile + agent notes from core/. */
@@ -512,20 +375,16 @@ export class MemoryManager {
     return parts.join("\n\n");
   }
 
-  /** Ingest an external document via the IngestionPipeline. */
-  async ingestDocument(source: IngestionSource, chatId: number): Promise<IngestionResult> {
-    if (!this.ingestionPipeline) {
-      throw new Error("Ingestion pipeline is not available — vector search must be enabled.");
-    }
-    return this.ingestionPipeline.ingest(source, chatId);
+  /** Ingest an external document (not available — requires future implementation). */
+  async ingestDocument(_source: IngestionSource, _chatId: number): Promise<IngestionResult> {
+    throw new Error("Ingestion not available.");
   }
 
-  /** List previously ingested documents, optionally filtered by chatId. */
-  listIngestedDocuments(chatId?: number): IngestedDocument[] {
-    if (!this.ingestionPipeline) {
-      return [];
-    }
-    return this.ingestionPipeline.listIngested(chatId);
+  /** List previously ingested documents. */
+  listIngestedDocuments(_chatId?: number): IngestedDocument[] {
+    if (!this.db) return [];
+    const rows = this.db.prepare("SELECT * FROM ingested_documents" + (_chatId !== undefined ? " WHERE chat_id = ?" : "")).all(...(_chatId !== undefined ? [_chatId] : [])) as IngestedDocument[];
+    return rows;
   }
 
   /** Generate a reflection for the given channel over a time window. */
@@ -550,18 +409,6 @@ export class MemoryManager {
     }
     return this.reflectionEngine.listReflections(channelKey);
   }
-
-  /**
-   * Re-embed all stored content with the current embedding model.
-   * Delegates to EmbeddingProvider.reembed() and passes through the onProgress callback.
-   */
-  async reembed(onProgress: (processed: number, total: number) => void): Promise<void> {
-    if (!this.embeddingProvider || !this.db) {
-      throw new Error("Embedding provider is not available — vector search must be enabled.");
-    }
-    return this.embeddingProvider.reembed({ db: this.db, onProgress });
-  }
-
 
   /**
    * Enforce the configured disk budget by deleting the oldest transcript files
@@ -738,7 +585,7 @@ export class MemoryManager {
       const effectiveThreshold = threshold ?? this.config.forgetThreshold;
 
       // Use hybrid search to find semantically related messages
-      const searchResults = await this.hybridSearch(topic, { chatId, limit: 100 });
+      const searchResults = await this.search(topic, { chatId, limit: 100 });
 
       // Filter results above the relevance threshold
       const relevant = searchResults.filter((r) => r.score >= effectiveThreshold);

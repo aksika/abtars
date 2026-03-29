@@ -32,7 +32,6 @@ describe("loadMemoryConfig", () => {
     expect(cfg.memoryDir).toBe(resolve(homedir(), ".agentbridge", "memory"));
     expect(cfg.maxMessagesPerChat).toBe(1000);
     expect(cfg.diskBudgetBytes).toBe(500 * 1024 * 1024);
-    expect(cfg.vectorEnabled).toBe(false);
     expect(cfg.stalenessThresholdMs).toBe(24 * 3_600_000);
     expect(cfg.restoreMessageCount).toBe(50);
   });
@@ -80,13 +79,6 @@ describe("loadMemoryConfig", () => {
     process.env["MEMORY_DISK_BUDGET_MB"] = "abc";
     const cfg = loadMemoryConfig();
     expect(cfg.diskBudgetBytes).toBe(500 * 1024 * 1024);
-  });
-
-  // --- MEMORY_VECTOR_ENABLED ---
-
-  it("parses MEMORY_VECTOR_ENABLED=true", () => {
-    process.env["MEMORY_VECTOR_ENABLED"] = "true";
-    expect(loadMemoryConfig().vectorEnabled).toBe(true);
   });
 
   // --- MEMORY_STALENESS_HOURS ---
