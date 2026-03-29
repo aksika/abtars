@@ -217,6 +217,15 @@ export async function startBridge(): Promise<void> {
           if (code === 0) {
             logInfo("main", `😴 Sleep routine finished successfully at ${localIso()}`);
             sleepTrigger.reportSuccess();
+            // Wake-up prompt — KP reflects on the sleep cycle
+            const chatId = [...config.allowedUserIds][0];
+            if (chatId && telegramAdapter) {
+              telegramAdapter.injectMessage({
+                platform: "telegram", channelId: String(chatId), sessionKey: `telegram:${chatId}`,
+                senderId: String(chatId), senderName: "system", text: "You just woke up.. how did you sleep buddy?",
+                timestamp: Date.now(), isGroup: false, isVoice: false,
+              });
+            }
           } else {
             logWarn("main", `😴 Sleep routine failed (exit code ${code}) at ${localIso()}`);
             sleepTrigger.reportFailure();
@@ -414,6 +423,15 @@ export async function startBridge(): Promise<void> {
             logInfo("main", `😴 Cron sleep routine finished successfully at ${localIso()}`);
             sleepTrigger.reportSuccess();
             if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
+            // Wake-up prompt — KP reflects on the sleep cycle
+            const chatId = [...config.allowedUserIds][0];
+            if (chatId && telegramAdapter) {
+              telegramAdapter.injectMessage({
+                platform: "telegram", channelId: String(chatId), sessionKey: `telegram:${chatId}`,
+                senderId: String(chatId), senderName: "system", text: "You just woke up.. how did you sleep buddy?",
+                timestamp: Date.now(), isGroup: false, isVoice: false,
+              });
+            }
           } else {
             logWarn("main", `😴 Cron sleep routine failed (exit code ${code}) at ${localIso()}`);
             sleepTrigger.reportFailure();
