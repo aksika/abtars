@@ -476,3 +476,28 @@ Extract the memory system into a standalone module/package, decoupled from the b
 - Memory module exposes: store, edit, recall, merge, delete, stats
 - Bridge consumes the module via interface, not direct DB access
 - Standalone CLI tools (agentbridge-store, agentbridge-edit, agentbridge-recall) become the public API
+
+## 51. TOOLS.md — Minimize to References Only
+
+**Status:** Not started
+**Priority:** High
+**Source:** Memory-edit tool discussion (2026-03-29)
+
+**Problem:**
+TOOLS.md has `alwaysApply: true` — it's injected into every context window. Currently it contains full syntax examples and inline rules, which wastes tokens. As more tools are added (agentbridge-edit, future tools), this file will keep growing and eating context budget.
+
+**Proposed approach:**
+Reduce TOOLS.md to minimal syntax references only — just enough for KP to know the command exists and its basic form. Full rules, examples, and edge cases should live in the individual skill files (instant-store, classification, trust-gating, etc.) which are loaded on-demand, not always-on.
+
+**Example target:**
+```
+## Memory Edit
+agentbridge-edit --memory-id <N> | --message-id <N> --chat-id <C> [field flags] [--dry-run] [--caller kp|dreamy]
+See: instant-store skill for full rules.
+```
+
+**Action items:**
+- Audit current TOOLS.md content — identify what can move to skill files
+- Reduce each tool entry to 1-2 lines (command + minimal flags)
+- Move detailed rules to the relevant skill files
+- Verify KP can still invoke tools correctly with minimal syntax
