@@ -153,7 +153,7 @@ Conflict resolution: higher trust wins → higher credibility wins → more rece
 |--------|------|------|
 | Emoji reactions | `updateEmotionByPlatformId()` → `editMemory()` | Runtime — user reacts on Telegram/Discord |
 | Instant store | `agentbridge-store --emotion-score N` | Runtime — agent stores emotionally significant memory |
-| Extraction | LLM assigns emotion during `MemoryExtractor` | Heartbeat/sleep extraction |
+| Extraction | LLM assigns emotion during Dreamy sleep extraction | Sleep §4 step 5 |
 | Verbal harvest | `agentbridge-edit --memory-id N --emotion-score N --caller dreamy` | Sleep §6 — Dreamy scans for verbal emotional reactions |
 
 Emoji reactions propagate immediately: message table updated → cascade to linked extracted_memories via `editMemory()`. Verbal emotions (e.g. "fasza!", "goddamn it!") are harvested during sleep and applied to the nearest relevant memory.
@@ -203,10 +203,10 @@ Nulled automatically on content edit (re-embedded on next batch run).
 |  Layer 5: Agent-Initiated Recall (single path)                       |
 |  agentbridge-recall ONLY (7-stage cascade, extracted-first)          |
 +---------------------------------------------------------------------+
-|  Layer 4: Background Extraction & Enrichment                        |
-|  HeartbeatSystem, agentbridge-store (Instant Store),                 |
-|  agentbridge-edit (Unified Memory Mutation),                         |
-|  MemoryExtractor (sleep-driven)                                      |
+|  Layer 4: Storage & Mutation                                        |
+|  agentbridge-store (Instant Store),                                  |
+|  agentbridge-edit (Unified Memory Mutation)                          |
+|  Extraction: Dreamy (sleep §4 step 5) via agentbridge-store          |
 +---------------------------------------------------------------------+
 |  Layer 3: Consolidation (subagent-driven)                           |
 |  working → daily → weekly → quarterly                                |
@@ -560,8 +560,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 |-----------|------|-------------|
 | MemoryManager | `memory-manager.ts` | Top-level coordinator. Owns SQLite DB, FTS index, editMemory(), instantStore(), merge, cascadeDelete. |
 | MemoryIndex | `memory-index.ts` | FTS5 search + Darwinism recall counting. Emoji-stripped at index level. |
-| MemoryExtractor | `memory-extractor.ts` | LLM-driven extraction from conversations. Entity tagging. Sleep-driven. |
-| memory-db | `memory-db.ts` | Schema creation, migrations, FTS5 triggers (INSERT, DELETE, UPDATE). |
+| memory-db | `memory-db.ts` | Schema creation, migrations, FTS5 triggers (INSERT, DELETE, UPDATE), strip_diacritics() function. |
 | memory-config | `memory-config.ts` | Env var loading + defaults for all memory settings. |
 | ollama-embed | `ollama-embed.ts` | Embedding via ollama API: embedText(), vectorSearch(), batch embed. Se sidecar for recall. |
 | recall-engine | `recall-engine.ts` | 7-stage cascade (S1-S7 + Se), extracted-first, short-circuit, MMR post-processing. |
@@ -630,7 +629,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 
 ## Test Coverage
 
-727 tests across 71 files.
+720 tests across 70 files.
 
 ### Test Categories
 
