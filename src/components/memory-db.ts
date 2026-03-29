@@ -220,6 +220,13 @@ export function initializeDatabase(dbPath: string): Database.Database {
     return text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").replace(/ {2,}/g, " ").trim();
   });
 
+  // Register strip_diacritics() scalar function for accent-insensitive LIKE queries.
+  // Used by S3/S5 recall stages — the broad safety net should be as forgiving as possible.
+  db.function("strip_diacritics", (text: unknown) => {
+    if (typeof text !== "string") return text;
+    return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  });
+
   // Migration: recreate FTS5 triggers to use strip_emojis() (R1 — raw content in messages)
   db.exec(`
     DROP TRIGGER IF EXISTS messages_ai;

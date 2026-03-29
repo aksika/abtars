@@ -184,7 +184,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
     if (params.timeStart) { conditions.push("created_at >= ?"); bindParams.push(params.timeStart); }
     if (params.timeEnd) { conditions.push("created_at <= ?"); bindParams.push(params.timeEnd); }
     if (params.maxClassification !== undefined) { conditions.push("COALESCE(classification, 0) <= ?"); bindParams.push(params.maxClassification); }
-    conditions.push(`(${allKw.map(kw => { bindParams.push(`%${kw}%`, `%${kw}%`); return "(content_en LIKE ? OR content_original LIKE ?)"; }).join(" OR ")})`);
+    conditions.push(`(${allKw.map(kw => { bindParams.push(`%${kw}%`, `%${kw}%`, `%${kw}%`); return "(strip_diacritics(content_en) LIKE '%' || strip_diacritics(?) || '%' OR strip_diacritics(content_original) LIKE '%' || strip_diacritics(?) || '%' OR strip_diacritics(preserved_keyword) LIKE '%' || strip_diacritics(?) || '%')"; }).join(" OR ")})`);
     const rows = deps.db.prepare(
       `SELECT id, content_en, content_original, memory_type, created_at, source_message_ids, trust, integrity, credibility, classification FROM extracted_memories WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC LIMIT ?`
     ).all(...bindParams, limit * 3) as Array<{
@@ -265,7 +265,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
       const bindParams: (string | number)[] = [params.chatId];
       if (params.timeStart) { conditions.push("timestamp >= ?"); bindParams.push(params.timeStart); }
       if (params.timeEnd) { conditions.push("timestamp <= ?"); bindParams.push(params.timeEnd); }
-      conditions.push(`(${allKw.map(kw => { bindParams.push(`%${kw}%`); return "content LIKE ?"; }).join(" OR ")})`);
+      conditions.push(`(${allKw.map(kw => { bindParams.push(kw); return "strip_diacritics(content) LIKE '%' || strip_diacritics(?) || '%'"; }).join(" OR ")})`);
       const rows = deps.db.prepare(
         `SELECT role, content, timestamp FROM messages WHERE ${conditions.join(" AND ")} ORDER BY timestamp DESC LIMIT 20`
       ).all(...bindParams) as Array<{ role: string; content: string; timestamp: number }>;

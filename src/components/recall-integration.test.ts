@@ -133,6 +133,16 @@ describe("Recall Pipeline — Integration", () => {
     expect(result.results.some(r => r.content.includes("OpenClaw"))).toBe(true);
   });
 
+  it("S3: LIKE finds by preserved_keyword tag", async () => {
+    const result = await recallSearch(deps, baseParams({ translated: ["kiscsávó"], stages: ["S3"] }));
+    expect(result.stages["S3"]?.hits.length).toBeGreaterThan(0);
+  });
+
+  it("S3: accent-stripped LIKE finds accented content", async () => {
+    const result = await recallSearch(deps, baseParams({ translated: ["kiscsavo"], stages: ["S3"] }));
+    expect(result.stages["S3"]?.hits.length).toBeGreaterThan(0);
+  });
+
   // ── S4: Messages — FTS5 ──
 
   it("S4: finds raw messages via FTS5", async () => {
