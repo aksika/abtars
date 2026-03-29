@@ -404,8 +404,7 @@ State gatherer fixed (embedding counts from extracted_memories.embedding). Sleep
 
 ## 48. Review A2A Agent Autonomy Model
 
-**Status:** Not started
-**Priority:** High
+**Status:** ✅ Done (2026-03-29)
 **Source:** Memory-edit tool planning discussion (2026-03-28)
 
 **Problem:**
