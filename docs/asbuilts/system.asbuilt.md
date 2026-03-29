@@ -11,7 +11,25 @@
 
 Kiro Professor is a standalone Node.js agent that bridges Telegram (and Discord) to [Kiro CLI](https://kiro.dev). It polls messaging platforms, forwards user messages to a kiro-cli session, and returns responses. Supports tmux and ACP (Agent Client Protocol) transports, an optional localhost web dashboard, a local memory system, a sleep maintenance cycle, and agent-callable CLI tools for memory storage, recall, browser automation, todo management, and scheduled reminders.
 
-For the memory subsystem, see [Memory.asbuilt.md](Memory.asbuilt.md).
+For the memory subsystem, see [memory.asbuilt.md](memory.asbuilt.md).
+
+---
+
+## Subsystems
+
+| Subsystem | Description |
+|-----------|-------------|
+| **Platform Abstraction** | Telegram + Discord adapters behind a shared `PlatformAdapter` interface and unified message pipeline. |
+| **Memory** | SQLite-backed persistence with FTS5, vector embeddings, CIA-AAA security model, Darwinism, emotion scoring. See [memory.asbuilt.md](memory.asbuilt.md). |
+| **Sleep (Dreamy)** | Overnight maintenance: retrospective, GC, extraction, consolidation, fitness review. See [memory.asbuilt.md](memory.asbuilt.md). |
+| **Cron** | Time-based scheduling for reminders and agent tasks. SQLite storage, sequential CronQueue, priority levels, retry. |
+| **Todo** | File-based todo list (`todo.md`). Agent-managed via `agentbridge-todo` CLI. |
+| **Browser (Browsie)** | Detached browser subagent. Headless Chromium in Docker, autonomous navigation, non-blocking. |
+| **Self-Healer** | Heartbeat task scanning `bridge.log` for errors, injecting bug reports to KP via Telegram. |
+| **A2A (Agent API)** | HTTP API for peer agents (Molty). HMAC challenge-response auth, consulting-only relationship. |
+| **Dashboard** | Localhost web UI: platform status, cron panel, log viewer, memory stats, 3D memory visualization. |
+| **Doctor** | `doctor.sh` — startup diagnostics + safe auto-repair (permissions, stale locks, FTS rebuild). |
+| **Deploy** | `deploy.sh` — builds, copies CLIs/skills/prompts/tasks to `~/.agentbridge/`, manages tmux session. |
 
 ---
 
