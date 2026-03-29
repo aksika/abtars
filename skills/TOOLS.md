@@ -9,8 +9,9 @@ Run any tool with `--help` for full usage. See linked skill for behavioral rules
 
 ```
 agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"]
-agentbridge-store --translated "English" --original "eredeti" --memory-type fact --emotion-score 0 --chat-id 7773842843
-agentbridge-edit --memory-id <N> [--credibility N | --classification N | --translated "..." | --relevance-score +N] [--caller kp]
+agentbridge-store --translated "English" --original "eredeti" --memory-type fact --emotion-score 0 --chat-id 7773842843 [--keyword "term"]
+agentbridge-edit --memory-id <N> [--credibility N] [--classification N] [--translated "..."] [--relevance-score +N] [--caller kp]
+agentbridge-expand --ids 451,452,453
 ```
 
 ## All tools
