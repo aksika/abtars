@@ -98,16 +98,17 @@ Covered in system engineering refactor v2: 654 tests across 66 files. Added comm
 
 ## 22. Picture / Media Support
 
-**Status:** Not started
+**Status:** Partial — receiving done, sending not implemented
 **Priority:** Medium
 **Source:** OpenClaw media handling study (memory refactor), user request (2026-03-22)
 
-**Problem:**
-AgentBridge is text-only. Users can't send images to the bot (screenshots, diagrams, photos) and the bot can't send images back. This limits usefulness for visual debugging, sharing context, and richer interactions.
+**Done:**
+- Telegram + Discord: photos/documents downloaded and saved to `~/.agentbridge/received/media/`
+- File path appended to prompt (`File saved at: ...`) — KP can read images via kiro-cli tools
+- Sleep §9.5 media cleanup (FIFO 100MB budget)
 
-**Scope (initial assessment):** `docs/specs/picture-support.assessment.md`
-
-**Reference:** OpenClaw `src/agents/tool-images.ts`, `src/media-understanding/attachments.cache.ts`, `src/web/media.ts` — studied during memory refactor, kept as future reference for big file / media patterns.
+**Remaining:**
+- KP cannot send images back to the user (no `sendPhoto` / `sendImage` on adapters)
 
 ## 21. Improve Security (NemoClaw Ideas)
 
