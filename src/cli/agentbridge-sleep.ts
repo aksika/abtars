@@ -93,7 +93,7 @@ type StepResult = { status: StepStatus; duration?: number; attempts?: number };
 type WiredResults = { purged: number; deduped: number; embedded: number; anomaliesFixed: number; walOk: boolean; ftsOk: boolean; logsDeleted: number };
 type SleepState = { pid: number; startedAt: number; wiredResults?: WiredResults; steps: Record<string, StepResult> };
 
-const SLEEP_TIMEOUT_MS = (parseInt(process.env["SLEEP_TIMEOUT_MIN"] ?? "", 10) || 30) * 60 * 1000; // default 30 minutes
+const SLEEP_TIMEOUT_MS = (parseInt(process.env["SLEEP_TIMEOUT_MIN"] ?? "", 10) || 45) * 60 * 1000; // default 45 minutes
 
 function readStateFile(path: string): SleepState | null {
   try {
