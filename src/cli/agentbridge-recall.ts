@@ -94,6 +94,12 @@ db.function("strip_emojis", (text: unknown) => {
   return text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").replace(/ {2,}/g, " ").trim();
 });
 
+// Register strip_diacritics for accent-insensitive queries
+db.function("strip_diacritics", (text: unknown) => {
+  if (typeof text !== "string") return text;
+  return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+});
+
 try {
   const index = new MemoryIndex(db);
   const result = await recallSearch(
