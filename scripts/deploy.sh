@@ -23,9 +23,13 @@ echo "   Project: $PROJECT_DIR"
 echo "   Runtime: $AB_HOME"
 echo ""
 
-# 1. Sync .env
+# 1. Sync .env (from persona/core/ — gitignored, personal)
 echo "📋 Syncing .env..."
-cp "$PROJECT_DIR/.env" "$AB_HOME/.env"
+if [ -f "$PROJECT_DIR/persona/core/.env" ]; then
+  cp "$PROJECT_DIR/persona/core/.env" "$AB_HOME/.env"
+else
+  echo "   ⚠️  No .env in persona/core/ — keeping existing"
+fi
 
 # 2. Build (unless --quick)
 if [ "$QUICK" = false ]; then
