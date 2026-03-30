@@ -93,7 +93,7 @@ type StepResult = { status: StepStatus; duration?: number; attempts?: number };
 type WiredResults = { purged: number; deduped: number; embedded: number; anomaliesFixed: number; walOk: boolean; ftsOk: boolean; logsDeleted: number };
 type SleepState = { pid: number; startedAt: number; wiredResults?: WiredResults; steps: Record<string, StepResult> };
 
-const SLEEP_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
+const SLEEP_TIMEOUT_MS = parseInt(process.env["SLEEP_TIMEOUT_MS"] ?? "", 10) || 40 * 60 * 1000; // 40 minutes (configurable)
 
 function readStateFile(path: string): SleepState | null {
   try {
@@ -554,7 +554,7 @@ async function main(): Promise<void> {
     let timedOut = false;
     const timeoutHandle = setTimeout(() => {
       timedOut = true;
-      logError(TAG, "[SLEEP] ⏰ 20-minute timeout reached — killing transport");
+      logError(TAG, `[SLEEP] ⏰ ${Math.round(SLEEP_TIMEOUT_MS / 60000)}-minute timeout reached — killing transport`);
     }, SLEEP_TIMEOUT_MS);
 
     const { transport, model: modelUsed } = await createSleepTransport(flags.verbose);
