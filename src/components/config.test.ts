@@ -18,12 +18,12 @@ vi.mock("dotenv", () => ({
 function setValidEnv() {
   process.env["TELEGRAM_BOT_TOKEN"] = "123456:ABC-DEF_ghi";
   process.env["ALLOWED_USER_IDS"] = "111,222";
-  process.env["KIRO_CLI_PATH"] = "kiro-cli";
+  process.env["AGENT_CLI_PATH"] = "kiro-cli";
   process.env["WORKING_DIR"] = process.cwd();
   delete process.env["TRUST_MODE"];
   delete process.env["PERMISSION_TIMEOUT_MS"];
   delete process.env["POLL_TIMEOUT_S"];
-  delete process.env["KIRO_TRANSPORT"];
+  delete process.env["AGENT_TRANSPORT"];
   delete process.env["TMUX_SESSION"];
   delete process.env["TMUX_CAPTURE_DELAY_SEC"];
   delete process.env["TMUX_MAX_WAIT_SEC"];
@@ -53,7 +53,7 @@ describe("loadAndValidateConfig", () => {
     const config = await loadAndValidateConfig();
     expect(config.telegramBotToken).toBe("123456:ABC-DEF_ghi");
     expect(config.allowedUserIds).toEqual(new Set([111, 222]));
-    expect(config.kiroCLIPath).toBe("kiro-cli");
+    expect(config.agentCliPath).toBe("kiro-cli");
     expect(config.workingDir).toBe(process.cwd());
     expect(config.trustMode).toBe(false);
     expect(config.permissionTimeoutMs).toBe(60_000);
@@ -99,16 +99,16 @@ describe("loadAndValidateConfig", () => {
   // --- KIRO_CLI_PATH ---
 
   it("throws when KIRO_CLI_PATH points to a non-executable file", async () => {
-    process.env["KIRO_CLI_PATH"] = "/usr/local/bin/kiro-cli";
+    process.env["AGENT_CLI_PATH"] = "/usr/local/bin/kiro-cli";
     vi.mocked(fs.access).mockRejectedValue(new Error("EACCES"));
     await expect(loadAndValidateConfig()).rejects.toThrow("CLI binary");
   });
 
   it("accepts bare command names without filesystem check", async () => {
-    process.env["KIRO_CLI_PATH"] = "kiro-cli";
+    process.env["AGENT_CLI_PATH"] = "kiro-cli";
     // access should NOT be called for bare commands
     const config = await loadAndValidateConfig();
-    expect(config.kiroCLIPath).toBe("kiro-cli");
+    expect(config.agentCliPath).toBe("kiro-cli");
   });
 
   // --- WORKING_DIR ---

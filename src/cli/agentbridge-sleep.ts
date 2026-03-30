@@ -7,11 +7,12 @@
  * maintenance, logs the audit trail, and exits.
  *
  * Usage:
- *   agentbridge sleep [--dry-run] [--verbose]
+ *   agentbridge sleep [--dry-run] [--verbose] [--force]
  *
  * Flags:
  *   --dry-run   Gather state and build prompt, print to stdout, skip subagent
  *   --verbose   Enable detailed logging at each orchestration step
+ *   --force     Run housekeeping even if no messages since last sleep
  *
  * Exit codes:
  *   0  Success
@@ -32,14 +33,11 @@ const TAG = "agentbridge-sleep";
 
 // ── Argument parsing ────────────────────────────────────────────────────────
 
-export type RawArgs = {
-  dryRun: boolean;
-  verbose: boolean;
-};
+export type RawArgs = { dryRun: boolean; verbose: boolean; force: boolean };
 
 export function parseArgs(argv: string[]): RawArgs {
   const args = argv.slice(2);
-  const parsed: RawArgs = { dryRun: false, verbose: false };
+  const parsed: RawArgs = { dryRun: false, verbose: false, force: false };
 
   for (const arg of args) {
     switch (arg) {
@@ -48,6 +46,9 @@ export function parseArgs(argv: string[]): RawArgs {
         break;
       case "--verbose":
         parsed.verbose = true;
+        break;
+      case "--force":
+        parsed.force = true;
         break;
     }
   }
@@ -473,10 +474,23 @@ async function main(): Promise<void> {
     const snapshot = await gatherer.gather();
     if (flags.verbose) logInfo(TAG, `State gathered: ${buildSnapshotSummary(snapshot)}`);
 
+    // Guardrail: skip if no messages since last sleep (unless --force)
+    const msgCount = snapshot.dbStats.messagesSinceLastSleep;
+    if (msgCount === 0 && !flags.force) {
+      logInfo(TAG, `[SLEEP] No messages since last sleep — nothing to process. Use --force to run housekeeping anyway.`);
+      return;
+    }
+    if (msgCount === 0 && flags.force) {
+      logInfo(TAG, `[SLEEP] No messages since last sleep — running housekeeping only (--force).`);
+    }
+
     // Wired pre-tasks (always run — fast, idempotent)
     logInfo(TAG, `[SLEEP] Running wired pre-tasks${isResume ? " (resume)" : ""}...`);
     const wiredResults = await runWiredPreTasks(db, memoryConfig.memoryDir);
     logInfo(TAG, `[SLEEP] Wired: ${formatWiredResults(wiredResults)}`);
+
+    // If --force with no messages, stop after housekeeping
+    if (msgCount === 0) return;
 
     // Load step files + build vars
     const vars = buildSleepVars(snapshot);

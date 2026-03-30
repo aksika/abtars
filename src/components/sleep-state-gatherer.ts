@@ -17,6 +17,7 @@ export interface WorkingDirEntry {
 
 export interface DbStats {
   messageCount: number;
+  messagesSinceLastSleep: number;
   embeddingCount: number;
   nullEmbeddingCount: number;
   sessionCount: number;
@@ -68,7 +69,8 @@ export class SleepStateGatherer {
     logInfo(TAG, "Gathering system state snapshot");
 
     const workingDirs = this.scanWorkingDirs();
-    const dbStats = this.queryDbStats();
+    const lastSleepTimestamp = this.getLastSleepTimestamp();
+    const dbStats = this.queryDbStats(lastSleepTimestamp);
     const fts5Health = this.checkFts5Health();
     const diskUsageBytes = this.calculateDiskUsage();
     const topicFiles = this.listTopicFiles();
@@ -82,7 +84,7 @@ export class SleepStateGatherer {
       diskBudgetBytes: this.config.diskBudgetBytes,
       topicFiles,
       lastSleepAudit: this.getLastSleepAudit(),
-      lastSleepTimestamp: this.getLastSleepTimestamp(),
+      lastSleepTimestamp,
       wakeupDate: this.getWakeupDate(),
       todoContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "todo.md")),
       cronContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "cron.json")),
@@ -141,7 +143,7 @@ export class SleepStateGatherer {
   }
 
   /** Query DB for aggregate statistics. */
-  private queryDbStats(): DbStats {
+  private queryDbStats(lastSleepTimestamp: number | null): DbStats {
     const count = (table: string): number => {
       try {
         const row = this.db.prepare(`SELECT COUNT(*) as cnt FROM ${table}`).get() as { cnt: number };
@@ -160,6 +162,9 @@ export class SleepStateGatherer {
     };
 
     const messageCount = count("messages");
+    const messagesSinceLastSleep = lastSleepTimestamp !== null
+      ? countWhere("messages", `timestamp >= ${lastSleepTimestamp}`)
+      : messageCount;
     const extractedMemoryCount = count("extracted_memories");
 
     // Darwinism stats
@@ -182,6 +187,7 @@ export class SleepStateGatherer {
 
     return {
       messageCount,
+      messagesSinceLastSleep,
       embeddingCount: countWhere("extracted_memories", "embedding IS NOT NULL"),
       nullEmbeddingCount: countWhere("extracted_memories", "embedding IS NULL"),
       sessionCount: count("sessions"),

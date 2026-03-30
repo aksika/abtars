@@ -17,7 +17,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
       destroy: vi.fn(),
       isReady: true,
     },
-    config: { kiroTransport: "acp", workingDir: "/tmp", discordA2aEnabled: false },
+    config: { agentTransport: "acp", workingDir: "/tmp", discordA2aEnabled: false },
     startedAt: Date.now(),
     memory: null,
     memoryConfig: { memoryEnabled: false, memoryDir: "/tmp" },
