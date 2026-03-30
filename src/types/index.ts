@@ -1,4 +1,4 @@
-export type { Config, KiroTransport } from "./config.js";
+export type { Config, AgentTransport, KiroTransport } from "./config.js";
 export { CONFIG_DEFAULTS } from "./config.js";
 
 export type { SessionState } from "./session.js";

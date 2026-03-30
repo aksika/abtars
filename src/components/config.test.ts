@@ -101,7 +101,7 @@ describe("loadAndValidateConfig", () => {
   it("throws when KIRO_CLI_PATH points to a non-executable file", async () => {
     process.env["KIRO_CLI_PATH"] = "/usr/local/bin/kiro-cli";
     vi.mocked(fs.access).mockRejectedValue(new Error("EACCES"));
-    await expect(loadAndValidateConfig()).rejects.toThrow("KIRO_CLI_PATH");
+    await expect(loadAndValidateConfig()).rejects.toThrow("CLI binary");
   });
 
   it("accepts bare command names without filesystem check", async () => {
