@@ -331,10 +331,9 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
 }
 
 function buildStatusLines(ctx: CommandContext): string[] {
-  const thisDir = join(homedir(), ".agentbridge");
   let version = "?";
   try {
-    const pkgPath = join(thisDir, "..", "workspace", "agentbridge", "package.json");
+    const pkgPath = join(import.meta.dirname, "..", "..", "package.json");
     version = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
   } catch { /* */ }
   let model = process.env["AGENT_MODEL"] || "";
