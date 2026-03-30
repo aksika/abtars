@@ -37,12 +37,8 @@ if [ "$QUICK" = false ]; then
   #   npx patchright install chromium  # fallback
 fi
 
-# 3. Deploy steering files (SOUL.md + skills as steering)
-echo "📝 Deploying steering files..."
-mkdir -p "$AB_HOME/.kiro/steering"
-mkdir -p "$AB_HOME/.kiro/agents"
-mkdir -p "$AB_HOME/skills/agents"
-mkdir -p "$AB_HOME/prompts"
+# 3. Deploy persona files
+echo "📝 Deploying persona..."
 
 # safe_cp: skip if deployed file is newer than source (agent may have modified it)
 safe_cp() {
@@ -54,32 +50,49 @@ safe_cp() {
   cp "$src" "$dst"
 }
 
-safe_cp "$PROJECT_DIR/persona/SOUL.md" "$AB_HOME/.kiro/steering/SOUL.md"
-safe_cp "$PROJECT_DIR/persona/professor.json" "$AB_HOME/.kiro/agents/professor.json"
-for f in "$PROJECT_DIR/skills/"*.md; do
-  safe_cp "$f" "$AB_HOME/.kiro/steering/$(basename "$f")"
+# Core (personal): deploy from persona/core/ if exists, else persona/core_templates/
+CORE_SRC="$PROJECT_DIR/persona/core"
+if [ ! -d "$CORE_SRC" ] || [ -z "$(ls -A "$CORE_SRC" 2>/dev/null)" ]; then
+  CORE_SRC="$PROJECT_DIR/persona/core_templates"
+  echo "   ℹ️  Using core_templates (no persona/core/ found)"
+fi
+mkdir -p "$AB_HOME/core"
+for f in "$CORE_SRC/"*.md; do
+  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/core/$(basename "$f")"
 done
-safe_cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/prompts/sleeping_prompt.md"
-chmod 644 "$AB_HOME/prompts/sleeping_prompt.md"
 
-# Deploy sleep step files (multi-turn) — clean old files first
+# Prompts: always from repo
+mkdir -p "$AB_HOME/prompts"
+for f in "$PROJECT_DIR/persona/prompts/"*.md; do
+  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/prompts/$(basename "$f")"
+done
+
+# Sleep step files — clean old files first
 rm -f "$AB_HOME/prompts/sleep/"*.md
 mkdir -p "$AB_HOME/prompts/sleep"
-for f in "$PROJECT_DIR/persona/sleep/"*.md; do
+for f in "$PROJECT_DIR/persona/prompts/sleep/"*.md; do
   [ -f "$f" ] && safe_cp "$f" "$AB_HOME/prompts/sleep/$(basename "$f")"
 done
 
-safe_cp "$PROJECT_DIR/persona/browsing_prompt.md" "$AB_HOME/prompts/browsing_prompt.md"
-chmod 644 "$AB_HOME/prompts/browsing_prompt.md"
+# Skills: always from repo
+mkdir -p "$AB_HOME/skills" "$AB_HOME/skills/agents"
+for f in "$PROJECT_DIR/persona/skills/"*.md; do
+  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/skills/$(basename "$f")"
+done
+for f in "$PROJECT_DIR/persona/skills/agents/"*.md; do
+  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/skills/agents/$(basename "$f")"
+done
 
-# Deploy task descriptions
+# Tasks (personal): deploy from persona/tasks/ if exists, else create empty dir
 mkdir -p "$AB_HOME/tasks"
-for f in "$PROJECT_DIR/tasks/"*.md; do
-  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/tasks/$(basename "$f")"
-done
-for f in "$PROJECT_DIR/skills/agents/"*.md; do
-  safe_cp "$f" "$AB_HOME/skills/agents/$(basename "$f")"
-done
+if [ -d "$PROJECT_DIR/persona/tasks" ] && [ -n "$(ls -A "$PROJECT_DIR/persona/tasks" 2>/dev/null)" ]; then
+  for f in "$PROJECT_DIR/persona/tasks/"*.md; do
+    [ -f "$f" ] && safe_cp "$f" "$AB_HOME/tasks/$(basename "$f")"
+  done
+fi
+
+# Agent config
+safe_cp "$PROJECT_DIR/persona/professor.json" "$AB_HOME/professor.json"
 
 # 4. Deploy launcher script + recall CLI
 echo "🚀 Deploying launcher + recall CLI..."
