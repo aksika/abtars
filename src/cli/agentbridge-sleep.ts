@@ -240,8 +240,8 @@ async function createSleepTransport(verbose: boolean): Promise<{ transport: impo
   const { loadAndValidateConfig } = await import("../components/config.js");
   const config = await loadAndValidateConfig();
   const { AcpTransport } = await import("../components/acp-transport.js");
-  const transport = new AcpTransport(config.kiroCLIPath, config.workingDir);
-  const model = process.env.MEMORY_SUBAGENT_MODEL || process.env.KIRO_MODEL || "unknown";
+  const transport = new AcpTransport(config.agentCliPath, config.workingDir);
+  const model = process.env.AGENT_SLEEP_MODEL || "unknown";
   await transport.initialize();
   if (verbose) logInfo(TAG, `ACP transport initialized (model=${model})`);
   return { transport, model };

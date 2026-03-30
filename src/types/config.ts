@@ -3,9 +3,6 @@ import type { LogLevel } from "../components/logger.js";
 /** Transport method for communicating with the agent CLI. */
 export type AgentTransport = "tmux" | "acp";
 
-/** @deprecated Use AgentTransport */
-export type KiroTransport = AgentTransport;
-
 /** Bridge configuration loaded from .env and validated at startup. */
 export type Config = {
   /** Telegram bot token (format: \d+:[A-Za-z0-9_-]+) */
@@ -72,14 +69,6 @@ export type Config = {
   agentCodingModel: string;
   /** Whether to start mcporter MCP daemon (default: false) */
   mcpDaemon: boolean;
-
-  // Legacy aliases (kept for backward compat, map to agent* fields)
-  /** @deprecated Use agentCliPath */
-  kiroCLIPath: string;
-  /** @deprecated Use agentTransport */
-  kiroTransport: AgentTransport;
-  /** @deprecated Use agentCodingModel */
-  codingAgentModel: string;
 };
 
 /** Default values for optional config fields. */
@@ -108,8 +97,4 @@ export const CONFIG_DEFAULTS = {
   discordEnabled: false,
   discordA2aEnabled: false,
   mcpDaemon: false,
-  // Legacy aliases
-  get kiroCLIPath() { return this.agentCliPath; },
-  get kiroTransport() { return this.agentTransport; },
-  get codingAgentModel() { return this.agentCodingModel; },
 } as const satisfies Partial<Config>;

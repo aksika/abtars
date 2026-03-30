@@ -153,7 +153,7 @@ Usage:
   // Build prompt
   const prompt = loadBrowsePrompt(task, chatId, taskId);
 
-  const browseModel = process.env.BROWSING_AGENT || "claude-sonnet-4.5";
+  const browseModel = process.env.AGENT_BROWSE_MODEL || "claude-sonnet-4.5";
 
   // Spawn detached kiro-cli acp subprocess
   const promptFile = join(logsDir, `browse_${taskId}_prompt.txt`);

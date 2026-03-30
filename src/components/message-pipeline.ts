@@ -31,7 +31,7 @@ export interface PipelineDeps {
   sleepQueue: SleepQueue;
   idleSave: IdleSave;
   conversationBuffer: ConversationBuffer;
-  config: { kiroTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
+  config: { agentTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
   startedAt: number;
   sttConfig: SttConfig | null;
   ttsConfig: TtsConfig | null;

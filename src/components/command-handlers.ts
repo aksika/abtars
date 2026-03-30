@@ -27,7 +27,7 @@ export interface CommandContext {
   reply: Reply;
   // Transport
   transport: IKiroTransport;
-  config: { kiroTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
+  config: { agentTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
   startedAt: number;
   // Memory
   memory: MemoryManager | null;
@@ -125,7 +125,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     if (ctx.transport instanceof TmuxClient) {
       await ctx.reply("♻️ Restarting Kiro...");
       ctx.busyChats.delete(ctx.sessionKey);
-      await (ctx.transport as TmuxClient).restartSession(ctx.config.workingDir, process.env["KIRO_MODEL"]);
+      await (ctx.transport as TmuxClient).restartSession(ctx.config.workingDir, process.env["AGENT_MODEL"]);
       ctx.pendingSessionStart.add(ctx.sessionKey);
       await ctx.reply("✅ Kiro restarted.");
     } else {
@@ -337,12 +337,12 @@ function buildStatusLines(ctx: CommandContext): string[] {
     const pkgPath = join(thisDir, "..", "workspace", "agentbridge", "package.json");
     version = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
   } catch { /* */ }
-  let model = process.env["KIRO_MODEL"] || "";
+  let model = process.env["AGENT_MODEL"] || "";
   if (!model) {
     try { model = JSON.parse(execSync("kiro-cli settings list --format json 2>/dev/null", { timeout: 3000, encoding: "utf-8" }))["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
   }
   const status = ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected";
-  const mode = ctx.config.kiroTransport.toUpperCase();
+  const mode = ctx.config.agentTransport.toUpperCase();
   const uptime = formatUptime(Date.now() - ctx.startedAt);
   const ctxPct = ("contextPercent" in ctx.transport && (ctx.transport as TmuxClient).contextPercent >= 0)
     ? `${(ctx.transport as TmuxClient).contextPercent}%`
