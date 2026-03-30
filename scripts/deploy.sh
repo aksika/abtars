@@ -63,9 +63,9 @@ safe_cp() {
 
 # Core (personal): deploy from persona/core/ if exists, else persona/core_templates/
 CORE_SRC="$PROJECT_DIR/persona/core"
-if [ ! -d "$CORE_SRC" ] || [ -z "$(ls -A "$CORE_SRC" 2>/dev/null)" ]; then
+if [ -z "$(ls "$CORE_SRC/"*.md 2>/dev/null)" ]; then
   CORE_SRC="$PROJECT_DIR/persona/core_templates"
-  echo "   ℹ️  Using core_templates (no persona/core/ found)"
+  echo "   ℹ️  Using core_templates (no .md files in persona/core/)"
 fi
 mkdir -p "$AB_HOME/core"
 for f in "$CORE_SRC/"*.md; do
