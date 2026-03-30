@@ -22,6 +22,8 @@ Telegram User ──► Telegram Bot API ──► Bridge ──► tmux session
 - **A Telegram Bot** — created via [@BotFather](https://t.me/BotFather)
 - **Your Telegram User ID** — get it from [@userinfobot](https://t.me/userinfobot)
 
+Optional: ollama (embeddings), mcporter (MCP), gws (Gmail), nlm (NotebookLM). See [docs/INSTALL.md](docs/INSTALL.md) for full setup.
+
 ## Quick Start
 
 ### 1. Clone and install
