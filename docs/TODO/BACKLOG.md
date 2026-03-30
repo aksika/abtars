@@ -634,3 +634,47 @@ Total always-on: ~10KB (~3K tokens). Total with all skills: ~25KB.
 - [ ] Prototype transport-level `systemContext` parameter
 - [ ] Measure token cost of always-prepend vs first-message
 - [ ] Test SOUL persistence across long conversations (does it get evicted?)
+
+## Hot-reload skills via heartbeat
+
+**Priority:** medium
+**Effort:** small
+
+### Plan
+
+1. **New file:** `src/components/skill-watcher.ts`
+   - `SkillWatcher` class, constructed with skills dir path
+   - `checkForChanges(): NewSkill[]` — stats all `*.md` in skills dir (recursive), compares mtime against stored map, returns new/changed files
+   - Returns `{ filename, name, description }` — parses first heading + first paragraph from the .md
+   - Stores `Map<filename, mtimeMs>` in memory (full scan on first tick, skip first tick since skills already loaded)
+
+2. **Heartbeat task:** register `skill-reloader` in `bridge-app.ts` heartbeat tasks
+   - Calls `skillWatcher.checkForChanges()`
+   - For each new skill: inject short notification into ACP session: `[NEW SKILL AVAILABLE] <name>: <description>. Read ~/.agentbridge/skills/<filename> if you need it.`
+   - Append a 1-liner to `~/.agentbridge/skills/TOOLS.md` tool list: `- <name>: <description>`
+   - Log: `[skill-reloader] New skill available: <name>`
+
+3. **No full injection** — agent reads the skill file on demand via `cat` when it needs it or user asks
+
+4. **No delete handling** — removed skills don't need hot-reload, handled on next restart
+
+
+
+## Multi-user Telegram support
+
+**Priority:** high
+**Effort:** medium
+
+Bridge should be able to send messages to Telegram chats other than the current user's. Required for:
+- Proactive messages to other users (e.g. daily riddle to Adrika)
+- Notifications to group chats
+- Agent-initiated outreach
+
+Implementation: expose `bot.sendMessage(chatId, text)` as an agent-callable tool or CLI (`agentbridge-send --chat-id <id> --message <text>`). The Telegram adapter already has the bot instance — just needs a send path that doesn't require an inbound message context.
+
+## 9Router integration
+
+**Priority:** medium
+**Effort:** small
+
+9Router is installed on the Mac (`localhost:20128`) and registered as an OpenClaw provider. Wire it into agentbridge as an alternative model provider — route requests through 9Router's OpenAI-compatible API to access free models (Kiro/AWS Claude, iFlow, Qwen direct). Already audited for security (see `docs/9ROUTER-SECURITY-AUDIT.md`). Don't enable MITM or tunnel features.
