@@ -40,7 +40,7 @@ while IFS= read -r f; do
   else
     warn "stale lock: $f"
   fi
-done < <(find "$AB" -name "*.lock" -not -path "*/sleep/*" -mmin +60 2>/dev/null)
+done < <(find "$AB" -name "*.lock" -not -path "*/sleep/*" -not -path "*/node_modules/*" -mmin +60 2>/dev/null)
 
 # 3. Stale sleep lock (older than 2 hours, no matching audit .md)
 for lockfile in "$AB/memory/sleep"/sleep_*.lock; do
