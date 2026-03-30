@@ -377,13 +377,13 @@ async function main(): Promise<void> {
       for (const step of steps) {
         // Check skip
         if (step.skippable && skipSet.has(step.name)) {
-          if (flags.verbose) logInfo(TAG, `Skipping ${step.name}`);
+          logInfo(TAG, `[SLEEP] ⏭ ${step.name} — skipped`);
           stepResults.push({ step: step.name, duration: 0, attempts: 0, status: "skipped", responseLen: 0 });
           continue;
         }
 
         const start = Date.now();
-        if (flags.verbose) logInfo(TAG, `→ ${step.name}`);
+        logInfo(TAG, `[SLEEP] → ${step.name}`);
 
         const response = await sendWithRetry(transport, step.prompt, step.name, flags.verbose);
         const duration = Date.now() - start;
@@ -397,9 +397,7 @@ async function main(): Promise<void> {
           responseLen: response?.length ?? 0,
         });
 
-        if (flags.verbose) {
-          logInfo(TAG, `  ${step.name}: ${response ? "ok" : "FAILED"} (${(duration / 1000).toFixed(1)}s, ${response?.length ?? 0} chars)`);
-        }
+        logInfo(TAG, `[SLEEP] ${response ? "✓" : "✗"} ${step.name} (${(duration / 1000).toFixed(1)}s, ${response?.length ?? 0} chars)`);
       }
     } finally {
       try { transport.destroy(); } catch { /* */ }
@@ -425,7 +423,7 @@ async function main(): Promise<void> {
     const okCount = stepResults.filter(r => r.status === "ok").length;
     const failCount = stepResults.filter(r => r.status === "failed").length;
     const skipCount = stepResults.filter(r => r.status === "skipped").length;
-    logInfo(TAG, `Sleep routine completed: ${okCount} ok, ${failCount} failed, ${skipCount} skipped`);
+    logInfo(TAG, `[SLEEP] 🏁 Sleep routine completed: ${okCount} ok, ${failCount} failed, ${skipCount} skipped`);
   } finally {
     memory.close();
   }
