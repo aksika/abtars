@@ -105,7 +105,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
     );
   }
 
-  // --- AGENT_CLI / KIRO_CLI_PATH (new name takes priority, old is fallback) ---
+  // --- AGENT_CLI_PATH ---
   const agentCli = process.env["AGENT_CLI"] || CONFIG_DEFAULTS.agentCli;
   const defaultCliPath = agentCli === "gemini" ? "gemini" : agentCli === "kiro" ? "kiro-cli" : agentCli;
   const agentCliPath = process.env["AGENT_CLI_PATH"] || defaultCliPath;
@@ -115,14 +115,14 @@ export async function loadAndValidateConfig(): Promise<Config> {
     throw new Error(`CLI binary "${agentCliPath}" is not accessible or not executable`);
   }
 
-  // --- AGENT_TRANSPORT / KIRO_TRANSPORT (new name takes priority) ---
+  // --- AGENT_TRANSPORT ---
   const rawTransport = (process.env["AGENT_TRANSPORT"] || CONFIG_DEFAULTS.agentTransport).toLowerCase();
   if (rawTransport !== "tmux" && rawTransport !== "acp") {
     throw new Error(`AGENT_TRANSPORT must be "tmux" or "acp", got "${rawTransport}"`);
   }
   const agentTransport = rawTransport as AgentTransport;
 
-  // --- AGENT_MODEL / KIRO_MODEL ---
+  // --- AGENT_MODEL ---
   const agentModel = process.env["AGENT_MODEL"] || CONFIG_DEFAULTS.agentModel;
 
   // --- AGENT_BROWSE_MODEL / BROWSING_AGENT ---

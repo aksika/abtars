@@ -98,7 +98,7 @@ describe("loadAndValidateConfig", () => {
 
   // --- KIRO_CLI_PATH ---
 
-  it("throws when KIRO_CLI_PATH points to a non-executable file", async () => {
+  it("throws when AGENT_CLI_PATH points to a non-executable file", async () => {
     process.env["AGENT_CLI_PATH"] = "/usr/local/bin/kiro-cli";
     vi.mocked(fs.access).mockRejectedValue(new Error("EACCES"));
     await expect(loadAndValidateConfig()).rejects.toThrow("CLI binary");
