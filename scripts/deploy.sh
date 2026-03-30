@@ -103,7 +103,12 @@ safe_cp "$PROJECT_DIR/persona/professor.json" "$AB_HOME/professor.json"
 
 # 4. Deploy launcher script + recall CLI
 echo "🚀 Deploying launcher + recall CLI..."
-cp "$PROJECT_DIR/scripts/agentbridge.sh" "$AB_HOME/agentbridge.sh"
+# Write agentbridge.sh with correct PROJECT_DIR baked in
+{
+  echo "#!/usr/bin/env bash"
+  echo "PROJECT_DIR=\"$PROJECT_DIR\""
+  tail -n +3 "$PROJECT_DIR/scripts/agentbridge.sh"
+} > "$AB_HOME/agentbridge.sh"
 chmod +x "$AB_HOME/agentbridge.sh"
 # Write browser-docker.sh with correct PROJECT_DIR baked in
 {
