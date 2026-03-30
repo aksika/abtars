@@ -62,7 +62,8 @@ done
 safe_cp "$PROJECT_DIR/persona/sleeping_prompt.md" "$AB_HOME/prompts/sleeping_prompt.md"
 chmod 644 "$AB_HOME/prompts/sleeping_prompt.md"
 
-# Deploy sleep step files (multi-turn)
+# Deploy sleep step files (multi-turn) — clean old files first
+rm -f "$AB_HOME/prompts/sleep/"*.md
 mkdir -p "$AB_HOME/prompts/sleep"
 for f in "$PROJECT_DIR/persona/sleep/"*.md; do
   [ -f "$f" ] && safe_cp "$f" "$AB_HOME/prompts/sleep/$(basename "$f")"
