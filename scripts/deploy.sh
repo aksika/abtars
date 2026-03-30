@@ -27,8 +27,11 @@ echo ""
 echo "📋 Syncing .env..."
 if [ -f "$PROJECT_DIR/persona/core/.env" ]; then
   cp "$PROJECT_DIR/persona/core/.env" "$AB_HOME/.env"
+elif [ -f "$AB_HOME/.env" ]; then
+  echo "   ⏭  No persona/core/.env — keeping existing"
 else
-  echo "   ⚠️  No .env in persona/core/ — keeping existing"
+  cp "$PROJECT_DIR/.env.example" "$AB_HOME/.env"
+  echo "   ℹ️  Created .env from .env.example — edit ~/.agentbridge/.env with your tokens"
 fi
 
 # 2. Build (unless --quick)
