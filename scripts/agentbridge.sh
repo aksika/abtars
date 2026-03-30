@@ -14,7 +14,7 @@
 set -euo pipefail
 
 AB_HOME="${HOME}/.agentbridge"
-PROJECT_DIR="/home/qakosal/workspace/agentbridge"
+PROJECT_DIR="$HOME/.agentbridge"
 ARGS=("${@:---telegram}")
 
 # Load env

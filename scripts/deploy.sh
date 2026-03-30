@@ -39,10 +39,14 @@ if [ "$QUICK" = false ]; then
   echo "🔨 Building..."
   cd "$PROJECT_DIR"
   npm run build
-  # Browser install is a one-time manual step (requires sudo for system deps):
-  #   npx patchright install chrome   # preferred, or:
-  #   npx patchright install chromium  # fallback
 fi
+
+# 2b. Copy runtime files to AB_HOME (self-contained)
+echo "📦 Copying runtime..."
+cp "$PROJECT_DIR/package.json" "$AB_HOME/package.json"
+rsync -a --delete "$PROJECT_DIR/dist/" "$AB_HOME/dist/"
+rsync -a --delete "$PROJECT_DIR/node_modules/" "$AB_HOME/node_modules/"
+[ -d "$PROJECT_DIR/docker" ] && rsync -a "$PROJECT_DIR/docker/" "$AB_HOME/docker/"
 
 # 3. Deploy persona files
 echo "📝 Deploying persona..."
@@ -103,17 +107,17 @@ safe_cp "$PROJECT_DIR/persona/professor.json" "$AB_HOME/professor.json"
 
 # 4. Deploy launcher script + recall CLI
 echo "🚀 Deploying launcher + recall CLI..."
-# Write agentbridge.sh with correct PROJECT_DIR baked in
+# Write agentbridge.sh with correct AB_HOME baked in
 {
   echo "#!/usr/bin/env bash"
-  echo "PROJECT_DIR=\"$PROJECT_DIR\""
+  echo "PROJECT_DIR=\"$AB_HOME\""
   tail -n +3 "$PROJECT_DIR/scripts/agentbridge.sh"
 } > "$AB_HOME/agentbridge.sh"
 chmod +x "$AB_HOME/agentbridge.sh"
-# Write browser-docker.sh with correct PROJECT_DIR baked in
+# Write browser-docker.sh pointing to AB_HOME (self-contained)
 {
   echo "#!/usr/bin/env bash"
-  echo "PROJECT_DIR=\"$PROJECT_DIR\""
+  echo "PROJECT_DIR=\"$AB_HOME\""
   tail -n +3 "$PROJECT_DIR/scripts/browser-docker.sh"
 } > "$AB_HOME/browser-docker.sh"
 chmod +x "$AB_HOME/browser-docker.sh"
@@ -126,7 +130,7 @@ chmod +x "$AB_HOME/scripts/doctor.sh"
 # Deploy agentbridge-recall CLI (agent-callable memory search)
 RECALL_SCRIPT="$AB_HOME/agentbridge-recall"
 echo '#!/usr/bin/env bash' > "$RECALL_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-recall.js\" \"\$@\"" >> "$RECALL_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-recall.js\" \"\$@\"" >> "$RECALL_SCRIPT"
 chmod +x "$RECALL_SCRIPT"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$RECALL_SCRIPT" "$HOME/.local/bin/agentbridge-recall"
@@ -134,63 +138,63 @@ ln -sf "$RECALL_SCRIPT" "$HOME/.local/bin/agentbridge-recall"
 # Deploy agentbridge-store CLI (agent-callable memory storage)
 STORE_SCRIPT="$AB_HOME/agentbridge-store"
 echo '#!/usr/bin/env bash' > "$STORE_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-store.js\" \"\$@\"" >> "$STORE_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-store.js\" \"\$@\"" >> "$STORE_SCRIPT"
 chmod +x "$STORE_SCRIPT"
 ln -sf "$STORE_SCRIPT" "$HOME/.local/bin/agentbridge-store"
 
 # Deploy agentbridge-sleep CLI (overnight memory maintenance)
 SLEEP_SCRIPT="$AB_HOME/agentbridge-sleep"
 echo '#!/usr/bin/env bash' > "$SLEEP_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-sleep.js\" \"\$@\"" >> "$SLEEP_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-sleep.js\" \"\$@\"" >> "$SLEEP_SCRIPT"
 chmod +x "$SLEEP_SCRIPT"
 ln -sf "$SLEEP_SCRIPT" "$HOME/.local/bin/agentbridge-sleep"
 
 # Deploy agentbridge-browser CLI (agent-callable headless browser)
 BROWSER_SCRIPT="$AB_HOME/agentbridge-browser"
 echo '#!/usr/bin/env bash' > "$BROWSER_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-browser.js\" \"\$@\"" >> "$BROWSER_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-browser.js\" \"\$@\"" >> "$BROWSER_SCRIPT"
 chmod +x "$BROWSER_SCRIPT"
 ln -sf "$BROWSER_SCRIPT" "$HOME/.local/bin/agentbridge-browser"
 
 # Deploy agentbridge-todo CLI (persistent todo list)
 TODO_SCRIPT="$AB_HOME/agentbridge-todo"
 echo '#!/usr/bin/env bash' > "$TODO_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-todo.js\" \"\$@\"" >> "$TODO_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-todo.js\" \"\$@\"" >> "$TODO_SCRIPT"
 chmod +x "$TODO_SCRIPT"
 ln -sf "$TODO_SCRIPT" "$HOME/.local/bin/agentbridge-todo"
 
 # Deploy agentbridge-cron CLI (time-based reminders and tasks)
 CRON_SCRIPT="$AB_HOME/agentbridge-cron"
 echo '#!/usr/bin/env bash' > "$CRON_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-cron.js\" \"\$@\"" >> "$CRON_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-cron.js\" \"\$@\"" >> "$CRON_SCRIPT"
 chmod +x "$CRON_SCRIPT"
 ln -sf "$CRON_SCRIPT" "$HOME/.local/bin/agentbridge-cron"
 
 # Deploy agentbridge-browse CLI (browser subagent launcher)
 BROWSE_SCRIPT="$AB_HOME/agentbridge-browse"
 echo '#!/usr/bin/env bash' > "$BROWSE_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-browse.js\" \"\$@\"" >> "$BROWSE_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-browse.js\" \"\$@\"" >> "$BROWSE_SCRIPT"
 chmod +x "$BROWSE_SCRIPT"
 ln -sf "$BROWSE_SCRIPT" "$HOME/.local/bin/agentbridge-browse"
 
 # Deploy agentbridge-expand CLI (source message lookup)
 EXPAND_SCRIPT="$AB_HOME/agentbridge-expand"
 echo '#!/usr/bin/env bash' > "$EXPAND_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-expand.js\" \"\$@\"" >> "$EXPAND_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-expand.js\" \"\$@\"" >> "$EXPAND_SCRIPT"
 chmod +x "$EXPAND_SCRIPT"
 ln -sf "$EXPAND_SCRIPT" "$HOME/.local/bin/agentbridge-expand"
 
 # Deploy agentbridge-tweet CLI (Twitter feed + discovery)
 TWEET_SCRIPT="$AB_HOME/agentbridge-tweet"
 echo '#!/usr/bin/env bash' > "$TWEET_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-tweet.js\" \"\$@\"" >> "$TWEET_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-tweet.js\" \"\$@\"" >> "$TWEET_SCRIPT"
 chmod +x "$TWEET_SCRIPT"
 ln -sf "$TWEET_SCRIPT" "$HOME/.local/bin/agentbridge-tweet"
 
 # Deploy agentbridge-rss CLI (RSS feed fetcher for finance pipeline)
 RSS_SCRIPT="$AB_HOME/agentbridge-rss"
 echo '#!/usr/bin/env bash' > "$RSS_SCRIPT"
-echo "exec node \"$PROJECT_DIR/dist/cli/agentbridge-rss.js\" \"\$@\"" >> "$RSS_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-rss.js\" \"\$@\"" >> "$RSS_SCRIPT"
 chmod +x "$RSS_SCRIPT"
 ln -sf "$RSS_SCRIPT" "$HOME/.local/bin/agentbridge-rss"
 
@@ -217,7 +221,7 @@ fi
 if grep -q "^EMBEDDING_ENABLED=true" "$AB_HOME/.env" 2>/dev/null; then
   EMBED_SCRIPT="$AB_HOME/agentbridge-embed"
   echo '#!/usr/bin/env bash' > "$EMBED_SCRIPT"
-  echo "EMBEDDING_ENABLED=true exec node \"$PROJECT_DIR/dist/cli/agentbridge-embed.js\" \"\$@\"" >> "$EMBED_SCRIPT"
+  echo "EMBEDDING_ENABLED=true exec node \"$AB_HOME/dist/cli/agentbridge-embed.js\" \"\$@\"" >> "$EMBED_SCRIPT"
   chmod +x "$EMBED_SCRIPT"
   ln -sf "$EMBED_SCRIPT" "$HOME/.local/bin/agentbridge-embed"
 
