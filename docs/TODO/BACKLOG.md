@@ -514,3 +514,11 @@ Replaced monolith `sleeping_prompt.md` with 15 focused step files in `persona/sl
 **Commits:** `69a6486`..`7e16c04`
 
 New CLI for modifying existing extracted memories. Lookup by `--memory-id` or `--message-id`. Two-tier usage: attribute edits free, content edits require user request (translation fixes exempt). CIA-AAA attribute rules enforced. Classification guards (SECRET locked, CONFIDENTIAL only 2→1). FTS5 UPDATE triggers. `edited_at`/`edited_by` audit fields. `source_timestamp` consolidated into `created_at`. Existing methods (`adjustRelevance`, `reclassifyMemory`, `updateEmotionByPlatformId`) routed through `editMemory()`. Sleep prompt §6/§7 use `agentbridge-edit`. 11 new tests, 729→735 total.
+
+## 48. Multi-CLI Support (Kiro / Gemini CLI)
+
+**Status:** Not started
+**Priority:** Low
+**Plan:** `docs/TODO/MULTI-CLI-PLAN.md`
+
+Add Gemini CLI as an alternative to Kiro CLI. Env var selects which CLI the bridge uses. Restructure .env CLI section.
