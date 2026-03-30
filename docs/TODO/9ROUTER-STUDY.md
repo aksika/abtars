@@ -49,44 +49,42 @@ This means it works by **intercepting the CLI tool's own API calls** — not by 
 
 ## Relevance to AgentBridge (#48)
 
-### Option A: Use 9Router as a proxy for Kiro CLI (current setup)
-- Run 9Router alongside the bridge
-- Kiro CLI's API calls get intercepted and routed to free providers
-- **No code changes to AgentBridge** — 9Router is transparent
-- Risk: MITM cert install required, may break on updates
+### Best path: Gemini CLI free tier directly (no 9Router needed)
 
-### Option B: Use 9Router's OpenAI-compatible endpoint directly
-- 9Router exposes `http://localhost:20128/v1` (OpenAI-compatible)
-- AgentBridge could call this endpoint for LLM calls (not via CLI)
-- But AgentBridge uses CLI tools (kiro-cli, gemini), not direct API calls
-- Not directly applicable to current architecture
+Gemini CLI has a built-in free tier — 180K completions/month via Google account OAuth. No MITM, no cert install, no third-party proxy:
 
-### Option C: Use Gemini CLI + 9Router (best fit for #48)
-- Install Gemini CLI, configure it to use 9Router's intercepted Gemini endpoint
-- Set `AGENT_CLI=gemini` in AgentBridge
-- Gemini CLI routes through 9Router → free Gemini 2.5 Pro
-- **180K completions/month free** via Antigravity/Google auth
+```bash
+npm install -g @google/gemini-cli
+gemini auth   # OAuth with Google account — done
+```
+
+Then `gemini --experimental-acp` works with the free tier. AgentBridge sets `AGENT_CLI=gemini` and gets free Gemini 2.5 Pro legitimately.
+
+**9Router is not needed for Gemini CLI.** Its value is for tools that don't have a free tier (Claude Code, Cursor) — it routes their traffic through free providers via MITM.
+
+### When 9Router IS useful
+
+- Running Claude Code or Cursor and want to route to free providers
+- Want fallback across multiple providers (subscription → cheap → free)
+- Multi-account round-robin to maximize free quotas
+
+### Summary
+
+| Approach | Free tier | Requires |
+|----------|-----------|---------|
+| Gemini CLI direct | ✅ 180K/month | Google account OAuth |
+| 9Router + Gemini CLI | ✅ same | + MITM cert install |
+| 9Router + Claude Code | ✅ via Kiro/AWS | + MITM cert + AWS Builder ID |
 
 ## Key findings
 
-1. **Not a simple proxy** — requires MITM cert install (needs sudo/admin)
-2. **Works with OpenClaw** — explicitly listed as supported tool
-3. **Kiro token auto-import** — reads from `~/.aws/sso/cache` automatically
-4. **No API key needed for free tiers** — uses OAuth/cookie auth
+1. **Gemini CLI free tier is direct** — no 9Router needed for AgentBridge use case
+2. **9Router uses MITM** — requires root CA cert install (needs sudo/admin)
+3. **Works with OpenClaw** — explicitly listed as supported tool
+4. **Kiro token auto-import** — reads from `~/.aws/sso/cache` automatically
 5. **Next.js app** — runs as a web server with dashboard UI
 
-## Integration path for AgentBridge
-
-Simplest path:
-1. Install 9Router: `npm install -g 9router && 9router`
-2. Connect Antigravity (Gemini) via OAuth in dashboard
-3. Install Gemini CLI: `npm install -g @google/gemini-cli`
-4. Configure Gemini CLI to use 9Router (via MITM — automatic)
-5. Set `AGENT_CLI=gemini` in AgentBridge `.env` (after #48 is implemented)
-
-Result: Free Gemini 2.5 Pro as the main agent, 180K completions/month.
-
-## Risks
+## Risks (if using 9Router)
 
 - MITM proxy requires root CA cert install — security consideration
 - Free tiers can be revoked by providers
