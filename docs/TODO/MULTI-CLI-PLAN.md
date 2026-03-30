@@ -1,39 +1,33 @@
-# Multi-CLI Support Plan (Kiro / Gemini CLI)
+# Multi-CLI Support Plan (#48)
 
 ## Goal
 
-The bridge should work with any compatible CLI agent, not just Kiro. A single env var selects the CLI. All CLI-related config is grouped in one .env section.
+AgentBridge works with any ACP-compatible CLI agent, not just Kiro. A single env var selects the CLI. All CLI-related config is grouped in one .env section.
 
-## Current State
+## Phases
 
-CLI config is scattered across the .env:
-- `KIRO_TRANSPORT` — transport mode (tmux/acp)
-- `KIRO_CLI_PATH` — binary path
-- `KIRO_MODEL` — model override
-- `WORKING_DIR` — project directory
-- `TRUST_MODE` — auto-approve
-- `BROWSING_AGENT` — browse subagent model
-- `MEMORY_SUBAGENT_MODEL` — sleep/memory model
-- `CODING_AGENT_MODEL` — coding model
+### Phase 1: Abstract CLI spawn + env restructure
 
-All prefixed with `KIRO_` or generic names. No way to switch to a different CLI.
+**What changes:**
+- `config.ts` — add `AGENT_CLI`, `AGENT_TRANSPORT`, `AGENT_MODEL`, `AGENT_BROWSE_MODEL`, `AGENT_SLEEP_MODEL`, `AGENT_CODING_MODEL`
+- Old vars kept as fallbacks (backward compatible)
+- `acp-transport.ts` — CLI spawn command driven by `AGENT_CLI` + `AGENT_TRANSPORT`
+- `.env.example` — new grouped "Agent CLI Configuration" section
+- README updated
 
-## Proposed .env Structure
-
+**New .env section:**
 ```env
 # ============================================================
 # Agent CLI Configuration
 # ============================================================
 
-# Which CLI to use: "kiro" (default) or "gemini"
+# Which CLI to use: "kiro" (default) or "gemini" or path to any ACP-compatible CLI
 AGENT_CLI=kiro
 
 # Transport: "acp" (recommended) or "tmux" (kiro only)
 AGENT_TRANSPORT=acp
 
 # Path to CLI binary (default: auto-detected from AGENT_CLI)
-#   kiro  → "kiro-cli"
-#   gemini → "gemini"
 # AGENT_CLI_PATH=kiro-cli
 
 # Working directory where the agent operates
@@ -56,45 +50,74 @@ AGENT_SLEEP_MODEL=claude-opus-4.6
 AGENT_CODING_MODEL=claude-opus-4.6
 ```
 
-## Implementation
-
-### Phase 1: Env restructure (backward compatible)
-
-1. Add new env vars (`AGENT_CLI`, `AGENT_TRANSPORT`, `AGENT_MODEL`, etc.)
-2. Keep old vars as fallbacks: `KIRO_TRANSPORT` → `AGENT_TRANSPORT`, `KIRO_MODEL` → `AGENT_MODEL`, etc.
-3. `config.ts` reads new vars first, falls back to old
-4. Update `.env.example` with new grouped section
-5. Update README
-
-### Phase 2: Gemini CLI adapter
-
-**Gemini CLI supports ACP natively** via `--experimental-acp` flag. Same JSON-RPC over stdio protocol as Kiro. No new transport needed.
-
-6. In `bridge-app.ts` / `acp-transport.ts`: when `AGENT_CLI=gemini`, spawn `gemini --experimental-acp` instead of `kiro-cli acp`
-7. Test with Gemini CLI — verify session creation, tool calls, permission flow
-8. Gemini model set via `AGENT_MODEL` (e.g. `gemini-2.5-pro`)
-
-### Phase 3: CLI-agnostic abstractions
-
-10. Rename `AcpTransport` → `AgentTransport` (if protocol is shared)
-11. Abstract CLI-specific quirks (session management, tool format, permission handling)
-12. Update asbuilts
-
-## Mapping: Old → New env vars
-
-| Old | New | Fallback |
-|-----|-----|----------|
+**Backward compatibility mapping:**
+| Old var | New var | Fallback |
+|---------|---------|---------|
 | `KIRO_TRANSPORT` | `AGENT_TRANSPORT` | Yes |
 | `KIRO_CLI_PATH` | `AGENT_CLI_PATH` | Yes |
 | `KIRO_MODEL` | `AGENT_MODEL` | Yes |
 | `BROWSING_AGENT` | `AGENT_BROWSE_MODEL` | Yes |
 | `MEMORY_SUBAGENT_MODEL` | `AGENT_SLEEP_MODEL` | Yes |
 | `CODING_AGENT_MODEL` | `AGENT_CODING_MODEL` | Yes |
-| (new) | `AGENT_CLI` | — |
 
-## Open Questions
+**CLI spawn logic:**
+```ts
+function getCliCommand(config: Config): { cmd: string; args: string[] } {
+  const cli = config.agentCli ?? "kiro";
+  const transport = config.agentTransport ?? "acp";
 
-- ~~Does Gemini CLI support ACP?~~ **Yes** — `gemini --experimental-acp` (same JSON-RPC over stdio as Kiro)
-- Tool format differences? (Gemini uses MCP tools same as Kiro — both support `@builtin` and custom MCP servers)
-- Permission model? (Gemini may handle permissions differently — needs testing)
-- Gemini CLI requires `GEMINI_API_KEY` env var — needs to be in the .env section
+  if (cli === "kiro") return { cmd: config.agentCliPath ?? "kiro-cli", args: ["acp"] };
+  if (cli === "gemini") return { cmd: config.agentCliPath ?? "gemini", args: ["--experimental-acp"] };
+
+  // Custom CLI path — pass as-is with acp flag
+  return { cmd: cli, args: ["--experimental-acp"] };
+}
+```
+
+**Files to change:**
+- `src/components/config.ts` — add new fields, fallback logic
+- `src/components/acp-transport.ts` — use `getCliCommand()`
+- `src/bridge-app.ts` — pass new config fields to subagents (browse, sleep, coding)
+- `.env.example` — new section
+- `README.md` — update config table
+
+### Phase 2: Gemini CLI
+
+**Prerequisites:** Phase 1 done, Gemini CLI installed (`npm install -g @google/gemini-cli`)
+
+**What changes:**
+- Test `AGENT_CLI=gemini` with `gemini --experimental-acp`
+- Verify session creation, tool calls, permission flow
+- Gemini uses `AGENT_MODEL` for model selection (e.g. `gemini-2.5-pro`)
+- Document in README
+
+**Known differences from Kiro:**
+- Gemini CLI uses `--experimental-acp` flag (not just `acp` subcommand)
+- Model names differ (`gemini-2.5-pro` vs `claude-sonnet-4.6`)
+- Permission handling may differ — needs testing
+- Steering/skills format may need adaptation
+
+**Files to change:**
+- `src/components/acp-transport.ts` — handle Gemini-specific startup differences if any
+- `docs/asbuilts/system.asbuilt.md` — update transport section
+- `.env.example` — add Gemini example
+
+### Phase 3: Cloud9 CLI (separate project)
+
+Cloud9 is a standalone project. AgentBridge just needs `AGENT_CLI=cloud9` to work.
+No changes to AgentBridge beyond Phase 1.
+
+## Execution Order
+
+1. `config.ts` — add new fields + fallback logic
+2. `acp-transport.ts` — `getCliCommand()` factory
+3. `bridge-app.ts` — propagate new model vars to subagents
+4. `.env.example` + README
+5. Tests for config fallback logic
+6. Test with `AGENT_CLI=gemini`
+7. Update asbuilts
+
+## Estimated effort
+
+Phase 1: ~50 lines code + docs
+Phase 2: ~10 lines + testing
