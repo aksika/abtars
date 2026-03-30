@@ -23,6 +23,44 @@ echo "   Project: $PROJECT_DIR"
 echo "   Runtime: $AB_HOME"
 echo ""
 
+mkdir -p "$AB_HOME"
+
+# 0. Initialize git backup repo if not present
+if [ ! -d "$AB_HOME/.git" ]; then
+  echo "📦 Initializing git backup repo..."
+  cd "$AB_HOME"
+  git init -q
+  cat > .gitignore << 'GITIGNORE'
+.env
+agentbridge-*
+mcporter
+browser-docker.sh
+agentbridge.sh
+scripts/
+dist/
+memory/memory.db
+memory/memory.db-wal
+memory/memory.db-shm
+memory/pending_*.json
+memory/cron_runs.json
+memory/cron.json.migrated
+memory/.heartbeat
+memory/context-window-start.json
+memory/garbage.json
+logs/
+finance/rss-*.json
+.kiro/
+titok/
+sleeping_prompt.md
+browsing_prompt.md
+professor.json
+GITIGNORE
+  echo "backup/memory.db.enc binary" > .gitattributes
+  git add -A
+  git commit -q -m "initial: agentbridge runtime"
+  echo "   ✅ Git repo initialized — add remote with: cd ~/.agentbridge && git remote add origin <url>"
+fi
+
 # 1. Sync .env (from persona/core/ — gitignored, personal)
 echo "📋 Syncing .env..."
 if [ -f "$PROJECT_DIR/persona/core/.env" ]; then
