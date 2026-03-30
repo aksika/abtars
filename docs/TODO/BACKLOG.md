@@ -539,9 +539,10 @@ Add Cohere as an alternative STT/TTS provider. Cohere's transcription system is 
 
 ## 50. 9Router Study
 
-**Status:** Not started
+**Status:** Done (study complete)
 **Priority:** Medium
 **Related:** #48 (Multi-CLI / Gemini CLI)
+**Study:** `docs/TODO/9ROUTER-STUDY.md`
 
 ### What is 9Router
 
