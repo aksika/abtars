@@ -23,7 +23,7 @@ import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, write
 import { MemoryManager } from "../components/memory-manager.js";
 import { loadMemoryConfig } from "../components/memory-config.js";
 import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
-import { loadSleepPrompt, loadSleepSteps, buildSleepVars, substituteVars } from "../components/sleep-prompt-loader.js";
+import { loadSleepSteps, buildSleepVars, substituteVars } from "../components/sleep-prompt-loader.js";
 import { logInfo, logWarn, logError, setLogLevel } from "../components/logger.js";
 import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
 import { localDate } from "../components/env-utils.js";
@@ -93,7 +93,7 @@ type StepResult = { status: StepStatus; duration?: number; attempts?: number };
 type WiredResults = { purged: number; deduped: number; embedded: number; anomaliesFixed: number; walOk: boolean; ftsOk: boolean; logsDeleted: number };
 type SleepState = { pid: number; startedAt: number; wiredResults?: WiredResults; steps: Record<string, StepResult> };
 
-const SLEEP_TIMEOUT_MS = (parseInt(process.env["SLEEP_TIMEOUT_MIN"] ?? "", 10) || 45) * 60 * 1000; // default 45 minutes
+const SLEEP_TIMEOUT_MS = (parseInt(process.env["SLEEP_TIMEOUT_MIN"] ?? "", 10) || 30) * 60 * 1000; // default 30 minutes
 
 function readStateFile(path: string): SleepState | null {
   try {
@@ -478,40 +478,16 @@ async function main(): Promise<void> {
     const wiredResults = await runWiredPreTasks(db, memoryConfig.memoryDir);
     logInfo(TAG, `[SLEEP] Wired: ${formatWiredResults(wiredResults)}`);
 
-    // Load step files
-    let steps: import("../components/sleep-prompt-loader.js").SleepStep[];
-    try {
-      // Build vars with wired results injected
-      const vars = buildSleepVars(snapshot);
-      vars.WIRED_RESULTS = formatWiredResults(wiredResults);
-      vars.RESUME_CONTEXT = isResume
-        ? `This is a RESUMED sleep cycle. Steps already completed: ${Object.entries(existingState!.steps).filter(([, s]) => s.status === "ok" || s.status === "skipped").map(([k]) => k).join(", ")}. Only pending/failed steps will run.`
-        : "Fresh sleep cycle — all steps will run.";
+    // Load step files + build vars
+    const vars = buildSleepVars(snapshot);
+    vars.WIRED_RESULTS = formatWiredResults(wiredResults);
+    vars.RESUME_CONTEXT = isResume
+      ? `This is a RESUMED sleep cycle. Steps already completed: ${Object.entries(existingState!.steps).filter(([, s]) => s.status === "ok" || s.status === "skipped").map(([k]) => k).join(", ")}. Only pending/failed steps will run.`
+      : "Fresh sleep cycle — all steps will run.";
 
-      steps = loadSleepSteps(snapshot);
-      // Re-substitute with updated vars
-      for (const step of steps) {
-        step.prompt = substituteVars(step.prompt, vars);
-      }
-      // Also re-substitute identity prompt
-      const identityStep = steps.find(s => s.name === "identity");
-      if (identityStep) identityStep.prompt = substituteVars(identityStep.prompt, vars);
-    } catch {
-      logWarn(TAG, "Sleep step files not found, falling back to monolith prompt");
-      const prompt = loadSleepPrompt(snapshot);
-      if (flags.dryRun) { process.stdout.write(prompt + "\n"); return; }
-      const { transport, model } = await createSleepTransport(flags.verbose);
-      try {
-        const response = await transport.sendPrompt("system:sleep", prompt);
-        writeAuditLog(memoryConfig.memoryDir, {
-          timestamp: new Date().toISOString(), model,
-          stateSnapshotSummary: buildSnapshotSummary(snapshot),
-          subagentResponse: response,
-          outcomes: parseOutcomesFromResponse(response),
-        });
-      } finally { try { transport.destroy(); } catch { /* */ } }
-      logInfo(TAG, "Sleep routine completed (monolith fallback)");
-      return;
+    const steps = loadSleepSteps(snapshot);
+    for (const step of steps) {
+      step.prompt = substituteVars(step.prompt, vars);
     }
 
     if (flags.dryRun) {
