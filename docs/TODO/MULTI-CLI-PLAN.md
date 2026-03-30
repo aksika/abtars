@@ -68,10 +68,11 @@ AGENT_CODING_MODEL=claude-opus-4.6
 
 ### Phase 2: Gemini CLI adapter
 
-6. Research Gemini CLI interface — does it support ACP/JSON-RPC? stdio? What's the protocol?
-7. Create `gemini-transport.ts` if protocol differs from ACP
-8. `bridge-app.ts` — factory pattern: `AGENT_CLI=gemini` → use Gemini transport
-9. Test with Gemini CLI
+**Gemini CLI supports ACP natively** via `--experimental-acp` flag. Same JSON-RPC over stdio protocol as Kiro. No new transport needed.
+
+6. In `bridge-app.ts` / `acp-transport.ts`: when `AGENT_CLI=gemini`, spawn `gemini --experimental-acp` instead of `kiro-cli acp`
+7. Test with Gemini CLI — verify session creation, tool calls, permission flow
+8. Gemini model set via `AGENT_MODEL` (e.g. `gemini-2.5-pro`)
 
 ### Phase 3: CLI-agnostic abstractions
 
@@ -93,7 +94,7 @@ AGENT_CODING_MODEL=claude-opus-4.6
 
 ## Open Questions
 
-- Does Gemini CLI support ACP (JSON-RPC over stdio)? If yes, same transport works.
-- Does Gemini CLI have equivalent of `kiro-cli acp` mode?
-- Tool format differences? (Gemini uses function calling, Kiro uses MCP tools)
-- Permission model? (Kiro has structured permission requests via ACP)
+- ~~Does Gemini CLI support ACP?~~ **Yes** — `gemini --experimental-acp` (same JSON-RPC over stdio as Kiro)
+- Tool format differences? (Gemini uses MCP tools same as Kiro — both support `@builtin` and custom MCP servers)
+- Permission model? (Gemini may handle permissions differently — needs testing)
+- Gemini CLI requires `GEMINI_API_KEY` env var — needs to be in the .env section
