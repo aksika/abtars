@@ -4,6 +4,7 @@ import { readEntry as cronReadEntry } from "./components/cron-db.js";
 import { spawn, execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
+import { AGENT_BRIDGE_HOME } from "./components/config.js";
 
 import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
@@ -25,6 +26,7 @@ import { renderDashboardHtml } from "./components/dashboard-ui.js";
 import { loadNLMConfig } from "./components/nlm-command-handler.js";
 import { SleepTrigger } from "./components/sleep-trigger.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
+import { SkillWatcher } from "./components/skill-watcher.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { BrowserManager } from "./components/browser-manager.js";
@@ -464,6 +466,27 @@ export async function startBridge(): Promise<void> {
   heartbeat.registerTask({
     name: "browse-checker",
     execute: async () => { await ensureBrowserIpc(); checkBrowseTasks(); },
+  });
+
+  // --- Skill hot-reload ---
+  const skillWatcher = new SkillWatcher(
+    join(AGENT_BRIDGE_HOME, "skills"),
+    join(AGENT_BRIDGE_HOME, "skills", "TOOLS.md"),
+  );
+  heartbeat.registerTask({
+    name: "skill-reloader",
+    execute: async () => {
+      const changed = skillWatcher.checkForChanges();
+      for (const skill of changed) {
+        skillWatcher.appendToTools(skill);
+        const chatId = [...config.allowedUserIds][0];
+        if (chatId) {
+          const msg = `[NEW SKILL AVAILABLE] ${skill.name}: ${skill.description}. Read ${skill.path} if you need it.`;
+          await transport.sendPrompt(`telegram:${chatId}`, msg);
+          logInfo("skill-reloader", `Injected: ${skill.name}`);
+        }
+      }
+    },
   });
 
   heartbeat.registerTask({
