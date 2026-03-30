@@ -28,4 +28,11 @@ EMBEDDING_ENABLED=true agentbridge-embed
 - Delete orphaned FTS entries (rowid not in source table)
 - Delete stale sessions (`is_active = 0` with old `last_activity_at`)
 
+## Log Rotation Cleanup
+
+Delete bridge log files older than 7 days:
+```bash
+find ~/.agentbridge/logs/ -name "bridge-*.log" -mtime +7 -delete
+```
+
 Respond with what you did (or "all healthy, nothing to do").

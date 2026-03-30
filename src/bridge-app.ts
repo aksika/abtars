@@ -1,6 +1,5 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
 import { readEntry as cronReadEntry } from "./components/cron-db.js";
 import { spawn, execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -10,7 +9,7 @@ import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError, localIso } from "./components/logger.js";
+import { setLogLevel, logInfo, logWarn, logError, localIso, getLogFile } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
@@ -491,7 +490,7 @@ export async function startBridge(): Promise<void> {
     heartbeat.registerTask({
       name: "self-healer",
       execute: async () => {
-        const logFile = join(homedir(), ".agentbridge", "logs", "bridge.log");
+        const logFile = getLogFile();
         try {
           const content = readFileSync(logFile, "utf-8");
           const lines = content.split("\n");

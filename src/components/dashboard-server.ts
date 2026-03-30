@@ -8,8 +8,7 @@
 
 import * as http from "node:http";
 import { readFileSync, existsSync } from "node:fs";
-import { resolve, join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Socket } from "node:net";
 import { WebSocketServer } from "ws";
@@ -18,12 +17,11 @@ import { AuthGate } from "./auth-gate.js";
 import { StatusBroadcaster } from "./status-broadcaster.js";
 import type { ServiceRegistry } from "./service-registry.js";
 import type { MemorySearchController } from "./memory-search-controller.js";
-import { logInfo, logError } from "./logger.js";
+import { logInfo, logError, getLogFile } from "./logger.js";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const TAG = "dashboard-server";
-const LOG_FILE = resolve(homedir(), ".agentbridge", "logs", "bridge.log");
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -319,8 +317,9 @@ export class DashboardServer {
 // ── Log Reader ──────────────────────────────────────────────────────────────
 
 function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): string[] {
-  if (!existsSync(LOG_FILE)) return [];
-  const content = readFileSync(LOG_FILE, "utf-8");
+  const logFile = getLogFile();
+  if (!existsSync(logFile)) return [];
+  const content = readFileSync(logFile, "utf-8");
   const allLines = content.split("\n").filter((l) => l.length > 0);
   const cutoffIso = new Date(cutoffMs).toISOString().slice(0, 23);
 

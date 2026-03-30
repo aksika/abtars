@@ -7,7 +7,13 @@ export type LogLevel = "off" | "low" | "debug";
 
 const LEVEL_ORDER: Record<LogLevel, number> = { off: 0, low: 1, debug: 2 };
 const LOG_DIR = resolve(homedir(), ".agentbridge", "logs");
-const LOG_FILE = resolve(LOG_DIR, "bridge.log");
+
+/** Get today's log filename: bridge-YYYY-MM-DD.log */
+export function getLogFile(): string {
+  const d = new Date();
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return resolve(LOG_DIR, `bridge-${date}.log`);
+}
 
 let currentLevel: LogLevel = "low";
 let fileLogging = true;
@@ -32,7 +38,7 @@ function writeToFile(line: string): void {
   if (!fileLogging) return;
   try {
     mkdirSync(LOG_DIR, { recursive: true });
-    appendFileSync(LOG_FILE, line + "\n");
+    appendFileSync(getLogFile(), line + "\n");
   } catch {
     // silently ignore file write errors
   }
