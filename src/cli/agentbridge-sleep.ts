@@ -19,14 +19,15 @@
  */
 
 import { join } from "node:path";
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { MemoryManager } from "../components/memory-manager.js";
 import { loadMemoryConfig } from "../components/memory-config.js";
 import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
-import { loadSleepPrompt, loadSleepSteps } from "../components/sleep-prompt-loader.js";
+import { loadSleepPrompt, loadSleepSteps, buildSleepVars, substituteVars } from "../components/sleep-prompt-loader.js";
 import { logInfo, logWarn, logError, setLogLevel } from "../components/logger.js";
 import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
 import { localDate } from "../components/env-utils.js";
+import { initializeDatabase } from "../components/memory-db.js";
 
 const TAG = "agentbridge-sleep";
 
@@ -85,6 +86,135 @@ export interface AuditLogEntry {
  * session mechanism — the Kiro CLI agent has full tool access.
  */
 /** Create a reusable ACP transport for the sleep session. */
+
+// ── State file types ────────────────────────────────────────────────────────
+
+type StepStatus = "ok" | "failed" | "skipped" | "pending" | "timeout";
+type StepResult = { status: StepStatus; duration?: number; attempts?: number };
+type WiredResults = { purged: number; deduped: number; embedded: number; anomaliesFixed: number; walOk: boolean; ftsOk: boolean; logsDeleted: number };
+type SleepState = { pid: number; startedAt: number; wiredResults?: WiredResults; steps: Record<string, StepResult> };
+
+const SLEEP_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
+
+function readStateFile(path: string): SleepState | null {
+  try { return existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : null; } catch { return null; }
+}
+
+function writeStateFile(path: string, state: SleepState): void {
+  writeFileSync(path, JSON.stringify(state, null, 2));
+}
+
+// ── Wired pre-tasks ─────────────────────────────────────────────────────────
+
+function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir: string): WiredResults {
+  const results: WiredResults = { purged: 0, deduped: 0, embedded: 0, anomaliesFixed: 0, walOk: false, ftsOk: false, logsDeleted: 0 };
+
+  // 1. Purge expired garbage
+  try {
+    const garbagePath = join(memoryDir, "garbage.json");
+    if (existsSync(garbagePath)) {
+      const garbage = JSON.parse(readFileSync(garbagePath, "utf-8")) as Record<string, string>;
+      const cutoff = Date.now() - 7 * 86400000;
+      const expired = Object.entries(garbage).filter(([, ts]) => new Date(ts).getTime() < cutoff);
+      if (expired.length > 0) {
+        const ids = expired.map(([id]) => parseInt(id, 10)).filter(n => Number.isFinite(n));
+        if (ids.length > 0) {
+          db.prepare(`DELETE FROM messages WHERE id IN (${ids.join(",")})`).run();
+        }
+        for (const [id] of expired) delete garbage[id];
+        writeFileSync(garbagePath, JSON.stringify(garbage));
+        results.purged = expired.length;
+      }
+    }
+  } catch (err) { logWarn(TAG, `[WIRED] garbage purge failed: ${err instanceof Error ? err.message : String(err)}`); }
+
+  // 2. Dedup consecutive exact messages
+  try {
+    const dupes = db.prepare(`
+      SELECT b.id FROM messages a JOIN messages b
+      ON a.chat_id = b.chat_id AND a.role = b.role
+      AND TRIM(a.content) = TRIM(b.content)
+      AND b.id > a.id
+      AND NOT EXISTS (
+        SELECT 1 FROM messages m WHERE m.chat_id = a.chat_id AND m.id > a.id AND m.id < b.id AND m.role = a.role
+      )
+    `).all() as Array<{ id: number }>;
+    if (dupes.length > 0) {
+      db.prepare(`DELETE FROM messages WHERE id IN (${dupes.map(d => d.id).join(",")})`).run();
+      results.deduped = dupes.length;
+    }
+  } catch (err) { logWarn(TAG, `[WIRED] dedup failed: ${err instanceof Error ? err.message : String(err)}`); }
+
+  // 3. WAL checkpoint
+  try { db.pragma("wal_checkpoint(TRUNCATE)"); results.walOk = true; } catch (err) { logWarn(TAG, `[WIRED] WAL checkpoint failed: ${err instanceof Error ? err.message : String(err)}`); }
+
+  // 4. FTS rebuild if corrupt
+  try {
+    for (const table of ["messages_fts", "extracted_memories_fts", "extracted_memories_original_fts"]) {
+      try { db.exec(`INSERT INTO ${table}(${table}) VALUES('integrity-check')`); }
+      catch { db.exec(`INSERT INTO ${table}(${table}) VALUES('rebuild')`); logInfo(TAG, `[WIRED] Rebuilt corrupt FTS: ${table}`); }
+    }
+    results.ftsOk = true;
+  } catch (err) { logWarn(TAG, `[WIRED] FTS check failed: ${err instanceof Error ? err.message : String(err)}`); }
+
+  // 5. Batch embed NULL embeddings
+  try {
+    if (process.env["EMBEDDING_ENABLED"] === "true") {
+      const { loadEmbedConfig, embedText } = require("../components/ollama-embed.js") as typeof import("../components/ollama-embed.js");
+      const cfg = loadEmbedConfig();
+      if (cfg.enabled) {
+        const rows = db.prepare("SELECT id, content_en FROM extracted_memories WHERE embedding IS NULL").all() as Array<{ id: number; content_en: string }>;
+        for (const row of rows) {
+          const vec = await embedText(cfg, row.content_en);
+          if (vec) { db.prepare("UPDATE extracted_memories SET embedding = ? WHERE id = ?").run(Buffer.from(vec.buffer), row.id); results.embedded++; }
+        }
+      }
+    }
+  } catch (err) { logWarn(TAG, `[WIRED] embed failed: ${err instanceof Error ? err.message : String(err)}`); }
+
+  // 6. Anomaly auto-fixes
+  try {
+    let fixed = 0;
+    fixed += db.prepare("UPDATE extracted_memories SET trust = 2 WHERE memory_type = 'decision' AND trust < 2").run().changes;
+    fixed += db.prepare("UPDATE extracted_memories SET classification = 1 WHERE memory_type = 'decision' AND classification = 0").run().changes;
+    fixed += db.prepare("UPDATE extracted_memories SET trust = 2 WHERE trust = 0 AND credibility = 6 AND integrity = 2").run().changes;
+    fixed += db.prepare("UPDATE extracted_memories SET credibility = 3 WHERE credibility = 6 AND created_at < ?").run(Date.now() - 7 * 86400000).changes;
+    results.anomaliesFixed = fixed;
+  } catch (err) { logWarn(TAG, `[WIRED] anomaly fixes failed: ${err instanceof Error ? err.message : String(err)}`); }
+
+  // 7. Log rotation (delete >7d)
+  try {
+    const logsDir = join(memoryDir, "..", "logs");
+    if (existsSync(logsDir)) {
+      const cutoff = Date.now() - 7 * 86400000;
+      for (const f of readdirSync(logsDir)) {
+        if (!f.startsWith("bridge-") || !f.endsWith(".log")) continue;
+        const match = f.match(/bridge-(\d{4}-\d{2}-\d{2})\.log/);
+        if (match && new Date(match[1]!).getTime() < cutoff) {
+          unlinkSync(join(logsDir, f));
+          results.logsDeleted++;
+        }
+      }
+    }
+  } catch (err) { logWarn(TAG, `[WIRED] log rotation failed: ${err instanceof Error ? err.message : String(err)}`); }
+
+  return results;
+}
+
+function formatWiredResults(r: WiredResults): string {
+  const parts: string[] = [];
+  if (r.purged > 0) parts.push(`${r.purged} garbage purged`);
+  if (r.deduped > 0) parts.push(`${r.deduped} dupes deleted`);
+  parts.push(`WAL ${r.walOk ? "ok" : "FAILED"}`);
+  parts.push(`FTS ${r.ftsOk ? "ok" : "FAILED"}`);
+  if (r.embedded > 0) parts.push(`${r.embedded} embedded`);
+  if (r.anomaliesFixed > 0) parts.push(`${r.anomaliesFixed} anomalies fixed`);
+  if (r.logsDeleted > 0) parts.push(`${r.logsDeleted} old logs deleted`);
+  return parts.length > 0 ? parts.join(", ") : "nothing to do";
+}
+
+// ── Transport ───────────────────────────────────────────────────────────────
+
 async function createSleepTransport(verbose: boolean): Promise<{ transport: import("../components/acp-transport.js").AcpTransport; model: string }> {
   const { loadAndValidateConfig } = await import("../components/config.js");
   const config = await loadAndValidateConfig();
@@ -311,18 +441,41 @@ async function main(): Promise<void> {
     const db = memory.getDatabase();
     if (!db) { process.stderr.write("Fatal: Database not available\n"); process.exit(1); }
 
+    // State file path
+    const dateStr = localDate().replace(/-/g, "");
+    const statePath = join(memoryConfig.memoryDir, "sleep", `sleep_${dateStr}.lock`);
+    const existingState = readStateFile(statePath);
+    const isResume = existingState !== null && Object.values(existingState.steps).some(s => s.status === "ok");
+
     // Gather state
     const gatherer = new SleepStateGatherer(db, memoryConfig);
     const snapshot = await gatherer.gather();
     if (flags.verbose) logInfo(TAG, `State gathered: ${buildSnapshotSummary(snapshot)}`);
 
+    // Wired pre-tasks (always run — fast, idempotent)
+    logInfo(TAG, `[SLEEP] Running wired pre-tasks${isResume ? " (resume)" : ""}...`);
+    const wiredResults = runWiredPreTasks(db, memoryConfig.memoryDir);
+    logInfo(TAG, `[SLEEP] Wired: ${formatWiredResults(wiredResults)}`);
+
     // Load step files
     let steps: import("../components/sleep-prompt-loader.js").SleepStep[];
     try {
+      // Build vars with wired results injected
+      const vars = buildSleepVars(snapshot);
+      vars.WIRED_RESULTS = formatWiredResults(wiredResults);
+      vars.RESUME_CONTEXT = isResume
+        ? `This is a RESUMED sleep cycle. Steps already completed: ${Object.entries(existingState!.steps).filter(([, s]) => s.status === "ok" || s.status === "skipped").map(([k]) => k).join(", ")}. Only pending/failed steps will run.`
+        : "Fresh sleep cycle — all steps will run.";
+
       steps = loadSleepSteps(snapshot);
-      if (flags.verbose) logInfo(TAG, `Loaded ${steps.length} sleep steps`);
+      // Re-substitute with updated vars
+      for (const step of steps) {
+        step.prompt = substituteVars(step.prompt, vars);
+      }
+      // Also re-substitute identity prompt
+      const identityStep = steps.find(s => s.name === "identity");
+      if (identityStep) identityStep.prompt = substituteVars(identityStep.prompt, vars);
     } catch {
-      // Fallback to monolith if step files not deployed yet
       logWarn(TAG, "Sleep step files not found, falling back to monolith prompt");
       const prompt = loadSleepPrompt(snapshot);
       if (flags.dryRun) { process.stdout.write(prompt + "\n"); return; }
@@ -340,90 +493,131 @@ async function main(): Promise<void> {
       return;
     }
 
-    // Dry-run: print all prompts
     if (flags.dryRun) {
-      for (const step of steps) {
-        process.stdout.write(`\n--- ${step.filename} ---\n${step.prompt}\n`);
-      }
+      for (const step of steps) process.stdout.write(`\n--- ${step.filename} ---\n${step.prompt}\n`);
       return;
     }
 
-    // Skip logic based on state snapshot
+    // Skip logic
     const skipSet = new Set<string>();
-    // Skip feedback if no recall invocations today
     try {
       const recallCount = (db.prepare(
         "SELECT COUNT(*) as cnt FROM messages WHERE content LIKE '%agentbridge-recall%' AND timestamp > ?",
       ).get(snapshot.lastSleepTimestamp ?? 0) as { cnt: number }).cnt;
       if (recallCount === 0) skipSet.add("feedback");
-    } catch { /* don't skip on error */ }
-    if (snapshot.fts5Health.messages_fts === "ok" && snapshot.fts5Health.extracted_memories_fts === "ok"
-        && snapshot.fts5Health.extracted_memories_original_fts === "ok" && snapshot.dbStats.nullEmbeddingCount === 0) {
-      skipSet.add("db-maintenance");
-    }
+    } catch { /* */ }
     if (snapshot.topicFiles.length === 0) skipSet.add("topic-reorg");
-    if (snapshot.dbStats.extractedMemoryCount < 10) skipSet.add("merge");
-    // media-cleanup: check received dir
+    if (snapshot.dbStats.extractedMemoryCount < 10) { skipSet.add("merge"); skipSet.add("darwinism"); }
+    try { if (!existsSync(join(memoryConfig.memoryDir, "..", "received"))) skipSet.add("media-cleanup"); } catch { /* */ }
+    // Skip noise if no short messages
     try {
-      const { existsSync: ex } = await import("node:fs");
-      if (!ex(join(memoryConfig.memoryDir, "..", "received"))) skipSet.add("media-cleanup");
-    } catch { /* don't skip on error */ }
+      const shortCount = (db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE role='user' AND length(content) < 20").get() as { cnt: number }).cnt;
+      if (shortCount === 0) skipSet.add("gc-noise");
+    } catch { /* */ }
+    // Skip translation check if no bilingual memories
+    try {
+      const bilingualCount = (db.prepare("SELECT COUNT(*) as cnt FROM extracted_memories WHERE content_en != content_original AND content_original IS NOT NULL").get() as { cnt: number }).cnt;
+      if (bilingualCount === 0) skipSet.add("translation-check");
+    } catch { /* */ }
 
-    // Create transport (one kiro-cli spawn for entire session)
+    // Initialize state file
+    const state: SleepState = existingState ?? {
+      pid: process.pid,
+      startedAt: Date.now(),
+      wiredResults,
+      steps: {},
+    };
+    state.wiredResults = wiredResults;
+
+    // 20-min wall-clock timeout
+    let timedOut = false;
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      logError(TAG, "[SLEEP] ⏰ 20-minute timeout reached — killing transport");
+    }, SLEEP_TIMEOUT_MS);
+
     const { transport, model: modelUsed } = await createSleepTransport(flags.verbose);
-    const stepResults: Array<{ step: string; duration: number; attempts: number; status: "ok" | "failed" | "skipped"; responseLen: number }> = [];
+    let dreamySucceeded = true;
 
     try {
       for (const step of steps) {
-        // Check skip
+        if (timedOut) {
+          state.steps[step.name] = { status: "timeout" };
+          writeStateFile(statePath, state);
+          continue;
+        }
+
+        // Resume: skip already completed steps
+        if (isResume && existingState?.steps[step.name]?.status === "ok") {
+          logInfo(TAG, `[SLEEP] ⏭ ${step.name} — already done (resume)`);
+          continue;
+        }
+        if (isResume && existingState?.steps[step.name]?.status === "skipped") {
+          logInfo(TAG, `[SLEEP] ⏭ ${step.name} — skipped (resume)`);
+          continue;
+        }
+
+        // Skip logic (identity and report always run)
         if (step.skippable && skipSet.has(step.name)) {
           logInfo(TAG, `[SLEEP] ⏭ ${step.name} — skipped`);
-          stepResults.push({ step: step.name, duration: 0, attempts: 0, status: "skipped", responseLen: 0 });
+          state.steps[step.name] = { status: "skipped" };
+          writeStateFile(statePath, state);
           continue;
         }
 
         const start = Date.now();
         logInfo(TAG, `[SLEEP] → ${step.name}`);
+        state.steps[step.name] = { status: "pending" };
+        writeStateFile(statePath, state);
 
         const response = await sendWithRetry(transport, step.prompt, step.name, flags.verbose);
         const duration = Date.now() - start;
-        const attempts = response ? 1 : MAX_RETRIES; // approximate
 
-        stepResults.push({
-          step: step.name,
-          duration,
-          attempts,
-          status: response ? "ok" : "failed",
-          responseLen: response?.length ?? 0,
-        });
+        if (response) {
+          state.steps[step.name] = { status: "ok", duration: Math.round(duration / 100) / 10 };
+        } else {
+          state.steps[step.name] = { status: "failed", duration: Math.round(duration / 100) / 10, attempts: MAX_RETRIES };
+          dreamySucceeded = false;
+        }
+        writeStateFile(statePath, state);
 
         logInfo(TAG, `[SLEEP] ${response ? "✓" : "✗"} ${step.name} (${(duration / 1000).toFixed(1)}s, ${response?.length ?? 0} chars)`);
       }
     } finally {
+      clearTimeout(timeoutHandle);
       try { transport.destroy(); } catch { /* */ }
     }
 
-    // Write structured audit
-    const allResponses = stepResults.map(r => `[${r.step}] ${r.status} (${(r.duration / 1000).toFixed(1)}s)`).join("\n");
+    // Write audit
+    const stepEntries = Object.entries(state.steps);
+    const okCount = stepEntries.filter(([, s]) => s.status === "ok").length;
+    const failCount = stepEntries.filter(([, s]) => s.status === "failed" || s.status === "timeout").length;
+    const skipCount = stepEntries.filter(([, s]) => s.status === "skipped").length;
+    const totalDuration = (Date.now() - state.startedAt) / 1000;
+
+    const allResponses = stepEntries.map(([k, v]) => `[${k}] ${v.status}${v.duration ? ` (${v.duration}s)` : ""}`).join("\n");
     try {
       writeAuditLog(memoryConfig.memoryDir, {
         timestamp: new Date().toISOString(),
         model: modelUsed,
         stateSnapshotSummary: buildSnapshotSummary(snapshot),
-        subagentResponse: allResponses,
-        outcomes: {
-          filesConsolidated: 0, messagesPruned: 0, embeddingsRemoved: 0,
-          sessionsCleaned: 0, topicsMerged: 0, topicsDeleted: 0,
-        },
+        subagentResponse: `Wired: ${formatWiredResults(wiredResults)}\n${allResponses}`,
+        outcomes: { filesConsolidated: 0, messagesPruned: wiredResults.purged + wiredResults.deduped, embeddingsRemoved: 0, sessionsCleaned: 0, topicsMerged: 0, topicsDeleted: 0 },
       });
     } catch (err) {
       process.stderr.write(`Warning: Failed to write audit — ${err instanceof Error ? err.message : String(err)}\n`);
     }
 
-    const okCount = stepResults.filter(r => r.status === "ok").length;
-    const failCount = stepResults.filter(r => r.status === "failed").length;
-    const skipCount = stepResults.filter(r => r.status === "skipped").length;
-    logInfo(TAG, `[SLEEP] 🏁 Sleep routine completed: ${okCount} ok, ${failCount} failed, ${skipCount} skipped`);
+    // Wired post-task: flush >24h messages (only if Dreamy succeeded)
+    if (dreamySucceeded && !timedOut) {
+      try {
+        const cutoff = Date.now() - 24 * 3600000;
+        const flushed = db.prepare("DELETE FROM messages WHERE timestamp < ?").run(cutoff);
+        if (flushed.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushed.changes} messages >24h`);
+      } catch (err) { logWarn(TAG, `[WIRED] flush failed: ${err instanceof Error ? err.message : String(err)}`); }
+    }
+
+    logInfo(TAG, `[SLEEP] 🏁 ${okCount} ok, ${failCount} failed, ${skipCount} skipped | wired: ${formatWiredResults(wiredResults)} | ${totalDuration.toFixed(0)}s total`);
   } finally {
     memory.close();
   }

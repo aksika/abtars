@@ -522,3 +522,17 @@ New CLI for modifying existing extracted memories. Lookup by `--memory-id` or `-
 **Plan:** `docs/TODO/MULTI-CLI-PLAN.md`
 
 Add Gemini CLI as an alternative to Kiro CLI. Env var selects which CLI the bridge uses. Restructure .env CLI section.
+
+## 49. Cohere STT/TTS Integration
+
+**Status:** Not started
+**Priority:** Medium
+
+Add Cohere as an alternative STT/TTS provider. Cohere's transcription system is Apache 2.0 licensed. Selectable via env var alongside existing Groq/Whisper.
+
+### Plan
+- `STT_PROVIDER=cohere` (alongside existing `groq`)
+- `COHERE_API_KEY` env var
+- Wire into `stt.ts` — same interface, different API call
+- TTS: check if Cohere offers TTS or STT only
+- Gated by `STT_PROVIDER` — no breaking change to existing Groq setup

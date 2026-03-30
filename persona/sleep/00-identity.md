@@ -42,4 +42,12 @@ ${STATE_SNAPSHOT}
 
 ${WORKING_DIRS_SECTION}
 
+## Wired Maintenance (already completed)
+
+${WIRED_RESULTS}
+
+## Resume Context
+
+${RESUME_CONTEXT}
+
 Acknowledge you understand your role and the system state. Then wait for the first task.
