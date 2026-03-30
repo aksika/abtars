@@ -93,7 +93,7 @@ export async function startBridge(): Promise<void> {
   const startedAt = Date.now();
   const platforms = parsePlatformFlags();
   const config = await loadAndValidateConfig();
-  if (platforms.transport) config.kiroTransport = platforms.transport;
+  if (platforms.transport) config.agentTransport = platforms.transport;
   setLogLevel(config.logLevel);
 
   const enabledList = [
@@ -118,7 +118,7 @@ export async function startBridge(): Promise<void> {
   const conversationBuffer = new ConversationBuffer(50);
 
   // --- Pre-flight: start external services ---
-  if (config.kiroTransport === "tmux") {
+  if (config.agentTransport === "tmux") {
     logInfo("main", `♻️  Starting tmux session '${config.tmuxSession}'...`);
     try {
       execFileSync(join(import.meta.dirname, "..", "scripts", "tmux-session.sh"), { stdio: "pipe" });
@@ -128,7 +128,7 @@ export async function startBridge(): Promise<void> {
   }
 
   let transport: IKiroTransport;
-  if (config.kiroTransport === "tmux") {
+  if (config.agentTransport === "tmux") {
     logInfo("main", `🖥️  tmux transport (session: ${config.tmuxSession})`);
     transport = new TmuxClient(
       config.tmuxSession,
@@ -136,10 +136,19 @@ export async function startBridge(): Promise<void> {
       config.tmuxMaxWaitSec,
     );
   } else {
-    // Kill orphaned kiro-cli acp processes from previous runs
+    // Kill orphaned processes from previous runs
     try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
-    logInfo("main", "🔌 ACP transport");
-    transport = new AcpTransport(config.kiroCLIPath, config.workingDir);
+    logInfo("main", `🔌 ACP transport (${config.agentCli})`);
+
+    // Build CLI args based on which CLI is selected
+    const cliArgs = config.agentCli === "gemini"
+      ? ["--experimental-acp"]
+      : undefined; // kiro and custom CLIs use default "acp" subcommand
+
+    transport = new AcpTransport(config.agentCliPath, config.workingDir, {
+      model: config.agentModel || undefined,
+      cliArgs,
+    });
   }
   await transport.initialize();
   logInfo("main", "✅ Transport ready");
@@ -159,7 +168,7 @@ export async function startBridge(): Promise<void> {
   const pendingSessionStart = new Set<string>();
   const seenSessions = new Set<string>();
   const fullModeChats = new Set<string>();
-  const codingModeManager = new CodingMode(config.kiroCLIPath, config.workingDir, config.codingAgentModel);
+  const codingModeManager = new CodingMode(config.agentCliPath, config.workingDir, config.agentCodingModel);
   const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
   const registry = new ServiceRegistry();
 
@@ -391,7 +400,7 @@ export async function startBridge(): Promise<void> {
     }
   };
 
-  const cronQueue = new CronQueue(config.kiroCLIPath, config.workingDir);
+  const cronQueue = new CronQueue(config.agentCliPath, config.workingDir);
 
   heartbeat.registerTask({
     name: "cron",
@@ -595,7 +604,7 @@ export async function startBridge(): Promise<void> {
         },
         services: svcStates,
         transport: {
-          type: config.kiroTransport as "tmux" | "acp",
+          type: config.agentTransport as "tmux" | "acp",
           isReady: transport.isReady,
           contextPercent: "contextPercent" in transport ? (transport as TmuxClient).contextPercent : -1,
         },
@@ -647,7 +656,7 @@ export async function startBridge(): Promise<void> {
     async create() {
       agentApiServer = new AgentApiServer({
         config: agentConfig,
-        cliPath: config.kiroCLIPath,
+        cliPath: config.agentCliPath,
         workingDir: config.workingDir,
         memory,
       });

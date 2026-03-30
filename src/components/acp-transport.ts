@@ -39,21 +39,30 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
 
-  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean; agent?: string; model?: string }) {
+  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean; agent?: string; model?: string; cliArgs?: string[] }) {
     this.cliPath = cliPath;
     this.workingDir = workingDir;
     this.skipAgent = opts?.skipAgent ?? false;
     this.agentName = opts?.agent ?? "professor";
     this.modelId = opts?.model;
+    this.extraCliArgs = opts?.cliArgs;
   }
 
   private readonly skipAgent: boolean;
   private readonly agentName: string;
   private readonly modelId?: string;
+  private readonly extraCliArgs?: string[];
 
   async initialize(): Promise<void> {
-    const args = this.skipAgent ? ["acp"] : ["acp", "--agent", this.agentName];
-    if (this.modelId) args.push("--model", this.modelId);
+    let args: string[];
+    if (this.extraCliArgs) {
+      // Custom CLI args (e.g. gemini --experimental-acp)
+      args = [...this.extraCliArgs];
+      if (this.modelId) args.push("--model", this.modelId);
+    } else {
+      args = this.skipAgent ? ["acp"] : ["acp", "--agent", this.agentName];
+      if (this.modelId) args.push("--model", this.modelId);
+    }
     this.agent = spawn(this.cliPath, args, {
       cwd: this.workingDir,
       stdio: ["pipe", "pipe", "pipe"],

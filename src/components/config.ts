@@ -2,7 +2,7 @@ import { access, stat, constants } from "node:fs/promises";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { config as loadDotenv } from "dotenv";
-import { type Config, type KiroTransport, CONFIG_DEFAULTS } from "../types/index.js";
+import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/index.js";
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
 import type { LogLevel } from "./logger.js";
 
@@ -105,16 +105,34 @@ export async function loadAndValidateConfig(): Promise<Config> {
     );
   }
 
-  // --- KIRO_CLI_PATH (optional, default from CONFIG_DEFAULTS) ---
-  const kiroCLIPath =
-    process.env["KIRO_CLI_PATH"] || CONFIG_DEFAULTS.kiroCLIPath;
+  // --- AGENT_CLI / KIRO_CLI_PATH (new name takes priority, old is fallback) ---
+  const agentCli = process.env["AGENT_CLI"] || CONFIG_DEFAULTS.agentCli;
+  const defaultCliPath = agentCli === "gemini" ? "gemini" : agentCli === "kiro" ? "kiro-cli" : agentCli;
+  const agentCliPath = process.env["AGENT_CLI_PATH"] || process.env["KIRO_CLI_PATH"] || defaultCliPath;
   try {
-    await validateCliPath(kiroCLIPath);
+    await validateCliPath(agentCliPath);
   } catch {
-    throw new Error(
-      `KIRO_CLI_PATH "${kiroCLIPath}" is not accessible or not executable`,
-    );
+    throw new Error(`CLI binary "${agentCliPath}" is not accessible or not executable`);
   }
+
+  // --- AGENT_TRANSPORT / KIRO_TRANSPORT (new name takes priority) ---
+  const rawTransport = (process.env["AGENT_TRANSPORT"] || process.env["KIRO_TRANSPORT"] || CONFIG_DEFAULTS.agentTransport).toLowerCase();
+  if (rawTransport !== "tmux" && rawTransport !== "acp") {
+    throw new Error(`AGENT_TRANSPORT must be "tmux" or "acp", got "${rawTransport}"`);
+  }
+  const agentTransport = rawTransport as AgentTransport;
+
+  // --- AGENT_MODEL / KIRO_MODEL ---
+  const agentModel = process.env["AGENT_MODEL"] || process.env["KIRO_MODEL"] || CONFIG_DEFAULTS.agentModel;
+
+  // --- AGENT_BROWSE_MODEL / BROWSING_AGENT ---
+  const agentBrowseModel = process.env["AGENT_BROWSE_MODEL"] || process.env["BROWSING_AGENT"] || CONFIG_DEFAULTS.agentBrowseModel;
+
+  // --- AGENT_SLEEP_MODEL / MEMORY_SUBAGENT_MODEL ---
+  const agentSleepModel = process.env["AGENT_SLEEP_MODEL"] || process.env["MEMORY_SUBAGENT_MODEL"] || CONFIG_DEFAULTS.agentSleepModel;
+
+  // --- AGENT_CODING_MODEL / CODING_AGENT_MODEL ---
+  const agentCodingModel = process.env["AGENT_CODING_MODEL"] || process.env["CODING_AGENT_MODEL"] || CONFIG_DEFAULTS.agentCodingModel;
 
   // --- WORKING_DIR (optional, default cwd) ---
   let workingDir = process.env["WORKING_DIR"] || CONFIG_DEFAULTS.workingDir;
@@ -157,12 +175,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
     CONFIG_DEFAULTS.pollTimeoutS,
   );
 
-  // --- KIRO_TRANSPORT (optional, default "tmux") ---
-  const rawTransport = (process.env["KIRO_TRANSPORT"] || CONFIG_DEFAULTS.kiroTransport).toLowerCase();
-  if (rawTransport !== "tmux" && rawTransport !== "acp") {
-    throw new Error(`KIRO_TRANSPORT must be "tmux" or "acp", got "${rawTransport}"`);
-  }
-  const kiroTransport = rawTransport as KiroTransport;
+  // --- AGENT_TRANSPORT / KIRO_TRANSPORT already parsed above ---
 
   // --- TMUX_SESSION (optional, default "kiro-bridge") ---
   const tmuxSession = process.env["TMUX_SESSION"] || CONFIG_DEFAULTS.tmuxSession;
@@ -276,12 +289,17 @@ export async function loadAndValidateConfig(): Promise<Config> {
   return {
     telegramBotToken: token,
     allowedUserIds,
-    kiroCLIPath,
+    agentCli,
+    agentCliPath,
+    agentTransport,
+    agentModel,
+    agentBrowseModel,
+    agentSleepModel,
+    agentCodingModel,
     workingDir,
     trustMode,
     permissionTimeoutMs,
     pollTimeoutS,
-    kiroTransport,
     tmuxSession,
     tmuxCaptureDelaySec,
     tmuxMaxWaitSec,
@@ -300,7 +318,10 @@ export async function loadAndValidateConfig(): Promise<Config> {
     discordA2aRateLimitMs,
     discordEnabled,
     discordA2aEnabled,
-    codingAgentModel: process.env["CODING_AGENT_MODEL"] || CONFIG_DEFAULTS.codingAgentModel,
     mcpDaemon: parseBoolEnv("MCPORTER_DAEMON", CONFIG_DEFAULTS.mcpDaemon),
+    // Legacy aliases
+    kiroCLIPath: agentCliPath,
+    kiroTransport: agentTransport,
+    codingAgentModel: agentCodingModel,
   };
 }

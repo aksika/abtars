@@ -1,7 +1,10 @@
 import type { LogLevel } from "../components/logger.js";
 
-/** Transport method for communicating with kiro-cli. */
-export type KiroTransport = "tmux" | "acp";
+/** Transport method for communicating with the agent CLI. */
+export type AgentTransport = "tmux" | "acp";
+
+/** @deprecated Use AgentTransport */
+export type KiroTransport = AgentTransport;
 
 /** Bridge configuration loaded from .env and validated at startup. */
 export type Config = {
@@ -9,9 +12,11 @@ export type Config = {
   telegramBotToken: string;
   /** Set of allowed Telegram user IDs (non-empty, fail-closed) */
   allowedUserIds: Set<number>;
-  /** Path to kiro-cli binary */
-  kiroCLIPath: string;
-  /** Working directory for Kiro sessions */
+  /** Which CLI to use: "kiro" (default), "gemini", or path to any ACP-compatible CLI */
+  agentCli: string;
+  /** Path to CLI binary (auto-detected from agentCli if not set) */
+  agentCliPath: string;
+  /** Working directory for agent sessions */
   workingDir: string;
   /** Auto-approve all permission requests */
   trustMode: boolean;
@@ -20,12 +25,12 @@ export type Config = {
   /** Telegram long-poll timeout in seconds */
   pollTimeoutS: number;
   /** Transport method: "acp" (default) or "tmux" */
-  kiroTransport: KiroTransport;
+  agentTransport: AgentTransport;
   /** tmux session name (only used when transport=tmux) */
   tmuxSession: string;
   /** Seconds to wait after sending a command before capturing output */
   tmuxCaptureDelaySec: number;
-  /** Max seconds to poll for Kiro to finish responding */
+  /** Max seconds to poll for agent to finish responding */
   tmuxMaxWaitSec: number;
   /** Log level: "off", "low", "debug" */
   logLevel: LogLevel;
@@ -57,20 +62,39 @@ export type Config = {
   discordEnabled: boolean;
   /** Whether A2A features are enabled (derived: true if discordA2aChannelId is set) */
   discordA2aEnabled: boolean;
-  /** Model ID for /coding agent (default: claude-opus-4.6) */
-  codingAgentModel: string;
+  /** Main conversation model */
+  agentModel: string;
+  /** Browse subagent model */
+  agentBrowseModel: string;
+  /** Sleep/memory subagent model */
+  agentSleepModel: string;
+  /** Coding subagent model */
+  agentCodingModel: string;
   /** Whether to start mcporter MCP daemon (default: false) */
   mcpDaemon: boolean;
+
+  // Legacy aliases (kept for backward compat, map to agent* fields)
+  /** @deprecated Use agentCliPath */
+  kiroCLIPath: string;
+  /** @deprecated Use agentTransport */
+  kiroTransport: AgentTransport;
+  /** @deprecated Use agentCodingModel */
+  codingAgentModel: string;
 };
 
 /** Default values for optional config fields. */
 export const CONFIG_DEFAULTS = {
-  kiroCLIPath: "kiro-cli",
+  agentCli: "kiro",
+  agentCliPath: "kiro-cli",
+  agentTransport: "acp" as AgentTransport,
+  agentModel: "claude-sonnet-4.6",
+  agentBrowseModel: "claude-sonnet-4.6",
+  agentSleepModel: "claude-opus-4.6",
+  agentCodingModel: "claude-opus-4.6",
   workingDir: process.cwd(),
   trustMode: false,
   permissionTimeoutMs: 60_000,
   pollTimeoutS: 30,
-  kiroTransport: "acp" as KiroTransport,
   tmuxSession: "kiro-bridge",
   tmuxCaptureDelaySec: 3,
   tmuxMaxWaitSec: 300,
@@ -83,6 +107,9 @@ export const CONFIG_DEFAULTS = {
   discordA2aRateLimitMs: 5000,
   discordEnabled: false,
   discordA2aEnabled: false,
-  codingAgentModel: "claude-opus-4.6",
   mcpDaemon: false,
+  // Legacy aliases
+  get kiroCLIPath() { return this.agentCliPath; },
+  get kiroTransport() { return this.agentTransport; },
+  get codingAgentModel() { return this.agentCodingModel; },
 } as const satisfies Partial<Config>;
