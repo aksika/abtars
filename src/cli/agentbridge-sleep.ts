@@ -197,6 +197,22 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
     }
   } catch (err) { logWarn(TAG, `[WIRED] log rotation failed: ${err instanceof Error ? err.message : String(err)}`); }
 
+  // 8. Delete old sleep lock files (>2 days)
+  try {
+    const sleepDir = join(memoryDir, "sleep");
+    if (existsSync(sleepDir)) {
+      const cutoff = Date.now() - 2 * 86400000;
+      for (const f of readdirSync(sleepDir)) {
+        if (!f.endsWith(".lock")) continue;
+        const match = f.match(/sleep_(\d{4})(\d{2})(\d{2})\.lock/);
+        if (match && new Date(`${match[1]}-${match[2]}-${match[3]}`).getTime() < cutoff) {
+          unlinkSync(join(sleepDir, f));
+          logInfo(TAG, `[WIRED] Deleted old lock: ${f}`);
+        }
+      }
+    }
+  } catch (err) { logWarn(TAG, `[WIRED] lock cleanup failed: ${err instanceof Error ? err.message : String(err)}`); }
+
   return results;
 }
 
