@@ -35,6 +35,7 @@ import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
 import { SleepQueue } from "./components/sleep-queue.js";
 import { buildSessionStartContext } from "./components/session-context.js";
+import { loadSoulBundle } from "./components/soul-loader.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 import { CronQueue } from "./components/cron-queue.js";
 
@@ -373,6 +374,8 @@ export async function startBridge(): Promise<void> {
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
         let greetPrompt = "[Telegram] You just woke up. Output ONLY a personalized greeting message.";
+        const soul = loadSoulBundle();
+        if (soul) greetPrompt = soul + "\n\n" + greetPrompt;
         const ctx = buildSessionStartContext(memory!, chatId);
         if (ctx) greetPrompt = ctx + "\n\n" + greetPrompt;
         seenSessions.add(sessionKey);
