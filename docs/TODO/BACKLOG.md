@@ -576,3 +576,61 @@ If Gemini CLI routes through 9Router, we get Gemini 2.5 Pro free at 180K complet
 2. Can it be used as a drop-in for `AGENT_MODEL` routing?
 3. Stability/reliability of free tiers — are they rate-limited?
 4. Can AgentBridge use 9Router as a proxy for all LLM calls (main agent + subagents)?
+
+## 54. Reliable SOUL & Core-Facts Injection (Cross-Model)
+
+**Status:** Not started — study phase
+**Priority:** HIGH
+**Source:** Multi-CLI planning (#48), kiro free tier limitations, Gemini CLI support
+
+### Problem
+
+SOUL.md and all `alwaysApply: true` steering files are injected by kiro-cli's `.kiro/steering/` mechanism. This is kiro-specific. If the bridge switches to:
+- **Kiro free tier** — steering may be limited or unavailable
+- **Gemini CLI** — no `.kiro/steering/` support at all
+- **9Router / other CLIs** — no steering mechanism
+
+Without SOUL injection, KP loses identity, memory awareness, classification rules, and tool syntax. The agent becomes a generic chatbot.
+
+### Current injection surface
+
+| File | Size | Purpose | Always loaded? |
+|------|------|---------|----------------|
+| `SOUL.md` | 5.4KB | Identity, personality, continuity | Yes (alwaysApply) |
+| `TOOLS.md` | 1.1KB | CLI tool syntax | Yes (alwaysApply) |
+| `classification.md` | ~1KB | CIA-AAA rules | Yes (alwaysApply) |
+| `trust-gating.md` | ~1KB | Trust/credibility rules | Yes (alwaysApply) |
+| `instant-store.md` | ~1KB | Store/edit rules | Yes (alwaysApply) |
+| 14 other steering files | ~15KB | Skills, tasks | On-demand |
+
+Total always-on: ~10KB (~3K tokens). Total with all skills: ~25KB.
+
+### Approaches to study
+
+1. **System prompt injection** — bridge prepends SOUL + core steering to every user message as a system prompt block. Works with any LLM. Cost: tokens per message.
+
+2. **First-message injection** — on session start, send SOUL as the first message before user content. Relies on context window persistence. Cheaper but fragile (context eviction).
+
+3. **Hybrid** — compact SOUL (~2KB) always prepended, full skills loaded on-demand via tool descriptions or function calling metadata.
+
+4. **Transport-level abstraction** — `IKiroTransport.sendPrompt()` gains a `systemContext` parameter. Each transport implementation handles injection differently:
+   - kiro-cli: relies on steering (no change)
+   - gemini-cli: prepends to prompt
+   - raw API: system message field
+
+5. **MCP tool descriptions** — encode SOUL/rules as tool descriptions that the model always sees. Hacky but works with any MCP-compatible client.
+
+### Key constraints
+
+- SOUL must survive context window compaction
+- Classification rules are security-critical — must ALWAYS be present
+- Token budget: free tiers have smaller context windows
+- Must not break existing kiro-cli steering (backward compatible)
+
+### Study tasks
+
+- [ ] Measure kiro free tier context window and steering support
+- [ ] Test Gemini CLI system prompt injection
+- [ ] Prototype transport-level `systemContext` parameter
+- [ ] Measure token cost of always-prepend vs first-message
+- [ ] Test SOUL persistence across long conversations (does it get evicted?)
