@@ -8,6 +8,7 @@ import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { handleCommand, type CommandContext, type Reply } from "./command-handlers.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
 import { buildSessionStartContext } from "./session-context.js";
+import { loadSoulBundle } from "./soul-loader.js";
 import { TmuxClient } from "./tmux-client.js";
 import { transcribeAudio, type SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
@@ -347,6 +348,11 @@ function preparePrompt(
 ): string {
   const isSessionStart = pending.has(sessionKey) || !seen.has(sessionKey);
   if (isSessionStart) {
+    const soul = loadSoulBundle();
+    if (soul) {
+      prompt = soul + "\n\n" + prompt;
+      logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
+    }
     const ctx = buildSessionStartContext(memory, chatId);
     if (ctx) {
       prompt = ctx + "\n\n" + prompt;
