@@ -96,7 +96,13 @@ type SleepState = { pid: number; startedAt: number; wiredResults?: WiredResults;
 const SLEEP_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 
 function readStateFile(path: string): SleepState | null {
-  try { return existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : null; } catch { return null; }
+  try {
+    if (!existsSync(path)) return null;
+    const raw = JSON.parse(readFileSync(path, "utf-8"));
+    // Validate it's a proper state file (not old PID-only format)
+    if (typeof raw !== "object" || raw === null || !raw.steps) return null;
+    return raw;
+  } catch { return null; }
 }
 
 function writeStateFile(path: string, state: SleepState): void {
