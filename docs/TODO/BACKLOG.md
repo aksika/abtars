@@ -678,3 +678,10 @@ Implementation: expose `bot.sendMessage(chatId, text)` as an agent-callable tool
 **Effort:** small
 
 9Router is installed on the Mac (`localhost:20128`) and registered as an OpenClaw provider. Wire it into agentbridge as an alternative model provider — route requests through 9Router's OpenAI-compatible API to access free models (Kiro/AWS Claude, iFlow, Qwen direct). Already audited for security (see `docs/9ROUTER-SECURITY-AUDIT.md`). Don't enable MITM or tunnel features.
+
+## Faster partial response delivery
+
+**Priority:** medium
+**Effort:** small
+
+Agent should send partial responses every ~30 seconds instead of waiting for the full 3-minute response. Stream chunks to Telegram as they arrive rather than buffering the entire reply. Improves perceived responsiveness especially on free tier where responses are slow.
