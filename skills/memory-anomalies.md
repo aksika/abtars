@@ -22,9 +22,12 @@ Reference for Dreamy's daily audit and KP's review of flagged items.
 
 | Anomaly | Detection | Why flagged |
 |---------|-----------|-------------|
-| Personal content at low classification | content mentions email/health/finance/travel at classification<2 | Human decides what's personal |
+| Personal content at low classification | content mentions health/finance/relationship AND user confirmed it's personal | Only flag if user context confirms — agent inference alone is not enough |
 | Conflicting attributes | trust=3 + credibility≥5, or trust=0 + classification≥2 | Contradictory signals |
 | Unknown patterns | Anything Dreamy hasn't seen before | Better safe than sorry |
+
+### Classification escalation — key principle
+Escalation comes from **user context**, not agent inference. Do NOT flag: operational emails, translations user asked for, business email mentions. DO flag: content user explicitly confirmed as personal/private.
 
 ## Classification scale
 0=UNCLASSIFIED, 1=RESTRICTED, 2=CONFIDENTIAL, 3=SECRET
