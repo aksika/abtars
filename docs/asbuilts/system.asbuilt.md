@@ -524,23 +524,55 @@ Diagnostic commands are in `skills/troubleshooting/SKILL.md` (Browser Agent sect
 
 ## Deploy Wiring
 
-All CLIs, skills, and prompt templates are deployed via `scripts/deploy.sh`:
+All persona files and CLIs deployed via `scripts/deploy.sh` (supports `--quick` to skip build).
+
+**Persona directories** (source: `persona/` in repo):
+
+| Source | Deploy target | Override logic |
+|--------|--------------|----------------|
+| `persona/core/` (gitignored) | `~/.agentbridge/core/` | Personal files; falls back to `persona/core_templates/` for fresh installs |
+| `persona/prompts/` | `~/.agentbridge/prompts/` | Always from repo |
+| `persona/skills/` | `~/.agentbridge/skills/` | Always from repo |
+| `persona/tasks/` (gitignored) | `~/.agentbridge/tasks/` | Personal; creates empty dir if missing |
+| `persona/core/.env` (gitignored) | `~/.agentbridge/.env` | Falls back to existing, then `.env.example` |
+
+All copies use `safe_cp` — never overwrites a newer file in production.
+
+**Soul injection**: Bridge reads `~/.agentbridge/core/*.md` (SOUL.md, TOOLS.md, user_profile.md, agent_notes.md) and injects as the first message at session start. No `.kiro/steering/` dependency — works with any CLI backend.
 
 **CLI wrappers** (bash scripts in `~/.agentbridge/`, symlinked to `~/.local/bin/`):
-- `agentbridge-todo` → `node <project>/dist/cli/agentbridge-todo.js`
-- `agentbridge-cron` → `node <project>/dist/cli/agentbridge-cron.js`
-- `agentbridge-browse` → `node <project>/dist/cli/agentbridge-browse.js`
+All `agentbridge-*` CLIs: recall, store, edit, sleep, browse, todo, cron, tweet, rss, expand, embed.
 
-**Skill steering** (copied to `~/.agentbridge/.kiro/steering/`):
-- `skills/*.md` → deployed via glob loop
-- `TOOLS.md` (`alwaysApply: true`) — compressed recall syntax, always in agent context (~825 bytes)
-- `session-start.md` — greeting and follow-up recall instructions
+---
 
-**Prompt templates** (copied to `~/.agentbridge/`):
-- `persona/browsing_prompt.md` → `browsing_prompt.md`
+## Backup
 
-**Task descriptions** (copied to `~/.agentbridge/tasks/`):
-- `tasks/*.md` → deployed via glob loop
+**Script:** `scripts/daily-backup.sh` — runs as a daily cron task.
+
+### Zip backup (local)
+```
+~/.backup-agentbridge/agentbridge-YYYYMMDD.zip
+```
+Contains: `memory/`, `core/`, `skills/`, `prompts/`, `tasks/`, `topics/`, `reports/`, `finance/`.
+Excludes: WAL/SHM files, pending state. Retention: 7 days (older auto-deleted).
+
+### Git backup (remote)
+Repository: `kiroprof-backup` on GitHub. Tracks text content only:
+- `core/` — SOUL.md, TOOLS.md, user_profile.md, agent_notes.md
+- `memory/daily|weekly|quarterly|retrospectives|audit` — summaries and reports
+- `skills/`, `prompts/`, `tasks/` — agent behavior
+- `finance/`, `reports/`, `twitterX/` — output data
+- `backup/memory.db.enc` — AES-256-CBC encrypted SQLite database
+
+**Encrypted DB**: `memory.db` is encrypted with `openssl aes-256-cbc -pbkdf2` using key at `~/.agentbridge/titok/db.key`, written to `backup/memory.db.enc`, and pushed to git. No smudge/clean filters — plain encrypted blob.
+
+**Restore:**
+```bash
+openssl enc -d -aes-256-cbc -pbkdf2 -pass file:titok/db.key \
+  -in backup/memory.db.enc -out memory/memory.db
+```
+
+**Gitignored from backup repo:** `.env`, CLI wrappers, `memory.db` (raw), WAL/SHM, logs, RSS dumps, transient state.
 
 ---
 
