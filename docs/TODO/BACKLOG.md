@@ -692,3 +692,10 @@ Agent should send partial responses every ~30 seconds instead of waiting for the
 **Effort:** medium
 
 Add OpenRouter as a direct model provider for agentbridge — bypass kiro-cli and call OpenRouter API directly. Enables access to 100+ models (free and paid) without depending on kiro-cli's model availability. Use OpenAI-compatible `/v1/chat/completions` endpoint with `OPENROUTER_API_KEY`. Include app attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`) for free tier eligibility.
+
+## Monitor context window — log ctx% from ACP metadata
+
+**Priority:** high
+**Effort:** small
+
+Parse `_kiro.dev/metadata` ACP events to extract context window usage percentage. Log it on every prompt completion: `[acp] Prompt complete (ctx: 45%)`. When ctx exceeds threshold (e.g. 80%), auto-trigger `/compact` or session reset. Currently `-32603` errors silently kill the session when context is full — need visibility.
