@@ -536,3 +536,33 @@ Add Cohere as an alternative STT/TTS provider. Cohere's transcription system is 
 - Wire into `stt.ts` — same interface, different API call
 - TTS: check if Cohere offers TTS or STT only
 - Gated by `STT_PROVIDER` — no breaking change to existing Groq setup
+
+## 50. 9Router Study
+
+**Status:** Not started
+**Priority:** Medium
+**Related:** #48 (Multi-CLI / Gemini CLI)
+
+### What is 9Router
+
+Open-source local proxy (npm package) that routes AI requests to 40+ providers with smart fallback. Runs on `localhost:20128`. Self-hosted middleware, not a cloud service.
+
+### Free tiers it aggregates
+
+| Provider | Models | Free tier |
+|----------|--------|-----------|
+| iFlow | Kimi K2, Qwen3 Coder, GLM-4.7, MiniMax M2, DeepSeek R1 | Free |
+| Qwen direct | Qwen3 Coder Plus/Flash | Free |
+| Kiro/AWS Builder ID | Claude Sonnet 4.5, Haiku 4.5 | Free (via AWS Builder ID, can be revoked) |
+| Gemini CLI | Gemini 3 Flash, 2.5 Pro | 180K completions/month free |
+
+### Relevance to #48
+
+If Gemini CLI routes through 9Router, we get Gemini 2.5 Pro free at 180K completions/month. Combined with `AGENT_CLI=gemini`, this could make the bridge essentially free to run.
+
+### Study questions
+
+1. How does 9Router integrate with Gemini CLI? Does it replace the API endpoint?
+2. Can it be used as a drop-in for `AGENT_MODEL` routing?
+3. Stability/reliability of free tiers — are they rate-limited?
+4. Can AgentBridge use 9Router as a proxy for all LLM calls (main agent + subagents)?
