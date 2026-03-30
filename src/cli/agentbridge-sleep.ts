@@ -27,7 +27,6 @@ import { loadSleepPrompt, loadSleepSteps, buildSleepVars, substituteVars } from 
 import { logInfo, logWarn, logError, setLogLevel } from "../components/logger.js";
 import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
 import { localDate } from "../components/env-utils.js";
-import { initializeDatabase } from "../components/memory-db.js";
 
 const TAG = "agentbridge-sleep";
 
@@ -106,7 +105,7 @@ function writeStateFile(path: string, state: SleepState): void {
 
 // ── Wired pre-tasks ─────────────────────────────────────────────────────────
 
-function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir: string): WiredResults {
+async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir: string): Promise<WiredResults> {
   const results: WiredResults = { purged: 0, deduped: 0, embedded: 0, anomaliesFixed: 0, walOk: false, ftsOk: false, logsDeleted: 0 };
 
   // 1. Purge expired garbage
@@ -454,7 +453,7 @@ async function main(): Promise<void> {
 
     // Wired pre-tasks (always run — fast, idempotent)
     logInfo(TAG, `[SLEEP] Running wired pre-tasks${isResume ? " (resume)" : ""}...`);
-    const wiredResults = runWiredPreTasks(db, memoryConfig.memoryDir);
+    const wiredResults = await runWiredPreTasks(db, memoryConfig.memoryDir);
     logInfo(TAG, `[SLEEP] Wired: ${formatWiredResults(wiredResults)}`);
 
     // Load step files
