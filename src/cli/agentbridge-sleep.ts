@@ -474,13 +474,13 @@ async function main(): Promise<void> {
     const snapshot = await gatherer.gather();
     if (flags.verbose) logInfo(TAG, `State gathered: ${buildSnapshotSummary(snapshot)}`);
 
-    // Guardrail: skip if no messages since last sleep (unless --force)
+    // Guardrail: skip if no messages since last sleep (unless --force or resuming)
     const msgCount = snapshot.dbStats.messagesSinceLastSleep;
-    if (msgCount === 0 && !flags.force) {
+    if (msgCount === 0 && !flags.force && !isResume) {
       logInfo(TAG, `[SLEEP] No messages since last sleep — nothing to process. Use --force to run housekeeping anyway.`);
       return;
     }
-    if (msgCount === 0 && flags.force) {
+    if (msgCount === 0 && flags.force && !isResume) {
       logInfo(TAG, `[SLEEP] No messages since last sleep — running housekeeping only (--force).`);
     }
 
@@ -489,8 +489,8 @@ async function main(): Promise<void> {
     const wiredResults = await runWiredPreTasks(db, memoryConfig.memoryDir);
     logInfo(TAG, `[SLEEP] Wired: ${formatWiredResults(wiredResults)}`);
 
-    // If --force with no messages, stop after housekeeping
-    if (msgCount === 0) return;
+    // If --force with no messages (and not resuming), stop after housekeeping
+    if (msgCount === 0 && !isResume) return;
 
     // Load step files + build vars
     const vars = buildSleepVars(snapshot);
