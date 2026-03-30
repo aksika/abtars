@@ -10,8 +10,7 @@ mkdir -p "$DEST"
 # Zip backup
 cd "$AB"
 zip -qr "$DEST/agentbridge-$DATE.zip" \
-  memory/ topics/ .kiro/ titok/ notebooklm/ \
-  sleeping_prompt.md browsing_prompt.md \
+  memory/ core/ skills/ prompts/ tasks/ topics/ reports/ finance/ \
   -x "memory/pending_*" "memory/memory.db-wal" "memory/memory.db-shm"
 
 # Prune >7 days
