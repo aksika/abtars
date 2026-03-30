@@ -480,17 +480,11 @@ async function main(): Promise<void> {
       logInfo(TAG, `[SLEEP] No messages since last sleep — nothing to process. Use --force to run housekeeping anyway.`);
       return;
     }
-    if (msgCount === 0 && flags.force && !isResume) {
-      logInfo(TAG, `[SLEEP] No messages since last sleep — running housekeeping only (--force).`);
-    }
 
     // Wired pre-tasks (always run — fast, idempotent)
     logInfo(TAG, `[SLEEP] Running wired pre-tasks${isResume ? " (resume)" : ""}...`);
     const wiredResults = await runWiredPreTasks(db, memoryConfig.memoryDir);
     logInfo(TAG, `[SLEEP] Wired: ${formatWiredResults(wiredResults)}`);
-
-    // If --force with no messages (and not resuming), stop after housekeeping
-    if (msgCount === 0 && !isResume) return;
 
     // Load step files + build vars
     const vars = buildSleepVars(snapshot);
