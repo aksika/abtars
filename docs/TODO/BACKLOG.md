@@ -685,3 +685,10 @@ Implementation: expose `bot.sendMessage(chatId, text)` as an agent-callable tool
 **Effort:** small
 
 Agent should send partial responses every ~30 seconds instead of waiting for the full 3-minute response. Stream chunks to Telegram as they arrive rather than buffering the entire reply. Improves perceived responsiveness especially on free tier where responses are slow.
+
+## OpenRouter provider support
+
+**Priority:** medium
+**Effort:** medium
+
+Add OpenRouter as a direct model provider for agentbridge — bypass kiro-cli and call OpenRouter API directly. Enables access to 100+ models (free and paid) without depending on kiro-cli's model availability. Use OpenAI-compatible `/v1/chat/completions` endpoint with `OPENROUTER_API_KEY`. Include app attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`) for free tier eligibility.
