@@ -111,8 +111,8 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     return true;
   }
 
-  // /stop, /cancel
-  if (text === "/stop" || text === "/cancel") {
+  // /stop, /ctrlc
+  if (text === "/stop" || text === "/ctrlc") {
     await ctx.transport.sendInterrupt();
     ctx.busyChats.delete(ctx.sessionKey);
     await ctx.reply("🛑 Ctrl+C sent to Kiro.");
@@ -295,7 +295,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       "/new — Start a new session",
       "/reset — Reset session + switch back to KP",
       "/status — Bot status, transport, heartbeat, mcporter",
-      "/stop — Stop current response (Ctrl+C)",
+      "/stop, /ctrlc — Stop current response (Ctrl+C)",
       "/memory — Memory storage statistics",
       "/cron — Scheduled tasks",
       "/cron log <id> — Last 5 runs for a task",
@@ -320,7 +320,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   // Unknown command guard
   if (text.startsWith("/") && /^\/\w+/.test(text) && !text.startsWith("//")) {
     const cmd = text.split(/\s/)[0]!;
-    const known = ["/new", "/reset", "/status", "/stop", "/cancel", "/restart", "/memory", "/cron", "/facts", "/coding", "/default", "/nlm", "/full", "/short", "/a2a-reset", "/help"];
+    const known = ["/new", "/reset", "/status", "/stop", "/ctrlc", "/restart", "/memory", "/cron", "/facts", "/coding", "/default", "/nlm", "/full", "/short", "/a2a-reset", "/help"];
     if (!known.includes(cmd)) {
       await ctx.reply(`❓ Unknown command: ${cmd}\nType /help for available commands.`);
       return true;
