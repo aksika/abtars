@@ -3,9 +3,22 @@ import { logInfo, logDebug, logWarn } from "./logger.js";
 
 export interface TtsConfig {
   voice: string;
+  voiceMap?: Record<string, string>; // lang code → voice name
 }
 
 const MAX_TTS_CHARS = 4000;
+
+const DEFAULT_VOICE_MAP: Record<string, string> = {
+  hu: "hu-HU-TamasNeural",
+  en: "en-US-AndrewMultilingualNeural",
+};
+
+/** Extract [lang:xx] tag from text, return { lang, text } */
+export function extractLangTag(text: string): { lang: string | null; text: string } {
+  const m = text.match(/^\[lang:(\w{2})\]\s*/i);
+  if (m) return { lang: m[1]!.toLowerCase(), text: text.slice(m[0].length) };
+  return { lang: null, text };
+}
 
 /**
  * Synthesize text to OGG Opus audio buffer using Microsoft Edge TTS.
@@ -15,22 +28,26 @@ export async function synthesizeSpeech(
   text: string,
   config: TtsConfig,
 ): Promise<Buffer | null> {
-  const cleaned = cleanForTts(text).trim();
+  const { lang, text: stripped } = extractLangTag(text);
+  const cleaned = cleanForTts(stripped).trim();
   if (!cleaned || cleaned.length < 5) {
     logDebug("tts", `Text too short for TTS (${cleaned.length} chars)`);
     return null;
   }
+
+  const voiceMap = { ...DEFAULT_VOICE_MAP, ...config.voiceMap };
+  const voice = (lang && voiceMap[lang]) || config.voice;
 
   // Truncate very long responses
   const input = cleaned.length > MAX_TTS_CHARS
     ? cleaned.slice(0, MAX_TTS_CHARS) + "... (truncated)"
     : cleaned;
 
-  logInfo("tts", `Synthesizing ${input.length} chars with voice ${config.voice}`);
+  logInfo("tts", `Synthesizing ${input.length} chars with voice ${voice}${lang ? ` (lang:${lang})` : ""}`);
 
   try {
     const tts = new EdgeTTS();
-    await tts.synthesize(input, config.voice, {
+    await tts.synthesize(input, voice, {
       rate: "+0%",
       pitch: "+0Hz",
       outputFormat: Constants.OUTPUT_FORMAT.WEBM_24KHZ_16BIT_MONO_OPUS,

@@ -534,17 +534,10 @@ Standalone MITM proxy + ACP CLI that provides free access to Google Cloud Code A
 
 ## 49. Cohere STT/TTS Integration
 
-**Status:** Not started
+**Status:** ⏸ Postponed — no Hungarian support
 **Priority:** Medium
 
-Add Cohere as an alternative STT/TTS provider. Cohere's transcription system is Apache 2.0 licensed. Selectable via env var alongside existing Groq/Whisper.
-
-### Plan
-- `STT_PROVIDER=cohere` (alongside existing `groq`)
-- `COHERE_API_KEY` env var
-- Wire into `stt.ts` — same interface, different API call
-- TTS: check if Cohere offers TTS or STT only
-- Gated by `STT_PROVIDER` — no breaking change to existing Groq setup
+Cohere Transcribe supports 14 languages (EN, DE, FR, IT, ES, PT, EL, NL, PL, VI, ZH, AR, JA, KO). No Hungarian — unusable for Molty's Hunglish conversations. Revisit if they add Hungarian. No TTS offering either — Edge TTS stays.
 
 ## 50. 9Router Study
 

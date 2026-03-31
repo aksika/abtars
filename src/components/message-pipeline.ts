@@ -197,7 +197,8 @@ export async function handleInboundMessage(
     // --- Extract clean answer ---
     const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
       ? (transport as TmuxClient).answerOnly : "";
-    const userResponse = fullModeChats.has(sessionKey) ? response : (cleanAnswer || response);
+    const userResponse = (fullModeChats.has(sessionKey) ? response : (cleanAnswer || response))
+      .replace(/^\[lang:\w{2}\]\s*/i, ""); // strip lang tag from display
 
     // --- Empty response ---
     if (!userResponse || !userResponse.trim()) {
