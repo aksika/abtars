@@ -41,6 +41,7 @@
   },
   "bin": {
     "agentbridge-recall": "dist/cli/agentbridge-recall.js",
+    "agentbridge-restart": "dist/cli/agentbridge-restart.js",
     "agentbridge-store": "dist/cli/agentbridge-store.js",
     "agentbridge-edit": "dist/cli/agentbridge-edit.js",
     "agentbridge-sleep": "dist/cli/agentbridge-sleep.js",

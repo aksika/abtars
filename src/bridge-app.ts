@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { readEntry as cronReadEntry } from "./components/cron-db.js";
 import { spawn, execFileSync, execSync } from "node:child_process";
@@ -515,6 +515,20 @@ export async function startBridge(): Promise<void> {
             isVoice: false,
           });
         }
+      }
+    },
+  });
+
+  // --- Restart flag check ---
+  heartbeat.registerTask({
+    name: "restart-check",
+    execute: async () => {
+      const flag = join(AGENT_BRIDGE_HOME, ".restart-requested");
+      if (existsSync(flag)) {
+        const reason = readFileSync(flag, "utf-8").trim();
+        logInfo("restart-check", `Restart requested: ${reason}`);
+        unlinkSync(flag);
+        process.exit(0);
       }
     },
   });
