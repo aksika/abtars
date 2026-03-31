@@ -539,6 +539,13 @@ Standalone MITM proxy + ACP CLI that provides free access to Google Cloud Code A
 
 Cohere Transcribe supports 14 languages (EN, DE, FR, IT, ES, PT, EL, NL, PL, VI, ZH, AR, JA, KO). No Hungarian — unusable for Molty's Hunglish conversations. Revisit if they add Hungarian. No TTS offering either — Edge TTS stays.
 
+## 55. TTS Language Switching
+
+**Status:** ✅ Done (2026-03-31)
+**Commit:** `37081cf`
+
+Agent prefixes voice replies with `[lang:hu]` or `[lang:en]`. Bridge picks matching Edge TTS voice (`hu-HU-TamasNeural` for Hungarian, `en-US-AndrewMultilingualNeural` for English). Tag stripped from display. SOUL updated with instruction.
+
 ## 50. 9Router Study
 
 **Status:** Done (study complete)
