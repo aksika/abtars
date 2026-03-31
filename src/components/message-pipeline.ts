@@ -209,15 +209,22 @@ export async function handleInboundMessage(
       return;
     }
 
-    // --- <NO_REPLY> → react with smile ---
+    // --- <NO_REPLY> → silently drop (group chats) ---
     if (userResponse.trim() === "<NO_REPLY>") {
-      logDebug(TAG, "LLM returned <NO_REPLY>, sending smile");
-      if (adapter.setReaction && msg.messageId) {
-        try {
-          await adapter.setReaction(channelId, msg.messageId, "😊");
-        } catch {
-          await adapter.sendMessage(channelId, "😊", { threadId: msg.threadId });
-        }
+      logDebug(TAG, "LLM returned <NO_REPLY>, dropping silently");
+      return;
+    }
+
+    // --- Standalone emoji → try reaction, fallback to message ---
+    const trimmed = userResponse.trim();
+    const isEmojiOnly = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}]{1,2}$/u.test(trimmed);
+    if (isEmojiOnly && adapter.setReaction && msg.messageId) {
+      try {
+        await adapter.setReaction(channelId, msg.messageId, trimmed);
+        logDebug(TAG, `Emoji reaction: ${trimmed}`);
+      } catch {
+        await adapter.sendMessage(channelId, trimmed, { threadId: msg.threadId });
+        logDebug(TAG, `Emoji as message (reaction failed): ${trimmed}`);
       }
       return;
     }
