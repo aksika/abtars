@@ -37,7 +37,10 @@ export class AcpTransport implements IKiroTransport {
   }
 
   /** Timestamp of last successful prompt. */
-  lastSuccessAt = Date.now();
+  lastSuccessAt = 0;
+
+  /** Timestamp of last prompt start. */
+  promptStartedAt = 0;
 
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
@@ -139,6 +142,7 @@ export class AcpTransport implements IKiroTransport {
 
     logDebug(TAG, `Sending prompt to session ${sessionId}: "${message.slice(0, 80)}"`);
 
+    this.promptStartedAt = Date.now();
     // TEMPORARY throttle — avoid overloading kiro-cli
     await new Promise((r) => setTimeout(r, TEMP_THROTTLE_MS));
 

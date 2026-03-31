@@ -523,20 +523,24 @@ export async function startBridge(): Promise<void> {
   let watchdogResetAt = 0;
   let watchdogRestartAt = 0;
   const WATCHDOG_COOLDOWN = 60 * 60 * 1000; // 1 hour
+  const WATCHDOG_CYCLES = parseInt(process.env["WATCHDOG_CYCLES"] ?? "2", 10);
 
   if (transport instanceof AcpTransport) {
     heartbeat.registerTask({
       name: "watchdog",
       execute: async () => {
         const acp = transport as AcpTransport;
-        const staleMs = Date.now() - acp.lastSuccessAt;
-        const threshold = hbIntervalMs * 1.1;
-        if (staleMs < threshold) return; // healthy
+        // Only trigger if a prompt is in-flight (started but not completed)
+        if (acp.promptStartedAt <= acp.lastSuccessAt) return;
+
+        const staleMs = Date.now() - acp.promptStartedAt;
+        const threshold = hbIntervalMs * WATCHDOG_CYCLES;
+        if (staleMs < threshold) return;
 
         const now = Date.now();
         // Level 1: reset session
         if (now - watchdogResetAt > WATCHDOG_COOLDOWN) {
-          logWarn("watchdog", `No successful prompt in ${Math.round(staleMs / 1000)}s — resetting ACP session`);
+          logWarn("watchdog", `Prompt stuck for ${Math.round(staleMs / 1000)}s — resetting ACP session`);
           watchdogResetAt = now;
           try {
             const sessionKey = [...config.allowedUserIds].map(id => `telegram:${id}`)[0];
