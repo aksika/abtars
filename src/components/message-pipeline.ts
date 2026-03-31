@@ -352,7 +352,8 @@ export async function handleInboundMessage(
       await adapter.setReaction(channelId, msg.messageId, "");
     }
 
-    logInfo(TAG, `→ [${msg.platform}] Response delivered${intermediateDelivered ? " (streamed)" : ""}`);
+    const ctxAfter = "contextPercent" in transport ? (transport as { contextPercent: number }).contextPercent : -1;
+    logInfo(TAG, `→ [${msg.platform}] Response delivered${intermediateDelivered ? " (streamed)" : ""}${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
 
     // --- Auto-compact ---
     if (memory && "contextPercent" in transport) {
