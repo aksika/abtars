@@ -188,6 +188,9 @@ export async function startBridge(): Promise<void> {
 
   const nlmConfig = loadNLMConfig();
 
+  // CronQueue must be initialized before pipelineDeps (which references it)
+  const cronQueue = new CronQueue(config.agentCliPath, config.workingDir);
+
   // Build pipeline deps (needed before platform start)
   const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
     transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
@@ -407,8 +410,6 @@ export async function startBridge(): Promise<void> {
       });
     }
   };
-
-  const cronQueue = new CronQueue(config.agentCliPath, config.workingDir);
 
   heartbeat.registerTask({
     name: "cron",

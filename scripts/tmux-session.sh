@@ -5,7 +5,7 @@
 # Usage:  ./scripts/tmux-session.sh
 # Kill:   tmux kill-session -t kiro-bridge
 
-set -euo pipefail
+set -uo pipefail
 
 SESSION="${TMUX_SESSION:-kiro-bridge}"
 WORKING_DIR="${WORKING_DIR:-.}"
