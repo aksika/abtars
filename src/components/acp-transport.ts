@@ -102,7 +102,10 @@ export class AcpTransport implements IKiroTransport {
           logDebug(TAG, `[ext] ${method}`);
           if (method === "_kiro.dev/metadata") {
             const pct = params["contextUsagePercentage"];
-            if (typeof pct === "number") this.lastContextPercent = Math.ceil(pct);
+            if (typeof pct === "number") {
+              this.lastContextPercent = Math.ceil(pct);
+              logDebug(TAG, `Context: ${this.lastContextPercent}%`);
+            }
           }
         },
       }),
@@ -140,7 +143,7 @@ export class AcpTransport implements IKiroTransport {
     // While running, sessionUpdate fires for each agent_message_chunk.
     const result = await this.promptWithRetry(sessionId, message);
 
-    logDebug(TAG, `Prompt complete (stopReason: ${result.stopReason})`);
+    logDebug(TAG, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
 
     const chunks = this.responseChunks.get(sessionId) ?? [];
     this.responseChunks.delete(sessionId);

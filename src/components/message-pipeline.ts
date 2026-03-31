@@ -356,7 +356,7 @@ export async function handleInboundMessage(
 
     // --- Auto-compact ---
     if (memory && "contextPercent" in transport) {
-      const pct = (transport as TmuxClient).contextPercent;
+      const pct = (transport as { contextPercent: number }).contextPercent;
       const threshold = memory.getConfig().searchEnhancements.compactThresholdPct;
       if (pct >= threshold) {
         logInfo(TAG, `⚠️ Context window at ${pct}% (threshold: ${threshold}%) — auto-compacting`);
