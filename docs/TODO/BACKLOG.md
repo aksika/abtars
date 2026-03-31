@@ -98,7 +98,7 @@ Covered in system engineering refactor v2: 654 tests across 66 files. Added comm
 
 ## 22. Picture / Media Support
 
-**Status:** Partial — receiving done, sending not implemented
+**Status:** Partial — receiving done, sending + context issues unresolved
 **Priority:** Medium
 **Source:** OpenClaw media handling study (memory refactor), user request (2026-03-22)
 
@@ -109,6 +109,15 @@ Covered in system engineering refactor v2: 654 tests across 66 files. Added comm
 
 **Remaining:**
 - KP cannot send images back to the user (no `sendPhoto` / `sendImage` on adapters)
+
+**Context window problem (2026-03-31):**
+kiro-cli reads images as a tool call (file read → base64 text into context). A 233KB JPEG = ~100K tokens — fills most of minimax-m2.5's 128K context. On retry, the image loads again, tripling the damage. Result: `-32603 ValidationException` after 3 retries, session dead.
+
+**Mitigation options:**
+1. **Downscale images** — resize to 512px max before saving. Drops ~20K tokens. Quick win.
+2. **Skip image forwarding** — tell agent "user sent an image" without file path. Agent asks if needed.
+3. **Native vision model** — Sonnet/GPT-4o handle images as image blocks, not base64 text. No context bloat.
+4. **Auto-reset on image fail** — if image read causes -32603, reset session and reply "image too large for current model".
 
 ## 21. Improve Security (NemoClaw Ideas)
 
