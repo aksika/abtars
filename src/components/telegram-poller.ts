@@ -63,7 +63,11 @@ export class TelegramPoller {
 
           for (const update of updates) {
             try {
-              await this.onUpdate(update);
+              // Don't await — process in background so /stop can interrupt
+              const result = this.onUpdate(update);
+              if (result instanceof Promise) {
+                result.catch((err: unknown) => logError("poller", "Error in update handler", err));
+              }
             } catch (err) {
               logError("poller", "Error in update handler", err);
             }
