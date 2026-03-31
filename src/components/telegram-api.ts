@@ -61,6 +61,16 @@ export class TelegramApi {
     return (res as { message_id: number }).message_id;
   }
 
+  /** Edit an existing message's text. */
+  async editMessageText(
+    chatId: number,
+    messageId: number,
+    text: string,
+    options?: { parse_mode?: string },
+  ): Promise<void> {
+    await this.call("editMessageText", { chat_id: chatId, message_id: messageId, text, ...options });
+  }
+
   /** Acknowledge a callback query (inline keyboard press). */
   async answerCallbackQuery(callbackQueryId: string): Promise<void> {
     await this.call("answerCallbackQuery", { callback_query_id: callbackQueryId });

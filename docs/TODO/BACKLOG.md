@@ -684,7 +684,36 @@ Implementation: expose `bot.sendMessage(chatId, text)` as an agent-callable tool
 **Priority:** medium
 **Effort:** small
 
-Agent should send partial responses every ~30 seconds instead of waiting for the full 3-minute response. Stream chunks to Telegram as they arrive rather than buffering the entire reply. Improves perceived responsiveness especially on free tier where responses are slow.
+### Problem
+On free tier, responses take 1-3 minutes. User sees nothing until complete.
+
+### Discovery
+ACP already sends `session/update` notifications with `type: "agent_message_chunk"` during generation. These are defined in `types/acp.ts` but not wired to delivery.
+
+### Plan
+
+1. **AcpClient** — emit typed events for session updates
+   - Listen for `session/update` notifications
+   - Parse `params` as `AcpSessionUpdate`
+   - Emit `"agent_chunk"` event with `{ sessionId, content }` for `agent_message_chunk` type
+   - Emit `"tool_call"` event for tool calls (for progress display)
+
+2. **SessionManager** — accumulate chunks per session, flush on timer
+   - Buffer incoming `agent_message_chunk` content per sessionId
+   - Every 30s: if buffer has new content since last flush, deliver it via callback
+   - On prompt complete: stop flushing (pipeline handles final delivery)
+   - Track `deliveredSoFar` to only send the delta
+
+3. **MessagePipeline** — wire intermediate delivery for ACP (same as TmuxClient)
+   - Register a flush callback on SessionManager before `sendPrompt`
+   - Callback calls `adapter.sendMessage()` with the new chunk
+   - On response complete: unregister, send any remaining tail
+   - Strip `[lang:xx]` from intermediate chunks too
+
+4. **Edge cases:**
+   - Don't deliver tool output as intermediate (only agent text)
+   - Don't deliver if chunk is just whitespace or thinking tokens
+   - Edit previous message instead of sending new one? (Telegram `editMessageText`) — cleaner UX but more complex. Start with new messages, optimize later.
 
 ## OpenRouter provider support
 

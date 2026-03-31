@@ -10,6 +10,7 @@ import { interceptLargeMessage } from "./message-interceptor.js";
 import { buildSessionStartContext } from "./session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { TmuxClient } from "./tmux-client.js";
+import { AcpTransport } from "./acp-transport.js";
 import { transcribeAudio, type SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import type { IKiroTransport } from "./kiro-transport.js";
@@ -174,6 +175,10 @@ export async function handleInboundMessage(
 
     // --- Intermediate streaming ---
     let intermediateDelivered = false;
+    let streamMsgId: number | undefined;
+    let streamBuffer = "";
+    let streamTimer: ReturnType<typeof setInterval> | undefined;
+
     if (transport instanceof TmuxClient) {
       (transport as TmuxClient).onIntermediateResponse = (chunk: string) => {
         intermediateDelivered = true;
@@ -185,12 +190,37 @@ export async function handleInboundMessage(
           }
         }
       };
+    } else if (transport instanceof AcpTransport && adapter.editMessage) {
+      const FLUSH_INTERVAL = 2000;
+      let lastFlushed = "";
+
+      (transport as AcpTransport).onIntermediateResponse = (chunk: string) => {
+        streamBuffer += chunk;
+      };
+
+      streamTimer = setInterval(async () => {
+        const text = streamBuffer.replace(/^\[lang:\w{2}\]\s*/i, "").trim();
+        if (!text || text === lastFlushed) return;
+        try {
+          if (!streamMsgId) {
+            streamMsgId = await adapter.sendMessage(channelId, text + " ▍", { threadId: msg.threadId });
+            intermediateDelivered = true;
+          } else {
+            await adapter.editMessage!(channelId, streamMsgId, text + " ▍");
+          }
+          lastFlushed = text;
+        } catch { /* edit may fail if text unchanged or too fast */ }
+      }, FLUSH_INTERVAL);
     }
 
     const response = await responsePromise;
 
     if (transport instanceof TmuxClient) {
       (transport as TmuxClient).onIntermediateResponse = undefined;
+    }
+    if (transport instanceof AcpTransport) {
+      clearInterval(streamTimer);
+      (transport as AcpTransport).onIntermediateResponse = undefined;
     }
     logDebug(TAG, `Response (${response.length} chars): "${response.slice(0, 120)}"`);
 
@@ -266,6 +296,12 @@ export async function handleInboundMessage(
           lastSentMsgId = await adapter.sendMessage(channelId, chunk, { threadId: msg.threadId });
         }
       }
+    } else if (streamMsgId && adapter.editMessage) {
+      // ACP edit-in-place: final edit removes cursor ▍
+      try {
+        await adapter.editMessage(channelId, streamMsgId, userResponse);
+        lastSentMsgId = streamMsgId;
+      } catch { /* final edit may fail if identical */ }
     } else if (transport instanceof TmuxClient) {
       // Send any tail not yet delivered by intermediate streaming
       const delivered = (transport as TmuxClient).intermediateDeliveredText;

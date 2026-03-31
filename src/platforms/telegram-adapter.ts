@@ -101,6 +101,11 @@ export class TelegramAdapter implements PlatformAdapter {
     return this.api.sendMessage(chatId, text, sendOpts);
   }
 
+  async editMessage(channelId: string, messageId: number, text: string): Promise<void> {
+    const chatId = parseInt(channelId, 10);
+    await this.api.editMessageText(chatId, messageId, text);
+  }
+
   chunkResponse(text: string): string[] {
     return this.formatter.chunkText(text);
   }

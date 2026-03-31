@@ -64,6 +64,7 @@ export interface PlatformAdapter {
 
   // Optional capabilities
   sendTyping?(channelId: string, threadId?: string): Promise<void>;
+  editMessage?(channelId: string, messageId: number, text: string): Promise<void>;
   setReaction?(channelId: string, messageId: number, emoji: string): Promise<void>;
   downloadVoice?(fileId: string): Promise<Buffer>;
   sendVoice?(channelId: string, audio: Buffer, opts?: SendOpts): Promise<void>;
