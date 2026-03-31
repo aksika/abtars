@@ -4,7 +4,7 @@
  * The dashboard and CLI flags both use this to start/stop services.
  */
 
-import { logInfo, logError } from "./logger.js";
+import { logInfo, logError, logWarn } from "./logger.js";
 
 const TAG = "service-registry";
 
@@ -28,23 +28,31 @@ export class ServiceRegistry {
     this.factories.set(name, factory);
   }
 
-  async start(name: string): Promise<{ ok: boolean; error?: string }> {
+  async start(name: string, retries = 3, delayMs = 5000): Promise<{ ok: boolean; error?: string }> {
     const factory = this.factories.get(name);
     if (!factory) return { ok: false, error: `Unknown service: ${name}` };
     if (!factory.configured) return { ok: false, error: `${name} not configured (check .env)` };
     if (this.instances.has(name)) return { ok: false, error: `${name} already running` };
 
-    try {
-      const instance = await factory.create();
-      await instance.start();
-      this.instances.set(name, instance);
-      logInfo(TAG, `Started service: ${name}`);
-      return { ok: true };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logError(TAG, `Failed to start ${name}: ${msg}`);
-      return { ok: false, error: msg };
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const instance = await factory.create();
+        await instance.start();
+        this.instances.set(name, instance);
+        logInfo(TAG, `Started service: ${name}${attempt > 1 ? ` (attempt ${attempt})` : ""}`);
+        return { ok: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempt < retries) {
+          logWarn(TAG, `Failed to start ${name} (attempt ${attempt}/${retries}): ${msg} — retrying in ${delayMs / 1000}s`);
+          await new Promise(r => setTimeout(r, delayMs));
+        } else {
+          logError(TAG, `Failed to start ${name} after ${retries} attempts: ${msg}`);
+          return { ok: false, error: msg };
+        }
+      }
     }
+    return { ok: false, error: "unreachable" };
   }
 
   stop(name: string): { ok: boolean; error?: string } {

@@ -68,7 +68,10 @@ async function sendBackOnline(
 ): Promise<void> {
   const msg = "🔄 Back online.";
   logInfo("main", "Startup: Back online notification sent");
-  const results = await Promise.allSettled([sendTelegram?.(msg), sendDiscord?.(msg)]);
+  const results = await Promise.allSettled([
+    sendTelegram?.(msg).catch(() => {}),
+    sendDiscord?.(msg).catch(() => {}),
+  ]);
   for (const r of results) {
     if (r.status === "rejected") logWarn("main", `Back online send failed: ${r.reason}`);
   }
