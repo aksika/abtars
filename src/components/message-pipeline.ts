@@ -121,8 +121,8 @@ export async function handleInboundMessage(
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   try {
     busyChats.add(sessionKey);
-    logInfo(TAG, `← [${msg.platform}] ${isVoice ? "🎤 " : ""}"${text.slice(0, 60)}"`);
-
+    const ctxPct = "contextPercent" in transport ? (transport as { contextPercent: number }).contextPercent : -1;
+    logInfo(TAG, `← [${msg.platform}] ${isVoice ? "🎤 " : ""}"${text.slice(0, 60)}"${ctxPct >= 0 ? ` (ctx: ${ctxPct}%)` : ""}`);
     // --- Sleep queue ---
     if (sleepQueue.isActive) {
       const isFirst = sleepQueue.enqueue({
