@@ -191,7 +191,7 @@ export async function handleInboundMessage(
         }
       };
     } else if (transport instanceof AcpTransport && adapter.editMessage) {
-      const rawVal = parseInt(process.env["STREAM_FLUSH_SEC"] ?? "5", 10);
+      const rawVal = parseInt(process.env["STREAM_FLUSH_SEC"] ?? "3", 10);
       const FLUSH_INTERVAL = rawVal === 0 ? 0 : Math.max(2, Math.min(180, rawVal)) * 1000;
       let lastFlushed = "";
 
