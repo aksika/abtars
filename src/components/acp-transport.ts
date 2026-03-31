@@ -36,6 +36,9 @@ export class AcpTransport implements IKiroTransport {
     return this.lastContextPercent;
   }
 
+  /** Timestamp of last successful prompt. */
+  lastSuccessAt = Date.now();
+
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
 
@@ -144,6 +147,7 @@ export class AcpTransport implements IKiroTransport {
     const result = await this.promptWithRetry(sessionId, message);
 
     logDebug(TAG, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
+    this.lastSuccessAt = Date.now();
 
     const chunks = this.responseChunks.get(sessionId) ?? [];
     this.responseChunks.delete(sessionId);

@@ -519,6 +519,43 @@ export async function startBridge(): Promise<void> {
     },
   });
 
+  // --- Watchdog: detect stuck agent ---
+  let watchdogResetAt = 0;
+  let watchdogRestartAt = 0;
+  const WATCHDOG_COOLDOWN = 60 * 60 * 1000; // 1 hour
+
+  if (transport instanceof AcpTransport) {
+    heartbeat.registerTask({
+      name: "watchdog",
+      execute: async () => {
+        const acp = transport as AcpTransport;
+        const staleMs = Date.now() - acp.lastSuccessAt;
+        const threshold = hbIntervalMs * 1.1;
+        if (staleMs < threshold) return; // healthy
+
+        const now = Date.now();
+        // Level 1: reset session
+        if (now - watchdogResetAt > WATCHDOG_COOLDOWN) {
+          logWarn("watchdog", `No successful prompt in ${Math.round(staleMs / 1000)}s — resetting ACP session`);
+          watchdogResetAt = now;
+          try {
+            const sessionKey = [...config.allowedUserIds].map(id => `telegram:${id}`)[0];
+            if (sessionKey) await acp.resetSession(sessionKey);
+          } catch (e) {
+            logError("watchdog", "Reset failed", e);
+          }
+          return;
+        }
+        // Level 2: restart bridge
+        if (now - watchdogRestartAt > WATCHDOG_COOLDOWN) {
+          logWarn("watchdog", `Still stuck after reset — restarting bridge`);
+          watchdogRestartAt = now;
+          process.exit(0);
+        }
+      },
+    });
+  }
+
   // --- Restart flag check ---
   heartbeat.registerTask({
     name: "restart-check",
