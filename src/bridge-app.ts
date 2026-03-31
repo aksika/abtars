@@ -520,7 +520,7 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- Self-healing agent: error scanner ---
-  const SELFHEAL_MAX = parseInt(process.env["SELFHEAL_MAX_REPORTS"] ?? "3", 10);
+  const SELFHEAL_MAX = parseInt(process.env["SELFHEAL_MAX_REPORTS"] ?? "1", 10);
   const SELFHEAL_COOLDOWN_MS = (parseInt(process.env["SELFHEAL_COOLDOWN_MIN"] ?? "30", 10)) * 60 * 1000;
   let lastSelfhealTs = "";
   const selfhealSeen = new Map<string, number>(); // errorKey → lastReportedAt
@@ -542,6 +542,8 @@ export async function startBridge(): Promise<void> {
             const ts = line.slice(0, 23);
             if (ts <= lastSelfhealTs) break;
             if (line.includes("TEST ")) continue;
+            // Skip non-critical transient errors
+            if (line.includes("-32603") || line.includes("Transient error") || line.includes("fetch failed")) continue;
 
             // Extract tag + message as dedup key
             const match = line.match(/\[([^\]]+)\] (.+)/);
