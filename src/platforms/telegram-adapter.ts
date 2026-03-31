@@ -316,13 +316,18 @@ export class TelegramAdapter implements PlatformAdapter {
       rawPlatformData: message,
     };
 
-    // /stop and /cancel bypass the pipeline queue — cancel immediately
+    // /stop, /ctrlc, /restart bypass the pipeline queue
     const trimText = (text ?? "").trim();
     if (trimText === "/stop" || trimText === "/ctrlc") {
       await this.deps.pipeline.transport.sendInterrupt();
       this.deps.pipeline.busyChats.delete(`telegram:${chatId}`);
       await this.api.sendMessage(chatId, "🛑 Stopped.");
       logInfo(TAG, "Immediate cancel via /stop");
+      return;
+    }
+    if (trimText === "/restart") {
+      await this.api.sendMessage(chatId, "♻️ Restarting bridge...");
+      setTimeout(() => process.exit(0), 500);
       return;
     }
 

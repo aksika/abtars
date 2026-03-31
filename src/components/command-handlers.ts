@@ -129,7 +129,8 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       ctx.pendingSessionStart.add(ctx.sessionKey);
       await ctx.reply("✅ Kiro restarted.");
     } else {
-      await ctx.reply("⚠️ /restart only works with tmux transport.");
+      await ctx.reply("♻️ Restarting bridge...");
+      setTimeout(() => process.exit(0), 500);
     }
     return true;
   }
