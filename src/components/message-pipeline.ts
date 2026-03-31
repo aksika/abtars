@@ -191,26 +191,30 @@ export async function handleInboundMessage(
         }
       };
     } else if (transport instanceof AcpTransport && adapter.editMessage) {
-      const FLUSH_INTERVAL = 2000;
+      const flushSec = Math.max(2, Math.min(180, parseInt(process.env["STREAM_FLUSH_SEC"] ?? "5", 10)));
+      const rawVal = parseInt(process.env["STREAM_FLUSH_SEC"] ?? "5", 10);
+      const FLUSH_INTERVAL = rawVal === 0 ? 0 : Math.max(2, Math.min(180, rawVal)) * 1000;
       let lastFlushed = "";
 
       (transport as AcpTransport).onIntermediateResponse = (chunk: string) => {
         streamBuffer += chunk;
       };
 
-      streamTimer = setInterval(async () => {
-        const text = streamBuffer.replace(/^\[lang:\w{2}\]\s*/i, "").trim();
-        if (!text || text === lastFlushed) return;
-        try {
-          if (!streamMsgId) {
-            streamMsgId = await adapter.sendMessage(channelId, text + " ▍", { threadId: msg.threadId });
-            intermediateDelivered = true;
-          } else {
-            await adapter.editMessage!(channelId, streamMsgId, text + " ▍");
-          }
-          lastFlushed = text;
-        } catch { /* edit may fail if text unchanged or too fast */ }
-      }, FLUSH_INTERVAL);
+      if (FLUSH_INTERVAL > 0) {
+        streamTimer = setInterval(async () => {
+          const text = streamBuffer.replace(/^\[lang:\w{2}\]\s*/i, "").trim();
+          if (!text || text === lastFlushed) return;
+          try {
+            if (!streamMsgId) {
+              streamMsgId = await adapter.sendMessage(channelId, text + " ▍", { threadId: msg.threadId });
+              intermediateDelivered = true;
+            } else {
+              await adapter.editMessage!(channelId, streamMsgId, text + " ▍");
+            }
+            lastFlushed = text;
+          } catch { /* edit may fail if text unchanged or too fast */ }
+        }, FLUSH_INTERVAL);
+      }
     }
 
     const response = await responsePromise;
