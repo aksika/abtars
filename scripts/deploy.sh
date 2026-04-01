@@ -111,6 +111,15 @@ for f in "$CORE_SRC/"*.md; do
   [ -f "$f" ] && safe_cp "$f" "$AB_HOME/core/$(basename "$f")"
 done
 
+# Transport profiles
+mkdir -p "$AB_HOME/transports"
+if [ -d "$CORE_SRC/transports" ]; then
+  for f in "$CORE_SRC/transports/"*.env; do
+    [ -f "$f" ] && cp "$f" "$AB_HOME/transports/$(basename "$f")"
+  done
+  echo "  ✓ Transport profiles deployed"
+fi
+
 # Prompts: always from repo
 mkdir -p "$AB_HOME/prompts"
 for f in "$PROJECT_DIR/persona/prompts/"*.md; do

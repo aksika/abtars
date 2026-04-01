@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { config as loadDotenv } from "dotenv";
 import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/index.js";
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
+import { logInfo } from "./logger.js";
 import type { LogLevel } from "./logger.js";
 
 /** ~/.agentbridge/ is the runtime config/data directory */
@@ -87,6 +88,14 @@ export async function loadAndValidateConfig(): Promise<Config> {
   // Load .env from ~/.agentbridge/.env
   const envPath = resolve(AGENT_BRIDGE_HOME, ".env");
   loadDotenv({ path: envPath });
+
+  // Load transport profile (e.g. transports/kiro.env) — overrides AGENT_* vars
+  const transportProfile = process.env["AGENT_TRANSPORT_PROFILE"];
+  if (transportProfile) {
+    const profilePath = resolve(AGENT_BRIDGE_HOME, "transports", `${transportProfile}.env`);
+    loadDotenv({ path: profilePath, override: true });
+    logInfo("config", `Loaded transport profile: ${transportProfile}`);
+  }
 
   // --- TELEGRAM_BOT_TOKEN (required) ---
   const token = process.env["TELEGRAM_BOT_TOKEN"] ?? "";
