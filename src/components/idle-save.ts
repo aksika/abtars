@@ -45,7 +45,7 @@ export class IdleSave {
       await this.transport.sendPrompt(sessionKey, `/chat save ${dest}`);
       logInfo("idle-save", `Chat saved to ${dest}`);
     } catch (e) {
-      logWarn("idle-save", `Chat save failed: ${e}`);
+      logWarn("idle-save", `Chat save failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
     }
   }
 
