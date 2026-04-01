@@ -198,6 +198,7 @@ export async function startBridge(): Promise<void> {
     sleepQueue, idleSave, conversationBuffer, config, startedAt,
     sttConfig, ttsConfig,
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
+    messageQueue: new Map(),
     cronCurrentJob: () => cronQueue.currentJob,
     enqueueCron: (entryId: string): string | null => {
       try {

@@ -40,6 +40,7 @@ export interface PipelineDeps {
   ttsConfig: TtsConfig | null;
   // Shared mutable state
   busyChats: Set<string>;
+  messageQueue: Map<string, Array<{ msg: InboundMessage; adapter: PlatformAdapter }>>;
   fullModeChats: Set<string>;
   pendingSessionStart: Set<string>;
   seenSessions: Set<string>;
@@ -115,9 +116,21 @@ export async function handleInboundMessage(
 
   // --- Busy check ---
   if (busyChats.has(sessionKey)) {
-    logDebug(TAG, `Busy — skipping "${text.slice(0, 40)}" for ${sessionKey}`);
-    await adapter.sendMessage(channelId, "⏳ Previous request still in progress...", { threadId: msg.threadId });
-    return;
+    const isWait = text.trim().toLowerCase().startsWith("wait");
+    if (isWait) {
+      // "WAIT" → cancel current, process this message immediately
+      logInfo(TAG, `WAIT interrupt — cancelling current prompt for ${sessionKey}`);
+      await transport.sendInterrupt();
+      busyChats.delete(sessionKey);
+    } else {
+      // Queue the message for processing after current completes
+      const queue = deps.messageQueue.get(sessionKey) ?? [];
+      queue.push({ msg, adapter });
+      deps.messageQueue.set(sessionKey, queue);
+      logDebug(TAG, `Queued "${text.slice(0, 40)}" for ${sessionKey} (${queue.length} pending)`);
+      await adapter.sendMessage(channelId, `⏳ Queued (${queue.length}) — will process after current response.`, { threadId: msg.threadId });
+      return;
+    }
   }
 
   let typingInterval: ReturnType<typeof setInterval> | undefined;
@@ -387,6 +400,15 @@ export async function handleInboundMessage(
     clearInterval(typingInterval);
     busyChats.delete(sessionKey);
     idleSave.reset(sessionKey, chatId);
+
+    // Drain queued messages
+    const queued = deps.messageQueue.get(sessionKey);
+    if (queued?.length) {
+      const next = queued.shift()!;
+      if (queued.length === 0) deps.messageQueue.delete(sessionKey);
+      logInfo(TAG, `Draining queued message for ${sessionKey} (${queued.length} remaining)`);
+      handleInboundMessage(next.msg, next.adapter, deps).catch(e => logError(TAG, "Queue drain error", e));
+    }
   }
 }
 
