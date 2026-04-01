@@ -584,7 +584,7 @@ export async function startBridge(): Promise<void> {
   // --- Self-healing agent: error scanner ---
   const SELFHEAL_MAX = parseInt(process.env["SELFHEAL_MAX_REPORTS"] ?? "1", 10);
   const SELFHEAL_COOLDOWN_MS = (parseInt(process.env["SELFHEAL_COOLDOWN_MIN"] ?? "30", 10)) * 60 * 1000;
-  let lastSelfhealTs = "";
+  let lastSelfhealTs = new Date().toISOString().slice(0, 23); // start from now — don't re-scan old errors
   const selfhealSeen = new Map<string, number>(); // errorKey → lastReportedAt
 
   if (process.env["SELFHEAL_ENABLED"] !== "false") {
