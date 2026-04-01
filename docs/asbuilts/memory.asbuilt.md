@@ -169,7 +169,13 @@ Survival-of-the-fittest for memories. Frequently recalled memories get stronger;
 | `relevance_score` | INTEGER | 0 | Boosted/demoted by feedback, affects recall ranking |
 | `confidence` | INTEGER | 3 | 1-5, adjusted based on evidence |
 
-**Recall scoring boost:** `base_score × (1 + recall_count × 0.1) × (relevance > 0 ? 1.2 : 1.0)`.
+**Recall scoring boost:** `base_score × (1 + recall_count × 0.1) × (relevance > 0 ? 1.2 : 1.0) × recency_factor × emotion_boost`.
+
+**Time-decay (recency_factor):** `max(0.3, 1 - age_days / 365)` — linear decay over a year, floor at 0.3. Recent memories rank higher.
+
+**Emotion override (emotion_boost):** `1 + abs(emotion_score) × 0.1` — emotional memories resist decay. A +5 emotion memory decays 1.5x slower than neutral.
+
+Configurable: `RECALL_DECAY_DAYS` (365), `RECALL_DECAY_FLOOR` (0.3), `RECALL_EMOTION_BOOST` (0.1).
 
 **Sleep §2 feedback pass:** If a recalled memory was confirmed by user → boost (+10 relevance). If corrected/rejected → demote (-10 relevance).
 
@@ -473,7 +479,11 @@ Dreamy scans all messages in the DB and cleans up noise while preserving emotion
 
 **Step 4 — Noise marking (7-day grace period):** Greetings, pings, filler → `garbage.json`. Does NOT mark action confirmations, instructions, or questions with content.
 
-**Step 5 — Verify extractions:** Extract missing facts via `agentbridge-store`. Garbage-mark verbose originals.
+**Step 4a — Daily summary (code-driven):** Reads messages from DB, batches by token budget (40% of `AGENT_SLEEP_CTX_WINDOW`), accumulates summary across batches. Strips media payloads (base64, binary). Three-level escalation: normal → aggressive → deterministic fallback. Writes `daily/daily_YYYYMMDD.md`.
+
+**Step 4b — Extract from daily (code-driven):** Reads daily summary file, sends to model with extraction prompt. Model calls `agentbridge-store` for each memory. Clean input (no SQL tool calls needed).
+
+**Step 5 — GC noise:** Marks small talk/noise messages as garbage (flushed after 12h).
 
 **Extraction watermark:** Tracks last processed timestamp per chat in `extraction_watermarks` table. Only advanced at the end of a completed sleep cycle — NOT on instant-store. This ensures Dreamy re-scans all messages since last sleep, even if the main agent stored some during conversation.
 
@@ -481,7 +491,7 @@ Dreamy scans all messages in the DB and cleans up noise while preserving emotion
 
 **Step 6 — Emotion harvest (verbal only):** Update nearest memory's `emotion_score` via `agentbridge-edit`. Mark emotional message as garbage.
 
-**Step 7 — Flush old messages:** Keep max 1000 messages, age out >10 days. Both conditions checked — whichever hits first. Gives Dreamy multiple nights to extract from the same messages.
+**Step 7 — Flush old messages:** Keep max 500 messages, age out >7 days, garbage flushed after 12h. Gives Dreamy multiple nights to extract from the same messages.
 
 ### Memory Anomaly Audit (§7.5)
 
@@ -545,8 +555,9 @@ recordMessage() ──► messages table (raw content, emojis preserved)
     │
     ├── §1: Retrospective reads full messages (raw + emotion_score)
     ├── §2: Feedback pass — boost/demote recalled memories
-    ├── §4: GC — noise marking, emotion harvest, flush >10d / cap 1000 messages
-    ├── §4+: Verify extractions → facts move to extracted_memories
+    ├── §4a: Daily summary (code-driven, accumulating batches → daily file)
+    ├── §4b: Extract from daily → facts move to extracted_memories
+    ├── §4c: GC — noise marking, garbage flush 12h, age 7d, cap 500
     ├── §7: Fitness — prune weak memories, fix translations
     │
     ▼

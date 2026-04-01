@@ -144,7 +144,9 @@ Injected as `[SESSION START REASON]` on next session start.
 - Triggered by heartbeat `sleep-trigger` task only (no startup special case)
 - Heartbeat startup delay: 1 min
 - Idle requirement: 10 min since last USER message (system messages excluded)
-- Model: `AGENT_SLEEP_MODEL` passed via `--model` flag to kiro-cli
+- Model: `AGENT_SLEEP_MODEL` passed via `--model` flag to kiro-cli (tag: `[acp-sleep]`)
+- Auto-reinit disabled for sleep transport (one-shot, not long-running)
+- Sleep child not detached — dies with bridge, no orphan processes
 - Timeout: 55 min default (`SLEEP_TIMEOUT_MIN`)
 - Lock file (`sleep_YYYYMMDD.lock`) = state file — tracks step completion
 - Resume: if lock has failed/pending steps, sleep retries only those
