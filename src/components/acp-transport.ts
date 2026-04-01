@@ -45,19 +45,21 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
 
-  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean; agent?: string; model?: string; cliArgs?: string[] }) {
+  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean; agent?: string; model?: string; cliArgs?: string[]; autoReinit?: boolean }) {
     this.cliPath = cliPath;
     this.workingDir = workingDir;
     this.skipAgent = opts?.skipAgent ?? false;
     this.agentName = opts?.agent ?? "professor";
     this.modelId = opts?.model;
     this.extraCliArgs = opts?.cliArgs;
+    this.autoReinit = opts?.autoReinit ?? true;
   }
 
   private readonly skipAgent: boolean;
   private readonly agentName: string;
   private readonly modelId?: string;
   private readonly extraCliArgs?: string[];
+  private readonly autoReinit: boolean;
 
   async initialize(): Promise<void> {
     let args: string[];
@@ -89,7 +91,7 @@ export class AcpTransport implements IKiroTransport {
         this.agent = null;
         this.client = null;
         // Auto-reinitialize on unexpected exit
-        if (code !== 0 || signal) {
+        if ((code !== 0 || signal) && this.autoReinit) {
           logWarn(TAG, "Unexpected kiro-cli exit — auto-reinitializing in 5s");
           setTimeout(() => this.initialize().catch(e => logError(TAG, "Auto-reinit failed", e)), 5000);
         }
