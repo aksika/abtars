@@ -98,12 +98,17 @@ export class SleepTrigger {
     return false;
   }
 
-  /** Write a lock file immediately so restarts don't spawn duplicates. */
+  /** Write a lock file immediately so restarts don't spawn duplicates. Preserves existing state for resume. */
   writeLock(): void {
     try {
       mkdirSync(this.auditDir, { recursive: true });
       const today = localDate().replace(/-/g, "");
-      writeFileSync(join(this.auditDir, `sleep_${today}.lock`), String(process.pid), "utf-8");
+      const lockPath = join(this.auditDir, `sleep_${today}.lock`);
+      if (existsSync(lockPath)) {
+        logInfo(TAG, "Lock file exists — preserving state for resume");
+        return;
+      }
+      writeFileSync(lockPath, String(process.pid), "utf-8");
       logInfo(TAG, "Lock file written");
     } catch { /* best-effort */ }
   }
