@@ -647,6 +647,7 @@ export async function startBridge(): Promise<void> {
               "[self-healer]", "[watchdog]", "[db-integrity]",
               "ECONNRESET", "ETIMEDOUT", "socket hang up",
               "auto-approved", "permission",
+              "BUG REPORT",
             ];
             if (SELFHEAL_BLACKLIST.some(b => line.includes(b))) continue;
 

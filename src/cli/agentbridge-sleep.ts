@@ -627,12 +627,18 @@ async function main(): Promise<void> {
       process.stderr.write(`Warning: Failed to write audit — ${err instanceof Error ? err.message : String(err)}\n`);
     }
 
-    // Wired post-task: flush >24h messages (only if Dreamy succeeded)
+    // Wired post-task: flush old messages (keep max 1000, age out >10 days)
     if (dreamySucceeded && !timedOut) {
       try {
-        const cutoff = Date.now() - 24 * 3600000;
-        const flushed = db.prepare("DELETE FROM messages WHERE timestamp < ?").run(cutoff);
-        if (flushed.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushed.changes} messages >24h`);
+        const ageCutoff = Date.now() - 10 * 24 * 3600000;
+        const flushedAge = db.prepare("DELETE FROM messages WHERE timestamp < ?").run(ageCutoff);
+        if (flushedAge.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushedAge.changes} messages >10d`);
+        const total = (db.prepare("SELECT COUNT(*) as c FROM messages").get() as { c: number }).c;
+        if (total > 1000) {
+          const excess = total - 1000;
+          const flushedCount = db.prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY timestamp ASC LIMIT ?)").run(excess);
+          if (flushedCount.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushedCount.changes} messages (cap 1000)`);
+        }
       } catch (err) { logWarn(TAG, `[WIRED] flush failed: ${err instanceof Error ? err.message : String(err)}`); }
     }
 
