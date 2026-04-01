@@ -111,8 +111,16 @@ export async function handleInboundMessage(
   };
   if (await handleCommand(text, cmdCtx)) return;
 
-  // // prefix → pass-through to Kiro
-  if (text.startsWith("//")) text = text.slice(1);
+  // // prefix → transport-specific command or pass-through to Kiro
+  if (text.startsWith("//")) {
+    const cmd = text.slice(1).split(/\s/)[0]!; // e.g. "//usage" → "/usage"
+    if (transport.transportCommands.includes(`/${cmd.replace(/^\//, "")}`) && transport.executeCommand) {
+      const result = await transport.executeCommand(text.slice(1));
+      await adapter.sendMessage(channelId, result, { threadId: msg.threadId });
+      return;
+    }
+    text = text.slice(1); // pass-through: strip one /
+  }
 
   // --- Busy check ---
   if (busyChats.has(sessionKey)) {

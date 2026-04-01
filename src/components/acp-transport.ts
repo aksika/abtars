@@ -134,6 +134,19 @@ export class AcpTransport implements IKiroTransport {
     return this.agent !== null && this.client !== null;
   }
 
+  readonly transportCommands = ["/usage", "/compact", "/model"];
+
+  async executeCommand(cmd: string): Promise<string> {
+    const arg = cmd.replace(/^\//, "");
+    try {
+      const { execSync } = await import("node:child_process");
+      const out = execSync(`${this.cliPath} ${arg}`, { timeout: 15000, encoding: "utf-8" });
+      return out.trim() || "(no output)";
+    } catch (e) {
+      return `Error: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
   async sendPrompt(sessionKey: string, message: string): Promise<string> {
     if (!this.client) {
       logWarn(TAG, "ACP client dead — reinitializing");

@@ -50,6 +50,8 @@ export class TmuxClient implements IKiroTransport {
     return this.ready && this.sessionExists();
   }
 
+  readonly transportCommands: string[] = [];
+
   async sendPrompt(_sessionKey: string, message: string): Promise<string> {
     if (!this.isReady) {
       throw new Error("tmux session not available");

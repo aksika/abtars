@@ -24,4 +24,10 @@ export interface IKiroTransport {
 
   /** Whether this transport is currently operational. */
   readonly isReady: boolean;
+
+  /** Transport-specific slash commands (e.g. /usage for kiro, /stats for gemini). */
+  readonly transportCommands: string[];
+
+  /** Execute a transport-specific command. Returns output text. */
+  executeCommand?(cmd: string): Promise<string>;
 }
