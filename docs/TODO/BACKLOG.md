@@ -876,7 +876,7 @@ Molty → bash tool call → kiro-cli permission handler (bridge intercepts)
 
 **Permission handler interception:**
 - ACP transport's `onPermissionRequest` already sees every tool call with title + command
-- Match commands starting with `agentbridge-store` or `agentbridge-recall`
+- Match commands starting with `agentbridge-store`, `agentbridge-recall`, or `agentbridge-edit`
 - Parse CLI args from the command string
 - Route to in-process MemoryManager methods
 - Return the result as tool output
@@ -887,6 +887,7 @@ Molty → bash tool call → kiro-cli permission handler (bridge intercepts)
 - Permission handler has access to it via closure
 - `agentbridge-store` → `memory.instantStore(parsedArgs)`
 - `agentbridge-recall` → `recallSearch(parsedArgs)` → format output
+- `agentbridge-edit` → `memory.editMemory(parsedArgs)` — emotion harvest, classification changes, darwinism edits
 
 **For sleep process:**
 - Sleep already has `db` open (for daily summary)
@@ -913,7 +914,8 @@ Molty → bash tool call → kiro-cli permission handler (bridge intercepts)
 - Fallback: if interception fails, let kiro-cli spawn the CLI as before
 
 ### Implementation steps
-1. Extract arg parsers from `agentbridge-store.ts` and `agentbridge-recall.ts` into shared modules
-2. Add interception logic to ACP permission handler in `bridge-app.ts`
-3. For sleep: keep MemoryManager alive across steps, pass to extraction
-4. Test: verify store/recall work both via interception and standalone CLI
+1. Extract arg parsers from `agentbridge-store.ts`, `agentbridge-recall.ts`, `agentbridge-edit.ts` into shared modules
+2. Add interception logic to ACP permission handler in `bridge-app.ts` — match all three CLIs
+3. For sleep: keep MemoryManager alive across steps, pass to extraction + emotion harvest + darwinism
+4. Conversation emotion harvest: `agentbridge-edit --emotion-score` intercepted in-process — no subprocess for reaction-triggered edits
+5. Test: verify store/recall/edit work both via interception and standalone CLI
