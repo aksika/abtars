@@ -389,7 +389,7 @@ export async function startBridge(): Promise<void> {
       if (busyChats.size > 0) return false;
       let lastMessageTs = 0;
       try {
-        const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages").get() as { latest: number | null } | undefined;
+        const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
         lastMessageTs = row?.latest ?? 0;
       } catch { return false; }
       if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) return false;
