@@ -226,7 +226,7 @@ export async function handleInboundMessage(
       clearInterval(streamTimer);
       (transport as AcpTransport).onIntermediateResponse = undefined;
     }
-    logDebug(TAG, `Response (${response.length} chars): "${response.slice(0, 120)}"`);
+    logDebug(TAG, `Response (${response.length} chars): "${response.trim().slice(0, 120)}"`);
 
     // --- Extract clean answer ---
     const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
