@@ -796,3 +796,10 @@ Messages arriving while a prompt is in-flight are queued (FIFO) instead of dropp
 **Commit:** `28510b5`
 
 When user replies to a message on Telegram, the quoted message text (up to 500 chars) is prepended to the prompt: `[Replying to name: "quoted text"]`. Agent sees what the user is replying to.
+
+## 63. Move sleep startup into heartbeat cycle
+
+**Priority:** high
+**Effort:** small
+
+Remove the special `shouldRunOnStartup()` sleep check from bridge startup. Let the heartbeat `sleep-trigger` task handle it — it already checks "should I run today?" every tick. Cleaner: one main process, one heartbeat loop, no extra startup logic. Also reduce `MIN_UPTIME_MS` from 3min to 1min — once-a-day tasks don't need 3min warmup.
