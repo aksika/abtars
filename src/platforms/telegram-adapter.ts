@@ -303,7 +303,7 @@ export class TelegramAdapter implements PlatformAdapter {
     const reply = message.reply_to_message;
     if (reply?.text) {
       const replyFrom = reply.from?.first_name ?? "someone";
-      text = `[Replying to ${replyFrom}: "${reply.text.slice(0, 200)}"]\n${text}`;
+      text = `[Replying to ${replyFrom}: "${reply.text.slice(0, 500)}"]\n${text}`;
     }
 
     // --- Dispatch to pipeline ---
