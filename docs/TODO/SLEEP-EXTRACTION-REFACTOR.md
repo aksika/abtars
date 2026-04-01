@@ -1,5 +1,7 @@
 # Sleep Extraction Refactor Plan
 
+> Research: OpenClaw (compaction.ts), Hermes-agent (trajectory_compressor.py), Lossless-claw (compaction.ts)
+
 ## Overview
 
 Replace unreliable LLM-does-SQL extraction with code-driven batched summarization + extraction from daily summary.
@@ -37,15 +39,25 @@ Batch budget derived: `ctx_window * 0.4` (OpenClaw's BASE_CHUNK_RATIO).
 
 ## Step 04a: daily-summary (code-driven)
 
-### Token estimation (from OpenClaw)
+### Token estimation (universal across OpenClaw/Hermes/Lossless-claw)
 - `estimateTokens(text) = Math.ceil(text.length / 4)`
 - Safety margin: 1.2x (20% buffer for estimation inaccuracy)
-- Summarization overhead: 4096 tokens reserved for prompt template + model response
-- Effective batch budget: `(ctx_window * 0.4) - overhead - safety_margin`
+- Summarization overhead: 4096 tokens reserved for prompt + response
+- Effective batch budget: `(ctx_window * 0.4) - 4096`
+
+### Pre-processing: strip media payloads (from Lossless-claw)
+Before summarization, strip binary/media content from messages:
+- Remove base64 data URLs: `data:[type];base64,...` → `[embedded media omitted]`
+- Remove `MEDIA:/...` file path references → skip
+- Detect binary payloads (long base64-like strings with no prose) → skip
+- Annotate media-only messages: `[Media attachment]`
+- Annotate mixed messages: `original text [with media attachment]`
+
+Prevents images/files from consuming the summary token budget.
 
 ### Dynamic batch sizing
 ```
-total_tokens = estimate(all messages) * 1.2
+total_tokens = estimate(all stripped messages) * 1.2
 effective_budget = (AGENT_SLEEP_CTX_WINDOW * 0.4) - 4096
 
 if total_tokens < AGENT_SLEEP_CTX_WINDOW * 0.7:
@@ -55,9 +67,10 @@ else:
     → accumulating summary approach
 ```
 
-### Accumulating summary flow
+### Accumulating summary flow (confirmed by Lossless-claw's `previousSummary` pattern)
 ```
 Code reads all messages from DB (since last watermark)
+Strip media payloads from each message
 
 Batch 1: first N messages (fit in budget) → model writes Summary A
 Batch 2: Summary A + next N messages → model writes Summary B
@@ -67,6 +80,17 @@ Final summary → write daily/daily_YYYYMMDD.md
 ```
 
 Each batch gets a fresh ACP session (no context buildup from previous batches).
+
+### Summary capping (from Lossless-claw)
+If model produces a summary exceeding `targetTokens * 3` (summaryMaxOverageFactor), hard-cap by truncation with `[Capped from N tokens to ~M]` suffix. Prevents runaway summaries from growing the accumulator unboundedly.
+
+### Three-level escalation (from Lossless-claw)
+If normal summarization produces output >= input tokens:
+1. **Normal**: standard prompt
+2. **Aggressive**: add "be more concise, focus on key facts only"
+3. **Fallback**: deterministic truncation (first 2048 chars + `[Truncated from N tokens]`)
+
+Never fails — always produces a summary.
 
 ### Batch prompt template
 ```
@@ -94,14 +118,12 @@ MUST PRESERVE:
 - Technical details worth remembering
 - Active tasks and their status
 - Open questions and follow-ups
+- All identifiers exactly (UUIDs, IPs, paths, names)
 
 SKIP:
 - Greetings, filler, small talk
 - Debugging noise, tool execution details
 - Transient errors and temporary states
-
-Write concise English bullet points, chronological order.
-Preserve all identifiers exactly (UUIDs, IPs, paths, names).
 ```
 
 ## Step 04b: extract-from-daily (code-driven)
@@ -149,7 +171,6 @@ Garbage-marked messages flushed after 12h (next sleep cycle).
 - Garbage: flush after 12h
 - Age: 7 days
 - Hard cap: 500 messages
-- S4/S5 recall searches messages — lean buffer = less noise
 
 ## Code changes
 
@@ -158,21 +179,29 @@ Garbage-marked messages flushed after 12h (next sleep cycle).
    - Token estimation: `Math.ceil(chars / 4) * 1.2`
    - Dynamic batching based on `AGENT_SLEEP_CTX_WINDOW`
    - Fresh ACP session per batch
+   - Media payload stripping before summarization
+   - Summary capping at `targetTokens * 3`
+   - Three-level escalation (normal → aggressive → fallback)
 
 2. **New:** `src/components/sleep-extract-daily.ts`
    - `extractFromDaily(dailyPath, transport)` → calls agentbridge-store
    - Fresh ACP session
 
-3. **Update:** `agentbridge-sleep.ts`
-   - Register 04a + 04b as code-driven steps
-   - Remove old 04c-gc-extract.md prompt
-   - Update 04c to use daily summary as filter
+3. **New:** `src/components/media-sanitizer.ts`
+   - `stripMediaPayloads(content)` → clean text for summarization
+   - Base64 removal, binary detection, media annotation
+   - Reusable across sleep + any future summarization
 
-4. **Update:** `12-consolidation.md`
+4. **Update:** `agentbridge-sleep.ts`
+   - Register 04a + 04b + 04c as code-driven steps
+   - Remove old 04c-gc-extract.md prompt
+   - Update garbage flush: 12h for marked, 7d age, 500 cap
+
+5. **Update:** `12-consolidation.md`
    - Remove daily file writing (done in 04a)
    - Keep weekly/quarterly rollups only
 
-5. **Update:** transport profiles
+6. **Update:** transport profiles
    - Add `AGENT_SLEEP_CTX_WINDOW` to kiro.env (128000) and gemini.env (1000000)
 
 ## What stays unchanged
@@ -183,3 +212,20 @@ Garbage-marked messages flushed after 12h (next sleep cycle).
 - 13-media-cleanup, 14-report
 - Watermark advance (end of sleep)
 - Sleep resume logic (lock file state)
+
+## Design references
+
+| Feature | Source | Adopted |
+|---------|--------|---------|
+| Token estimation `chars/4` | All three | ✅ |
+| Safety margin 1.2x | OpenClaw | ✅ |
+| BASE_CHUNK_RATIO 0.4 | OpenClaw | ✅ |
+| Overhead budget 4096 | OpenClaw | ✅ |
+| Previous summary context | Lossless-claw | ✅ (accumulating) |
+| Three-level escalation | Lossless-claw | ✅ |
+| Summary capping | Lossless-claw | ✅ |
+| Media payload stripping | Lossless-claw | ✅ |
+| Protected fresh tail | Hermes + Lossless-claw | Not needed (sleep processes all) |
+| Parallel compression | Hermes | Not needed (sequential batches) |
+| Hierarchical summary DAG | Lossless-claw | Not needed (flat daily file) |
+| Compress-only-as-needed | Hermes | ✅ (single shot if fits) |
