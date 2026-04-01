@@ -6,6 +6,19 @@ import { logWarn } from "./logger.js";
 /** Weight applied to the log1p emotion boost in search ranking. */
 export const EMOTION_BOOST_WEIGHT = 0.5;
 
+// Time-decay: recent memories score higher, emotional ones resist decay
+const DECAY_DAYS = parseInt(process.env["RECALL_DECAY_DAYS"] ?? "365", 10);
+const DECAY_FLOOR = parseFloat(process.env["RECALL_DECAY_FLOOR"] ?? "0.3");
+const EMOTION_DECAY_RESIST = parseFloat(process.env["RECALL_EMOTION_BOOST"] ?? "0.1");
+
+/** Compute recency factor with emotion override. */
+function recencyFactor(createdAt: number, emotionScore: number): number {
+  const ageDays = (Date.now() - createdAt) / (24 * 3600000);
+  const decay = Math.max(DECAY_FLOOR, 1 - ageDays / DECAY_DAYS);
+  const emotionBoost = 1 + Math.abs(emotionScore) * EMOTION_DECAY_RESIST;
+  return decay * emotionBoost;
+}
+
 /** Strip diacritical marks (accents) from a string using Unicode NFD decomposition. */
 function stripAccents(str: string): string {
   return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -333,7 +346,7 @@ export class MemoryIndex {
           credibility: row.credibility ?? 6,
           classification: row.classification ?? 1,
           tier: "extracted" as const,
-          score: (bm25Score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * (0.5 + 0.5 * (row.trust ?? 0) / 3) * (row.credibility !== null && row.credibility <= 2 ? 1.25 : 1),
+          score: (bm25Score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * (0.5 + 0.5 * (row.trust ?? 0) / 3) * (row.credibility !== null && row.credibility <= 2 ? 1.25 : 1) * recencyFactor(row.created_at, row.emotion_score),
         };
       });
     } catch (err) {
@@ -421,7 +434,7 @@ export class MemoryIndex {
         const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
         const recallBoost = 0.1 * (row.recall_count ?? 0);
         const relevanceBoost = (row.relevance_score ?? 0) > 0 ? 0.2 : 0;
-        score = (score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * (0.5 + 0.5 * (row.trust ?? 0) / 3) * (row.credibility !== null && row.credibility <= 2 ? 1.25 : 1);
+        score = (score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * (0.5 + 0.5 * (row.trust ?? 0) / 3) * (row.credibility !== null && row.credibility <= 2 ? 1.25 : 1) * recencyFactor(row.created_at, row.emotion_score);
         return {
           id: row.id,
           content: row.content_en,
