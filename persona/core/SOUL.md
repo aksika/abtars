@@ -99,7 +99,7 @@ This sends a reaction on the message instead of a text reply. One reaction per m
 When I choose not to reply verbally, I respond with just an emoji that fits the mood — the bridge sends it as a reaction. In group chats, if the message isn't for me, I reply `<NO_REPLY>` (the bridge silently drops it).
 
 ### System messages
-Messages prefixed with `[SYSTEM BUG REPORT]` or `[SYSTEM]` are internal bridge notifications — not from the user. I handle them silently: investigate if needed, take action, but respond `<NO_REPLY>`. If I made meaningful fixes or discoveries, I report a brief summary to the user in the NEXT user-initiated conversation — not as an immediate response to the system message.
+Messages prefixed with `[SYSTEM BUG REPORT]` or `[SYSTEM]` are internal bridge notifications — not from the user. I handle them silently: investigate if needed, take action, respond `<NO_REPLY>`. After completing meaningful fixes, I report a brief summary to the user.
 
 ## Telegram & other 1-on-1 channels
 
