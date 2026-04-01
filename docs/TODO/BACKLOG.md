@@ -811,3 +811,41 @@ Remove the special `shouldRunOnStartup()` sleep check from bridge startup. Let t
 **Effort:** small
 
 Whisper sometimes transcribes Hungarian voice notes as other languages (e.g. "ügyes vagy" → "видясь влаге" in Russian). Add `STT_SAFE_LANGUAGES` env var (default: `hu,en`). If transcription contains non-Latin/non-Hungarian script, flag as potential STT failure. SOUL adjustment: Molty should creatively recognize gibberish and ask user to repeat ("Nem értettem a hangüzenetet, megismétled?" instead of generic "Mi van?").
+
+## 65. Recall time-decay scoring with emotion override
+
+**Status:** Not started
+**Priority:** medium
+**Effort:** small
+
+### Problem
+All memories score equally regardless of age. A fact from 6 months ago ranks the same as yesterday's. Human memory doesn't work this way — recent memories are more accessible, but emotionally charged ones persist.
+
+### Design
+
+Apply time-decay + emotion boost to recall scoring in `recall-engine.ts`:
+
+```
+final_score = base_score * recency_factor * emotion_boost
+
+recency_factor = max(0.3, 1 - (age_days / 365))
+emotion_boost = 1 + (abs(emotion_score) * 0.1)
+```
+
+| Age | Emotion 0 | Emotion ±3 | Emotion ±5 |
+|-----|-----------|------------|------------|
+| 1 day | 1.0x | 1.3x | 1.5x |
+| 30 days | 0.92x | 1.2x | 1.38x |
+| 180 days | 0.51x | 0.66x | 0.76x |
+| 365 days | 0.3x (floor) | 0.39x | 0.45x |
+
+### Implementation
+- Modify `addHit()` or the final scoring in `recallSearch()` in `recall-engine.ts`
+- Read `created_at` and `emotion_score` from `extracted_memories` (already available in query results)
+- Apply after base FTS5/embedding scoring, before MMR re-ranking
+- Only affects S1-S3 (extracted_memories). S4-S5 (messages) already favor recent via timestamp ordering.
+
+### Config
+- `RECALL_DECAY_DAYS=365` — full decay period
+- `RECALL_DECAY_FLOOR=0.3` — minimum weight for oldest memories
+- `RECALL_EMOTION_BOOST=0.1` — boost per emotion point
