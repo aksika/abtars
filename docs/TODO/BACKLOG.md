@@ -919,3 +919,19 @@ Molty → bash tool call → kiro-cli permission handler (bridge intercepts)
 3. For sleep: keep MemoryManager alive across steps, pass to extraction + emotion harvest + darwinism
 4. Conversation emotion harvest: `agentbridge-edit --emotion-score` intercepted in-process — no subprocess for reaction-triggered edits
 5. Test: verify store/recall/edit work both via interception and standalone CLI
+
+### Research findings (2026-04-02)
+
+**Measured overhead:** ~176ms per CLI call on Mac Mini (node spawn + DB init + embedding check + store + close). Not as slow as expected.
+
+**Permission handler limitation:** ACP `RequestPermissionRequest` only allows approve/cancel — cannot replace tool output. The bridge cannot intercept and return results at the permission level.
+
+**Viable approaches:**
+1. **Local HTTP API** — bridge exposes `/memory/store` etc. CLI tools check if bridge is running, call API instead of opening DB. Simple but adds HTTP overhead.
+2. **Unix socket IPC** — bridge listens on socket, CLI tools connect. Faster than HTTP, more code.
+3. **No-init mode** — CLI tools skip embedding init with `--fast` flag. Bridge handles embedding async. Quickest win but partial.
+4. **Environment variable routing** — CLI tools check `AGENTBRIDGE_MEMORY_PORT`, if set, use HTTP to bridge instead of direct DB.
+
+**Decision:** Deferred. 176ms per call is acceptable for conversation (LLM turns take seconds). For sleep with 10 stores = 1.7s total overhead — not critical. Revisit when store frequency increases significantly or when sleep extraction moves fully in-process (step 04b already code-driven).
+
+**When to implement:** If Molty starts storing 20+ memories per conversation (proactive SOUL), the cumulative overhead becomes noticeable. Or if sleep extraction needs 50+ stores per cycle.
