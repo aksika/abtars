@@ -114,7 +114,6 @@ export class AcpTransport implements IKiroTransport {
             const pct = params["contextUsagePercentage"];
             if (typeof pct === "number") {
               this.lastContextPercent = Math.ceil(pct);
-              logDebug(TAG, `Context: ${this.lastContextPercent}%`);
             }
           }
         },
