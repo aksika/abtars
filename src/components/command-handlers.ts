@@ -323,7 +323,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   // Unknown command guard
   if (text.startsWith("/") && /^\/\w+/.test(text) && !text.startsWith("//")) {
     const cmd = text.split(/\s/)[0]!;
-    const known = ["/new", "/reset", "/status", "/stop", "/ctrlc", "/restart", "/memory", "/cron", "/facts", "/coding", "/default", "/nlm", "/full", "/short", "/a2a-reset", "/help"];
+    const known = ["/new", "/reset", "/status", "/stop", "/ctrlc", "/restart", "/memory", "/cron", "/facts", "/coding", "/default", "/nlm", "/full", "/short", "/a2a-reset", "/help", "/usage", "/model", "/compact"];
     if (!known.includes(cmd)) {
       await ctx.reply(`❓ Unknown command: ${cmd}\nType /help for available commands.`);
       return true;
