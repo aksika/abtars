@@ -12,7 +12,7 @@ const DECAY_FLOOR = parseFloat(process.env["RECALL_DECAY_FLOOR"] ?? "0.3");
 const EMOTION_DECAY_RESIST = parseFloat(process.env["RECALL_EMOTION_BOOST"] ?? "0.1");
 
 /** Compute recency factor with emotion override. */
-function recencyFactor(createdAt: number, emotionScore: number): number {
+export function recencyFactor(createdAt: number, emotionScore: number): number {
   const ageDays = (Date.now() - createdAt) / (24 * 3600000);
   const decay = Math.max(DECAY_FLOOR, 1 - ageDays / DECAY_DAYS);
   const emotionBoost = 1 + Math.abs(emotionScore) * EMOTION_DECAY_RESIST;
