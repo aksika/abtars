@@ -11,7 +11,6 @@ import {
 import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn, logError } from "./logger.js";
 
-const TAG = "acp";
 const TEMP_THROTTLE_MS = 2000; // TEMPORARY — remove after testing
 
 /**
@@ -45,7 +44,7 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
 
-  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean; agent?: string; model?: string; cliArgs?: string[]; autoReinit?: boolean }) {
+  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean; agent?: string; model?: string; cliArgs?: string[]; autoReinit?: boolean; tag?: string }) {
     this.cliPath = cliPath;
     this.workingDir = workingDir;
     this.skipAgent = opts?.skipAgent ?? false;
@@ -53,6 +52,7 @@ export class AcpTransport implements IKiroTransport {
     this.modelId = opts?.model;
     this.extraCliArgs = opts?.cliArgs;
     this.autoReinit = opts?.autoReinit ?? true;
+    this.tag = opts?.tag ?? "acp";
   }
 
   private readonly skipAgent: boolean;
@@ -60,6 +60,7 @@ export class AcpTransport implements IKiroTransport {
   private readonly modelId?: string;
   private readonly extraCliArgs?: string[];
   private readonly autoReinit: boolean;
+  private readonly tag: string;
 
   async initialize(): Promise<void> {
     let args: string[];
@@ -81,19 +82,19 @@ export class AcpTransport implements IKiroTransport {
     }
 
     this.agent.stderr?.on("data", (chunk: Buffer) => {
-      logDebug(TAG, `[stderr] ${chunk.toString().trim()}`);
+      logDebug(this.tag, `[stderr] ${chunk.toString().trim()}`);
     });
 
     const thisProcess = this.agent;
     this.agent.on("exit", (code, signal) => {
-      logWarn(TAG, `kiro-cli exited (code=${code}, signal=${signal})`);
+      logWarn(this.tag, `kiro-cli exited (code=${code}, signal=${signal})`);
       if (this.agent === thisProcess) {
         this.agent = null;
         this.client = null;
         // Auto-reinitialize on unexpected exit
         if ((code !== 0 || signal) && this.autoReinit) {
-          logWarn(TAG, "Unexpected kiro-cli exit — auto-reinitializing in 5s");
-          setTimeout(() => this.initialize().catch(e => logError(TAG, "Auto-reinit failed", e)), 5000);
+          logWarn(this.tag, "Unexpected kiro-cli exit — auto-reinitializing in 5s");
+          setTimeout(() => this.initialize().catch(e => logError(this.tag, "Auto-reinit failed", e)), 5000);
         }
       }
     });
@@ -111,7 +112,7 @@ export class AcpTransport implements IKiroTransport {
           return this.handlePermission(params);
         },
         extNotification: async (method: string, params: Record<string, unknown>) => {
-          logDebug(TAG, `[ext] ${method}`);
+          logDebug(this.tag, `[ext] ${method}`);
           if (method === "_kiro.dev/metadata") {
             const pct = params["contextUsagePercentage"];
             if (typeof pct === "number") {
@@ -123,13 +124,13 @@ export class AcpTransport implements IKiroTransport {
       stream,
     );
 
-    logDebug(TAG, "Initializing ACP connection");
+    logDebug(this.tag, "Initializing ACP connection");
     const initResult = await this.client.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: { name: "agentbridge", version: "1.0.0" },
     });
-    logInfo(TAG, `ACP initialized (agent: ${initResult.agentInfo?.name ?? "unknown"})`);
+    logInfo(this.tag, `ACP initialized (agent: ${initResult.agentInfo?.name ?? "unknown"})`);
   }
 
   get isReady(): boolean {
@@ -151,14 +152,14 @@ export class AcpTransport implements IKiroTransport {
 
   async sendPrompt(sessionKey: string, message: string): Promise<string> {
     if (!this.client) {
-      logWarn(TAG, "ACP client dead — reinitializing");
+      logWarn(this.tag, "ACP client dead — reinitializing");
       await this.initialize();
     }
 
     const sessionId = await this.getOrCreateSession(sessionKey);
     this.responseChunks.set(sessionId, []);
 
-    logDebug(TAG, `Sending prompt to session ${sessionId}: "${message.slice(0, 80)}"`);
+    logDebug(this.tag, `Sending prompt to session ${sessionId}: "${message.slice(0, 80)}"`);
 
     this.promptStartedAt = Date.now();
     // TEMPORARY throttle — avoid overloading kiro-cli
@@ -168,7 +169,7 @@ export class AcpTransport implements IKiroTransport {
     // While running, sessionUpdate fires for each agent_message_chunk.
     const result = await this.promptWithRetry(sessionId, message);
 
-    logDebug(TAG, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
+    logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
     this.lastSuccessAt = Date.now();
 
     const chunks = this.responseChunks.get(sessionId) ?? [];
@@ -187,7 +188,7 @@ export class AcpTransport implements IKiroTransport {
       } catch (err: unknown) {
         const code = (err as { code?: number }).code;
         if (code === -32603 && attempt < maxRetries) {
-          logWarn(TAG, `Transient error (code ${code}), retry ${attempt + 1}/${maxRetries}`);
+          logWarn(this.tag, `Transient error (code ${code}), retry ${attempt + 1}/${maxRetries}`);
           this.responseChunks.set(sessionId, []); // reset chunks for retry
           await new Promise(r => setTimeout(r, 2000));
           continue;
@@ -225,7 +226,7 @@ export class AcpTransport implements IKiroTransport {
       this.agent = null;
       this.client = null;
     }
-    logInfo(TAG, "ACP transport destroyed");
+    logInfo(this.tag, "ACP transport destroyed");
   }
 
   private handleSessionUpdate(params: SessionNotification): void {
@@ -252,12 +253,12 @@ export class AcpTransport implements IKiroTransport {
         break;
       }
       case "tool_call": {
-        logDebug(TAG, `[tool] ${update.title} (${update.status})`);
+        logDebug(this.tag, `[tool] ${update.title} (${update.status})`);
         break;
       }
       case "tool_call_update": {
         if (update.status) {
-          logDebug(TAG, `[tool update] ${update.toolCallId}: ${update.status}`);
+          logDebug(this.tag, `[tool update] ${update.toolCallId}: ${update.status}`);
         }
         break;
       }
@@ -274,11 +275,11 @@ export class AcpTransport implements IKiroTransport {
       (o) => o.kind === "allow_once" || o.kind === "allow_always",
     );
     if (allowOption) {
-      logDebug(TAG, `[permission auto-approved] ${params.toolCall?.title ?? "unknown"}`);
+      logDebug(this.tag, `[permission auto-approved] ${params.toolCall?.title ?? "unknown"}`);
       return { outcome: { outcome: "selected", optionId: allowOption.optionId } };
     }
 
-    logWarn(TAG, `[permission cancelled] ${params.toolCall?.title ?? "unknown"}: no allow option`);
+    logWarn(this.tag, `[permission cancelled] ${params.toolCall?.title ?? "unknown"}: no allow option`);
     return { outcome: { outcome: "cancelled" } };
   }
 
@@ -293,7 +294,7 @@ export class AcpTransport implements IKiroTransport {
       mcpServers: [],
     });
     this.sessions.set(sessionKey, session.sessionId);
-    logInfo(TAG, `Created session ${session.sessionId} for ${sessionKey}`);
+    logInfo(this.tag, `Created session ${session.sessionId} for ${sessionKey}`);
     return session.sessionId;
   }
 }

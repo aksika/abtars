@@ -242,7 +242,7 @@ async function createSleepTransport(verbose: boolean): Promise<{ transport: impo
   const config = await loadAndValidateConfig();
   const { AcpTransport } = await import("../components/acp-transport.js");
   const model = process.env["AGENT_SLEEP_MODEL"] || "auto";
-  const transport = new AcpTransport(config.agentCliPath, config.workingDir, { model: model !== "unknown" ? model : undefined, autoReinit: false });
+  const transport = new AcpTransport(config.agentCliPath, config.workingDir, { model: model !== "unknown" ? model : undefined, autoReinit: false, tag: "acp-sleep" });
   await transport.initialize();
   if (verbose) logInfo(TAG, `ACP transport initialized (model=${model})`);
   return { transport, model };
