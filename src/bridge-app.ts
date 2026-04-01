@@ -167,6 +167,7 @@ export async function startBridge(): Promise<void> {
 
   // Sleep state
   const sleepQueue = new SleepQueue();
+  let sleepChild: import("node:child_process").ChildProcess | null = null;
   const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
   const sleepTrigger = new SleepTrigger(join(memoryConfig.memoryDir, "sleep"));
 
@@ -387,6 +388,8 @@ export async function startBridge(): Promise<void> {
     heavy: true,
     execute: async () => {
       if (busyChats.size > 0) return false;
+      // Don't spawn if a sleep process is already running
+      if (sleepChild && !sleepChild.killed) return false;
       let lastMessageTs = 0;
       try {
         const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
@@ -398,7 +401,9 @@ export async function startBridge(): Promise<void> {
       try {
         const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
         const child = spawn(process.execPath, [sleepScript], { stdio: "ignore" });
+        sleepChild = child;
         child.on("exit", (code) => {
+          sleepChild = null;
           if (code === 0) {
             logInfo("main", `😴 Cron sleep routine finished successfully at ${localIso()}`);
             sleepTrigger.reportSuccess();
