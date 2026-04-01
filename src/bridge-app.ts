@@ -27,6 +27,7 @@ import { loadNLMConfig } from "./components/nlm-command-handler.js";
 import { SleepTrigger } from "./components/sleep-trigger.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
 import { SkillWatcher } from "./components/skill-watcher.js";
+import { writeRestartReason } from "./components/restart-reason.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { BrowserManager } from "./components/browser-manager.js";
@@ -519,9 +520,29 @@ export async function startBridge(): Promise<void> {
     },
   });
 
+  // --- DB integrity check (hourly) ---
+  let dbCheckCounter = 0;
+  heartbeat.registerTask({
+    name: "db-integrity",
+    execute: async () => {
+      dbCheckCounter++;
+      if (dbCheckCounter % 12 !== 0) return; // every 12 ticks ≈ 1hr
+      if (!memory?.getDb()) return;
+      try {
+        const result = memory.getDb()!.prepare("PRAGMA integrity_check").get() as { integrity_check: string } | undefined;
+        if (result?.integrity_check !== "ok") {
+          logError("db-integrity", `Memory DB integrity check failed: ${result?.integrity_check}`);
+        }
+      } catch (e) {
+        logError("db-integrity", "Integrity check error", e);
+      }
+    },
+  });
+
   // --- Watchdog: detect stuck agent ---
-  let watchdogResetAt = 0;
-  let watchdogRestartAt = 0;
+  let watchdogDoctorRan = false;
+  let watchdogDidReset = false;
+  let watchdogLastActionAt = 0;
   const WATCHDOG_COOLDOWN = 60 * 60 * 1000; // 1 hour
   const WATCHDOG_CYCLES = parseInt(process.env["WATCHDOG_CYCLES"] ?? "2", 10);
 
@@ -530,19 +551,40 @@ export async function startBridge(): Promise<void> {
       name: "watchdog",
       execute: async () => {
         const acp = transport as AcpTransport;
-        // Only trigger if a prompt is in-flight (started but not completed)
-        if (acp.promptStartedAt <= acp.lastSuccessAt) return;
+        // Only trigger if a prompt is in-flight
+        if (acp.promptStartedAt <= acp.lastSuccessAt) {
+          // Prompt completed — reset flags
+          watchdogDoctorRan = false;
+          watchdogDidReset = false;
+          return;
+        }
 
         const staleMs = Date.now() - acp.promptStartedAt;
-        const threshold = hbIntervalMs * WATCHDOG_CYCLES;
-        if (staleMs < threshold) return;
-
+        const stuckCycles = Math.floor(staleMs / hbIntervalMs);
         const now = Date.now();
-        // Level 1: reset session
-        if (now - watchdogResetAt > WATCHDOG_COOLDOWN) {
-          logWarn("watchdog", `Prompt stuck for ${Math.round(staleMs / 1000)}s — resetting ACP session`);
-          watchdogResetAt = now;
+
+        // Cooldown check
+        if (now - watchdogLastActionAt < WATCHDOG_COOLDOWN && watchdogDidReset) return;
+
+        // Level 0: doctor --fix (first stuck detection)
+        if (stuckCycles >= 1 && !watchdogDoctorRan) {
+          logWarn("watchdog", `Prompt stuck ${Math.round(staleMs / 1000)}s — running doctor --fix`);
+          watchdogDoctorRan = true;
           try {
+            const { execSync } = await import("node:child_process");
+            execSync(`${join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh")} --fix`, { timeout: 30000 });
+          } catch { /* doctor may not exist or fail — continue */ }
+          return;
+        }
+
+        // Level 1: reset ACP session
+        if (stuckCycles >= WATCHDOG_CYCLES && !watchdogDidReset) {
+          logWarn("watchdog", `Prompt stuck ${stuckCycles} cycles — Level 1: cancelling + resetting ACP session`);
+          watchdogDidReset = true;
+          watchdogLastActionAt = now;
+          writeRestartReason(`watchdog-reset: prompt stuck ${Math.round(staleMs / 1000)}s`);
+          try {
+            await acp.sendInterrupt(); // cancel first
             const sessionKey = [...config.allowedUserIds].map(id => `telegram:${id}`)[0];
             if (sessionKey) await acp.resetSession(sessionKey);
           } catch (e) {
@@ -550,10 +592,11 @@ export async function startBridge(): Promise<void> {
           }
           return;
         }
-        // Level 2: restart bridge
-        if (now - watchdogRestartAt > WATCHDOG_COOLDOWN) {
-          logWarn("watchdog", `Still stuck after reset — restarting bridge`);
-          watchdogRestartAt = now;
+
+        // Level 2: restart bridge (next tick after reset)
+        if (watchdogDidReset && stuckCycles > WATCHDOG_CYCLES) {
+          logWarn("watchdog", `Still stuck after reset — Level 2: restarting bridge`);
+          writeRestartReason(`watchdog-restart: prompt stuck after reset, ${Math.round(staleMs / 1000)}s`);
           process.exit(0);
         }
       },

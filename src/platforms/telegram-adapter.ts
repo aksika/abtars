@@ -12,6 +12,7 @@ import { formatReactionSignal } from "../components/reaction-signal.js";
 import { routeReaction } from "../components/reaction-router.js";
 import { emojiToScore } from "../components/emotion-utils.js";
 import { logInfo, logWarn, logError, logDebug } from "../components/logger.js";
+import { writeRestartReason } from "../components/restart-reason.js";
 import { handleInboundMessage, type PipelineDeps } from "../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../types/platform.js";
 import type { TelegramUpdate } from "../types/index.js";
@@ -327,6 +328,7 @@ export class TelegramAdapter implements PlatformAdapter {
     }
     if (trimText === "/restart") {
       await this.api.sendMessage(chatId, "♻️ Restarting bridge...");
+      writeRestartReason("user-restart");
       setTimeout(() => process.exit(0), 500);
       return;
     }

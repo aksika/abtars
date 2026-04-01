@@ -13,6 +13,7 @@ import { TmuxClient } from "./tmux-client.js";
 import { AcpTransport } from "./acp-transport.js";
 import { transcribeAudio, type SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
+import { writeRestartReason, readAndClearRestartReason } from "./restart-reason.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 import type { MemoryManager } from "./memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
@@ -361,6 +362,7 @@ export async function handleInboundMessage(
       const threshold = memory.getConfig().searchEnhancements.compactThresholdPct;
       if (pct >= threshold) {
         logInfo(TAG, `⚠️ Context window at ${pct}% (threshold: ${threshold}%) — auto-compacting`);
+        writeRestartReason(`compaction: ctx at ${pct}%`);
         await adapter.sendMessage(channelId, `📦 Context window at ${pct}% — auto-compacting...`, { threadId: msg.threadId });
         try {
           await memory.checkAutoCompact({
@@ -409,6 +411,11 @@ function preparePrompt(
     if (ctx) {
       prompt = ctx + "\n\n" + prompt;
       logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
+    }
+    const reason = readAndClearRestartReason();
+    if (reason) {
+      prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
+      logInfo(TAG, `Injected restart reason: ${reason}`);
     }
   }
   seen.add(sessionKey);

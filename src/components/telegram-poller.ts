@@ -14,6 +14,9 @@ export class TelegramPoller {
   private running = false;
   private abortController: AbortController | null = null;
 
+  /** Timestamp of last successful poll cycle. */
+  lastPollAt = Date.now();
+
   constructor(api: TelegramApi, pollTimeoutS: number, onUpdate: (update: TelegramUpdate) => void | Promise<void>) {
     this.api = api;
     this.pollTimeout = pollTimeoutS;
@@ -55,6 +58,7 @@ export class TelegramPoller {
         );
 
         failures = 0;
+        this.lastPollAt = Date.now();
         // logDebug("poller", `Got ${updates.length} update(s)`);
 
         if (updates.length > 0) {

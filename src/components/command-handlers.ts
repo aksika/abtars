@@ -8,6 +8,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo } from "./logger.js";
+import { writeRestartReason } from "./restart-reason.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { TmuxClient } from "./tmux-client.js";
@@ -68,6 +69,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     if (ctx.conversationBuffer && ctx.bufKey) ctx.conversationBuffer.clear(ctx.bufKey);
     ctx.pendingSessionStart.add(ctx.sessionKey);
     if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
+    writeRestartReason("user-reset");
     const label = text === "/reset" ? "🔄 Reset to KP." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
     await ctx.reply(label);
     logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);

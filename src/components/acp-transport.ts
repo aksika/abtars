@@ -9,7 +9,7 @@ import {
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import type { IKiroTransport } from "./kiro-transport.js";
-import { logInfo, logDebug, logWarn } from "./logger.js";
+import { logInfo, logDebug, logWarn, logError } from "./logger.js";
 
 const TAG = "acp";
 const TEMP_THROTTLE_MS = 2000; // TEMPORARY — remove after testing
@@ -85,10 +85,14 @@ export class AcpTransport implements IKiroTransport {
     const thisProcess = this.agent;
     this.agent.on("exit", (code, signal) => {
       logWarn(TAG, `kiro-cli exited (code=${code}, signal=${signal})`);
-      // Only clear state if this is still the active process (not after respawn)
       if (this.agent === thisProcess) {
         this.agent = null;
         this.client = null;
+        // Auto-reinitialize on unexpected exit
+        if (code !== 0 && code !== null) {
+          logWarn(TAG, "Unexpected kiro-cli exit — auto-reinitializing in 5s");
+          setTimeout(() => this.initialize().catch(e => logError(TAG, "Auto-reinit failed", e)), 5000);
+        }
       }
     });
 
