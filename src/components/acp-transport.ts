@@ -137,11 +137,11 @@ export class AcpTransport implements IKiroTransport {
   readonly transportCommands = ["/usage", "/compact", "/model"];
 
   async executeCommand(cmd: string): Promise<string> {
-    const arg = cmd.replace(/^\//, "");
+    // Send as prompt to the active session — these are in-session commands
+    const sessionKey = [...this.sessions.keys()][0];
+    if (!sessionKey) return "No active session.";
     try {
-      const { execSync } = await import("node:child_process");
-      const out = execSync(`${this.cliPath} ${arg}`, { timeout: 15000, encoding: "utf-8" });
-      return out.trim() || "(no output)";
+      return await this.sendPrompt(sessionKey, cmd);
     } catch (e) {
       return `Error: ${e instanceof Error ? e.message : String(e)}`;
     }
