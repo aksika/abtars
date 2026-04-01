@@ -441,7 +441,7 @@ export function writeAuditLog(
 
 // ── Main orchestration ──────────────────────────────────────────────────────
 
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   const flags = parseArgs(process.argv);
 
   if (flags.verbose) {
@@ -478,7 +478,7 @@ async function main(): Promise<void> {
     const msgCount = snapshot.dbStats.messagesSinceLastSleep;
     if (msgCount === 0 && !flags.force && !isResume) {
       logInfo(TAG, `[SLEEP] No messages since last sleep — nothing to process. Use --force to run housekeeping anyway.`);
-      return;
+      return 0;
     }
 
     // Wired pre-tasks (always run — fast, idempotent)
@@ -500,7 +500,7 @@ async function main(): Promise<void> {
 
     if (flags.dryRun) {
       for (const step of steps) process.stdout.write(`\n--- ${step.filename} ---\n${step.prompt}\n`);
-      return;
+      return 0;
     }
 
     // Skip logic
@@ -643,6 +643,7 @@ async function main(): Promise<void> {
     }
 
     logInfo(TAG, `[SLEEP] 🏁 ${okCount} ok, ${failCount} failed, ${skipCount} skipped | wired: ${formatWiredResults(wiredResults)} | ${totalDuration.toFixed(0)}s total`);
+    return failCount;
   } finally {
     memory.close();
   }
@@ -656,7 +657,7 @@ const isDirectRun =
   process.argv[1]?.endsWith("agentbridge-sleep.js");
 if (isDirectRun) {
   main()
-    .then(() => process.exit(0))
+    .then((failCount) => process.exit(failCount > 0 ? 2 : 0))
     .catch((err) => {
       process.stderr.write(`Fatal: ${err instanceof Error ? err.message : String(err)}\n`);
       process.exit(1);

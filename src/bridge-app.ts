@@ -403,7 +403,6 @@ export async function startBridge(): Promise<void> {
             logInfo("main", `😴 Cron sleep routine finished successfully at ${localIso()}`);
             sleepTrigger.reportSuccess();
             if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
-            // Wake-up prompt — KP reflects on the sleep cycle
             const chatId = [...config.allowedUserIds][0];
             if (chatId && telegramAdapter) {
               telegramAdapter.injectMessage({
@@ -412,6 +411,9 @@ export async function startBridge(): Promise<void> {
                 timestamp: Date.now(), isGroup: false, isVoice: false,
               });
             }
+          } else if (code === 2) {
+            logWarn("main", `😴 Sleep partial — some steps failed, will retry at ${localIso()}`);
+            sleepTrigger.reportFailure();
           } else {
             logWarn("main", `😴 Cron sleep routine failed (exit code ${code}) at ${localIso()}`);
             sleepTrigger.reportFailure();
