@@ -182,6 +182,22 @@ if [ "$KIRO_PROCS" -gt 1 ]; then
   fi
 fi
 
+# 12b. Orphaned agentbridge-sleep processes
+SLEEP_PROCS=$(pgrep -f 'agentbridge-sleep' 2>/dev/null | wc -l)
+if [ "$SLEEP_PROCS" -gt 1 ]; then
+  if $FIX; then
+    PIDS=$(pgrep -f 'agentbridge-sleep' 2>/dev/null | sort -n)
+    NEWEST=$(echo "$PIDS" | tail -1)
+    for pid in $PIDS; do
+      if [ "$pid" != "$NEWEST" ]; then
+        kill "$pid" 2>/dev/null && fix "killed orphaned agentbridge-sleep (pid $pid)"
+      fi
+    done
+  else
+    warn "$SLEEP_PROCS agentbridge-sleep processes running — likely orphans"
+  fi
+fi
+
 # 13. Full fixes (--fix-full only)
 if $FIX_FULL && [ -f "$DB" ]; then
   sqlite3 "$DB" "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt messages_fts index"
