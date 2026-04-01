@@ -397,7 +397,7 @@ export async function startBridge(): Promise<void> {
       sleepQueue.activate();
       try {
         const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
-        const child = spawn(process.execPath, [sleepScript], { stdio: "ignore", detached: true });
+        const child = spawn(process.execPath, [sleepScript], { stdio: "ignore" });
         child.on("exit", (code) => {
           if (code === 0) {
             logInfo("main", `😴 Cron sleep routine finished successfully at ${localIso()}`);
@@ -421,7 +421,6 @@ export async function startBridge(): Promise<void> {
           sleepQueue.deactivate();
           sleepQueue.replay(platformAdapters);
         });
-        child.unref();
         logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid}) at ${localIso()}`);
         return true;
       } catch (err) {
