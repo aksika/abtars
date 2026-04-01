@@ -593,6 +593,20 @@ async function main(): Promise<void> {
       try { transport.destroy(); } catch { /* */ }
     }
 
+    // Advance extraction watermark — all messages up to now are considered processed
+    try {
+      const chatIds = db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[];
+      const now = Date.now();
+      for (const { chat_id } of chatIds) {
+        db.prepare(
+          `INSERT INTO extraction_watermarks (chat_id, last_processed_timestamp)
+           VALUES (?, ?)
+           ON CONFLICT(chat_id) DO UPDATE SET last_processed_timestamp = excluded.last_processed_timestamp`,
+        ).run(chat_id, now);
+      }
+      logInfo(TAG, `[SLEEP] Extraction watermark advanced for ${chatIds.length} chat(s)`);
+    } catch { /* non-fatal */ }
+
     // Write audit
     const stepEntries = Object.entries(state.steps);
     const okCount = stepEntries.filter(([, s]) => s.status === "ok").length;

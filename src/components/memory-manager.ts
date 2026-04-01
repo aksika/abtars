@@ -993,12 +993,9 @@ export class MemoryManager {
         params.credibility ?? 6,
       );
 
-      // Advance watermark to prevent heartbeat re-extraction
-      this.db.prepare(
-        `INSERT INTO extraction_watermarks (chat_id, last_processed_timestamp)
-         VALUES (?, ?)
-         ON CONFLICT(chat_id) DO UPDATE SET last_processed_timestamp = excluded.last_processed_timestamp`,
-      ).run(params.chatId, now);
+      // NOTE: Do NOT advance watermark here — only sleep extraction should advance it.
+      // Instant-store memories are ad-hoc; the extraction step still needs to scan
+      // all messages since its last run to catch anything the main agent missed.
 
       // Embed for Se sidecar (async, non-blocking — failure is OK)
       this.embedNewMemory(params.contentEn.trim());
