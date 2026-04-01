@@ -849,3 +849,71 @@ emotion_boost = 1 + (abs(emotion_score) * 0.1)
 - `RECALL_DECAY_DAYS=365` — full decay period
 - `RECALL_DECAY_FLOOR=0.3` — minimum weight for oldest memories
 - `RECALL_EMOTION_BOOST=0.1` — boost per emotion point
+
+## 66. In-process memory CLI interception
+
+**Status:** Not started
+**Priority:** high
+**Effort:** medium
+
+### Problem
+`agentbridge-store` and `agentbridge-recall` are CLI tools. Every call spawns a new node process → full DB init → embeddings init → execute → close. During conversation, Molty may store 5-10 memories — that's 5-10 cold starts. During sleep extraction, the model calls `agentbridge-store` per memory — same overhead.
+
+### Current flow
+```
+Molty → bash tool call → kiro-cli spawns node process → agentbridge-store CLI
+  → new MemoryManager → open DB → init embeddings → store → close → exit
+```
+
+### Proposed flow
+```
+Molty → bash tool call → kiro-cli permission handler (bridge intercepts)
+  → parse args → call bridge's in-process MemoryManager.instantStore()
+  → return result to kiro-cli → no subprocess spawned
+```
+
+### Design
+
+**Permission handler interception:**
+- ACP transport's `onPermissionRequest` already sees every tool call with title + command
+- Match commands starting with `agentbridge-store` or `agentbridge-recall`
+- Parse CLI args from the command string
+- Route to in-process MemoryManager methods
+- Return the result as tool output
+- Auto-approve (no permission prompt needed)
+
+**For main bridge (conversation):**
+- Bridge has MemoryManager in-process, DB already open
+- Permission handler has access to it via closure
+- `agentbridge-store` → `memory.instantStore(parsedArgs)`
+- `agentbridge-recall` → `recallSearch(parsedArgs)` → format output
+
+**For sleep process:**
+- Sleep already has `db` open (for daily summary)
+- Create a lightweight MemoryManager in the sleep process
+- Keep it alive across all steps (don't close between steps)
+- Extraction step calls `instantStore()` directly instead of bash
+- No ACP interception needed — code-driven step calls it in-process
+
+**Arg parsing:**
+- Reuse existing CLI arg parsing from `agentbridge-store.ts` and `agentbridge-recall.ts`
+- Extract into shared `parseStoreArgs()` and `parseRecallArgs()` functions
+- Both CLI entry point and interception handler use the same parser
+
+### Benefits
+- ~500ms per store/recall instead of ~3-5s (no cold start)
+- No orphan node processes
+- No duplicate DB connections
+- Embeddings reused (already loaded in bridge)
+- Sleep extraction much faster (10 stores = 5s instead of 30-50s)
+
+### Migration
+- CLI tools still work standalone (for manual use, doctor.sh, etc.)
+- Interception is transparent — agent doesn't know the difference
+- Fallback: if interception fails, let kiro-cli spawn the CLI as before
+
+### Implementation steps
+1. Extract arg parsers from `agentbridge-store.ts` and `agentbridge-recall.ts` into shared modules
+2. Add interception logic to ACP permission handler in `bridge-app.ts`
+3. For sleep: keep MemoryManager alive across steps, pass to extraction
+4. Test: verify store/recall work both via interception and standalone CLI
