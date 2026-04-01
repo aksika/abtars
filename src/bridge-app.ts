@@ -643,6 +643,8 @@ export async function startBridge(): Promise<void> {
             if (line.includes("TEST ")) continue;
             // Skip non-critical transient errors
             if (line.includes("-32603") || line.includes("Transient error") || line.includes("fetch failed")) continue;
+            // Skip self-healer's own reports (prevent feedback loop)
+            if (line.includes("[self-healer]")) continue;
 
             // Extract tag + message as dedup key
             const match = line.match(/\[([^\]]+)\] (.+)/);
