@@ -44,13 +44,24 @@
 - Sleep: 2:00 AM daily (`pmset`)
 - Wake: 8:00 AM daily (`pmset`)
 
+## Transport Profiles
+
+Configured via `AGENT_TRANSPORT_PROFILE` in `.env`. Profiles at `~/.agentbridge/transports/<name>.env`.
+
+| Profile | CLI | Models |
+|---------|-----|--------|
+| `kiro` | kiro-cli (ACP) | minimax-m2.5 (main/browse/sleep), qwen3-coder-next (coding) |
+| `gemini` | gemini (ACP) | auto:gemini-3 (all roles) |
+
+Transport-specific commands: `/usage`, `/model`, `/compact` — routed through ACP session.
+
 ## Models
 
 | Role | Model |
 |------|-------|
-| Main agent | minimax-m2.5 (via kiro-cli free tier) |
+| Main agent | minimax-m2.5 |
 | Browse agent | minimax-m2.5 |
-| Sleep/Dreamy | deepseek-3.2 |
+| Sleep/Dreamy | minimax-m2.5 |
 | Coding agent | qwen3-coder-next |
 | STT | groq/whisper-large-v3 |
 | TTS | Edge TTS (hu-HU-TamasNeural / en-US-AndrewMultilingualNeural) |
@@ -120,12 +131,33 @@ Cooldown: 1hr between L1+L2 sequences
 
 Written to `.last-restart-reason` by:
 - `compaction: ctx at X%`
+- `ctx-overflow: ValidationException/error details`
 - `watchdog-reset: prompt stuck Ns`
 - `watchdog-restart: prompt stuck after reset`
 - `user-reset`
 - `user-restart`
 
 Injected as `[SESSION START REASON]` on next session start.
+
+## Sleep Cycle
+
+- Triggered by heartbeat `sleep-trigger` task only (no startup special case)
+- Heartbeat startup delay: 1 min
+- Idle requirement: 10 min since last USER message (system messages excluded)
+- Model: `AGENT_SLEEP_MODEL` passed via `--model` flag to kiro-cli
+- Timeout: 55 min default (`SLEEP_TIMEOUT_MIN`)
+- Lock file (`sleep_YYYYMMDD.lock`) = state file — tracks step completion
+- Resume: if lock has failed/pending steps, sleep retries only those
+- `writeLock()` preserves existing state — never clobbers resume data
+- Exit code 0 = all ok, exit code 2 = partial (bridge retries)
+- Watermark: only advances on sleep completion, not on instant-store
+
+## Self-Healer
+
+- Scans bridge log for ERROR lines since last boot (watermark starts at startup time)
+- Max 1 report per tick, 30 min cooldown per error key
+- Blacklist: `-32603`, `Transient error`, `fetch failed`, `ECONNRESET`, `ETIMEDOUT`, `socket hang up`, `[self-healer]`, `[watchdog]`, `[db-integrity]`, `auto-approved`, `permission`, `BUG REPORT`, `[agentbridge-sleep]`
+- System messages: agent responds `<NO_REPLY>`, reports fixes to user after completion
 
 ## Streaming
 

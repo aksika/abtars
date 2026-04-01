@@ -534,7 +534,8 @@ recordMessage() ──► messages table (raw content, emojis preserved)
     │
     ▼
 [During conversation: searchable via agentbridge-recall stages 3-5]
-[Agent may instant-store important facts via agentbridge-store → extracted_memories]
+[Agent proactively stores memories via agentbridge-store → extracted_memories (SOUL: "if in doubt, store it")]
+[instant-store skill removed — storing instructions now in SOUL Continuity section]
     │
     ▼
 [Reaction arrives → messages.emotion_score updated → propagated to extracted_memory via editMemory]
