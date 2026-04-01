@@ -166,7 +166,6 @@ export async function startBridge(): Promise<void> {
   }
 
   // Sleep state
-  let sleepChild: import("node:child_process").ChildProcess | null = null;
   const sleepQueue = new SleepQueue();
   const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
   const sleepTrigger = new SleepTrigger(join(memoryConfig.memoryDir, "sleep"));
@@ -217,49 +216,11 @@ export async function startBridge(): Promise<void> {
     });
     memory.setIsBusy(() => busyChats.size > 0);
     logInfo("main", "🧠 Memory LLM callback registered");
+  }
 
     // Unified heartbeat — single 5-min timer for all periodic tasks
 
-    // Run sleep on startup if needed (≥8am, no audit today)
-    try {
-      if (sleepTrigger.shouldRunOnStartup()) {
-        logInfo("main", `😴 Startup sleep trigger fired — spawning sleep routine at ${localIso()}`);
-        sleepTrigger.writeLock();
-        sleepQueue.activate();
-        const thisDir = dirname(fileURLToPath(import.meta.url));
-        const sleepScript = join(thisDir, "cli", "agentbridge-sleep.js");
-        sleepChild = spawn(process.execPath, [sleepScript], {
-          stdio: "ignore",
-          detached: true,
-        });
-        sleepChild.on("exit", (code) => {
-          if (code === 0) {
-            logInfo("main", `😴 Sleep routine finished successfully at ${localIso()}`);
-            sleepTrigger.reportSuccess();
-            // Wake-up prompt — KP reflects on the sleep cycle
-            const chatId = [...config.allowedUserIds][0];
-            if (chatId && telegramAdapter) {
-              telegramAdapter.injectMessage({
-                platform: "telegram", channelId: String(chatId), sessionKey: `telegram:${chatId}`,
-                senderId: String(chatId), senderName: "system", text: "You just woke up.. how did you sleep buddy?",
-                timestamp: Date.now(), isGroup: false, isVoice: false,
-              });
-            }
-          } else {
-            logWarn("main", `😴 Sleep routine failed (exit code ${code}) at ${localIso()}`);
-            sleepTrigger.reportFailure();
-          }
-          sleepChild = null;
-          sleepQueue.deactivate();
-          sleepQueue.replay(platformAdapters);
-        });
-        sleepChild.unref();
-        logInfo("main", `😴 Sleep routine spawned (pid=${sleepChild.pid}) at ${localIso()}`);
-      }
-    } catch (err) {
-      logWarn("main", `Sleep trigger check failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+    // Sleep is handled by the heartbeat sleep-trigger task — no startup special case.
 
   // --- Telegram service ---
   let telegramAdapter: import("./platforms/telegram-adapter.js").TelegramAdapter | null = null;

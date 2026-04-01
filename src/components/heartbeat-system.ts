@@ -10,7 +10,7 @@ export type HeartbeatConfig = {
 };
 
 const TAG = "heartbeat";
-const MIN_UPTIME_MS = 3 * 60 * 1000;
+const MIN_UPTIME_MS = 1 * 60 * 1000;
 
 export class HeartbeatSystem {
   private timer: ReturnType<typeof setInterval> | null = null;
