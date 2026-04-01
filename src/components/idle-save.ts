@@ -37,6 +37,8 @@ export class IdleSave {
 
   async save(sessionKey: string, chatId: number): Promise<void> {
     if (!this.enabled) return;
+    // /chat save only works on tmux transport, not ACP
+    if (!("sendKeys" in this.transport)) return;
     const today = localDate();
     const dir = join(this.memoryDir, "working", today);
     mkdirSync(dir, { recursive: true });
