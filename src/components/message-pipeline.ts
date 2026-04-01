@@ -115,6 +115,7 @@ export async function handleInboundMessage(
 
   // --- Busy check ---
   if (busyChats.has(sessionKey)) {
+    logDebug(TAG, `Busy — skipping "${text.slice(0, 40)}" for ${sessionKey}`);
     await adapter.sendMessage(channelId, "⏳ Previous request still in progress...", { threadId: msg.threadId });
     return;
   }
