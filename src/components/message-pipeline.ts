@@ -395,7 +395,18 @@ export async function handleInboundMessage(
     if (adapter.setReaction && msg.messageId) {
       await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
     }
-    await adapter.sendMessage(channelId, "❌ Something went wrong. Try /reset to start fresh.", { threadId: msg.threadId }).catch(() => {});
+
+    // Auto-reset on context window overflow (ValidationException / -32603 repeated)
+    const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
+    if (errStr.includes("ValidationException") || errStr.includes("-32603")) {
+      logWarn(TAG, `Context overflow detected — auto-resetting session`);
+      writeRestartReason(`ctx-overflow: ${errStr.slice(0, 100)}`);
+      await transport.resetSession(sessionKey).catch(() => {});
+      pendingSessionStart.add(sessionKey);
+      await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(() => {});
+    } else {
+      await adapter.sendMessage(channelId, "❌ Something went wrong. Try /reset to start fresh.", { threadId: msg.threadId }).catch(() => {});
+    }
   } finally {
     clearInterval(typingInterval);
     busyChats.delete(sessionKey);
