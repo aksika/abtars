@@ -24,6 +24,7 @@ echo "   Runtime: $AB_HOME"
 echo ""
 
 mkdir -p "$AB_HOME"
+mkdir -p "$AB_HOME/logs" "$AB_HOME/topics" "$AB_HOME/workspace" "$AB_HOME/memory/working" "$AB_HOME/memory/sleep" "$AB_HOME/memory/retrospectives" "$AB_HOME/received/media" "$AB_HOME/backup" "$AB_HOME/logo"
 
 # 0. Initialize git backup repo if not present
 if [ ! -d "$AB_HOME/.git" ]; then
