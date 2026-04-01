@@ -641,10 +641,14 @@ export async function startBridge(): Promise<void> {
             const ts = line.slice(0, 23);
             if (ts <= lastSelfhealTs) break;
             if (line.includes("TEST ")) continue;
-            // Skip non-critical transient errors
-            if (line.includes("-32603") || line.includes("Transient error") || line.includes("fetch failed")) continue;
-            // Skip self-healer's own reports (prevent feedback loop)
-            if (line.includes("[self-healer]")) continue;
+            // Blacklist — skip noise, transient errors, and self-references
+            const SELFHEAL_BLACKLIST = [
+              "-32603", "Transient error", "fetch failed",
+              "[self-healer]", "[watchdog]", "[db-integrity]",
+              "ECONNRESET", "ETIMEDOUT", "socket hang up",
+              "auto-approved", "permission",
+            ];
+            if (SELFHEAL_BLACKLIST.some(b => line.includes(b))) continue;
 
             // Extract tag + message as dedup key
             const match = line.match(/\[([^\]]+)\] (.+)/);
