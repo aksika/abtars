@@ -2,7 +2,7 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { StateSnapshot } from "./sleep-state-gatherer.js";
-import { logWarn } from "./logger.js";
+import { logDebug } from "./logger.js";
 import { localDate } from "./env-utils.js";
 
 const TAG = "sleep-prompt-loader";
@@ -39,7 +39,7 @@ export function substituteVars(template: string, vars: Record<string, string>): 
     result = result.replaceAll(`\${${key}}`, value);
   }
   const unreplaced = result.match(/\$\{[A-Z_]+\}/g);
-  if (unreplaced) logWarn(TAG, `Unreplaced template variables: ${unreplaced.join(", ")}`);
+  if (unreplaced) logDebug(TAG, `Unreplaced template variables: ${unreplaced.join(", ")}`);
   return result;
 }
 

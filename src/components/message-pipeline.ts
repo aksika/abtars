@@ -305,7 +305,13 @@ export async function handleInboundMessage(
 
     // --- Deliver response ---
     let lastSentMsgId: number | undefined;
-    if (!intermediateDelivered) {
+    if (streamMsgId && adapter.editMessage) {
+      // ACP edit-in-place: final edit removes cursor ▍
+      try {
+        await adapter.editMessage(channelId, streamMsgId, userResponse);
+        lastSentMsgId = streamMsgId;
+      } catch { /* final edit may fail if identical */ }
+    } else if (!intermediateDelivered) {
       const chunks = adapter.chunkResponse(userResponse);
       logDebug(TAG, `Sending ${chunks.length} chunk(s)`);
       for (const chunk of chunks) {
@@ -314,12 +320,6 @@ export async function handleInboundMessage(
           lastSentMsgId = await adapter.sendMessage(channelId, chunk, { threadId: msg.threadId });
         }
       }
-    } else if (streamMsgId && adapter.editMessage) {
-      // ACP edit-in-place: final edit removes cursor ▍
-      try {
-        await adapter.editMessage(channelId, streamMsgId, userResponse);
-        lastSentMsgId = streamMsgId;
-      } catch { /* final edit may fail if identical */ }
     } else if (transport instanceof TmuxClient) {
       // Send any tail not yet delivered by intermediate streaming
       const delivered = (transport as TmuxClient).intermediateDeliveredText;

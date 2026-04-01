@@ -89,7 +89,7 @@ export class AcpTransport implements IKiroTransport {
         this.agent = null;
         this.client = null;
         // Auto-reinitialize on unexpected exit
-        if (code !== 0 && code !== null) {
+        if (code !== 0 || signal) {
           logWarn(TAG, "Unexpected kiro-cli exit — auto-reinitializing in 5s");
           setTimeout(() => this.initialize().catch(e => logError(TAG, "Auto-reinit failed", e)), 5000);
         }
