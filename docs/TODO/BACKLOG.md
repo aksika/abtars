@@ -707,8 +707,64 @@ Add OpenRouter as a direct model provider for agentbridge — bypass kiro-cli an
 
 ## Monitor context window — log ctx% from ACP metadata
 
-**Status:** Not started
-**Priority:** high
-**Effort:** small
+**Status:** ✅ Done (2026-03-31)
+**Commits:** `ef8b3c9`..`0c6ce44`
 
-Parse `_kiro.dev/metadata` ACP events to extract context window usage percentage. Log it on every prompt completion: `[acp] Prompt complete (ctx: 45%)`. When ctx exceeds threshold (e.g. 80%), auto-trigger `/compact` or session reset. Currently `-32603` errors silently kill the session when context is full — need visibility.
+ctx% logged on every ACP metadata event, prompt complete, inbound message, and outbound response. Auto-compact triggers at 85% (configurable via `MEMORY_COMPACT_THRESHOLD_PCT`). Fixed cast to work for AcpTransport (was TmuxClient-only).
+
+## 56. Bridge Resilience Package
+
+**Status:** ✅ Done (2026-04-01)
+**Commit:** `90cbbbb`
+
+Full self-healing and resilience system:
+
+### Watchdog (heartbeat task)
+- Tracks `promptStartedAt` / `lastSuccessAt` on AcpTransport
+- Only triggers when a prompt is in-flight (no false positives on idle)
+- Level 0 (stuck 1 cycle): `doctor.sh --fix` (once)
+- Level 1 (stuck N cycles, `WATCHDOG_CYCLES` env, default 2): cancel + reset ACP session
+- Level 2 (still stuck next tick): `process.exit(0)` → launchd restarts
+- 1hr cooldown on full sequence to prevent loops
+
+### Restart reason tracking
+- `.last-restart-reason` file written by: auto-compact, watchdog L1/L2, user /reset, user /restart
+- On session start: injected as `[SESSION START REASON]` so agent knows why previous session ended
+- File deleted after read (one-shot)
+
+### ACP auto-reinitialize
+- kiro-cli child process `exit` event monitored
+- On unexpected exit (code ≠ 0): auto-respawn in 5s
+- Faster recovery than waiting for watchdog timeout
+
+### DB integrity (hourly)
+- Every 12 heartbeat ticks: `PRAGMA integrity_check` on memory.db
+- Logs ERROR if failed
+
+### Poller liveness
+- `lastPollAt` tracked on Telegram poller (updated every successful poll cycle)
+- Ready for watchdog integration (service registry access needed)
+
+### /stop, /ctrlc, /restart
+- All bypass the pipeline queue (work even when bridge is busy)
+- `/restart`: `process.exit(0)` → launchd auto-restarts
+
+### agentbridge-restart CLI
+- Molty can self-restart via `agentbridge-restart "reason"`
+- Writes flag file → heartbeat picks up → `process.exit(0)`
+
+## 57. ACP Streaming — Edit-in-Place
+
+**Status:** ✅ Done (2026-04-01)
+**Commits:** `861177c`..`c863b3f`
+
+Partial response delivery via Telegram `editMessageText`. ACP `agent_message_chunk` notifications accumulated in buffer, flushed every `STREAM_FLUSH_SEC` (default 3s, env configurable, range 2-180, 0=disabled). Shows `▍` cursor while generating. Final edit removes cursor. Falls back to normal delivery if no chunks arrived.
+
+## 58. Self-Healer Hardening
+
+**Status:** ✅ Done (2026-04-01)
+**Commit:** `21042f7`
+
+- Skip transient errors (-32603, fetch failed) — handled by retry logic
+- Max 1 report per tick (was 3)
+- 30min cooldown per error key unchanged
