@@ -98,9 +98,23 @@ Cooldown: 1hr between L1+L2 sequences
 
 ### Other recovery:
 - ACP auto-reinit on unexpected kiro-cli exit (5s delay)
+- Auto-reset on ctx overflow (`ValidationException`/`-32603` after retries) — immediate, no watchdog wait
 - Service registry retry on boot (3x, 5s delay)
 - Telegram poller exponential backoff on errors
 - Auto-compact at 85% context window
+- Self-healer blacklist filter (skip transient errors, own logs, network noise)
+
+## Error Handling
+
+| Error | Handler |
+|-------|---------|
+| `-32603 + ValidationException` | Pipeline auto-resets session immediately |
+| `-32603` transient | `promptWithRetry` 2x with 2s delay |
+| `fetch failed` (boot) | Service registry retries 3x, 5s delay |
+| Poller network error | Exponential backoff with jitter |
+| `REACTION_INVALID` | Fallback: send emoji as message |
+| Stuck prompt (>10min) | Watchdog L0→L1→L2 |
+| kiro-cli crash | Auto-reinitialize in 5s |
 
 ## Restart Reason Tracking
 

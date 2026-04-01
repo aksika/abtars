@@ -768,3 +768,31 @@ Partial response delivery via Telegram `editMessageText`. ACP `agent_message_chu
 - Skip transient errors (-32603, fetch failed) — handled by retry logic
 - Max 1 report per tick (was 3)
 - 30min cooldown per error key unchanged
+
+## 59. Auto-Reset on Context Overflow
+
+**Status:** ✅ Done (2026-04-01)
+**Commit:** `151a10b`
+
+Pipeline error handler detects `ValidationException` or `-32603` after retries exhausted. Immediately resets ACP session, writes restart reason, tells user "Context window full — session reset." No watchdog wait needed.
+
+## 60. Self-Healer Blacklist Filter
+
+**Status:** ✅ Done (2026-04-01)
+**Commit:** `10b433c`
+
+Configurable blacklist array for self-healer log scanner. Skips: `-32603`, `Transient error`, `fetch failed`, `ECONNRESET`, `ETIMEDOUT`, `socket hang up`, `[self-healer]`, `[watchdog]`, `[db-integrity]`, `auto-approved`, `permission`. Fixed feedback loop where self-healer reported its own log lines as errors.
+
+## 61. Message Queue + WAIT Interrupt
+
+**Status:** ✅ Done (2026-04-01)
+**Commit:** `a8655ff`
+
+Messages arriving while a prompt is in-flight are queued (FIFO) instead of dropped. User sees `⏳ Queued (N)`. Queue drains one at a time after each prompt completes. Messages starting with "WAIT" (case-insensitive) cancel the current prompt and process immediately.
+
+## 62. Telegram Reply Context
+
+**Status:** ✅ Done (2026-04-01)
+**Commit:** `28510b5`
+
+When user replies to a message on Telegram, the quoted message text (up to 500 chars) is prepended to the prompt: `[Replying to name: "quoted text"]`. Agent sees what the user is replying to.
