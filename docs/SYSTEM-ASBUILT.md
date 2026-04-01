@@ -139,4 +139,12 @@ Bridge picks matching Edge TTS voice. Tag stripped from display.
 | `/new` | New session (keeps mode) |
 | `/coding` | Switch to coding agent |
 | `/default` | Switch back to main agent |
+| `WAIT ...` | Cancel current prompt, process this message immediately |
 | `agentbridge-restart "reason"` | Agent self-restart via flag file |
+
+## Message Queue
+
+When a message arrives while a prompt is in-flight:
+- **Normal message**: queued (FIFO), processed after current completes. User sees: `⏳ Queued (N)`
+- **Message starting with "WAIT"** (case-insensitive): cancels current prompt, processes immediately
+- **`/stop`, `/ctrlc`, `/restart`**: bypass pipeline entirely, execute immediately
