@@ -1,4 +1,4 @@
-import { readdirSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { readdirSync, existsSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logDebug } from "./logger.js";
 import { localDate } from "./env-utils.js";
@@ -116,7 +116,21 @@ export class SleepTrigger {
       String(today.getMonth() + 1).padStart(2, "0") +
       String(today.getDate()).padStart(2, "0");
     try {
-      return readdirSync(this.auditDir).some((f) => f.startsWith(`sleep_${dateStr}`));
+      const files = readdirSync(this.auditDir);
+      // If lock file exists, check if all steps completed
+      const lockFile = files.find(f => f === `sleep_${dateStr}.lock`);
+      if (lockFile) {
+        try {
+          const state = JSON.parse(readFileSync(join(this.auditDir, lockFile), "utf-8"));
+          const steps = Object.values(state.steps ?? {}) as Array<{ status: string }>;
+          const hasFailed = steps.some(s => s.status === "failed" || s.status === "pending" || s.status === "timeout");
+          if (hasFailed) {
+            logDebug(TAG, "Lock file has incomplete steps — retry allowed");
+            return false;
+          }
+        } catch { /* can't parse lock — treat as incomplete */ return false; }
+      }
+      return files.some((f) => f.startsWith(`sleep_${dateStr}`) && f.endsWith(".md"));
     } catch {
       return false;
     }
