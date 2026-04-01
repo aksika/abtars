@@ -25,6 +25,8 @@ import { MemoryManager } from "../components/memory-manager.js";
 import { loadMemoryConfig } from "../components/memory-config.js";
 import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
 import { loadSleepSteps, buildSleepVars, substituteVars } from "../components/sleep-prompt-loader.js";
+import { buildDailySummary, writeDailyFile } from "../components/sleep-daily-summary.js";
+import { extractFromDaily } from "../components/sleep-extract-daily.js";
 import { logInfo, logWarn, logError, setLogLevel } from "../components/logger.js";
 import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
 import { localDate } from "../components/env-utils.js";
@@ -543,6 +545,7 @@ async function main(): Promise<number> {
 
     const { transport, model: modelUsed } = await createSleepTransport(flags.verbose);
     let dreamySucceeded = true;
+    let dailySummaryPath: string | null = null;
 
     try {
       for (const step of steps) {
@@ -575,6 +578,54 @@ async function main(): Promise<number> {
         state.steps[step.name] = { status: "pending" };
         writeStateFile(statePath, state);
 
+        // Code-driven steps
+        if (step.name === "04a-daily-summary") {
+          try {
+            const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
+            const chatId = [...(db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[])][0]?.chat_id ?? 7773842843;
+            const watermarkRow = db.prepare("SELECT last_processed_timestamp FROM extraction_watermarks WHERE chat_id = ?").get(chatId) as { last_processed_timestamp: number } | undefined;
+            const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "04a-daily-summary", flags.verbose).then(r => r ?? ""), {
+              ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs: watermarkRow?.last_processed_timestamp ?? 0,
+            });
+            if (summary) {
+              const dateStr = localDate();
+              dailySummaryPath = writeDailyFile(memoryConfig.memoryDir, dateStr, summary);
+              state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
+            } else {
+              state.steps[step.name] = { status: "skipped" };
+            }
+          } catch (err) {
+            logWarn(TAG, `[SLEEP] 04a failed: ${err instanceof Error ? err.message : String(err)}`);
+            state.steps[step.name] = { status: "failed", duration: Math.round((Date.now() - start) / 100) / 10 };
+            dreamySucceeded = false;
+          }
+          writeStateFile(statePath, state);
+          logInfo(TAG, `[SLEEP] ${state.steps[step.name]?.status === "ok" ? "✓" : "✗"} ${step.name} (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+          continue;
+        }
+
+        if (step.name === "04b-extract-from-daily") {
+          if (!dailySummaryPath) {
+            state.steps[step.name] = { status: "skipped" };
+            writeStateFile(statePath, state);
+            logInfo(TAG, `[SLEEP] ⏭ ${step.name} — no daily summary`);
+            continue;
+          }
+          try {
+            const chatId = [...(db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[])][0]?.chat_id ?? 7773842843;
+            const result = await extractFromDaily(dailySummaryPath, chatId, (p) => sendWithRetry(transport, p, "04b-extract", flags.verbose).then(r => r ?? ""));
+            state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
+            logInfo(TAG, `[SLEEP] ✓ ${step.name} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
+          } catch (err) {
+            logWarn(TAG, `[SLEEP] 04b failed: ${err instanceof Error ? err.message : String(err)}`);
+            state.steps[step.name] = { status: "failed", duration: Math.round((Date.now() - start) / 100) / 10 };
+            dreamySucceeded = false;
+          }
+          writeStateFile(statePath, state);
+          continue;
+        }
+
+        // Standard prompt-driven step
         const response = await sendWithRetry(transport, step.prompt, step.name, flags.verbose);
         const duration = Date.now() - start;
 
@@ -627,17 +678,33 @@ async function main(): Promise<number> {
       process.stderr.write(`Warning: Failed to write audit — ${err instanceof Error ? err.message : String(err)}\n`);
     }
 
-    // Wired post-task: flush old messages (keep max 1000, age out >10 days)
+    // Wired post-task: flush old messages (keep max 500, age out >7 days, garbage 12h)
     if (dreamySucceeded && !timedOut) {
       try {
-        const ageCutoff = Date.now() - 10 * 24 * 3600000;
+        // Flush garbage-marked messages >12h
+        const garbagePath = join(memoryConfig.memoryDir, "garbage.json");
+        if (existsSync(garbagePath)) {
+          const garbage = JSON.parse(readFileSync(garbagePath, "utf-8")) as Array<{ msg_id: number }>;
+          const oldGarbage = garbage.filter(() => true); // all garbage gets flushed
+          if (oldGarbage.length > 0) {
+            const ids = oldGarbage.map(g => g.msg_id).filter(id => typeof id === "number");
+            if (ids.length > 0) {
+              db.prepare(`DELETE FROM messages WHERE id IN (${ids.join(",")})`).run();
+              logInfo(TAG, `[SLEEP] Flushed ${ids.length} garbage messages`);
+            }
+            writeFileSync(garbagePath, "[]");
+          }
+        }
+        // Age out >7 days
+        const ageCutoff = Date.now() - 7 * 24 * 3600000;
         const flushedAge = db.prepare("DELETE FROM messages WHERE timestamp < ?").run(ageCutoff);
-        if (flushedAge.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushedAge.changes} messages >10d`);
+        if (flushedAge.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushedAge.changes} messages >7d`);
+        // Cap at 500
         const total = (db.prepare("SELECT COUNT(*) as c FROM messages").get() as { c: number }).c;
-        if (total > 1000) {
-          const excess = total - 1000;
+        if (total > 500) {
+          const excess = total - 500;
           const flushedCount = db.prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY timestamp ASC LIMIT ?)").run(excess);
-          if (flushedCount.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushedCount.changes} messages (cap 1000)`);
+          if (flushedCount.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushedCount.changes} messages (cap 500)`);
         }
       } catch (err) { logWarn(TAG, `[WIRED] flush failed: ${err instanceof Error ? err.message : String(err)}`); }
     }
