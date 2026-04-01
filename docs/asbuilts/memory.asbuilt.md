@@ -23,7 +23,7 @@ SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (
 |----|------|--------|------------|---------|------------|
 | C0 | LLM Context Window | In-memory | Bridge (raw pass-through) | LLM | Ephemeral |
 | C1 | Consolidated Summaries | Markdown files | Sleep subagent | Consolidation search, sleep subagent | Persistent — promoted up tiers |
-| C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store, agentbridge-edit | agentbridge-recall | messages: hot buffer (flushed after sleep). extracted_memories: persistent |
+| C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store, agentbridge-edit | agentbridge-recall | messages: hot buffer (max 1000, aged >10d). extracted_memories: persistent |
 | C4 | Markdown Knowledge Files | Flat files | Agent, retrospective | Sleep subagent | Persistent |
 | C5 | Embeddings | `memory.db` (`extracted_memories.embedding` BLOB) | ollama nomic-embed-text (on insert + batch) | recall-engine Se sidecar | Persistent — gated by `EMBEDDING_ENABLED` |
 | C6 | Retrospectives | Markdown files | Sleep subagent | Sleep subagent, agent (via recall) | Persistent |
@@ -475,9 +475,13 @@ Dreamy scans all messages in the DB and cleans up noise while preserving emotion
 
 **Step 5 — Verify extractions:** Extract missing facts via `agentbridge-store`. Garbage-mark verbose originals.
 
+**Extraction watermark:** Tracks last processed timestamp per chat in `extraction_watermarks` table. Only advanced at the end of a completed sleep cycle — NOT on instant-store. This ensures Dreamy re-scans all messages since last sleep, even if the main agent stored some during conversation.
+
+**Proactive storing (SOUL):** The main agent stores memories during conversation — facts, decisions, preferences, events. Dreamy is the safety net for anything missed. "If in doubt, store it" — deduplication happens during sleep.
+
 **Step 6 — Emotion harvest (verbal only):** Update nearest memory's `emotion_score` via `agentbridge-edit`. Mark emotional message as garbage.
 
-**Step 7 — Flush old messages:** Delete all messages older than 24 hours.
+**Step 7 — Flush old messages:** Keep max 1000 messages, age out >10 days. Both conditions checked — whichever hits first. Gives Dreamy multiple nights to extract from the same messages.
 
 ### Memory Anomaly Audit (§7.5)
 
@@ -540,7 +544,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
     │
     ├── §1: Retrospective reads full messages (raw + emotion_score)
     ├── §2: Feedback pass — boost/demote recalled memories
-    ├── §4: GC — noise marking, emotion harvest, flush >24h messages
+    ├── §4: GC — noise marking, emotion harvest, flush >10d / cap 1000 messages
     ├── §4+: Verify extractions → facts move to extracted_memories
     ├── §7: Fitness — prune weak memories, fix translations
     │
