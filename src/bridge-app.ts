@@ -441,9 +441,20 @@ export async function startBridge(): Promise<void> {
             if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
             const chatId = [...config.allowedUserIds][0];
             if (chatId && telegramAdapter) {
+              // Read today's daily summary for wake-up context
+              let sleepContext = "";
+              try {
+                const dailyPath = join(memoryConfig.memoryDir, "daily", `daily_${localDate()}.md`);
+                if (existsSync(dailyPath)) {
+                  const daily = readFileSync(dailyPath, "utf-8").trim();
+                  if (daily) sleepContext = `\n\nHere's what came out of your sleep cycle:\n${daily}`;
+                }
+              } catch { /* best-effort */ }
+
               telegramAdapter.injectMessage({
                 platform: "telegram", channelId: String(chatId), sessionKey: `telegram:${chatId}`,
-                senderId: String(chatId), senderName: "system", text: "You just woke up.. how did you sleep buddy?",
+                senderId: String(chatId), senderName: "system",
+                text: `You just completed your sleep cycle — a routine memory maintenance procedure that keeps your memories organized, extracts lessons from the day, and cleans up noise. Think of it like how humans sleep to consolidate memories. You have one too.${sleepContext}\n\nHow did it go? Share your thoughts with the user.`,
                 timestamp: Date.now(), isGroup: false, isVoice: false,
               });
             }
