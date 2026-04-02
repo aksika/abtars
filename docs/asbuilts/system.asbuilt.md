@@ -377,7 +377,7 @@ All scheduling goes through `agentbridge-cron` CLI — never host crontab.
 
 ## Context Window Management
 
-Tracks and manages the LLM context window to prevent overflow and maintain conversation quality.
+Tracks and manages the LLM context window with graduated thresholds and own compaction system (transport-agnostic).
 
 ### Monitoring
 
@@ -386,29 +386,62 @@ Tracks and manages the LLM context window to prevent overflow and maintain conve
 - Logged on every inbound (`ctx: XX%`) and outbound
 - Dashboard shows live ctx% via WebSocket
 - `/status` command displays current ctx%
+- Gemini CLI: self-manages at 50% internally, bridge is blind to ctx%
 
-### Auto-Compact
+### Graduated Thresholds
 
-Triggered in `message-pipeline.ts` after each response when `contextPercent >= compactThresholdPct`:
-1. Sends `/compact` command to kiro-cli session
-2. Notifies user: "📦 Context window at XX% — auto-compacting..."
-3. Updates session-start context after compaction
-4. Writes restart reason for audit trail
+Config: `CTX_WARN_PCT` (default 70), `CTX_COMPACT_PCT` (default 80), `CTX_AGGRESSIVE_PCT` (default 90). Only fire when `contextPercent >= 0` (kiro transport).
+
+| Level | ctx% | Action |
+|-------|------|--------|
+| Normal | <70% | Nothing |
+| Warning | ≥70% | Log + notify user once per session |
+| Compact | ≥80% | Trigger compaction (see below) |
+| Aggressive | ≥90% | Compact + strip media from injection |
+| Overflow | error | Auto-reset session (`ValidationException` / `-32603`) |
+
+Per-session tracking: `ctxWarned` set (no spam), `compactFailures` map (circuit breaker).
+
+### Compaction System
+
+Own compaction — no dependency on kiro's `/compact`. Works with any transport.
+
+**Flow:**
+1. Send compaction prompt to the **same session** (model has conversation in context, 20% headroom)
+2. Model produces `<analysis>` (scratchpad, stripped) + `<summary>` (8-section structured summary)
+3. `resetSession(sessionKey)` — wipes the CLI's context
+4. Inject as first message: compaction summary + memory context block
+5. Mark `pendingSessionStart` — next user message gets full session-start context
+6. User continues naturally
+
+**Compaction prompt** (`compaction.ts`): adapted from Claude Code. Sections: user intent, decisions, technical context, errors/fixes, user messages, pending tasks, current work, next step. `NO_TOOLS` preamble forces text-only response.
+
+**Memory context block** (`session-memory.ts`): appended after LLM summary:
+- Last 5 extracted memories by recency (simple DB query)
+- Today's daily summary (if exists)
+- Active todo items
+
+**User `/compact`**: intercepted by bridge, runs full compaction. `//compact` passes through to kiro's native compact.
+
+### Circuit Breaker
+
+Track consecutive compaction failures per session. After 3 failures → stop trying, warn user "⚠️ Compaction failing — consider /reset". Reset counter on successful compaction or `/reset`.
 
 ### Auto-Reset on Overflow
 
 If the model returns `ValidationException` or error code `-32603` (context too large):
 1. Resets the ACP session immediately
 2. Marks session for fresh session-start injection
-3. Notifies user: "🔄 Context window full — session reset. Send your message again."
+3. Notifies user: "🔄 Context window full — session reset."
 
-### Current Limitations
+### Key Files
 
-- Reactive only — no proactive management before threshold
-- No graduated response (warn → compact → aggressive → reset)
-- No compaction effectiveness tracking
-- Images/media not factored into threshold decisions
-- See backlog #70 for planned improvements
+| File | Purpose |
+|------|---------|
+| `src/components/compaction.ts` | Compaction prompt + summary extraction |
+| `src/components/session-memory.ts` | Memory context block builder |
+| `src/components/message-pipeline.ts` | Graduated thresholds, auto-compact trigger, circuit breaker |
+| `src/components/command-handlers.ts` | `/compact` command handler |
 
 ---
 
