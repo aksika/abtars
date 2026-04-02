@@ -1011,33 +1011,34 @@ Changes:
 1. `message-pipeline.ts` — graduated thresholds, `pendingSessionStart` after compact, circuit breaker
 2. `config.ts` — new env vars
 
-**Phase 2: Session memory compaction**
+**Phase 2: Unified compaction system (transport-agnostic)**
 
-Build our own compaction system. Two modes depending on transport:
+Own compaction — no dependency on kiro's `/compact` or gemini's `/compress`. Works with any transport.
 
-**Mode A — ACP transport (kiro-cli):**
-kiro's `/compact` handles the session summary. We inject our memory context as a follow-up message after compaction:
-- Extracted memories relevant to conversation (recall engine, max 5)
-- Today's daily summary (if exists)
-- Active todo items
+**Flow:**
+1. Compact trigger fires (Phase 1 threshold)
+2. Send conversation to LLM with compaction prompt → structured summary
+3. `resetSession(sessionKey)` — wipes the CLI's context
+4. Inject as first message: compaction summary + memory context + session-start context
+5. User's next message continues naturally — agent has full context
 
-No extra LLM call — kiro summarizes, we add memory context.
+**Compaction prompt** (adapted from Claude Code's approach, see `~/workspace/studies/claude-code-context-window-management.md`):
+- LLM produces `<analysis>` (scratchpad, stripped) + `<summary>` (kept)
+- Summary sections:
+  1. User's requests and intent
+  2. Key decisions made
+  3. Technical context (files, code, concepts discussed)
+  4. Errors encountered and how they were fixed
+  5. All user messages (non-tool, preserves intent drift)
+  6. Pending tasks
+  7. Current work (what was happening right before compaction)
+  8. Next step (with direct quotes from recent messages)
+- `NO_TOOLS` preamble: force text-only response, no tool calls
+- Custom instructions support (SOUL can add compaction guidance)
 
-**Mode B — Raw model transport (9Router/OpenRouter/ollama):**
-We manage the conversation buffer ourselves. On compact trigger:
-1. Send conversation to LLM with compaction prompt → get session summary
-2. Replace old messages with: session summary + memory context + recent N messages
-3. Memory context same as Mode A (extracted memories, daily, todos)
-
-One LLM call for the session summary. The compaction prompt asks for:
-- What the user is working on
-- Key decisions made
-- Pending questions/tasks
-- Technical context (files, errors, concepts)
-
-**Session memory format (injected after compaction):**
+**Memory context block** (appended after LLM summary):
 ```markdown
-[SESSION MEMORY — compacted at {timestamp}]
+[MEMORY CONTEXT]
 
 ## Key Memories
 {extracted memories from recall, max 5}
@@ -1049,41 +1050,52 @@ One LLM call for the session summary. The compaction prompt asks for:
 {todo items}
 ```
 
-For Mode B, prepend the LLM-generated session summary before the memory block.
+**Why not `/compact`:**
+- Transport-agnostic: one system for kiro, gemini, raw models, future transports
+- We control what's preserved: memory system knows what matters
+- Enriched with extracted memories, daily summaries, todos — things the CLI doesn't know
+- `resetSession()` + inject = same effect but we own the content
+- One compaction system to maintain, not one per transport
+
+**Prompt-too-long fallback:** If the compaction request itself exceeds context, truncate oldest messages and retry (up to 3 attempts). If still failing, fall back to deterministic summary (last N messages + memory context, no LLM call).
 
 Changes:
-1. New: `src/components/session-memory-compact.ts` — builds memory context block
-2. New: `src/components/compaction-prompt.ts` — session summary prompt (Mode B only)
-3. `message-pipeline.ts` — call session-memory-compact after compaction
+1. New: `src/components/compaction.ts` — compaction prompt, LLM call, summary formatting
+2. New: `src/components/session-memory.ts` — builds memory context block from recall + daily + todos
+3. `message-pipeline.ts` — on compact trigger: call compaction → resetSession → inject summary + memory
 4. `memory-manager.ts` — expose method to fetch relevant memories for compaction
 
-**Phase 3: Raw model conversation buffer**
+**Phase 3: Conversation buffer**
 
-Prerequisite for Mode B. Manage our own message history for raw model transport:
-- Store messages in an array (or DB table) per session
-- Send full history on each API call
-- On compaction: truncate old messages, insert summary
-- Read token counts from API response → compute ctx%
-- `AGENT_CTX_WINDOW` in transport profile for the model's context limit
+Shadow copy of message history per session. Needed for:
+- Feeding the compaction prompt (we need the conversation to summarize it)
+- Raw model transport (#69) where we ARE the history manager
+- Token tracking for transports that don't report ctx%
 
-This is the foundation for #69 (raw model transport). Phase 2 Mode B depends on this.
+For ACP transports: shadow copy — CLI manages real history, we track a copy for compaction input.
+For raw model (future): we are the history manager.
+
+- Store messages per session (array, flushed on reset)
+- Append on every send/receive in message-pipeline
+- `AGENT_CTX_WINDOW` in transport profile for token budget
+- Read token counts from API response when available
 
 Changes:
-1. New: `src/components/conversation-buffer.ts` — message history management
-2. New: raw model transport implementation (part of #69)
-3. Transport profiles: add `AGENT_CTX_WINDOW` for main conversation (separate from `AGENT_SLEEP_CTX_WINDOW`)
+1. New: `src/components/conversation-buffer.ts` — message history per session
+2. `message-pipeline.ts` — append to buffer on every send/receive
+3. `compaction.ts` — read from buffer for compaction input
+4. Transport profiles: add `AGENT_CTX_WINDOW`
 
 ### Transport-specific ctx% availability
 
 | Transport | ctx% source | Available to bridge? | Compaction |
 |-----------|-------------|---------------------|------------|
-| kiro-cli (ACP) | `_kiro.dev/metadata` | ✅ Real-time | `/compact` + memory injection (Mode A) |
-| gemini-cli (ACP) | Internal only | ❌ Self-manages at 50% | No action needed |
-| Raw model (future) | API `usage.prompt_tokens` | ✅ We compute it | Own compaction (Mode B) |
+| kiro-cli (ACP) | `_kiro.dev/metadata` | ✅ Real-time | Own compaction (reset + inject) |
+| gemini-cli (ACP) | Internal only | ❌ Self-manages at 50% | Own compaction if needed |
+| Raw model (future) | API `usage.prompt_tokens` | ✅ We compute it | Own compaction |
 
 ### Implementation order
 1. **Phase 1** — graduated thresholds + re-injection + circuit breaker (independent, ship now)
-2. **Phase 2 Mode A** — memory injection after kiro `/compact` (needs recall engine access)
-3. **Phase 3** — raw model conversation buffer (foundation for #69)
-4. **Phase 2 Mode B** — own compaction with LLM summary (needs Phase 3)
+2. **Phase 3** — conversation buffer (needed for Phase 2 — compaction needs message history)
+3. **Phase 2** — unified compaction (needs buffer + recall engine)
 
