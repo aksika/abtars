@@ -972,13 +972,95 @@ Add OpenRouter as a transport provider alongside kiro-cli. Enables model diversi
 ## 70. Context window management improvements
 
 **Priority:** high
-**Status:** Not started
+**Status:** Planned
 **Effort:** medium
 
-Current ctx window management is reactive only (auto-compact at threshold, auto-reset on overflow). Needs proactive management:
-- Smarter compaction: summarize old messages before hitting threshold, not just `/compact`
-- Graduated response: warn user at 70%, compact at 80%, aggressive compact at 90%, reset at overflow
-- Track compaction history (how often, how effective — did ctx% actually drop?)
-- Picture/media awareness: images consume disproportionate context, factor into threshold
-- Per-session ctx tracking in memory DB for analytics
-- Consider proactive session rotation after N hours or N messages regardless of ctx%
+Based on Claude Code context management study (`~/workspace/studies/claude-code-context-window-management.md`).
+
+### Current state
+- ctx% tracked from ACP metadata on every response
+- Single threshold: auto-compact sends `/compact` to kiro-cli
+- Auto-reset on overflow (ValidationException / -32603)
+- Session-start context injected on `/new` and `/reset` only
+
+### Design
+
+**Phase 1: Graduated thresholds**
+
+Replace single `compactThresholdPct` with multi-level response:
+
+| Level | ctx% | Action |
+|-------|------|--------|
+| Normal | <70% | Nothing |
+| Warning | ≥70% | Log warning, notify user once per session ("⚠️ Context at 70%") |
+| Compact | ≥80% | Trigger compaction (Phase 2) |
+| Aggressive | ≥90% | Compact + strip media/tool results from injection |
+| Overflow | error | Auto-reset session (existing) |
+
+Config: `CTX_WARN_PCT=70`, `CTX_COMPACT_PCT=80`, `CTX_AGGRESSIVE_PCT=90`. Env-configurable.
+
+Track `warnedThisSession` flag to avoid spamming warnings.
+
+**Phase 2: Session memory compaction (own compaction, not kiro's /compact)**
+
+Critical for future raw model access (9Router/OpenRouter/ollama) where `/compact` won't exist.
+
+On compact trigger, build a compaction summary from our memory system:
+1. Read last 8 extracted memories relevant to current conversation (recall engine)
+2. Read today's daily summary (if exists)
+3. Read current session-start context
+4. Read active todo items
+5. Assemble into a structured "session memory" block
+
+Then:
+- If using kiro-cli: send `/compact`, then inject session memory as follow-up message
+- If using raw model (future): replace old messages with session memory + recent N messages
+
+**Session memory format:**
+```markdown
+[SESSION MEMORY — compacted at {timestamp}]
+
+## Recent Context
+{last 8 messages summary}
+
+## Key Memories
+{extracted memories from recall, max 5}
+
+## Today's Summary
+{daily summary if exists}
+
+## Active Tasks
+{todo items}
+
+## Conversation State
+{what was being discussed, pending questions}
+```
+
+**Phase 3: Post-compact re-injection**
+
+After any compaction (manual `/compact`, auto-compact, or session memory compact):
+1. Mark session for re-injection (`pendingSessionStart.add(sessionKey)`)
+2. On next user message, `buildSessionStartContext()` fires — injects recent memories, daily summary, conversation history
+3. Agent regains full memory context without user noticing
+
+This already works for `/new` and `/reset` — just wire it into the post-compact path.
+
+**Phase 4: Circuit breaker**
+
+Track consecutive compaction failures per session:
+- After 3 failed compactions, stop trying
+- Warn user: "⚠️ Compaction failing — consider /reset"
+- Reset counter on successful compaction or manual `/reset`
+
+### Changes required
+
+1. `message-pipeline.ts` — graduated thresholds, warning state tracking, circuit breaker
+2. New: `src/components/session-memory-compact.ts` — builds compaction summary from memory system
+3. `message-pipeline.ts` — post-compact: add sessionKey to `pendingSessionStart` set
+4. `config.ts` — new env vars: `CTX_WARN_PCT`, `CTX_COMPACT_PCT`, `CTX_AGGRESSIVE_PCT`
+5. `memory-manager.ts` — expose method to fetch recent relevant memories for compaction
+
+### Dependencies
+- None for Phase 1, 3, 4 (can ship independently)
+- Phase 2 needs recall engine access from compaction path
+
