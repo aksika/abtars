@@ -399,8 +399,8 @@ export async function startBridge(): Promise<void> {
         logInfo("main", `🔄 Daily session restart (>=${DAY_START_HOUR}:00)`);
         writeRestartReason("daily-restart");
         try {
-          transport.destroy();
-          await transport.initialize();
+          const sessionKey = `telegram:${[...config.allowedUserIds][0]}`;
+          await transport.resetSession(sessionKey);
           for (const uid of config.allowedUserIds) {
             pendingSessionStart.add(`telegram:${uid}`);
             pendingSessionStart.add(`discord:${uid}`);
