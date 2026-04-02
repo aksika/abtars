@@ -7,6 +7,8 @@
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { handleCommand, type CommandContext, type Reply } from "./command-handlers.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
+import { getCompactionPrompt, extractSummary } from "./compaction.js";
+import { buildMemoryContext } from "./session-memory.js";
 import { buildSessionStartContext } from "./session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { TmuxClient } from "./tmux-client.js";
@@ -24,6 +26,16 @@ import type { RunningJob } from "./cron-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 
 const TAG = "pipeline";
+
+// Context window thresholds
+const CTX_WARN_PCT = parseInt(process.env["CTX_WARN_PCT"] ?? "70", 10);
+const CTX_COMPACT_PCT = parseInt(process.env["CTX_COMPACT_PCT"] ?? "80", 10);
+const CTX_AGGRESSIVE_PCT = parseInt(process.env["CTX_AGGRESSIVE_PCT"] ?? "90", 10);
+const COMPACT_MAX_FAILURES = 3;
+
+// Per-session compaction state
+const ctxWarned = new Set<string>();
+const compactFailures = new Map<string, number>();
 
 export interface PipelineDeps {
   transport: IKiroTransport;
@@ -380,23 +392,66 @@ export async function handleInboundMessage(
     const ctxAfter = "contextPercent" in transport ? (transport as { contextPercent: number }).contextPercent : -1;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${intermediateDelivered ? " (streamed)" : ""}${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
 
-    // --- Auto-compact ---
-    if (memory && "contextPercent" in transport) {
+    // --- Context window management (graduated thresholds) ---
+    if ("contextPercent" in transport) {
       const pct = (transport as { contextPercent: number }).contextPercent;
-      const threshold = memory.getConfig().searchEnhancements.compactThresholdPct;
-      if (pct >= threshold) {
-        logInfo(TAG, `⚠️ Context window at ${pct}% (threshold: ${threshold}%) — auto-compacting`);
-        writeRestartReason(`compaction: ctx at ${pct}%`);
-        await adapter.sendMessage(channelId, `📦 Context window at ${pct}% — auto-compacting...`, { threadId: msg.threadId });
-        try {
-          await memory.checkAutoCompact({
-            chatId, sessionId: sessionKey, contextPercent: pct,
-            sendCompactCommand: (sk, cmd) => transport.sendPrompt(sk, cmd),
-          });
-          await adapter.sendMessage(channelId, "📦 Auto-compaction complete.", { threadId: msg.threadId });
-          if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
-        } catch (err) {
-          logError(TAG, "Auto-compaction failed", err);
+      if (pct >= 0) {
+        const failures = compactFailures.get(sessionKey) ?? 0;
+
+        if (pct >= CTX_COMPACT_PCT && failures < COMPACT_MAX_FAILURES) {
+          const aggressive = pct >= CTX_AGGRESSIVE_PCT;
+          logInfo(TAG, `📦 Context at ${pct}% (${aggressive ? "aggressive" : "compact"} threshold) — compacting`);
+          writeRestartReason(`compaction: ctx at ${pct}%`);
+          await adapter.sendMessage(channelId, `📦 Context at ${pct}% — compacting...`, { threadId: msg.threadId });
+
+          try {
+            // Safety-net transcript
+            if (memory?.getDatabase()) {
+              memory.checkAutoCompact({
+                chatId, sessionId: sessionKey, contextPercent: pct,
+                sendCompactCommand: async () => "", // skip /compact — we do our own
+              }).catch(() => {});
+            }
+
+            // Send compaction prompt to same session
+            const compactResponse = await transport.sendPrompt(sessionKey, getCompactionPrompt());
+            const summary = extractSummary(compactResponse ?? "");
+
+            if (!summary || summary.length < 50) {
+              throw new Error("Compaction produced empty or too-short summary");
+            }
+
+            // Build memory context
+            const memCtx = buildMemoryContext(memory?.getDatabase() ?? null, memoryConfig.memoryDir);
+
+            // Reset session and inject summary + memory
+            await transport.resetSession(sessionKey);
+
+            const injection = `This session continues from a compacted conversation. The summary below covers everything before this point.\n\n${summary}${memCtx ? "\n\n" + memCtx : ""}`;
+            await transport.sendPrompt(sessionKey, injection);
+
+            // Mark for session-start re-injection on next user message
+            pendingSessionStart.add(sessionKey);
+            ctxWarned.delete(sessionKey);
+            compactFailures.delete(sessionKey);
+
+            await adapter.sendMessage(channelId, "📦 Compaction complete.", { threadId: msg.threadId });
+            logInfo(TAG, `📦 Compaction done — summary ${summary.length} chars, memory ${memCtx.length} chars`);
+            if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
+          } catch (err) {
+            const count = (compactFailures.get(sessionKey) ?? 0) + 1;
+            compactFailures.set(sessionKey, count);
+            logError(TAG, `Compaction failed (${count}/${COMPACT_MAX_FAILURES})`, err);
+            if (count >= COMPACT_MAX_FAILURES) {
+              await adapter.sendMessage(channelId, "⚠️ Compaction failing repeatedly — consider /reset", { threadId: msg.threadId });
+            }
+          }
+        } else if (pct >= CTX_WARN_PCT && !ctxWarned.has(sessionKey)) {
+          ctxWarned.add(sessionKey);
+          logInfo(TAG, `⚠️ Context at ${pct}% — warning threshold`);
+          await adapter.sendMessage(channelId, `⚠️ Context window at ${pct}% — will auto-compact at ${CTX_COMPACT_PCT}%`, { threadId: msg.threadId });
+        } else if (pct >= CTX_COMPACT_PCT && failures >= COMPACT_MAX_FAILURES) {
+          logDebug(TAG, `Context at ${pct}% but compaction circuit breaker active (${failures} failures)`);
         }
       }
     }

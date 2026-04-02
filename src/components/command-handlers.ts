@@ -7,9 +7,11 @@ import { execSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { logInfo } from "./logger.js";
+import { logInfo, logError } from "./logger.js";
 import { writeRestartReason } from "./restart-reason.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
+import { getCompactionPrompt, extractSummary } from "./compaction.js";
+import { buildMemoryContext } from "./session-memory.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { TmuxClient } from "./tmux-client.js";
 import type { MemoryManager } from "./memory-manager.js";
@@ -73,6 +75,28 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     const label = text === "/reset" ? "🔄 Reset to KP." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
     await ctx.reply(label);
     logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
+    return true;
+  }
+
+  // /compact — trigger our own compaction
+  if (text === "/compact") {
+    await ctx.reply("📦 Compacting...");
+    try {
+      const response = await ctx.transport.sendPrompt(ctx.sessionKey, getCompactionPrompt());
+      const summary = extractSummary(response ?? "");
+      if (!summary || summary.length < 50) throw new Error("Summary too short");
+      const memCtx = buildMemoryContext(ctx.memory?.getDatabase() ?? null, ctx.memoryConfig.memoryDir);
+      await ctx.transport.resetSession(ctx.sessionKey);
+      const injection = `This session continues from a compacted conversation.\n\n${summary}${memCtx ? "\n\n" + memCtx : ""}`;
+      await ctx.transport.sendPrompt(ctx.sessionKey, injection);
+      ctx.pendingSessionStart.add(ctx.sessionKey);
+      if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
+      await ctx.reply("📦 Compaction complete.");
+      logInfo(TAG, `Manual compaction done — summary ${summary.length} chars`);
+    } catch (err) {
+      logError(TAG, "Manual compaction failed", err);
+      await ctx.reply("❌ Compaction failed. Try /reset to start fresh.");
+    }
     return true;
   }
 

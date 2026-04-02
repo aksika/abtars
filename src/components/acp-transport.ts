@@ -137,7 +137,7 @@ export class AcpTransport implements IKiroTransport {
     return this.agent !== null && this.client !== null;
   }
 
-  readonly transportCommands = ["/usage", "/compact", "/model"];
+  readonly transportCommands = ["/usage", "/model"];
 
   async executeCommand(cmd: string): Promise<string> {
     // Send as prompt to the active session — these are in-session commands
