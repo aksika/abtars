@@ -1016,11 +1016,14 @@ Changes:
 Own compaction — no dependency on kiro's `/compact` or gemini's `/compress`. Works with any transport.
 
 **Flow:**
-1. Compact trigger fires (Phase 1 threshold)
-2. Send conversation to LLM with compaction prompt → structured summary
-3. `resetSession(sessionKey)` — wipes the CLI's context
-4. Inject as first message: compaction summary + memory context + session-start context
-5. User's next message continues naturally — agent has full context
+1. Compact trigger fires (Phase 1 threshold, e.g. 80%)
+2. Send compaction prompt to the **same session** — model already has the conversation in context, 20% headroom is enough for summary output
+3. Extract `<summary>` from response, strip `<analysis>` scratchpad
+4. `resetSession(sessionKey)` — wipes the CLI's context
+5. Inject as first message: compaction summary + memory context + session-start context
+6. User's next message continues naturally — agent has full context
+
+No subagent, no separate session. One extra turn in the existing session.
 
 **Compaction prompt** (adapted from Claude Code's approach, see `~/workspace/studies/claude-code-context-window-management.md`):
 - LLM produces `<analysis>` (scratchpad, stripped) + `<summary>` (kept)
@@ -1041,7 +1044,7 @@ Own compaction — no dependency on kiro's `/compact` or gemini's `/compress`. W
 [MEMORY CONTEXT]
 
 ## Key Memories
-{extracted memories from recall, max 5}
+{last 5 extracted memories by recency — simple DB query, no recall engine}
 
 ## Today's Summary
 {daily summary if exists}
@@ -1050,6 +1053,8 @@ Own compaction — no dependency on kiro's `/compact` or gemini's `/compress`. W
 {todo items}
 ```
 
+**User `/compact` command:** Intercepted by bridge, routed through our compaction system. User can still reach kiro's native compact via `//compact`.
+
 **Why not `/compact`:**
 - Transport-agnostic: one system for kiro, gemini, raw models, future transports
 - We control what's preserved: memory system knows what matters
@@ -1057,25 +1062,25 @@ Own compaction — no dependency on kiro's `/compact` or gemini's `/compress`. W
 - `resetSession()` + inject = same effect but we own the content
 - One compaction system to maintain, not one per transport
 
-**Prompt-too-long fallback:** If the compaction request itself exceeds context, truncate oldest messages and retry (up to 3 attempts). If still failing, fall back to deterministic summary (last N messages + memory context, no LLM call).
+**Prompt-too-long fallback:** If the compaction response fails (at 90% aggressive threshold, less headroom), fall back to deterministic summary (memory context only, no LLM call) + reset.
 
 Changes:
-1. New: `src/components/compaction.ts` — compaction prompt, LLM call, summary formatting
-2. New: `src/components/session-memory.ts` — builds memory context block from recall + daily + todos
-3. `message-pipeline.ts` — on compact trigger: call compaction → resetSession → inject summary + memory
-4. `memory-manager.ts` — expose method to fetch relevant memories for compaction
+1. New: `src/components/compaction.ts` — compaction prompt, summary formatting, flow orchestration
+2. New: `src/components/session-memory.ts` — builds memory context block (recent memories + daily + todos)
+3. `message-pipeline.ts` — on compact trigger: send compaction prompt → extract summary → resetSession → inject
+4. `command-handlers.ts` — intercept `/compact` → route to our compaction
+5. Replace `compactThresholdPct` with `CTX_WARN_PCT`, `CTX_COMPACT_PCT`, `CTX_AGGRESSIVE_PCT`
 
 **Phase 3: Conversation buffer**
 
 Shadow copy of message history per session. Needed for:
-- Feeding the compaction prompt (we need the conversation to summarize it)
 - Raw model transport (#69) where we ARE the history manager
 - Token tracking for transports that don't report ctx%
 
-For ACP transports: shadow copy — CLI manages real history, we track a copy for compaction input.
+For ACP transports: shadow copy — CLI manages real history, we track for analytics/debugging.
 For raw model (future): we are the history manager.
 
-- Store messages per session (array, flushed on reset)
+- Store messages per session (array, flushed on reset/compaction)
 - Append on every send/receive in message-pipeline
 - `AGENT_CTX_WINDOW` in transport profile for token budget
 - Read token counts from API response when available
@@ -1083,8 +1088,7 @@ For raw model (future): we are the history manager.
 Changes:
 1. New: `src/components/conversation-buffer.ts` — message history per session
 2. `message-pipeline.ts` — append to buffer on every send/receive
-3. `compaction.ts` — read from buffer for compaction input
-4. Transport profiles: add `AGENT_CTX_WINDOW`
+3. Transport profiles: add `AGENT_CTX_WINDOW`
 
 ### Transport-specific ctx% availability
 
