@@ -9,8 +9,7 @@ const RETRY_COOLDOWN_MS = 60 * 60 * 1000; // 1h cooldown after 2nd failure
 
 /**
  * Sleep trigger with retry support.
- * - Startup: run if no audit today (or >25h since last)
- * - Cron: ≥8am AND 10min idle AND not exhausted
+ * - Cron: ≥8am AND 10min idle AND not exhausted AND no audit today
  * - On failure: retry on next HB (attempt 2), then after 1h cooldown (attempt 3)
  * - On success or 3 failures: stop until next 24h cycle
  */
@@ -30,26 +29,6 @@ export class SleepTrigger {
   reportFailure(): void {
     this.lastFailureTime = Date.now();
     logInfo(TAG, `Sleep failed (attempt ${this.attempts}/${MAX_ATTEMPTS}, next retry ${this.attempts < MAX_ATTEMPTS ? (this.attempts === 1 ? "on next HB" : "after 1h cooldown") : "none — exhausted"})`);
-  }
-
-  shouldRunOnStartup(): boolean {
-    if (this.hasSleepAuditToday()) {
-      logDebug(TAG, "Startup: already slept today — skip");
-      return false;
-    }
-    const lastAuditAge = this.getLastAuditAgeMs();
-    if (lastAuditAge > 25 * 60 * 60 * 1000) {
-      logInfo(TAG, `Startup sleep triggered (last audit ${Math.round(lastAuditAge / 3600000)}h ago, >25h threshold)`);
-      this.attempts = 1;
-      return true;
-    }
-    if (new Date().getHours() < 8) {
-      logDebug(TAG, "Startup: before 8am — skip");
-      return false;
-    }
-    logInfo(TAG, "Startup sleep triggered");
-    this.attempts = 1;
-    return true;
   }
 
   /**
@@ -108,18 +87,15 @@ export class SleepTrigger {
         logInfo(TAG, "Lock file exists — preserving state for resume");
         return;
       }
-      writeFileSync(lockPath, String(process.pid), "utf-8");
+      const state = { pid: process.pid, startedAt: Date.now(), steps: {} };
+      writeFileSync(lockPath, JSON.stringify(state, null, 2), "utf-8");
       logInfo(TAG, "Lock file written");
     } catch { /* best-effort */ }
   }
 
   private hasSleepAuditToday(): boolean {
     if (!existsSync(this.auditDir)) return false;
-    const today = new Date();
-    const dateStr =
-      String(today.getFullYear()) +
-      String(today.getMonth() + 1).padStart(2, "0") +
-      String(today.getDate()).padStart(2, "0");
+    const dateStr = localDate().replace(/-/g, "");
     try {
       const files = readdirSync(this.auditDir);
       // If lock file exists, check if all steps completed

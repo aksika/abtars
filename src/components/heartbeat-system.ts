@@ -7,6 +7,8 @@ import type { HeartbeatTask } from "../types/memory.js";
 export type HeartbeatConfig = {
   enabled: boolean;
   intervalMs: number;
+  /** When true, skip all heavy tasks (e.g. sleep in progress — avoid model rate limits). */
+  sleepActive?: () => boolean;
 };
 
 const TAG = "heartbeat";
@@ -74,11 +76,12 @@ export class HeartbeatSystem {
     }
     logDebug(TAG, `Tick — executing ${this.tasks.length} task(s)`);
     let heavyRan = false;
+    const sleepBlocking = this.config.sleepActive?.() ?? false;
 
     for (const task of this.tasks) {
       try {
-        if (task.heavy && heavyRan) {
-          logDebug(TAG, `Skipping heavy task "${task.name}" — another heavy task already ran`);
+        if (task.heavy && (heavyRan || sleepBlocking)) {
+          logDebug(TAG, `Skipping heavy task "${task.name}" — ${sleepBlocking ? "sleep in progress" : "another heavy task already ran"}`);
           continue;
         }
         const result = await task.execute();

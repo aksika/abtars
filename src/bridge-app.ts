@@ -221,8 +221,6 @@ export async function startBridge(): Promise<void> {
 
     // Unified heartbeat — single 5-min timer for all periodic tasks
 
-    // Sleep is handled by the heartbeat sleep-trigger task — no startup special case.
-
   // --- Telegram service ---
   let telegramAdapter: import("./platforms/telegram-adapter.js").TelegramAdapter | null = null;
 
@@ -363,7 +361,7 @@ export async function startBridge(): Promise<void> {
   }
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
-  const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: hbIntervalMs });
+  const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: hbIntervalMs, sleepActive: () => sleepChild !== null && !sleepChild.killed });
 
   const cronCallback = (chatId: number, message: string, result: string): void => {
     if (platforms.telegram && telegramAdapter) {

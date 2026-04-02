@@ -800,9 +800,18 @@ When user replies to a message on Telegram, the quoted message text (up to 500 c
 ## 63. Move sleep startup into heartbeat cycle
 
 **Priority:** high
-**Effort:** small
+**Effort:** small → medium (expanded scope)
 
 Remove the special `shouldRunOnStartup()` sleep check from bridge startup. Let the heartbeat `sleep-trigger` task handle it — it already checks "should I run today?" every tick. Cleaner: one main process, one heartbeat loop, no extra startup logic. Also reduce `MIN_UPTIME_MS` from 3min to 1min — once-a-day tasks don't need 3min warmup.
+
+**Expanded scope:** Refactor `SleepTrigger` and heartbeat integration to unify all sleep lifecycle management:
+- Startup trigger → heartbeat only (no special case)
+- Cross-day catch-up already implemented in `agentbridge-sleep.ts` (commit `b1a946a`)
+- Watermark gated on `dreamySucceeded` (commit `b1a946a`)
+- Lock file lifecycle: cleanup completed, warn on failures, 3-day retention (commit `b1a946a`)
+- Remaining: remove `shouldRunOnStartup()`, wire everything through heartbeat tick
+
+See `docs/TODO/SLEEP-CATCHUP-DESIGN.md` for catch-up design.
 
 ## 64. STT gibberish detection + safe languages
 
