@@ -975,53 +975,69 @@ Add OpenRouter as a transport provider alongside kiro-cli. Enables model diversi
 **Status:** Planned
 **Effort:** medium
 
-Based on Claude Code context management study (`~/workspace/studies/claude-code-context-window-management.md`).
+Based on studies: `~/workspace/studies/claude-code-context-window-management.md`, `~/workspace/studies/gemini-cli-context-window-management.md`
 
 ### Current state
-- ctx% tracked from ACP metadata on every response
+- ctx% tracked from ACP metadata on every response (kiro only, gemini self-manages at 50%)
 - Single threshold: auto-compact sends `/compact` to kiro-cli
 - Auto-reset on overflow (ValidationException / -32603)
-- Session-start context injected on `/new` and `/reset` only
+- Session-start context injected on `/new` and `/reset` only — NOT after compaction
 
 ### Design
 
-**Phase 1: Graduated thresholds**
+**Phase 1: Graduated thresholds + re-injection + circuit breaker**
 
-Replace single `compactThresholdPct` with multi-level response:
+Ship together — all simple changes in `message-pipeline.ts`.
+
+Graduated thresholds (only fire when `contextPercent >= 0` — gemini: no action, self-manages):
 
 | Level | ctx% | Action |
 |-------|------|--------|
 | Normal | <70% | Nothing |
-| Warning | ≥70% | Log warning, notify user once per session ("⚠️ Context at 70%") |
-| Compact | ≥80% | Trigger compaction (Phase 2) |
-| Aggressive | ≥90% | Compact + strip media/tool results from injection |
+| Warning | ≥70% | Log warning, notify user once per session |
+| Compact | ≥80% | Trigger compaction |
+| Aggressive | ≥90% | Compact + strip media from session-start injection |
 | Overflow | error | Auto-reset session (existing) |
 
-Config: `CTX_WARN_PCT=70`, `CTX_COMPACT_PCT=80`, `CTX_AGGRESSIVE_PCT=90`. Env-configurable.
+Config: `CTX_WARN_PCT=70`, `CTX_COMPACT_PCT=80`, `CTX_AGGRESSIVE_PCT=90`.
 
-Track `warnedThisSession` flag to avoid spamming warnings.
+Post-compact re-injection: add `pendingSessionStart.add(sessionKey)` after any compaction. Next user message gets full memory context (daily summary, recent messages, memories). One line change — already works for `/new` and `/reset`.
 
-**Phase 2: Session memory compaction (own compaction, not kiro's /compact)**
+Circuit breaker: track consecutive compaction failures per session. After 3 failures → stop trying, warn user "⚠️ Compaction failing — consider /reset". Reset counter on success or `/reset`.
 
-Critical for future raw model access (9Router/OpenRouter/ollama) where `/compact` won't exist.
+Track `warnedThisSession` flag per session to avoid spamming warnings.
 
-On compact trigger, build a compaction summary from our memory system:
-1. Read last 8 extracted memories relevant to current conversation (recall engine)
-2. Read today's daily summary (if exists)
-3. Read current session-start context
-4. Read active todo items
-5. Assemble into a structured "session memory" block
+Changes:
+1. `message-pipeline.ts` — graduated thresholds, `pendingSessionStart` after compact, circuit breaker
+2. `config.ts` — new env vars
 
-Then:
-- If using kiro-cli: send `/compact`, then inject session memory as follow-up message
-- If using raw model (future): replace old messages with session memory + recent N messages
+**Phase 2: Session memory compaction**
 
-**Session memory format:**
+Build our own compaction system. Two modes depending on transport:
+
+**Mode A — ACP transport (kiro-cli):**
+kiro's `/compact` handles the session summary. We inject our memory context as a follow-up message after compaction:
+- Extracted memories relevant to conversation (recall engine, max 5)
+- Today's daily summary (if exists)
+- Active todo items
+
+No extra LLM call — kiro summarizes, we add memory context.
+
+**Mode B — Raw model transport (9Router/OpenRouter/ollama):**
+We manage the conversation buffer ourselves. On compact trigger:
+1. Send conversation to LLM with compaction prompt → get session summary
+2. Replace old messages with: session summary + memory context + recent N messages
+3. Memory context same as Mode A (extracted memories, daily, todos)
+
+One LLM call for the session summary. The compaction prompt asks for:
+- What the user is working on
+- Key decisions made
+- Pending questions/tasks
+- Technical context (files, errors, concepts)
+
+**Session memory format (injected after compaction):**
 ```markdown
 [SESSION MEMORY — compacted at {timestamp}]
-
-## Recent Context
-{last 8 messages summary}
 
 ## Key Memories
 {extracted memories from recall, max 5}
@@ -1031,50 +1047,43 @@ Then:
 
 ## Active Tasks
 {todo items}
-
-## Conversation State
-{what was being discussed, pending questions}
 ```
 
-**Phase 3: Post-compact re-injection**
+For Mode B, prepend the LLM-generated session summary before the memory block.
 
-After any compaction (manual `/compact`, auto-compact, or session memory compact):
-1. Mark session for re-injection (`pendingSessionStart.add(sessionKey)`)
-2. On next user message, `buildSessionStartContext()` fires — injects recent memories, daily summary, conversation history
-3. Agent regains full memory context without user noticing
+Changes:
+1. New: `src/components/session-memory-compact.ts` — builds memory context block
+2. New: `src/components/compaction-prompt.ts` — session summary prompt (Mode B only)
+3. `message-pipeline.ts` — call session-memory-compact after compaction
+4. `memory-manager.ts` — expose method to fetch relevant memories for compaction
 
-This already works for `/new` and `/reset` — just wire it into the post-compact path.
+**Phase 3: Raw model conversation buffer**
 
-**Phase 4: Circuit breaker**
+Prerequisite for Mode B. Manage our own message history for raw model transport:
+- Store messages in an array (or DB table) per session
+- Send full history on each API call
+- On compaction: truncate old messages, insert summary
+- Read token counts from API response → compute ctx%
+- `AGENT_CTX_WINDOW` in transport profile for the model's context limit
 
-Track consecutive compaction failures per session:
-- After 3 failed compactions, stop trying
-- Warn user: "⚠️ Compaction failing — consider /reset"
-- Reset counter on successful compaction or manual `/reset`
+This is the foundation for #69 (raw model transport). Phase 2 Mode B depends on this.
 
-### Changes required
-
-1. `message-pipeline.ts` — graduated thresholds, warning state tracking, circuit breaker
-2. New: `src/components/session-memory-compact.ts` — builds compaction summary from memory system
-3. `message-pipeline.ts` — post-compact: add sessionKey to `pendingSessionStart` set
-4. `config.ts` — new env vars: `CTX_WARN_PCT`, `CTX_COMPACT_PCT`, `CTX_AGGRESSIVE_PCT`
-5. `memory-manager.ts` — expose method to fetch recent relevant memories for compaction
-
-### Dependencies
-- None for Phase 1, 3, 4 (can ship independently)
-- Phase 2 needs recall engine access from compaction path
+Changes:
+1. New: `src/components/conversation-buffer.ts` — message history management
+2. New: raw model transport implementation (part of #69)
+3. Transport profiles: add `AGENT_CTX_WINDOW` for main conversation (separate from `AGENT_SLEEP_CTX_WINDOW`)
 
 ### Transport-specific ctx% availability
 
-Based on studies: `~/workspace/studies/claude-code-context-window-management.md`, `~/workspace/studies/gemini-cli-context-window-management.md`
+| Transport | ctx% source | Available to bridge? | Compaction |
+|-----------|-------------|---------------------|------------|
+| kiro-cli (ACP) | `_kiro.dev/metadata` | ✅ Real-time | `/compact` + memory injection (Mode A) |
+| gemini-cli (ACP) | Internal only | ❌ Self-manages at 50% | No action needed |
+| Raw model (future) | API `usage.prompt_tokens` | ✅ We compute it | Own compaction (Mode B) |
 
-| Transport | ctx% source | Available to bridge? |
-|-----------|-------------|---------------------|
-| kiro-cli (ACP) | `_kiro.dev/metadata` notification | ✅ Yes — real-time |
-| gemini-cli (ACP) | Internal only (Gemini API `usageMetadata`) | ❌ No — gemini auto-compresses at 50% silently |
-| Raw model (future: 9Router/OpenRouter/ollama) | API response `usage.prompt_tokens` | ✅ Yes — we read it directly |
-
-**No estimation needed.** Every model API returns actual token counts. For ACP-wrapped CLIs, we depend on them reporting it. Gemini doesn't, but it self-manages aggressively (50% threshold). For raw model access, we'll have native token counts and full control.
-
-**Phase 0 (if needed):** Add `AGENT_CTX_WINDOW` to transport profiles. For transports that don't report ctx%, compute `estimatedPct = totalTokens / ctxWindow * 100` from API response token counts. Fallback only — kiro reports it, gemini self-manages, raw models will report it.
+### Implementation order
+1. **Phase 1** — graduated thresholds + re-injection + circuit breaker (independent, ship now)
+2. **Phase 2 Mode A** — memory injection after kiro `/compact` (needs recall engine access)
+3. **Phase 3** — raw model conversation buffer (foundation for #69)
+4. **Phase 2 Mode B** — own compaction with LLM summary (needs Phase 3)
 
