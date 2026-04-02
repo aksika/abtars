@@ -383,7 +383,7 @@ All platforms write to the same SQLite database. Facts learned on Telegram are r
 
 ## Sleep Cycle — Dreamy
 
-The sleep agent (Dreamy) is KP running as a dedicated maintenance subagent. Spawned as a detached `kiro-cli acp` process. The sleep cycle is a **multi-turn conversation** — a series of focused prompts sent sequentially into the same session, each handling one maintenance task.
+The sleep agent (Dreamy) is KP running as a dedicated maintenance subagent. Spawned as a **non-detached** `kiro-cli acp` child process (dies with bridge — no orphans). The sleep cycle is a **multi-turn conversation** — a series of focused prompts sent sequentially into the same session, each handling one maintenance task.
 
 ### Architecture
 
@@ -417,7 +417,26 @@ Registered as `sleep-trigger` task in HeartbeatSystem (5-min interval).
 
 **Cron (heartbeat tick):** runs if ≥8am, 10min idle, and no audit today.
 
-**Retry on failure:** up to 3 attempts per 24h cycle. Writes `.lock` file to prevent duplicate spawns.
+**Retry on failure:** up to 3 attempts per 24h cycle. Attempt 2 fires on next heartbeat tick, attempt 3 after 1h cooldown.
+
+**Duplicate prevention:** `sleepChild` in-memory guard tracks the spawned child process — if one is running, another won't spawn regardless of date. Lock file (`sleep_YYYYMMDD.lock`) is a JSON state file tracking per-step completion for resume.
+
+### Lock File Lifecycle
+
+Lock files are date-scoped (`sleep_YYYYMMDD.lock`). Each day gets its own file.
+
+**Same-day resume:** If sleep is re-triggered on the same day (bridge restart, heartbeat retry), the lock file preserves step state. Steps with status `ok` or `skipped` are skipped on resume. Steps with `failed`/`timeout`/`pending` are re-run.
+
+**Cross-day catch-up:** On sleep start, the orchestrator scans for previous days' lock files before running today's cycle:
+- All essential steps ok → delete lock (cleanup)
+- Essential steps failed → run catch-up (04a with date-range query, 04b from daily file, retro/retro-extract via prompt)
+- Catch-up succeeds → delete lock
+- Catch-up fails → keep lock, log WARNING with step name and consecutive failure count
+- Lock older than 3 days → log ERROR, delete (data too stale to recover)
+
+**Essential steps** (time-sensitive, data lost if skipped): `04a-daily-summary`, `04b-extract-from-daily`, `retrospective`, `retro-extract`.
+
+**Idempotent steps** (today's run catches up naturally): all others (GC, merge, darwinism, consolidation, etc.).
 
 ### Per-Step Retry
 
@@ -452,17 +471,20 @@ Before sleep starts, `SleepStateGatherer` collects system state and injects it i
 | 1 | `01-retrospective.md` | §1 Retrospective | Read messages, write retro, emotional attribution, update agent_notes |
 | 2 | `02-feedback.md` | §2 Feedback | Boost/demote recalled memories via `agentbridge-edit` |
 | 3 | `03-reminders.md` | §3 Reminders | Extract todos via `agentbridge-todo` |
-| 4 | `04-gc.md` | §4 GC | 7-step garbage collection (see below) |
-| 5 | `05-db-maintenance.md` | §4+ DB Maintenance | WAL checkpoint, FTS rebuild, batch embed |
-| 6 | `06-cron-verify.md` | §5 Cron Verify | Cross-check reminders against cron entries |
-| 7 | `07-topic-reorg.md` | §6 Topic Reorg | Topic file maintenance |
-| 8 | `08-fitness.md` | §7 Fitness | Darwinism review, core knowledge, translation fixes |
-| 9 | `09-anomaly-audit.md` | §7.5 Anomaly Audit | CIA-AAA attribute audit (daily) |
-| 10 | `10-retro-extract.md` | §5.5 Retro Extract | Extract durable facts from retro (replaces regex hack) |
-| 11 | `11-merge.md` | §8 Merge | Near-duplicate memory merge (max 5) |
-| 12 | `12-consolidation.md` | §9 Consolidation | daily→weekly→quarterly summaries, classification-aware |
-| 13 | `13-media-cleanup.md` | §9.5 Media Cleanup | FIFO 100MB cleanup |
-| 14 | `14-report.md` | §10 Report | Self-review, fix missed items, write audit, append flagged items to retro |
+| 4a | `04a-daily-summary.md` | §4a Daily Summary | **Code-driven.** Batched summarization → `daily/daily_YYYYMMDD.md` |
+| 4b | `04b-extract-from-daily.md` | §4b Extract from Daily | **Code-driven.** Model reads daily file, calls `agentbridge-store` |
+| 4c | `04c-gc-noise.md` | §4c GC Noise | Mark small talk/noise as garbage |
+| 5 | `06-cron-verify.md` | §5 Cron Verify | Cross-check reminders against cron entries |
+| 6 | `07-topic-reorg.md` | §6 Topic Reorg | Topic file maintenance |
+| 7 | `08a-darwinism.md` | §7 Darwinism | Fitness review, prune weak memories |
+| 7b | `08b-core-knowledge.md` | §7b Core Knowledge | Review core knowledge files |
+| 7c | `08c-translation-check.md` | §7c Translation | Fix bilingual memory quality |
+| 8 | `09-anomaly-audit.md` | §7.5 Anomaly Audit | CIA-AAA attribute audit (daily) |
+| 9 | `10-retro-extract.md` | §5.5 Retro Extract | Extract durable facts from retro |
+| 10 | `11-merge.md` | §8 Merge | Near-duplicate memory merge (max 5) |
+| 11 | `12-consolidation.md` | §9 Consolidation | Weekly/quarterly rollups only (daily done in 04a) |
+| 12 | `13-media-cleanup.md` | §9.5 Media Cleanup | FIFO 100MB cleanup |
+| 13 | `14-report.md` | §10 Report | Self-review, fix missed items, write audit |
 
 ### Garbage Collection (§4)
 
@@ -485,7 +507,7 @@ Dreamy scans all messages in the DB and cleans up noise while preserving emotion
 
 **Step 5 — GC noise:** Marks small talk/noise messages as garbage (flushed after 12h).
 
-**Extraction watermark:** Tracks last processed timestamp per chat in `extraction_watermarks` table. Only advanced at the end of a completed sleep cycle — NOT on instant-store. This ensures Dreamy re-scans all messages since last sleep, even if the main agent stored some during conversation.
+**Extraction watermark:** Tracks last processed timestamp per chat in `extraction_watermarks` table. Only advanced when all steps succeed (`dreamySucceeded` gate) — NOT on partial completion, NOT on instant-store. If essential steps fail, the watermark stays put so catch-up can re-read those messages. This ensures Dreamy re-scans all messages since last successful sleep, even if the main agent stored some during conversation.
 
 **Proactive storing (SOUL):** The main agent stores memories during conversation — facts, decisions, preferences, events. Dreamy is the safety net for anything missed. "If in doubt, store it" — deduplication happens during sleep.
 
@@ -518,15 +540,19 @@ After successful sleep, the bridge injects "You just woke up.. how did you sleep
 
 | File | Purpose |
 |------|---------|
-| `persona/sleep/*.md` | 15 step prompt files (multi-turn) |
+| `persona/sleep/*.md` | 15+ step prompt files (multi-turn) |
 | `persona/sleeping_prompt.md` | Monolith fallback (legacy) |
 | `skills/memory-anomalies.md` | Anomaly definitions for Dreamy + KP |
-| `src/cli/agentbridge-sleep.ts` | CLI orchestrator: step loop, retry, skip logic |
+| `src/cli/agentbridge-sleep.ts` | CLI orchestrator: step loop, retry, skip, catch-up, watermark |
 | `src/components/sleep-prompt-loader.ts` | Load step files + variable substitution |
-| `src/components/sleep-trigger.ts` | Heartbeat task, trigger logic, retry |
+| `src/components/sleep-trigger.ts` | Heartbeat task, trigger logic, retry, lock file |
 | `src/components/sleep-state-gatherer.ts` | Collects system state for identity prompt |
+| `src/components/sleep-daily-summary.ts` | Code-driven batched summarization (04a) |
+| `src/components/sleep-extract-daily.ts` | Code-driven extraction from daily file (04b) |
+| `src/components/media-sanitizer.ts` | Strips base64/binary/media paths from messages |
 | `~/.agentbridge/memory/garbage.json` | GC tracking |
-| `~/.agentbridge/memory/sleep/` | Audit logs + lock files |
+| `~/.agentbridge/memory/sleep/` | Audit logs (`.md`) + state files (`.lock`) |
+| `~/.agentbridge/memory/daily/` | Daily summary files (`daily_YYYY-MM-DD.md`) |
 | `~/.agentbridge/memory/retrospectives/` | Daily self-reflections |
 
 ---

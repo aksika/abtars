@@ -19,7 +19,7 @@
  *   1  Fatal error
  */
 
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { MemoryManager } from "../components/memory-manager.js";
 import { loadMemoryConfig } from "../components/memory-config.js";
@@ -30,8 +30,12 @@ import { extractFromDaily } from "../components/sleep-extract-daily.js";
 import { logInfo, logWarn, logError, setLogLevel } from "../components/logger.js";
 import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
 import { localDate } from "../components/env-utils.js";
+import type { SleepStep } from "../components/sleep-prompt-loader.js";
 
 const TAG = "agentbridge-sleep";
+
+const ESSENTIAL_STEPS = new Set(["04a-daily-summary", "04b-extract-from-daily", "retrospective", "retro-extract"]);
+const CATCHUP_MAX_AGE_DAYS = 3;
 
 // ── Argument parsing ────────────────────────────────────────────────────────
 
@@ -441,6 +445,148 @@ export function writeAuditLog(
   writeFileSync(join(sleepDir, filename), `# Sleep Audit Log${suffix}`, "utf-8");
 }
 
+// ── Catch-up for previous days ──────────────────────────────────────────────
+
+interface PreviousLock {
+  path: string;
+  dateStr: string; // YYYYMMDD
+  state: SleepState;
+  ageDays: number;
+}
+
+function scanPreviousLocks(sleepDir: string, todayStr: string): PreviousLock[] {
+  if (!existsSync(sleepDir)) return [];
+  const locks: PreviousLock[] = [];
+  const todayMs = dateStrToMs(todayStr);
+  for (const f of readdirSync(sleepDir)) {
+    const m = f.match(/^sleep_(\d{8})\.lock$/);
+    if (!m || m[1] === todayStr) continue;
+    const state = readStateFile(join(sleepDir, f));
+    if (!state) continue;
+    const ageDays = Math.round((todayMs - dateStrToMs(m[1]!)) / 86400000);
+    if (ageDays > 0) locks.push({ path: join(sleepDir, f), dateStr: m[1]!, state, ageDays });
+  }
+  return locks.sort((a, b) => b.dateStr.localeCompare(a.dateStr)); // newest first
+}
+
+function dateStrToMs(ds: string): number {
+  return new Date(`${ds.slice(0, 4)}-${ds.slice(4, 6)}-${ds.slice(6, 8)}T00:00:00`).getTime();
+}
+
+function dateStrToFormatted(ds: string): string {
+  return `${ds.slice(0, 4)}-${ds.slice(4, 6)}-${ds.slice(6, 8)}`;
+}
+
+function failedEssentials(state: SleepState): string[] {
+  const failed: string[] = [];
+  for (const name of ESSENTIAL_STEPS) {
+    const s = state.steps[name];
+    if (!s || s.status === "failed" || s.status === "timeout" || s.status === "pending") {
+      failed.push(name);
+    }
+  }
+  return failed;
+}
+
+async function runCatchUp(
+  locks: PreviousLock[],
+  transport: import("../components/acp-transport.js").AcpTransport,
+  db: import("better-sqlite3").Database,
+  memoryConfig: { memoryDir: string },
+  steps: SleepStep[],
+  flags: RawArgs,
+): Promise<void> {
+  for (const lock of locks) {
+    if (lock.ageDays > CATCHUP_MAX_AGE_DAYS) {
+      logError(TAG, `[CATCH-UP] Abandoning stale lock ${basename(lock.path)} — ${lock.ageDays} days old, data unrecoverable`);
+      unlinkSync(lock.path);
+      continue;
+    }
+
+    const needed = failedEssentials(lock.state);
+    if (needed.length === 0) {
+      logInfo(TAG, `[CATCH-UP] Cleaning up completed lock ${basename(lock.path)}`);
+      unlinkSync(lock.path);
+      continue;
+    }
+
+    logInfo(TAG, `[CATCH-UP] ${basename(lock.path)} — recovering: ${needed.join(", ")}`);
+
+    // 04a — daily summary with date-range
+    if (needed.includes("04a-daily-summary")) {
+      const start = Date.now();
+      try {
+        const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
+        const chatId = [...(db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[])][0]?.chat_id ?? 7773842843;
+        const dayStart = dateStrToMs(lock.dateStr);
+        const dayEnd = dayStart + 86400000;
+        const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "catch-up-04a", flags.verbose).then(r => r ?? ""), {
+          ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs: 0,
+          dateRange: { startTs: dayStart, endTs: dayEnd },
+        });
+        if (summary) {
+          writeDailyFile(memoryConfig.memoryDir, dateStrToFormatted(lock.dateStr), summary);
+          lock.state.steps["04a-daily-summary"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
+        } else {
+          lock.state.steps["04a-daily-summary"] = { status: "skipped" };
+        }
+        logInfo(TAG, `[CATCH-UP] ✓ 04a-daily-summary for ${lock.dateStr} (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+      } catch (err) {
+        logWarn(TAG, `[CATCH-UP] ✗ 04a-daily-summary for ${lock.dateStr}: ${err instanceof Error ? err.message : String(err)}`);
+        lock.state.steps["04a-daily-summary"] = { status: "failed", duration: Math.round((Date.now() - start) / 100) / 10 };
+      }
+      writeStateFile(lock.path, lock.state);
+    }
+
+    // 04b — extract from daily (needs daily file to exist)
+    if (needed.includes("04b-extract-from-daily")) {
+      const dailyPath = join(memoryConfig.memoryDir, "daily", `daily_${dateStrToFormatted(lock.dateStr)}.md`);
+      if (!existsSync(dailyPath)) {
+        logInfo(TAG, `[CATCH-UP] ⏭ 04b — no daily file for ${lock.dateStr}`);
+        lock.state.steps["04b-extract-from-daily"] = { status: "skipped" };
+      } else {
+        const start = Date.now();
+        try {
+          const chatId = [...(db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[])][0]?.chat_id ?? 7773842843;
+          const result = await extractFromDaily(dailyPath, chatId, (p) => sendWithRetry(transport, p, "catch-up-04b", flags.verbose).then(r => r ?? ""));
+          lock.state.steps["04b-extract-from-daily"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
+          logInfo(TAG, `[CATCH-UP] ✓ 04b-extract-from-daily for ${lock.dateStr} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
+        } catch (err) {
+          logWarn(TAG, `[CATCH-UP] ✗ 04b for ${lock.dateStr}: ${err instanceof Error ? err.message : String(err)}`);
+          lock.state.steps["04b-extract-from-daily"] = { status: "failed", duration: Math.round((Date.now() - start) / 100) / 10 };
+        }
+      }
+      writeStateFile(lock.path, lock.state);
+    }
+
+    // Prompt-driven essentials (retrospective, retro-extract)
+    for (const stepName of ["retrospective", "retro-extract"] as const) {
+      if (!needed.includes(stepName)) continue;
+      const step = steps.find(s => s.name === stepName);
+      if (!step) { logWarn(TAG, `[CATCH-UP] Step file not found: ${stepName}`); continue; }
+      const start = Date.now();
+      const response = await sendWithRetry(transport, step.prompt, `catch-up-${stepName}`, flags.verbose);
+      if (response) {
+        lock.state.steps[stepName] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
+        logInfo(TAG, `[CATCH-UP] ✓ ${stepName} (${((Date.now() - start) / 1000).toFixed(1)}s)`);
+      } else {
+        lock.state.steps[stepName] = { status: "failed", duration: Math.round((Date.now() - start) / 100) / 10 };
+        logWarn(TAG, `[CATCH-UP] ✗ ${stepName}`);
+      }
+      writeStateFile(lock.path, lock.state);
+    }
+
+    // Final check: all essentials recovered?
+    const stillFailing = failedEssentials(lock.state);
+    if (stillFailing.length === 0) {
+      logInfo(TAG, `[CATCH-UP] ✅ ${basename(lock.path)} — all essentials recovered, lock deleted`);
+      unlinkSync(lock.path);
+    } else {
+      logWarn(TAG, `[CATCH-UP] ${basename(lock.path)} — still failing: ${stillFailing.join(", ")} (failing ${lock.ageDays} day(s))`);
+    }
+  }
+}
+
 // ── Main orchestration ──────────────────────────────────────────────────────
 
 async function main(): Promise<number> {
@@ -548,6 +694,14 @@ async function main(): Promise<number> {
     let dailySummaryPath: string | null = null;
 
     try {
+      // ── Catch-up: recover failed essentials from previous days ──
+      const sleepDir = join(memoryConfig.memoryDir, "sleep");
+      const previousLocks = scanPreviousLocks(sleepDir, dateStr);
+      if (previousLocks.length > 0) {
+        logInfo(TAG, `[CATCH-UP] Found ${previousLocks.length} previous lock(s)`);
+        await runCatchUp(previousLocks, transport, db, memoryConfig, steps, flags);
+      }
+
       for (const step of steps) {
         if (timedOut) {
           state.steps[step.name] = { status: "timeout" };
@@ -644,19 +798,23 @@ async function main(): Promise<number> {
       try { transport.destroy(); } catch { /* */ }
     }
 
-    // Advance extraction watermark — all messages up to now are considered processed
-    try {
-      const chatIds = db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[];
-      const now = Date.now();
-      for (const { chat_id } of chatIds) {
-        db.prepare(
-          `INSERT INTO extraction_watermarks (chat_id, last_processed_timestamp)
-           VALUES (?, ?)
-           ON CONFLICT(chat_id) DO UPDATE SET last_processed_timestamp = excluded.last_processed_timestamp`,
-        ).run(chat_id, now);
-      }
-      logInfo(TAG, `[SLEEP] Extraction watermark advanced for ${chatIds.length} chat(s)`);
-    } catch { /* non-fatal */ }
+    // Advance extraction watermark — only when all steps succeeded
+    if (dreamySucceeded) {
+      try {
+        const chatIds = db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[];
+        const now = Date.now();
+        for (const { chat_id } of chatIds) {
+          db.prepare(
+            `INSERT INTO extraction_watermarks (chat_id, last_processed_timestamp)
+             VALUES (?, ?)
+             ON CONFLICT(chat_id) DO UPDATE SET last_processed_timestamp = excluded.last_processed_timestamp`,
+          ).run(chat_id, now);
+        }
+        logInfo(TAG, `[SLEEP] Extraction watermark advanced for ${chatIds.length} chat(s)`);
+      } catch { /* non-fatal */ }
+    } else {
+      logWarn(TAG, "[SLEEP] Watermark NOT advanced — essential steps failed, messages preserved for catch-up");
+    }
 
     // Write audit
     const stepEntries = Object.entries(state.steps);

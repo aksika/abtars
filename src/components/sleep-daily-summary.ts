@@ -27,6 +27,8 @@ export interface DailySummaryConfig {
   memoryDir: string;
   chatId: number;
   watermarkTs: number;
+  /** For catch-up: read messages within date range instead of watermark. */
+  dateRange?: { startTs: number; endTs: number };
 }
 
 type Message = { id: number; role: string; content: string; timestamp: number };
@@ -38,6 +40,13 @@ export function readMessages(db: Database.Database, chatId: number, watermarkTs:
   return db.prepare(
     "SELECT id, role, content, timestamp FROM messages WHERE chat_id = ? AND timestamp > ? ORDER BY timestamp ASC",
   ).all(chatId, watermarkTs) as Message[];
+}
+
+/** Read messages within a date range (for catch-up). */
+export function readMessagesByDateRange(db: Database.Database, chatId: number, startTs: number, endTs: number): Message[] {
+  return db.prepare(
+    "SELECT id, role, content, timestamp FROM messages WHERE chat_id = ? AND timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC",
+  ).all(chatId, startTs, endTs) as Message[];
 }
 
 /** Format messages for the prompt. */
@@ -136,7 +145,9 @@ export async function buildDailySummary(
   sendPrompt: SendPromptFn,
   config: DailySummaryConfig,
 ): Promise<string | null> {
-  const messages = readMessages(db, config.chatId, config.watermarkTs);
+  const messages = config.dateRange
+    ? readMessagesByDateRange(db, config.chatId, config.dateRange.startTs, config.dateRange.endTs)
+    : readMessages(db, config.chatId, config.watermarkTs);
   if (messages.length === 0) {
     logInfo(TAG, "No messages to summarize");
     return null;
