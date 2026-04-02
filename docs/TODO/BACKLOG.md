@@ -944,3 +944,27 @@ Molty → bash tool call → kiro-cli permission handler (bridge intercepts)
 **Decision:** Deferred. 176ms per call is acceptable for conversation (LLM turns take seconds). For sleep with 10 stores = 1.7s total overhead — not critical. Revisit when store frequency increases significantly or when sleep extraction moves fully in-process (step 04b already code-driven).
 
 **When to implement:** If Molty starts storing 20+ memories per conversation (proactive SOUL), the cumulative overhead becomes noticeable. Or if sleep extraction needs 50+ stores per cycle.
+
+## 67. Multi-user Telegram support
+
+**Priority:** high
+**Status:** Not started
+**Effort:** medium
+
+Support multiple Telegram users with separate sessions. Currently `ALLOWED_USER_IDS` accepts multiple IDs but all share the same kiro-cli session. Need per-user session isolation, separate memory contexts, and `agentbridge-send` CLI for programmatic message injection.
+
+## 68. Picture context bloat mitigations
+
+**Priority:** medium
+**Status:** Not started
+**Effort:** medium
+
+Images sent via Telegram consume large context window chunks. Mitigations: auto-resize/compress before sending to model, strip image data from message history after processing, configurable max image size, skip images when context is above threshold.
+
+## 69. OpenRouter / 9Router integration
+
+**Priority:** medium
+**Status:** Not started (9Router security audit done: `docs/9ROUTER-SECURITY-AUDIT.md`)
+**Effort:** medium
+
+Add OpenRouter as a transport provider alongside kiro-cli. Enables model diversity (Claude, GPT, Gemini, open-source) without separate CLI tools. 9Router is the self-hosted variant — security audit completed, deployment plan needed.

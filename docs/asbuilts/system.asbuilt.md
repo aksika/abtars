@@ -120,7 +120,7 @@ Entity clusters: memories sharing entities gravitate together with connecting li
 1. Kill orphaned `kiro-cli acp` processes from previous runs
 2. Initialize transport (ACP or tmux)
 3. Initialize memory, browser, platforms
-4. Start heartbeat (3-min uptime guard before first tick)
+4. Start heartbeat (1-min uptime guard before first tick)
 5. Auto-restart on crash (launcher retries up to 10 times, 5s delay)
 
 ---
@@ -187,7 +187,7 @@ File: `src/cli/agentbridge-todo.test.ts` — 7 tests covering add, list, done, r
 
 ### Overview
 
-A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. A unified `HeartbeatSystem` (5-min interval, owned by `bridge-app.ts`, 3-minute uptime guard) is the single owner of cron scanning — no startup check, no duplicate paths. Due reminders are injected into conversation; due tasks are processed by `CronQueue`.
+A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. A unified `HeartbeatSystem` (5-min interval, owned by `bridge-app.ts`, 1-minute uptime guard) is the single owner of cron scanning — no startup check, no duplicate paths. Due reminders are injected into conversation; due tasks are processed by `CronQueue`. Heavy tasks (agent cron jobs) are blocked while sleep is active (`sleepActive` callback) to avoid model rate-limit contention.
 
 ### Architecture
 
@@ -197,7 +197,7 @@ User: "remind me tomorrow at 8am"
                                                         ↓
                                           ~/.agentbridge/memory/memory.db (cron_entries table)
 
-Every 5 min (HeartbeatSystem — cron task, skips first 3 min of uptime):
+Every 5 min (HeartbeatSystem — cron task, skips first 1 min of uptime):
   → checkCron() reads cron_entries from SQLite, returns due entries
   → Due reminders → pending_reminders.json → injected as synthetic message
   → Due tasks → cronQueue.enqueue(entry) → sequential processing
@@ -232,8 +232,10 @@ Replaces inline task spawning. All task execution goes through the queue.
 2. `transport.initialize()` → spawns `kiro-cli acp --agent professor`
 3. `transport.sendPrompt(sessionKey, prompt)` — handles session creation + prompt
 4. `transport.destroy()` — kills the process
-5. Run DoD checks if task has `taskFile`
-6. Record exit code to history
+5. Write result to `~/.agentbridge/workspace/cron-results/{entryId}_{date}.md`
+6. Run DoD checks if task has `taskFile`
+7. Record exit code to history
+8. Report to Telegram: ✅ on success (exit 0), ❌ on failure/DoD fail
 
 **Script task flow:**
 1. `spawn("bash", ["-c", entry.message])`
