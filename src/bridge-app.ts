@@ -365,6 +365,8 @@ export async function startBridge(): Promise<void> {
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
   const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: hbIntervalMs, sleepActive: () => sleepChild !== null && !sleepChild.killed });
+  const DAY_START_HOUR = parseInt(process.env["DAY_START_HOUR"] ?? "8", 10);
+  let dailyRestartDate = "";
 
   const cronCallback = (chatId: number, message: string, result: string): void => {
     if (platforms.telegram && telegramAdapter) {
@@ -381,6 +383,36 @@ export async function startBridge(): Promise<void> {
       for (const entry of dueTasks) cronQueue.enqueue(entry, cronCallback);
     },
   });
+
+  // --- Daily session restart (before sleep) ---
+  if (DAY_START_HOUR >= 0) {
+    heartbeat.registerTask({
+      name: "daily-restart",
+      execute: async () => {
+        const now = new Date();
+        if (now.getHours() < DAY_START_HOUR) return;
+        const today = localDate();
+        if (dailyRestartDate === today) return;
+        if (busyChats.size > 0) return;
+        if (sleepChild && !sleepChild.killed) return;
+
+        logInfo("main", `🔄 Daily session restart (>=${DAY_START_HOUR}:00)`);
+        writeRestartReason("daily-restart");
+        try {
+          transport.destroy();
+          await transport.initialize();
+          for (const uid of config.allowedUserIds) {
+            pendingSessionStart.add(`telegram:${uid}`);
+            pendingSessionStart.add(`discord:${uid}`);
+          }
+          dailyRestartDate = today;
+          logInfo("main", "🔄 Daily restart complete — fresh CLI session");
+        } catch (err) {
+          logError("main", "Daily restart failed", err);
+        }
+      },
+    });
+  }
 
   heartbeat.registerTask({
     name: "sleep-trigger",
@@ -491,9 +523,7 @@ export async function startBridge(): Promise<void> {
   let dbCheckCounter = 0;
   const CTX_IDLE_COMPACT_PCT = parseInt(process.env["CTX_IDLE_COMPACT_PCT"] ?? "65", 10);
   const CTX_IDLE_COMPACT_MIN = parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10);
-  const DAY_START_HOUR = parseInt(process.env["DAY_START_HOUR"] ?? "8", 10);
   let compactedThisIdle = false;
-  let dailyRestartDate = "";
   setIdleCompactReset(() => { compactedThisIdle = false; });
 
   // --- Floating compaction (idle-triggered) ---
@@ -537,32 +567,6 @@ export async function startBridge(): Promise<void> {
           compactingSessions.delete(sessionKey);
         }
         return true;
-      },
-    });
-  }
-
-  // --- Daily session restart ---
-  if (DAY_START_HOUR >= 0) {
-    heartbeat.registerTask({
-      name: "daily-restart",
-      execute: async () => {
-        const now = new Date();
-        if (now.getHours() !== DAY_START_HOUR) return;
-        const today = localDate();
-        if (dailyRestartDate === today) return;
-        if (busyChats.size > 0) return;
-        if (sleepChild && !sleepChild.killed) return;
-
-        logInfo("main", `🔄 Daily session restart (${DAY_START_HOUR}:00)`);
-        try {
-          transport.destroy();
-          await transport.initialize();
-          pendingSessionStart.add(`telegram:${[...config.allowedUserIds][0]}`);
-          dailyRestartDate = today;
-          logInfo("main", "🔄 Daily restart complete — fresh CLI session");
-        } catch (err) {
-          logError("main", "Daily restart failed", err);
-        }
       },
     });
   }
