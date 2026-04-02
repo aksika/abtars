@@ -1111,25 +1111,37 @@ Changes:
 **Effort:** small
 
 ### Problem
-Context grows during conversation but compaction only triggers at 80%. If the user stops chatting at 72%, the context stays bloated until next interaction pushes it over. Wasted context = slower responses, higher cost.
+Context grows during conversation but compaction only triggers at 80%. If the user stops chatting at 67%, the context stays bloated until next interaction pushes it over. Wasted context = slower responses, higher cost.
 
 ### Design
-If ctx% ≥ `CTX_WARN_PCT` (70%) and no message exchange for 10 minutes, trigger compaction automatically.
+If ctx% ≥ `CTX_IDLE_COMPACT_PCT` (65%) and no message exchange for 10 minutes, trigger compaction automatically. Lower threshold than active compaction (80%) because it's free — user isn't waiting.
 
 **Implementation:** Heartbeat task (5-min interval). On each tick:
 1. Check `lastMessageTs` (already tracked for sleep trigger)
 2. Check `lastContextPercent` from transport
-3. If `pct >= CTX_WARN_PCT && idle >= 10min && !compactedThisIdle` → trigger compaction
-4. Set `compactedThisIdle = true` to prevent re-triggering
-5. Reset `compactedThisIdle` on next user message
+3. If `pct >= CTX_IDLE_COMPACT_PCT && idle >= 10min && !compactedThisIdle` → trigger compaction
+4. Add sessionKey to `busyChats` during compaction
+5. Set `compactedThisIdle = true` to prevent re-triggering
+6. Reset `compactedThisIdle` on next user message
 
-**Why heartbeat, not setTimeout:** Heartbeat already ticks every 5 min. Adding a check is one `if` statement. No new timers, no cleanup on session reset.
+**If user messages during compaction:** Session is in `busyChats`, message gets queued. Detect compaction-busy and send: "☕ Hold on, just tidying up my thoughts over coffee..." (instead of generic "⏳ Queued"). After compaction completes, queued message replays automatically.
 
-**Config:** `CTX_IDLE_COMPACT_MIN=10` (minutes of idle before floating compact). Set to 0 to disable.
+**Config:**
+- `CTX_IDLE_COMPACT_PCT=65` (idle compaction threshold — lower than active 80%)
+- `CTX_IDLE_COMPACT_MIN=10` (minutes of idle before floating compact, 0 to disable)
+
+### Threshold summary (with #70)
+| Trigger | ctx% | When |
+|---------|------|------|
+| Floating compact | ≥65% | Idle 10min (heartbeat) |
+| Warning | ≥70% | After response |
+| Active compact | ≥80% | After response |
+| Aggressive compact | ≥90% | After response |
+| Overflow reset | error | On API error |
 
 ### Changes
-1. `bridge-app.ts` — new heartbeat task `idle-compact` (or add to existing sleep-trigger task)
-2. Track `compactedThisIdle` flag per session, reset on inbound message in `message-pipeline.ts`
+1. `bridge-app.ts` — new heartbeat task `idle-compact`
+2. `message-pipeline.ts` — detect compaction-busy for fun message, track `compactedThisIdle` flag
 3. Reuse `compaction.ts` flow (same prompt → reset → inject)
 
 ## 72. Daily session restart
