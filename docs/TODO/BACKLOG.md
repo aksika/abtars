@@ -1099,7 +1099,7 @@ Changes:
 | Raw model (future) | API `usage.prompt_tokens` | ✅ We compute it | Own compaction |
 
 ### Implementation order
-1. **Phase 1** — graduated thresholds + re-injection + circuit breaker (independent, ship now)
-2. **Phase 3** — conversation buffer (needed for Phase 2 — compaction needs message history)
-3. **Phase 2** — unified compaction (needs buffer + recall engine)
+1. **Phase 1** — graduated thresholds + re-injection + circuit breaker
+2. **Phase 2** — unified compaction (works for ACP transports without buffer — model already has conversation in context)
+3. **Phase 3** — conversation buffer (ships with #69 raw model transport — needed when WE manage history)
 
