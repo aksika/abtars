@@ -1103,3 +1103,66 @@ Changes:
 2. **Phase 2** — unified compaction (works for ACP transports without buffer — model already has conversation in context)
 3. **Phase 3** — conversation buffer (ships with #69 raw model transport — needed when WE manage history)
 
+
+## 71. Floating compaction (idle-triggered)
+
+**Priority:** medium
+**Status:** Planned
+**Effort:** small
+
+### Problem
+Context grows during conversation but compaction only triggers at 80%. If the user stops chatting at 72%, the context stays bloated until next interaction pushes it over. Wasted context = slower responses, higher cost.
+
+### Design
+If ctx% ≥ `CTX_WARN_PCT` (70%) and no message exchange for 10 minutes, trigger compaction automatically.
+
+**Implementation:** Heartbeat task (5-min interval). On each tick:
+1. Check `lastMessageTs` (already tracked for sleep trigger)
+2. Check `lastContextPercent` from transport
+3. If `pct >= CTX_WARN_PCT && idle >= 10min && !compactedThisIdle` → trigger compaction
+4. Set `compactedThisIdle = true` to prevent re-triggering
+5. Reset `compactedThisIdle` on next user message
+
+**Why heartbeat, not setTimeout:** Heartbeat already ticks every 5 min. Adding a check is one `if` statement. No new timers, no cleanup on session reset.
+
+**Config:** `CTX_IDLE_COMPACT_MIN=10` (minutes of idle before floating compact). Set to 0 to disable.
+
+### Changes
+1. `bridge-app.ts` — new heartbeat task `idle-compact` (or add to existing sleep-trigger task)
+2. Track `compactedThisIdle` flag per session, reset on inbound message in `message-pipeline.ts`
+3. Reuse `compaction.ts` flow (same prompt → reset → inject)
+
+## 72. Daily session restart
+
+**Priority:** medium
+**Status:** Planned
+**Effort:** small
+
+### Problem
+kiro-cli and gemini-cli are long-running processes. Over 24h+ they accumulate state, potential memory leaks, stale caches, and context drift. A daily fresh start improves reliability.
+
+### Design
+Once per day at `DAY_START_HOUR` (default 8, env-configurable), restart the CLI transport process:
+
+1. Heartbeat task checks: `currentHour == DAY_START_HOUR && !restartedToday`
+2. Wait for idle (no busy chats, no sleep in progress)
+3. `transport.destroy()` → `transport.initialize()` (ACP: kills kiro-cli, spawns fresh)
+4. Mark all sessions for re-injection (`pendingSessionStart`)
+5. Set `restartedToday = true`, reset at midnight
+
+**Not a bridge restart** — only the CLI subprocess. Bridge stays up, memory intact, cron continues.
+
+**Timing:** Runs after sleep cycle completes (sleep triggers at 8am, takes 10-60min). The restart fires on the next idle heartbeat tick after `DAY_START_HOUR`. If sleep is running, it waits (sleepActive check).
+
+**Config:** `DAY_START_HOUR=8` (0-23). Set to -1 to disable.
+
+**Safety:**
+- Skip if user is chatting (`busyChats.size > 0`)
+- Skip if sleep is active (`sleepActive()`)
+- Skip if already restarted today
+- Log restart reason for audit
+
+### Changes
+1. `bridge-app.ts` — new heartbeat task `daily-restart`
+2. `acp-transport.ts` — ensure `destroy()` + `initialize()` is safe to call sequentially
+3. Track `restartedToday` flag, reset at midnight (or when date changes via `localDate()`)
