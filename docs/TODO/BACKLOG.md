@@ -968,3 +968,17 @@ Images sent via Telegram consume large context window chunks. Mitigations: auto-
 **Effort:** medium
 
 Add OpenRouter as a transport provider alongside kiro-cli. Enables model diversity (Claude, GPT, Gemini, open-source) without separate CLI tools. 9Router is the self-hosted variant — security audit completed, deployment plan needed.
+
+## 70. Context window management improvements
+
+**Priority:** high
+**Status:** Not started
+**Effort:** medium
+
+Current ctx window management is reactive only (auto-compact at threshold, auto-reset on overflow). Needs proactive management:
+- Smarter compaction: summarize old messages before hitting threshold, not just `/compact`
+- Graduated response: warn user at 70%, compact at 80%, aggressive compact at 90%, reset at overflow
+- Track compaction history (how often, how effective — did ctx% actually drop?)
+- Picture/media awareness: images consume disproportionate context, factor into threshold
+- Per-session ctx tracking in memory DB for analytics
+- Consider proactive session rotation after N hours or N messages regardless of ctx%

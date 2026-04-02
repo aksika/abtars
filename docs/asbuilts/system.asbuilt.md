@@ -375,6 +375,43 @@ All scheduling goes through `agentbridge-cron` CLI — never host crontab.
 
 ---
 
+## Context Window Management
+
+Tracks and manages the LLM context window to prevent overflow and maintain conversation quality.
+
+### Monitoring
+
+- `contextPercent` tracked on every ACP response via `_kiro.dev/metadata` notification
+- tmux: parsed from kiro-cli output
+- Logged on every inbound (`ctx: XX%`) and outbound
+- Dashboard shows live ctx% via WebSocket
+- `/status` command displays current ctx%
+
+### Auto-Compact
+
+Triggered in `message-pipeline.ts` after each response when `contextPercent >= compactThresholdPct`:
+1. Sends `/compact` command to kiro-cli session
+2. Notifies user: "📦 Context window at XX% — auto-compacting..."
+3. Updates session-start context after compaction
+4. Writes restart reason for audit trail
+
+### Auto-Reset on Overflow
+
+If the model returns `ValidationException` or error code `-32603` (context too large):
+1. Resets the ACP session immediately
+2. Marks session for fresh session-start injection
+3. Notifies user: "🔄 Context window full — session reset. Send your message again."
+
+### Current Limitations
+
+- Reactive only — no proactive management before threshold
+- No graduated response (warn → compact → aggressive → reset)
+- No compaction effectiveness tracking
+- Images/media not factored into threshold decisions
+- See backlog #70 for planned improvements
+
+---
+
 ## Self-Healing Agent
 
 Heartbeat task (`self-healer`) that scans `bridge.log` for ERROR lines every 5 minutes. When errors are found, injects `[SYSTEM BUG REPORT]` messages to KP via the Telegram pipeline. KP can analyze, attempt fixes, or notify the user.
