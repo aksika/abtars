@@ -8,8 +8,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { AcpTransport } from "./acp-transport.js";
@@ -24,6 +24,16 @@ const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
 
 function recordRunToFile(entryId: string, exitCode?: number): void {
   dbRecordRun(entryId, exitCode);
+}
+
+function writeResultFile(entryId: string, content: string): string | null {
+  try {
+    const dir = join(homedir(), ".agentbridge", "workspace", "cron-results");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${entryId}_${localDate()}.md`);
+    writeFileSync(file, content, "utf-8");
+    return file;
+  } catch { return null; }
 }
 
 const DOD_MIN_BYTES = 100;
@@ -254,9 +264,15 @@ export class CronQueue {
         } else {
           logInfo(TAG, `■ Agent completed: "${entry.message.slice(0, 60)}"`);
         }
+
+        // Write result file
+        const resultPath = writeResultFile(entry.id, response || "(no output)");
+        if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
+
         recordRunToFile(entry.id, exitCode);
         if (exitCode !== 0) scheduleRetry(entry, !!entry._retrying);
-        onComplete?.(entry.chatId, entry.message, summary + dodResult);
+        const icon = exitCode === 0 ? "✅" : "❌";
+        onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`);
       })
       .catch((err) => {
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
