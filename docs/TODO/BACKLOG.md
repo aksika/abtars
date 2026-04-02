@@ -1064,3 +1064,17 @@ Track consecutive compaction failures per session:
 - None for Phase 1, 3, 4 (can ship independently)
 - Phase 2 needs recall engine access from compaction path
 
+### Transport-specific ctx% availability
+
+Based on studies: `~/workspace/studies/claude-code-context-window-management.md`, `~/workspace/studies/gemini-cli-context-window-management.md`
+
+| Transport | ctx% source | Available to bridge? |
+|-----------|-------------|---------------------|
+| kiro-cli (ACP) | `_kiro.dev/metadata` notification | ✅ Yes — real-time |
+| gemini-cli (ACP) | Internal only (Gemini API `usageMetadata`) | ❌ No — gemini auto-compresses at 50% silently |
+| Raw model (future: 9Router/OpenRouter/ollama) | API response `usage.prompt_tokens` | ✅ Yes — we read it directly |
+
+**No estimation needed.** Every model API returns actual token counts. For ACP-wrapped CLIs, we depend on them reporting it. Gemini doesn't, but it self-manages aggressively (50% threshold). For raw model access, we'll have native token counts and full control.
+
+**Phase 0 (if needed):** Add `AGENT_CTX_WINDOW` to transport profiles. For transports that don't report ctx%, compute `estimatedPct = totalTokens / ctxWindow * 100` from API response token counts. Fallback only — kiro reports it, gemini self-manages, raw models will report it.
+
