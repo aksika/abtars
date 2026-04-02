@@ -1,7 +1,13 @@
 /**
- * Compaction prompt and summary extraction.
- * Sends a compaction request to the current session, extracts the structured summary.
+ * Compaction prompt, summary extraction, and shared compaction flow.
  */
+
+import { logInfo } from "./logger.js";
+import { buildMemoryContext } from "./session-memory.js";
+import type { IKiroTransport } from "./kiro-transport.js";
+import type Database from "better-sqlite3";
+
+const TAG = "compaction";
 
 const COMPACTION_PROMPT = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 Tool calls will be REJECTED and will waste your only turn.
@@ -56,15 +62,33 @@ REMINDER: Do NOT call any tools. Respond with plain text only.`;
 
 /** Extract <summary> content, strip <analysis>. */
 export function extractSummary(response: string): string {
-  // Strip analysis
   let text = response.replace(/<analysis>[\s\S]*?<\/analysis>/i, "").trim();
-  // Extract summary content
   const match = text.match(/<summary>([\s\S]*?)<\/summary>/i);
   if (match?.[1]) return match[1].trim();
-  // No tags — use the whole response (model didn't follow format)
   return text;
 }
 
 export function getCompactionPrompt(): string {
   return COMPACTION_PROMPT;
+}
+
+/** Run full compaction: prompt → extract → reset → inject. Returns true on success. */
+export async function runCompaction(
+  transport: IKiroTransport,
+  sessionKey: string,
+  db: Database.Database | null,
+  memoryDir: string,
+): Promise<boolean> {
+  const response = await transport.sendPrompt(sessionKey, COMPACTION_PROMPT);
+  const summary = extractSummary(response ?? "");
+  if (!summary || summary.length < 50) throw new Error("Summary too short");
+
+  const memCtx = buildMemoryContext(db, memoryDir);
+  await transport.resetSession(sessionKey);
+
+  const injection = `This session continues from a compacted conversation.\n\n${summary}${memCtx ? "\n\n" + memCtx : ""}`;
+  await transport.sendPrompt(sessionKey, injection);
+
+  logInfo(TAG, `Compaction done — summary ${summary.length} chars, memory ${memCtx.length} chars`);
+  return true;
 }

@@ -10,8 +10,7 @@ import { homedir } from "node:os";
 import { logInfo, logError } from "./logger.js";
 import { writeRestartReason } from "./restart-reason.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
-import { getCompactionPrompt, extractSummary } from "./compaction.js";
-import { buildMemoryContext } from "./session-memory.js";
+import { runCompaction } from "./compaction.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { TmuxClient } from "./tmux-client.js";
 import type { MemoryManager } from "./memory-manager.js";
@@ -82,17 +81,11 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   if (text === "/compact") {
     await ctx.reply("📦 Compacting...");
     try {
-      const response = await ctx.transport.sendPrompt(ctx.sessionKey, getCompactionPrompt());
-      const summary = extractSummary(response ?? "");
-      if (!summary || summary.length < 50) throw new Error("Summary too short");
-      const memCtx = buildMemoryContext(ctx.memory?.getDatabase() ?? null, ctx.memoryConfig.memoryDir);
-      await ctx.transport.resetSession(ctx.sessionKey);
-      const injection = `This session continues from a compacted conversation.\n\n${summary}${memCtx ? "\n\n" + memCtx : ""}`;
-      await ctx.transport.sendPrompt(ctx.sessionKey, injection);
+      await runCompaction(ctx.transport, ctx.sessionKey, ctx.memory?.getDatabase() ?? null, ctx.memoryConfig.memoryDir);
       ctx.pendingSessionStart.add(ctx.sessionKey);
       if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
       await ctx.reply("📦 Compaction complete.");
-      logInfo(TAG, `Manual compaction done — summary ${summary.length} chars`);
+      logInfo(TAG, `Manual compaction done`);
     } catch (err) {
       logError(TAG, "Manual compaction failed", err);
       await ctx.reply("❌ Compaction failed. Try /reset to start fresh.");

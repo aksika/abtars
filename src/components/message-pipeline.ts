@@ -7,8 +7,7 @@
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { handleCommand, type CommandContext, type Reply } from "./command-handlers.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
-import { getCompactionPrompt, extractSummary } from "./compaction.js";
-import { buildMemoryContext } from "./session-memory.js";
+import { runCompaction } from "./compaction.js";
 import { buildSessionStartContext } from "./session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { TmuxClient } from "./tmux-client.js";
@@ -36,6 +35,11 @@ const COMPACT_MAX_FAILURES = 3;
 // Per-session compaction state
 const ctxWarned = new Set<string>();
 const compactFailures = new Map<string, number>();
+/** Sessions currently being compacted (for coffee message). */
+export const compactingSessions = new Set<string>();
+/** Reset by bridge-app on inbound message to re-enable floating compaction. */
+export let resetIdleCompactFlag: (() => void) | null = null;
+export function setIdleCompactReset(fn: () => void): void { resetIdleCompactFlag = fn; }
 
 export interface PipelineDeps {
   transport: IKiroTransport;
@@ -150,7 +154,10 @@ export async function handleInboundMessage(
       queue.push({ msg, adapter });
       deps.messageQueue.set(sessionKey, queue);
       logDebug(TAG, `Queued "${text.slice(0, 40)}" for ${sessionKey} (${queue.length} pending)`);
-      await adapter.sendMessage(channelId, `⏳ Queued (${queue.length}) — will process after current response.`, { threadId: msg.threadId });
+      const queueMsg = compactingSessions.has(sessionKey)
+        ? "☕ Hold on, just tidying up my thoughts over coffee... I'll get to you in a moment!"
+        : `⏳ Queued (${queue.length}) — will process after current response.`;
+      await adapter.sendMessage(channelId, queueMsg, { threadId: msg.threadId });
       return;
     }
   }
@@ -158,6 +165,7 @@ export async function handleInboundMessage(
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   try {
     busyChats.add(sessionKey);
+    resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
     const ctxPct = "contextPercent" in transport ? (transport as { contextPercent: number }).contextPercent : -1;
     logInfo(TAG, `← [${msg.platform}] ${isVoice ? "🎤 " : ""}"${text.slice(0, 60)}"${ctxPct >= 0 ? ` (ctx: ${ctxPct}%)` : ""}`);
     // --- Sleep queue ---
@@ -409,34 +417,16 @@ export async function handleInboundMessage(
             if (memory?.getDatabase()) {
               memory.checkAutoCompact({
                 chatId, sessionId: sessionKey, contextPercent: pct,
-                sendCompactCommand: async () => "", // skip /compact — we do our own
+                sendCompactCommand: async () => "",
               }).catch(() => {});
             }
 
-            // Send compaction prompt to same session
-            const compactResponse = await transport.sendPrompt(sessionKey, getCompactionPrompt());
-            const summary = extractSummary(compactResponse ?? "");
-
-            if (!summary || summary.length < 50) {
-              throw new Error("Compaction produced empty or too-short summary");
-            }
-
-            // Build memory context
-            const memCtx = buildMemoryContext(memory?.getDatabase() ?? null, memoryConfig.memoryDir);
-
-            // Reset session and inject summary + memory
-            await transport.resetSession(sessionKey);
-
-            const injection = `This session continues from a compacted conversation. The summary below covers everything before this point.\n\n${summary}${memCtx ? "\n\n" + memCtx : ""}`;
-            await transport.sendPrompt(sessionKey, injection);
-
-            // Mark for session-start re-injection on next user message
+            await runCompaction(transport, sessionKey, memory?.getDatabase() ?? null, memoryConfig.memoryDir);
             pendingSessionStart.add(sessionKey);
             ctxWarned.delete(sessionKey);
             compactFailures.delete(sessionKey);
 
             await adapter.sendMessage(channelId, "📦 Compaction complete.", { threadId: msg.threadId });
-            logInfo(TAG, `📦 Compaction done — summary ${summary.length} chars, memory ${memCtx.length} chars`);
             if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
           } catch (err) {
             const count = (compactFailures.get(sessionKey) ?? 0) + 1;

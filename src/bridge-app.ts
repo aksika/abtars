@@ -41,6 +41,9 @@ import { buildSessionStartContext } from "./components/session-context.js";
 import { loadSoulBundle } from "./components/soul-loader.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 import { CronQueue } from "./components/cron-queue.js";
+import { runCompaction } from "./components/compaction.js";
+import { compactingSessions, setIdleCompactReset } from "./components/message-pipeline.js";
+import { localDate } from "./components/env-utils.js";
 
 
 /** Update context-window-start timestamp for a chat. Used by recall fallback stages. */
@@ -486,6 +489,84 @@ export async function startBridge(): Promise<void> {
 
   // --- DB integrity check (hourly) ---
   let dbCheckCounter = 0;
+  const CTX_IDLE_COMPACT_PCT = parseInt(process.env["CTX_IDLE_COMPACT_PCT"] ?? "65", 10);
+  const CTX_IDLE_COMPACT_MIN = parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10);
+  const DAY_START_HOUR = parseInt(process.env["DAY_START_HOUR"] ?? "8", 10);
+  let compactedThisIdle = false;
+  let dailyRestartDate = "";
+  setIdleCompactReset(() => { compactedThisIdle = false; });
+
+  // --- Floating compaction (idle-triggered) ---
+  if (CTX_IDLE_COMPACT_MIN > 0) {
+    heartbeat.registerTask({
+      name: "idle-compact",
+      heavy: true,
+      execute: async () => {
+        if (!("contextPercent" in transport)) return false;
+        const pct = (transport as AcpTransport).contextPercent;
+        if (pct < CTX_IDLE_COMPACT_PCT) return false;
+        if (compactedThisIdle) return false;
+        if (busyChats.size > 0) return false;
+        if (sleepChild && !sleepChild.killed) return false;
+
+        // Check idle time
+        let lastMsgTs = 0;
+        try {
+          const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
+          lastMsgTs = row?.latest ?? 0;
+        } catch { return false; }
+        if (Date.now() - lastMsgTs < CTX_IDLE_COMPACT_MIN * 60 * 1000) return false;
+
+        // Find active session
+        const chatId = [...config.allowedUserIds][0];
+        if (!chatId) return false;
+        const sessionKey = `telegram:${chatId}`;
+
+        logInfo("main", `☕ Floating compaction — ctx at ${pct}%, idle ${Math.round((Date.now() - lastMsgTs) / 60000)}min`);
+        busyChats.add(sessionKey);
+        compactingSessions.add(sessionKey);
+        try {
+          await runCompaction(transport, sessionKey, memory?.getDb() ?? null, memoryConfig.memoryDir);
+          pendingSessionStart.add(sessionKey);
+          compactedThisIdle = true;
+          logInfo("main", "☕ Floating compaction complete");
+        } catch (err) {
+          logWarn("main", `☕ Floating compaction failed: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          busyChats.delete(sessionKey);
+          compactingSessions.delete(sessionKey);
+        }
+        return true;
+      },
+    });
+  }
+
+  // --- Daily session restart ---
+  if (DAY_START_HOUR >= 0) {
+    heartbeat.registerTask({
+      name: "daily-restart",
+      execute: async () => {
+        const now = new Date();
+        if (now.getHours() !== DAY_START_HOUR) return;
+        const today = localDate();
+        if (dailyRestartDate === today) return;
+        if (busyChats.size > 0) return;
+        if (sleepChild && !sleepChild.killed) return;
+
+        logInfo("main", `🔄 Daily session restart (${DAY_START_HOUR}:00)`);
+        try {
+          transport.destroy();
+          await transport.initialize();
+          pendingSessionStart.add(`telegram:${[...config.allowedUserIds][0]}`);
+          dailyRestartDate = today;
+          logInfo("main", "🔄 Daily restart complete — fresh CLI session");
+        } catch (err) {
+          logError("main", "Daily restart failed", err);
+        }
+      },
+    });
+  }
+
   heartbeat.registerTask({
     name: "db-integrity",
     execute: async () => {
