@@ -309,12 +309,11 @@ export async function handleInboundMessage(
     }
 
     // --- [REACT:emoji] ---
-    if (adapter.setReaction && msg.messageId) {
-      const reactMatch = userResponse.trim().match(/^\[REACT:(.+)\]$/);
-      if (reactMatch) {
-        const emoji = reactMatch[1]!;
-        // Telegram only allows specific reactions — map unsupported to closest allowed
-        const TELEGRAM_ALLOWED = new Set(["👍","👎","❤","🔥","🥰","👏","😁","🤔","🤯","😱","🤬","😢","🎉","🤩","🤮","💩","🙏","👌","🕊","🤡","🥱","🥴","😍","🐳","❤‍🔥","🌚","🌭","💯","🤣","⚡","🍌","🏆","💔","🤨","😐","🍓","🍾","💋","🖕","😈","😴","😭","🤓","👻","👨‍💻","👀","🎃","🙈","😇","😨","🤝","✍","🤗","🫡","🎅","🎄","☃","💅","🤪","🗿","🆒","💘","🙉","🦄","😘","💊","🙊","😎","👾","🤷‍♂","🤷","🤷‍♀","😡"]);
+    const reactMatch = userResponse.trim().match(/^\[REACT:(.+)\]$/);
+    if (reactMatch) {
+      const emoji = reactMatch[1]!;
+      if (adapter.setReaction && msg.messageId) {
+        const TELEGRAM_ALLOWED = new Set(["👍","👎","❤","🔥","🥰","👏","😁","🤔","🤯","😱","🤬","😢","🎉","🤩","🤮","💩","🙏","👌","🕊","🤡","🥱","🥴","😍","🐳","❤🔥","🌚","🌭","💯","🤣","⚡","🍌","🏆","💔","🤨","😐","🍓","🍾","💋","🖕","😈","😴","😭","🤓","👻","👨💻","👀","🎃","🙈","😇","😨","🤝","✍","🤗","🫡","🎅","🎄","☃","💅","🤪","🗿","🆒","💘","🙉","🦄","😘","💊","🙊","😎","👾","🤷♂","🤷","🤷♀","😡"]);
         const FALLBACK_MAP: Record<string, string> = {
           "😅": "🤣", "😂": "🤣", "😆": "😁", "😄": "😁", "😃": "😁",
           "🙂": "😁", "😊": "😁", "☺": "😁", "😉": "😁", "🫠": "🤪",
@@ -325,12 +324,14 @@ export async function handleInboundMessage(
         const fallback = TELEGRAM_ALLOWED.has(emoji) ? emoji : (FALLBACK_MAP[emoji] ?? null);
         if (fallback) {
           await adapter.setReaction(channelId, msg.messageId, fallback);
-        } else {
-          await adapter.sendMessage(channelId, emoji, { threadId: msg.threadId });
+          logDebug(TAG, `Reaction: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);
+          return;
         }
-        logDebug(TAG, `Reaction-only response: ${emoji}${fallback && emoji !== fallback ? ` → ${fallback}` : ""}${!fallback ? " (sent as message)" : ""}`);
-        return;
       }
+      // No messageId (injected/system message) or unsupported emoji — send as standalone
+      await adapter.sendMessage(channelId, emoji, { threadId: msg.threadId });
+      logDebug(TAG, `Reaction as message: ${emoji}`);
+      return;
     }
 
     // --- Deliver response ---
