@@ -312,19 +312,20 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   // /help
   if (text === "/help") {
     const cmds = [
-      "/new — Start a new session",
-      "/reset — Reset session + switch back to KP",
-      "/status — Bot status, transport, heartbeat, mcporter",
-      "/stop, /ctrlc — Stop current response (Ctrl+C)",
+      "/new — Fresh session (keeps current mode)",
+      "/reset — Fresh session + exit coding mode",
+      "/compact — Compact context window (summarize + fresh session)",
+      "/status — Bridge status, transport, heartbeat",
+      "/stop, /ctrlc — Stop current response",
       "/memory — Memory storage statistics",
       "/cron — Scheduled tasks",
       "/cron log <id> — Last 5 runs for a task",
-      "/cron trigger <id> — Manually fire a cron task",
+      "/cron trigger <id> — Manually fire a task",
       "/facts — Core knowledge (user profile + agent notes)",
-      "/coding — Switch to Opus coding agent",
-      "/default — Switch back to KP",
+      "/coding — Switch to coding agent",
+      "/default — Switch back to default agent",
       "/nlm — Knowledge base (list/create/sources/query)",
-      "/restart — Restart Kiro (tmux only)",
+      "/restart — Restart CLI session",
     ];
     if (ctx.platform === "telegram") {
       cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)");
