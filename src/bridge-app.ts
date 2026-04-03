@@ -600,10 +600,11 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- Watchdog: detect stuck agent ---
+  let watchdogDoctorRan = false;
   let watchdogDidReset = false;
   let watchdogLastActionAt = 0;
   const WATCHDOG_COOLDOWN = 60 * 60 * 1000; // 1 hour
-  const WATCHDOG_STUCK_SEC = parseInt(process.env["WATCHDOG_STUCK_SEC"] ?? "180", 10); // 3 min no activity
+  const WATCHDOG_CYCLES = parseInt(process.env["WATCHDOG_CYCLES"] ?? "2", 10);
 
   if (transport instanceof AcpTransport) {
     heartbeat.registerTask({
@@ -612,25 +613,38 @@ export async function startBridge(): Promise<void> {
         const acp = transport as AcpTransport;
         // Only trigger if a prompt is in-flight
         if (acp.promptStartedAt <= acp.lastSuccessAt) {
+          // Prompt completed — reset flags
+          watchdogDoctorRan = false;
           watchdogDidReset = false;
           return;
         }
 
-        // Check for activity (chunks, tool calls) — not just prompt completion
-        const silentMs = Date.now() - acp.lastActivityAt;
-        if (silentMs < WATCHDOG_STUCK_SEC * 1000) return; // still active, not stuck
-
+        const staleMs = Date.now() - acp.promptStartedAt;
+        const stuckCycles = Math.floor(staleMs / hbIntervalMs);
         const now = Date.now();
+
+        // Cooldown check
         if (now - watchdogLastActionAt < WATCHDOG_COOLDOWN && watchdogDidReset) return;
 
-        // Level 1: cancel + reset (skip doctor — can't fix hung tool calls)
-        if (!watchdogDidReset) {
-          logWarn("watchdog", `No activity for ${Math.round(silentMs / 1000)}s — Level 1: cancelling + resetting ACP session`);
+        // Level 0: doctor --fix (first stuck detection)
+        if (stuckCycles >= 1 && !watchdogDoctorRan) {
+          logWarn("watchdog", `Prompt stuck ${Math.round(staleMs / 1000)}s — running doctor --fix`);
+          watchdogDoctorRan = true;
+          try {
+            const { execSync } = await import("node:child_process");
+            execSync(`${join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh")} --fix`, { timeout: 30000 });
+          } catch { /* doctor may not exist or fail — continue */ }
+          return;
+        }
+
+        // Level 1: reset ACP session
+        if (stuckCycles >= WATCHDOG_CYCLES && !watchdogDidReset) {
+          logWarn("watchdog", `Prompt stuck ${stuckCycles} cycles — Level 1: cancelling + resetting ACP session`);
           watchdogDidReset = true;
           watchdogLastActionAt = now;
-          writeRestartReason(`watchdog-reset: no activity ${Math.round(silentMs / 1000)}s`);
+          writeRestartReason(`watchdog-reset: prompt stuck ${Math.round(staleMs / 1000)}s`);
           try {
-            await acp.sendInterrupt();
+            await acp.sendInterrupt(); // cancel first
             const sessionKey = [...config.allowedUserIds].map(id => `telegram:${id}`)[0];
             if (sessionKey) await acp.resetSession(sessionKey);
           } catch (e) {
@@ -639,10 +653,12 @@ export async function startBridge(): Promise<void> {
           return;
         }
 
-        // Level 2: restart bridge (next tick after reset still stuck)
-        logWarn("watchdog", `Still stuck after reset — Level 2: restarting bridge`);
-        writeRestartReason(`watchdog-restart: still stuck after reset, ${Math.round(silentMs / 1000)}s`);
-        process.exit(0);
+        // Level 2: restart bridge (next tick after reset)
+        if (watchdogDidReset && stuckCycles > WATCHDOG_CYCLES) {
+          logWarn("watchdog", `Still stuck after reset — Level 2: restarting bridge`);
+          writeRestartReason(`watchdog-restart: prompt stuck after reset, ${Math.round(staleMs / 1000)}s`);
+          process.exit(0);
+        }
       },
     });
   }
