@@ -10,7 +10,7 @@ import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError, localIso, getLogFile } from "./components/logger.js";
+import { setLogLevel, logInfo, logWarn, logError, logDebug, localIso, getLogFile } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
@@ -366,7 +366,9 @@ export async function startBridge(): Promise<void> {
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
   const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: hbIntervalMs, sleepActive: () => sleepChild !== null && !sleepChild.killed });
   const DAY_START_HOUR = parseInt(process.env["DAY_START_HOUR"] ?? "8", 10);
+  const dailyRestartFile = join(AGENT_BRIDGE_HOME, ".daily-restart-date");
   let dailyRestartDate = "";
+  try { dailyRestartDate = readFileSync(dailyRestartFile, "utf-8").trim(); } catch { /* */ }
 
   const cronCallback = (chatId: number, message: string, result: string): void => {
     if (platforms.telegram && telegramAdapter) {
@@ -395,6 +397,11 @@ export async function startBridge(): Promise<void> {
         if (dailyRestartDate === today) return;
         if (busyChats.size > 0) return;
         if (sleepChild && !sleepChild.killed) return;
+        // Don't restart a session younger than 1 hour
+        if (Date.now() - startedAt < 60 * 60 * 1000) {
+          logDebug("main", "Daily restart skipped — bridge uptime < 1h");
+          return;
+        }
 
         logInfo("main", `🔄 Daily session restart (>=${DAY_START_HOUR}:00)`);
         writeRestartReason("daily-restart");
@@ -406,6 +413,7 @@ export async function startBridge(): Promise<void> {
             pendingSessionStart.add(`discord:${uid}`);
           }
           dailyRestartDate = today;
+          writeFileSync(dailyRestartFile, today, "utf-8");
           logInfo("main", "🔄 Daily restart complete — fresh CLI session");
         } catch (err) {
           logError("main", "Daily restart failed", err);
