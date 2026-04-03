@@ -24,7 +24,7 @@ import { MemorySearchController } from "./components/memory-search-controller.js
 import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
 import { loadNLMConfig } from "./components/nlm-command-handler.js";
-import { SleepTrigger } from "./components/sleep-trigger.js";
+import { hasSleepAuditToday } from "./components/sleep-trigger.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
 import { SkillWatcher } from "./components/skill-watcher.js";
 import { writeRestartReason } from "./components/restart-reason.js";
@@ -169,7 +169,7 @@ export async function startBridge(): Promise<void> {
   const sleepQueue = new SleepQueue();
   let sleepChild: import("node:child_process").ChildProcess | null = null;
   const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
-  const sleepTrigger = new SleepTrigger(join(memoryConfig.memoryDir, "sleep"));
+  const sleepAuditDir = join(memoryConfig.memoryDir, "sleep");
 
   const busyChats = new Set<string>();
   const pendingSessionStart = new Set<string>();
@@ -384,51 +384,6 @@ export async function startBridge(): Promise<void> {
     execute: async () => {
       const dueTasks = checkCron();
       for (const entry of dueTasks) cronQueue.enqueue(entry, cronCallback);
-    },
-  });
-
-  heartbeat.registerTask({
-    name: "sleep-trigger",
-    heavy: true,
-    execute: async () => {
-      if (busyChats.size > 0) return false;
-      // Don't spawn if a sleep process is already running
-      if (sleepChild && !sleepChild.killed) return false;
-      let lastMessageTs = 0;
-      try {
-        const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
-        lastMessageTs = row?.latest ?? 0;
-      } catch { return false; }
-      if (!sleepTrigger.shouldRunFromCron(lastMessageTs)) return false;
-      sleepTrigger.writeLock();
-      sleepQueue.activate();
-      try {
-        const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
-        const child = spawn(process.execPath, [sleepScript], { stdio: "ignore" });
-        sleepChild = child;
-        child.on("exit", (code) => {
-          sleepChild = null;
-          if (code === 0) {
-            logInfo("main", `😴 Sleep routine finished successfully at ${localIso()}`);
-            sleepTrigger.reportSuccess();
-            if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
-          } else if (code === 2) {
-            logWarn("main", `😴 Sleep partial — some steps failed, will retry at ${localIso()}`);
-            sleepTrigger.reportFailure();
-          } else {
-            logWarn("main", `😴 Cron sleep routine failed (exit code ${code}) at ${localIso()}`);
-            sleepTrigger.reportFailure();
-          }
-          sleepQueue.deactivate();
-          sleepQueue.replay(platformAdapters);
-        });
-        logInfo("main", `😴 Sleep routine spawned from cron (pid=${child.pid}) at ${localIso()}`);
-        return true;
-      } catch (err) {
-        logWarn("main", `sleep-trigger: failed to spawn: ${err instanceof Error ? err.message : String(err)}`);
-        sleepTrigger.reportFailure();
-        return false;
-      }
     },
   });
 
@@ -776,6 +731,46 @@ export async function startBridge(): Promise<void> {
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);
   logInfo("main", "💓 Heartbeat started (5-min interval)");
+
+  // --- Startup sleep (background, with retry) ---
+  const SLEEP_MAX_RETRIES = 3;
+  const SLEEP_RETRY_MS = 5 * 60 * 1000;
+  let sleepAttempts = 0;
+
+  function spawnSleep(): void {
+    if (hasSleepAuditToday(sleepAuditDir)) {
+      logInfo("main", "😴 Sleep already done today — skip");
+      return;
+    }
+    if (sleepChild && !sleepChild.killed) return;
+    sleepAttempts++;
+    sleepQueue.activate();
+    try {
+      const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
+      const child = spawn(process.execPath, [sleepScript], { stdio: "ignore" });
+      sleepChild = child;
+      child.on("exit", (code) => {
+        sleepChild = null;
+        if (code === 0) {
+          logInfo("main", `😴 Sleep finished successfully (attempt ${sleepAttempts})`);
+          if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
+        } else if (sleepAttempts < SLEEP_MAX_RETRIES) {
+          logWarn("main", `😴 Sleep failed (code=${code}, attempt ${sleepAttempts}/${SLEEP_MAX_RETRIES}) — retry in 5min`);
+          setTimeout(spawnSleep, SLEEP_RETRY_MS);
+        } else {
+          logWarn("main", `😴 Sleep failed (code=${code}) — exhausted ${SLEEP_MAX_RETRIES} attempts`);
+        }
+        sleepQueue.deactivate();
+        sleepQueue.replay(platformAdapters);
+      });
+      logInfo("main", `😴 Sleep spawned (pid=${child.pid}, attempt ${sleepAttempts})`);
+    } catch (err) {
+      logWarn("main", `😴 Sleep spawn failed: ${err instanceof Error ? err.message : String(err)}`);
+      sleepQueue.deactivate();
+      if (sleepAttempts < SLEEP_MAX_RETRIES) setTimeout(spawnSleep, SLEEP_RETRY_MS);
+    }
+  }
+  spawnSleep();
 
   // --- Web Dashboard wiring (conditional) ---
   let dashboardServer: DashboardServer | null = null;
