@@ -1186,39 +1186,46 @@ Once per day at `DAY_START_HOUR` (default 8, env-configurable), restart the CLI 
 **Effort:** medium
 
 ### Problem
-Current watchdog detects "stuck" by checking if a prompt has been in-flight for N cycles. It doesn't know WHY it's stuck, so it applies the same escalation (doctor → reset → exit) regardless. Doctor can't fix hung tool calls. 10 min to resolve (2 cycles × 5 min).
+Current watchdog detects "stuck" by counting heartbeat cycles since prompt start. It doesn't know WHY it's stuck, applies the same escalation regardless. Doctor can't fix hung tool calls. 10 min to resolve.
 
-### Design
+### Decision Table
 
-**Step 1: Identify root cause before acting.**
+| # | State | Detection | L1 (first try) | L2 (if L1 fails) |
+|---|-------|-----------|----------------|-------------------|
+| 1 | Tool hung | `toolInFlight` > 3min | `sendInterrupt()` + `[SYSTEM] Your tool call "${title}" was interrupted after 3 minutes. Try a different approach.` | Reset + re-send |
+| 2 | Process dead | `agent === null` | Reinit transport + re-send prompt | `process.exit(0)` → launchd restarts |
+| 3 | Silent (transient/rate limit) | No events for 5min, no toolInFlight | Re-send same prompt (no reset) | Reset + re-send |
+| 4 | Active but endless | Chunks flowing > 10min | `sendInterrupt()` + `[SYSTEM] Interrupted — you appeared stuck in a loop. Please wrap up and respond to the user.` | Reset + re-send |
 
-On each watchdog tick when prompt is in-flight, classify the stuck state:
+All actions logged as `[watchdog]` with state classification and duration.
 
-| State | How to detect | Action |
-|-------|--------------|--------|
-| Tool call hung | ACP `tool_call` event fired, no `tool_call_update` completion | Cancel tool (sendInterrupt), retry prompt |
-| Model not responding | No chunks, no tool calls, no activity since prompt start | Reset session |
-| kiro-cli process dead | `this.agent === null` or process exited | Reinit transport |
-| Network/transient | Recent activity but prompt not completing | Wait longer (transient) |
+### Implementation
 
-**Step 2: Track activity (keep lastActivityAt from reverted commit)**
+**acp-transport.ts:**
+- Add `toolInFlight: { title: string; startedAt: number } | null`
+- `tool_call` → set `toolInFlight`
+- `tool_call_update` → clear `toolInFlight`
+- `agent_message_chunk` → clear `toolInFlight` (model responding = tool done)
+- Add `lastActivityAt` — updated on chunks, tool calls, tool_call_updates, thinking
+- Store `lastPromptText` + `lastSessionKey` on `sendPrompt()` for re-send
 
-Add `lastActivityAt` to AcpTransport, updated on: chunks, tool calls, tool_call_updates, thinking. This distinguishes "actively working" from "truly stuck".
+**bridge-app.ts watchdog task:**
+```
+On each tick, if prompt in-flight:
+  1. Check agent === null → Case 2 (process dead)
+  2. Check toolInFlight > 3min → Case 1 (tool hung)
+  3. Check lastActivityAt > 10min with active chunks → Case 4 (endless)
+  4. Check lastActivityAt > 5min with no toolInFlight → Case 3 (silent)
+  5. Otherwise → still working, skip
+```
 
-**Step 3: Smarter escalation**
+L1 attempted once. If next tick still stuck → L2. 1hr cooldown after L2.
 
-- Skip L0 doctor for mid-conversation stucks (doctor fixes filesystem, not hung prompts)
-- Keep doctor for startup stucks (first prompt after boot)
-- L1: action based on root cause (cancel tool vs reset session vs reinit)
-- L2: process.exit only if L1 failed
-
-**Step 4: Configurable thresholds**
-
-- `WATCHDOG_STUCK_SEC=300` (5 min no activity → stuck)
-- `WATCHDOG_CYCLES=1` (1 cycle after stuck detection → act)
-- Active streaming/tool execution prevents triggering
+### Config
+- `WATCHDOG_TOOL_TIMEOUT_SEC=180` (3 min tool hang)
+- `WATCHDOG_SILENT_SEC=300` (5 min silence)
+- `WATCHDOG_ENDLESS_SEC=600` (10 min active but not completing)
 
 ### Changes
-1. `acp-transport.ts` — add `lastActivityAt`, track on chunks/tools/thinking. Add `toolInFlight` flag.
-2. `bridge-app.ts` — rewrite watchdog with root cause classification
-3. Keep existing L0→L1→L2 structure but make L0/L1 actions context-dependent
+1. `acp-transport.ts` — `toolInFlight`, `lastActivityAt`, `lastPromptText`, `lastSessionKey`
+2. `bridge-app.ts` — rewrite watchdog with root cause classification + decision table
