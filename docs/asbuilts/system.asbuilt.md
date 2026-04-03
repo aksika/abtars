@@ -120,8 +120,46 @@ Entity clusters: memories sharing entities gravitate together with connecting li
 1. Kill orphaned `kiro-cli acp` processes from previous runs
 2. Initialize transport (ACP or tmux)
 3. Initialize memory, browser, platforms
-4. Start heartbeat (1-min uptime guard before first tick)
-5. Auto-restart on crash (launcher retries up to 10 times, 5s delay)
+4. Create `bridge.lock` (`{pid, startedAt}`) — tracks bridge lifecycle
+5. Start heartbeat (clock-synced, ≥3min guard before first tick)
+6. Auto-restart on crash (LaunchAgent KeepAlive)
+
+### Heartbeat System
+
+Single heartbeat loop controls everything: task scheduling, standby detection, watchdog, session lifecycle.
+
+**Clock-synced:** Ticks aligned to wall-clock boundaries (`:00`, `:05`, `:10`...) based on interval. First tick delayed ≥3min from startup for network/service stabilization.
+
+**Standby detection:** Tracks `lastTickAt`. If gap between ticks > interval×3 (~15min), process was suspended (Mac standby or HB bug). Triggers: `doctor --fix` → delete `bridge.lock` → `process.exit(0)` → LaunchAgent restarts fresh.
+
+**24h fallback:** `age-check` task — if `bridge.lock.startedAt` >24h AND idle >1h → same doctor + restart sequence. Covers always-on (no standby).
+
+**bridge.lock:** `~/.agentbridge/bridge.lock` — created on startup, deleted before restart. No lock on startup = fresh start.
+
+**Task registration order:**
+```
+cron → sleep-trigger(heavy) → idle-compact(heavy) → age-check →
+db-integrity → watchdog → restart-check → self-healer →
+browse-checker → skill-reloader → reminder-injector
+```
+
+### Session Start (single path)
+
+All session resets converge to one function: `preparePrompt()` in `message-pipeline.ts`.
+
+**Triggers that set `pendingSessionStart`:**
+- `/new`, `/reset`, `/restart` commands
+- `/compact` (after compaction)
+- Auto-compact (ctx% threshold)
+- Auto-reset on ctx overflow (ValidationException/-32603)
+- Floating compaction (idle-triggered)
+
+**On next message, `preparePrompt()` injects:**
+1. SOUL bundle (identity, tools, steering)
+2. Session-start context (daily summary + recent messages)
+3. Restart reason (if any)
+
+First message to a new session also triggers injection (`!seen.has(sessionKey)`). One path, every time.
 
 ---
 
@@ -187,7 +225,7 @@ File: `src/cli/agentbridge-todo.test.ts` — 7 tests covering add, list, done, r
 
 ### Overview
 
-A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. A unified `HeartbeatSystem` (5-min interval, owned by `bridge-app.ts`, 1-minute uptime guard) is the single owner of cron scanning — no startup check, no duplicate paths. Due reminders are injected into conversation; due tasks are processed by `CronQueue`. Heavy tasks (agent cron jobs) are blocked while sleep is active (`sleepActive` callback) to avoid model rate-limit contention.
+A time-based scheduling system for reminders and tasks. The agent creates cron entries when users mention specific dates/times. The `HeartbeatSystem` (see above) is the single owner of cron scanning. Due reminders are injected into conversation; due tasks are processed by `CronQueue`. Heavy tasks (agent cron jobs) are blocked while sleep is active (`sleepActive` callback) to avoid model rate-limit contention.
 
 ### Architecture
 
@@ -197,7 +235,7 @@ User: "remind me tomorrow at 8am"
                                                         ↓
                                           ~/.agentbridge/memory/memory.db (cron_entries table)
 
-Every 5 min (HeartbeatSystem — cron task, skips first 1 min of uptime):
+Every 5 min (HeartbeatSystem — cron task):
   → checkCron() reads cron_entries from SQLite, returns due entries
   → Due reminders → pending_reminders.json → injected as synthetic message
   → Due tasks → cronQueue.enqueue(entry) → sequential processing
