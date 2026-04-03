@@ -1259,3 +1259,22 @@ L1 attempted once. If next tick still stuck → L2. 1hr cooldown after L2.
 ### Changes
 1. `acp-transport.ts` — `toolInFlight`, `lastActivityAt`, `lastPromptText`, `lastSessionKey`
 2. `bridge-app.ts` — rewrite watchdog with root cause classification + decision table
+
+## 74. Model switching via /model command
+
+**Priority:** medium
+**Status:** Not started
+**Effort:** medium
+
+`/model` currently passes through to CLI (shows current model only, no switching via ACP).
+
+### Design
+- `/model` — show current model name
+- `/model list` — list available models (from transport profile or provider API)
+- `/model <name>` — switch: destroy transport → reinit with `--model <name>`
+
+Model list source depends on transport:
+- kiro-cli: hardcoded list in transport profile (`AGENT_AVAILABLE_MODELS=model1,model2,...`)
+- Raw model (future): query provider API (`/models` endpoint)
+
+Switching requires transport restart (new `--model` flag). Session resets — use `pendingSessionStart` for SOUL re-injection.
