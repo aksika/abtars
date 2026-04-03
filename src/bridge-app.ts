@@ -454,7 +454,7 @@ export async function startBridge(): Promise<void> {
               telegramAdapter.injectMessage({
                 platform: "telegram", channelId: String(chatId), sessionKey: `telegram:${chatId}`,
                 senderId: String(chatId), senderName: "system",
-                text: `You just completed your sleep cycle — a routine memory maintenance procedure that keeps your memories organized, extracts lessons from the day, and cleans up noise. Think of it like how humans sleep to consolidate memories. You have one too.${sleepContext}\n\nWrite a personalized good morning message to the user. Mention something from your sleep results. Do NOT use [REACT:] — respond with text.`,
+                text: `You just completed your sleep cycle — a routine memory maintenance procedure that keeps your memories organized, extracts lessons from the day, and cleans up noise. Think of it like how humans sleep to consolidate memories. You have one too.${sleepContext}\n\nHow did it go? Share your thoughts with the user.`,
                 timestamp: Date.now(), isGroup: false, isVoice: false,
               });
             }
