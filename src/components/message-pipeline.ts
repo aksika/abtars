@@ -289,7 +289,7 @@ export async function handleInboundMessage(
     }
 
     // --- <NO_REPLY> → silently drop (group chats) ---
-    if (userResponse.trim() === "<NO_REPLY>") {
+    if (userResponse.trim() === "<NO_REPLY>" || userResponse.trim() === "(no response)") {
       logDebug(TAG, "LLM returned <NO_REPLY>, dropping silently");
       return;
     }
