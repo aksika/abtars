@@ -600,64 +600,99 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- Watchdog: detect stuck agent ---
-  let watchdogDoctorRan = false;
-  let watchdogDidReset = false;
+  let watchdogL1Done = false;
   let watchdogLastActionAt = 0;
-  const WATCHDOG_COOLDOWN = 60 * 60 * 1000; // 1 hour
-  const WATCHDOG_CYCLES = parseInt(process.env["WATCHDOG_CYCLES"] ?? "2", 10);
+  const WATCHDOG_COOLDOWN = 60 * 60 * 1000;
+  const WD_TOOL_TIMEOUT = (parseInt(process.env["WATCHDOG_TOOL_TIMEOUT_SEC"] ?? "180", 10)) * 1000;
+  const WD_SILENT_TIMEOUT = (parseInt(process.env["WATCHDOG_SILENT_SEC"] ?? "300", 10)) * 1000;
+  const WD_ENDLESS_TIMEOUT = (parseInt(process.env["WATCHDOG_ENDLESS_SEC"] ?? "600", 10)) * 1000;
 
   if (transport instanceof AcpTransport) {
     heartbeat.registerTask({
       name: "watchdog",
       execute: async () => {
         const acp = transport as AcpTransport;
-        // Only trigger if a prompt is in-flight
         if (acp.promptStartedAt <= acp.lastSuccessAt) {
-          // Prompt completed — reset flags
-          watchdogDoctorRan = false;
-          watchdogDidReset = false;
+          watchdogL1Done = false;
           return;
         }
 
-        const staleMs = Date.now() - acp.promptStartedAt;
-        const stuckCycles = Math.floor(staleMs / hbIntervalMs);
         const now = Date.now();
+        if (now - watchdogLastActionAt < WATCHDOG_COOLDOWN && watchdogL1Done) return;
 
-        // Cooldown check
-        if (now - watchdogLastActionAt < WATCHDOG_COOLDOWN && watchdogDidReset) return;
+        const silentMs = now - acp.lastActivityAt;
+        const totalMs = now - acp.promptStartedAt;
 
-        // Level 0: doctor --fix (first stuck detection)
-        if (stuckCycles >= 1 && !watchdogDoctorRan) {
-          logWarn("watchdog", `Prompt stuck ${Math.round(staleMs / 1000)}s — running doctor --fix`);
-          watchdogDoctorRan = true;
+        // Case 2: Process dead
+        if (!acp.isConnected) {
+          logWarn("watchdog", `[Case 2] Process dead — reinit + re-send`);
+          watchdogLastActionAt = now;
+          writeRestartReason("watchdog: process dead");
           try {
-            const { execSync } = await import("node:child_process");
-            execSync(`${join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh")} --fix`, { timeout: 30000 });
-          } catch { /* doctor may not exist or fail — continue */ }
+            await acp.initialize();
+            if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText);
+          } catch { process.exit(0); }
           return;
         }
 
-        // Level 1: reset ACP session
-        if (stuckCycles >= WATCHDOG_CYCLES && !watchdogDidReset) {
-          logWarn("watchdog", `Prompt stuck ${stuckCycles} cycles — Level 1: cancelling + resetting ACP session`);
-          watchdogDidReset = true;
+        // Case 1: Tool hung > 3min
+        if (acp.toolInFlight && now - acp.toolInFlight.startedAt > WD_TOOL_TIMEOUT) {
+          const title = acp.toolInFlight.title;
+          const dur = Math.round((now - acp.toolInFlight.startedAt) / 1000);
+          logWarn("watchdog", `[Case 1] Tool "${title}" hung ${dur}s — interrupting`);
           watchdogLastActionAt = now;
-          writeRestartReason(`watchdog-reset: prompt stuck ${Math.round(staleMs / 1000)}s`);
           try {
-            await acp.sendInterrupt(); // cancel first
-            const sessionKey = [...config.allowedUserIds].map(id => `telegram:${id}`)[0];
-            if (sessionKey) await acp.resetSession(sessionKey);
-          } catch (e) {
-            logError("watchdog", "Reset failed", e);
+            await acp.sendInterrupt();
+            acp.toolInFlight = null;
+            if (!watchdogL1Done) {
+              await acp.sendPrompt(acp.lastSessionKey, `[SYSTEM] Your tool call "${title}" was interrupted after ${dur} seconds. Try a different approach.`);
+              watchdogL1Done = true;
+            }
+          } catch {
+            logWarn("watchdog", "[Case 1] Interrupt failed — resetting");
+            await acp.resetSession(acp.lastSessionKey).catch(() => {});
+            if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText).catch(() => {});
           }
           return;
         }
 
-        // Level 2: restart bridge (next tick after reset)
-        if (watchdogDidReset && stuckCycles > WATCHDOG_CYCLES) {
-          logWarn("watchdog", `Still stuck after reset — Level 2: restarting bridge`);
-          writeRestartReason(`watchdog-restart: prompt stuck after reset, ${Math.round(staleMs / 1000)}s`);
-          process.exit(0);
+        // Case 4: Active but endless > 10min
+        if (silentMs < WD_SILENT_TIMEOUT && totalMs > WD_ENDLESS_TIMEOUT) {
+          logWarn("watchdog", `[Case 4] Active but endless (${Math.round(totalMs / 1000)}s) — interrupting`);
+          watchdogLastActionAt = now;
+          try {
+            await acp.sendInterrupt();
+            if (!watchdogL1Done) {
+              await acp.sendPrompt(acp.lastSessionKey, "[SYSTEM] Interrupted — you appeared stuck in a loop. Please wrap up and respond to the user.");
+              watchdogL1Done = true;
+            }
+          } catch {
+            await acp.resetSession(acp.lastSessionKey).catch(() => {});
+            if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText).catch(() => {});
+          }
+          return;
+        }
+
+        // Case 3: Silent > 5min (transient/rate limit)
+        if (silentMs > WD_SILENT_TIMEOUT && !acp.toolInFlight) {
+          if (!watchdogL1Done) {
+            logWarn("watchdog", `[Case 3] Silent ${Math.round(silentMs / 1000)}s — re-sending prompt`);
+            watchdogL1Done = true;
+            watchdogLastActionAt = now;
+            try {
+              if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText);
+            } catch {
+              logWarn("watchdog", "[Case 3] Re-send failed — resetting");
+              await acp.resetSession(acp.lastSessionKey).catch(() => {});
+              if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText).catch(() => {});
+            }
+          } else {
+            // L2: L1 already tried, still stuck
+            logWarn("watchdog", `[Case 3] Still silent after re-send — L2: restarting bridge`);
+            writeRestartReason(`watchdog-restart: silent after re-send, ${Math.round(silentMs / 1000)}s`);
+            process.exit(0);
+          }
+          return;
         }
       },
     });

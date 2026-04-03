@@ -35,11 +35,22 @@ export class AcpTransport implements IKiroTransport {
     return this.lastContextPercent;
   }
 
+  get isConnected(): boolean {
+    return this.agent !== null && this.client !== null;
+  }
+
   /** Timestamp of last successful prompt. */
   lastSuccessAt = 0;
-
   /** Timestamp of last prompt start. */
   promptStartedAt = 0;
+  /** Timestamp of last ACP activity (chunk, tool call, thinking). */
+  lastActivityAt = 0;
+  /** Currently in-flight tool call (null if none). */
+  toolInFlight: { title: string; startedAt: number } | null = null;
+  /** Last prompt sent (for watchdog re-send). */
+  lastPromptText = "";
+  /** Last session key used (for watchdog re-send). */
+  lastSessionKey = "";
 
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
@@ -162,6 +173,10 @@ export class AcpTransport implements IKiroTransport {
     logDebug(this.tag, `Sending prompt to session ${sessionId}: "${message.slice(0, 80)}"`);
 
     this.promptStartedAt = Date.now();
+    this.lastActivityAt = Date.now();
+    this.toolInFlight = null;
+    this.lastPromptText = message;
+    this.lastSessionKey = sessionKey;
     // TEMPORARY throttle — avoid overloading kiro-cli
     await new Promise((r) => setTimeout(r, TEMP_THROTTLE_MS));
 
@@ -242,6 +257,8 @@ export class AcpTransport implements IKiroTransport {
           const text = content.text;
           const chunks = this.responseChunks.get(sessionId);
           if (chunks) chunks.push(text);
+          this.lastActivityAt = Date.now();
+          this.toolInFlight = null; // model responding = tool done
           if (this.onIntermediateResponse && text.trim()) {
             this.onIntermediateResponse(text);
           }
@@ -249,16 +266,23 @@ export class AcpTransport implements IKiroTransport {
           const text = (content as { text?: string }).text ?? "";
           const chunks = this.responseChunks.get(sessionId);
           if (chunks) chunks.push(`\n[thinking] ${text}\n`);
+          this.lastActivityAt = Date.now();
         }
         break;
       }
       case "tool_call": {
         logDebug(this.tag, `[tool] ${update.title} (${update.status})`);
+        this.lastActivityAt = Date.now();
+        this.toolInFlight = { title: update.title ?? "unknown", startedAt: Date.now() };
         break;
       }
       case "tool_call_update": {
         if (update.status) {
           logDebug(this.tag, `[tool update] ${update.toolCallId}: ${update.status}`);
+          this.lastActivityAt = Date.now();
+          if (update.status === "completed" || update.status === "failed") {
+            this.toolInFlight = null;
+          }
         }
         break;
       }
