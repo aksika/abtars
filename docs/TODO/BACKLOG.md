@@ -1187,6 +1187,7 @@ The daily-restart heartbeat task has issues: in-memory state lost on deploys, ki
 **heartbeat-system.ts:**
 - Add `lastTickAt` tracking
 - Export standby detection: `tick()` returns early if gap > interval × 3, calls `onStandbyResume` callback
+- Clock-sync: align ticks to wall clock boundaries (:00, :05, :10...) instead of bridge start time. On startup, delay first tick to next boundary, then `setInterval` from there.
 
 **bridge-app.ts:**
 - Create bridge.lock on startup
