@@ -1144,40 +1144,69 @@ If ctx% ≥ `CTX_IDLE_COMPACT_PCT` (65%) and no message exchange for 10 minutes,
 2. `message-pipeline.ts` — detect compaction-busy for fun message, track `compactedThisIdle` flag
 3. Reuse `compaction.ts` flow (same prompt → reset → inject)
 
-## 72. Daily session restart
+## 72. Standby-triggered restart + bridge.lock
 
-**Priority:** medium
+**Priority:** high
 **Status:** Planned
 **Effort:** small
 
 ### Problem
-kiro-cli and gemini-cli are long-running processes. Over 24h+ they accumulate state, potential memory leaks, stale caches, and context drift. A daily fresh start improves reliability.
+The daily-restart heartbeat task has issues: in-memory state lost on deploys, kills fresh sessions, complex guards. Need a simpler mechanism that handles both Mac standby resume and long-running always-on scenarios.
 
 ### Design
-Once per day at `DAY_START_HOUR` (default 8, env-configurable), restart the CLI transport process:
 
-1. Heartbeat task checks: `currentHour == DAY_START_HOUR && !restartedToday`
-2. Wait for idle (no busy chats, no sleep in progress)
-3. `transport.destroy()` → `transport.initialize()` (ACP: kills kiro-cli, spawns fresh)
-4. Mark all sessions for re-injection (`pendingSessionStart`)
-5. Set `restartedToday = true`, reset at midnight
+**Standby detection:** Heartbeat tracks `lastTickAt`. If `gap = now - lastTickAt > interval × 3` (~15min), the process was suspended (Mac standby). Every standby resume triggers: doctor --fix → delete bridge.lock → `process.exit(0)` → LaunchAgent restarts fresh.
 
-**Not a bridge restart** — only the CLI subprocess. Bridge stays up, memory intact, cron continues.
+**24h fallback:** On each tick, if `bridge.lock.startedAt > 24h` AND no messages for >1h → same sequence. Covers Mac never sleeping.
 
-**Timing:** Runs after sleep cycle completes (sleep triggers at 8am, takes 10-60min). The restart fires on the next idle heartbeat tick after `DAY_START_HOUR`. If sleep is running, it waits (sleepActive check).
+**bridge.lock:** `~/.agentbridge/bridge.lock` — JSON state file.
+```json
+{"pid": 12345, "startedAt": 1775225013194}
+```
+- Created on bridge startup
+- Deleted before doctor-triggered exit
+- No bridge.lock on startup = fresh start (post-restart)
+- Stale PID in bridge.lock = previous bridge crashed
 
-**Config:** `DAY_START_HOUR=8` (0-23). Set to -1 to disable.
-
-**Safety:**
-- Skip if user is chatting (`busyChats.size > 0`)
-- Skip if sleep is active (`sleepActive()`)
-- Skip if already restarted today
-- Log restart reason for audit
+**Morning sequence (Mac wakes at 8am):**
+```
+8:00  Mac wakes, setInterval fires
+      → tick: gap = 6h >> 15min → standby detected
+      → doctor --fix (filesystem/DB health)
+      → delete bridge.lock → exit
+8:00  LaunchAgent restarts bridge
+      → no bridge.lock → fresh start
+      → create bridge.lock
+      → heartbeat starts (1min guard)
+8:01  First tick
+      → Dreamy triggers (≥8am, idle, no audit today)
+```
 
 ### Changes
-1. `bridge-app.ts` — new heartbeat task `daily-restart`
-2. `acp-transport.ts` — ensure `destroy()` + `initialize()` is safe to call sequentially
-3. Track `restartedToday` flag, reset at midnight (or when date changes via `localDate()`)
+
+**heartbeat-system.ts:**
+- Add `lastTickAt` tracking
+- Export standby detection: `tick()` returns early if gap > interval × 3, calls `onStandbyResume` callback
+
+**bridge-app.ts:**
+- Create bridge.lock on startup
+- `onStandbyResume` callback: doctor --fix → delete bridge.lock → `process.exit(0)`
+- On each tick: check bridge.lock age >24h + idle >1h → same sequence
+- Remove: daily-restart task, DAY_START_HOUR, .daily-restart-date file
+
+**doctor.sh:**
+- Move chmod 700 from `--fix` (L1) to `--fix-full` (L2)
+- Add bridge.lock stale PID check (diagnose mode)
+
+**Deploy (Mac):**
+- Remove evening doctor cron entry (`e5a301`)
+
+### Eliminates
+- daily-restart heartbeat task
+- `DAY_START_HOUR` env variable
+- `.daily-restart-date` file
+- Evening doctor cron (7pm)
+- Complex uptime guards and date persistence
 
 ## 73. Watchdog improvements — root cause detection
 
