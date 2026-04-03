@@ -1278,3 +1278,12 @@ Model list source depends on transport:
 - Raw model (future): query provider API (`/models` endpoint)
 
 Switching requires transport restart (new `--model` flag). Session resets — use `pendingSessionStart` for SOUL re-injection.
+
+## 75. Web UI improvements
+
+**Priority:** LOW
+**Status:** Not started
+
+### Issues
+- Memory Universe: button not aligned
+- Memory Universe: memory node color should be based on `memory_type` (fact/decision/preference/etc), not `classification`
