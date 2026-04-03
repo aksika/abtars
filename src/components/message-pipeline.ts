@@ -77,7 +77,7 @@ export async function handleInboundMessage(
 ): Promise<void> {
   const {
     transport, codingMode, memory, memoryConfig, nlmConfig,
-    sleepQueue, idleSave, conversationBuffer, config, startedAt,
+    idleSave, conversationBuffer, config, startedAt,
     sttConfig, ttsConfig,
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
   } = deps;
@@ -168,18 +168,8 @@ export async function handleInboundMessage(
     resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
     const ctxPct = "contextPercent" in transport ? (transport as { contextPercent: number }).contextPercent : -1;
     logInfo(TAG, `← [${msg.platform}] ${isVoice ? "🎤 " : ""}"${text.slice(0, 60)}"${ctxPct >= 0 ? ` (ctx: ${ctxPct}%)` : ""}`);
-    // --- Sleep queue ---
-    if (sleepQueue.isActive) {
-      const isFirst = sleepQueue.enqueue({
-        sessionKey, channelId, text,
-        threadId: msg.threadId, platform: msg.platform,
-      });
-      if (isFirst) {
-        await adapter.sendMessage(channelId, "Oh good morning, I am just waking up, give me a minute please.. I answer you soon ☕", { threadId: msg.threadId });
-      }
-      busyChats.delete(sessionKey);
-      return;
-    }
+    // --- Sleep: main transport is available during sleep (sleep uses its own) ---
+    // No queueing needed
 
     // --- Build prompt ---
     const bufKey = `${msg.platform}:${channelId}`;
