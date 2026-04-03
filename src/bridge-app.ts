@@ -37,13 +37,10 @@ import { DomainAllowlist } from "./components/domain-allowlist.js";
 import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
 import { SleepQueue } from "./components/sleep-queue.js";
-import { buildSessionStartContext } from "./components/session-context.js";
-import { loadSoulBundle } from "./components/soul-loader.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 import { CronQueue } from "./components/cron-queue.js";
 import { runCompaction } from "./components/compaction.js";
-import { compactingSessions, setIdleCompactReset } from "./components/message-pipeline.js";
-import { localDate } from "./components/env-utils.js";
+import { compactingSessions, setIdleCompactReset, startSession } from "./components/message-pipeline.js";
 
 
 /** Update context-window-start timestamp for a chat. Used by recall fallback stages. */
@@ -341,24 +338,17 @@ export async function startBridge(): Promise<void> {
       logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
     });
 
-    // Send greeting prompt to kiro-cli (with session context) so KP greets personally
-    if (telegramAdapter) {
+    // Start session: inject SOUL + context + greeting, push response to Telegram
+    if (telegramAdapter && memory) {
       const chatId = [...config.allowedUserIds][0];
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
-        let greetPrompt = "[Telegram] You just woke up. Output ONLY a personalized greeting message.";
-        const soul = loadSoulBundle();
-        if (soul) greetPrompt = soul + "\n\n" + greetPrompt;
-        const ctx = buildSessionStartContext(memory!, chatId);
-        if (ctx) greetPrompt = ctx + "\n\n" + greetPrompt;
         seenSessions.add(sessionKey);
-        transport.sendPrompt(sessionKey, greetPrompt).then(async (response) => {
-          if (response) {
-            await telegramAdapter!.sendMessage(String(chatId), response);
-          }
-        }).catch((err) => {
-          logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
+        startSession(
+          transport, memory, chatId, sessionKey,
+          "You just came online. Output ONLY a personalized greeting message.",
+          (text) => (telegramAdapter as import("./platforms/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
+        ).catch(err => logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : String(err)}`));
       }
     }
   }
@@ -419,28 +409,9 @@ export async function startBridge(): Promise<void> {
         child.on("exit", (code) => {
           sleepChild = null;
           if (code === 0) {
-            logInfo("main", `😴 Cron sleep routine finished successfully at ${localIso()}`);
+            logInfo("main", `😴 Sleep routine finished successfully at ${localIso()}`);
             sleepTrigger.reportSuccess();
             if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
-            const chatId = [...config.allowedUserIds][0];
-            if (chatId && telegramAdapter) {
-              // Read today's daily summary for wake-up context
-              let sleepContext = "";
-              try {
-                const dailyPath = join(memoryConfig.memoryDir, "daily", `daily_${localDate()}.md`);
-                if (existsSync(dailyPath)) {
-                  const daily = readFileSync(dailyPath, "utf-8").trim();
-                  if (daily) sleepContext = `\n\nHere's what came out of your sleep cycle:\n${daily}`;
-                }
-              } catch { /* best-effort */ }
-
-              telegramAdapter.injectMessage({
-                platform: "telegram", channelId: String(chatId), sessionKey: `telegram:${chatId}`,
-                senderId: String(chatId), senderName: "system",
-                text: `You just completed your sleep cycle — a routine memory maintenance procedure that keeps your memories organized, extracts lessons from the day, and cleans up noise. Think of it like how humans sleep to consolidate memories. You have one too.${sleepContext}\n\nHow did it go? Share your thoughts with the user.`,
-                timestamp: Date.now(), isGroup: false, isVoice: false,
-              });
-            }
           } else if (code === 2) {
             logWarn("main", `😴 Sleep partial — some steps failed, will retry at ${localIso()}`);
             sleepTrigger.reportFailure();

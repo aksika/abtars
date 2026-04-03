@@ -479,6 +479,38 @@ export async function handleInboundMessage(
   }
 }
 
+/** Build session-start prompt with SOUL + context + greeting, send to transport, push response to adapter. */
+export async function startSession(
+  transport: IKiroTransport,
+  memory: MemoryManager,
+  chatId: number,
+  sessionKey: string,
+  greeting: string,
+  sendResponse: (text: string) => Promise<unknown>,
+): Promise<void> {
+  let prompt = greeting;
+  const soul = loadSoulBundle();
+  if (soul) {
+    prompt = soul + "\n\n" + prompt;
+    logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
+  }
+  const ctx = buildSessionStartContext(memory, chatId);
+  if (ctx) {
+    prompt = ctx + "\n\n" + prompt;
+    logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
+  }
+  const reason = readAndClearRestartReason();
+  if (reason) {
+    prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
+    logInfo(TAG, `Injected restart reason: ${reason}`);
+  }
+  logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
+  const response = await transport.sendPrompt(sessionKey, prompt);
+  if (response?.trim() && response.trim() !== "<NO_REPLY>" && response.trim() !== "(no response)") {
+    await sendResponse(response);
+  }
+}
+
 /** Inject session-start context if pending, record user message. */
 function preparePrompt(
   prompt: string,
@@ -495,17 +527,17 @@ function preparePrompt(
     const soul = loadSoulBundle();
     if (soul) {
       prompt = soul + "\n\n" + prompt;
-      logDebug(TAG, `Injected soul bundle (${soul.length} chars)`);
+      logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
     }
     const ctx = buildSessionStartContext(memory, chatId);
     if (ctx) {
       prompt = ctx + "\n\n" + prompt;
-      logDebug(TAG, `Injected session-start context (${ctx.length} chars)`);
+      logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
     }
     const reason = readAndClearRestartReason();
     if (reason) {
       prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
-      logDebug(TAG, `Injected restart reason: ${reason}`);
+      logInfo(TAG, `Injected restart reason: ${reason}`);
     }
   }
   seen.add(sessionKey);
