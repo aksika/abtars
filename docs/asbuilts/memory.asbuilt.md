@@ -409,17 +409,20 @@ Established in the identity prompt (00-identity.md):
 - If unsure about destructive actions → skip and flag
 - Accumulate "Flagged for Review" items throughout all steps → KP picks up on wake-up
 
-### Trigger (`SleepTrigger` in `sleep-trigger.ts`)
+### Trigger
 
-Registered as `sleep-trigger` task in HeartbeatSystem (5-min interval).
+Sleep runs on bridge startup (not heartbeat). On every bridge start:
 
-**Startup:** runs if no audit file exists for today AND last audit is >25h old (or ≥8am).
+1. Check `hasSleepAuditToday()` — if audit `.md` exists with all steps ok, skip
+2. Spawn `agentbridge-sleep` as background child process (non-detached)
+3. On failure: retry via `setTimeout` (5min delay, max 3 attempts)
+4. On success: log, reset ctx starts
 
-**Cron (heartbeat tick):** runs if ≥8am, 10min idle, and no audit today.
+**Guard against re-run:** `hasSleepAuditToday()` checks for today's audit file. Deploys restart the bridge but sleep only runs once per day. Partial completions (lock file with failed steps) allow retry.
 
-**Retry on failure:** up to 3 attempts per 24h cycle. Attempt 2 fires on next heartbeat tick, attempt 3 after 1h cooldown.
+**Duplicate prevention:** `sleepChild` in-memory guard — if one is running, another won't spawn.
 
-**Duplicate prevention:** `sleepChild` in-memory guard tracks the spawned child process — if one is running, another won't spawn regardless of date. Lock file (`sleep_YYYYMMDD.lock`) is a JSON state file tracking per-step completion for resume.
+**Sleep queue:** User messages during sleep are queued (`SleepQueue`), replayed after sleep completes.
 
 ### Lock File Lifecycle
 
@@ -545,7 +548,7 @@ After successful sleep, the bridge injects "You just woke up.. how did you sleep
 | `skills/memory-anomalies.md` | Anomaly definitions for Dreamy + KP |
 | `src/cli/agentbridge-sleep.ts` | CLI orchestrator: step loop, retry, skip, catch-up, watermark |
 | `src/components/sleep-prompt-loader.ts` | Load step files + variable substitution |
-| `src/components/sleep-trigger.ts` | Heartbeat task, trigger logic, retry, lock file |
+| `src/components/sleep-trigger.ts` | `hasSleepAuditToday()` — checks if sleep already ran today |
 | `src/components/sleep-state-gatherer.ts` | Collects system state for identity prompt |
 | `src/components/sleep-daily-summary.ts` | Code-driven batched summarization (04a) |
 | `src/components/sleep-extract-daily.ts` | Code-driven extraction from daily file (04b) |
@@ -613,7 +616,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 | sleep-queue | `sleep-queue.ts` | Queue messages during sleep, replay via platform adapters on wake. |
 | PromptScanner | `prompt-scanner.ts` | 22-pattern prompt injection detector. Used by store, edit, A2A. |
 | SessionContext | `session-context.ts` | `buildSessionStartContext()` — session-start context injection. |
-| SleepTrigger | `sleep-trigger.ts` | Heartbeat task. Startup + cron trigger with retry logic. |
+| SleepTrigger | `sleep-trigger.ts` | `hasSleepAuditToday()` — guard against re-run |
 | SleepStateGatherer | `sleep-state-gatherer.ts` | Gathers DB stats, FTS5 health, disk usage for sleep prompt. |
 | agentbridge-recall | `cli/agentbridge-recall.ts` | CLI wrapper for recall-engine. |
 | agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete (legacy, delegating to editMemory). |

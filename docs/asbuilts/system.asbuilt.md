@@ -121,8 +121,10 @@ Entity clusters: memories sharing entities gravitate together with connecting li
 2. Initialize transport (ACP or tmux)
 3. Initialize memory, browser, platforms
 4. Create `bridge.lock` (`{pid, startedAt}`) — tracks bridge lifecycle
-5. Start heartbeat (clock-synced, ≥3min guard before first tick)
-6. Auto-restart on crash (LaunchAgent KeepAlive)
+5. `startSession()` — inject SOUL + context + greeting → agent comes online
+6. Start heartbeat (clock-synced, ≥3min guard before first tick)
+7. Spawn sleep if not done today (`hasSleepAuditToday()` guard, 3 retries via setTimeout)
+8. Auto-restart on crash (LaunchAgent KeepAlive)
 
 ### Heartbeat System
 
@@ -138,7 +140,7 @@ Single heartbeat loop controls everything: task scheduling, standby detection, w
 
 **Task registration order:**
 ```
-cron → sleep-trigger(heavy) → idle-compact(heavy) → age-check →
+cron → idle-compact(heavy) → age-check →
 db-integrity → watchdog → restart-check → self-healer →
 browse-checker → skill-reloader → reminder-injector
 ```
