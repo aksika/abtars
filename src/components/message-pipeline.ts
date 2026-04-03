@@ -495,17 +495,17 @@ function preparePrompt(
     const soul = loadSoulBundle();
     if (soul) {
       prompt = soul + "\n\n" + prompt;
-      logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
+      logDebug(TAG, `Injected soul bundle (${soul.length} chars)`);
     }
     const ctx = buildSessionStartContext(memory, chatId);
     if (ctx) {
       prompt = ctx + "\n\n" + prompt;
-      logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
+      logDebug(TAG, `Injected session-start context (${ctx.length} chars)`);
     }
     const reason = readAndClearRestartReason();
     if (reason) {
       prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
-      logInfo(TAG, `Injected restart reason: ${reason}`);
+      logDebug(TAG, `Injected restart reason: ${reason}`);
     }
   }
   seen.add(sessionKey);
