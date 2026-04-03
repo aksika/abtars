@@ -1178,3 +1178,47 @@ Once per day at `DAY_START_HOUR` (default 8, env-configurable), restart the CLI 
 1. `bridge-app.ts` — new heartbeat task `daily-restart`
 2. `acp-transport.ts` — ensure `destroy()` + `initialize()` is safe to call sequentially
 3. Track `restartedToday` flag, reset at midnight (or when date changes via `localDate()`)
+
+## 73. Watchdog improvements — root cause detection
+
+**Priority:** high
+**Status:** Planned
+**Effort:** medium
+
+### Problem
+Current watchdog detects "stuck" by checking if a prompt has been in-flight for N cycles. It doesn't know WHY it's stuck, so it applies the same escalation (doctor → reset → exit) regardless. Doctor can't fix hung tool calls. 10 min to resolve (2 cycles × 5 min).
+
+### Design
+
+**Step 1: Identify root cause before acting.**
+
+On each watchdog tick when prompt is in-flight, classify the stuck state:
+
+| State | How to detect | Action |
+|-------|--------------|--------|
+| Tool call hung | ACP `tool_call` event fired, no `tool_call_update` completion | Cancel tool (sendInterrupt), retry prompt |
+| Model not responding | No chunks, no tool calls, no activity since prompt start | Reset session |
+| kiro-cli process dead | `this.agent === null` or process exited | Reinit transport |
+| Network/transient | Recent activity but prompt not completing | Wait longer (transient) |
+
+**Step 2: Track activity (keep lastActivityAt from reverted commit)**
+
+Add `lastActivityAt` to AcpTransport, updated on: chunks, tool calls, tool_call_updates, thinking. This distinguishes "actively working" from "truly stuck".
+
+**Step 3: Smarter escalation**
+
+- Skip L0 doctor for mid-conversation stucks (doctor fixes filesystem, not hung prompts)
+- Keep doctor for startup stucks (first prompt after boot)
+- L1: action based on root cause (cancel tool vs reset session vs reinit)
+- L2: process.exit only if L1 failed
+
+**Step 4: Configurable thresholds**
+
+- `WATCHDOG_STUCK_SEC=300` (5 min no activity → stuck)
+- `WATCHDOG_CYCLES=1` (1 cycle after stuck detection → act)
+- Active streaming/tool execution prevents triggering
+
+### Changes
+1. `acp-transport.ts` — add `lastActivityAt`, track on chunks/tools/thinking. Add `toolInFlight` flag.
+2. `bridge-app.ts` — rewrite watchdog with root cause classification
+3. Keep existing L0→L1→L2 structure but make L0/L1 actions context-dependent
