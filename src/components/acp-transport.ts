@@ -37,7 +37,8 @@ export class AcpTransport implements IKiroTransport {
 
   /** Timestamp of last successful prompt. */
   lastSuccessAt = 0;
-
+  /** Timestamp of last streaming chunk, tool call, or any ACP activity. */
+  lastActivityAt = 0;
   /** Timestamp of last prompt start. */
   promptStartedAt = 0;
 
@@ -162,6 +163,7 @@ export class AcpTransport implements IKiroTransport {
     logDebug(this.tag, `Sending prompt to session ${sessionId}: "${message.slice(0, 80)}"`);
 
     this.promptStartedAt = Date.now();
+    this.lastActivityAt = Date.now();
     // TEMPORARY throttle — avoid overloading kiro-cli
     await new Promise((r) => setTimeout(r, TEMP_THROTTLE_MS));
 
@@ -242,6 +244,7 @@ export class AcpTransport implements IKiroTransport {
           const text = content.text;
           const chunks = this.responseChunks.get(sessionId);
           if (chunks) chunks.push(text);
+          this.lastActivityAt = Date.now();
           if (this.onIntermediateResponse && text.trim()) {
             this.onIntermediateResponse(text);
           }
@@ -249,11 +252,13 @@ export class AcpTransport implements IKiroTransport {
           const text = (content as { text?: string }).text ?? "";
           const chunks = this.responseChunks.get(sessionId);
           if (chunks) chunks.push(`\n[thinking] ${text}\n`);
+          this.lastActivityAt = Date.now();
         }
         break;
       }
       case "tool_call": {
         logDebug(this.tag, `[tool] ${update.title} (${update.status})`);
+        this.lastActivityAt = Date.now();
         break;
       }
       case "tool_call_update": {
