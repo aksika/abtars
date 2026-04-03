@@ -738,12 +738,27 @@ async function main(): Promise<number> {
             const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
             const chatId = [...(db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[])][0]?.chat_id ?? 7773842843;
             const watermarkRow = db.prepare("SELECT last_processed_timestamp FROM extraction_watermarks WHERE chat_id = ?").get(chatId) as { last_processed_timestamp: number } | undefined;
+
+            // Determine target date: if yesterday has no daily file but has messages, summarize yesterday
+            let targetDate = localDate();
+            const yesterday = new Date(Date.now() - 86400000);
+            const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, "0")}-${String(yesterday.getDate()).padStart(2, "0")}`;
+            const yesterdayDailyPath = join(memoryConfig.memoryDir, "daily", `daily_${yesterdayStr}.md`);
+            if (!existsSync(yesterdayDailyPath)) {
+              const yStart = new Date(yesterdayStr + "T00:00:00").getTime();
+              const yEnd = yStart + 86400000;
+              const yMsgCount = (db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ? AND timestamp >= ? AND timestamp < ?").get(chatId, yStart, yEnd) as { cnt: number }).cnt;
+              if (yMsgCount > 0) {
+                logInfo(TAG, `[SLEEP] Yesterday (${yesterdayStr}) has ${yMsgCount} messages but no daily — summarizing yesterday`);
+                targetDate = yesterdayStr;
+              }
+            }
+
             const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "04a-daily-summary", flags.verbose).then(r => r ?? ""), {
               ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs: watermarkRow?.last_processed_timestamp ?? 0,
             });
             if (summary) {
-              const dateStr = localDate();
-              dailySummaryPath = writeDailyFile(memoryConfig.memoryDir, dateStr, summary);
+              dailySummaryPath = writeDailyFile(memoryConfig.memoryDir, targetDate, summary);
               state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
             } else {
               state.steps[step.name] = { status: "skipped" };
