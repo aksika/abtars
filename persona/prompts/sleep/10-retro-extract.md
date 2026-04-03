@@ -2,16 +2,42 @@
 
 Read the retrospective you wrote in §1 (`~/.agentbridge/memory/retrospectives/retro_${WAKEUP_DATE}.md`).
 
-Extract durable facts from the "What did I learn?" and "How can I improve?" sections. For each:
+Extract EVERY lesson, mistake, correction, and user feedback. Nothing is too small — if it happened, store it. For each item, determine:
+
+- **What happened** — the specific event or feedback
+- **The consequence** — what to do differently, or what to keep doing
+- **Emotion** — how significant was this?
+
+Store each with:
 
 ```bash
-agentbridge-store --translated "<fact in English>" --original "<fact in English>" \
-  --memory-type <fact|decision> --emotion-score 0 --chat-id 0 \
+agentbridge-store --translated "<consequence in English>" --original "<consequence in English>" \
+  --memory-type <fact|decision> --emotion-score <-10 to 10> --chat-id 0 \
   --trust 2 --integrity 2 --credibility 2 --classification 1
 ```
 
-- "What did I learn?" items → memory_type `fact`
-- "How can I improve?" items → memory_type `decision`
-- Skip items that are too vague or already stored
+**Categories and emotion scoring:**
 
-Respond with count of facts extracted.
+| Category | memory_type | emotion_score | Example |
+|----------|------------|---------------|---------|
+| Mistake I made | decision | -5 to -8 | "Don't restart without asking — user got frustrated" |
+| User correction | decision | -3 to -6 | "Use local timezone CEST, not UTC" |
+| Lesson learned | fact | -2 to +2 | "Mac uses darkwake with MAGICWAKE on en1" |
+| Positive feedback | fact | +3 to +5 | "User appreciated quick fix of the cron bug" |
+| Behavioral rule | decision | -5 to -8 | "Never pretend I did something I didn't" |
+| User preference | decision | +1 to +3 | "User prefers planning before implementation" |
+
+**Dedup and escalation:**
+- Before storing, check with `agentbridge-recall --translated "<consequence>"` if a similar memory exists
+- If it exists and the new event adds context → update with `agentbridge-edit --memory-id <id> --content "<updated consequence>"`
+- If the same mistake happened AGAIN → escalate emotion: increase the negative score by -2 (e.g. -5 → -7) using `agentbridge-edit --memory-id <id> --emotion-score <escalated>`
+- Only store as new if no similar memory found
+
+**Rules:**
+- Every "What did I learn?" item → store it
+- Every "How can I improve?" item → store it
+- Every user correction or frustration → store with negative emotion
+- Every positive moment → store with positive emotion
+- Phrase as actionable consequences: "Do X" or "Don't do Y" — not just "X happened"
+
+Respond with count of memories stored and updated.
