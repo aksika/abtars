@@ -9,16 +9,19 @@ export type HeartbeatConfig = {
   intervalMs: number;
   /** When true, skip all heavy tasks (e.g. sleep in progress — avoid model rate limits). */
   sleepActive?: () => boolean;
+  /** Called when standby resume detected (gap > interval×3). Bridge should doctor + exit. */
+  onStandbyResume?: (gapMs: number) => void;
 };
 
 const TAG = "heartbeat";
-const MIN_UPTIME_MS = 1 * 60 * 1000;
+const MIN_GUARD_MS = 3 * 60 * 1000; // 3 min minimum delay before first tick
 
 export class HeartbeatSystem {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private initTimeout: ReturnType<typeof setTimeout> | null = null;
   private tasks: HeartbeatTask[] = [];
   private running = false;
-  private readonly startedAt = Date.now();
+  private lastTickAt = 0;
 
   constructor(private config: HeartbeatConfig) {}
 
@@ -27,7 +30,7 @@ export class HeartbeatSystem {
     this.tasks.push(task);
   }
 
-  /** Start the heartbeat loop. Logs interval and registered task names. */
+  /** Start the heartbeat loop, aligned to wall-clock boundaries. */
   start(): void {
     if (this.running) return;
     if (!this.config.enabled) {
@@ -37,21 +40,35 @@ export class HeartbeatSystem {
 
     this.running = true;
     const taskNames = this.tasks.map((t) => t.name).join(", ");
-    logInfo(TAG, `Starting heartbeat — interval=${this.config.intervalMs}ms, tasks=[${taskNames}]`);
+    const iv = this.config.intervalMs;
 
-    this.timer = setInterval(() => {
+    // Align to next clock boundary (ceil(now / interval) * interval)
+    const now = Date.now();
+    let nextBoundary = Math.ceil(now / iv) * iv;
+    let delay = nextBoundary - now;
+    if (delay < MIN_GUARD_MS) {
+      nextBoundary += iv;
+      delay += iv;
+    }
+
+    const firstTickAt = new Date(nextBoundary).toTimeString().slice(0, 8);
+    logInfo(TAG, `Starting heartbeat — interval=${iv}ms, first tick at ${firstTickAt} (${Math.round(delay / 1000)}s), tasks=[${taskNames}]`);
+
+    this.lastTickAt = now; // seed for standby detection
+    this.initTimeout = setTimeout(() => {
+      this.lastTickAt = Date.now();
       void this.tick();
-    }, this.config.intervalMs);
+      this.timer = setInterval(() => {
+        void this.tick();
+      }, iv);
+    }, delay);
   }
 
   /** Stop the heartbeat loop and clean up timers. */
   stop(): void {
     if (!this.running) return;
-
-    if (this.timer !== null) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    if (this.initTimeout !== null) { clearTimeout(this.initTimeout); this.initTimeout = null; }
+    if (this.timer !== null) { clearInterval(this.timer); this.timer = null; }
     this.running = false;
     logInfo(TAG, "Heartbeat stopped");
   }
@@ -67,13 +84,22 @@ export class HeartbeatSystem {
     return this.tasks.map(t => t.name);
   }
 
-  /** Execute all registered tasks with error isolation. Heavy-task gating: once a heavy task returns true, remaining heavy tasks are skipped. */
+  /** Execute all registered tasks with error isolation. */
   private async tick(): Promise<void> {
-    const uptime = Date.now() - this.startedAt;
-    if (uptime < MIN_UPTIME_MS) {
-      logDebug(TAG, `Skipping tick — uptime ${Math.round(uptime / 1000)}s < 3min`);
-      return;
+    const now = Date.now();
+    const gap = now - this.lastTickAt;
+    this.lastTickAt = now;
+
+    // Standby detection: gap > interval × 3 means process was suspended
+    if (gap > this.config.intervalMs * 3) {
+      const gapMin = Math.round(gap / 60000);
+      logInfo(TAG, `Standby resume detected — suspended ${gapMin}min`);
+      if (this.config.onStandbyResume) {
+        this.config.onStandbyResume(gap);
+        return; // skip all tasks this tick
+      }
     }
+
     logDebug(TAG, `Tick — executing ${this.tasks.length} task(s)`);
     let heavyRan = false;
     const sleepBlocking = this.config.sleepActive?.() ?? false;

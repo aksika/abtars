@@ -10,7 +10,7 @@ import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError, logDebug, localIso, getLogFile } from "./components/logger.js";
+import { setLogLevel, logInfo, logWarn, logError, localIso, getLogFile } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
@@ -364,11 +364,22 @@ export async function startBridge(): Promise<void> {
   }
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
-  const heartbeat = new HeartbeatSystem({ enabled: true, intervalMs: hbIntervalMs, sleepActive: () => sleepChild !== null && !sleepChild.killed });
-  const DAY_START_HOUR = parseInt(process.env["DAY_START_HOUR"] ?? "8", 10);
-  const dailyRestartFile = join(AGENT_BRIDGE_HOME, ".daily-restart-date");
-  let dailyRestartDate = "";
-  try { dailyRestartDate = readFileSync(dailyRestartFile, "utf-8").trim(); } catch { /* */ }
+  const heartbeat = new HeartbeatSystem({
+    enabled: true,
+    intervalMs: hbIntervalMs,
+    sleepActive: () => sleepChild !== null && !sleepChild.killed,
+    onStandbyResume: (gapMs) => {
+      logInfo("main", `🔄 Standby resume (${Math.round(gapMs / 60000)}min) — doctor --fix + restart`);
+      writeRestartReason(`standby-resume: ${Math.round(gapMs / 60000)}min`);
+      try { execSync(`${join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh")} --fix`, { timeout: 30000 }); } catch { /* */ }
+      try { unlinkSync(join(AGENT_BRIDGE_HOME, "bridge.lock")); } catch { /* */ }
+      process.exit(0);
+    },
+  });
+
+  // bridge.lock — track bridge lifecycle
+  const bridgeLockPath = join(AGENT_BRIDGE_HOME, "bridge.lock");
+  try { writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf-8"); } catch { /* */ }
 
   const cronCallback = (chatId: number, message: string, result: string): void => {
     if (platforms.telegram && telegramAdapter) {
@@ -385,42 +396,6 @@ export async function startBridge(): Promise<void> {
       for (const entry of dueTasks) cronQueue.enqueue(entry, cronCallback);
     },
   });
-
-  // --- Daily session restart (before sleep) ---
-  if (DAY_START_HOUR >= 0) {
-    heartbeat.registerTask({
-      name: "daily-restart",
-      execute: async () => {
-        const now = new Date();
-        if (now.getHours() < DAY_START_HOUR) return;
-        const today = localDate();
-        if (dailyRestartDate === today) return;
-        if (busyChats.size > 0) return;
-        if (sleepChild && !sleepChild.killed) return;
-        // Don't restart a session younger than 1 hour
-        if (Date.now() - startedAt < 60 * 60 * 1000) {
-          logDebug("main", "Daily restart skipped — bridge uptime < 1h");
-          return;
-        }
-
-        logInfo("main", `🔄 Daily session restart (>=${DAY_START_HOUR}:00)`);
-        writeRestartReason("daily-restart");
-        try {
-          const sessionKey = `telegram:${[...config.allowedUserIds][0]}`;
-          await transport.resetSession(sessionKey);
-          for (const uid of config.allowedUserIds) {
-            pendingSessionStart.add(`telegram:${uid}`);
-            pendingSessionStart.add(`discord:${uid}`);
-          }
-          dailyRestartDate = today;
-          writeFileSync(dailyRestartFile, today, "utf-8");
-          logInfo("main", "🔄 Daily restart complete — fresh CLI session");
-        } catch (err) {
-          logError("main", "Daily restart failed", err);
-        }
-      },
-    });
-  }
 
   heartbeat.registerTask({
     name: "sleep-trigger",
@@ -589,6 +564,32 @@ export async function startBridge(): Promise<void> {
       },
     });
   }
+
+  // --- 24h fallback: restart if bridge running >24h and idle >1h ---
+  heartbeat.registerTask({
+    name: "age-check",
+    execute: async () => {
+      try {
+        const lockData = JSON.parse(readFileSync(bridgeLockPath, "utf-8"));
+        const age = Date.now() - lockData.startedAt;
+        if (age < 24 * 60 * 60 * 1000) return; // <24h
+      } catch { return; }
+      // Check idle
+      let lastMsgTs = 0;
+      try {
+        const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
+        lastMsgTs = row?.latest ?? 0;
+      } catch { return; }
+      if (Date.now() - lastMsgTs < 60 * 60 * 1000) return; // <1h idle
+      if (busyChats.size > 0 || (sleepChild && !sleepChild.killed)) return;
+
+      logInfo("main", `🔄 Bridge age >24h + idle >1h — preventive restart`);
+      writeRestartReason("age-restart: >24h uptime");
+      try { execSync(`${join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh")} --fix`, { timeout: 30000 }); } catch { /* */ }
+      try { unlinkSync(bridgeLockPath); } catch { /* */ }
+      process.exit(0);
+    },
+  });
 
   heartbeat.registerTask({
     name: "db-integrity",

@@ -22,10 +22,10 @@ esac
 warn() { echo "[doctor] WARN: $1"; WARNS=$((WARNS + 1)); }
 fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 
-# 1. Directory permissions (sensitive dirs should be 700)
+# 1. Directory permissions (sensitive dirs should be 700) — fix-full only
 for d in "$AB/titok" "$AB/titok/cookies" "$AB/memory"; do
   if [ -d "$d" ] && [ "$(stat -c %a "$d" 2>/dev/null)" != "700" ]; then
-    if $FIX; then
+    if $FIX_FULL; then
       chmod 700 "$d"; fix "$d permissions → 700"
     else
       warn "$d permissions not 700"
