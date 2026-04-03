@@ -155,6 +155,7 @@ Conflict resolution: higher trust wins → higher credibility wins → more rece
 | Instant store | `agentbridge-store --emotion-score N` | Runtime — agent stores emotionally significant memory |
 | Extraction | LLM assigns emotion during Dreamy sleep extraction | Sleep §4 step 5 |
 | Verbal harvest | `agentbridge-edit --memory-id N --emotion-score N --caller dreamy` | Sleep §6 — Dreamy scans for verbal emotional reactions |
+| Retro extract | `agentbridge-store --emotion-score N` or `agentbridge-edit --emotion-score N` | Sleep §5.5 — lessons/mistakes from retrospective. Repeated mistakes escalate by -2. |
 
 Emoji reactions propagate immediately: message table updated → cascade to linked extracted_memories via `editMemory()`. Verbal emotions (e.g. "fasza!", "goddamn it!") are harvested during sleep and applied to the nearest relevant memory.
 
@@ -422,7 +423,7 @@ Sleep runs on bridge startup (not heartbeat). On every bridge start:
 
 **Duplicate prevention:** `sleepChild` in-memory guard — if one is running, another won't spawn.
 
-**Sleep queue:** User messages during sleep are queued (`SleepQueue`), replayed after sleep completes.
+**Sleep and main transport:** Sleep uses its own AcpTransport. Main transport stays responsive — user messages go straight through during sleep, no queueing.
 
 ### Lock File Lifecycle
 
@@ -474,7 +475,7 @@ Before sleep starts, `SleepStateGatherer` collects system state and injects it i
 | 1 | `01-retrospective.md` | §1 Retrospective | Read messages, write retro, emotional attribution, update agent_notes |
 | 2 | `02-feedback.md` | §2 Feedback | Boost/demote recalled memories via `agentbridge-edit` |
 | 3 | `03-reminders.md` | §3 Reminders | Extract todos via `agentbridge-todo` |
-| 4a | `04a-daily-summary.md` | §4a Daily Summary | **Code-driven.** Batched summarization → `daily/daily_YYYYMMDD.md` |
+| 4a | `04a-daily-summary.md` | §4a Daily Summary | **Code-driven.** Batched summarization → `daily/daily_YYYYMMDD.md`. If yesterday has no daily file but has messages, targets yesterday (human day cycle: midnight–2am is still "today"). |
 | 4b | `04b-extract-from-daily.md` | §4b Extract from Daily | **Code-driven.** Model reads daily file, calls `agentbridge-store` |
 | 4c | `04c-gc-noise.md` | §4c GC Noise | Mark small talk/noise as garbage |
 | 5 | `06-cron-verify.md` | §5 Cron Verify | Cross-check reminders against cron entries |
@@ -483,7 +484,7 @@ Before sleep starts, `SleepStateGatherer` collects system state and injects it i
 | 7b | `08b-core-knowledge.md` | §7b Core Knowledge | Review core knowledge files |
 | 7c | `08c-translation-check.md` | §7c Translation | Fix bilingual memory quality |
 | 8 | `09-anomaly-audit.md` | §7.5 Anomaly Audit | CIA-AAA attribute audit (daily) |
-| 9 | `10-retro-extract.md` | §5.5 Retro Extract | Extract durable facts from retro |
+| 9 | `10-retro-extract.md` | §5.5 Retro Extract | Extract lessons/mistakes from retro with emotion scoring. Dedup via recall, escalate emotion on repeated mistakes. |
 | 10 | `11-merge.md` | §8 Merge | Near-duplicate memory merge (max 5) |
 | 11 | `12-consolidation.md` | §9 Consolidation | Weekly/quarterly rollups only (daily done in 04a) |
 | 12 | `13-media-cleanup.md` | §9.5 Media Cleanup | FIFO 100MB cleanup |
