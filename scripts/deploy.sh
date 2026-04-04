@@ -86,6 +86,12 @@ cp "$PROJECT_DIR/package.json" "$AB_HOME/package.json"
 rsync -a --delete "$PROJECT_DIR/dist/" "$AB_HOME/dist/"
 rsync -a --delete "$PROJECT_DIR/node_modules/" "$AB_HOME/node_modules/"
 
+# 2c. Copy asbuilts to knowledgebase (agent-readable, no source code paths)
+echo "📚 Copying knowledgebase..."
+mkdir -p "$AB_HOME/knowledgebase"
+cp "$PROJECT_DIR/docs/asbuilts/system.asbuilt.md" "$AB_HOME/knowledgebase/"
+cp "$PROJECT_DIR/docs/asbuilts/memory.asbuilt.md" "$AB_HOME/knowledgebase/"
+
 # Generate CLI wrapper scripts in ~/.agentbridge/bin/
 echo "🔧 Generating CLI wrappers..."
 mkdir -p "$AB_HOME/bin"
