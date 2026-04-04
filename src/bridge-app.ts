@@ -36,7 +36,6 @@ import { BrowserIpcServer } from "./components/browser-ipc-server.js";
 import { DomainAllowlist } from "./components/domain-allowlist.js";
 import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
-import { SleepQueue } from "./components/sleep-queue.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 import { CronQueue } from "./components/cron-queue.js";
 import { runCompaction } from "./components/compaction.js";
@@ -166,7 +165,6 @@ export async function startBridge(): Promise<void> {
   }
 
   // Sleep state
-  const sleepQueue = new SleepQueue();
   let sleepChild: import("node:child_process").ChildProcess | null = null;
   const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
   const sleepAuditDir = join(memoryConfig.memoryDir, "sleep");
@@ -200,7 +198,7 @@ export async function startBridge(): Promise<void> {
   // Build pipeline deps (needed before platform start)
   const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
     transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
-    sleepQueue, idleSave, conversationBuffer, config, startedAt,
+    idleSave, conversationBuffer, config, startedAt,
     sttConfig, ttsConfig,
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
     messageQueue: new Map(),
@@ -349,11 +347,19 @@ export async function startBridge(): Promise<void> {
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
         seenSessions.add(sessionKey);
+        let sessionReady = false;
         startSession(
           transport, memory, chatId, sessionKey,
           "You just came online. Output ONLY a personalized greeting message.",
           (text) => (telegramAdapter as import("./platforms/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
-        ).catch(err => logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`));
+        ).then(() => { sessionReady = true; })
+         .catch(err => { sessionReady = true; logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`); });
+        // Wait for session to be ready before accepting messages (Gemini can take minutes for large SOUL)
+        const waitStart = Date.now();
+        while (!sessionReady && Date.now() - waitStart < 5 * 60 * 1000) {
+          await new Promise(r => setTimeout(r, 500));
+        }
+        if (!sessionReady) logWarn("main", "Startup session timed out (5min) — proceeding anyway");
       }
     }
   }
@@ -768,7 +774,6 @@ export async function startBridge(): Promise<void> {
     }
     if (sleepChild && !sleepChild.killed) return;
     sleepAttempts++;
-    sleepQueue.activate();
     try {
       const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
       const child = spawn(process.execPath, [sleepScript], { stdio: "ignore" });
@@ -784,13 +789,10 @@ export async function startBridge(): Promise<void> {
         } else {
           logWarn("main", `😴 Sleep failed (code=${code}) — exhausted ${SLEEP_MAX_RETRIES} attempts`);
         }
-        sleepQueue.deactivate();
-        sleepQueue.replay(platformAdapters);
       });
       logInfo("main", `😴 Sleep spawned (pid=${child.pid}, attempt ${sleepAttempts})`);
     } catch (err) {
       logWarn("main", `😴 Sleep spawn failed: ${err instanceof Error ? err.message : String(err)}`);
-      sleepQueue.deactivate();
       if (sleepAttempts < SLEEP_MAX_RETRIES) setTimeout(spawnSleep, SLEEP_RETRY_MS);
     }
   }

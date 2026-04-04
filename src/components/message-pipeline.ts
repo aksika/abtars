@@ -19,7 +19,6 @@ import type { IKiroTransport } from "./kiro-transport.js";
 import type { MemoryManager } from "./memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
-import type { SleepQueue } from "./sleep-queue.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./cron-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
@@ -62,7 +61,6 @@ export interface PipelineDeps {
   memory: MemoryManager | null;
   memoryConfig: { memoryEnabled: boolean; memoryDir: string };
   nlmConfig: { enabled: boolean; [k: string]: unknown };
-  sleepQueue: SleepQueue;
   idleSave: IdleSave;
   conversationBuffer: ConversationBuffer;
   config: { agentTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
