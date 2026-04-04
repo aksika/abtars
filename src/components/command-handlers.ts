@@ -354,6 +354,7 @@ function buildStatusLines(ctx: CommandContext): string[] {
   }
   const status = ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected";
   const mode = ctx.config.agentTransport.toUpperCase();
+  const provider = process.env["AGENT_CLI"] || "unknown";
   const uptime = formatUptime(Date.now() - ctx.startedAt);
   const ctxPct = ctx.transport.contextPercent >= 0
     ? `${ctx.transport.contextPercent}%`
@@ -364,7 +365,7 @@ function buildStatusLines(ctx: CommandContext): string[] {
     `🤖 Model: ${model}`,
     `📊 Context window: ${ctxPct}`,
     `⏱️ Uptime: ${uptime}`,
-    `🔌 Transport: ${mode} — ${status}`,
+    `🔌 Transport: ${mode} (${provider}) — ${status}`,
   ];
   if (cronInfo) {
     const mins = Math.round(cronInfo.intervalMs / 60000);
