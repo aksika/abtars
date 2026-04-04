@@ -353,7 +353,7 @@ export async function startBridge(): Promise<void> {
           transport, memory, chatId, sessionKey,
           "You just came online. Output ONLY a personalized greeting message.",
           (text) => (telegramAdapter as import("./platforms/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
-        ).catch(err => logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : String(err)}`));
+        ).catch(err => logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`));
       }
     }
   }

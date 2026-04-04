@@ -456,7 +456,7 @@ export async function handleInboundMessage(
       }
     }
   } catch (err) {
-    logError(TAG, `Error for ${sessionKey}`, err);
+    logError(TAG, `Error for ${sessionKey} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
     if (adapter.setReaction && msg.messageId) {
       await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
     }
