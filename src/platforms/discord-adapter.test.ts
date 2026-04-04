@@ -59,7 +59,6 @@ function makeDeps(transport: IKiroTransport): DiscordAdapterDeps {
       memory: null,
       memoryConfig: { memoryEnabled: false, memoryDir: "/tmp" },
       nlmConfig: { enabled: false },
-      sleepQueue: { isActive: false, enqueue: vi.fn() } as any,
       idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() } as any,
       conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() } as any,
       config: { agentTransport: "tmux", workingDir: "/tmp" },

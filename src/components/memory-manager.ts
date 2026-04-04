@@ -47,10 +47,6 @@ export class MemoryManager {
     this.config = config;
   }
 
-  /** Register a callback that returns true when the transport is busy (e.g. processing a user prompt). */
-  setIsBusy(_fn: () => boolean): void {
-  }
-
   /** Register the LLM callback. Called once from main.ts after transport is ready. */
   setLlmCall(llmCall: (prompt: string, content: string) => Promise<string>): void {
     this.llmCall = llmCall;
@@ -64,11 +60,6 @@ export class MemoryManager {
   /** Expose the underlying MemoryIndex for direct search access (used by MemorySearchController). */
   getMemoryIndex(): MemoryIndex | null {
     return this.memoryIndex;
-  }
-
-  /** Register the BrowserManager for webpage ingestion. Called from main.ts after BrowserManager is created. */
-  setBrowserManager(_bm: import("./browser-manager.js").BrowserManager): void {
-    // Reserved for future ingestion pipeline
   }
 
   /** Expose the underlying database for direct query access (used by MemorySearchController). */

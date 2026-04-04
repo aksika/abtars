@@ -220,7 +220,6 @@ export async function startBridge(): Promise<void> {
     memory.setLlmCall(async (prompt: string, content: string) => {
       return transport.sendPrompt("system:memory", `${prompt}\n\n${content}`);
     });
-    memory.setIsBusy(() => busyChats.size > 0);
     logInfo("main", "🧠 Memory LLM callback registered");
   }
 
@@ -349,7 +348,7 @@ export async function startBridge(): Promise<void> {
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
         seenSessions.add(sessionKey);
-        startSession(
+        await startSession(
           transport, memory, chatId, sessionKey,
           "You just came online. Output ONLY a personalized greeting message.",
           (text) => (telegramAdapter as import("./platforms/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
