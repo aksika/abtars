@@ -358,6 +358,19 @@ export async function startBridge(): Promise<void> {
     }
   }
 
+  // bridge.lock — track bridge lifecycle + standby grace period
+  const bridgeLockPath = join(AGENT_BRIDGE_HOME, "bridge.lock");
+  const STANDBY_GRACE_MS = 3 * 60 * 1000; // 3 minutes
+  try {
+    const prevLock = existsSync(bridgeLockPath) ? JSON.parse(readFileSync(bridgeLockPath, "utf-8")) : null;
+    if (prevLock?.exitReason === "standby" && prevLock.exitedAt && (Date.now() - prevLock.exitedAt) < 30 * 60 * 1000) {
+      logInfo("main", `⏸️  Standby wake detected — ${STANDBY_GRACE_MS / 1000}s grace period before starting`);
+      await new Promise(resolve => setTimeout(resolve, STANDBY_GRACE_MS));
+      logInfo("main", `⏸️  Grace period complete — proceeding with startup`);
+    }
+  } catch { /* corrupt lock, proceed normally */ }
+  try { writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf-8"); } catch { /* */ }
+
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
   const heartbeat = new HeartbeatSystem({
     enabled: true,
@@ -367,14 +380,13 @@ export async function startBridge(): Promise<void> {
       logInfo("main", `🔄 Standby resume (${Math.round(gapMs / 60000)}min) — doctor --fix + restart`);
       writeRestartReason(`standby-resume: ${Math.round(gapMs / 60000)}min`);
       try { execSync(`${join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh")} --fix`, { timeout: 30000 }); } catch { /* */ }
-      try { unlinkSync(join(AGENT_BRIDGE_HOME, "bridge.lock")); } catch { /* */ }
+      try {
+        const lock = { pid: process.pid, startedAt, exitReason: "standby", exitedAt: Date.now() };
+        writeFileSync(bridgeLockPath, JSON.stringify(lock), "utf-8");
+      } catch { /* */ }
       process.exit(0);
     },
   });
-
-  // bridge.lock — track bridge lifecycle
-  const bridgeLockPath = join(AGENT_BRIDGE_HOME, "bridge.lock");
-  try { writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf-8"); } catch { /* */ }
 
   const cronCallback = (chatId: number, message: string, result: string): void => {
     if (platforms.telegram && telegramAdapter) {

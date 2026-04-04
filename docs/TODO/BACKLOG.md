@@ -1287,3 +1287,24 @@ Switching requires transport restart (new `--model` flag). Session resets — us
 ### Issues
 - Memory Universe: button not aligned
 - Memory Universe: memory node color should be based on `memory_type` (fact/decision/preference/etc), not `classification`
+
+## 76. Standby wake grace period
+
+**Priority:** HIGH
+**Status:** In progress
+
+### Problem
+Mac Power Nap wakes the machine every ~30min overnight. Each wake triggers standby detection → bridge restart → agent session start → greeting. 10+ restarts per night, all wasted.
+
+### Solution
+Use `bridge.lock` to distinguish standby wake from real failure:
+
+1. On standby-triggered exit: write `exitReason: "standby"` + `exitedAt` to bridge.lock, then exit
+2. On startup: read bridge.lock
+   - If `exitReason === "standby"` and `exitedAt` < 30min ago → **standby wake** → 3-min grace period before starting. If OS sleeps during grace → process dies quietly.
+   - Otherwise → **real failure/restart** → start immediately
+3. On clean startup (deploy, /restart) → no standby marker → immediate start
+4. Bump LaunchAgent ThrottleInterval from 15s to 60s
+
+### Future enhancement
+OS-specific darkwake detection (macOS `pmset -g systemstate`, Linux suspend state) as secondary signal. Not needed now — grace period handles it.
