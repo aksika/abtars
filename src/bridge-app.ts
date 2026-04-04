@@ -10,7 +10,7 @@ import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError, localIso, getLogFile } from "./components/logger.js";
+import { setLogLevel, logInfo, logWarn, logError, logDebug, localIso, getLogFile } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
@@ -759,11 +759,11 @@ export async function startBridge(): Promise<void> {
 
   function spawnSleep(): void {
     if (new Date().getHours() < SLEEP_HOUR) {
-      logInfo("main", `😴 Before SLEEP_TIME (${SLEEP_HOUR}:00) — skip`);
+      logDebug("main", `😴 Before SLEEP_TIME (${SLEEP_HOUR}:00) — skip`);
       return;
     }
     if (hasSleepAuditToday(sleepAuditDir)) {
-      logInfo("main", "😴 Sleep already done today — skip");
+      logDebug("main", "😴 Sleep already done today — skip");
       return;
     }
     if (sleepChild && !sleepChild.killed) return;
