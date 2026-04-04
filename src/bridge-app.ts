@@ -10,6 +10,7 @@ import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
 import { createWatchdogTask } from "./components/watchdog.js";
 import { createSelfHealerTask } from "./components/self-healer.js";
+import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
 import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
@@ -40,8 +41,7 @@ import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 import { CronQueue } from "./components/cron-queue.js";
-import { runCompaction } from "./components/compaction.js";
-import { compactingSessions, setIdleCompactReset, startSession } from "./components/message-pipeline.js";
+import { startSession } from "./components/message-pipeline.js";
 
 
 /** Update context-window-start timestamp for a chat. Used by recall fallback stages. */
@@ -444,101 +444,24 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- DB integrity check (hourly) ---
-  let dbCheckCounter = 0;
-  const CTX_IDLE_COMPACT_PCT = parseInt(process.env["CTX_IDLE_COMPACT_PCT"] ?? "65", 10);
-  const CTX_IDLE_COMPACT_MIN = parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10);
-  let compactedThisIdle = false;
-  setIdleCompactReset(() => { compactedThisIdle = false; });
+  const SLEEP_HOUR = parseInt(process.env["SLEEP_TIME"]?.split(":")[0] ?? "6", 10);
+  const isSleepActive = (): boolean => sleepChild !== null && !sleepChild.killed;
 
   // --- Floating compaction (idle-triggered) ---
-  if (CTX_IDLE_COMPACT_MIN > 0) {
-    heartbeat.registerTask({
-      name: "idle-compact",
-      heavy: true,
-      execute: async () => {
-        if (transport.contextPercent < 0) return false;
-        const pct = transport.contextPercent;
-        if (pct < CTX_IDLE_COMPACT_PCT) return false;
-        if (compactedThisIdle) return false;
-        if (busyChats.size > 0) return false;
-        if (sleepChild && !sleepChild.killed) return false;
-
-        // Check idle time
-        let lastMsgTs = 0;
-        try {
-          const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
-          lastMsgTs = row?.latest ?? 0;
-        } catch { return false; }
-        if (Date.now() - lastMsgTs < CTX_IDLE_COMPACT_MIN * 60 * 1000) return false;
-
-        // Find active session
-        const chatId = [...config.allowedUserIds][0];
-        if (!chatId) return false;
-        const sessionKey = `telegram:${chatId}`;
-
-        logInfo("main", `☕ Floating compaction — ctx at ${pct}%, idle ${Math.round((Date.now() - lastMsgTs) / 60000)}min`);
-        busyChats.add(sessionKey);
-        compactingSessions.add(sessionKey);
-        try {
-          await runCompaction(transport, sessionKey, memory?.getDb() ?? null, memoryConfig.memoryDir);
-          pendingSessionStart.add(sessionKey);
-          compactedThisIdle = true;
-          logInfo("main", "☕ Floating compaction complete");
-        } catch (err) {
-          logWarn("main", `☕ Floating compaction failed: ${err instanceof Error ? err.message : String(err)}`);
-        } finally {
-          busyChats.delete(sessionKey);
-          compactingSessions.delete(sessionKey);
-        }
-        return true;
-      },
-    });
+  if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
+    heartbeat.registerTask(createIdleCompactTask({
+      transport, memory, memoryDir: memoryConfig.memoryDir,
+      allowedUserIds: config.allowedUserIds, busyChats, pendingSessionStart, isSleepActive,
+    }));
   }
 
-  // --- Daily cycle: restart after SLEEP_TIME if bridge started before today's SLEEP_TIME ---
-  heartbeat.registerTask({
-    name: "age-check",
-    execute: async () => {
-      const now = new Date();
-      if (now.getHours() < SLEEP_HOUR) return; // before SLEEP_TIME
-      try {
-        const lockData = JSON.parse(readFileSync(bridgeLockPath, "utf-8"));
-        const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), SLEEP_HOUR).getTime();
-        if (lockData.startedAt >= todaySleepTime) return; // started after today's SLEEP_TIME
-      } catch { return; }
-      // Check idle
-      let lastMsgTs = 0;
-      try {
-        const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
-        lastMsgTs = row?.latest ?? 0;
-      } catch { return; }
-      if (Date.now() - lastMsgTs < 60 * 60 * 1000) return; // <1h idle
-      if (busyChats.size > 0 || (sleepChild && !sleepChild.killed)) return;
+  // --- Daily cycle: restart after SLEEP_TIME ---
+  heartbeat.registerTask(createAgeCheckTask({
+    memory, bridgeLockPath, sleepHour: SLEEP_HOUR, busyChats, isSleepActive,
+    doctorPath: join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh"),
+  }));
 
-      logInfo("main", `🔄 Past SLEEP_TIME (${SLEEP_HOUR}:00) + bridge started before today — daily restart`);
-      writeRestartReason(`daily-cycle: SLEEP_TIME ${SLEEP_HOUR}:00`);
-      try { execSync(`${join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh")} --fix`, { timeout: 30000 }); } catch { /* */ }
-      try { unlinkSync(bridgeLockPath); } catch { /* */ }
-      process.exit(0);
-    },
-  });
-
-  heartbeat.registerTask({
-    name: "db-integrity",
-    execute: async () => {
-      dbCheckCounter++;
-      if (dbCheckCounter % 12 !== 0) return; // every 12 ticks ≈ 1hr
-      if (!memory?.getDb()) return;
-      try {
-        const result = memory.getDb()!.prepare("PRAGMA integrity_check").get() as { integrity_check: string } | undefined;
-        if (result?.integrity_check !== "ok") {
-          logError("db-integrity", `Memory DB integrity check failed: ${result?.integrity_check}`);
-        }
-      } catch (e) {
-        logError("db-integrity", "Integrity check error", e);
-      }
-    },
-  });
+  heartbeat.registerTask(createDbIntegrityTask(memory));
 
   // --- Watchdog: detect stuck agent ---
   if (transport instanceof AcpTransport) {
@@ -573,7 +496,6 @@ export async function startBridge(): Promise<void> {
   // --- Startup sleep (background, with retry) ---
   const SLEEP_MAX_RETRIES = 3;
   const SLEEP_RETRY_MS = 5 * 60 * 1000;
-  const SLEEP_HOUR = parseInt(process.env["SLEEP_TIME"]?.split(":")[0] ?? "6", 10);
   let sleepAttempts = 0;
 
   function spawnSleep(): void {
