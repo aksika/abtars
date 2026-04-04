@@ -103,6 +103,7 @@ function scheduleRetry(entry: CronEntry, isRetry: boolean): void {
 }
 
 export type TaskCompleteCallback = (chatId: number, message: string, result: string) => void;
+export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
 
 interface QueuedJob {
   entry: CronEntry;
@@ -123,10 +124,13 @@ export class CronQueue {
   private timeout: ReturnType<typeof setTimeout> | null = null;
   private readonly cliPath: string;
   private readonly workingDir: string;
+  private readonly onFailInject?: FailInjectCallback;
+  private readonly failCounts = new Map<string, { date: string; count: number }>();
 
-  constructor(cliPath: string, workingDir: string) {
+  constructor(cliPath: string, workingDir: string, onFailInject?: FailInjectCallback) {
     this.cliPath = cliPath;
     this.workingDir = workingDir;
+    this.onFailInject = onFailInject;
   }
 
   /** Currently running job, or null. */
@@ -188,6 +192,21 @@ export class CronQueue {
     
   }
 
+  private tryInjectFailure(entry: CronEntry, result: string): void {
+    if (!this.onFailInject) return;
+    const today = localDate();
+    const key = entry.id;
+    const fc = this.failCounts.get(key);
+    if (fc && fc.date === today && fc.count >= 2) {
+      logInfo(TAG, `Skip auto-fix for "${key}" — already 2 attempts today`);
+      return;
+    }
+    const count = (fc?.date === today ? fc.count : 0) + 1;
+    this.failCounts.set(key, { date: today, count });
+    logInfo(TAG, `Injecting failure to agent for "${key}" (attempt ${count}/2)`);
+    this.onFailInject(entry.id, entry.message, result);
+  }
+
   private runScript(entry: CronEntry, onComplete?: TaskCompleteCallback): void {
     logInfo(TAG, `▶ Script: "${entry.message.slice(0, 60)}"`);
     try {
@@ -203,7 +222,10 @@ export class CronQueue {
         const status = code === 0 ? "✅" : `❌ (exit ${code})`;
         logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
         recordRunToFile(entry.id, code ?? undefined);
-        if (code !== 0) scheduleRetry(entry, !!entry._retrying);
+        if (code !== 0) {
+          scheduleRetry(entry, !!entry._retrying);
+          this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
+        }
         onComplete?.(entry.chatId, entry.message, `${status}\n${(output || "(no output)").slice(0, 500)}`);
         this.clearCurrent();
         this.processNext();
@@ -270,15 +292,20 @@ export class CronQueue {
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         recordRunToFile(entry.id, exitCode);
-        if (exitCode !== 0) scheduleRetry(entry, !!entry._retrying);
         const icon = exitCode === 0 ? "✅" : "❌";
+        if (exitCode !== 0) {
+          scheduleRetry(entry, !!entry._retrying);
+          this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
+        }
         onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`);
       })
       .catch((err) => {
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
         recordRunToFile(entry.id, 1);
         scheduleRetry(entry, !!entry._retrying);
-        onComplete?.(entry.chatId, entry.message, `❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+        const errMsg = `❌ Failed: ${err instanceof Error ? err.message : String(err)}`;
+        this.tryInjectFailure(entry, errMsg);
+        onComplete?.(entry.chatId, entry.message, errMsg);
       })
       .finally(() => {
         transport.destroy();

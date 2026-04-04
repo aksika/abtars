@@ -190,7 +190,12 @@ export async function startBridge(): Promise<void> {
   const nlmConfig = loadNLMConfig();
 
   // CronQueue must be initialized before pipelineDeps (which references it)
-  const cronQueue = new CronQueue(config.agentCliPath, config.workingDir);
+  const cronQueue = new CronQueue(config.agentCliPath, config.workingDir, (entryId, command, result) => {
+    const msg = `[System] Cron task "${entryId}" failed:\nCommand: ${command}\nResult: ${result}\n\nDiagnose and fix if possible. If you can't fix it, tell the user.`;
+    transport.sendPrompt("system:cron-fix", msg).catch(err => {
+      logWarn("main", `Cron auto-fix inject failed: ${err}`);
+    });
+  });
 
   // Build pipeline deps (needed before platform start)
   const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
