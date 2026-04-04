@@ -23,15 +23,15 @@ Operational issues encountered, how they were addressed, and potential future im
 
 ---
 
-## 2. Cron Failures Go Unresolved
+## 2. Task Failures Go Unresolved
 
-**Problem:** When a cron job fails (e.g. `exit 127: command not found`), the error is reported to the user via Telegram but the agent never sees it. The agent is often capable of diagnosing and fixing the issue (wrong path, missing tool, permission error) but has no opportunity to do so.
+**Problem:** When a task fails (e.g. `exit 127: command not found`), the error is reported to the user via Telegram but the agent never sees it. The agent is often capable of diagnosing and fixing the issue (wrong path, missing tool, permission error) but has no opportunity to do so.
 
-**Impact:** User has to manually debug and fix cron issues that the agent could handle autonomously.
+**Impact:** User has to manually debug and fix task issues that the agent could handle autonomously.
 
 **Mitigation (implemented):**
-- On cron failure, error details (command, exit code, stderr) are injected to the main agent transport
-- Agent receives: "Cron task X failed: [details]. Diagnose and fix if possible."
+- On task failure, error details (command, exit code, stderr) are injected to the main agent transport
+- Agent receives: "Task X failed: [details]. Diagnose and fix if possible."
 - Max 2 auto-fix attempts per entry per day to prevent loops
 - User still gets the failure notification via Telegram
 

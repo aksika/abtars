@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CronEntry } from "../cli/agentbridge-cron.js";
+import type { CronEntry } from "../cli/agentbridge-task.js";
 import { writeEntry, readEntries, closeDb } from "./cron-db.js";
 
 const originalHome = process.env.HOME;

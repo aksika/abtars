@@ -220,12 +220,12 @@ echo "exec node \"$AB_HOME/dist/cli/agentbridge-todo.js\" \"\$@\"" >> "$TODO_SCR
 chmod +x "$TODO_SCRIPT"
 ln -sf "$TODO_SCRIPT" "$HOME/.local/bin/agentbridge-todo"
 
-# Deploy agentbridge-cron CLI (time-based reminders and tasks)
-CRON_SCRIPT="$AB_HOME/agentbridge-cron"
+# Deploy agentbridge-task CLI (time-based reminders and tasks)
+CRON_SCRIPT="$AB_HOME/agentbridge-task"
 echo '#!/usr/bin/env bash' > "$CRON_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-cron.js\" \"\$@\"" >> "$CRON_SCRIPT"
+echo "exec node \"$AB_HOME/dist/cli/agentbridge-task.js\" \"\$@\"" >> "$CRON_SCRIPT"
 chmod +x "$CRON_SCRIPT"
-ln -sf "$CRON_SCRIPT" "$HOME/.local/bin/agentbridge-cron"
+ln -sf "$CRON_SCRIPT" "$HOME/.local/bin/agentbridge-task"
 
 # Deploy agentbridge-browse CLI (browser subagent launcher)
 BROWSE_SCRIPT="$AB_HOME/agentbridge-browse"

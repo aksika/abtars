@@ -397,7 +397,7 @@ export async function startBridge(): Promise<void> {
   };
 
   heartbeat.registerTask({
-    name: "cron",
+    name: "tasks",
     execute: async () => {
       const dueTasks = checkCron();
       for (const entry of dueTasks) cronQueue.enqueue(entry, cronCallback);

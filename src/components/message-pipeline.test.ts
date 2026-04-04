@@ -10,6 +10,7 @@ function mockTransport(): IKiroTransport {
     resetSession: vi.fn().mockResolvedValue(undefined),
     sendInterrupt: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
+    transportCommands: [],
     get isReady() { return true; },
   };
 }
@@ -38,7 +39,6 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     memory: null,
     memoryConfig: { memoryEnabled: false, memoryDir: "/tmp" },
     nlmConfig: { enabled: false },
-    sleepQueue: { isActive: false, enqueue: vi.fn(), activate: vi.fn(), deactivate: vi.fn(), replay: vi.fn() } as any,
     idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() } as any,
     conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() } as any,
     config: { agentTransport: "tmux", workingDir: "/tmp" },
@@ -46,6 +46,7 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     sttConfig: null,
     ttsConfig: null,
     busyChats: new Set(),
+    messageQueue: new Map(),
     fullModeChats: new Set(),
     pendingSessionStart: new Set(),
     seenSessions: new Set(),
@@ -103,26 +104,14 @@ describe("handleInboundMessage", () => {
     expect(adapter.sendTyping).toHaveBeenCalled();
   });
 
-  it("queues message when sleep is active", async () => {
-    const adapter = mockAdapter();
-    const sleepQueue = { isActive: true, enqueue: vi.fn().mockReturnValue(true), activate: vi.fn(), deactivate: vi.fn(), replay: vi.fn() } as any;
-    const deps = mockDeps(transport, { sleepQueue });
-
-    await handleInboundMessage(makeMsg(), adapter, deps);
-
-    expect(sleepQueue.enqueue).toHaveBeenCalled();
-    expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("waking up"), expect.any(Object));
-    expect(transport.sendPrompt).not.toHaveBeenCalled();
-  });
-
-  it("rejects busy session", async () => {
+  it("queues message when session is busy", async () => {
     const adapter = mockAdapter();
     const busyChats = new Set(["telegram:100"]);
     const deps = mockDeps(transport, { busyChats });
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("in progress"), expect.any(Object));
+    expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Queued"), expect.any(Object));
     expect(transport.sendPrompt).not.toHaveBeenCalled();
   });
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * agentbridge-cron — schedule time-based reminders and tasks.
+ * agentbridge-task — schedule time-based reminders and tasks.
  *
  * Usage:
- *   agentbridge-cron add --at "2026-03-16T08:00" --message "Remind about cookies" --chat-id 7773842843 --type reminder
- *   agentbridge-cron list
- *   agentbridge-cron remove <id>
+ *   agentbridge-task add --at "2026-03-16T08:00" --message "Remind about cookies" --chat-id 7773842843 --type reminder
+ *   agentbridge-task list
+ *   agentbridge-task remove <id>
  *
  * File: ~/.agentbridge/memory/cron.json
  */
@@ -177,16 +177,16 @@ function showHistory(id: string): void {
 
 export function main(argv: string[] = process.argv): void {
   if (argv.includes('--help')) {
-    console.log(`agentbridge-cron — schedule time-based reminders and tasks.
+    console.log(`agentbridge-task — schedule time-based reminders and tasks.
 
 Usage:
-  agentbridge-cron add --at "2026-03-16T08:00" --message "..." --chat-id ID --type reminder
-  agentbridge-cron add --schedule "0 9 * * *" --message "..." --chat-id ID --type task
-  agentbridge-cron list
-  agentbridge-cron remove <id>
-  agentbridge-cron pause <id>
-  agentbridge-cron resume <id>
-  agentbridge-cron history <id>`);
+  agentbridge-task add --at "2026-03-16T08:00" --message "..." --chat-id ID --type reminder
+  agentbridge-task add --schedule "0 9 * * *" --message "..." --chat-id ID --type task
+  agentbridge-task list
+  agentbridge-task remove <id>
+  agentbridge-task pause <id>
+  agentbridge-task resume <id>
+  agentbridge-task history <id>`);
     process.exit(0);
   }
 
@@ -202,34 +202,34 @@ Usage:
       break;
     case "remove": {
       const id = args[1];
-      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron remove <id>" })); process.exit(1); }
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task remove <id>" })); process.exit(1); }
       remove(id);
       break;
     }
     case "pause": {
       const id = args[1];
-      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron pause <id>" })); process.exit(1); }
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task pause <id>" })); process.exit(1); }
       pause(id);
       break;
     }
     case "resume": {
       const id = args[1];
-      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron resume <id>" })); process.exit(1); }
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task resume <id>" })); process.exit(1); }
       resume(id);
       break;
     }
     case "history": {
       const id = args[1];
-      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron history <id>" })); process.exit(1); }
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task history <id>" })); process.exit(1); }
       showHistory(id);
       break;
     }
     default:
-      console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-cron <add|list|remove|pause|resume|history> [args]" }));
+      console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task <add|list|remove|pause|resume|history> [args]" }));
       process.exit(1);
   }
 }
 
-const isDirectRun = process.argv[1]?.endsWith("agentbridge-cron.ts") ||
-  process.argv[1]?.endsWith("agentbridge-cron.js");
+const isDirectRun = process.argv[1]?.endsWith("agentbridge-task.ts") ||
+  process.argv[1]?.endsWith("agentbridge-task.js");
 if (isDirectRun) main();

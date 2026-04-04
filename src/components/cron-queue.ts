@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { AcpTransport } from "./acp-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
-import type { CronEntry } from "../cli/agentbridge-cron.js";
+import type { CronEntry } from "../cli/agentbridge-task.js";
 import { localDate } from "./env-utils.js";
 
 const TAG = "cron-queue";
@@ -28,7 +28,7 @@ function recordRunToFile(entryId: string, exitCode?: number): void {
 
 function writeResultFile(entryId: string, content: string): string | null {
   try {
-    const dir = join(homedir(), ".agentbridge", "workspace", "cron-results");
+    const dir = join(homedir(), ".agentbridge", "workspace", "task-results");
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `${entryId}_${localDate()}.md`);
     writeFileSync(file, content, "utf-8");

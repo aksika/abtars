@@ -183,7 +183,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
     let listing: string;
     try {
-      const raw = execSync("agentbridge-cron list", { timeout: 5000, encoding: "utf-8" }).trim();
+      const raw = execSync("agentbridge-task list", { timeout: 5000, encoding: "utf-8" }).trim();
       const entries = JSON.parse(raw).entries ?? JSON.parse(raw);
       const active = entries.filter((e: any) => !e.fired && !e.paused);
       // Sort chronologically by schedule time (hour:minute from cron expr)
@@ -249,7 +249,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   if (text.startsWith("/tasks log ") || text.startsWith("/cron log ")) {
     const id = text.replace(/^\/(tasks|cron) log /, "").trim();
     try {
-      const raw = execSync(`agentbridge-cron history ${id}`, { timeout: 5000, encoding: "utf-8" }).trim();
+      const raw = execSync(`agentbridge-task history ${id}`, { timeout: 5000, encoding: "utf-8" }).trim();
       const data = JSON.parse(raw);
       if (!data.ok) { await ctx.reply(`❌ ${data.error}`); return true; }
       const runs = (data.runs as { ranAt: string; exitCode?: number }[]).slice(-5);

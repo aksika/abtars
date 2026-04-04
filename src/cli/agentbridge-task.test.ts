@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const originalHome = process.env.HOME;
 
-describe("agentbridge-cron", () => {
+describe("agentbridge-task", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -26,12 +26,12 @@ describe("agentbridge-cron", () => {
     // Force re-import to pick up new HOME
     const { closeDb } = await import("../components/cron-db.js");
     closeDb();
-    const mod = await import("./agentbridge-cron.js");
+    const mod = await import("./agentbridge-task.js");
     const logs: string[] = [];
     const origLog = console.log;
     console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
     try {
-      mod.main(["node", "agentbridge-cron", ...args]);
+      mod.main(["node", "agentbridge-task", ...args]);
     } finally {
       console.log = origLog;
     }

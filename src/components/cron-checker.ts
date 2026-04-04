@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { logInfo, logWarn } from "./logger.js";
 import { CronExpressionParser } from "cron-parser";
 import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./cron-db.js";
-import type { CronEntry } from "../cli/agentbridge-cron.js";
+import type { CronEntry } from "../cli/agentbridge-task.js";
 
 const TAG = "cron-checker";
 const memoryDir = (): string => join(homedir(), ".agentbridge", "memory");

@@ -22,7 +22,7 @@ For the memory subsystem, see [memory.asbuilt.md](memory.asbuilt.md).
 | **Platform Abstraction** | Telegram + Discord adapters behind a shared `PlatformAdapter` interface and unified message pipeline. |
 | **Memory** | SQLite-backed persistence with FTS5, vector embeddings, CIA-AAA security model, Darwinism, emotion scoring. See [memory.asbuilt.md](memory.asbuilt.md). |
 | **Sleep (Dreamy)** | Overnight maintenance: retrospective, GC, extraction, consolidation, fitness review. See [memory.asbuilt.md](memory.asbuilt.md). |
-| **Cron** | Time-based scheduling for reminders and agent tasks. SQLite storage, sequential CronQueue, priority levels, retry. |
+| **Tasks** | Time-based scheduling for reminders and agent tasks. SQLite storage, sequential queue, priority levels, retry. User-facing: `/tasks`. CLI: `agentbridge-task`. |
 | **Todo** | File-based todo list (`todo.md`). Agent-managed via `agentbridge-todo` CLI. |
 | **Browser (Browsie)** | Detached browser subagent. Headless Chromium in Docker, autonomous navigation, non-blocking. |
 | **Self-Healer** | Heartbeat task scanning `bridge.log` for errors, injecting bug reports to KP via Telegram. |
@@ -143,7 +143,7 @@ Single heartbeat loop controls everything: task scheduling, standby detection, w
 
 **Task registration order:**
 ```
-cron → idle-compact(heavy) → age-check →
+tasks → idle-compact(heavy) → age-check →
 db-integrity → watchdog → restart-check → self-healer →
 browse-checker → skill-reloader → reminder-injector
 ```
