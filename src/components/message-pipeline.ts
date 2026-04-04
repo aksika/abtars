@@ -493,7 +493,20 @@ export async function startSession(
   greeting: string,
   sendResponse: (text: string) => Promise<unknown>,
 ): Promise<void> {
-  let prompt = greeting;
+  const prompt = buildSessionStartPrompt(greeting, memory, chatId);
+  logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
+  const response = await transport.sendPrompt(sessionKey, prompt);
+  if (response?.trim() && response.trim() !== "<NO_REPLY>" && response.trim() !== "(no response)") {
+    await sendResponse(response);
+  }
+}
+
+/** Single path for session-start injection: SOUL + context + restart reason. */
+function buildSessionStartPrompt(
+  prompt: string,
+  memory: MemoryManager,
+  chatId: number,
+): string {
   const soul = loadSoulBundle();
   if (soul) {
     prompt = soul + "\n\n" + prompt;
@@ -509,11 +522,10 @@ export async function startSession(
     prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
     logInfo(TAG, `Injected restart reason: ${reason}`);
   }
-  logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
-  const response = await transport.sendPrompt(sessionKey, prompt);
-  if (response?.trim() && response.trim() !== "<NO_REPLY>" && response.trim() !== "(no response)") {
-    await sendResponse(response);
+  if (prompt.length < 5000) {
+    logWarn(TAG, `Session-start prompt suspiciously small (${prompt.length} chars) — SOUL may be missing`);
   }
+  return prompt;
 }
 
 /** Inject session-start context if pending, record user message. */
@@ -529,24 +541,7 @@ function preparePrompt(
 ): string {
   const isSessionStart = pending.has(sessionKey) || !seen.has(sessionKey);
   if (isSessionStart) {
-    const soul = loadSoulBundle();
-    if (soul) {
-      prompt = soul + "\n\n" + prompt;
-      logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
-    }
-    const ctx = buildSessionStartContext(memory, chatId);
-    if (ctx) {
-      prompt = ctx + "\n\n" + prompt;
-      logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
-    }
-    const reason = readAndClearRestartReason();
-    if (reason) {
-      prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
-      logInfo(TAG, `Injected restart reason: ${reason}`);
-    }
-    if (prompt.length < 5000) {
-      logWarn(TAG, `Session-start prompt suspiciously small (${prompt.length} chars) — SOUL may be missing`);
-    }
+    prompt = buildSessionStartPrompt(prompt, memory, chatId);
   }
   seen.add(sessionKey);
   pending.delete(sessionKey);

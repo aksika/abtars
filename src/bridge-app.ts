@@ -10,7 +10,7 @@ import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError, logDebug, localIso, getLogFile } from "./components/logger.js";
+import { setLogLevel, logInfo, logWarn, logError, logDebug, getLogFile } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
@@ -74,24 +74,6 @@ async function sendBackOnline(
   ]);
   for (const r of results) {
     if (r.status === "rejected") logWarn("main", `Back online send failed: ${r.reason}`);
-  }
-}
-
-/** Send a platform context announcement to the transport so the LLM knows which platform is active. */
-async function announcePlatform(
-  transport: IKiroTransport,
-  platform: string,
-): Promise<void> {
-  // Skip for ACP — creating a system session wastes the --agent first-session slot
-  if (transport instanceof AcpTransport) return;
-  const ts = localIso();
-  const msg = `[SYSTEM] Platform: ${platform} | Connected at: ${ts} | Refer to your CHATS.md steering for ${platform}-specific behavior.`;
-  const sessionKey = `system:${platform.toLowerCase()}`;
-  try {
-    await transport.sendPrompt(sessionKey, msg);
-    logInfo("main", `📢 Announced ${platform} platform to transport`);
-  } catch (err) {
-    logWarn("main", `Failed to announce ${platform} platform: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -247,7 +229,6 @@ export async function startBridge(): Promise<void> {
     const result = await registry.start("telegram");
     if (result.ok) {
       logInfo("main", "📡 Telegram polling started");
-      announcePlatform(transport, "TELEGRAM").catch(() => {});
     } else {
       logError("main", `Telegram failed to start: ${result.error}`);
     }
@@ -287,7 +268,6 @@ export async function startBridge(): Promise<void> {
     const result = await registry.start("discord");
     if (result.ok) {
       logInfo("main", "📡 Discord polling started");
-      announcePlatform(transport, "DISCORD").catch(() => {});
     } else if (result.error?.includes("not configured")) {
       logWarn("main", "Discord flag set but not configured — skipping");
     } else {
@@ -301,7 +281,6 @@ export async function startBridge(): Promise<void> {
 
   // Browser (lazy — IPC starts on first browse task)
   const browserManager = new BrowserManager();
-  if (memory) memory.setBrowserManager(browserManager);
   const allowlist = DomainAllowlist.fromEnv();
   const browserTool = new BrowserTool(browserManager, allowlist);
   let browserIpc: BrowserIpcServer | null = null;

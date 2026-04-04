@@ -8,6 +8,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logError } from "./logger.js";
+import { readEntries as cronReadEntries } from "./cron-db.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import { runCompaction } from "./compaction.js";
 import { resetAndPrepare } from "./message-pipeline.js";
@@ -384,7 +385,7 @@ function buildStatusLines(ctx: CommandContext): string[] {
       if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);
     } catch { /* */ }
     try {
-      const ce = JSON.parse(readFileSync(join(homedir(), ".agentbridge", "memory", "cron.json"), "utf-8")) as Array<{ fired: boolean; schedule?: string; paused?: boolean }>;
+      const ce = cronReadEntries();
       const r = ce.filter(e => e.schedule && !e.paused).length;
       const p = ce.filter(e => !e.fired && !e.schedule).length;
       const pa = ce.filter(e => e.paused).length;

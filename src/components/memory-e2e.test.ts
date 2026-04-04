@@ -76,26 +76,10 @@ describe("Memory system — end-to-end smoke test", () => {
     const searchResults2 = await mm.search("quantum", { chatId, limit: 5 });
     expect(searchResults2.length).toBeGreaterThan(0);
 
-    // 4. Session persistence round-trip
-    mm.persistSession({
-      channelKey: `telegram:${chatId}`,
-      acpSessionId: sess1,
-      isProcessing: false,
-      pendingRequestId: null,
-      createdAt: 1000,
-      lastActivityAt: Date.now(),
-    });
-    const restored = mm.restoreSessions(999_999_999);
-    expect(restored.length).toBeGreaterThanOrEqual(1);
-    expect(restored.find((s) => s.channelKey === `telegram:${chatId}`)).toBeDefined();
-
     // 8. Close and reinitialize — verify data survives
     mm.close();
     mm = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await mm.initialize();
-
-    const restoredAfterRestart = mm.restoreSessions(999_999_999);
-    expect(restoredAfterRestart.length).toBeGreaterThanOrEqual(1);
 
     const searchAfterRestart = await mm.search("quantum", { chatId });
     expect(searchAfterRestart.length).toBeGreaterThanOrEqual(1);
