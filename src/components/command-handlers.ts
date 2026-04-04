@@ -12,10 +12,7 @@ import { readEntries as cronReadEntries } from "./cron-db.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import { runCompaction } from "./compaction.js";
 import { resetAndPrepare } from "./message-pipeline.js";
-import type { IKiroTransport } from "./kiro-transport.js";
-import type { MemoryManager } from "./memory-manager.js";
-import type { CodingMode } from "./coding-mode.js";
-import type { IdleSave } from "./idle-save.js";
+import type { PipelineDeps } from "./message-pipeline.js";
 import type { RunningJob } from "./cron-queue.js";
 
 import type { Platform } from "../types/platform.js";
@@ -27,27 +24,23 @@ export interface CommandContext {
   chatId: number;
   platform: Platform;
   reply: Reply;
-  // Transport
-  transport: IKiroTransport;
-  config: { agentTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
-  startedAt: number;
-  // Memory
-  memory: MemoryManager | null;
-  memoryConfig: { memoryEnabled: boolean; memoryDir: string };
-  nlmConfig: { enabled: boolean; [k: string]: unknown };
-  // Modules
-  codingMode: CodingMode;
-  idleSave: IdleSave;
+  // From PipelineDeps
+  transport: PipelineDeps["transport"];
+  config: PipelineDeps["config"];
+  startedAt: PipelineDeps["startedAt"];
+  memory: PipelineDeps["memory"];
+  memoryConfig: PipelineDeps["memoryConfig"];
+  nlmConfig: PipelineDeps["nlmConfig"];
+  codingMode: PipelineDeps["codingMode"];
+  idleSave: PipelineDeps["idleSave"];
+  busyChats: PipelineDeps["busyChats"];
+  fullModeChats: PipelineDeps["fullModeChats"];
+  pendingSessionStart: PipelineDeps["pendingSessionStart"];
+  updateCtxStart: PipelineDeps["updateCtxStart"];
   cronCurrentJob?: RunningJob | null;
-  enqueueCron?: (entryId: string) => string | null;
-  requestShutdown?: () => void;
-  // Mutable state
-  busyChats: Set<string>;
-  fullModeChats: Set<string>;
-  pendingSessionStart: Set<string>;
-  // Callbacks
-  updateCtxStart: (memoryDir: string, chatId: number) => void;
-  // Group/buffer (optional, for group chats)
+  enqueueCron?: PipelineDeps["enqueueCron"];
+  requestShutdown?: PipelineDeps["requestShutdown"];
+  // Per-message (optional)
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
 }
