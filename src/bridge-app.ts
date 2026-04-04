@@ -149,7 +149,7 @@ export async function startBridge(): Promise<void> {
 
     // Build CLI args based on which CLI is selected
     const cliArgs = config.agentCli === "gemini"
-      ? ["--experimental-acp"]
+      ? ["--acp", "-y"]
       : undefined; // kiro and custom CLIs use default "acp" subcommand
 
     transport = new AcpTransport(config.agentCliPath, config.workingDir, {
