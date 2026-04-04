@@ -14,8 +14,8 @@ import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
 import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
-import { loadMemoryConfig } from "./components/memory-config.js";
-import { MemoryManager } from "./components/memory-manager.js";
+import { loadMemoryConfig } from "./memory/memory-config.js";
+import { MemoryManager } from "./memory/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
 import type { IKiroTransport } from "./components/kiro-transport.js";
 import { parsePlatformFlags } from "./components/cli-flags.js";

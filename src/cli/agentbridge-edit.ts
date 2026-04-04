@@ -14,8 +14,8 @@
  * Output: { "ok": true, "memoriesUpdated": 1, "ids": [42], "fieldsUpdated": ["content_en"] }
  */
 
-import { MemoryManager } from "../components/memory-manager.js";
-import { loadMemoryConfig } from "../components/memory-config.js";
+import { MemoryManager } from "../memory/memory-manager.js";
+import { loadMemoryConfig } from "../memory/memory-config.js";
 import type { EditMemoryParams } from "../types/index.js";
 import { appendFileSync } from "node:fs";
 import { homedir } from "node:os";

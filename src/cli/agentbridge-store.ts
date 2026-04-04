@@ -23,8 +23,8 @@
  *   { "stored": false, "error": "content-en is required" }
  */
 
-import { MemoryManager } from "../components/memory-manager.js";
-import { loadMemoryConfig } from "../components/memory-config.js";
+import { MemoryManager } from "../memory/memory-manager.js";
+import { loadMemoryConfig } from "../memory/memory-config.js";
 import type { InstantStoreParams } from "../types/index.js";
 import { appendFileSync } from "node:fs";
 import { homedir } from "node:os";

@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { MemoryConfig } from "./memory-config.js";
+import type { MemoryConfig } from "../memory/memory-config.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { logInfo, logWarn, logError } from "./logger.js";

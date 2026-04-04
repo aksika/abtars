@@ -21,8 +21,8 @@
 
 import { join, basename } from "node:path";
 import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { MemoryManager } from "../components/memory-manager.js";
-import { loadMemoryConfig } from "../components/memory-config.js";
+import { MemoryManager } from "../memory/memory-manager.js";
+import { loadMemoryConfig } from "../memory/memory-config.js";
 import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
 import { loadSleepSteps, buildSleepVars, substituteVars } from "../components/sleep-prompt-loader.js";
 import { buildDailySummary, writeDailyFile } from "../components/sleep-daily-summary.js";
@@ -184,7 +184,7 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
   // 5. Batch embed NULL embeddings
   try {
     if (process.env["EMBEDDING_ENABLED"] === "true") {
-      const { loadEmbedConfig, embedText: embedFn } = await import("../components/ollama-embed.js");
+      const { loadEmbedConfig, embedText: embedFn } = await import("../memory/ollama-embed.js");
       const cfg = loadEmbedConfig();
       if (cfg.enabled) {
         const rows = db.prepare("SELECT id, content_en FROM extracted_memories WHERE embedding IS NULL").all() as Array<{ id: number; content_en: string }>;

@@ -5,7 +5,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { localDate } from "./env-utils.js";
+import { localDate } from "../components/env-utils.js";
 import type Database from "better-sqlite3";
 
 /** Build memory context block from DB + filesystem. */

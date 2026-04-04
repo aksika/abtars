@@ -8,10 +8,10 @@ import { MessageStore } from "./message-store.js";
 import { MemoryEditor } from "./memory-editor.js";
 import { MaintenanceService } from "./maintenance-service.js";
 import { loadEmbedConfig } from "./ollama-embed.js";
-import { HeartbeatSystem } from "./heartbeat-system.js";
+import { HeartbeatSystem } from "../components/heartbeat-system.js";
 import { getLatestConsolidationFile } from "./consolidation-search.js";
 import type { SearchResult, SearchOptions } from "../types/index.js";
-import { logError, logInfo, logWarn } from "./logger.js";
+import { logError, logInfo, logWarn } from "../components/logger.js";
 
 const TAG = "memory-manager";
 

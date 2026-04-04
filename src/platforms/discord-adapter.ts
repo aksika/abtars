@@ -11,13 +11,13 @@ import { ResponseFormatter } from "../components/response-formatter.js";
 import { A2ARouter } from "../components/a2a-router.js";
 import { interceptLargeMessage } from "../components/message-interceptor.js";
 import { formatReactionSignal } from "../components/reaction-signal.js";
-import { emojiToScore } from "../components/emotion-utils.js";
+import { emojiToScore } from "../memory/emotion-utils.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
 import { handleInboundMessage, type PipelineDeps } from "../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../types/platform.js";
 import type { DiscordInboundMessage } from "../types/index.js";
 import type { IKiroTransport } from "../components/kiro-transport.js";
-import type { MemoryManager } from "../components/memory-manager.js";
+import type { MemoryManager } from "../memory/memory-manager.js";
 import type { ConversationBuffer } from "../components/conversation-buffer.js";
 
 const TAG = "discord";

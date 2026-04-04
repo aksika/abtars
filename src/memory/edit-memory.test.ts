@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { MemoryManager } from "../components/memory-manager.js";
-import { initializeDatabase } from "../components/memory-db.js";
+import { MemoryManager } from "./memory-manager.js";
+import { initializeDatabase } from "./memory-db.js";
 import { makeMemoryTestConfig } from "../tests/helpers.js";
 
 function insertMemory(

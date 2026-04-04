@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { logInfo } from "./logger.js";
+import { logInfo } from "../components/logger.js";
 
 const TAG = "memory-db";
 

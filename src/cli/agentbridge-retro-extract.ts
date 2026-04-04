@@ -11,8 +11,8 @@
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { MemoryManager } from "../components/memory-manager.js";
-import { loadMemoryConfig } from "../components/memory-config.js";
+import { MemoryManager } from "../memory/memory-manager.js";
+import { loadMemoryConfig } from "../memory/memory-config.js";
 import type { InstantStoreParams } from "../types/index.js";
 
 const TAG = "retro-extract";

@@ -6,11 +6,11 @@
  */
 
 import type Database from "better-sqlite3";
-import type { MemoryIndex } from "./memory-index.js";
+import type { MemoryIndex } from "../memory/memory-index.js";
 import { logWarn } from "./logger.js";
 import type { MemorySearchResponse } from "./dashboard-config.js";
-import { recallSearch } from "./recall-engine.js";
-import type { RecallHit } from "./recall-engine.js";
+import { recallSearch } from "../memory/recall-engine.js";
+import type { RecallHit } from "../memory/recall-engine.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 

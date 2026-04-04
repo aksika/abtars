@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
-import type { MemoryConfig } from "./memory-config.js";
+import type { MemoryConfig } from "../memory/memory-config.js";
 
 export type Reflection = {
   channelKey: string;
