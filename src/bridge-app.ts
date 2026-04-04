@@ -508,14 +508,16 @@ export async function startBridge(): Promise<void> {
     });
   }
 
-  // --- 24h fallback: restart if bridge running >24h and idle >1h ---
+  // --- Daily cycle: restart after SLEEP_TIME if bridge started before today's SLEEP_TIME ---
   heartbeat.registerTask({
     name: "age-check",
     execute: async () => {
+      const now = new Date();
+      if (now.getHours() < SLEEP_HOUR) return; // before SLEEP_TIME
       try {
         const lockData = JSON.parse(readFileSync(bridgeLockPath, "utf-8"));
-        const age = Date.now() - lockData.startedAt;
-        if (age < 24 * 60 * 60 * 1000) return; // <24h
+        const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), SLEEP_HOUR).getTime();
+        if (lockData.startedAt >= todaySleepTime) return; // started after today's SLEEP_TIME
       } catch { return; }
       // Check idle
       let lastMsgTs = 0;
@@ -526,8 +528,8 @@ export async function startBridge(): Promise<void> {
       if (Date.now() - lastMsgTs < 60 * 60 * 1000) return; // <1h idle
       if (busyChats.size > 0 || (sleepChild && !sleepChild.killed)) return;
 
-      logInfo("main", `🔄 Bridge age >24h + idle >1h — preventive restart`);
-      writeRestartReason("age-restart: >24h uptime");
+      logInfo("main", `🔄 Past SLEEP_TIME (${SLEEP_HOUR}:00) + bridge started before today — daily restart`);
+      writeRestartReason(`daily-cycle: SLEEP_TIME ${SLEEP_HOUR}:00`);
       try { execSync(`${join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh")} --fix`, { timeout: 30000 }); } catch { /* */ }
       try { unlinkSync(bridgeLockPath); } catch { /* */ }
       process.exit(0);
@@ -752,9 +754,14 @@ export async function startBridge(): Promise<void> {
   // --- Startup sleep (background, with retry) ---
   const SLEEP_MAX_RETRIES = 3;
   const SLEEP_RETRY_MS = 5 * 60 * 1000;
+  const SLEEP_HOUR = parseInt(process.env["SLEEP_TIME"]?.split(":")[0] ?? "6", 10);
   let sleepAttempts = 0;
 
   function spawnSleep(): void {
+    if (new Date().getHours() < SLEEP_HOUR) {
+      logInfo("main", `😴 Before SLEEP_TIME (${SLEEP_HOUR}:00) — skip`);
+      return;
+    }
     if (hasSleepAuditToday(sleepAuditDir)) {
       logInfo("main", "😴 Sleep already done today — skip");
       return;
