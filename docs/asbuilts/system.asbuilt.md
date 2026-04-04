@@ -120,7 +120,8 @@ Entity clusters: memories sharing entities gravitate together with connecting li
 1. Kill orphaned `kiro-cli acp` processes from previous runs
 2. Initialize transport (ACP or tmux)
 3. Initialize memory, browser, platforms
-4. Create `bridge.lock` (`{pid, startedAt}`) — tracks bridge lifecycle
+4. Read `bridge.lock` — if `exitReason === "standby"` and recent (< 30min) → 3-min grace period (if OS sleeps during grace, process dies quietly)
+5. Create `bridge.lock` (`{pid, startedAt}`) — tracks bridge lifecycle
 5. `startSession()` — inject SOUL + context + greeting → agent comes online
 6. Start heartbeat (clock-synced, ≥3min guard before first tick)
 7. Spawn sleep if not done today (`hasSleepAuditToday()` guard, 3 retries via setTimeout)
@@ -132,11 +133,13 @@ Single heartbeat loop controls everything: task scheduling, standby detection, w
 
 **Clock-synced:** Ticks aligned to wall-clock boundaries (`:00`, `:05`, `:10`...) based on interval. First tick delayed ≥3min from startup for network/service stabilization.
 
-**Standby detection:** Tracks `lastTickAt`. If gap between ticks > interval×3 (~15min), process was suspended (Mac standby or HB bug). Triggers: `doctor --fix` → delete `bridge.lock` → `process.exit(0)` → LaunchAgent restarts fresh.
+**Standby detection:** Tracks `lastTickAt`. If gap between ticks > interval×3 (~15min), process was suspended (Mac standby or HB bug). Triggers: `doctor --fix` → write `exitReason: "standby"` to `bridge.lock` → `process.exit(0)` → LaunchAgent restarts.
+
+**Standby grace period:** On startup, if `bridge.lock` has `exitReason === "standby"` and `exitedAt` < 30min ago → wait 3 minutes before starting. Prevents wasted restarts during brief Power Nap wakes. If OS sleeps during grace → process dies quietly.
 
 **24h fallback:** `age-check` task — if `bridge.lock.startedAt` >24h AND idle >1h → same doctor + restart sequence. Covers always-on (no standby).
 
-**bridge.lock:** `~/.agentbridge/bridge.lock` — created on startup, deleted before restart. No lock on startup = fresh start.
+**bridge.lock:** `~/.agentbridge/bridge.lock` — created on startup with `{pid, startedAt}`. On standby exit: `{pid, startedAt, exitReason: "standby", exitedAt}`. LaunchAgent ThrottleInterval: 60s.
 
 **Task registration order:**
 ```
