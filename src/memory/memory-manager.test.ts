@@ -6,159 +6,10 @@ import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
 import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
 import type { MemoryConfig } from "./memory-config.js";
-import type { SessionState, MessageRecord } from "../types/index.js";
+import type { MessageRecord } from "../types/index.js";
 import { MemoryIndex } from "./memory-index.js";
 import { initializeDatabase } from "./memory-db.js";
 import { makeMemoryTestConfig } from "../tests/helpers.js";
-
-function makeSession(overrides: Partial<SessionState> = {}): SessionState {
-  return {
-    channelKey: "telegram:100",
-    acpSessionId: "sess-001",
-    isProcessing: false,
-    pendingRequestId: null,
-    createdAt: Date.now() - 60_000,
-    lastActivityAt: Date.now(),
-    ...overrides,
-  };
-}
-
-describe("MemoryManager — session CRUD", () => {
-  let tmpDir: string;
-  let manager: MemoryManager;
-
-  beforeEach(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), "mm-test-"));
-    manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
-    await manager.initialize();
-  });
-
-  afterEach(() => {
-    manager.close();
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("initialize creates database", () => {
-    expect(existsSync(join(tmpDir, "memory.db"))).toBe(true);
-  });
-
-  it("persistSession inserts a session row", async () => {
-    const session = makeSession({ channelKey: "telegram:42", acpSessionId: "abc-123" });
-    manager.persistSession(session);
-
-    const restored = manager.restoreSessions(999_999_999);
-    expect(restored).toHaveLength(1);
-    expect(restored[0]!.channelKey).toBe("telegram:42");
-    expect(restored[0]!.acpSessionId).toBe("abc-123");
-    expect(restored[0]!.createdAt).toBe(session.createdAt);
-    expect(restored[0]!.lastActivityAt).toBe(session.lastActivityAt);
-  });
-
-  it("touchSession updates lastActivityAt", async () => {
-    const session = makeSession({ channelKey: "telegram:10", acpSessionId: "s1", lastActivityAt: 1000 });
-    manager.persistSession(session);
-
-    manager.touchSession("telegram:10", "s1");
-
-    const restored = manager.restoreSessions(999_999_999);
-    expect(restored).toHaveLength(1);
-    // touchSession sets lastActivityAt to Date.now(), which should be > 1000
-    expect(restored[0]!.lastActivityAt).toBeGreaterThan(1000);
-  });
-
-  it("deactivateSession sets is_active to 0", async () => {
-    const session = makeSession({ channelKey: "telegram:20", acpSessionId: "s2" });
-    manager.persistSession(session);
-
-    manager.deactivateSession("telegram:20", "s2");
-
-    // Deactivated session should not appear in restoreSessions
-    const restored = manager.restoreSessions(999_999_999);
-    expect(restored).toHaveLength(0);
-  });
-
-  it("restoreSessions returns only active sessions within threshold", async () => {
-    const now = Date.now();
-
-    // Recent active session
-    manager.persistSession(
-      makeSession({ channelKey: "telegram:1", acpSessionId: "recent", lastActivityAt: now - 1000 }),
-    );
-    // Old active session (beyond threshold)
-    manager.persistSession(
-      makeSession({ channelKey: "telegram:2", acpSessionId: "old", lastActivityAt: now - 100_000 }),
-    );
-    // Recent but deactivated session
-    manager.persistSession(
-      makeSession({ channelKey: "telegram:3", acpSessionId: "inactive", lastActivityAt: now - 1000 }),
-    );
-    manager.deactivateSession("telegram:3", "inactive");
-
-    // Threshold of 50_000ms — only the recent active session qualifies
-    const restored = manager.restoreSessions(50_000);
-    expect(restored).toHaveLength(1);
-    expect(restored[0]!.channelKey).toBe("telegram:1");
-    expect(restored[0]!.acpSessionId).toBe("recent");
-  });
-
-  it("restoreSessions excludes inactive sessions", async () => {
-    manager.persistSession(makeSession({ channelKey: "telegram:5", acpSessionId: "a1" }));
-    manager.persistSession(makeSession({ channelKey: "telegram:6", acpSessionId: "a2" }));
-
-    manager.deactivateSession("telegram:5", "a1");
-
-    const restored = manager.restoreSessions(999_999_999);
-    expect(restored).toHaveLength(1);
-    expect(restored[0]!.channelKey).toBe("telegram:6");
-  });
-
-  it("all methods are no-ops when memoryEnabled is false", async () => {
-    const disabledManager = new MemoryManager(makeMemoryTestConfig(tmpDir, { memoryEnabled: false }));
-    await disabledManager.initialize();
-
-    // These should all return without error
-    disabledManager.persistSession(makeSession());
-    disabledManager.touchSession("telegram:1", "s1");
-    disabledManager.deactivateSession("telegram:1", "s1");
-    const restored = disabledManager.restoreSessions(999_999_999);
-    expect(restored).toEqual([]);
-
-    disabledManager.close();
-  });
-
-  it("close() closes the database", async () => {
-    // After close, operations should be no-ops (db is null)
-    manager.close();
-
-    // These should not throw
-    manager.persistSession(makeSession());
-    manager.touchSession("telegram:1", "s1");
-    manager.deactivateSession("telegram:1", "s1");
-    const restored = manager.restoreSessions(999_999_999);
-    expect(restored).toEqual([]);
-  });
-
-  it("persistSession upserts on duplicate key", async () => {
-    const now = Date.now();
-    const session1 = makeSession({
-      channelKey: "telegram:50",
-      acpSessionId: "dup",
-      lastActivityAt: now - 5000,
-    });
-    manager.persistSession(session1);
-
-    const session2 = makeSession({
-      channelKey: "telegram:50",
-      acpSessionId: "dup",
-      lastActivityAt: now - 1000,
-    });
-    manager.persistSession(session2);
-
-    const restored = manager.restoreSessions(999_999_999);
-    expect(restored).toHaveLength(1);
-    expect(restored[0]!.lastActivityAt).toBe(now - 1000);
-  });
-});
 
 describe("MemoryManager — enforceDiskBudget", () => {
   let tmpDir: string;
@@ -184,7 +35,7 @@ describe("MemoryManager — enforceDiskBudget", () => {
       makeMemoryTestConfig(tmpDir, { diskBudgetBytes: 100 * 1024 * 1024 }),
     );
     await bigBudgetManager.initialize();
-    expect(() => bigBudgetManager.enforceDiskBudget()).not.toThrow();
+    expect(() => bigBudgetManager.maintenance.enforceDiskBudget()).not.toThrow();
     bigBudgetManager.close();
   });
 
@@ -193,7 +44,7 @@ describe("MemoryManager — enforceDiskBudget", () => {
       makeMemoryTestConfig(tmpDir, { memoryEnabled: false, diskBudgetBytes: 1 }),
     );
     await disabledManager.initialize();
-    expect(() => disabledManager.enforceDiskBudget()).not.toThrow();
+    expect(() => disabledManager.maintenance?.enforceDiskBudget()).not.toThrow();
     disabledManager.close();
   });
 });
@@ -395,7 +246,7 @@ describe("MemoryManager — checkAutoCompact", () => {
       makeRecord({ content: "hi", chatId: 1, sessionId: "s1", timestamp: 1000 }),
     );
 
-    await manager.checkAutoCompact({
+    await manager.maintenance.checkAutoCompact({
       chatId: 1,
       sessionId: "s1",
       contextPercent: 50,
@@ -420,7 +271,7 @@ describe("MemoryManager — checkAutoCompact", () => {
       return "compacted";
     };
 
-    await manager.checkAutoCompact({
+    await manager.maintenance.checkAutoCompact({
       chatId: 10,
       sessionId: "s1",
       contextPercent: 90,
@@ -441,7 +292,7 @@ describe("MemoryManager — checkAutoCompact", () => {
     );
     await disabledManager.initialize();
 
-    await disabledManager.checkAutoCompact({
+    await disabledManager.maintenance?.checkAutoCompact({
       chatId: 1,
       sessionId: "s1",
       contextPercent: 95,
@@ -468,7 +319,7 @@ describe("MemoryManager — checkAutoCompact", () => {
 
     // Should not throw — error is logged and raw transcript already saved as safety net
     await expect(
-      manager.checkAutoCompact({
+      manager.maintenance.checkAutoCompact({
         chatId: 20,
         sessionId: "s1",
         contextPercent: 90,
@@ -480,7 +331,7 @@ describe("MemoryManager — checkAutoCompact", () => {
   it("does nothing when no messages exist for session", async () => {
     // Call with a chatId/sessionId that has no messages
     await expect(
-      manager.checkAutoCompact({
+      manager.maintenance.checkAutoCompact({
         chatId: 999,
         sessionId: "nonexistent",
         contextPercent: 90,
@@ -501,7 +352,7 @@ describe("MemoryManager — checkAutoCompact", () => {
     };
 
     // contextPercent == threshold (85) should trigger (>= check)
-    await manager.checkAutoCompact({
+    await manager.maintenance.checkAutoCompact({
       chatId: 30,
       sessionId: "s1",
       contextPercent: 85,

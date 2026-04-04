@@ -1,6 +1,6 @@
 import type { BrowserManager } from "./browser-manager.js";
 import { extractTextFromHtml, extractTextFromPage } from "./content-extractor.js";
-import { parseIntEnv, parseStringEnv } from "./env-utils.js";
+import { parseNumberEnv, parseStringEnv } from "./env-utils.js";
 
 // ---------------------------------------------------------------------------
 // Constants & env-var parsing
@@ -25,8 +25,8 @@ interface WebScraperConfig {
  */
 export function parseWebScraperConfig(): WebScraperConfig {
   return {
-    fetchTimeoutMs: parseIntEnv("WEB_SCRAPE_FETCH_TIMEOUT_MS", 15_000),
-    playwrightTimeoutMs: parseIntEnv("WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_MS", 30_000),
+    fetchTimeoutMs: parseNumberEnv("WEB_SCRAPE_FETCH_TIMEOUT_MS", 15_000),
+    playwrightTimeoutMs: parseNumberEnv("WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_MS", 30_000),
     userAgent: parseStringEnv(
       "WEB_SCRAPE_USER_AGENT",
       "Mozilla/5.0 (compatible; AgentBridge/1.0)",

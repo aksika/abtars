@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { MessageRecord, SearchResult } from "../types/index.js";
 import type { ExtractedMemory, MemorySearchResult } from "../types/memory.js";
-import { logWarn } from "./logger.js";
+import { logWarn } from "../components/logger.js";
 
 /** Weight applied to the log1p emotion boost in search ranking. */
 export const EMOTION_BOOST_WEIGHT = 0.5;
@@ -40,6 +40,43 @@ export function sanitizeFtsQuery(query: string, mode: "or" | "and" = "and"): str
   if (tokens.length === 0) return "";
   const joiner = mode === "or" ? " OR " : " ";
   return tokens.map((t) => `"${t.replace(/"/g, "")}"*`).join(joiner);
+}
+
+/** Row shape returned by extracted memory FTS queries. */
+type ExtractedFtsRow = {
+  id: number; content_en: string; content_original: string; memory_type: string;
+  created_at: number; preserve_original: number; emotion_score: number;
+  recall_count: number; relevance_score: number; source_message_ids: string | null;
+  trust: number | null; integrity: number | null; credibility: number | null;
+  classification: number | null; rank: number;
+};
+
+/** Compute final score for an extracted memory FTS row. */
+function scoreExtractedRow(row: ExtractedFtsRow, baseScore: number): number {
+  const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
+  const recallBoost = 0.1 * (row.recall_count ?? 0);
+  const relevanceBoost = (row.relevance_score ?? 0) > 0 ? 0.2 : 0;
+  const trustFactor = 0.5 + 0.5 * (row.trust ?? 0) / 3;
+  const credibilityFactor = (row.credibility !== null && row.credibility <= 2) ? 1.25 : 1;
+  return (baseScore + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * trustFactor * credibilityFactor * recencyFactor(row.created_at, row.emotion_score);
+}
+
+/** Map an extracted memory FTS row to a MemorySearchResult. */
+function mapExtractedRow(row: ExtractedFtsRow, score: number): MemorySearchResult {
+  return {
+    id: row.id,
+    content: row.content_en,
+    content_original: row.content_original,
+    memory_type: row.memory_type,
+    created_at: row.created_at,
+    source_message_ids: row.source_message_ids ?? undefined,
+    trust: row.trust ?? 0,
+    integrity: row.integrity ?? 2,
+    credibility: row.credibility ?? 6,
+    classification: row.classification ?? 1,
+    tier: "extracted" as const,
+    score,
+  };
 }
 
 /**
@@ -311,44 +348,9 @@ export class MemoryIndex {
         LIMIT ?
       `;
 
-      const rows = this.db.prepare(sql).all(...params) as Array<{
-        id: number;
-        content_en: string;
-        content_original: string;
-        memory_type: string;
-        created_at: number;
-        preserve_original: number;
-        emotion_score: number;
-        recall_count: number;
-        relevance_score: number;
-        source_message_ids: string | null;
-        trust: number | null;
-        integrity: number | null;
-        credibility: number | null;
-        classification: number | null;
-        rank: number;
-      }>;
+      const rows = this.db.prepare(sql).all(...params) as ExtractedFtsRow[];
 
-      return rows.map((row) => {
-        const bm25Score = Math.abs(row.rank);
-        const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
-        const recallBoost = 0.1 * (row.recall_count ?? 0);
-        const relevanceBoost = (row.relevance_score ?? 0) > 0 ? 0.2 : 0;
-        return {
-          id: row.id,
-          content: row.content_en,
-          content_original: row.content_original,
-          memory_type: row.memory_type,
-          created_at: row.created_at,
-          source_message_ids: row.source_message_ids ?? undefined,
-          trust: row.trust ?? 0,
-          integrity: row.integrity ?? 2,
-          credibility: row.credibility ?? 6,
-          classification: row.classification ?? 1,
-          tier: "extracted" as const,
-          score: (bm25Score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * (0.5 + 0.5 * (row.trust ?? 0) / 3) * (row.credibility !== null && row.credibility <= 2 ? 1.25 : 1) * recencyFactor(row.created_at, row.emotion_score),
-        };
-      });
+      return rows.map((row) => mapExtractedRow(row, scoreExtractedRow(row, Math.abs(row.rank))));
     } catch (err) {
       logWarn("memory-index", `searchExtracted failed: ${err instanceof Error ? err.message : String(err)}`);
       return [];
@@ -406,49 +408,15 @@ export class MemoryIndex {
         LIMIT ?
       `;
 
-      const rows = this.db.prepare(sql).all(...params) as Array<{
-        id: number;
-        content_en: string;
-        content_original: string;
-        memory_type: string;
-        created_at: number;
-        preserve_original: number;
-        emotion_score: number;
-        recall_count: number;
-        relevance_score: number;
-        source_message_ids: string | null;
-        trust: number | null;
-        integrity: number | null;
-        credibility: number | null;
-        classification: number | null;
-        rank: number;
-      }>;
+      const rows = this.db.prepare(sql).all(...params) as ExtractedFtsRow[];
 
       const boostPreserved = opts?.boostPreserved ?? false;
 
       return rows.map((row) => {
-        let score = Math.abs(row.rank);
-        if (boostPreserved && row.preserve_original === 1) {
-          score *= 1.5;
-        }
-        const emotionBoost = EMOTION_BOOST_WEIGHT * Math.log(1 + Math.abs(row.emotion_score));
-        const recallBoost = 0.1 * (row.recall_count ?? 0);
-        const relevanceBoost = (row.relevance_score ?? 0) > 0 ? 0.2 : 0;
-        score = (score + emotionBoost) * (1 + recallBoost) * (1 + relevanceBoost) * (0.5 + 0.5 * (row.trust ?? 0) / 3) * (row.credibility !== null && row.credibility <= 2 ? 1.25 : 1) * recencyFactor(row.created_at, row.emotion_score);
-        return {
-          id: row.id,
-          content: row.content_en,
-          content_original: row.content_original,
-          memory_type: row.memory_type,
-          created_at: row.created_at,
-          source_message_ids: row.source_message_ids ?? undefined,
-          trust: row.trust ?? 0,
-          integrity: row.integrity ?? 2,
-          credibility: row.credibility ?? 6,
-          classification: row.classification ?? 1,
-          tier: "extracted" as const,
-          score,
-        };
+        const base = boostPreserved && row.preserve_original === 1
+          ? Math.abs(row.rank) * 1.5
+          : Math.abs(row.rank);
+        return mapExtractedRow(row, scoreExtractedRow(row, base));
       });
     } catch (err) {
       logWarn("memory-index", `searchOriginal failed: ${err instanceof Error ? err.message : String(err)}`);

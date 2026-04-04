@@ -6,7 +6,7 @@ import { createHmac, randomBytes } from "crypto";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./kiro-transport.js";
 import { AcpTransport } from "./acp-transport.js";
-import { MemoryManager } from "./memory-manager.js";
+import { MemoryManager } from "../memory/memory-manager.js";
 import { scanPrompt } from "./prompt-scanner.js";
 import { logInfo, logWarn } from "./logger.js";
 import { localDate } from "./env-utils.js";

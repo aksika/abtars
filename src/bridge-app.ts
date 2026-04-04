@@ -8,11 +8,14 @@ import { AGENT_BRIDGE_HOME } from "./components/config.js";
 
 import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
+import { createWatchdogTask } from "./components/watchdog.js";
+import { createSelfHealerTask } from "./components/self-healer.js";
+import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError, logDebug, localIso, getLogFile } from "./components/logger.js";
-import { loadMemoryConfig } from "./components/memory-config.js";
-import { MemoryManager } from "./components/memory-manager.js";
+import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
+import { loadMemoryConfig } from "./memory/memory-config.js";
+import { MemoryManager } from "./memory/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
 import type { IKiroTransport } from "./components/kiro-transport.js";
 import { parsePlatformFlags } from "./components/cli-flags.js";
@@ -36,11 +39,9 @@ import { BrowserIpcServer } from "./components/browser-ipc-server.js";
 import { DomainAllowlist } from "./components/domain-allowlist.js";
 import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
-import { SleepQueue } from "./components/sleep-queue.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 import { CronQueue } from "./components/cron-queue.js";
-import { runCompaction } from "./components/compaction.js";
-import { compactingSessions, setIdleCompactReset, startSession } from "./components/message-pipeline.js";
+import { startSession } from "./components/message-pipeline.js";
 
 
 /** Update context-window-start timestamp for a chat. Used by recall fallback stages. */
@@ -75,24 +76,6 @@ async function sendBackOnline(
   ]);
   for (const r of results) {
     if (r.status === "rejected") logWarn("main", `Back online send failed: ${r.reason}`);
-  }
-}
-
-/** Send a platform context announcement to the transport so the LLM knows which platform is active. */
-async function announcePlatform(
-  transport: IKiroTransport,
-  platform: string,
-): Promise<void> {
-  // Skip for ACP — creating a system session wastes the --agent first-session slot
-  if (transport instanceof AcpTransport) return;
-  const ts = localIso();
-  const msg = `[SYSTEM] Platform: ${platform} | Connected at: ${ts} | Refer to your CHATS.md steering for ${platform}-specific behavior.`;
-  const sessionKey = `system:${platform.toLowerCase()}`;
-  try {
-    await transport.sendPrompt(sessionKey, msg);
-    logInfo("main", `📢 Announced ${platform} platform to transport`);
-  } catch (err) {
-    logWarn("main", `Failed to announce ${platform} platform: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -166,7 +149,6 @@ export async function startBridge(): Promise<void> {
   }
 
   // Sleep state
-  const sleepQueue = new SleepQueue();
   let sleepChild: import("node:child_process").ChildProcess | null = null;
   const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
   const sleepAuditDir = join(memoryConfig.memoryDir, "sleep");
@@ -200,7 +182,7 @@ export async function startBridge(): Promise<void> {
   // Build pipeline deps (needed before platform start)
   const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
     transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
-    sleepQueue, idleSave, conversationBuffer, config, startedAt,
+    idleSave, conversationBuffer, config, startedAt,
     sttConfig, ttsConfig,
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
     messageQueue: new Map(),
@@ -213,6 +195,7 @@ export async function startBridge(): Promise<void> {
         return null;
       } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
     },
+    requestShutdown: () => process.exit(0),
   };
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
@@ -248,7 +231,6 @@ export async function startBridge(): Promise<void> {
     const result = await registry.start("telegram");
     if (result.ok) {
       logInfo("main", "📡 Telegram polling started");
-      announcePlatform(transport, "TELEGRAM").catch(() => {});
     } else {
       logError("main", `Telegram failed to start: ${result.error}`);
     }
@@ -288,7 +270,6 @@ export async function startBridge(): Promise<void> {
     const result = await registry.start("discord");
     if (result.ok) {
       logInfo("main", "📡 Discord polling started");
-      announcePlatform(transport, "DISCORD").catch(() => {});
     } else if (result.error?.includes("not configured")) {
       logWarn("main", "Discord flag set but not configured — skipping");
     } else {
@@ -302,7 +283,6 @@ export async function startBridge(): Promise<void> {
 
   // Browser (lazy — IPC starts on first browse task)
   const browserManager = new BrowserManager();
-  if (memory) memory.setBrowserManager(browserManager);
   const allowlist = DomainAllowlist.fromEnv();
   const browserTool = new BrowserTool(browserManager, allowlist);
   let browserIpc: BrowserIpcServer | null = null;
@@ -348,11 +328,19 @@ export async function startBridge(): Promise<void> {
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
         seenSessions.add(sessionKey);
-        await startSession(
+        let sessionReady = false;
+        startSession(
           transport, memory, chatId, sessionKey,
           "You just came online. Output ONLY a personalized greeting message.",
           (text) => (telegramAdapter as import("./platforms/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
-        ).catch(err => logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`));
+        ).then(() => { sessionReady = true; })
+         .catch(err => { sessionReady = true; logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`); });
+        // Wait for session to be ready before accepting messages (Gemini can take minutes for large SOUL)
+        const waitStart = Date.now();
+        while (!sessionReady && Date.now() - waitStart < 5 * 60 * 1000) {
+          await new Promise(r => setTimeout(r, 500));
+        }
+        if (!sessionReady) logWarn("main", "Startup session timed out (5min) — proceeding anyway");
       }
     }
   }
@@ -456,199 +444,28 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- DB integrity check (hourly) ---
-  let dbCheckCounter = 0;
-  const CTX_IDLE_COMPACT_PCT = parseInt(process.env["CTX_IDLE_COMPACT_PCT"] ?? "65", 10);
-  const CTX_IDLE_COMPACT_MIN = parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10);
-  let compactedThisIdle = false;
-  setIdleCompactReset(() => { compactedThisIdle = false; });
+  const SLEEP_HOUR = parseInt(process.env["SLEEP_TIME"]?.split(":")[0] ?? "6", 10);
+  const isSleepActive = (): boolean => sleepChild !== null && !sleepChild.killed;
 
   // --- Floating compaction (idle-triggered) ---
-  if (CTX_IDLE_COMPACT_MIN > 0) {
-    heartbeat.registerTask({
-      name: "idle-compact",
-      heavy: true,
-      execute: async () => {
-        if (!("contextPercent" in transport)) return false;
-        const pct = (transport as AcpTransport).contextPercent;
-        if (pct < CTX_IDLE_COMPACT_PCT) return false;
-        if (compactedThisIdle) return false;
-        if (busyChats.size > 0) return false;
-        if (sleepChild && !sleepChild.killed) return false;
-
-        // Check idle time
-        let lastMsgTs = 0;
-        try {
-          const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
-          lastMsgTs = row?.latest ?? 0;
-        } catch { return false; }
-        if (Date.now() - lastMsgTs < CTX_IDLE_COMPACT_MIN * 60 * 1000) return false;
-
-        // Find active session
-        const chatId = [...config.allowedUserIds][0];
-        if (!chatId) return false;
-        const sessionKey = `telegram:${chatId}`;
-
-        logInfo("main", `☕ Floating compaction — ctx at ${pct}%, idle ${Math.round((Date.now() - lastMsgTs) / 60000)}min`);
-        busyChats.add(sessionKey);
-        compactingSessions.add(sessionKey);
-        try {
-          await runCompaction(transport, sessionKey, memory?.getDb() ?? null, memoryConfig.memoryDir);
-          pendingSessionStart.add(sessionKey);
-          compactedThisIdle = true;
-          logInfo("main", "☕ Floating compaction complete");
-        } catch (err) {
-          logWarn("main", `☕ Floating compaction failed: ${err instanceof Error ? err.message : String(err)}`);
-        } finally {
-          busyChats.delete(sessionKey);
-          compactingSessions.delete(sessionKey);
-        }
-        return true;
-      },
-    });
+  if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
+    heartbeat.registerTask(createIdleCompactTask({
+      transport, memory, memoryDir: memoryConfig.memoryDir,
+      allowedUserIds: config.allowedUserIds, busyChats, pendingSessionStart, isSleepActive,
+    }));
   }
 
-  // --- Daily cycle: restart after SLEEP_TIME if bridge started before today's SLEEP_TIME ---
-  heartbeat.registerTask({
-    name: "age-check",
-    execute: async () => {
-      const now = new Date();
-      if (now.getHours() < SLEEP_HOUR) return; // before SLEEP_TIME
-      try {
-        const lockData = JSON.parse(readFileSync(bridgeLockPath, "utf-8"));
-        const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), SLEEP_HOUR).getTime();
-        if (lockData.startedAt >= todaySleepTime) return; // started after today's SLEEP_TIME
-      } catch { return; }
-      // Check idle
-      let lastMsgTs = 0;
-      try {
-        const row = memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
-        lastMsgTs = row?.latest ?? 0;
-      } catch { return; }
-      if (Date.now() - lastMsgTs < 60 * 60 * 1000) return; // <1h idle
-      if (busyChats.size > 0 || (sleepChild && !sleepChild.killed)) return;
+  // --- Daily cycle: restart after SLEEP_TIME ---
+  heartbeat.registerTask(createAgeCheckTask({
+    memory, bridgeLockPath, sleepHour: SLEEP_HOUR, busyChats, isSleepActive,
+    doctorPath: join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh"),
+  }));
 
-      logInfo("main", `🔄 Past SLEEP_TIME (${SLEEP_HOUR}:00) + bridge started before today — daily restart`);
-      writeRestartReason(`daily-cycle: SLEEP_TIME ${SLEEP_HOUR}:00`);
-      try { execSync(`${join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh")} --fix`, { timeout: 30000 }); } catch { /* */ }
-      try { unlinkSync(bridgeLockPath); } catch { /* */ }
-      process.exit(0);
-    },
-  });
-
-  heartbeat.registerTask({
-    name: "db-integrity",
-    execute: async () => {
-      dbCheckCounter++;
-      if (dbCheckCounter % 12 !== 0) return; // every 12 ticks ≈ 1hr
-      if (!memory?.getDb()) return;
-      try {
-        const result = memory.getDb()!.prepare("PRAGMA integrity_check").get() as { integrity_check: string } | undefined;
-        if (result?.integrity_check !== "ok") {
-          logError("db-integrity", `Memory DB integrity check failed: ${result?.integrity_check}`);
-        }
-      } catch (e) {
-        logError("db-integrity", "Integrity check error", e);
-      }
-    },
-  });
+  heartbeat.registerTask(createDbIntegrityTask(memory));
 
   // --- Watchdog: detect stuck agent ---
-  let watchdogL1Done = false;
-  let watchdogLastActionAt = 0;
-  const WATCHDOG_COOLDOWN = 60 * 60 * 1000;
-  const WD_TOOL_TIMEOUT = (parseInt(process.env["WATCHDOG_TOOL_TIMEOUT_SEC"] ?? "180", 10)) * 1000;
-  const WD_SILENT_TIMEOUT = (parseInt(process.env["WATCHDOG_SILENT_SEC"] ?? "300", 10)) * 1000;
-  const WD_ENDLESS_TIMEOUT = (parseInt(process.env["WATCHDOG_ENDLESS_SEC"] ?? "600", 10)) * 1000;
-
   if (transport instanceof AcpTransport) {
-    heartbeat.registerTask({
-      name: "watchdog",
-      execute: async () => {
-        const acp = transport as AcpTransport;
-        if (acp.promptStartedAt <= acp.lastSuccessAt) {
-          watchdogL1Done = false;
-          return;
-        }
-
-        const now = Date.now();
-        if (now - watchdogLastActionAt < WATCHDOG_COOLDOWN && watchdogL1Done) return;
-
-        const silentMs = now - acp.lastActivityAt;
-        const totalMs = now - acp.promptStartedAt;
-
-        // Case 2: Process dead
-        if (!acp.isConnected) {
-          logWarn("watchdog", `[Case 2] Process dead — reinit + re-send`);
-          watchdogLastActionAt = now;
-          writeRestartReason("watchdog: process dead");
-          try {
-            await acp.initialize();
-            if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText);
-          } catch { process.exit(0); }
-          return;
-        }
-
-        // Case 1: Tool hung > 3min
-        if (acp.toolInFlight && now - acp.toolInFlight.startedAt > WD_TOOL_TIMEOUT) {
-          const title = acp.toolInFlight.title;
-          const dur = Math.round((now - acp.toolInFlight.startedAt) / 1000);
-          logWarn("watchdog", `[Case 1] Tool "${title}" hung ${dur}s — interrupting`);
-          watchdogLastActionAt = now;
-          try {
-            await acp.sendInterrupt();
-            acp.toolInFlight = null;
-            if (!watchdogL1Done) {
-              await acp.sendPrompt(acp.lastSessionKey, `[SYSTEM] Your tool call "${title}" was interrupted after ${dur} seconds. Try a different approach.`);
-              watchdogL1Done = true;
-            }
-          } catch {
-            logWarn("watchdog", "[Case 1] Interrupt failed — resetting");
-            await acp.resetSession(acp.lastSessionKey).catch(() => {});
-            if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText).catch(() => {});
-          }
-          return;
-        }
-
-        // Case 4: Active but endless > 10min
-        if (silentMs < WD_SILENT_TIMEOUT && totalMs > WD_ENDLESS_TIMEOUT) {
-          logWarn("watchdog", `[Case 4] Active but endless (${Math.round(totalMs / 1000)}s) — interrupting`);
-          watchdogLastActionAt = now;
-          try {
-            await acp.sendInterrupt();
-            if (!watchdogL1Done) {
-              await acp.sendPrompt(acp.lastSessionKey, "[SYSTEM] Interrupted — you appeared stuck in a loop. Please wrap up and respond to the user.");
-              watchdogL1Done = true;
-            }
-          } catch {
-            await acp.resetSession(acp.lastSessionKey).catch(() => {});
-            if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText).catch(() => {});
-          }
-          return;
-        }
-
-        // Case 3: Silent > 5min (transient/rate limit)
-        if (silentMs > WD_SILENT_TIMEOUT && !acp.toolInFlight) {
-          if (!watchdogL1Done) {
-            logWarn("watchdog", `[Case 3] Silent ${Math.round(silentMs / 1000)}s — re-sending prompt`);
-            watchdogL1Done = true;
-            watchdogLastActionAt = now;
-            try {
-              if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText);
-            } catch {
-              logWarn("watchdog", "[Case 3] Re-send failed — resetting");
-              await acp.resetSession(acp.lastSessionKey).catch(() => {});
-              if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText).catch(() => {});
-            }
-          } else {
-            // L2: L1 already tried, still stuck
-            logWarn("watchdog", `[Case 3] Still silent after re-send — L2: restarting bridge`);
-            writeRestartReason(`watchdog-restart: silent after re-send, ${Math.round(silentMs / 1000)}s`);
-            process.exit(0);
-          }
-          return;
-        }
-      },
-    });
+    heartbeat.registerTask(createWatchdogTask(transport, () => process.exit(0)));
   }
 
   // --- Restart flag check ---
@@ -666,82 +483,8 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- Self-healing agent: error scanner ---
-  const SELFHEAL_MAX = parseInt(process.env["SELFHEAL_MAX_REPORTS"] ?? "1", 10);
-  const SELFHEAL_COOLDOWN_MS = (parseInt(process.env["SELFHEAL_COOLDOWN_MIN"] ?? "30", 10)) * 60 * 1000;
-  let lastSelfhealTs = new Date().toISOString().slice(0, 23); // start from now — don't re-scan old errors
-  const selfhealSeen = new Map<string, number>(); // errorKey → lastReportedAt
-
   if (process.env["SELFHEAL_ENABLED"] !== "false") {
-    heartbeat.registerTask({
-      name: "self-healer",
-      execute: async () => {
-        const logFile = getLogFile();
-        try {
-          const content = readFileSync(logFile, "utf-8");
-          const lines = content.split("\n");
-          const now = Date.now();
-          let reported = 0;
-
-          for (let i = lines.length - 1; i >= 0 && reported < SELFHEAL_MAX; i--) {
-            const line = lines[i]!;
-            if (line.length < 24 || !line.includes(" ERROR ")) continue;
-            const ts = line.slice(0, 23);
-            if (ts <= lastSelfhealTs) break;
-            if (line.includes("TEST ")) continue;
-            // Blacklist — skip noise, transient errors, and self-references
-            const SELFHEAL_BLACKLIST = [
-              "-32603", "Transient error", "fetch failed",
-              "[self-healer]", "[watchdog]", "[db-integrity]",
-              "ECONNRESET", "ETIMEDOUT", "socket hang up",
-              "auto-approved", "permission",
-              "BUG REPORT", "[agentbridge-sleep]",
-            ];
-            if (SELFHEAL_BLACKLIST.some(b => line.includes(b))) continue;
-
-            // Extract tag + message as dedup key
-            const match = line.match(/\[([^\]]+)\] (.+)/);
-            if (!match) continue;
-            const errorKey = `${match[1]}:${match[2]!.slice(0, 80)}`;
-
-            // Cooldown check
-            const lastSeen = selfhealSeen.get(errorKey);
-            if (lastSeen && now - lastSeen < SELFHEAL_COOLDOWN_MS) continue;
-            selfhealSeen.set(errorKey, now);
-
-            // Inject to KP
-            if (telegramAdapter) {
-              const chatId = [...config.allowedUserIds][0];
-              if (chatId) {
-                telegramAdapter.injectMessage({
-                  platform: "telegram",
-                  channelId: String(chatId),
-                  sessionKey: `telegram:${chatId}`,
-                  senderId: "system",
-                  senderName: "Self-Healing Agent",
-                  text: `[SYSTEM BUG REPORT] ${line.slice(0, 500)}`,
-                  timestamp: now,
-                  isGroup: false,
-                  isVoice: false,
-                });
-                reported++;
-                logInfo("self-healer", `Reported error to KP: ${errorKey.slice(0, 80)}`);
-              }
-            }
-          }
-
-          // Advance watermark
-          if (lines.length > 1) {
-            const lastLine = lines[lines.length - 2] ?? "";
-            if (lastLine.length >= 23) lastSelfhealTs = lastLine.slice(0, 23);
-          }
-
-          // Evict old cooldown entries
-          for (const [key, ts] of selfhealSeen) {
-            if (now - ts > SELFHEAL_COOLDOWN_MS * 2) selfhealSeen.delete(key);
-          }
-        } catch { /* log file not readable — skip */ }
-      },
-    });
+    heartbeat.registerTask(createSelfHealerTask(() => telegramAdapter, config.allowedUserIds));
   }
 
   // Run once on startup, then start periodic
@@ -753,7 +496,6 @@ export async function startBridge(): Promise<void> {
   // --- Startup sleep (background, with retry) ---
   const SLEEP_MAX_RETRIES = 3;
   const SLEEP_RETRY_MS = 5 * 60 * 1000;
-  const SLEEP_HOUR = parseInt(process.env["SLEEP_TIME"]?.split(":")[0] ?? "6", 10);
   let sleepAttempts = 0;
 
   function spawnSleep(): void {
@@ -767,7 +509,6 @@ export async function startBridge(): Promise<void> {
     }
     if (sleepChild && !sleepChild.killed) return;
     sleepAttempts++;
-    sleepQueue.activate();
     try {
       const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
       const child = spawn(process.execPath, [sleepScript], { stdio: "ignore" });
@@ -783,13 +524,10 @@ export async function startBridge(): Promise<void> {
         } else {
           logWarn("main", `😴 Sleep failed (code=${code}) — exhausted ${SLEEP_MAX_RETRIES} attempts`);
         }
-        sleepQueue.deactivate();
-        sleepQueue.replay(platformAdapters);
       });
       logInfo("main", `😴 Sleep spawned (pid=${child.pid}, attempt ${sleepAttempts})`);
     } catch (err) {
       logWarn("main", `😴 Sleep spawn failed: ${err instanceof Error ? err.message : String(err)}`);
-      sleepQueue.deactivate();
       if (sleepAttempts < SLEEP_MAX_RETRIES) setTimeout(spawnSleep, SLEEP_RETRY_MS);
     }
   }
@@ -836,7 +574,7 @@ export async function startBridge(): Promise<void> {
         transport: {
           type: config.agentTransport as "tmux" | "acp",
           isReady: transport.isReady,
-          contextPercent: "contextPercent" in transport ? (transport as TmuxClient).contextPercent : -1,
+          contextPercent: transport.contextPercent,
         },
         memory: memory
           ? { getStats: (chatId?: number) => memory!.getStats(chatId) }

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { loadMemoryConfig, MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
-import * as logger from "./logger.js";
+import * as logger from "../components/logger.js";
 
 vi.mock("./logger.js", () => ({
   logWarn: vi.fn(),

@@ -21,8 +21,8 @@
 
 import { join, basename } from "node:path";
 import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { MemoryManager } from "../components/memory-manager.js";
-import { loadMemoryConfig } from "../components/memory-config.js";
+import { MemoryManager } from "../memory/memory-manager.js";
+import { loadMemoryConfig } from "../memory/memory-config.js";
 import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
 import { loadSleepSteps, buildSleepVars, substituteVars } from "../components/sleep-prompt-loader.js";
 import { buildDailySummary, writeDailyFile } from "../components/sleep-daily-summary.js";
@@ -102,6 +102,18 @@ type SleepState = { pid: number; startedAt: number; wiredResults?: WiredResults;
 
 const SLEEP_TIMEOUT_MS = (parseInt(process.env["SLEEP_TIMEOUT_MIN"] ?? "", 10) || 55) * 60 * 1000; // default 55 minutes
 
+/** Get the primary chat ID from DB, falling back to ALLOWED_USER_IDS env var. */
+function getPrimaryChatId(db: import("better-sqlite3").Database): number {
+  try {
+    const row = db.prepare("SELECT DISTINCT chat_id FROM messages LIMIT 1").get() as { chat_id: number } | undefined;
+    if (row?.chat_id) return row.chat_id;
+  } catch { /* */ }
+  const envIds = process.env["ALLOWED_USER_IDS"] ?? "";
+  const first = parseInt(envIds.split(",")[0]?.trim() ?? "", 10);
+  if (Number.isFinite(first) && first > 0) return first;
+  throw new Error("No chat_id found in DB and ALLOWED_USER_IDS not set");
+}
+
 function readStateFile(path: string): SleepState | null {
   try {
     if (!existsSync(path)) return null;
@@ -172,7 +184,7 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
   // 5. Batch embed NULL embeddings
   try {
     if (process.env["EMBEDDING_ENABLED"] === "true") {
-      const { loadEmbedConfig, embedText: embedFn } = await import("../components/ollama-embed.js");
+      const { loadEmbedConfig, embedText: embedFn } = await import("../memory/ollama-embed.js");
       const cfg = loadEmbedConfig();
       if (cfg.enabled) {
         const rows = db.prepare("SELECT id, content_en FROM extracted_memories WHERE embedding IS NULL").all() as Array<{ id: number; content_en: string }>;
@@ -517,7 +529,7 @@ async function runCatchUp(
       const start = Date.now();
       try {
         const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
-        const chatId = [...(db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[])][0]?.chat_id ?? 7773842843;
+        const chatId = getPrimaryChatId(db);
         const dayStart = dateStrToMs(lock.dateStr);
         const dayEnd = dayStart + 86400000;
         const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "catch-up-04a", flags.verbose).then(r => r ?? ""), {
@@ -547,7 +559,7 @@ async function runCatchUp(
       } else {
         const start = Date.now();
         try {
-          const chatId = [...(db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[])][0]?.chat_id ?? 7773842843;
+          const chatId = getPrimaryChatId(db);
           const result = await extractFromDaily(dailyPath, chatId, (p) => sendWithRetry(transport, p, "catch-up-04b", flags.verbose).then(r => r ?? ""));
           lock.state.steps["04b-extract-from-daily"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
           logInfo(TAG, `[CATCH-UP] ✓ 04b-extract-from-daily for ${lock.dateStr} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
@@ -736,7 +748,7 @@ async function main(): Promise<number> {
         if (step.name === "04a-daily-summary") {
           try {
             const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
-            const chatId = [...(db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[])][0]?.chat_id ?? 7773842843;
+            const chatId = getPrimaryChatId(db);
             const watermarkRow = db.prepare("SELECT last_processed_timestamp FROM extraction_watermarks WHERE chat_id = ?").get(chatId) as { last_processed_timestamp: number } | undefined;
 
             // Determine target date: if yesterday has no daily file but has messages, summarize yesterday
@@ -781,7 +793,7 @@ async function main(): Promise<number> {
             continue;
           }
           try {
-            const chatId = [...(db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[])][0]?.chat_id ?? 7773842843;
+            const chatId = getPrimaryChatId(db);
             const result = await extractFromDaily(dailySummaryPath, chatId, (p) => sendWithRetry(transport, p, "04b-extract", flags.verbose).then(r => r ?? ""));
             state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
             logInfo(TAG, `[SLEEP] ✓ ${step.name} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);

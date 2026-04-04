@@ -25,15 +25,6 @@ export interface InboundMessage {
   rawPlatformData?: unknown;
 }
 
-/** Message queued during sleep for later replay. */
-export interface QueuedMessage {
-  sessionKey: string;
-  channelId: string;
-  text: string;
-  threadId?: string;
-  platform: Platform;
-}
-
 /** What a platform adapter can do — pipeline checks these. */
 export interface PlatformCapabilities {
   voice: boolean;

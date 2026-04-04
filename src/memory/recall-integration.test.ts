@@ -7,9 +7,9 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initializeDatabase } from "../components/memory-db.js";
-import { MemoryIndex } from "../components/memory-index.js";
-import { recallSearch, type RecallDeps, type RecallParams } from "../components/recall-engine.js";
+import { initializeDatabase } from "./memory-db.js";
+import { MemoryIndex } from "./memory-index.js";
+import { recallSearch, type RecallDeps, type RecallParams } from "./recall-engine.js";
 import type Database from "better-sqlite3";
 
 let tmpDir: string;
@@ -190,7 +190,7 @@ describe("Recall Pipeline — Integration", () => {
     const prev = process.env["EMBEDDING_ENABLED"];
     process.env["EMBEDDING_ENABLED"] = "true";
     try {
-      const { loadEmbedConfig, embedText } = await import("../components/ollama-embed.js");
+      const { loadEmbedConfig, embedText } = await import("./ollama-embed.js");
       const cfg = loadEmbedConfig();
       const rows = db.prepare("SELECT id, content_en FROM extracted_memories WHERE embedding IS NULL").all() as Array<{ id: number; content_en: string }>;
       for (const row of rows) {

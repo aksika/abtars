@@ -34,7 +34,7 @@ function ensureDir(dir: string): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
-function buildFilename(chatId: number, ext: string): string {
+function buildFilename(chatId: number | string, ext: string): string {
   const now = new Date();
   const pad = (n: number): string => String(n).padStart(2, "0");
   const ts = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
@@ -74,7 +74,7 @@ async function detectMime(buffer: Buffer, extHint?: string, claimedMime?: string
  */
 export async function saveInboundMedia(
   buffer: Buffer,
-  chatId: number,
+  chatId: number | string,
   opts?: { extHint?: string; claimedMime?: string },
 ): Promise<SavedMedia | null> {
   if (buffer.length > MAX_FILE_BYTES) {

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { homedir } from "node:os";
-import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
+import { parseBoolEnv, parseNumberEnv } from "../components/env-utils.js";
 
 /** Configuration for the local memory layer. */
 export type MemoryConfig = {

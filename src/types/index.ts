@@ -59,7 +59,6 @@ export type {
   PlatformAdapter,
   PlatformCapabilities,
   InboundMessage,
-  QueuedMessage,
   SendOpts,
 } from "./platform.js";
 

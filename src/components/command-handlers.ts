@@ -8,14 +8,11 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logError } from "./logger.js";
+import { readEntries as cronReadEntries } from "./cron-db.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import { runCompaction } from "./compaction.js";
 import { resetAndPrepare } from "./message-pipeline.js";
-import type { IKiroTransport } from "./kiro-transport.js";
-import { TmuxClient } from "./tmux-client.js";
-import type { MemoryManager } from "./memory-manager.js";
-import type { CodingMode } from "./coding-mode.js";
-import type { IdleSave } from "./idle-save.js";
+import type { PipelineDeps } from "./message-pipeline.js";
 import type { RunningJob } from "./cron-queue.js";
 
 import type { Platform } from "../types/platform.js";
@@ -27,26 +24,23 @@ export interface CommandContext {
   chatId: number;
   platform: Platform;
   reply: Reply;
-  // Transport
-  transport: IKiroTransport;
-  config: { agentTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
-  startedAt: number;
-  // Memory
-  memory: MemoryManager | null;
-  memoryConfig: { memoryEnabled: boolean; memoryDir: string };
-  nlmConfig: { enabled: boolean; [k: string]: unknown };
-  // Modules
-  codingMode: CodingMode;
-  idleSave: IdleSave;
+  // From PipelineDeps
+  transport: PipelineDeps["transport"];
+  config: PipelineDeps["config"];
+  startedAt: PipelineDeps["startedAt"];
+  memory: PipelineDeps["memory"];
+  memoryConfig: PipelineDeps["memoryConfig"];
+  nlmConfig: PipelineDeps["nlmConfig"];
+  codingMode: PipelineDeps["codingMode"];
+  idleSave: PipelineDeps["idleSave"];
+  busyChats: PipelineDeps["busyChats"];
+  fullModeChats: PipelineDeps["fullModeChats"];
+  pendingSessionStart: PipelineDeps["pendingSessionStart"];
+  updateCtxStart: PipelineDeps["updateCtxStart"];
   cronCurrentJob?: RunningJob | null;
-  enqueueCron?: (entryId: string) => string | null;
-  // Mutable state
-  busyChats: Set<string>;
-  fullModeChats: Set<string>;
-  pendingSessionStart: Set<string>;
-  // Callbacks
-  updateCtxStart: (memoryDir: string, chatId: number) => void;
-  // Group/buffer (optional, for group chats)
+  enqueueCron?: PipelineDeps["enqueueCron"];
+  requestShutdown?: PipelineDeps["requestShutdown"];
+  // Per-message (optional)
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
 }
@@ -138,15 +132,15 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
 
   // /restart
   if (text === "/restart") {
-    if (ctx.transport instanceof TmuxClient) {
+    if (ctx.transport.restartSession) {
       await ctx.reply("♻️ Restarting Kiro...");
       ctx.busyChats.delete(ctx.sessionKey);
-      await (ctx.transport as TmuxClient).restartSession(ctx.config.workingDir, process.env["AGENT_MODEL"]);
+      await ctx.transport.restartSession(ctx.config.workingDir, process.env["AGENT_MODEL"]);
       ctx.pendingSessionStart.add(ctx.sessionKey);
       await ctx.reply("✅ Kiro restarted.");
     } else {
       await ctx.reply("♻️ Restarting bridge...");
-      setTimeout(() => process.exit(0), 500);
+      setTimeout(() => ctx.requestShutdown?.(), 500);
     }
     return true;
   }
@@ -360,9 +354,10 @@ function buildStatusLines(ctx: CommandContext): string[] {
   }
   const status = ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected";
   const mode = ctx.config.agentTransport.toUpperCase();
+  const provider = process.env["AGENT_CLI"] || "unknown";
   const uptime = formatUptime(Date.now() - ctx.startedAt);
-  const ctxPct = ("contextPercent" in ctx.transport && (ctx.transport as TmuxClient).contextPercent >= 0)
-    ? `${(ctx.transport as TmuxClient).contextPercent}%`
+  const ctxPct = ctx.transport.contextPercent >= 0
+    ? `${ctx.transport.contextPercent}%`
     : "n/a";
   const cronInfo = ctx.memory?.getCronInfo();
   const lines = [
@@ -370,7 +365,7 @@ function buildStatusLines(ctx: CommandContext): string[] {
     `🤖 Model: ${model}`,
     `📊 Context window: ${ctxPct}`,
     `⏱️ Uptime: ${uptime}`,
-    `🔌 Transport: ${mode} — ${status}`,
+    `🔌 Transport: ${mode} (${provider}) — ${status}`,
   ];
   if (cronInfo) {
     const mins = Math.round(cronInfo.intervalMs / 60000);
@@ -384,7 +379,7 @@ function buildStatusLines(ctx: CommandContext): string[] {
       if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);
     } catch { /* */ }
     try {
-      const ce = JSON.parse(readFileSync(join(homedir(), ".agentbridge", "memory", "cron.json"), "utf-8")) as Array<{ fired: boolean; schedule?: string; paused?: boolean }>;
+      const ce = cronReadEntries();
       const r = ce.filter(e => e.schedule && !e.paused).length;
       const p = ce.filter(e => !e.fired && !e.schedule).length;
       const pa = ce.filter(e => e.paused).length;

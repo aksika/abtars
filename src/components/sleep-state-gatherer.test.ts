@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SleepStateGatherer } from "./sleep-state-gatherer.js";
-import { initializeDatabase } from "./memory-db.js";
+import { initializeDatabase } from "../memory/memory-db.js";
 import { makeMemoryTestConfig } from "../tests/helpers.js";
 import type Database from "better-sqlite3";
 

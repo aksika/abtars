@@ -58,7 +58,7 @@ describe("instantStore — Property 2: Instant Store Persists Valid Memories", (
         await iterManager.initialize();
 
         try {
-          const result = await iterManager.instantStore(params);
+          const result = await iterManager.editor.instantStore(params);
 
           expect(result.stored).toBe(true);
           expect(result.memoriesCount).toBe(1);
@@ -127,7 +127,7 @@ describe("instantStore — Property 3: Instant Store Rejects Invalid Inputs", ()
 
     await fc.assert(
       fc.asyncProperty(paramsWithEmptyContentEn, async (params) => {
-        const result = await manager.instantStore(params);
+        const result = await manager.editor.instantStore(params);
 
         expect(result.stored).toBe(false);
         expect(result.memoriesCount).toBe(0);
@@ -154,7 +154,7 @@ describe("instantStore — Property 3: Instant Store Rejects Invalid Inputs", ()
 
     await fc.assert(
       fc.asyncProperty(paramsWithEmptyContentOriginal, async (params) => {
-        const result = await manager.instantStore(params);
+        const result = await manager.editor.instantStore(params);
 
         expect(result.stored).toBe(false);
         expect(result.memoriesCount).toBe(0);
@@ -183,7 +183,7 @@ describe("instantStore — Property 3: Instant Store Rejects Invalid Inputs", ()
 
     await fc.assert(
       fc.asyncProperty(paramsWithWhitespaceContent, async (params) => {
-        const result = await manager.instantStore(params);
+        const result = await manager.editor.instantStore(params);
 
         expect(result.stored).toBe(false);
         expect(result.memoriesCount).toBe(0);
@@ -237,7 +237,7 @@ describe("instantStore — Property 4: Watermark Advance Prevents Heartbeat Re-E
               "INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
             ).run(chatId, "sess-test", "user", content, Date.now() - 60_000);
 
-            const result = await iterManager.instantStore({
+            const result = await iterManager.editor.instantStore({
               chatId,
               contentEn: "Test memory",
               contentOriginal: "Test memory",

@@ -3,7 +3,7 @@
  */
 
 import { logInfo } from "./logger.js";
-import { buildMemoryContext } from "./session-memory.js";
+import { buildMemoryContext } from "../memory/session-memory.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 import type Database from "better-sqlite3";
 

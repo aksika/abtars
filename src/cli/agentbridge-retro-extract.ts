@@ -11,8 +11,8 @@
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { MemoryManager } from "../components/memory-manager.js";
-import { loadMemoryConfig } from "../components/memory-config.js";
+import { MemoryManager } from "../memory/memory-manager.js";
+import { loadMemoryConfig } from "../memory/memory-config.js";
 import type { InstantStoreParams } from "../types/index.js";
 
 const TAG = "retro-extract";
@@ -97,7 +97,7 @@ async function main(): Promise<void> {
 
   const memory = new MemoryManager(config);
   try {
-    await memory.initialize();
+    await memory.initialize({ skipEmbeddingCheck: true });
 
     let totalStored = 0;
 
@@ -123,7 +123,7 @@ async function main(): Promise<void> {
           classification: 0,
         };
 
-        const result = await memory.instantStore(params);
+        const result = await memory.editor.instantStore(params);
         if (result.stored) totalStored++;
         if (flags.verbose) console.log(`[${TAG}]   ${result.stored ? "✓" : "✗"} ${item.memoryType}: ${item.content.slice(0, 80)}`);
       }

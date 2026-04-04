@@ -118,7 +118,7 @@ describe("Memory Darwinism", () => {
 
       const manager2 = new MemoryManager(makeMemoryTestConfig(tmpDir));
       await manager2.initialize();
-      manager2.adjustRelevance(id, 10);
+      manager2.editor.adjustRelevance(id, 10);
 
       const row = initializeDatabase(join(tmpDir, "memory.db"))
         .prepare("SELECT relevance_score FROM extracted_memories WHERE id = ?")
@@ -130,7 +130,7 @@ describe("Memory Darwinism", () => {
     it("demotes relevance_score by -10", async () => {
       const manager = new MemoryManager(makeMemoryTestConfig(tmpDir));
       await manager.initialize();
-      manager.adjustRelevance(1, -10); // even if ID doesn't exist, no error
+      manager.editor.adjustRelevance(1, -10); // even if ID doesn't exist, no error
       manager.close();
     });
   });
@@ -159,7 +159,7 @@ describe("Memory Darwinism", () => {
       const mgr2 = new MemoryManager(makeMemoryTestConfig(olderDir));
       await mgr2.initialize();
 
-      const result = mgr2.mergeMemories(oldId, newId);
+      const result = mgr2.editor.mergeMemories(oldId, newId);
       expect(result).toHaveProperty("merged", true);
       expect(result).toHaveProperty("keptId", newId);
       expect(result).toHaveProperty("deletedId", oldId);
@@ -181,7 +181,7 @@ describe("Memory Darwinism", () => {
     it("returns error when IDs not found", async () => {
       const mgr = new MemoryManager(makeMemoryTestConfig(tmpDir));
       await mgr.initialize();
-      const result = mgr.mergeMemories(9999, 9998);
+      const result = mgr.editor.mergeMemories(9999, 9998);
       expect(result).toHaveProperty("merged", false);
       expect(result).toHaveProperty("error");
       mgr.close();
@@ -194,7 +194,7 @@ describe("Memory Darwinism", () => {
       const mgr = new MemoryManager(makeMemoryTestConfig(storeDir));
       await mgr.initialize();
 
-      await mgr.instantStore({
+      await mgr.editor.instantStore({
         chatId: 100,
         contentEn: "test fact",
         contentOriginal: "teszt tény",
@@ -219,7 +219,7 @@ describe("Memory Darwinism", () => {
       const mgr = new MemoryManager(makeMemoryTestConfig(storeDir));
       await mgr.initialize();
 
-      await mgr.instantStore({
+      await mgr.editor.instantStore({
         chatId: 100,
         contentEn: "test fact",
         contentOriginal: "teszt tény",
@@ -393,9 +393,9 @@ describe("Memory Darwinism", () => {
       const mgr2 = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr2.initialize();
 
-      expect(mgr2.reclassifyMemory(id, 2)).toMatchObject({ ok: true });
-      expect(mgr2.reclassifyMemory(id, 1)).toMatchObject({ ok: true });
-      expect(mgr2.reclassifyMemory(id, 0)).toMatchObject({ ok: true });
+      expect(mgr2.editor.reclassifyMemory(id, 2)).toMatchObject({ ok: true });
+      expect(mgr2.editor.reclassifyMemory(id, 1)).toMatchObject({ ok: true });
+      expect(mgr2.editor.reclassifyMemory(id, 0)).toMatchObject({ ok: true });
 
       mgr2.close();
       rmSync(dir, { recursive: true, force: true });
@@ -426,7 +426,7 @@ describe("Memory Darwinism", () => {
       const mgr2 = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr2.initialize();
 
-      const result = mgr2.reclassifyMemory(id, 1);
+      const result = mgr2.editor.reclassifyMemory(id, 1);
       expect(result.ok).toBe(false);
       expect(result.error).toContain("cannot declassify");
 
@@ -459,7 +459,7 @@ describe("Memory Darwinism", () => {
       const mgr2 = new MemoryManager(makeMemoryTestConfig(dir));
       await mgr2.initialize();
 
-      const result = mgr2.reclassifyMemory(id, 0, true);
+      const result = mgr2.editor.reclassifyMemory(id, 0, true);
       expect(result.ok).toBe(true);
 
       const mdb2 = initializeDatabase(join(dir, "memory.db"));

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { IdleSave } from "./idle-save.js";
-import type { IKiroTransport } from "./kiro-transport.js";
+import { IdleSave } from "../components/idle-save.js";
+import type { IKiroTransport } from "../components/kiro-transport.js";
 
 function mockTransport(): IKiroTransport & { sendKeys: unknown } {
   return {

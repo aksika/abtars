@@ -8,18 +8,16 @@ import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { handleCommand, type CommandContext, type Reply } from "./command-handlers.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction } from "./compaction.js";
-import { buildSessionStartContext } from "./session-context.js";
+import { buildSessionStartContext } from "../memory/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
-import { TmuxClient } from "./tmux-client.js";
-import { AcpTransport } from "./acp-transport.js";
+import { TELEGRAM_ALLOWED_REACTIONS, REACTION_FALLBACK_MAP } from "./reaction-signal.js";
 import { transcribeAudio, type SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason, readAndClearRestartReason } from "./restart-reason.js";
 import type { IKiroTransport } from "./kiro-transport.js";
-import type { MemoryManager } from "./memory-manager.js";
+import type { MemoryManager } from "../memory/memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
-import type { SleepQueue } from "./sleep-queue.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./cron-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
@@ -62,7 +60,6 @@ export interface PipelineDeps {
   memory: MemoryManager | null;
   memoryConfig: { memoryEnabled: boolean; memoryDir: string };
   nlmConfig: { enabled: boolean; [k: string]: unknown };
-  sleepQueue: SleepQueue;
   idleSave: IdleSave;
   conversationBuffer: ConversationBuffer;
   config: { agentTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
@@ -78,6 +75,7 @@ export interface PipelineDeps {
   updateCtxStart: (memoryDir: string, chatId: number) => void;
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string) => string | null;
+  requestShutdown?: () => void;
 }
 
 /**
@@ -137,6 +135,7 @@ export async function handleInboundMessage(
     updateCtxStart,
     cronCurrentJob: deps.cronCurrentJob?.() ?? null,
     enqueueCron: deps.enqueueCron,
+    requestShutdown: deps.requestShutdown,
     conversationBuffer: isGroup ? conversationBuffer : undefined,
     bufKey: isGroup ? `${msg.platform}:${channelId}` : undefined,
   };
@@ -181,7 +180,7 @@ export async function handleInboundMessage(
   try {
     busyChats.add(sessionKey);
     resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
-    const ctxPct = "contextPercent" in transport ? (transport as { contextPercent: number }).contextPercent : -1;
+    const ctxPct = transport.contextPercent;
     logInfo(TAG, `← [${msg.platform}] ${isVoice ? "🎤 " : ""}"${text.slice(0, 60)}"${ctxPct >= 0 ? ` (ctx: ${ctxPct}%)` : ""}`);
     // --- Sleep: main transport is available during sleep (sleep uses its own) ---
     // No queueing needed
@@ -233,23 +232,13 @@ export async function handleInboundMessage(
     let streamBuffer = "";
     let streamTimer: ReturnType<typeof setInterval> | undefined;
 
-    if (transport instanceof TmuxClient) {
-      (transport as TmuxClient).onIntermediateResponse = (chunk: string) => {
-        intermediateDelivered = true;
-        const chunks = adapter.chunkResponse(chunk);
-        for (const c of chunks) {
-          if (c.trim()) {
-            adapter.sendTyping?.(channelId, msg.threadId).catch(() => {});
-            adapter.sendMessage(channelId, c, { threadId: msg.threadId }).catch(() => {});
-          }
-        }
-      };
-    } else if (transport instanceof AcpTransport && adapter.editMessage) {
+    if (adapter.editMessage) {
+      // Edit-in-place streaming (ACP + platforms that support editMessage)
       const rawVal = parseInt(process.env["STREAM_FLUSH_SEC"] ?? "3", 10);
       const FLUSH_INTERVAL = rawVal === 0 ? 0 : Math.max(2, Math.min(180, rawVal)) * 1000;
       let lastFlushed = "";
 
-      (transport as AcpTransport).onIntermediateResponse = (chunk: string) => {
+      transport.onIntermediateResponse = (chunk: string) => {
         streamBuffer += chunk;
       };
 
@@ -268,22 +257,28 @@ export async function handleInboundMessage(
           } catch { /* edit may fail if text unchanged or too fast */ }
         }, FLUSH_INTERVAL);
       }
+    } else {
+      // Chunk-based streaming (tmux + platforms without editMessage)
+      transport.onIntermediateResponse = (chunk: string) => {
+        intermediateDelivered = true;
+        const chunks = adapter.chunkResponse(chunk);
+        for (const c of chunks) {
+          if (c.trim()) {
+            adapter.sendTyping?.(channelId, msg.threadId).catch(() => {});
+            adapter.sendMessage(channelId, c, { threadId: msg.threadId }).catch(() => {});
+          }
+        }
+      };
     }
 
     const response = await responsePromise;
 
-    if (transport instanceof TmuxClient) {
-      (transport as TmuxClient).onIntermediateResponse = undefined;
-    }
-    if (transport instanceof AcpTransport) {
-      clearInterval(streamTimer);
-      (transport as AcpTransport).onIntermediateResponse = undefined;
-    }
+    clearInterval(streamTimer);
+    transport.onIntermediateResponse = undefined;
     logDebug(TAG, `Response (${response.length} chars): "${response.trim().slice(0, 120)}"`);
 
     // --- Extract clean answer ---
-    const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
-      ? (transport as TmuxClient).answerOnly : "";
+    const cleanAnswer = transport.answerOnly;
     const userResponse = (fullModeChats.has(sessionKey) ? response : (cleanAnswer || response))
       .replace(/^\[lang:\w{2}\]\s*/i, ""); // strip lang tag from display
 
@@ -322,15 +317,7 @@ export async function handleInboundMessage(
     if (reactMatch) {
       const emoji = reactMatch[1]!;
       if (adapter.setReaction && msg.messageId) {
-        const TELEGRAM_ALLOWED = new Set(["👍","👎","❤","🔥","🥰","👏","😁","🤔","🤯","😱","🤬","😢","🎉","🤩","🤮","💩","🙏","👌","🕊","🤡","🥱","🥴","😍","🐳","❤🔥","🌚","🌭","💯","🤣","⚡","🍌","🏆","💔","🤨","😐","🍓","🍾","💋","🖕","😈","😴","😭","🤓","👻","👨💻","👀","🎃","🙈","😇","😨","🤝","✍","🤗","🫡","🎅","🎄","☃","💅","🤪","🗿","🆒","💘","🙉","🦄","😘","💊","🙊","😎","👾","🤷♂","🤷","🤷♀","😡"]);
-        const FALLBACK_MAP: Record<string, string> = {
-          "😅": "🤣", "😂": "🤣", "😆": "😁", "😄": "😁", "😃": "😁",
-          "🙂": "😁", "😊": "😁", "☺": "😁", "😉": "😁", "🫠": "🤪",
-          "😞": "😢", "😔": "😢", "😟": "😢", "😕": "🤔", "🫤": "🤨",
-          "😤": "😡", "😠": "😡", "💪": "👏", "🤞": "🙏", "✅": "👍",
-          "❌": "👎", "😬": "🙈", "🫣": "🙈", "🤭": "🙊", "💀": "👻",
-        };
-        const fallback = TELEGRAM_ALLOWED.has(emoji) ? emoji : (FALLBACK_MAP[emoji] ?? null);
+        const fallback = TELEGRAM_ALLOWED_REACTIONS.has(emoji) ? emoji : (REACTION_FALLBACK_MAP[emoji] ?? null);
         if (fallback) {
           await adapter.setReaction(channelId, msg.messageId, fallback);
           logDebug(TAG, `Reaction: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);
@@ -360,9 +347,9 @@ export async function handleInboundMessage(
           lastSentMsgId = await adapter.sendMessage(channelId, chunk, { threadId: msg.threadId });
         }
       }
-    } else if (transport instanceof TmuxClient) {
+    } else if (transport.intermediateDeliveredText) {
       // Send any tail not yet delivered by intermediate streaming
-      const delivered = (transport as TmuxClient).intermediateDeliveredText;
+      const delivered = transport.intermediateDeliveredText;
       const finalAnswer = cleanAnswer || response;
       if (delivered && finalAnswer.length > delivered.length && finalAnswer.startsWith(delivered)) {
         const tail = finalAnswer.slice(delivered.length).trim();
@@ -407,12 +394,12 @@ export async function handleInboundMessage(
       await adapter.setReaction(channelId, msg.messageId, "");
     }
 
-    const ctxAfter = "contextPercent" in transport ? (transport as { contextPercent: number }).contextPercent : -1;
+    const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${intermediateDelivered ? " (streamed)" : ""}${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
 
     // --- Context window management (graduated thresholds) ---
-    if ("contextPercent" in transport) {
-      const pct = (transport as { contextPercent: number }).contextPercent;
+    {
+      const pct = transport.contextPercent;
       if (pct >= 0) {
         const failures = compactFailures.get(sessionKey) ?? 0;
 
@@ -425,7 +412,7 @@ export async function handleInboundMessage(
           try {
             // Safety-net transcript
             if (memory?.getDatabase()) {
-              memory.checkAutoCompact({
+              memory.maintenance.checkAutoCompact({
                 chatId, sessionId: sessionKey, contextPercent: pct,
                 sendCompactCommand: async () => "",
               }).catch(() => {});
@@ -495,7 +482,20 @@ export async function startSession(
   greeting: string,
   sendResponse: (text: string) => Promise<unknown>,
 ): Promise<void> {
-  let prompt = greeting;
+  const prompt = buildSessionStartPrompt(greeting, memory, chatId);
+  logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
+  const response = await transport.sendPrompt(sessionKey, prompt);
+  if (response?.trim() && response.trim() !== "<NO_REPLY>" && response.trim() !== "(no response)") {
+    await sendResponse(response);
+  }
+}
+
+/** Single path for session-start injection: SOUL + context + restart reason. */
+function buildSessionStartPrompt(
+  prompt: string,
+  memory: MemoryManager,
+  chatId: number,
+): string {
   const soul = loadSoulBundle();
   if (soul) {
     prompt = soul + "\n\n" + prompt;
@@ -511,11 +511,10 @@ export async function startSession(
     prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
     logInfo(TAG, `Injected restart reason: ${reason}`);
   }
-  logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
-  const response = await transport.sendPrompt(sessionKey, prompt);
-  if (response?.trim() && response.trim() !== "<NO_REPLY>" && response.trim() !== "(no response)") {
-    await sendResponse(response);
+  if (prompt.length < 5000) {
+    logWarn(TAG, `Session-start prompt suspiciously small (${prompt.length} chars) — SOUL may be missing`);
   }
+  return prompt;
 }
 
 /** Inject session-start context if pending, record user message. */
@@ -531,24 +530,7 @@ function preparePrompt(
 ): string {
   const isSessionStart = pending.has(sessionKey) || !seen.has(sessionKey);
   if (isSessionStart) {
-    const soul = loadSoulBundle();
-    if (soul) {
-      prompt = soul + "\n\n" + prompt;
-      logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
-    }
-    const ctx = buildSessionStartContext(memory, chatId);
-    if (ctx) {
-      prompt = ctx + "\n\n" + prompt;
-      logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
-    }
-    const reason = readAndClearRestartReason();
-    if (reason) {
-      prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
-      logInfo(TAG, `Injected restart reason: ${reason}`);
-    }
-    if (prompt.length < 5000) {
-      logWarn(TAG, `Session-start prompt suspiciously small (${prompt.length} chars) — SOUL may be missing`);
-    }
+    prompt = buildSessionStartPrompt(prompt, memory, chatId);
   }
   seen.add(sessionKey);
   pending.delete(sessionKey);

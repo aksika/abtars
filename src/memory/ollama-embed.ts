@@ -3,7 +3,7 @@
  * Gated by EMBEDDING_ENABLED env var. When disabled, all methods return null/empty.
  */
 
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn } from "../components/logger.js";
 import type Database from "better-sqlite3";
 
 const TAG = "ollama-embed";
@@ -72,25 +72,28 @@ export function vectorSearch(
   if (opts.chatId) { conditions.push("chat_id = ?"); params.push(opts.chatId); }
   if (opts.maxClassification !== undefined) { conditions.push("COALESCE(classification, 0) <= ?"); params.push(opts.maxClassification); }
 
+  // Cap the scan to the most recent 500 embedded memories to avoid O(n) over entire DB
+  const scanLimit = 500;
+
   const rows = db.prepare(
-    `SELECT id, content_en, content_original, created_at, memory_type, embedding, trust, integrity, credibility, classification, source_message_ids FROM extracted_memories WHERE ${conditions.join(" AND ")}`
+    `SELECT id, content_en, content_original, created_at, memory_type, embedding, trust, integrity, credibility, classification, source_message_ids FROM extracted_memories WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC LIMIT ${scanLimit}`
   ).all(...params) as Array<{
     id: number; content_en: string; content_original: string | null; created_at: number;
     memory_type: string | null; embedding: Buffer; trust: number | null; integrity: number | null;
     credibility: number | null; classification: number | null; source_message_ids: string | null;
   }>;
 
-  const results: typeof rows extends (infer R)[] ? (R & { score: number })[] : never = [];
+  const scored: Array<{ id: number; content_en: string; content_original: string | null; created_at: number; memory_type: string | null; score: number; trust: number | null; integrity: number | null; credibility: number | null; classification: number | null; source_message_ids: string | null }> = [];
   for (const row of rows) {
     const stored = new Float32Array(new Uint8Array(row.embedding).buffer);
     const score = cosineSimilarity(queryVector, stored);
     if (score >= opts.threshold) {
-      results.push({ ...row, score });
+      scored.push({ id: row.id, content_en: row.content_en, content_original: row.content_original, created_at: row.created_at, memory_type: row.memory_type, score, trust: row.trust, integrity: row.integrity, credibility: row.credibility, classification: row.classification, source_message_ids: row.source_message_ids });
     }
   }
 
-  results.sort((a, b) => b.score - a.score);
-  return results.slice(0, opts.limit ?? 10) as any;
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, opts.limit ?? 10);
 }
 
 /**

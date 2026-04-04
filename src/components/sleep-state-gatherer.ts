@@ -1,8 +1,9 @@
 import type Database from "better-sqlite3";
-import type { MemoryConfig } from "./memory-config.js";
+import type { MemoryConfig } from "../memory/memory-config.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { logInfo, logWarn, logError } from "./logger.js";
+import { readEntries as cronReadEntries } from "./cron-db.js";
 
 const TAG = "sleep-state-gatherer";
 
@@ -87,7 +88,7 @@ export class SleepStateGatherer {
       lastSleepTimestamp,
       wakeupDate: this.getWakeupDate(),
       todoContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "todo.md")),
-      cronContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "cron.json")),
+      cronContents: (() => { try { return JSON.stringify(cronReadEntries()); } catch { return null; } })(),
     };
 
     logInfo(

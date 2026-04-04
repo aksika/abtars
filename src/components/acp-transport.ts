@@ -11,8 +11,6 @@ import {
 import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn, logError } from "./logger.js";
 
-const TEMP_THROTTLE_MS = 2000; // TEMPORARY — remove after testing
-
 /**
  * ACP transport using @agentclientprotocol/sdk.
  * Spawns kiro-cli acp as a child process and communicates via JSON-RPC over stdio.
@@ -34,6 +32,12 @@ export class AcpTransport implements IKiroTransport {
   get contextPercent(): number {
     return this.lastContextPercent;
   }
+
+  /** ACP returns full response — no separate "answer only" extraction. */
+  get answerOnly(): string { return ""; }
+
+  /** ACP doesn't track intermediate delivered text (edit-in-place instead). */
+  get intermediateDeliveredText(): string { return ""; }
 
   get isConnected(): boolean {
     return this.agent !== null && this.client !== null;
@@ -177,8 +181,6 @@ export class AcpTransport implements IKiroTransport {
     this.toolInFlight = null;
     this.lastPromptText = message;
     this.lastSessionKey = sessionKey;
-    // TEMPORARY throttle — avoid overloading kiro-cli
-    await new Promise((r) => setTimeout(r, TEMP_THROTTLE_MS));
 
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.

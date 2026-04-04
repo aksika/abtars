@@ -14,8 +14,8 @@
  * Output: { "ok": true, "memoriesUpdated": 1, "ids": [42], "fieldsUpdated": ["content_en"] }
  */
 
-import { MemoryManager } from "../components/memory-manager.js";
-import { loadMemoryConfig } from "../components/memory-config.js";
+import { MemoryManager } from "../memory/memory-manager.js";
+import { loadMemoryConfig } from "../memory/memory-config.js";
 import type { EditMemoryParams } from "../types/index.js";
 import { appendFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -167,8 +167,8 @@ async function main() {
   const config = loadMemoryConfig();
   const memory = new MemoryManager(config);
   try {
-    await memory.initialize();
-    const result = memory.editMemory(params);
+    await memory.initialize({ skipEmbeddingCheck: true });
+    const result = memory.editor.editMemory(params);
     console.log(JSON.stringify(result));
     if (!result.ok) process.exit(1);
   } catch (err) {

@@ -14,8 +14,8 @@ import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { MemoryIndex } from "../components/memory-index.js";
-import { recallSearch } from "../components/recall-engine.js";
+import { MemoryIndex } from "../memory/memory-index.js";
+import { recallSearch } from "../memory/recall-engine.js";
 
 const MEMORY_DIR = join(homedir(), ".agentbridge", "memory");
 const DB_PATH = join(MEMORY_DIR, "memory.db");

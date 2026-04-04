@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { MemoryManager } from "../components/memory-manager.js";
-import { initializeDatabase } from "../components/memory-db.js";
+import { MemoryManager } from "./memory-manager.js";
+import { initializeDatabase } from "./memory-db.js";
 import { makeMemoryTestConfig } from "../tests/helpers.js";
 
 function insertMemory(
@@ -70,7 +70,7 @@ describe("editMemory", () => {
 
   it("updates attribute fields by memory ID", () => {
     const id = insertMemory(db);
-    const result = mgr.editMemory({ memoryId: id, credibility: 2, trust: 3, caller: "kp" });
+    const result = mgr.editor.editMemory({ memoryId: id, credibility: 2, trust: 3, caller: "kp" });
     expect(result.ok).toBe(true);
     expect(result.memoriesUpdated).toBe(1);
     expect(result.fieldsUpdated).toContain("credibility");
@@ -87,7 +87,7 @@ describe("editMemory", () => {
     const id = insertMemory(db);
     db.prepare("UPDATE extracted_memories SET embedding = ? WHERE id = ?").run(Buffer.from([1, 2, 3]), id);
 
-    const result = mgr.editMemory({ memoryId: id, contentEn: "new content" });
+    const result = mgr.editor.editMemory({ memoryId: id, contentEn: "new content" });
     expect(result.ok).toBe(true);
 
     const row = db.prepare("SELECT content_en, embedding FROM extracted_memories WHERE id = ?").get(id) as Record<string, unknown>;
@@ -99,51 +99,51 @@ describe("editMemory", () => {
     const id = insertMemory(db);
     db.prepare("UPDATE extracted_memories SET relevance_score = 10 WHERE id = ?").run(id);
 
-    mgr.editMemory({ memoryId: id, relevanceScore: "+5" });
+    mgr.editor.editMemory({ memoryId: id, relevanceScore: "+5" });
     const row1 = db.prepare("SELECT relevance_score FROM extracted_memories WHERE id = ?").get(id) as { relevance_score: number };
     expect(row1.relevance_score).toBe(15);
 
-    mgr.editMemory({ memoryId: id, relevanceScore: "-3" });
+    mgr.editor.editMemory({ memoryId: id, relevanceScore: "-3" });
     const row2 = db.prepare("SELECT relevance_score FROM extracted_memories WHERE id = ?").get(id) as { relevance_score: number };
     expect(row2.relevance_score).toBe(12);
   });
 
   it("blocks SECRET declassification without userOverride", () => {
     const id = insertMemory(db, { classification: 3 });
-    const result = mgr.editMemory({ memoryId: id, classification: 1 });
+    const result = mgr.editor.editMemory({ memoryId: id, classification: 1 });
     expect(result.ok).toBe(false);
     expect(result.error).toContain("SECRET");
   });
 
   it("blocks CONFIDENTIAL → UNCLASSIFIED (must step through RESTRICTED)", () => {
     const id = insertMemory(db, { classification: 2 });
-    const result = mgr.editMemory({ memoryId: id, classification: 0 });
+    const result = mgr.editor.editMemory({ memoryId: id, classification: 0 });
     expect(result.ok).toBe(false);
     expect(result.error).toContain("CONFIDENTIAL");
   });
 
   it("allows CONFIDENTIAL → RESTRICTED", () => {
     const id = insertMemory(db, { classification: 2 });
-    const result = mgr.editMemory({ memoryId: id, classification: 1 });
+    const result = mgr.editor.editMemory({ memoryId: id, classification: 1 });
     expect(result.ok).toBe(true);
   });
 
   it("returns error for missing memory ID", () => {
-    const result = mgr.editMemory({ memoryId: 99999, credibility: 1 });
+    const result = mgr.editor.editMemory({ memoryId: 99999, credibility: 1 });
     expect(result.ok).toBe(true);
     expect(result.memoriesUpdated).toBe(1); // UPDATE runs but changes 0 rows — still "ok"
   });
 
   it("returns error when no fields provided", () => {
     const id = insertMemory(db);
-    const result = mgr.editMemory({ memoryId: id });
+    const result = mgr.editor.editMemory({ memoryId: id });
     expect(result.ok).toBe(false);
     expect(result.error).toContain("no fields");
   });
 
   it("dry-run returns preview without committing", () => {
     const id = insertMemory(db);
-    const result = mgr.editMemory({ memoryId: id, credibility: 1, dryRun: true });
+    const result = mgr.editor.editMemory({ memoryId: id, credibility: 1, dryRun: true });
     expect(result.ok).toBe(true);
     expect(result.fieldsUpdated).toContain("credibility");
 
@@ -155,7 +155,7 @@ describe("editMemory", () => {
     const msgId = insertMessage(db, { platformMessageId: 555 });
     const memId = insertMemory(db, { platformMessageId: msgId });
 
-    const result = mgr.editMemory({ messageId: 555, chatId: 100, emotionScore: 3 });
+    const result = mgr.editor.editMemory({ messageId: 555, chatId: 100, emotionScore: 3 });
     expect(result.ok).toBe(true);
     expect(result.ids).toContain(memId);
 
@@ -165,7 +165,7 @@ describe("editMemory", () => {
 
   it("FTS5 stays in sync after content edit", () => {
     const id = insertMemory(db, { contentEn: "original searchable text" });
-    mgr.editMemory({ memoryId: id, contentEn: "completely different words" });
+    mgr.editor.editMemory({ memoryId: id, contentEn: "completely different words" });
 
     const oldHits = db.prepare("SELECT rowid FROM extracted_memories_fts WHERE content_en MATCH 'searchable'").all();
     expect(oldHits).toHaveLength(0);

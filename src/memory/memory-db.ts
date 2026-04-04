@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { logInfo } from "./logger.js";
+import { logInfo } from "../components/logger.js";
 
 const TAG = "memory-db";
 
@@ -211,6 +211,29 @@ export function initializeDatabase(dbPath: string): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_id);
   `);
+
+  // Idempotent column migrations for older databases
+  for (const ddl of [
+    "ALTER TABLE extracted_memories ADD COLUMN emotion_score INTEGER DEFAULT 0",
+    "ALTER TABLE extracted_memories ADD COLUMN recall_count INTEGER DEFAULT 0",
+    "ALTER TABLE extracted_memories ADD COLUMN last_recalled_at INTEGER",
+    "ALTER TABLE extracted_memories ADD COLUMN relevance_score INTEGER DEFAULT 0",
+    "ALTER TABLE extracted_memories ADD COLUMN confidence INTEGER DEFAULT 3",
+    "ALTER TABLE extracted_memories ADD COLUMN source_message_ids TEXT",
+    "ALTER TABLE extracted_memories ADD COLUMN classification INTEGER DEFAULT 1",
+    "ALTER TABLE extracted_memories ADD COLUMN trust INTEGER DEFAULT 0",
+    "ALTER TABLE extracted_memories ADD COLUMN integrity INTEGER DEFAULT 2",
+    "ALTER TABLE extracted_memories ADD COLUMN credibility INTEGER DEFAULT 6",
+    "ALTER TABLE extracted_memories ADD COLUMN edited_at INTEGER",
+    "ALTER TABLE extracted_memories ADD COLUMN edited_by TEXT",
+  ]) {
+    try { db.exec(ddl); } catch { /* already exists */ }
+  }
+
+  // Data migration: consolidate source_timestamp into created_at
+  try { db.exec("UPDATE extracted_memories SET created_at = source_timestamp WHERE created_at != source_timestamp"); } catch { /* */ }
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_extracted_memories_chat_created ON extracted_memories(chat_id, created_at DESC)"); } catch { /* */ }
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_messages_platform_id ON messages(chat_id, platform_message_id)"); } catch { /* */ }
 
   // Register strip_emojis() scalar function for FTS5 triggers.
   // Messages store raw content (emojis preserved for retrospective sarcasm detection).

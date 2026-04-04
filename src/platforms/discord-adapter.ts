@@ -6,18 +6,18 @@
 
 import { DiscordApi } from "../components/discord-api.js";
 import { DiscordPoller } from "../components/discord-poller.js";
-import { DiscordSecurityGate } from "../components/discord-security-gate.js";
+import { SecurityGate } from "../components/security-gate.js";
 import { ResponseFormatter } from "../components/response-formatter.js";
 import { A2ARouter } from "../components/a2a-router.js";
 import { interceptLargeMessage } from "../components/message-interceptor.js";
 import { formatReactionSignal } from "../components/reaction-signal.js";
-import { emojiToScore } from "../components/emotion-utils.js";
+import { emojiToScore } from "../memory/emotion-utils.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
 import { handleInboundMessage, type PipelineDeps } from "../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../types/platform.js";
 import type { DiscordInboundMessage } from "../types/index.js";
 import type { IKiroTransport } from "../components/kiro-transport.js";
-import type { MemoryManager } from "../components/memory-manager.js";
+import type { MemoryManager } from "../memory/memory-manager.js";
 import type { ConversationBuffer } from "../components/conversation-buffer.js";
 
 const TAG = "discord";
@@ -50,7 +50,7 @@ export class DiscordAdapter implements PlatformAdapter {
   };
 
   private readonly api: DiscordApi;
-  private readonly securityGate: DiscordSecurityGate;
+  private readonly securityGate: SecurityGate;
   private readonly formatter = new ResponseFormatter();
   private readonly config: DiscordAdapterConfig;
   private readonly deps: DiscordAdapterDeps;
@@ -59,7 +59,7 @@ export class DiscordAdapter implements PlatformAdapter {
 
   constructor(config: DiscordAdapterConfig, deps: DiscordAdapterDeps) {
     this.api = new DiscordApi(config.botToken);
-    this.securityGate = new DiscordSecurityGate(config.allowedUserIds, config.allowedChannelIds);
+    this.securityGate = new SecurityGate(config.allowedUserIds, config.allowedChannelIds);
     this.config = config;
     this.deps = deps;
   }
@@ -137,7 +137,7 @@ export class DiscordAdapter implements PlatformAdapter {
         if (res.ok) {
           const buf = Buffer.from(await res.arrayBuffer());
           const extHint = att.filename ? "." + (att.filename.split(".").pop() ?? "") : undefined;
-          const saved = await saveInboundMedia(buf, parseInt(message.channelId, 10) || 0, { extHint, claimedMime: att.contentType });
+          const saved = await saveInboundMedia(buf, message.channelId, { extHint, claimedMime: att.contentType });
           if (saved) {
             mediaPath = saved.path;
             if (!text) text = `User sent a ${saved.isImage ? "photo" : "file"}.`;
@@ -193,8 +193,7 @@ export class DiscordAdapter implements PlatformAdapter {
     // Emotion scoring on authorized reactions
     if (isAuthorized && this.deps.memory) {
       const score = emojiToScore(emoji);
-      const chatId = parseInt(channelId, 10) || 0;
-      const updated = this.deps.memory.updateEmotionByPlatformId(chatId, messageId, score);
+      const updated = this.deps.memory.updateEmotionByPlatformId(channelId, messageId, score);
       if (updated) logDebug(TAG, `Emotion score ${score} set on msg ${reaction.message.id}`);
     }
 

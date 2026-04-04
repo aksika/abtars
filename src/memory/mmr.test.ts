@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyMMR } from "../components/mmr.js";
+import { applyMMR } from "./mmr.js";
 
 type Item = { content: string; score: number };
 

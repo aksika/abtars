@@ -170,7 +170,7 @@ describe("DiscordAdapter", () => {
 
       await capturedReactionHandler!(fakeReaction("❤️", "ch1", "555"), fakeUser("42"));
       expect(mockMemory.updateEmotionByPlatformId).toHaveBeenCalledWith(
-        expect.any(Number), 555, expect.any(Number),
+        "ch1", 555, expect.any(Number),
       );
     });
   });
