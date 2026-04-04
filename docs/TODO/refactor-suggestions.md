@@ -1,0 +1,123 @@
+# Refactor Suggestions — Future Architecture Improvements
+
+> Generated: 2026-04-04 after full codebase review and cleanup pass.
+> These are structural changes that would require significant effort but improve long-term maintainability.
+> Not bugs — the system works correctly as-is.
+
+---
+
+## 1. Bridge as a class (replace startBridge god function)
+
+**Problem:** `startBridge()` is a ~677-line closure with 20+ mutable variables. Every new feature adds more lines to the same function.
+
+**Suggestion:** Create a `Bridge` class with phased initialization:
+```
+class Bridge {
+  private transport, platforms, heartbeat, memory, ...
+  async start() { initTransport → initPlatforms → initHeartbeat → initDashboard }
+  async shutdown() { single exit path }
+}
+```
+Each subsystem becomes a method or registered plugin, not more lines in the closure.
+
+**Effort:** Medium. **Risk:** Medium (touches all wiring).
+
+---
+
+## 2. Event-driven message pipeline (replace 300-line handleInboundMessage)
+
+**Problem:** `handleInboundMessage()` is one giant function handling: voice transcription, command dispatch, prompt building, streaming setup, response delivery, memory recording, TTS, reactions, and compaction. Adding a new step means editing the monolith.
+
+**Suggestion:** Middleware chain or event emitter:
+```
+message.received → transcribe → authorize → buildPrompt → send →
+stream → deliver → recordMemory → checkCompaction
+```
+Each step is a small function. Streaming becomes transport-emitted `chunk` events instead of per-transport callback wiring.
+
+**Effort:** High. **Risk:** High (core message flow).
+
+---
+
+## 3. Eliminate getDb() escape hatch
+
+**Problem:** 5+ files reach through `memory.getDb()` to run raw SQL: session-context, idle-compact, age-check, dashboard, sleep. The DB schema is a public API surface.
+
+**Suggestion:** Every query becomes a method on the appropriate sub-service (MessageStore, MaintenanceService, etc.). Remove `getDb()` and `getDatabase()`. If you need a new query, add a method.
+
+**Files affected:** bridge-app.ts (idle-compact, age-check), session-context.ts, heartbeat-tasks.ts, dashboard-server.ts, compaction.ts, sleep CLIs.
+
+**Effort:** Medium. **Risk:** Low (additive — add methods, then remove getDb).
+
+---
+
+## 4. CLI tools as IPC clients (not standalone MemoryManager instances)
+
+**Problem:** Every CLI invocation (`agentbridge-store`, `agentbridge-edit`, `agentbridge-recall`) creates its own MemoryManager, opens the DB, runs migrations, does one operation, and exits. ~200ms+ startup per call. The sleep cycle calls these dozens of times.
+
+**Suggestion:** Either:
+- **Unix socket IPC:** Long-running memory service (like browser IPC already works). CLI tools send JSON commands over socket.
+- **Single CLI with subcommands:** `agentbridge-memory store ...`, `agentbridge-memory edit ...` — one process, one DB connection, multiple operations.
+
+**Effort:** High. **Risk:** Medium (changes CLI interface that agent prompts reference).
+
+---
+
+## 5. Typed config groups (replace flat 37-field Config)
+
+**Problem:** `Config` has 37 fields in a flat structure. `PipelineDeps` carries 20+ fields because consumers need "some of config." No clear ownership.
+
+**Suggestion:** Group by domain:
+```typescript
+type Config = {
+  telegram: TelegramConfig;
+  discord: DiscordConfig;
+  transport: TransportConfig;
+  voice: VoiceConfig;
+  models: ModelConfig;
+}
+```
+Each consumer takes only the group it needs.
+
+**Effort:** Medium. **Risk:** Low (type-level change, compiler catches everything).
+
+---
+
+## 6. Schema migration versioning
+
+**Problem:** Migrations are idempotent ALTER TABLE with empty catch blocks. Can't tell which ran, can't roll back. Currently all in memory-db.ts but historically were split across two files.
+
+**Suggestion:** `schema_version` table + numbered migration functions:
+```typescript
+const migrations = [
+  { version: 1, up: (db) => db.exec("CREATE TABLE ...") },
+  { version: 2, up: (db) => db.exec("ALTER TABLE ...") },
+];
+```
+Run only migrations above current version. Store version in DB.
+
+**Effort:** Low. **Risk:** Low (additive — wrap existing DDL in version checks).
+
+---
+
+## 7. Injectable paths (replace hardcoded homedir)
+
+**Problem:** `homedir() + ".agentbridge"` computed independently in 10+ files. `AGENT_BRIDGE_HOME` exists in config.ts but cron-db, sleep-trigger, heartbeat-system, and others compute their own paths.
+
+**Suggestion:** All paths flow from config. No module-level `homedir()` calls. Pass paths through constructors or config objects.
+
+**Effort:** Low. **Risk:** Low (mechanical find-and-replace).
+
+---
+
+## Priority Order
+
+If tackling these incrementally:
+
+1. **#6 Schema versioning** — lowest effort, prevents future migration bugs
+2. **#7 Injectable paths** — mechanical, improves testability
+3. **#3 Eliminate getDb()** — additive (add methods first, remove escape hatch after)
+4. **#5 Typed config groups** — compiler-assisted, no runtime risk
+5. **#1 Bridge class** — medium effort, unlocks cleaner feature additions
+6. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
+7. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently
