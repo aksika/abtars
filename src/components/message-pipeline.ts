@@ -185,11 +185,15 @@ export async function handleInboundMessage(
       }
     }
 
+    const isSessionStart = pendingSessionStart.has(sessionKey);
+
     if (memory) {
       prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart, seenSessions, msg.messageId);
     }
 
-    prompt = interceptLargeMessage(prompt).text;
+    if (!isSessionStart) {
+      prompt = interceptLargeMessage(prompt).text;
+    }
 
     // --- Send to transport ---
     const activeTransport = codingMode.has(sessionKey) && codingMode.getTransport()
