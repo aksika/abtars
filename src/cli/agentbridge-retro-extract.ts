@@ -97,7 +97,7 @@ async function main(): Promise<void> {
 
   const memory = new MemoryManager(config);
   try {
-    await memory.initialize();
+    await memory.initialize({ skipEmbeddingCheck: true });
 
     let totalStored = 0;
 

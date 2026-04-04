@@ -167,7 +167,7 @@ async function main() {
   const config = loadMemoryConfig();
   const memory = new MemoryManager(config);
   try {
-    await memory.initialize();
+    await memory.initialize({ skipEmbeddingCheck: true });
     const result = memory.editor.editMemory(params);
     console.log(JSON.stringify(result));
     if (!result.ok) process.exit(1);

@@ -335,7 +335,7 @@ export class TelegramAdapter implements PlatformAdapter {
     if (trimText === "/restart") {
       await this.api.sendMessage(chatId, "♻️ Restarting bridge...");
       writeRestartReason("user-restart");
-      setTimeout(() => process.exit(0), 500);
+      setTimeout(() => this.deps.pipeline.requestShutdown?.(), 500);
       return;
     }
 

@@ -195,6 +195,7 @@ export async function startBridge(): Promise<void> {
         return null;
       } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
     },
+    requestShutdown: () => process.exit(0),
   };
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
@@ -541,7 +542,7 @@ export async function startBridge(): Promise<void> {
 
   // --- Watchdog: detect stuck agent ---
   if (transport instanceof AcpTransport) {
-    heartbeat.registerTask(createWatchdogTask(transport));
+    heartbeat.registerTask(createWatchdogTask(transport, () => process.exit(0)));
   }
 
   // --- Restart flag check ---

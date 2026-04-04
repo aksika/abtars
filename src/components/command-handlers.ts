@@ -40,6 +40,7 @@ export interface CommandContext {
   idleSave: IdleSave;
   cronCurrentJob?: RunningJob | null;
   enqueueCron?: (entryId: string) => string | null;
+  requestShutdown?: () => void;
   // Mutable state
   busyChats: Set<string>;
   fullModeChats: Set<string>;
@@ -146,7 +147,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       await ctx.reply("✅ Kiro restarted.");
     } else {
       await ctx.reply("♻️ Restarting bridge...");
-      setTimeout(() => process.exit(0), 500);
+      setTimeout(() => ctx.requestShutdown?.(), 500);
     }
     return true;
   }

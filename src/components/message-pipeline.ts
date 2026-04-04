@@ -75,6 +75,7 @@ export interface PipelineDeps {
   updateCtxStart: (memoryDir: string, chatId: number) => void;
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string) => string | null;
+  requestShutdown?: () => void;
 }
 
 /**
@@ -134,6 +135,7 @@ export async function handleInboundMessage(
     updateCtxStart,
     cronCurrentJob: deps.cronCurrentJob?.() ?? null,
     enqueueCron: deps.enqueueCron,
+    requestShutdown: deps.requestShutdown,
     conversationBuffer: isGroup ? conversationBuffer : undefined,
     bufKey: isGroup ? `${msg.platform}:${channelId}` : undefined,
   };

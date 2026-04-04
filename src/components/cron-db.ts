@@ -65,7 +65,14 @@ function migrate(): void {
   } catch { /* migration is best-effort */ }
 }
 
-function rowToEntry(row: any): CronEntry {
+type CronRow = {
+  id: string; fire_at: number; message: string; chat_id: number; type: "reminder" | "task";
+  executor?: "agent" | "script"; schedule?: string; priority?: "high" | "medium" | "low"; task_file?: string;
+  paused?: number; fired: number; created_at: number; last_ran_at?: number;
+  retry_after?: number; retrying?: number; history?: string;
+};
+
+function rowToEntry(row: CronRow): CronEntry {
   return {
     id: row.id, fireAt: row.fire_at, message: row.message, chatId: row.chat_id,
     type: row.type, fired: !!row.fired, createdAt: row.created_at,
@@ -82,11 +89,11 @@ function rowToEntry(row: any): CronEntry {
 }
 
 export function readEntries(): CronEntry[] {
-  return getDb().prepare("SELECT * FROM cron_entries").all().map(rowToEntry);
+  return (getDb().prepare("SELECT * FROM cron_entries").all() as CronRow[]).map(rowToEntry);
 }
 
 export function readEntry(id: string): CronEntry | null {
-  const row = getDb().prepare("SELECT * FROM cron_entries WHERE id = ?").get(id);
+  const row = getDb().prepare("SELECT * FROM cron_entries WHERE id = ?").get(id) as CronRow | undefined;
   return row ? rowToEntry(row) : null;
 }
 

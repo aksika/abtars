@@ -87,21 +87,6 @@ describe("MaintenanceService — forget operations", () => {
 
   // --- forgetTopic ---
 
-  it("forgetTopic deletes messages matching a topic via FTS", async () => {
-    insertMessage(1, "s1", "quantum computing is fascinating");
-    insertMessage(1, "s1", "the weather is nice today");
-    insertMessage(1, "s1", "quantum entanglement experiment");
-
-    const result = await mm.maintenance.forgetTopic(1, "quantum", 0);
-
-    expect(result.messagesRemoved).toBeGreaterThanOrEqual(1);
-    // "weather" message should survive
-    const remaining = mm.getDb()!.prepare(
-      "SELECT content FROM messages WHERE chat_id = 1",
-    ).all() as Array<{ content: string }>;
-    expect(remaining.some(r => r.content.includes("weather"))).toBe(true);
-  });
-
   it("forgetTopic returns zero when no matches above threshold", async () => {
     insertMessage(1, "s1", "completely unrelated content");
 

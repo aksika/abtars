@@ -8,7 +8,7 @@ import { writeRestartReason } from "./restart-reason.js";
 import type { AcpTransport } from "./acp-transport.js";
 import type { HeartbeatTask } from "../types/memory.js";
 
-export function createWatchdogTask(transport: AcpTransport): HeartbeatTask {
+export function createWatchdogTask(transport: AcpTransport, requestShutdown: () => void): HeartbeatTask {
   let l1Done = false;
   let lastActionAt = 0;
   const COOLDOWN = 60 * 60 * 1000;
@@ -38,7 +38,7 @@ export function createWatchdogTask(transport: AcpTransport): HeartbeatTask {
         try {
           await transport.initialize();
           if (transport.lastPromptText) await transport.sendPrompt(transport.lastSessionKey, transport.lastPromptText);
-        } catch { process.exit(0); }
+        } catch { requestShutdown(); }
         return;
       }
 
@@ -96,7 +96,7 @@ export function createWatchdogTask(transport: AcpTransport): HeartbeatTask {
         } else {
           logWarn("watchdog", `[Case 3] Still silent after re-send — L2: restarting bridge`);
           writeRestartReason(`watchdog-restart: silent after re-send, ${Math.round(silentMs / 1000)}s`);
-          process.exit(0);
+          requestShutdown();
         }
         return;
       }

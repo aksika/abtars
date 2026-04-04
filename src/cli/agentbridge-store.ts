@@ -160,7 +160,7 @@ async function main() {
   const memory = new MemoryManager(config);
 
   try {
-    await memory.initialize();
+    await memory.initialize({ skipEmbeddingCheck: true });
 
     // --delete-ids path: cascade delete messages from DB + JSONL
     if (raw.deleteIds) {

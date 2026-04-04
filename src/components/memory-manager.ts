@@ -56,7 +56,7 @@ export class MemoryManager {
   getDb(): Database.Database | null { return this.db; }
   getConfig(): MemoryConfig { return this.config; }
 
-  async initialize(): Promise<void> {
+  async initialize(opts?: { skipEmbeddingCheck?: boolean }): Promise<void> {
     if (!this.config.memoryEnabled) return;
 
     try {
@@ -97,24 +97,26 @@ export class MemoryManager {
       this.maintenance = new MaintenanceService(this.db, this.config, this.memoryIndex, this.editor);
       this.store.setDiskBudgetCallback(() => this.maintenance.enforceDiskBudget());
 
-      // Ollama embedding health check
-      const embedConfig = loadEmbedConfig();
-      if (embedConfig.enabled) {
-        try {
-          const res = await fetch(`${embedConfig.url}/api/tags`);
-          if (res.ok) {
-            const data = await res.json() as { models?: Array<{ name: string }> };
-            const models = data.models?.map(m => m.name) ?? [];
-            if (models.some(m => m.startsWith(embedConfig.model))) {
-              logInfo(TAG, `Embedding enabled: ${embedConfig.model} via ollama (Se sidecar ready)`);
+      // Ollama embedding health check (skip for CLI tools that just need DB access)
+      if (!opts?.skipEmbeddingCheck) {
+        const embedConfig = loadEmbedConfig();
+        if (embedConfig.enabled) {
+          try {
+            const res = await fetch(`${embedConfig.url}/api/tags`);
+            if (res.ok) {
+              const data = await res.json() as { models?: Array<{ name: string }> };
+              const models = data.models?.map(m => m.name) ?? [];
+              if (models.some(m => m.startsWith(embedConfig.model))) {
+                logInfo(TAG, `Embedding enabled: ${embedConfig.model} via ollama (Se sidecar ready)`);
+              } else {
+                logWarn(TAG, `Embedding model '${embedConfig.model}' not found in ollama (available: ${models.join(", ")})`);
+              }
             } else {
-              logWarn(TAG, `Embedding model '${embedConfig.model}' not found in ollama (available: ${models.join(", ")})`);
+              logWarn(TAG, `Ollama health check failed (HTTP ${res.status})`);
             }
-          } else {
-            logWarn(TAG, `Ollama health check failed (HTTP ${res.status})`);
+          } catch {
+            logWarn(TAG, `Ollama unreachable at ${embedConfig.url} — Se sidecar disabled`);
           }
-        } catch {
-          logWarn(TAG, `Ollama unreachable at ${embedConfig.url} — Se sidecar disabled`);
         }
       }
 
