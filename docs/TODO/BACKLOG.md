@@ -1359,3 +1359,35 @@ Option D (hybrid). Phase 1 is a code change in `acp-transport.ts` auto-approve l
   - Blocked → reject with explanation message to agent
 - Config: `SANDBOX_BLOCKED_PATHS`, `SANDBOX_ALLOWED_WRITE_PATHS` in `.env`
 - Log all blocked attempts at WARN level
+
+## 78. Enhanced Testing Strategy
+
+**Priority:** HIGH
+**Status:** Not started
+
+### Current State
+- 731 unit tests + property-based tests (fast-check)
+- 1 e2e test (memory subsystem)
+- No integration, smoke, or contract tests
+
+### Phase 1: Smoke Test
+Single test that verifies the bridge lifecycle:
+1. Start bridge with mock transport
+2. Send one message through pipeline
+3. Verify response delivered
+4. Shut down cleanly, no orphaned processes
+
+Run after every deploy. Would have caught: `setBrowserManager` crash, SOUL truncation, sleep queue blocking.
+
+### Phase 2: Integration Tests
+Test real component combinations without full bridge:
+- **Pipeline + Transport**: real message-pipeline + real AcpTransport (mocked CLI process). Verify SOUL injection reaches transport, interceptor doesn't truncate session-start, resetAndPrepare triggers re-injection.
+- **Heartbeat + Tasks**: real HeartbeatSystem + real task callbacks. Verify clock-sync, standby detection, age-check fires at SLEEP_TIME.
+- **Sleep + Memory**: real sleep spawn + real DB. Verify audit file created, watermark advanced, daily summary written.
+
+### Phase 3: Contract Tests
+Verify ACP protocol compatibility between our transport and CLI providers:
+- **Kiro contract**: initialize → newSession → prompt → response with chunks → permission request → tool calls → resetSession. Verify all message types handled.
+- **Gemini contract**: same flow but with Gemini-specific behaviors — `cancelled` stopReason on concurrent prompts, no `contextUsagePercentage` metadata, `--acp -y` flags.
+- Run against recorded fixtures (not live CLIs) for speed and determinism.
+- Update fixtures when CLI versions change.
