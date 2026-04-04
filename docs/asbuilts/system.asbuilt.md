@@ -318,7 +318,7 @@ Uses {today} placeholder → substituted with YYYY-MM-DD local date at runtime.
 
 Deploy: `scripts/deploy.sh` copies `tasks/*.md` to `~/.agentbridge/tasks/`.
 
-### `/cron` Display
+### `/tasks` Display (alias: `/cron`)
 
 Source: `src/components/command-handlers.ts`
 

@@ -178,8 +178,8 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     return true;
   }
 
-  // /cron
-  if (text === "/cron") {
+  // /tasks (alias: /cron)
+  if (text === "/tasks" || text === "/cron") {
     const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
     let listing: string;
     try {
@@ -236,18 +236,18 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     return true;
   }
 
-  // /cron trigger <id>
-  if (text.startsWith("/cron trigger ")) {
-    const id = text.slice(14).trim();
+  // /tasks trigger <id> (alias: /cron trigger)
+  if (text.startsWith("/tasks trigger ") || text.startsWith("/cron trigger ")) {
+    const id = text.replace(/^\/(tasks|cron) trigger /, "").trim();
     if (!id) { await ctx.reply("Usage: /trigger <cron-id>"); return true; }
     const err = ctx.enqueueCron?.(id);
     await ctx.reply(err ?? `✅ Triggered ${id}`);
     return true;
   }
 
-  // /cron log <id>
-  if (text.startsWith("/cron log ")) {
-    const id = text.slice(10).trim();
+  // /tasks log <id> (alias: /cron log)
+  if (text.startsWith("/tasks log ") || text.startsWith("/cron log ")) {
+    const id = text.replace(/^\/(tasks|cron) log /, "").trim();
     try {
       const raw = execSync(`agentbridge-cron history ${id}`, { timeout: 5000, encoding: "utf-8" }).trim();
       const data = JSON.parse(raw);
@@ -315,9 +315,9 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
       "/status — Bridge status, transport, heartbeat",
       "/stop, /ctrlc — Stop current response",
       "/memory — Memory storage statistics",
-      "/cron — Scheduled tasks",
-      "/cron log <id> — Last 5 runs for a task",
-      "/cron trigger <id> — Manually fire a task",
+      "/tasks — Scheduled tasks",
+      "/tasks log <id> — Last 5 runs for a task",
+      "/tasks trigger <id> — Manually fire a task",
       "/facts — Core knowledge (user profile + agent notes)",
       "/coding — Switch to coding agent",
       "/default — Switch back to default agent",
