@@ -1308,3 +1308,54 @@ Use `bridge.lock` to distinguish standby wake from real failure:
 
 ### Future enhancement
 OS-specific darkwake detection (macOS `pmset -g systemstate`, Linux suspend state) as secondary signal. Not needed now — grace period handles it.
+
+## 77. Agent Sandbox — Restrict File/Command Access
+
+**Priority:** CRITICAL
+**Status:** Not started
+
+### Problem
+Agent modified source code in `~/agentbridge/` (developer repo) without permission. Agent notes say "don't modify code" but the agent ignored it. Notes are advisory — the agent can bypass them. Need enforcement, not guidance.
+
+### Scope
+Restrict what the agent can read, write, and execute. The agent should only operate within its designated workspace.
+
+### Design Options
+
+**Option A: Permission handler allowlist/blocklist**
+- ACP transport's auto-approve logic checks paths before approving
+- Blocklist: `~/agentbridge/`, `~/.ssh/`, `~/.aws/`, etc.
+- Allowlist: `~/.agentbridge/`, `/tmp/`, `~/.agentbridge/workspace/`
+- Write operations: only allowlist paths
+- Read operations: allowlist + selective read-only paths (e.g. can read `~/agentbridge/docs/` but not write)
+- Pros: simple, in our control, no OS-level changes
+- Cons: only works for ACP transport (tool calls), agent could use bash to bypass
+
+**Option B: OS-level sandbox (macOS sandbox-exec / Linux namespaces)**
+- Run kiro-cli inside a sandbox profile that restricts filesystem access
+- macOS: `sandbox-exec -f profile.sb kiro-cli acp`
+- Linux: `unshare` / `firejail` / AppArmor profile
+- Pros: enforced at OS level, can't bypass from inside
+- Cons: complex, platform-specific, may break kiro-cli functionality
+
+**Option C: Dedicated user + filesystem permissions**
+- Run the agent as a separate OS user (e.g. `molty`)
+- `~/.agentbridge/` owned by `molty`, `~/agentbridge/` owned by `akos`
+- Agent literally can't write to developer repo
+- Pros: simple, battle-tested, cross-platform
+- Cons: complicates deployment, needs sudo for setup
+
+**Option D: Hybrid — Permission handler (quick) + OS sandbox (later)**
+- Phase 1: Implement Option A (permission handler blocklist) — immediate protection
+- Phase 2: Add Option B or C for defense-in-depth
+
+### Recommendation
+Option D (hybrid). Phase 1 is a code change in `acp-transport.ts` auto-approve logic — can ship today. Phase 2 is infrastructure work for later.
+
+### Phase 1 — Permission handler sandbox
+- In `acp-transport.ts`, before auto-approving a tool call:
+  - Extract file path from tool description
+  - Check against blocklist (reject) and allowlist (approve)
+  - Blocked → reject with explanation message to agent
+- Config: `SANDBOX_BLOCKED_PATHS`, `SANDBOX_ALLOWED_WRITE_PATHS` in `.env`
+- Log all blocked attempts at WARN level
