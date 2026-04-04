@@ -65,20 +65,19 @@ export class TelegramAdapter implements PlatformAdapter {
     logInfo(TAG, `🤖 Bot: @${botInfo.username}`);
 
     await this.api.setMyCommands([
-      { command: "new", description: "Start a fresh session" },
-      { command: "reset", description: "Start a fresh session" },
-      { command: "status", description: "Connection & uptime info" },
-      { command: "stop", description: "Send Ctrl+C to Kiro" },
-      { command: "restart", description: "Restart Kiro (tmux only)" },
-      { command: "full", description: "Raw output mode, TTS off" },
-      { command: "short", description: "Clean output mode, TTS on" },
-      { command: "memory", description: "Memory system stats" },
-      { command: "facts", description: "Show core knowledge" },
-      { command: "reflect", description: "Generate a reflection" },
-      { command: "ingest", description: "Ingest a document or URL" },
-      { command: "forget", description: "Forget topic or date range" },
-      { command: "coding", description: "Switch to Opus coding agent" },
-      { command: "default", description: "Switch back to KP" },
+      { command: "new", description: "Fresh session (keeps mode)" },
+      { command: "reset", description: "Fresh session + exit coding" },
+      { command: "compact", description: "Compact context window" },
+      { command: "status", description: "Bridge status" },
+      { command: "stop", description: "Stop current response" },
+      { command: "tasks", description: "Scheduled tasks" },
+      { command: "memory", description: "Memory stats" },
+      { command: "facts", description: "Core knowledge" },
+      { command: "coding", description: "Switch to coding agent" },
+      { command: "default", description: "Switch to default agent" },
+      { command: "full", description: "Raw output, TTS off" },
+      { command: "short", description: "Clean output, TTS on" },
+      { command: "help", description: "Show all commands" },
     ]).catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
 
     this.poller = new TelegramPoller(this.api, this.config.pollTimeoutS, (u) => this.handleUpdate(u));
