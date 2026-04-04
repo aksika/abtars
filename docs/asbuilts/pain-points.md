@@ -71,3 +71,25 @@ Operational issues encountered, how they were addressed, and potential future im
 **What else could be done:**
 - **Configurable day boundary:** `DAY_BOUNDARY_HOUR` env var (default: 6am) for users with different schedules
 - **Multi-day catch-up:** If multiple days are missing summaries, process all of them (currently only checks yesterday)
+
+---
+
+## 5. SOUL Injection Silently Truncated for 2 Weeks (CRITICAL)
+
+**Problem:** The `MessageInterceptor` (8000 char threshold, designed for A2A/Browsie overflow) was applied to ALL outbound prompts, including session-start prompts. The SOUL bundle alone is 10165 chars — every session start got truncated to a 500-char preview + file path. The agent ran without its identity, tools, memory context, or steering on every `/new`, restart, standby resume, and deploy for ~2 weeks.
+
+**Impact:** Agent had no persona, no TOOLS.md, no agent notes, no memory context after any session reset. It still "worked" because kiro-cli has its own base prompt, but all AgentBridge customization was lost. Led to hallucinated features, ignored steering rules, and inconsistent behavior.
+
+**Why it wasn't caught:**
+- The interceptor logged the truncation at INFO level, but it looked routine ("Intercepted oversized message")
+- The agent responded normally (kiro-cli base prompt), so nothing obviously broke
+- No test verified that session-start prompts actually reached the transport intact
+
+**Mitigation (implemented):**
+- Session-start prompts (when `pendingSessionStart` is set) bypass the interceptor entirely
+- SOUL + context injection is expected to be large — it's not overflow
+
+**What else could be done:**
+- **Integration test:** Verify that after `/new`, the prompt sent to transport contains the SOUL bundle
+- **Prompt size monitoring:** Log prompt size on session start, alert if suspiciously small (< 5000 chars)
+- **Interceptor scope:** Rename/refactor to make it clear it's for A2A/Browsie only, not general pipeline
