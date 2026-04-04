@@ -8,9 +8,11 @@ import { AGENT_BRIDGE_HOME } from "./components/config.js";
 
 import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
+import { createWatchdogTask } from "./components/watchdog.js";
+import { createSelfHealerTask } from "./components/self-healer.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError, logDebug, getLogFile } from "./components/logger.js";
+import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
 import { loadMemoryConfig } from "./components/memory-config.js";
 import { MemoryManager } from "./components/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
@@ -539,102 +541,8 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- Watchdog: detect stuck agent ---
-  let watchdogL1Done = false;
-  let watchdogLastActionAt = 0;
-  const WATCHDOG_COOLDOWN = 60 * 60 * 1000;
-  const WD_TOOL_TIMEOUT = (parseInt(process.env["WATCHDOG_TOOL_TIMEOUT_SEC"] ?? "180", 10)) * 1000;
-  const WD_SILENT_TIMEOUT = (parseInt(process.env["WATCHDOG_SILENT_SEC"] ?? "300", 10)) * 1000;
-  const WD_ENDLESS_TIMEOUT = (parseInt(process.env["WATCHDOG_ENDLESS_SEC"] ?? "600", 10)) * 1000;
-
   if (transport instanceof AcpTransport) {
-    heartbeat.registerTask({
-      name: "watchdog",
-      execute: async () => {
-        const acp = transport as AcpTransport;
-        if (acp.promptStartedAt <= acp.lastSuccessAt) {
-          watchdogL1Done = false;
-          return;
-        }
-
-        const now = Date.now();
-        if (now - watchdogLastActionAt < WATCHDOG_COOLDOWN && watchdogL1Done) return;
-
-        const silentMs = now - acp.lastActivityAt;
-        const totalMs = now - acp.promptStartedAt;
-
-        // Case 2: Process dead
-        if (!acp.isConnected) {
-          logWarn("watchdog", `[Case 2] Process dead — reinit + re-send`);
-          watchdogLastActionAt = now;
-          writeRestartReason("watchdog: process dead");
-          try {
-            await acp.initialize();
-            if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText);
-          } catch { process.exit(0); }
-          return;
-        }
-
-        // Case 1: Tool hung > 3min
-        if (acp.toolInFlight && now - acp.toolInFlight.startedAt > WD_TOOL_TIMEOUT) {
-          const title = acp.toolInFlight.title;
-          const dur = Math.round((now - acp.toolInFlight.startedAt) / 1000);
-          logWarn("watchdog", `[Case 1] Tool "${title}" hung ${dur}s — interrupting`);
-          watchdogLastActionAt = now;
-          try {
-            await acp.sendInterrupt();
-            acp.toolInFlight = null;
-            if (!watchdogL1Done) {
-              await acp.sendPrompt(acp.lastSessionKey, `[SYSTEM] Your tool call "${title}" was interrupted after ${dur} seconds. Try a different approach.`);
-              watchdogL1Done = true;
-            }
-          } catch {
-            logWarn("watchdog", "[Case 1] Interrupt failed — resetting");
-            await acp.resetSession(acp.lastSessionKey).catch(() => {});
-            if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText).catch(() => {});
-          }
-          return;
-        }
-
-        // Case 4: Active but endless > 10min
-        if (silentMs < WD_SILENT_TIMEOUT && totalMs > WD_ENDLESS_TIMEOUT) {
-          logWarn("watchdog", `[Case 4] Active but endless (${Math.round(totalMs / 1000)}s) — interrupting`);
-          watchdogLastActionAt = now;
-          try {
-            await acp.sendInterrupt();
-            if (!watchdogL1Done) {
-              await acp.sendPrompt(acp.lastSessionKey, "[SYSTEM] Interrupted — you appeared stuck in a loop. Please wrap up and respond to the user.");
-              watchdogL1Done = true;
-            }
-          } catch {
-            await acp.resetSession(acp.lastSessionKey).catch(() => {});
-            if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText).catch(() => {});
-          }
-          return;
-        }
-
-        // Case 3: Silent > 5min (transient/rate limit)
-        if (silentMs > WD_SILENT_TIMEOUT && !acp.toolInFlight) {
-          if (!watchdogL1Done) {
-            logWarn("watchdog", `[Case 3] Silent ${Math.round(silentMs / 1000)}s — re-sending prompt`);
-            watchdogL1Done = true;
-            watchdogLastActionAt = now;
-            try {
-              if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText);
-            } catch {
-              logWarn("watchdog", "[Case 3] Re-send failed — resetting");
-              await acp.resetSession(acp.lastSessionKey).catch(() => {});
-              if (acp.lastPromptText) await acp.sendPrompt(acp.lastSessionKey, acp.lastPromptText).catch(() => {});
-            }
-          } else {
-            // L2: L1 already tried, still stuck
-            logWarn("watchdog", `[Case 3] Still silent after re-send — L2: restarting bridge`);
-            writeRestartReason(`watchdog-restart: silent after re-send, ${Math.round(silentMs / 1000)}s`);
-            process.exit(0);
-          }
-          return;
-        }
-      },
-    });
+    heartbeat.registerTask(createWatchdogTask(transport as AcpTransport));
   }
 
   // --- Restart flag check ---
@@ -652,82 +560,8 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- Self-healing agent: error scanner ---
-  const SELFHEAL_MAX = parseInt(process.env["SELFHEAL_MAX_REPORTS"] ?? "1", 10);
-  const SELFHEAL_COOLDOWN_MS = (parseInt(process.env["SELFHEAL_COOLDOWN_MIN"] ?? "30", 10)) * 60 * 1000;
-  let lastSelfhealTs = new Date().toISOString().slice(0, 23); // start from now — don't re-scan old errors
-  const selfhealSeen = new Map<string, number>(); // errorKey → lastReportedAt
-
   if (process.env["SELFHEAL_ENABLED"] !== "false") {
-    heartbeat.registerTask({
-      name: "self-healer",
-      execute: async () => {
-        const logFile = getLogFile();
-        try {
-          const content = readFileSync(logFile, "utf-8");
-          const lines = content.split("\n");
-          const now = Date.now();
-          let reported = 0;
-
-          for (let i = lines.length - 1; i >= 0 && reported < SELFHEAL_MAX; i--) {
-            const line = lines[i]!;
-            if (line.length < 24 || !line.includes(" ERROR ")) continue;
-            const ts = line.slice(0, 23);
-            if (ts <= lastSelfhealTs) break;
-            if (line.includes("TEST ")) continue;
-            // Blacklist — skip noise, transient errors, and self-references
-            const SELFHEAL_BLACKLIST = [
-              "-32603", "Transient error", "fetch failed",
-              "[self-healer]", "[watchdog]", "[db-integrity]",
-              "ECONNRESET", "ETIMEDOUT", "socket hang up",
-              "auto-approved", "permission",
-              "BUG REPORT", "[agentbridge-sleep]",
-            ];
-            if (SELFHEAL_BLACKLIST.some(b => line.includes(b))) continue;
-
-            // Extract tag + message as dedup key
-            const match = line.match(/\[([^\]]+)\] (.+)/);
-            if (!match) continue;
-            const errorKey = `${match[1]}:${match[2]!.slice(0, 80)}`;
-
-            // Cooldown check
-            const lastSeen = selfhealSeen.get(errorKey);
-            if (lastSeen && now - lastSeen < SELFHEAL_COOLDOWN_MS) continue;
-            selfhealSeen.set(errorKey, now);
-
-            // Inject to KP
-            if (telegramAdapter) {
-              const chatId = [...config.allowedUserIds][0];
-              if (chatId) {
-                telegramAdapter.injectMessage({
-                  platform: "telegram",
-                  channelId: String(chatId),
-                  sessionKey: `telegram:${chatId}`,
-                  senderId: "system",
-                  senderName: "Self-Healing Agent",
-                  text: `[SYSTEM BUG REPORT] ${line.slice(0, 500)}`,
-                  timestamp: now,
-                  isGroup: false,
-                  isVoice: false,
-                });
-                reported++;
-                logInfo("self-healer", `Reported error to KP: ${errorKey.slice(0, 80)}`);
-              }
-            }
-          }
-
-          // Advance watermark
-          if (lines.length > 1) {
-            const lastLine = lines[lines.length - 2] ?? "";
-            if (lastLine.length >= 23) lastSelfhealTs = lastLine.slice(0, 23);
-          }
-
-          // Evict old cooldown entries
-          for (const [key, ts] of selfhealSeen) {
-            if (now - ts > SELFHEAL_COOLDOWN_MS * 2) selfhealSeen.delete(key);
-          }
-        } catch { /* log file not readable — skip */ }
-      },
-    });
+    heartbeat.registerTask(createSelfHealerTask(() => telegramAdapter, config.allowedUserIds));
   }
 
   // Run once on startup, then start periodic

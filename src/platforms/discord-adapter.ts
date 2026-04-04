@@ -6,7 +6,7 @@
 
 import { DiscordApi } from "../components/discord-api.js";
 import { DiscordPoller } from "../components/discord-poller.js";
-import { DiscordSecurityGate } from "../components/discord-security-gate.js";
+import { SecurityGate } from "../components/security-gate.js";
 import { ResponseFormatter } from "../components/response-formatter.js";
 import { A2ARouter } from "../components/a2a-router.js";
 import { interceptLargeMessage } from "../components/message-interceptor.js";
@@ -50,7 +50,7 @@ export class DiscordAdapter implements PlatformAdapter {
   };
 
   private readonly api: DiscordApi;
-  private readonly securityGate: DiscordSecurityGate;
+  private readonly securityGate: SecurityGate;
   private readonly formatter = new ResponseFormatter();
   private readonly config: DiscordAdapterConfig;
   private readonly deps: DiscordAdapterDeps;
@@ -59,7 +59,7 @@ export class DiscordAdapter implements PlatformAdapter {
 
   constructor(config: DiscordAdapterConfig, deps: DiscordAdapterDeps) {
     this.api = new DiscordApi(config.botToken);
-    this.securityGate = new DiscordSecurityGate(config.allowedUserIds, config.allowedChannelIds);
+    this.securityGate = new SecurityGate(config.allowedUserIds, config.allowedChannelIds);
     this.config = config;
     this.deps = deps;
   }

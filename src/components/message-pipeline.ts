@@ -10,6 +10,7 @@ import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction } from "./compaction.js";
 import { buildSessionStartContext } from "./session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
+import { TELEGRAM_ALLOWED_REACTIONS, REACTION_FALLBACK_MAP } from "./reaction-signal.js";
 import { TmuxClient } from "./tmux-client.js";
 import { AcpTransport } from "./acp-transport.js";
 import { transcribeAudio, type SttConfig } from "./stt.js";
@@ -320,15 +321,7 @@ export async function handleInboundMessage(
     if (reactMatch) {
       const emoji = reactMatch[1]!;
       if (adapter.setReaction && msg.messageId) {
-        const TELEGRAM_ALLOWED = new Set(["👍","👎","❤","🔥","🥰","👏","😁","🤔","🤯","😱","🤬","😢","🎉","🤩","🤮","💩","🙏","👌","🕊","🤡","🥱","🥴","😍","🐳","❤🔥","🌚","🌭","💯","🤣","⚡","🍌","🏆","💔","🤨","😐","🍓","🍾","💋","🖕","😈","😴","😭","🤓","👻","👨💻","👀","🎃","🙈","😇","😨","🤝","✍","🤗","🫡","🎅","🎄","☃","💅","🤪","🗿","🆒","💘","🙉","🦄","😘","💊","🙊","😎","👾","🤷♂","🤷","🤷♀","😡"]);
-        const FALLBACK_MAP: Record<string, string> = {
-          "😅": "🤣", "😂": "🤣", "😆": "😁", "😄": "😁", "😃": "😁",
-          "🙂": "😁", "😊": "😁", "☺": "😁", "😉": "😁", "🫠": "🤪",
-          "😞": "😢", "😔": "😢", "😟": "😢", "😕": "🤔", "🫤": "🤨",
-          "😤": "😡", "😠": "😡", "💪": "👏", "🤞": "🙏", "✅": "👍",
-          "❌": "👎", "😬": "🙈", "🫣": "🙈", "🤭": "🙊", "💀": "👻",
-        };
-        const fallback = TELEGRAM_ALLOWED.has(emoji) ? emoji : (FALLBACK_MAP[emoji] ?? null);
+        const fallback = TELEGRAM_ALLOWED_REACTIONS.has(emoji) ? emoji : (REACTION_FALLBACK_MAP[emoji] ?? null);
         if (fallback) {
           await adapter.setReaction(channelId, msg.messageId, fallback);
           logDebug(TAG, `Reaction: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);

@@ -54,7 +54,7 @@ export class TelegramAdapter implements PlatformAdapter {
 
   constructor(config: TelegramAdapterConfig, deps: TelegramAdapterDeps) {
     this.api = new TelegramApi(config.botToken);
-    this.securityGate = new SecurityGate(config.allowedUserIds);
+    this.securityGate = new SecurityGate(new Set([...config.allowedUserIds].map(String)));
     this.config = config;
     this.deps = deps;
   }
@@ -90,7 +90,7 @@ export class TelegramAdapter implements PlatformAdapter {
   }
 
   authorize(msg: InboundMessage): boolean {
-    return this.securityGate.authorizeUserId(parseInt(msg.senderId, 10));
+    return this.securityGate.authorize(msg.senderId);
   }
 
   async sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<number | undefined> {
@@ -191,13 +191,13 @@ export class TelegramAdapter implements PlatformAdapter {
       if (!this.deps.pipeline.sttConfig) {
         if (isGroup) {
           this.deps.conversationBuffer.push(bufKey, senderName, "[voice note - STT disabled]");
-        } else if (this.securityGate.authorize(message)) {
+        } else if (this.securityGate.authorize(String(message.from?.id))) {
           await this.api.sendMessage(chatId, "🎤 Voice notes require STT (set GROQ_API_KEY).", { message_thread_id: threadId });
         }
         return;
       }
 
-      if (!this.securityGate.authorize(message)) {
+      if (!this.securityGate.authorize(String(message.from?.id))) {
         if (isGroup) this.deps.conversationBuffer.push(bufKey, senderName, "[voice note]");
         return;
       }
@@ -258,7 +258,7 @@ export class TelegramAdapter implements PlatformAdapter {
     }
 
     // --- Security ---
-    if (!isVoiceNote && !this.securityGate.authorize(message)) {
+    if (!isVoiceNote && !this.securityGate.authorize(String(message.from?.id))) {
       if (isGroup) this.deps.conversationBuffer.push(bufKey, senderName, text);
       logWarn(TAG, `Unauthorized user ${message.from.id}`);
       return;
@@ -267,7 +267,7 @@ export class TelegramAdapter implements PlatformAdapter {
     // --- Photo/document handling ---
     let mediaPath: string | undefined;
 
-    if ((hasPhoto || hasDocument) && this.securityGate.authorize(message)) {
+    if ((hasPhoto || hasDocument) && this.securityGate.authorize(String(message.from?.id))) {
       try {
         const { saveInboundMedia } = await import("../components/media-utils.js");
         let fileId: string;
@@ -356,7 +356,7 @@ export class TelegramAdapter implements PlatformAdapter {
     const emojis = added.map((r) => r.emoji);
     logInfo(TAG, `Reaction ${emojis.join("")} from ${senderName} on msg ${reaction.message_id}`);
 
-    const isAuthorized = this.securityGate.authorizeUserId(user.id);
+    const isAuthorized = this.securityGate.authorize(String(user.id));
     const signal = formatReactionSignal(senderName, emojis);
     const chatId = reaction.chat.id;
     const route = routeReaction(isAuthorized, reaction.chat.type);
