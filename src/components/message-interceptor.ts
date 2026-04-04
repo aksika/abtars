@@ -1,5 +1,6 @@
 /**
- * Large message interception — safety net for A2A / Browsie oversized payloads.
+ * Oversized payload interception — safety net for A2A / Browsie responses.
+ * NOT for session-start or SOUL injection (those are expected to be large).
  *
  * If a message exceeds the threshold, the full content is written to a file
  * and the message body is replaced with a truncated preview + file path.

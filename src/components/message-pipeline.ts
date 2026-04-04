@@ -41,6 +41,21 @@ export const compactingSessions = new Set<string>();
 export let resetIdleCompactFlag: (() => void) | null = null;
 export function setIdleCompactReset(fn: () => void): void { resetIdleCompactFlag = fn; }
 
+/** Shared session reset: reset transport, clear buffer, mark for SOUL re-injection. */
+export async function resetAndPrepare(opts: {
+  transport: IKiroTransport;
+  sessionKey: string;
+  reason: string;
+  pendingSessionStart: Set<string>;
+  conversationBuffer?: { clear: (key: string) => void };
+  bufKey?: string;
+}): Promise<void> {
+  await opts.transport.resetSession(opts.sessionKey);
+  if (opts.conversationBuffer && opts.bufKey) opts.conversationBuffer.clear(opts.bufKey);
+  opts.pendingSessionStart.add(opts.sessionKey);
+  writeRestartReason(opts.reason);
+}
+
 export interface PipelineDeps {
   transport: IKiroTransport;
   codingMode: CodingMode;
@@ -450,9 +465,7 @@ export async function handleInboundMessage(
     const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
     if (errStr.includes("ValidationException") || errStr.includes("-32603")) {
       logWarn(TAG, `Context overflow detected — auto-resetting session`);
-      writeRestartReason(`ctx-overflow: ${errStr.slice(0, 100)}`);
-      await transport.resetSession(sessionKey).catch(() => {});
-      pendingSessionStart.add(sessionKey);
+      await resetAndPrepare({ transport, sessionKey, reason: `ctx-overflow: ${errStr.slice(0, 100)}`, pendingSessionStart });
       await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(() => {});
     } else {
       await adapter.sendMessage(channelId, "❌ Something went wrong. Try /reset to start fresh.", { threadId: msg.threadId }).catch(() => {});
@@ -532,6 +545,9 @@ function preparePrompt(
     if (reason) {
       prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
       logInfo(TAG, `Injected restart reason: ${reason}`);
+    }
+    if (prompt.length < 5000) {
+      logWarn(TAG, `Session-start prompt suspiciously small (${prompt.length} chars) — SOUL may be missing`);
     }
   }
   seen.add(sessionKey);

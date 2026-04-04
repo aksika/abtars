@@ -8,9 +8,9 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logError } from "./logger.js";
-import { writeRestartReason } from "./restart-reason.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import { runCompaction } from "./compaction.js";
+import { resetAndPrepare } from "./message-pipeline.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { TmuxClient } from "./tmux-client.js";
 import type { MemoryManager } from "./memory-manager.js";
@@ -61,17 +61,14 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     if (text === "/reset" && ctx.codingMode.has(ctx.sessionKey)) {
       await ctx.codingMode.stop(ctx.sessionKey);
     }
-    const codingTransport = ctx.codingMode.getTransport();
-    if (ctx.codingMode.has(ctx.sessionKey) && codingTransport) {
-      await codingTransport.resetSession(ctx.sessionKey);
-    } else {
-      await ctx.transport.resetSession(ctx.sessionKey);
-    }
-    if (ctx.conversationBuffer && ctx.bufKey) ctx.conversationBuffer.clear(ctx.bufKey);
-    ctx.pendingSessionStart.add(ctx.sessionKey);
+    const activeTransport = ctx.codingMode.has(ctx.sessionKey) && ctx.codingMode.getTransport()
+      ? ctx.codingMode.getTransport()! : ctx.transport;
+    await resetAndPrepare({
+      transport: activeTransport, sessionKey: ctx.sessionKey, reason: "user-reset",
+      pendingSessionStart: ctx.pendingSessionStart, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
+    });
     if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
-    writeRestartReason("user-reset");
-    const label = text === "/reset" ? "🔄 Reset to KP." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
+    const label = text === "/reset" ? "🔄 Reset to default." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
     await ctx.reply(label);
     logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
     return true;
