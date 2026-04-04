@@ -2,13 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { IdleSave } from "./idle-save.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 
-function mockTransport(): IKiroTransport {
+function mockTransport(): IKiroTransport & { sendKeys: unknown } {
   return {
     initialize: vi.fn().mockResolvedValue(undefined),
     sendPrompt: vi.fn().mockResolvedValue("saved"),
     resetSession: vi.fn().mockResolvedValue(undefined),
     sendInterrupt: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
+    sendKeys: vi.fn(),
     get isReady() { return true; },
   };
 }

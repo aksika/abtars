@@ -220,7 +220,7 @@ describe("instantStore — Property 4: Watermark Advance Prevents Heartbeat Re-E
    * For any chat where instantStore() succeeds, a subsequent processTranscripts()
    * does not re-extract messages up to that timestamp.
    */
-  it("after instantStore succeeds, processTranscripts skips messages at or before the watermark", async () => {
+  it("instantStore does not advance watermark (extraction watermark is sleep-only)", async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 1, max: 999999 }),
@@ -231,15 +231,12 @@ describe("instantStore — Property 4: Watermark Advance Prevents Heartbeat Re-E
           await iterManager.initialize();
 
           try {
-            const db = initializeDatabase(join(iterDir, "memory.db"));
+            const db = iterManager.getDatabase()!;
 
-            // Insert messages with timestamps in the past (before Date.now())
-            const pastTimestamp = Date.now() - 60_000;
             db.prepare(
               "INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
-            ).run(chatId, "sess-test", "user", content, pastTimestamp);
+            ).run(chatId, "sess-test", "user", content, Date.now() - 60_000);
 
-            // Call instantStore — this advances watermark to Date.now()
             const result = await iterManager.instantStore({
               chatId,
               contentEn: "Test memory",
@@ -250,21 +247,12 @@ describe("instantStore — Property 4: Watermark Advance Prevents Heartbeat Re-E
 
             expect(result.stored).toBe(true);
 
-            // Verify watermark was advanced past the message timestamp
+            // Watermark should NOT be advanced by instantStore
             const watermarkRow = db
               .prepare("SELECT last_processed_timestamp FROM extraction_watermarks WHERE chat_id = ?")
               .get(chatId) as { last_processed_timestamp: number } | undefined;
 
-            expect(watermarkRow).toBeDefined();
-            expect(watermarkRow!.last_processed_timestamp).toBeGreaterThanOrEqual(pastTimestamp);
-
-            // Verify no unprocessed messages exist after the watermark
-            const unprocessed = db
-              .prepare("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ? AND timestamp > ?")
-              .get(chatId, watermarkRow!.last_processed_timestamp) as { cnt: number };
-            expect(unprocessed.cnt).toBe(0);
-
-            db.close();
+            expect(watermarkRow).toBeUndefined();
           } finally {
             iterManager.close();
             rmSync(iterDir, { recursive: true, force: true });
