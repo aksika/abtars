@@ -13,7 +13,6 @@ import { handleNLMCommand } from "./nlm-command-handler.js";
 import { runCompaction } from "./compaction.js";
 import { resetAndPrepare } from "./message-pipeline.js";
 import type { IKiroTransport } from "./kiro-transport.js";
-import { TmuxClient } from "./tmux-client.js";
 import type { MemoryManager } from "./memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
@@ -139,10 +138,10 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
 
   // /restart
   if (text === "/restart") {
-    if (ctx.transport instanceof TmuxClient) {
+    if (ctx.transport.restartSession) {
       await ctx.reply("♻️ Restarting Kiro...");
       ctx.busyChats.delete(ctx.sessionKey);
-      await (ctx.transport as TmuxClient).restartSession(ctx.config.workingDir, process.env["AGENT_MODEL"]);
+      await ctx.transport.restartSession(ctx.config.workingDir, process.env["AGENT_MODEL"]);
       ctx.pendingSessionStart.add(ctx.sessionKey);
       await ctx.reply("✅ Kiro restarted.");
     } else {
@@ -362,8 +361,8 @@ function buildStatusLines(ctx: CommandContext): string[] {
   const status = ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected";
   const mode = ctx.config.agentTransport.toUpperCase();
   const uptime = formatUptime(Date.now() - ctx.startedAt);
-  const ctxPct = ("contextPercent" in ctx.transport && (ctx.transport as TmuxClient).contextPercent >= 0)
-    ? `${(ctx.transport as TmuxClient).contextPercent}%`
+  const ctxPct = ctx.transport.contextPercent >= 0
+    ? `${ctx.transport.contextPercent}%`
     : "n/a";
   const cronInfo = ctx.memory?.getCronInfo();
   const lines = [

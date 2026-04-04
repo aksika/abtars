@@ -137,7 +137,7 @@ export class DiscordAdapter implements PlatformAdapter {
         if (res.ok) {
           const buf = Buffer.from(await res.arrayBuffer());
           const extHint = att.filename ? "." + (att.filename.split(".").pop() ?? "") : undefined;
-          const saved = await saveInboundMedia(buf, parseInt(message.channelId, 10) || 0, { extHint, claimedMime: att.contentType });
+          const saved = await saveInboundMedia(buf, message.channelId, { extHint, claimedMime: att.contentType });
           if (saved) {
             mediaPath = saved.path;
             if (!text) text = `User sent a ${saved.isImage ? "photo" : "file"}.`;
@@ -193,8 +193,7 @@ export class DiscordAdapter implements PlatformAdapter {
     // Emotion scoring on authorized reactions
     if (isAuthorized && this.deps.memory) {
       const score = emojiToScore(emoji);
-      const chatId = parseInt(channelId, 10) || 0;
-      const updated = this.deps.memory.updateEmotionByPlatformId(chatId, messageId, score);
+      const updated = this.deps.memory.updateEmotionByPlatformId(channelId, messageId, score);
       if (updated) logDebug(TAG, `Emotion score ${score} set on msg ${reaction.message.id}`);
     }
 

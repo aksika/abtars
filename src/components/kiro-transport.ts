@@ -25,9 +25,24 @@ export interface IKiroTransport {
   /** Whether this transport is currently operational. */
   readonly isReady: boolean;
 
+  /** Context window usage percentage (0-100). Returns -1 if unknown/unsupported. */
+  readonly contextPercent: number;
+
+  /** Clean answer text from last response (stripped of tool output/noise). Empty if not available. */
+  readonly answerOnly: string;
+
+  /** Cumulative text delivered via intermediate streaming (for tail detection). Empty if not available. */
+  readonly intermediateDeliveredText: string;
+
+  /** Optional callback for streaming intermediate response chunks. Set by pipeline per-message. */
+  onIntermediateResponse?: (text: string) => void;
+
   /** Transport-specific slash commands (e.g. /usage for kiro, /stats for gemini). */
   readonly transportCommands: string[];
 
   /** Execute a transport-specific command. Returns output text. */
   executeCommand?(cmd: string): Promise<string>;
+
+  /** Restart the CLI session (tmux-only). No-op if not supported. */
+  restartSession?(workingDir: string, model?: string): Promise<void>;
 }

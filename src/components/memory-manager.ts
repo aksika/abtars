@@ -313,7 +313,7 @@ export class MemoryManager {
   /** Update emotion_score on a message identified by platform message ID.
    *  Propagates to linked extracted_memories immediately.
    *  Returns true if the message was updated. */
-  updateEmotionByPlatformId(chatId: number, platformMessageId: number, score: number): boolean {
+  updateEmotionByPlatformId(chatId: number | string, platformMessageId: number, score: number): boolean {
     if (!this.db) return false;
     try {
       const result = this.db.prepare(
@@ -322,7 +322,7 @@ export class MemoryManager {
       if (result.changes === 0) return false;
 
       // Cascade to extracted_memories via editMemory
-      this.editMemory({ messageId: platformMessageId, chatId, emotionScore: score });
+      this.editMemory({ messageId: platformMessageId, chatId: typeof chatId === "string" ? parseInt(chatId, 10) : chatId, emotionScore: score });
       return true;
     } catch (err) {
       logError(TAG, "Failed to update emotion score", err);

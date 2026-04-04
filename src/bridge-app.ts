@@ -456,8 +456,8 @@ export async function startBridge(): Promise<void> {
       name: "idle-compact",
       heavy: true,
       execute: async () => {
-        if (!("contextPercent" in transport)) return false;
-        const pct = (transport as AcpTransport).contextPercent;
+        if (transport.contextPercent < 0) return false;
+        const pct = transport.contextPercent;
         if (pct < CTX_IDLE_COMPACT_PCT) return false;
         if (compactedThisIdle) return false;
         if (busyChats.size > 0) return false;
@@ -542,7 +542,7 @@ export async function startBridge(): Promise<void> {
 
   // --- Watchdog: detect stuck agent ---
   if (transport instanceof AcpTransport) {
-    heartbeat.registerTask(createWatchdogTask(transport as AcpTransport));
+    heartbeat.registerTask(createWatchdogTask(transport));
   }
 
   // --- Restart flag check ---
@@ -652,7 +652,7 @@ export async function startBridge(): Promise<void> {
         transport: {
           type: config.agentTransport as "tmux" | "acp",
           isReady: transport.isReady,
-          contextPercent: "contextPercent" in transport ? (transport as TmuxClient).contextPercent : -1,
+          contextPercent: transport.contextPercent,
         },
         memory: memory
           ? { getStats: (chatId?: number) => memory!.getStats(chatId) }

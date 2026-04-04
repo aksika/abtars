@@ -11,8 +11,6 @@ import { runCompaction } from "./compaction.js";
 import { buildSessionStartContext } from "./session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { TELEGRAM_ALLOWED_REACTIONS, REACTION_FALLBACK_MAP } from "./reaction-signal.js";
-import { TmuxClient } from "./tmux-client.js";
-import { AcpTransport } from "./acp-transport.js";
 import { transcribeAudio, type SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason, readAndClearRestartReason } from "./restart-reason.js";
@@ -180,7 +178,7 @@ export async function handleInboundMessage(
   try {
     busyChats.add(sessionKey);
     resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
-    const ctxPct = "contextPercent" in transport ? (transport as { contextPercent: number }).contextPercent : -1;
+    const ctxPct = transport.contextPercent;
     logInfo(TAG, `← [${msg.platform}] ${isVoice ? "🎤 " : ""}"${text.slice(0, 60)}"${ctxPct >= 0 ? ` (ctx: ${ctxPct}%)` : ""}`);
     // --- Sleep: main transport is available during sleep (sleep uses its own) ---
     // No queueing needed
@@ -232,23 +230,13 @@ export async function handleInboundMessage(
     let streamBuffer = "";
     let streamTimer: ReturnType<typeof setInterval> | undefined;
 
-    if (transport instanceof TmuxClient) {
-      (transport as TmuxClient).onIntermediateResponse = (chunk: string) => {
-        intermediateDelivered = true;
-        const chunks = adapter.chunkResponse(chunk);
-        for (const c of chunks) {
-          if (c.trim()) {
-            adapter.sendTyping?.(channelId, msg.threadId).catch(() => {});
-            adapter.sendMessage(channelId, c, { threadId: msg.threadId }).catch(() => {});
-          }
-        }
-      };
-    } else if (transport instanceof AcpTransport && adapter.editMessage) {
+    if (adapter.editMessage) {
+      // Edit-in-place streaming (ACP + platforms that support editMessage)
       const rawVal = parseInt(process.env["STREAM_FLUSH_SEC"] ?? "3", 10);
       const FLUSH_INTERVAL = rawVal === 0 ? 0 : Math.max(2, Math.min(180, rawVal)) * 1000;
       let lastFlushed = "";
 
-      (transport as AcpTransport).onIntermediateResponse = (chunk: string) => {
+      transport.onIntermediateResponse = (chunk: string) => {
         streamBuffer += chunk;
       };
 
@@ -267,22 +255,28 @@ export async function handleInboundMessage(
           } catch { /* edit may fail if text unchanged or too fast */ }
         }, FLUSH_INTERVAL);
       }
+    } else {
+      // Chunk-based streaming (tmux + platforms without editMessage)
+      transport.onIntermediateResponse = (chunk: string) => {
+        intermediateDelivered = true;
+        const chunks = adapter.chunkResponse(chunk);
+        for (const c of chunks) {
+          if (c.trim()) {
+            adapter.sendTyping?.(channelId, msg.threadId).catch(() => {});
+            adapter.sendMessage(channelId, c, { threadId: msg.threadId }).catch(() => {});
+          }
+        }
+      };
     }
 
     const response = await responsePromise;
 
-    if (transport instanceof TmuxClient) {
-      (transport as TmuxClient).onIntermediateResponse = undefined;
-    }
-    if (transport instanceof AcpTransport) {
-      clearInterval(streamTimer);
-      (transport as AcpTransport).onIntermediateResponse = undefined;
-    }
+    clearInterval(streamTimer);
+    transport.onIntermediateResponse = undefined;
     logDebug(TAG, `Response (${response.length} chars): "${response.trim().slice(0, 120)}"`);
 
     // --- Extract clean answer ---
-    const cleanAnswer = ("answerOnly" in transport && (transport as TmuxClient).answerOnly)
-      ? (transport as TmuxClient).answerOnly : "";
+    const cleanAnswer = transport.answerOnly;
     const userResponse = (fullModeChats.has(sessionKey) ? response : (cleanAnswer || response))
       .replace(/^\[lang:\w{2}\]\s*/i, ""); // strip lang tag from display
 
@@ -351,9 +345,9 @@ export async function handleInboundMessage(
           lastSentMsgId = await adapter.sendMessage(channelId, chunk, { threadId: msg.threadId });
         }
       }
-    } else if (transport instanceof TmuxClient) {
+    } else if (transport.intermediateDeliveredText) {
       // Send any tail not yet delivered by intermediate streaming
-      const delivered = (transport as TmuxClient).intermediateDeliveredText;
+      const delivered = transport.intermediateDeliveredText;
       const finalAnswer = cleanAnswer || response;
       if (delivered && finalAnswer.length > delivered.length && finalAnswer.startsWith(delivered)) {
         const tail = finalAnswer.slice(delivered.length).trim();
@@ -398,12 +392,12 @@ export async function handleInboundMessage(
       await adapter.setReaction(channelId, msg.messageId, "");
     }
 
-    const ctxAfter = "contextPercent" in transport ? (transport as { contextPercent: number }).contextPercent : -1;
+    const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${intermediateDelivered ? " (streamed)" : ""}${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
 
     // --- Context window management (graduated thresholds) ---
-    if ("contextPercent" in transport) {
-      const pct = (transport as { contextPercent: number }).contextPercent;
+    {
+      const pct = transport.contextPercent;
       if (pct >= 0) {
         const failures = compactFailures.get(sessionKey) ?? 0;
 

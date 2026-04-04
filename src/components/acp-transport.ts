@@ -33,6 +33,12 @@ export class AcpTransport implements IKiroTransport {
     return this.lastContextPercent;
   }
 
+  /** ACP returns full response — no separate "answer only" extraction. */
+  get answerOnly(): string { return ""; }
+
+  /** ACP doesn't track intermediate delivered text (edit-in-place instead). */
+  get intermediateDeliveredText(): string { return ""; }
+
   get isConnected(): boolean {
     return this.agent !== null && this.client !== null;
   }
