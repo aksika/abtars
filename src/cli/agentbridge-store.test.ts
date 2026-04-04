@@ -156,7 +156,7 @@ describe("agentbridge-store --delete-ids", () => {
     const ids = seedMessages(100, 6);
     const toDelete = ids.slice(0, 3);
 
-    const result = manager.cascadeDelete(toDelete, 100);
+    const result = manager.editor.cascadeDelete(toDelete, 100);
 
     expect(result.messagesRemoved).toBe(3);
     const db = initializeDatabase(join(tmpDir, "memory.db"));
@@ -169,7 +169,7 @@ describe("agentbridge-store --delete-ids", () => {
     const ids = seedMessages(200, 4);
     const toDelete = ids.slice(0, 2);
 
-    const result = manager.cascadeDelete(toDelete, 200);
+    const result = manager.editor.cascadeDelete(toDelete, 200);
 
     expect(result.messagesRemoved).toBe(2);
     const db = initializeDatabase(join(tmpDir, "memory.db"));
@@ -180,14 +180,14 @@ describe("agentbridge-store --delete-ids", () => {
 
   it("cascadeDelete with empty IDs is a no-op", () => {
     seedMessages(300, 3);
-    const result = manager.cascadeDelete([], 300);
+    const result = manager.editor.cascadeDelete([], 300);
     expect(result.messagesRemoved).toBe(0);
     expect(result.transcriptEntriesRemoved).toBe(0);
   });
 
   it("cascadeDelete with non-existent IDs is a no-op", () => {
     seedMessages(400, 3);
-    const result = manager.cascadeDelete([9999, 9998], 400);
+    const result = manager.editor.cascadeDelete([9999, 9998], 400);
     expect(result.messagesRemoved).toBe(0);
   });
 });
@@ -258,7 +258,7 @@ describe("agentbridge-store — instantStore", () => {
   });
 
   it("stores a memory and returns success", async () => {
-    const result = await manager.instantStore({
+    const result = await manager.editor.instantStore({
       chatId: 123, contentEn: "test fact", contentOriginal: "teszt tény",
       memoryType: "fact", emotionScore: 2,
     });
@@ -272,7 +272,7 @@ describe("agentbridge-store — instantStore", () => {
   });
 
   it("rejects empty content_en", async () => {
-    const result = await manager.instantStore({
+    const result = await manager.editor.instantStore({
       chatId: 123, contentEn: "", contentOriginal: "teszt",
       memoryType: "fact", emotionScore: 0,
     });
@@ -296,7 +296,7 @@ describe("agentbridge-store — boost/demote", () => {
   });
 
   it("boost increases relevance_score", async () => {
-    await manager.instantStore({
+    await manager.editor.instantStore({
       chatId: 1, contentEn: "boost test", contentOriginal: "boost test",
       memoryType: "fact", emotionScore: 0,
     });
@@ -305,7 +305,7 @@ describe("agentbridge-store — boost/demote", () => {
     const id = (db.prepare("SELECT id FROM extracted_memories LIMIT 1").get() as { id: number }).id;
     db.close();
 
-    manager.adjustRelevance(id, 10);
+    manager.editor.adjustRelevance(id, 10);
 
     const db2 = initializeDatabase(join(tmpDir, "memory.db"));
     const after = db2.prepare("SELECT relevance_score FROM extracted_memories WHERE id = ?").get(id) as { relevance_score: number };
@@ -330,14 +330,14 @@ describe("agentbridge-store — merge", () => {
   });
 
   it("merges two memories — keeps newer, deletes older", async () => {
-    await manager.instantStore({ chatId: 1, contentEn: "older", contentOriginal: "older", memoryType: "fact", emotionScore: 0 });
-    await manager.instantStore({ chatId: 1, contentEn: "newer", contentOriginal: "newer", memoryType: "fact", emotionScore: 0 });
+    await manager.editor.instantStore({ chatId: 1, contentEn: "older", contentOriginal: "older", memoryType: "fact", emotionScore: 0 });
+    await manager.editor.instantStore({ chatId: 1, contentEn: "newer", contentOriginal: "newer", memoryType: "fact", emotionScore: 0 });
 
     const db = initializeDatabase(join(tmpDir, "memory.db"));
     const ids = db.prepare("SELECT id FROM extracted_memories ORDER BY created_at").all() as Array<{ id: number }>;
     db.close();
 
-    const result = manager.mergeMemories(ids[0]!.id, ids[1]!.id);
+    const result = manager.editor.mergeMemories(ids[0]!.id, ids[1]!.id);
     expect(result.merged).toBe(true);
     if (result.merged) {
       expect(result.keptId).toBe(ids[1]!.id);
@@ -351,7 +351,7 @@ describe("agentbridge-store — merge", () => {
   });
 
   it("returns error for non-existent IDs", () => {
-    const result = manager.mergeMemories(999, 998);
+    const result = manager.editor.mergeMemories(999, 998);
     expect(result.merged).toBe(false);
   });
 });

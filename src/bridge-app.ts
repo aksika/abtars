@@ -202,7 +202,6 @@ export async function startBridge(): Promise<void> {
     memory.setLlmCall(async (prompt: string, content: string) => {
       return transport.sendPrompt("system:memory", `${prompt}\n\n${content}`);
     });
-    memory.setIsBusy(() => busyChats.size > 0);
     logInfo("main", "🧠 Memory LLM callback registered");
   }
 

@@ -168,7 +168,7 @@ async function main() {
   const memory = new MemoryManager(config);
   try {
     await memory.initialize();
-    const result = memory.editMemory(params);
+    const result = memory.editor.editMemory(params);
     console.log(JSON.stringify(result));
     if (!result.ok) process.exit(1);
   } catch (err) {

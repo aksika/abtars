@@ -35,7 +35,7 @@ describe("MemoryManager — enforceDiskBudget", () => {
       makeMemoryTestConfig(tmpDir, { diskBudgetBytes: 100 * 1024 * 1024 }),
     );
     await bigBudgetManager.initialize();
-    expect(() => bigBudgetManager.enforceDiskBudget()).not.toThrow();
+    expect(() => bigBudgetManager.maintenance.enforceDiskBudget()).not.toThrow();
     bigBudgetManager.close();
   });
 
@@ -44,7 +44,7 @@ describe("MemoryManager — enforceDiskBudget", () => {
       makeMemoryTestConfig(tmpDir, { memoryEnabled: false, diskBudgetBytes: 1 }),
     );
     await disabledManager.initialize();
-    expect(() => disabledManager.enforceDiskBudget()).not.toThrow();
+    expect(() => disabledManager.maintenance?.enforceDiskBudget()).not.toThrow();
     disabledManager.close();
   });
 });
@@ -246,7 +246,7 @@ describe("MemoryManager — checkAutoCompact", () => {
       makeRecord({ content: "hi", chatId: 1, sessionId: "s1", timestamp: 1000 }),
     );
 
-    await manager.checkAutoCompact({
+    await manager.maintenance.checkAutoCompact({
       chatId: 1,
       sessionId: "s1",
       contextPercent: 50,
@@ -271,7 +271,7 @@ describe("MemoryManager — checkAutoCompact", () => {
       return "compacted";
     };
 
-    await manager.checkAutoCompact({
+    await manager.maintenance.checkAutoCompact({
       chatId: 10,
       sessionId: "s1",
       contextPercent: 90,
@@ -292,7 +292,7 @@ describe("MemoryManager — checkAutoCompact", () => {
     );
     await disabledManager.initialize();
 
-    await disabledManager.checkAutoCompact({
+    await disabledManager.maintenance?.checkAutoCompact({
       chatId: 1,
       sessionId: "s1",
       contextPercent: 95,
@@ -319,7 +319,7 @@ describe("MemoryManager — checkAutoCompact", () => {
 
     // Should not throw — error is logged and raw transcript already saved as safety net
     await expect(
-      manager.checkAutoCompact({
+      manager.maintenance.checkAutoCompact({
         chatId: 20,
         sessionId: "s1",
         contextPercent: 90,
@@ -331,7 +331,7 @@ describe("MemoryManager — checkAutoCompact", () => {
   it("does nothing when no messages exist for session", async () => {
     // Call with a chatId/sessionId that has no messages
     await expect(
-      manager.checkAutoCompact({
+      manager.maintenance.checkAutoCompact({
         chatId: 999,
         sessionId: "nonexistent",
         contextPercent: 90,
@@ -352,7 +352,7 @@ describe("MemoryManager — checkAutoCompact", () => {
     };
 
     // contextPercent == threshold (85) should trigger (>= check)
-    await manager.checkAutoCompact({
+    await manager.maintenance.checkAutoCompact({
       chatId: 30,
       sessionId: "s1",
       contextPercent: 85,

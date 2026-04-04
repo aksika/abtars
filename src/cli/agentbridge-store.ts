@@ -174,7 +174,7 @@ async function main() {
         process.exit(1);
       }
       const chatId = parseInt(raw.chatId, 10);
-      const result = memory.cascadeDelete(ids, chatId);
+      const result = memory.editor.cascadeDelete(ids, chatId);
       console.log(JSON.stringify({ deleted: true, ...result }));
       return;
     }
@@ -187,7 +187,7 @@ async function main() {
       }
       const id = parseInt(raw.id, 10);
       const level = parseInt(raw.classification, 10);
-      const result = memory.reclassifyMemory(id, level, raw.userOverride ?? false);
+      const result = memory.editor.reclassifyMemory(id, level, raw.userOverride ?? false);
       console.log(JSON.stringify(result));
       return;
     }
@@ -200,7 +200,7 @@ async function main() {
       }
       const id = parseInt(raw.id, 10);
       const delta = raw.boost ? 10 : -10;
-      memory.adjustRelevance(id, delta);
+      memory.editor.adjustRelevance(id, delta);
       console.log(JSON.stringify({ stored: true, adjusted: { id, delta } }));
       return;
     }
@@ -216,7 +216,7 @@ async function main() {
         console.log(JSON.stringify({ stored: false, error: "--merge-ids must be exactly 2 comma-separated IDs" }));
         process.exit(1);
       }
-      const result = memory.mergeMemories(ids[0]!, ids[1]!);
+      const result = memory.editor.mergeMemories(ids[0]!, ids[1]!);
       console.log(JSON.stringify(result));
       return;
     }
@@ -243,7 +243,7 @@ async function main() {
       }
     }
 
-    const result = await memory.instantStore(validation.params);
+    const result = await memory.editor.instantStore(validation.params);
     console.log(JSON.stringify(result));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

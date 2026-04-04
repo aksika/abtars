@@ -40,7 +40,7 @@ describe("Memory system — end-to-end smoke test", () => {
 
     // 1. Record messages across two sessions
     for (let i = 0; i < 5; i++) {
-      mm.recordMessage(makeRecord({
+      mm.store.recordMessage(makeRecord({
         role: i % 2 === 0 ? "user" : "assistant",
         content: `session1 message ${i} about quantum physics`,
         chatId,
@@ -49,7 +49,7 @@ describe("Memory system — end-to-end smoke test", () => {
       }));
     }
     for (let i = 0; i < 5; i++) {
-      mm.recordMessage(makeRecord({
+      mm.store.recordMessage(makeRecord({
         role: i % 2 === 0 ? "user" : "assistant",
         content: `session2 message ${i} about machine learning`,
         chatId,
@@ -95,7 +95,7 @@ describe("Memory system — end-to-end smoke test", () => {
 
     // Record enough messages to create transcript files
     for (let i = 0; i < 10; i++) {
-      mm.recordMessage(makeRecord({
+      mm.store.recordMessage(makeRecord({
         content: `budget test message ${i} with some padding text to increase file size`,
         chatId: 1,
         sessionId: "s1",
@@ -104,7 +104,7 @@ describe("Memory system — end-to-end smoke test", () => {
     }
 
     // Force budget enforcement
-    mm.enforceDiskBudget();
+    mm.maintenance.enforceDiskBudget();
 
     // Transcript file should be deleted (budget is 1 byte, DB alone exceeds it)
     const transcriptPath = join(tmpDir, "transcripts", "1", "s1.jsonl");
@@ -124,7 +124,7 @@ describe("Memory system — end-to-end smoke test", () => {
     await mm.initialize();
 
     // Record a message so there's a transcript to write as safety net
-    mm.recordMessage(makeRecord({
+    mm.store.recordMessage(makeRecord({
       content: "x".repeat(250),
       chatId: 10,
       sessionId: "s1",
@@ -132,7 +132,7 @@ describe("Memory system — end-to-end smoke test", () => {
     }));
 
     const mockSendCompact = async (_sk: string, _cmd: string) => "compacted";
-    await mm.checkAutoCompact({
+    await mm.maintenance.checkAutoCompact({
       chatId: 10,
       sessionId: "s1",
       contextPercent: 90,

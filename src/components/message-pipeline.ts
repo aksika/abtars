@@ -410,7 +410,7 @@ export async function handleInboundMessage(
           try {
             // Safety-net transcript
             if (memory?.getDatabase()) {
-              memory.checkAutoCompact({
+              memory.maintenance.checkAutoCompact({
                 chatId, sessionId: sessionKey, contextPercent: pct,
                 sendCompactCommand: async () => "",
               }).catch(() => {});

@@ -104,7 +104,7 @@ describe("Emotion Boost — Property 7: Emotion Score Storage Round-Trip", () =>
 
           try {
             // Store a memory with a known emotion_score
-            const result = await iterManager.instantStore({
+            const result = await iterManager.editor.instantStore({
               chatId,
               contentEn: "User prefers dark mode for coding",
               contentOriginal: "A user dark mode-ot preferálja kódoláshoz",
