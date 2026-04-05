@@ -6,7 +6,57 @@
 
 ---
 
-## 1. Bridge as a class (replace startBridge god function)
+## 1. Capability plugin system (replace hardwired subsystems)
+
+**Problem:** Every capability (browser, cron, coding mode, sleep, A2A) is hardwired in `bridge-app.ts`. Adding a new capability (Slack adapter, different browser engine, new tool) requires editing the god function. There's no way to attach or detach capabilities without code changes.
+
+The `ServiceRegistry` already solves this for platforms (Telegram, Discord) — they register with a factory and can be started/stopped dynamically. But browser, cron, coding mode, and sleep don't use this pattern.
+
+**Suggestion:** A `CapabilityRegistry` that subsystems register into:
+
+```typescript
+interface Capability {
+  name: string;
+  configure(bridge: Bridge): Promise<void>;  // wire into bridge
+  heartbeatTasks?: HeartbeatTask[];           // periodic work
+  commands?: Record<string, CommandHandler>;   // slash commands
+  shutdown?(): Promise<void>;                  // cleanup
+}
+
+// Browser becomes a capability:
+const browserCapability: Capability = {
+  name: "browser",
+  async configure(bridge) {
+    this.manager = new BrowserManager();
+    this.tool = new BrowserTool(this.manager, DomainAllowlist.fromEnv());
+  },
+  heartbeatTasks: [browseCheckerTask],
+  commands: { "/browse": handleBrowseCommand },
+  async shutdown() { await this.manager.shutdown(); },
+};
+
+// bridge-app.ts becomes:
+const bridge = new Bridge(config);
+bridge.register(browserCapability);
+bridge.register(cronCapability);
+bridge.register(codingCapability);
+await bridge.start();
+```
+
+**What this enables:**
+- Add a new capability (e.g. Slack, WhatsApp, calendar) by writing one file and registering it
+- Disable capabilities via config (`CAPABILITIES=telegram,memory,cron` — no browser, no coding)
+- Move `src/components/browser-*` to `src/capabilities/browser/` — self-contained module
+- Test capabilities in isolation (mock the Bridge interface)
+- The bridge core becomes ~200 lines: config → transport → registry → heartbeat → shutdown
+
+**Depends on:** #1b (Bridge as a class) — the capability needs a Bridge instance to wire into.
+
+**Effort:** High. **Risk:** Medium (incremental — migrate one capability at a time).
+
+---
+
+## 1b. Bridge as a class (replace startBridge god function)
 
 **Problem:** `startBridge()` is a ~677-line closure with 20+ mutable variables. Every new feature adds more lines to the same function.
 
@@ -18,7 +68,7 @@ class Bridge {
   async shutdown() { single exit path }
 }
 ```
-Each subsystem becomes a method or registered plugin, not more lines in the closure.
+The Bridge class is the foundation that capabilities register into. Without it, the capability registry has nothing to attach to.
 
 **Effort:** Medium. **Risk:** Medium (touches all wiring).
 
@@ -118,6 +168,7 @@ If tackling these incrementally:
 2. **#7 Injectable paths** — mechanical, improves testability
 3. **#3 Eliminate getDb()** — additive (add methods first, remove escape hatch after)
 4. **#5 Typed config groups** — compiler-assisted, no runtime risk
-5. **#1 Bridge class** — medium effort, unlocks cleaner feature additions
-6. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
-7. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently
+5. **#1b Bridge class** — medium effort, prerequisite for plugin system
+6. **#1 Capability plugin system** — the big payoff: plug-and-play subsystems
+7. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
+8. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently
