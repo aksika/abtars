@@ -154,7 +154,21 @@ function ensureReportFile(taskId: string): string {
 }
 
 /**
- * Check pending browse tasks. Deliver results for completed/timed-out tasks.
+ * Deliver result for a single browse task. Used by exit callback (instant) and browse-checker (safety net).
+ */
+export function deliverBrowseResult(entry: PendingBrowseEntry, timedOut = false): void {
+  const reportPath = ensureReportFile(entry.taskId);
+  const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
+  const msg = timedOut
+    ? `🌐 Browse task timed out (${Math.round(entry.timeoutMs / 1000)}s): ${taskLabel}\nPartial report: ${reportPath}`
+    : `🌐 Browse task complete: ${taskLabel}\nReport: ${reportPath}`;
+  appendReminder({ chatId: entry.chatId, message: msg, createdAt: Date.now(), threadId: entry.threadId });
+  (timedOut ? logWarn : logInfo)(TAG, `🌐 Browse "${taskLabel}" ${timedOut ? "timed out" : "finished"} — ${reportPath}`);
+}
+
+/**
+ * Check pending browse tasks. Safety net for timeout kills and orphaned processes.
+ * Normal completion is handled by the exit callback in the browser capability.
  */
 export function checkBrowseTasks(): void {
   const entries = readPendingBrowse();
@@ -168,30 +182,11 @@ export function checkBrowseTasks(): void {
     const elapsed = now - entry.startedAt;
 
     if (!alive) {
-      // Process finished — ensure report file exists, notify with path
-      const reportPath = ensureReportFile(entry.taskId);
-      const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
-      appendReminder({
-        chatId: entry.chatId,
-        message: `🌐 Browse task complete: ${taskLabel}\nReport: ${reportPath}`,
-        createdAt: now,
-        threadId: entry.threadId,
-      });
-      logInfo(TAG, `🌐 Browse task "${taskLabel}" finished — report: ${reportPath}`);
+      deliverBrowseResult(entry);
     } else if (elapsed > entry.timeoutMs) {
-      // Timed out — kill, save partial, notify
-      try { process.kill(entry.pid, "SIGKILL"); } catch { /* already dead */ }
-      const reportPath = ensureReportFile(entry.taskId);
-      const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
-      appendReminder({
-        chatId: entry.chatId,
-        message: `🌐 Browse task timed out (${Math.round(entry.timeoutMs / 1000)}s): ${taskLabel}\nPartial report: ${reportPath}`,
-        createdAt: now,
-        threadId: entry.threadId,
-      });
-      logWarn(TAG, `🌐 Browse task "${taskLabel}" timed out — partial report: ${reportPath}`);
+      try { process.kill(entry.pid, "SIGKILL"); } catch { /* */ }
+      deliverBrowseResult(entry, true);
     } else {
-      // Still running within timeout — keep
       remaining.push(entry);
     }
   }

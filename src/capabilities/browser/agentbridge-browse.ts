@@ -14,7 +14,6 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { agentBridgeHome } from "../../paths.js";
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
 import { localDate } from "../../components/env-utils.js";
@@ -117,7 +116,7 @@ export function writePendingBrowse(entries: PendingBrowseEntry[]): void {
 
 // --- Main ---
 
-export function main(argv: string[] = process.argv): void {
+export async function main(argv: string[] = process.argv): Promise<void> {
   if (argv.includes('--help')) {
     console.log(`agentbridge-browse — spawn a browser subagent for autonomous web tasks.
 
@@ -212,19 +211,27 @@ child.on("exit", () => process.exit());
   const logFd = openSync(logFile, "w");
   closeSync(logFd); // just create the file
 
-  const child = spawn("node", [wrapperFile, logFile, promptFile], {
-    stdio: "ignore",
-    detached: true,
-    env: { ...process.env, ...(raw.engine ? { BROWSER_ENGINE: raw.engine } : {}) },
+  // Send spawn request to bridge via IPC (bridge owns the child → instant exit callback)
+  const browseSocket = join(agentBridgeHome(), "browse.sock");
+  const net = await import("node:net");
+  const result = await new Promise<{ ok: boolean; taskId?: string; pid?: number; error?: string }>((resolve, reject) => {
+    const conn = net.createConnection(browseSocket);
+    conn.on("connect", () => {
+      conn.write(JSON.stringify({ wrapperFile, logFile, promptFile, taskId, task, chatId, threadId, timeoutMs, engine: raw.engine }) + "\n");
+    });
+    let buf = "";
+    conn.on("data", (chunk) => {
+      buf += chunk.toString();
+      const nl = buf.indexOf("\n");
+      if (nl === -1) return;
+      conn.end();
+      try { resolve(JSON.parse(buf.slice(0, nl))); } catch (e) { reject(e); }
+    });
+    conn.on("error", reject);
+    conn.setTimeout(10_000, () => { conn.destroy(); reject(new Error("IPC timeout")); });
   });
-  child.unref();
 
-  // Record in pending_browse.json
-  const entries = readPendingBrowse();
-  entries.push({ taskId, task, chatId, threadId, pid: child.pid!, startedAt: Date.now(), timeoutMs, logFile });
-  writePendingBrowse(entries);
-
-  console.log(JSON.stringify({ ok: true, taskId, status: "spawned", pid: child.pid }));
+  console.log(JSON.stringify(result));
 }
 
 const isDirectRun = process.argv[1]?.endsWith("agentbridge-browse.ts") ||
