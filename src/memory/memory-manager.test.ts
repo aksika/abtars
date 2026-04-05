@@ -254,16 +254,17 @@ describe("MemoryManager — checkAutoCompact", () => {
     });
 
     // No working directory consolidation file should exist
-    const today = new Date().toISOString().slice(0, 10);
+    const today = new Date().toLocaleDateString("sv-SE");
     const workingDir = join(tmpDir, "working", today);
     expect(existsSync(workingDir)).toBe(false);
   });
 
   it("triggers consolidation when contextPercent meets threshold", async () => {
     const longContent = "a".repeat(250);
-    manager.recordMessage(
-      makeRecord({ content: longContent, chatId: 10, sessionId: "s1", timestamp: 1000 }),
-    );
+    // Insert into messages table (recordMessage only indexes in-memory)
+    manager.getDatabase().prepare(
+      "INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+    ).run(10, "s1", "user", longContent, 1000);
 
     let compactCalled = false;
     const trackingSendCompact = async (_sk: string, _cmd: string) => {
@@ -281,7 +282,7 @@ describe("MemoryManager — checkAutoCompact", () => {
     expect(compactCalled).toBe(true);
 
     // A working directory consolidation file should have been created
-    const today = new Date().toISOString().slice(0, 10);
+    const today = new Date().toLocaleDateString("sv-SE");
     const workingDir = join(tmpDir, "working", today);
     expect(existsSync(workingDir)).toBe(true);
   });
@@ -300,7 +301,7 @@ describe("MemoryManager — checkAutoCompact", () => {
     });
 
     // No working directory consolidation file should exist
-    const today = new Date().toISOString().slice(0, 10);
+    const today = new Date().toLocaleDateString("sv-SE");
     const workingDir = join(tmpDir, "working", today);
     expect(existsSync(workingDir)).toBe(false);
 

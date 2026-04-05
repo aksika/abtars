@@ -123,13 +123,10 @@ describe("Memory system — end-to-end smoke test", () => {
     }));
     await mm.initialize();
 
-    // Record a message so there's a transcript to write as safety net
-    mm.store.recordMessage(makeRecord({
-      content: "x".repeat(250),
-      chatId: 10,
-      sessionId: "s1",
-      timestamp: 1000,
-    }));
+    // Insert into messages table (recordMessage only indexes in-memory)
+    mm.getDatabase().prepare(
+      "INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+    ).run(10, "s1", "user", "x".repeat(250), 1000);
 
     const mockSendCompact = async (_sk: string, _cmd: string) => "compacted";
     await mm.maintenance.checkAutoCompact({
@@ -140,7 +137,7 @@ describe("Memory system — end-to-end smoke test", () => {
     });
 
     // Working directory safety-net file should exist
-    const today = new Date().toISOString().slice(0, 10);
+    const today = new Date().toLocaleDateString("sv-SE");
     const workingDir = join(tmpDir, "working", today);
     expect(existsSync(workingDir)).toBe(true);
   });
