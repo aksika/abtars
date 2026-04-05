@@ -21,16 +21,16 @@
 
 import { join, basename } from "node:path";
 import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { MemoryManager } from "../memory/memory-manager.js";
-import { loadMemoryConfig } from "../memory/memory-config.js";
-import { SleepStateGatherer } from "../components/sleep-state-gatherer.js";
-import { loadSleepSteps, buildSleepVars, substituteVars } from "../components/sleep-prompt-loader.js";
-import { buildDailySummary, writeDailyFile } from "../components/sleep-daily-summary.js";
-import { extractFromDaily } from "../components/sleep-extract-daily.js";
-import { logInfo, logWarn, logError, setLogLevel } from "../components/logger.js";
-import type { StateSnapshot } from "../components/sleep-state-gatherer.js";
-import { localDate } from "../components/env-utils.js";
-import type { SleepStep } from "../components/sleep-prompt-loader.js";
+import { MemoryManager } from "../../memory/memory-manager.js";
+import { loadMemoryConfig } from "../../memory/memory-config.js";
+import { SleepStateGatherer } from "./sleep-state-gatherer.js";
+import { loadSleepSteps, buildSleepVars, substituteVars } from "./sleep-prompt-loader.js";
+import { buildDailySummary, writeDailyFile } from "./sleep-daily-summary.js";
+import { extractFromDaily } from "./sleep-extract-daily.js";
+import { logInfo, logWarn, logError, setLogLevel } from "../../components/logger.js";
+import type { StateSnapshot } from "./sleep-state-gatherer.js";
+import { localDate } from "../../components/env-utils.js";
+import type { SleepStep } from "./sleep-prompt-loader.js";
 
 const TAG = "agentbridge-sleep";
 
@@ -184,7 +184,7 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
   // 5. Batch embed NULL embeddings
   try {
     if (process.env["EMBEDDING_ENABLED"] === "true") {
-      const { loadEmbedConfig, embedText: embedFn } = await import("../memory/ollama-embed.js");
+      const { loadEmbedConfig, embedText: embedFn } = await import("../../memory/ollama-embed.js");
       const cfg = loadEmbedConfig();
       if (cfg.enabled) {
         const rows = db.prepare("SELECT id, content_en FROM extracted_memories WHERE embedding IS NULL").all() as Array<{ id: number; content_en: string }>;
@@ -255,10 +255,10 @@ function formatWiredResults(r: WiredResults): string {
 
 // ── Transport ───────────────────────────────────────────────────────────────
 
-async function createSleepTransport(verbose: boolean): Promise<{ transport: import("../components/acp-transport.js").AcpTransport; model: string }> {
-  const { loadAndValidateConfig } = await import("../components/config.js");
+async function createSleepTransport(verbose: boolean): Promise<{ transport: import("../../components/acp-transport.js").AcpTransport; model: string }> {
+  const { loadAndValidateConfig } = await import("../../components/config.js");
   const config = await loadAndValidateConfig();
-  const { AcpTransport } = await import("../components/acp-transport.js");
+  const { AcpTransport } = await import("../../components/acp-transport.js");
   const model = process.env["AGENT_SLEEP_MODEL"] || "auto";
   const transport = new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, { model: model !== "unknown" ? model : undefined, autoReinit: false, tag: "acp-sleep" });
   await transport.initialize();
@@ -270,7 +270,7 @@ const MAX_RETRIES = 3;
 
 /** Send a prompt with retry logic. Returns response or null on exhaustion. */
 async function sendWithRetry(
-  transport: import("../components/acp-transport.js").AcpTransport,
+  transport: import("../../components/acp-transport.js").AcpTransport,
   prompt: string,
   stepName: string,
   _verbose: boolean,
@@ -502,7 +502,7 @@ function failedEssentials(state: SleepState): string[] {
 
 async function runCatchUp(
   locks: PreviousLock[],
-  transport: import("../components/acp-transport.js").AcpTransport,
+  transport: import("../../components/acp-transport.js").AcpTransport,
   db: import("better-sqlite3").Database,
   memoryConfig: { memoryDir: string },
   steps: SleepStep[],

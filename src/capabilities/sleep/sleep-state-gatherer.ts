@@ -1,10 +1,10 @@
 import type Database from "better-sqlite3";
-import type { MemoryConfig } from "../memory/memory-config.js";
-import type { MemoryManager } from "../memory/memory-manager.js";
+import type { MemoryConfig } from "../../memory/memory-config.js";
+import type { MemoryManager } from "../../memory/memory-manager.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { logInfo, logWarn, logError } from "./logger.js";
-import { readEntries as cronReadEntries } from "./cron-db.js";
+import { logInfo, logWarn, logError } from "../../components/logger.js";
+import { readEntries as cronReadEntries } from "../../components/cron-db.js";
 
 const TAG = "sleep-state-gatherer";
 

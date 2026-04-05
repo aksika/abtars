@@ -6,7 +6,7 @@
 import { spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { hasSleepAuditToday } from "../../components/sleep-trigger.js";
+import { hasSleepAuditToday } from "./sleep-trigger.js";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 
 export interface SleepOpts {

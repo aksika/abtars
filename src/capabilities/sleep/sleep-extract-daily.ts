@@ -4,7 +4,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn } from "../../components/logger.js";
 
 const TAG = "extract-daily";
 

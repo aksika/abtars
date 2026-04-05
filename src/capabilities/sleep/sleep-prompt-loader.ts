@@ -1,9 +1,9 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../paths.js";
+import { agentBridgeHome } from "../../paths.js";
 import type { StateSnapshot } from "./sleep-state-gatherer.js";
-import { logDebug } from "./logger.js";
-import { localDate } from "./env-utils.js";
+import { logDebug } from "../../components/logger.js";
+import { localDate } from "../../components/env-utils.js";
 
 const TAG = "sleep-prompt-loader";
 
