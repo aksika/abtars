@@ -26,6 +26,7 @@ export interface BrowseArgs {
   chatId?: string;
   threadId?: string;
   timeout?: string;
+  engine?: string;
   dryRun: boolean;
 }
 
@@ -51,6 +52,7 @@ export function parseArgs(argv: string[]): BrowseArgs {
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
       case "--thread-id": parsed.threadId = args[++i] ?? ""; break;
       case "--timeout": parsed.timeout = args[++i] ?? ""; break;
+      case "--engine": parsed.engine = args[++i] ?? ""; break;
       case "--dry-run": parsed.dryRun = true; break;
     }
   }
@@ -204,6 +206,7 @@ child.on("exit", () => process.exit());
   const child = spawn("node", [wrapperFile, logFile, promptFile], {
     stdio: "ignore",
     detached: true,
+    env: { ...process.env, ...(raw.engine ? { BROWSER_ENGINE: raw.engine } : {}) },
   });
   child.unref();
 
