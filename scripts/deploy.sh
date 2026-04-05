@@ -191,12 +191,6 @@ for script in daily-backup.sh doctor.sh upgrade-deps.sh; do
   chmod +x "$AB_HOME/scripts/$script"
 done
 
-# Symlink all CLI wrappers from bin/ to ~/.local/bin/ (PATH accessible)
-mkdir -p "$HOME/.local/bin"
-for wrapper in "$AB_HOME/bin/agentbridge-"*; do
-  ln -sf "$wrapper" "$HOME/.local/bin/$(basename "$wrapper")"
-done
-
 # Deploy stock watchlist (only if not already present — user manages this file)
 mkdir -p "$AB_HOME/finance"
 if [ ! -f "$AB_HOME/finance/stock_watchlist.md" ]; then
