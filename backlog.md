@@ -45,3 +45,26 @@
 - When implementing memory-edit `--caller molty`: this means Molty calls the CLI tool directly with its own permissions, NOT that KP runs it for Molty
 
 ---
+
+## Medium Priority
+
+### [MEDIUM] Progress protocol for long-running CLI operations
+**Added:** 2026-04-05
+**Context:** Sleep cycle runs up to 55 minutes across 14 steps. Bridge has zero visibility into which step is running — only "process alive" or "process exited." Inspired by NemoClaw's `PROGRESS:<0-100>:<label>` stdout protocol.
+
+**Goal:** CLI tools emit progress lines on stdout that the bridge can parse.
+
+**Format:** `PROGRESS:<percent>:<step-name>` (e.g. `PROGRESS:35:04a-daily-summary`)
+
+**Benefits:**
+- `/status` shows current sleep step
+- Dashboard displays sleep progress
+- Watchdog can detect stuck steps earlier (progress stopped advancing)
+- Works for other long CLIs too (batch embed, massedit)
+
+**Action items:**
+- [ ] Add `PROGRESS:` lines to `agentbridge-sleep.ts` at each step boundary
+- [ ] Parse progress lines in bridge sleep spawn handler (read child stdout)
+- [ ] Expose in `/status` and dashboard WebSocket push
+
+**Effort:** Low (~30 lines). **Risk:** None (additive, stdout lines ignored if not parsed).
