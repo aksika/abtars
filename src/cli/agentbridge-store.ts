@@ -23,7 +23,6 @@
  *   { "stored": false, "error": "content-en is required" }
  */
 
-import { MemoryManager } from "../memory/memory-manager.js";
 import { loadMemoryConfig } from "../memory/memory-config.js";
 import type { InstantStoreParams } from "../types/index.js";
 import { appendFileSync } from "node:fs";
@@ -157,11 +156,10 @@ async function main() {
   const raw = parseArgs(process.argv);
 
   const config = loadMemoryConfig();
-  const memory = new MemoryManager(config);
+  const { createMemoryBackend } = await import("../memory/backend-factory.js");
+  const backend = await createMemoryBackend(config);
 
   try {
-    await memory.initialize({ skipEmbeddingCheck: true });
-
     // --delete-ids path: cascade delete messages from DB + JSONL
     if (raw.deleteIds) {
       if (!raw.chatId) {
@@ -174,7 +172,7 @@ async function main() {
         process.exit(1);
       }
       const chatId = parseInt(raw.chatId, 10);
-      const result = memory.editor.cascadeDelete(ids, chatId);
+      const result = backend.cascadeDelete(ids, chatId);
       console.log(JSON.stringify({ deleted: true, ...result }));
       return;
     }
@@ -187,7 +185,7 @@ async function main() {
       }
       const id = parseInt(raw.id, 10);
       const level = parseInt(raw.classification, 10);
-      const result = memory.editor.reclassifyMemory(id, level, raw.userOverride ?? false);
+      const result = backend.reclassifyMemory(id, level, raw.userOverride ?? false);
       console.log(JSON.stringify(result));
       return;
     }
@@ -200,7 +198,7 @@ async function main() {
       }
       const id = parseInt(raw.id, 10);
       const delta = raw.boost ? 10 : -10;
-      memory.editor.adjustRelevance(id, delta);
+      backend.adjustRelevance(id, delta);
       console.log(JSON.stringify({ stored: true, adjusted: { id, delta } }));
       return;
     }
@@ -216,7 +214,7 @@ async function main() {
         console.log(JSON.stringify({ stored: false, error: "--merge-ids must be exactly 2 comma-separated IDs" }));
         process.exit(1);
       }
-      const result = memory.editor.mergeMemories(ids[0]!, ids[1]!);
+      const result = backend.mergeMemories(ids[0]!, ids[1]!);
       console.log(JSON.stringify(result));
       return;
     }
@@ -243,13 +241,13 @@ async function main() {
       }
     }
 
-    const result = await memory.editor.instantStore(validation.params);
+    const result = await backend.instantStore(validation.params);
     console.log(JSON.stringify(result));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(JSON.stringify({ stored: false, error: message }));
   } finally {
-    memory.close();
+    backend.close();
   }
 }
 

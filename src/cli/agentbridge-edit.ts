@@ -14,7 +14,6 @@
  * Output: { "ok": true, "memoriesUpdated": 1, "ids": [42], "fieldsUpdated": ["content_en"] }
  */
 
-import { MemoryManager } from "../memory/memory-manager.js";
 import { loadMemoryConfig } from "../memory/memory-config.js";
 import type { EditMemoryParams } from "../types/index.js";
 import { appendFileSync } from "node:fs";
@@ -165,17 +164,17 @@ async function main() {
   }
 
   const config = loadMemoryConfig();
-  const memory = new MemoryManager(config);
+  const { createMemoryBackend } = await import("../memory/backend-factory.js");
+  const backend = await createMemoryBackend(config);
   try {
-    await memory.initialize({ skipEmbeddingCheck: true });
-    const result = memory.editor.editMemory(params);
+    const result = backend.editMemory(params);
     console.log(JSON.stringify(result));
     if (!result.ok) process.exit(1);
   } catch (err) {
     console.log(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     process.exit(1);
   } finally {
-    memory.close();
+    backend.close();
   }
 }
 
