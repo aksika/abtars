@@ -221,7 +221,7 @@ export async function buildDailySummary(
 export function writeDailyFile(memoryDir: string, date: string, content: string): string {
   const dir = join(memoryDir, "daily");
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, `daily_${date.replace(/-/g, "")}.md`);
+  const path = join(dir, `daily_${date}.md`);
   writeFileSync(path, `# Daily Summary ${date}\n\n${content}\n`);
   logInfo(TAG, `Written ${path} (${content.length} chars)`);
   return path;
