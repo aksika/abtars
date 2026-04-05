@@ -177,6 +177,44 @@ Run only migrations above current version. Store version in DB.
 
 ---
 
+## 8. Pluggable memory providers (replace hardcoded SQLite+FTS5+ollama)
+
+**Problem:** The memory system is hardcoded to SQLite + FTS5 + ollama embeddings. There's no way to swap in a different backend (cloud vector DB, Honcho for session management, Mem0, etc.) without rewriting the memory layer.
+
+**Reference:** Hermes Agent's `MemoryProvider` ABC (`agent/memory_provider.py`, `plugins/memory/`). Key patterns:
+- Abstract base class with lifecycle hooks: `initialize()`, `prefetch(query)`, `sync_turn(user, asst)`, `get_tool_schemas()`, `handle_tool_call()`, `shutdown()`
+- 7 providers ship as plugins in `plugins/memory/<name>/`: openviking, hindsight, retaindb, byterover, holographic, mem0, honcho
+- `MemoryManager` orchestrates: builtin always active + at most ONE external provider
+- Providers discovered via directory scan, activated by config (`memory.provider`)
+
+**Suggestion:** Define a `MemoryProvider` interface in TypeScript:
+
+```typescript
+interface MemoryProvider {
+  name: string;
+  initialize(): Promise<void>;
+  recordMessage(record: MessageRecord): void;
+  search(query: string, opts?: SearchOptions): Promise<SearchResult[]>;
+  editMemory(params: EditMemoryParams): EditMemoryResult;
+  instantStore(params: InstantStoreParams): Promise<InstantStoreResult>;
+  getStats(): MemoryStats | null;
+  shutdown(): Promise<void>;
+}
+```
+
+The current SQLite+FTS5 implementation becomes `SqliteMemoryProvider`. New providers (e.g. cloud vector DB) implement the same interface. `MemoryManager` delegates to the active provider.
+
+**What this enables:**
+- Swap memory backends via config (`MEMORY_PROVIDER=sqlite` or `MEMORY_PROVIDER=honcho`)
+- Test with in-memory provider (no SQLite dependency)
+- Future: cloud-hosted memory for multi-device sync
+
+**Depends on:** #3 (eliminate getDb) — callers must use the provider interface, not raw DB access.
+
+**Effort:** High. **Risk:** Medium (the interface already exists implicitly in MemoryManager's public API).
+
+---
+
 ## Priority Order
 
 If tackling these incrementally:
@@ -187,5 +225,6 @@ If tackling these incrementally:
 4. **#5 Typed config groups** — compiler-assisted, no runtime risk
 5. **#1b Bridge class** — medium effort, prerequisite for plugin system
 6. **#1 Capability plugin system** — the big payoff: plug-and-play subsystems
-7. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
-8. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently
+7. **#8 Pluggable memory providers** — swap memory backends without touching bridge code
+8. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
+9. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently

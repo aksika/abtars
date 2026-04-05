@@ -14,11 +14,19 @@
 
 **What NemoClaw does:** CLI automatically redacts secret patterns from stdout/stderr before logging.
 
-**Action:** Add a sanitizer to `logger.ts` that strips patterns before writing to file:
-- `sk-[a-zA-Z0-9]+` (OpenAI/Anthropic keys)
+**Action:** Add a sanitizer to `logger.ts` that strips patterns before writing to file. Adopt Hermes Agent's comprehensive pattern list (`agent/redact.py`):
+- `sk-[A-Za-z0-9_-]+` (OpenAI/Anthropic keys)
+- `ghp_[A-Za-z0-9]+`, `github_pat_[A-Za-z0-9_]+` (GitHub PATs)
+- `xox[baprs]-[A-Za-z0-9-]+` (Slack tokens)
+- `AIza[A-Za-z0-9_-]+` (Google API keys)
+- `AKIA[A-Z0-9]{16}` (AWS Access Key IDs)
 - `\d+:[A-Za-z0-9_-]{35,}` (Telegram bot tokens)
 - `Bearer [a-zA-Z0-9._-]+`
-- `NVIDIA_API_KEY=\S+`, `GROQ_API_KEY=\S+`, etc.
+- `hf_[A-Za-z0-9]+` (HuggingFace), `npm_[A-Za-z0-9]+` (npm)
+- `sk_live_`, `sk_test_` (Stripe), `SG\.[A-Za-z0-9_-]+` (SendGrid)
+- ENV assignment patterns: `KEY_NAME=secret_value`
+- JSON field patterns: `"apiKey": "value"`, `"token": "value"`
+- Short tokens (<18 chars) fully masked, longer tokens preserve first 6 + last 4 for debuggability
 
 **Effort:** Low (~20 lines). **Risk:** None.
 
