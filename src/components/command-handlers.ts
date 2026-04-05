@@ -3,7 +3,7 @@
  * Platform-specific commands check ctx.platform internally.
  */
 
-import { execSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -117,7 +117,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
 
   // /status (includes mcporter)
   if (text === "/status") {
-    const lines = buildStatusLines(ctx);
+    const lines = await buildStatusLines(ctx);
     await ctx.reply(lines.join("\n"));
     return true;
   }
@@ -178,7 +178,8 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
     const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
     let listing: string;
     try {
-      const raw = execSync("agentbridge-task list", { timeout: 5000, encoding: "utf-8" }).trim();
+      const raw = await execAsync("agentbridge-task", ["list"], 5000);
+      if (!raw) throw new Error("empty");
       const entries = JSON.parse(raw).entries ?? JSON.parse(raw);
       const active = entries.filter((e: any) => !e.fired && !e.paused);
       // Sort chronologically by schedule time (hour:minute from cron expr)
@@ -244,7 +245,8 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   if (text.startsWith("/tasks log ") || text.startsWith("/cron log ")) {
     const id = text.replace(/^\/(tasks|cron) log /, "").trim();
     try {
-      const raw = execSync(`agentbridge-task history ${id}`, { timeout: 5000, encoding: "utf-8" }).trim();
+      const raw = await execAsync("agentbridge-task", ["history", id], 5000);
+      if (!raw) throw new Error("empty");
       const data = JSON.parse(raw);
       if (!data.ok) { await ctx.reply(`❌ ${data.error}`); return true; }
       const runs = (data.runs as { ranAt: string; exitCode?: number }[]).slice(-5);
@@ -343,16 +345,36 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   return false;
 }
 
-function buildStatusLines(ctx: CommandContext): string[] {
+/** Run a command asynchronously with timeout. Returns stdout or fallback on failure. */
+function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string> {
+  return new Promise((resolve) => {
+    const child = execFile(cmd, args, { timeout: timeoutMs, encoding: "utf-8" }, (err, stdout) => {
+      resolve(err ? "" : stdout.trim());
+    });
+    child.stderr?.resume(); // drain stderr
+  });
+}
+
+async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   let version = "?";
   try {
     const pkgPath = join(import.meta.dirname, "..", "..", "package.json");
     version = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
   } catch { /* */ }
+
+  // Fire async checks in parallel
+  const [modelRaw, mcpRaw] = await Promise.all([
+    process.env["AGENT_MODEL"]
+      ? Promise.resolve("")
+      : execAsync("kiro-cli", ["settings", "list", "--format", "json"], 3000),
+    execAsync("mcporter", ["list", "--json"], 15_000),
+  ]);
+
   let model = process.env["AGENT_MODEL"] || "";
   if (!model) {
-    try { model = JSON.parse(execSync("kiro-cli settings list --format json 2>/dev/null", { timeout: 3000, encoding: "utf-8" }))["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
+    try { model = JSON.parse(modelRaw)["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
   }
+
   const status = ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected";
   const mode = ctx.config.agentTransport.toUpperCase();
   const provider = process.env["AGENT_CLI"] || "unknown";
@@ -392,21 +414,22 @@ function buildStatusLines(ctx: CommandContext): string[] {
       if (bk.length > 0) lines.push(`💾 Last backup: ${bk[bk.length - 1]}`);
     } catch { /* */ }
   }
-  // mcporter status
-  try {
-    const raw = execSync("mcporter list --json 2>/dev/null", { timeout: 15_000 }).toString();
-    const data = JSON.parse(raw);
-    const servers = data.servers ?? [];
-    const ok = servers.filter((s: Record<string, unknown>) => s.status === "ok").length;
-    lines.push(`📦 MCP: ${ok}/${servers.length} servers online`);
-  } catch {
+
+  // MCP status (already fetched async)
+  if (mcpRaw) {
     try {
-      execSync("mcporter --version 2>/dev/null", { timeout: 5_000 });
-      lines.push("📦 MCP: installed, list failed");
+      const data = JSON.parse(mcpRaw);
+      const servers = data.servers ?? [];
+      const ok = servers.filter((s: Record<string, unknown>) => s.status === "ok").length;
+      lines.push(`📦 MCP: ${ok}/${servers.length} servers online`);
     } catch {
-      lines.push("📦 MCP: not installed");
+      lines.push("📦 MCP: installed, list failed");
     }
+  } else {
+    const hasCmd = await execAsync("mcporter", ["--version"], 5000);
+    lines.push(hasCmd ? "📦 MCP: installed, list failed" : "📦 MCP: not installed");
   }
+
   return lines;
 }
 
