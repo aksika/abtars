@@ -149,7 +149,7 @@
       var brightnesses = new Float32Array(count);
       var hasEmbeddings = new Float32Array(count);
 
-      var PULSE_MAP = { fact: 0.0, decision: 0.75, preference: 1.5, event: 3.0, lesson: 2.0, feedback: 1.0, story: 0.5 };
+      var PULSE_MAP = { 0: 0.0, 1: 0.75, 2: 1.5, 3: 3.0 }; // U/R/C/S — higher classification pulses faster
 
       var now = Date.now();
       var oldest = memories.reduce(function(a, m) { return Math.min(a, m.created_at || now); }, now);
@@ -192,7 +192,7 @@
         opacities[i] = Math.max(0.3, 1.0 - ((mem.credibility || 6) - 1) * 0.14);
 
         // Type → pulse rate
-        pulseRates[i] = PULSE_MAP[mem.memory_type] || 0.0;
+        pulseRates[i] = PULSE_MAP[mem.classification || 0] || 0.0;
 
         // Emotion → brightness: -5=0.3, 0=0.7, +5=1.5
         brightnesses[i] = 0.7 + (mem.emotion_score || 0) * 0.16;
