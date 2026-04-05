@@ -233,7 +233,7 @@ Nulled automatically on content edit (re-embedded on next batch run).
 
 Source: `src/memory/recall-engine.ts`
 CLI wrapper: `src/cli/agentbridge-recall.ts`
-Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine)
+Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine, takes MemoryManager)
 
 ### Design Philosophy
 
@@ -607,7 +607,7 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | Component | File | Description |
 |-----------|------|-------------|
 | MemoryManager | `memory-manager.ts` | Top-level coordinator. Owns SQLite DB, delegates to sub-services. Search, stats, core knowledge. |
-| MessageStore | `message-store.ts` | Message recording, loading, emotion score updates. |
+| MessageStore | `message-store.ts` | Message recording, loading, emotion score updates. Dashboard queries (getAllExtractedMemories, getAllEntities, getDistinctChatIds). |
 | MemoryEditor | `memory-editor.ts` | Extracted memory mutations: editMemory(), instantStore(), merge, reclassify, cascadeDelete. |
 | MaintenanceService | `maintenance-service.ts` | Disk budget, backup pruning, auto-compact, forget operations. |
 | MemoryBackend | `memory-backend.ts` | Abstract interface for memory storage (store, edit, recall, delete, merge). |
@@ -626,7 +626,7 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | SessionContext | `session-context.ts` | `buildSessionStartContext()` — session-start context injection. |
 | PromptScanner | `prompt-scanner.ts` (in `src/components/`) | 22-pattern prompt injection detector. Used by store, edit, A2A. |
 | SleepTrigger | `sleep-trigger.ts` (in `src/components/`) | `hasSleepAuditToday()` — guard against re-run |
-| SleepStateGatherer | `sleep-state-gatherer.ts` (in `src/components/`) | Gathers DB stats, FTS5 health, disk usage for sleep prompt. |
+| SleepStateGatherer | `sleep-state-gatherer.ts` (in `src/components/`) | Gathers DB stats, FTS5 health, disk usage for sleep prompt. Takes MemoryManager. |
 | agentbridge-recall | `cli/agentbridge-recall.ts` | CLI wrapper for recall-engine. Uses `createMemoryBackend()` (IPC or SQLite). |
 | agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete. Uses `createMemoryBackend()` (IPC or SQLite). |
 | agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run. Uses `createMemoryBackend()` (IPC or SQLite). |
