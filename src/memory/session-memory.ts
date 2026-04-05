@@ -6,23 +6,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { localDate } from "../components/env-utils.js";
-import type Database from "better-sqlite3";
+import type { MemoryManager } from "./memory-manager.js";
 
-/** Build memory context block from DB + filesystem. */
-export function buildMemoryContext(db: Database.Database | null, memoryDir: string): string {
+/** Build memory context block from memory manager + filesystem. */
+export function buildMemoryContext(memory: MemoryManager | null, memoryDir: string): string {
   const parts: string[] = ["[MEMORY CONTEXT]"];
 
-  // Recent extracted memories (last 5 by recency)
-  if (db) {
-    try {
-      const rows = db.prepare(
-        "SELECT content_en FROM extracted_memories ORDER BY created_at DESC LIMIT 5",
-      ).all() as { content_en: string }[];
-      if (rows.length > 0) {
-        parts.push("\n## Key Memories");
-        for (const r of rows) parts.push(`- ${r.content_en}`);
-      }
-    } catch { /* table may not exist */ }
+  if (memory) {
+    const memories = memory.store.getRecentExtractedMemories(5);
+    if (memories.length > 0) {
+      parts.push("\n## Key Memories");
+      for (const m of memories) parts.push(`- ${m}`);
+    }
   }
 
   // Today's daily summary

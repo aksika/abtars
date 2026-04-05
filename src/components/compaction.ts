@@ -5,7 +5,7 @@
 import { logInfo } from "./logger.js";
 import { buildMemoryContext } from "../memory/session-memory.js";
 import type { IKiroTransport } from "./kiro-transport.js";
-import type Database from "better-sqlite3";
+import type { MemoryManager } from "../memory/memory-manager.js";
 
 const TAG = "compaction";
 
@@ -76,14 +76,14 @@ export function getCompactionPrompt(): string {
 export async function runCompaction(
   transport: IKiroTransport,
   sessionKey: string,
-  db: Database.Database | null,
+  memory: MemoryManager | null,
   memoryDir: string,
 ): Promise<boolean> {
   const response = await transport.sendPrompt(sessionKey, COMPACTION_PROMPT);
   const summary = extractSummary(response ?? "");
   if (!summary || summary.length < 50) throw new Error("Summary too short");
 
-  const memCtx = buildMemoryContext(db, memoryDir);
+  const memCtx = buildMemoryContext(memory, memoryDir);
   await transport.resetSession(sessionKey);
 
   const injection = `This session continues from a compacted conversation.\n\n${summary}${memCtx ? "\n\n" + memCtx : ""}`;

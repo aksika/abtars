@@ -52,7 +52,9 @@ export class MemoryManager {
   }
 
   getMemoryIndex(): MemoryIndex | null { return this.memoryIndex; }
+  /** @deprecated Use sub-service methods (store, editor, maintenance) instead of raw DB access. */
   getDatabase(): Database.Database | null { return this.db; }
+  /** @deprecated Use sub-service methods (store, editor, maintenance) instead of raw DB access. */
   getDb(): Database.Database | null { return this.db; }
   getConfig(): MemoryConfig { return this.config; }
 

@@ -411,14 +411,14 @@ export async function handleInboundMessage(
 
           try {
             // Safety-net transcript
-            if (memory?.getDatabase()) {
+            if (memory) {
               memory.maintenance.checkAutoCompact({
                 chatId, sessionId: sessionKey, contextPercent: pct,
                 sendCompactCommand: async () => "",
               }).catch(() => {});
             }
 
-            await runCompaction(transport, sessionKey, memory?.getDatabase() ?? null, memoryConfig.memoryDir);
+            await runCompaction(transport, sessionKey, memory ?? null, memoryConfig.memoryDir);
             pendingSessionStart.add(sessionKey);
             ctxWarned.delete(sessionKey);
             compactFailures.delete(sessionKey);

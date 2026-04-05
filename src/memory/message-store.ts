@@ -79,4 +79,34 @@ export class MessageStore {
       return false;
     }
   }
+
+  /** Get the timestamp of the most recent user message (optionally excluding system markers). */
+  getLastMessageTimestamp(excludeSystem = false): number {
+    try {
+      const sql = excludeSystem
+        ? "SELECT MAX(timestamp) as ts FROM messages WHERE content NOT LIKE '%[SYSTEM%'"
+        : "SELECT MAX(timestamp) as ts FROM messages WHERE role = 'user'";
+      const row = this.db.prepare(sql).get() as { ts: number | null } | undefined;
+      return row?.ts ?? 0;
+    } catch { return 0; }
+  }
+
+  /** Get recent messages since a timestamp, ordered newest first. */
+  getMessagesSince(sinceTimestamp: number, limit: number): Array<{ role: string; content: string; timestamp: number }> {
+    try {
+      return this.db.prepare(
+        "SELECT role, content, timestamp FROM messages WHERE timestamp > ? ORDER BY timestamp DESC LIMIT ?",
+      ).all(sinceTimestamp, limit) as Array<{ role: string; content: string; timestamp: number }>;
+    } catch { return []; }
+  }
+
+  /** Get recent extracted memories (English content), newest first. */
+  getRecentExtractedMemories(limit: number): string[] {
+    try {
+      const rows = this.db.prepare(
+        "SELECT content_en FROM extracted_memories ORDER BY created_at DESC LIMIT ?",
+      ).all(limit) as Array<{ content_en: string }>;
+      return rows.map(r => r.content_en);
+    } catch { return []; }
+  }
 }
