@@ -6,7 +6,7 @@ import { BrowserManager } from "./browser-manager.js";
 import { BrowserTool } from "./browser-tool.js";
 import { BrowserIpcServer } from "./browser-ipc-server.js";
 import { DomainAllowlist } from "./domain-allowlist.js";
-import { checkBrowseTasks, deliverBrowseResult } from "../../components/cron-checker.js";
+import { checkBrowseTasks, deliverBrowseResult } from "./browse-delivery.js";
 import { readPendingBrowse, writePendingBrowse } from "./agentbridge-browse.js";
 import type { PendingBrowseEntry } from "./agentbridge-browse.js";
 import { logInfo } from "../../components/logger.js";
