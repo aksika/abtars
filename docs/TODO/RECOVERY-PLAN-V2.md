@@ -101,3 +101,94 @@ Gap detected OR heartbeat tick:
 - Should we log platform wake type at INFO for overnight diagnostics?
 - Backoff state: in-memory (resets on restart) or persisted?
 
+### Patterns borrowed from OpenClaw
+
+**Generic retry with policy (`retry.ts`):**
+- `retryAsync<T>(fn, { attempts, minDelayMs, maxDelayMs, jitter, shouldRetry, retryAfterMs })`
+- `shouldRetry(err)` — classify errors as retryable or permanent
+- `retryAfterMs(err)` — extract delay from rate limit headers
+- Jitter via secure random to break convoy patterns
+- We should build a similar `retryAsync` for transport reinit and model calls
+
+**Permanent error detection (`delivery-queue-recovery.ts`):**
+- `PERMANENT_ERROR_PATTERNS` — regex list of known-unrecoverable errors
+- Auth failures, "bot was blocked", "chat not found" → stop retrying immediately
+- For us: auth errors, invalid model, account suspended → don't retry, alert user
+
+**Escalating backoff (not pure exponential):**
+- OpenClaw: 5s → 25s → 2min → 10min (4 steps, practical)
+- Hermes: 30s → 60s → 120s → 240s → 300s cap (exponential with cap)
+- Our choice: escalating with cap. 5s → 30s → 2min → 5min cap. Max 5 attempts.
+
+**Typed wake reasons (`heartbeat-reason.ts`):**
+- `retry | interval | manual | exec-event | wake | cron | hook`
+- Instead of just "gap detected", know WHY the heartbeat fired
+- Helps diagnostics: "was this a Power Nap wake or a manual restart?"
+- We should add: `standby-resume | daily-cycle | deploy | user-reset | watchdog`
+
+**Wake coalescing (`heartbeat-wake.ts`):**
+- Multiple wake requests within 250ms merged into one tick
+- Priority: retry > interval > manual
+- Prevents thundering herd after standby resume
+
+**Recovery budget:**
+- Don't spend unlimited time recovering — cap total recovery time
+- Defer remaining items if budget exceeded
+- For us: if transport reinit takes > 2min, give up and restart
+
+### Recovery E2E Tests
+
+Tests that verify the full recovery flow with real components (mock transport/CLI only).
+
+**File: `src/tests/recovery-e2e.test.ts`**
+
+**Test 1: "standby resume before SLEEP_TIME — no restart"**
+- Create real HeartbeatSystem with real tasks
+- Simulate gap > threshold (advance clock)
+- Set time before SLEEP_TIME
+- Verify: no process.exit, heartbeat continues ticking
+
+**Test 2: "standby resume after SLEEP_TIME — daily cycle restart"**
+- Same setup, set time after SLEEP_TIME
+- Bridge.lock startedAt = yesterday
+- Verify: process.exit(0) called (daily cycle)
+
+**Test 3: "darkwake detection skips entirely (macOS)"**
+- Mock `detectWakeType()` → return "dark"
+- Simulate gap
+- Verify: no restart, no health check, just log + continue
+
+**Test 4: "transport dead after resume — reinit with backoff"**
+- Mock transport.isReady = false
+- Simulate gap (not daily cycle time)
+- Verify: transport.initialize() called
+- Mock first reinit fails, second succeeds
+- Verify: backoff delay between attempts
+
+**Test 5: "transport reinit exhausted — restart"**
+- Mock transport.isReady = false, all reinit attempts fail
+- Verify: process.exit(0) after max attempts
+
+**Test 6: "permanent error — immediate restart, no retry"**
+- Mock transport reinit throws auth error (matches PERMANENT_ERROR_PATTERNS)
+- Verify: process.exit(0) immediately, no backoff
+
+**Test 7: "watchdog catches silent after standby resume"**
+- Simulate gap → bridge continues (no restart)
+- Transport is "ready" but model is silent
+- Verify: watchdog fires after WATCHDOG_SILENT_SEC, re-sends prompt
+
+**Test 8: "sleep not interrupted by standby resume"**
+- Sleep is running (sleepChild active)
+- Simulate gap
+- Verify: no restart (sleep guard), sleep continues
+
+**Test 9: "full overnight simulation"**
+- Simulate 8 hours of Power Nap wakes (gap every 30min)
+- SLEEP_TIME = 06:00
+- Verify: 0 restarts before 06:00, 1 restart at 06:00, sleep spawned after restart
+
+### Open questions
+- Should health check run on every tick or only after gap detection?
+- Should we log platform wake type at INFO for overnight diagnostics?
+- Backoff state: in-memory (resets on restart) or persisted?
