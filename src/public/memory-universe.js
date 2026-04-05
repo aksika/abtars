@@ -329,6 +329,7 @@
             (mem.content_original && mem.content_original !== mem.content_en ? '<div style="color:#888;font-size:11px;margin-bottom:12px;">' + escHtml(mem.content_original) + '</div>' : '') +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;">' +
             '<div>Type: <span style="color:' + typeColor + ';">' + (mem.memory_type || '?') + '</span></div>' +
+            '<div>Class: <span style="color:' + (['#0ff','#66f','#fa0','#f22'][mem.classification || 0] || '#fff') + ';">' + (['U','R','C','S'][mem.classification || 0] || '?') + '</span></div>' +
             '<div>Emotion: <span style="color:' + (mem.emotion_score > 0 ? '#4f4' : mem.emotion_score < 0 ? '#f44' : '#888') + ';">' + (mem.emotion_score || 0) + '</span></div>' +
             '<div>Recall: <span style="color:#0ff;">' + (mem.recall_count || 0) + '</span></div>' +
             '<div>Trust: ' + (mem.trust ?? '?') + '</div>' +
