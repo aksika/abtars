@@ -70,6 +70,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/tasks": handleTasksList,
   "/cron": handleTasksList,
   "/memory": handleMemory,
+  "/heartbeat": handleHeartbeat,
   "/a2a-reset": handleA2aReset,
   "/help": handleHelp,
 };
@@ -306,6 +307,50 @@ async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolea
   return true;
 }
 
+async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<boolean> {
+  const cronInfo = ctx.memory?.getCronInfo();
+  if (!cronInfo) { await ctx.reply("💓 Heartbeat not available."); return true; }
+
+  const mins = Math.round(cronInfo.intervalMs / 60000);
+  const lines = [
+    `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min interval)`,
+    "",
+  ];
+
+  // Task statuses
+  if (cronInfo.taskStatuses.size > 0) {
+    lines.push("Tasks (last tick):");
+    for (const [name, status] of cronInfo.taskStatuses) {
+      lines.push(`  ${status} ${name}`);
+    }
+  } else {
+    lines.push("Tasks: (no ticks yet)");
+  }
+
+  // Last tick age
+  try {
+    const hbTs = parseInt(readFileSync(join(agentBridgeHome(), "memory", ".heartbeat"), "utf-8"), 10);
+    if (hbTs > 0) {
+      const agoMin = Math.round((Date.now() - hbTs) / 60000);
+      lines.push("", `🫀 Last tick: ${agoMin}min ago`);
+    }
+  } catch { /* */ }
+
+  // Loaded capabilities
+  if (ctx.loadedCapabilities?.length) {
+    lines.push("", `🔌 Capabilities: ${ctx.loadedCapabilities.join(", ")}`);
+  }
+
+  // Sleep progress
+  const sp = ctx.sleepProgress?.();
+  if (sp) {
+    lines.push(`😴 Sleep: ${sp.percent}% (${sp.step})`);
+  }
+
+  await ctx.reply(lines.join("\n"));
+  return true;
+}
+
 async function handleMemory(_text: string, ctx: CommandContext): Promise<boolean> {
   if (!ctx.memory) { await ctx.reply("🧠 Memory is disabled."); return true; }
   const stats = ctx.memory.getStats(ctx.chatId);
@@ -358,6 +403,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/status — Bridge status, transport, heartbeat",
     "/stop, /ctrlc — Stop current response",
     "/memory — Memory storage statistics",
+    "/heartbeat — Heartbeat diagnostics (tasks, capabilities)",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",
@@ -426,10 +472,6 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     lines.push(
       `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
     );
-    if (cronInfo.taskStatuses.size > 0) {
-      const statusLine = [...cronInfo.taskStatuses.entries()].map(([name, s]) => `${name} ${s}`).join(" | ");
-      lines.push(`   ${statusLine}`);
-    }
     if (ctx.loadedCapabilities?.length) {
       lines.push(`🔌 Capabilities: ${ctx.loadedCapabilities.join(", ")}`);
     }
