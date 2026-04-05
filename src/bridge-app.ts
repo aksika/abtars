@@ -85,7 +85,7 @@ export async function startBridge(): Promise<void> {
   const startedAt = Date.now();
   const platforms = parsePlatformFlags();
   const config = await loadAndValidateConfig();
-  if (platforms.transport) config.agentTransport = platforms.transport;
+  if (platforms.transport) config.transport.agentTransport = platforms.transport;
   setLogLevel(config.logLevel);
 
   const enabledList = [
@@ -110,8 +110,8 @@ export async function startBridge(): Promise<void> {
   const conversationBuffer = new ConversationBuffer(50);
 
   // --- Pre-flight: start external services ---
-  if (config.agentTransport === "tmux") {
-    logInfo("main", `♻️  Starting tmux session '${config.tmuxSession}'...`);
+  if (config.transport.agentTransport === "tmux") {
+    logInfo("main", `♻️  Starting tmux session '${config.transport.tmuxSession}'...`);
     try {
       execFileSync(join(import.meta.dirname, "..", "scripts", "tmux-session.sh"), { stdio: "pipe" });
     } catch (err) {
@@ -120,25 +120,25 @@ export async function startBridge(): Promise<void> {
   }
 
   let transport: IKiroTransport;
-  if (config.agentTransport === "tmux") {
-    logInfo("main", `🖥️  tmux transport (session: ${config.tmuxSession})`);
+  if (config.transport.agentTransport === "tmux") {
+    logInfo("main", `🖥️  tmux transport (session: ${config.transport.tmuxSession})`);
     transport = new TmuxClient(
-      config.tmuxSession,
-      config.tmuxCaptureDelaySec,
-      config.tmuxMaxWaitSec,
+      config.transport.tmuxSession,
+      config.transport.tmuxCaptureDelaySec,
+      config.transport.tmuxMaxWaitSec,
     );
   } else {
     // Kill orphaned processes from previous runs
     try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
-    logInfo("main", `🔌 ACP transport (${config.agentCli})`);
+    logInfo("main", `🔌 ACP transport (${config.transport.agentCli})`);
 
     // Build CLI args based on which CLI is selected
-    const cliArgs = config.agentCli === "gemini"
+    const cliArgs = config.transport.agentCli === "gemini"
       ? ["--acp", "-y"]
       : undefined; // kiro and custom CLIs use default "acp" subcommand
 
-    transport = new AcpTransport(config.agentCliPath, config.workingDir, {
-      model: config.agentModel || undefined,
+    transport = new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, {
+      model: config.models.agentModel || undefined,
       cliArgs,
     });
   }
@@ -147,7 +147,7 @@ export async function startBridge(): Promise<void> {
 
   // Initialize context-window-start for all known chats
   if (memoryConfig.memoryEnabled) {
-    for (const uid of config.allowedUserIds) updateCtxStart(memoryConfig.memoryDir, uid, startedAt);
+    for (const uid of config.telegram.allowedUserIds) updateCtxStart(memoryConfig.memoryDir, uid, startedAt);
   }
 
   // Sleep state
@@ -159,22 +159,22 @@ export async function startBridge(): Promise<void> {
   const pendingSessionStart = new Set<string>();
   const seenSessions = new Set<string>();
   const fullModeChats = new Set<string>();
-  const codingModeManager = new CodingMode(config.agentCliPath, config.workingDir, config.agentCodingModel);
+  const codingModeManager = new CodingMode(config.transport.agentCliPath, config.transport.workingDir, config.models.codingModel);
   const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
   const registry = new ServiceRegistry();
 
   // STT/TTS config (lightweight — just reads env vars)
-  const sttConfig: SttConfig | null = config.sttEnabled
-    ? { provider: "groq", apiKey: config.groqApiKey, model: config.sttModel }
+  const sttConfig: SttConfig | null = config.voice.sttEnabled
+    ? { provider: "groq", apiKey: config.voice.groqApiKey, model: config.voice.sttModel }
     : null;
-  const ttsConfig: TtsConfig | null = config.ttsEnabled
-    ? { voice: config.ttsVoice }
+  const ttsConfig: TtsConfig | null = config.voice.ttsEnabled
+    ? { voice: config.voice.ttsVoice }
     : null;
 
   const nlmConfig = loadNLMConfig();
 
   // CronQueue must be initialized before pipelineDeps (which references it)
-  const cronQueue = new CronQueue(config.agentCliPath, config.workingDir, (entryId, command, result) => {
+  const cronQueue = new CronQueue(config.transport.agentCliPath, config.transport.workingDir, (entryId, command, result) => {
     const msg = `[System] Cron task "${entryId}" failed:\nCommand: ${command}\nResult: ${result}\n\nDiagnose and fix if possible. If you can't fix it, tell the user.`;
     transport.sendPrompt("system:cron-fix", msg).catch(err => {
       logWarn("main", `Cron auto-fix inject failed: ${err}`);
@@ -184,7 +184,12 @@ export async function startBridge(): Promise<void> {
   // Build pipeline deps (needed before platform start)
   const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
     transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
-    idleSave, conversationBuffer, config, startedAt,
+    idleSave, conversationBuffer, config: {
+      agentTransport: config.transport.agentTransport,
+      workingDir: config.transport.workingDir,
+      discordA2aEnabled: config.discord.a2aEnabled,
+      discordA2aChannelId: config.discord.a2aChannelId,
+    }, startedAt,
     sttConfig, ttsConfig,
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
     messageQueue: new Map(),
@@ -214,11 +219,11 @@ export async function startBridge(): Promise<void> {
   let telegramAdapter: import("./platforms/telegram-adapter.js").TelegramAdapter | null = null;
 
   registry.register("telegram", {
-    configured: Boolean(config.telegramBotToken && config.allowedUserIds.size > 0),
+    configured: Boolean(config.telegram.botToken && config.telegram.allowedUserIds.size > 0),
     async create() {
       const { TelegramAdapter } = await import("./platforms/telegram-adapter.js");
       telegramAdapter = new TelegramAdapter(
-        { botToken: config.telegramBotToken, allowedUserIds: config.allowedUserIds, pollTimeoutS: config.pollTimeoutS },
+        { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
         { pipeline: pipelineDeps, conversationBuffer, transport, memory },
       );
       platformAdapters.set("telegram", telegramAdapter);
@@ -244,19 +249,19 @@ export async function startBridge(): Promise<void> {
   let discordAdapter: import("./platforms/discord-adapter.js").DiscordAdapter | null = null;
 
   registry.register("discord", {
-    configured: Boolean(config.discordEnabled && config.discordBotToken),
+    configured: Boolean(config.discord.enabled && config.discord.botToken),
     async create() {
       const { DiscordAdapter } = await import("./platforms/discord-adapter.js");
       discordAdapter = new DiscordAdapter(
         {
-          botToken: config.discordBotToken!,
-          appId: config.discordAppId!,
-          allowedUserIds: config.discordAllowedUserIds!,
-          allowedChannelIds: config.discordAllowedChannelIds!,
-          a2aEnabled: config.discordA2aEnabled,
-          a2aChannelId: config.discordA2aChannelId,
-          a2aPeerBotId: config.discordA2aPeerBotId,
-          a2aRateLimitMs: config.discordA2aRateLimitMs,
+          botToken: config.discord.botToken!,
+          appId: config.discord.appId!,
+          allowedUserIds: config.discord.allowedUserIds!,
+          allowedChannelIds: config.discord.allowedChannelIds!,
+          a2aEnabled: config.discord.a2aEnabled,
+          a2aChannelId: config.discord.a2aChannelId,
+          a2aPeerBotId: config.discord.a2aPeerBotId,
+          a2aRateLimitMs: config.discord.a2aRateLimitMs,
         },
         { pipeline: pipelineDeps, transport, memory, conversationBuffer },
       );
@@ -313,11 +318,11 @@ export async function startBridge(): Promise<void> {
   // --- Startup notification (async, non-blocking) ---
   if (memoryConfig.memoryEnabled) {
     const tgSend = telegramAdapter ? async (msg: string): Promise<void> => {
-      const chatId = [...config.allowedUserIds][0];
+      const chatId = [...config.telegram.allowedUserIds][0];
       if (chatId) await telegramAdapter!.sendMessage(String(chatId), msg);
     } : undefined;
     const dcSend = discordAdapter ? async (msg: string): Promise<void> => {
-      const channelId = config.discordAllowedChannelIds ? [...config.discordAllowedChannelIds][0] : undefined;
+      const channelId = config.discord.allowedChannelIds ? [...config.discord.allowedChannelIds][0] : undefined;
       if (channelId) await discordAdapter!.sendMessage(channelId, msg);
     } : undefined;
     sendBackOnline(tgSend, dcSend).catch((err) => {
@@ -326,7 +331,7 @@ export async function startBridge(): Promise<void> {
 
     // Start session: inject SOUL + context + greeting, push response to Telegram
     if (telegramAdapter && memory) {
-      const chatId = [...config.allowedUserIds][0];
+      const chatId = [...config.telegram.allowedUserIds][0];
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
         seenSessions.add(sessionKey);
@@ -407,7 +412,7 @@ export async function startBridge(): Promise<void> {
       const changed = skillWatcher.checkForChanges();
       for (const skill of changed) {
         skillWatcher.appendToTools(skill);
-        const chatId = [...config.allowedUserIds][0];
+        const chatId = [...config.telegram.allowedUserIds][0];
         if (chatId) {
           const msg = `[NEW SKILL AVAILABLE] ${skill.name}: ${skill.description}. Read ${skill.path} if you need it.`;
           await transport.sendPrompt(`telegram:${chatId}`, msg);
@@ -451,7 +456,7 @@ export async function startBridge(): Promise<void> {
   if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
     heartbeat.registerTask(createIdleCompactTask({
       transport, memory, memoryDir: memoryConfig.memoryDir,
-      allowedUserIds: config.allowedUserIds, busyChats, pendingSessionStart, isSleepActive,
+      allowedUserIds: config.telegram.allowedUserIds, busyChats, pendingSessionStart, isSleepActive,
     }));
   }
 
@@ -484,7 +489,7 @@ export async function startBridge(): Promise<void> {
 
   // --- Self-healing agent: error scanner ---
   if (process.env["SELFHEAL_ENABLED"] !== "false") {
-    heartbeat.registerTask(createSelfHealerTask(() => telegramAdapter, config.allowedUserIds));
+    heartbeat.registerTask(createSelfHealerTask(() => telegramAdapter, config.telegram.allowedUserIds));
   }
 
   // Run once on startup, then start periodic
@@ -572,7 +577,7 @@ export async function startBridge(): Promise<void> {
         },
         services: svcStates,
         transport: {
-          type: config.agentTransport as "tmux" | "acp",
+          type: config.transport.agentTransport as "tmux" | "acp",
           isReady: transport.isReady,
           contextPercent: transport.contextPercent,
         },
@@ -624,8 +629,8 @@ export async function startBridge(): Promise<void> {
     async create() {
       agentApiServer = new AgentApiServer({
         config: agentConfig,
-        cliPath: config.agentCliPath,
-        workingDir: config.workingDir,
+        cliPath: config.transport.agentCliPath,
+        workingDir: config.transport.workingDir,
         memory,
       });
       return {
