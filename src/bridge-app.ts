@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { readEntry as cronReadEntry } from "./components/cron-db.js";
+import { readEntry as cronReadEntry } from "./components/cron/cron-db.js";
 import { execFileSync, execSync } from "node:child_process";
 import { loadAndValidateConfig } from "./components/config.js";
 import { agentBridgeHome } from "./paths.js";
@@ -36,8 +36,8 @@ import { BrowserManager } from "./capabilities/browser/browser-manager.js";
 import { BrowserIpcServer } from "./capabilities/browser/browser-ipc-server.js";
 import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
-import { checkCron, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
-import { CronQueue } from "./components/cron-queue.js";
+import { checkCron, readPendingReminders, clearPendingReminders } from "./components/cron/cron-checker.js";
+import { CronQueue } from "./components/cron/cron-queue.js";
 import { startSession } from "./components/message-pipeline.js";
 
 

@@ -18,7 +18,7 @@ import type { MemoryManager } from "../memory/memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
-import type { RunningJob } from "./cron-queue.js";
+import type { RunningJob } from "./cron/cron-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 
 const TAG = "pipeline";

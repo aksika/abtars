@@ -245,7 +245,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
   };
 }
 
-import { readEntries as readCronEntries } from "./cron-db.js";
+import { readEntries as readCronEntries } from "./cron/cron-db.js";
 
 function readCronStatus(): CronEntryStatus[] {
   try {

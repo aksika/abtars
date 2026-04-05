@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CronQueue } from "./cron-queue.js";
-import type { CronEntry } from "../cli/agentbridge-task.js";
+import type { CronEntry } from "../../cli/agentbridge-task.js";
 
 function makeEntry(overrides: Partial<CronEntry> = {}): CronEntry {
   return {

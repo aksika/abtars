@@ -342,7 +342,7 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
 
 // ── Cron Control ────────────────────────────────────────────────────────────
 
-import { readEntry as cronReadEntry, writeEntry as cronWriteEntry } from "./cron-db.js";
+import { readEntry as cronReadEntry, writeEntry as cronWriteEntry } from "./cron/cron-db.js";
 
 function handleCronAction(id: string, action: string): { ok: boolean; error?: string } {
   const entry = cronReadEntry(id);
