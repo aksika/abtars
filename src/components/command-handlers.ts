@@ -84,6 +84,12 @@ const prefixCommands: ReadonlyArray<{ prefix: string; handler: CommandHandler }>
 
 const KNOWN_COMMANDS = new Set([...Object.keys(exactCommands), ...prefixCommands.map(p => p.prefix.split(" ")[0]!)]);
 
+/** Register an additional exact-match command (used by capability system). */
+export function registerCommand(name: string, handler: CommandHandler): void {
+  exactCommands[name] = handler;
+  KNOWN_COMMANDS.add(name);
+}
+
 /** Returns true if command was handled. */
 export async function handleCommand(text: string, ctx: CommandContext): Promise<boolean> {
   const exact = exactCommands[text];

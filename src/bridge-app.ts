@@ -36,9 +36,7 @@ import { classifyResume } from "./components/platform-detect.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { BrowserManager } from "./components/browser-manager.js";
-import { BrowserTool } from "./components/browser-tool.js";
 import { BrowserIpcServer } from "./components/browser-ipc-server.js";
-import { DomainAllowlist } from "./components/domain-allowlist.js";
 import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
@@ -84,6 +82,8 @@ async function sendBackOnline(
 import type { Config } from "./types/index.js";
 import type { MemoryConfig } from "./memory/memory-config.js";
 import type { PipelineDeps } from "./components/message-pipeline.js";
+import { createCapabilityRegistry, createCapabilityApi } from "./capabilities/capability.js";
+import type { CapabilityRegistry, CapabilityRegisterFn } from "./capabilities/capability.js";
 
 /**
  * Bridge — owns the lifecycle of all subsystems.
@@ -103,7 +103,8 @@ export class Bridge {
   dashboardServer: DashboardServer | null = null;
   agentApiServer: AgentApiServer | null = null;
   browserIpc: BrowserIpcServer | null = null;
-  browserManager = new BrowserManager();
+  /** @deprecated Browser is now a capability — this field is only used by shutdown. */
+  browserManager: BrowserManager | null = null;
   sleepChild: import("node:child_process").ChildProcess | null = null;
   mcpDaemonStarted = false;
   cronQueue!: CronQueue;
@@ -111,6 +112,15 @@ export class Bridge {
   constructor(config: Config, memoryConfig: MemoryConfig) {
     this.config = config;
     this.memoryConfig = memoryConfig;
+  }
+
+  /** Collected registrations from all capabilities. */
+  readonly capabilities: CapabilityRegistry = createCapabilityRegistry();
+
+  /** Register a capability before start(). */
+  registerCapability(fn: CapabilityRegisterFn): void {
+    const api = createCapabilityApi(this.capabilities, this.config, this.memory, this.transport);
+    fn(api);
   }
 
   async shutdown(): Promise<void> {
@@ -132,7 +142,7 @@ export class Bridge {
     await step("services", () => this.registry.stopAll());
     await step("heartbeat", () => this.heartbeat.stop());
     await step("browser-ipc", () => this.browserIpc?.shutdown());
-    await step("browser", () => this.browserManager.shutdown(), 5000);
+    await step("browser", () => this.browserManager?.shutdown(), 5000);
     await step("memory", () => this.memory?.close());
     await step("transport", () => this.transport.destroy());
     if (this.mcpDaemonStarted) {
@@ -353,17 +363,9 @@ export async function startBridge(): Promise<void> {
 
   // === DEFERRED INIT: non-critical services (after platforms are accepting messages) ===
 
-  // Browser (lazy — IPC starts on first browse task)
-  const browserManager = bridge.browserManager;
-  const allowlist = DomainAllowlist.fromEnv();
-  const browserTool = new BrowserTool(browserManager, allowlist);
-  // browserIpc is on bridge
-  const ensureBrowserIpc = async (): Promise<void> => {
-    if (bridge.browserIpc || process.env["BROWSER_DOCKER"] === "1") return;
-    bridge.browserIpc = new BrowserIpcServer(browserTool);
-    await bridge.browserIpc!.start();
-    logInfo("main", `🔌 Browser IPC listening on ${bridge.browserIpc!.socketPath}`);
-  };
+  // Browser capability (lazy — IPC starts on first browse task)
+  const { register: registerBrowser } = await import("./capabilities/browser/index.js");
+  bridge.registerCapability(registerBrowser);
 
   // MCP daemon
   // mcpDaemonStarted is on bridge
@@ -461,10 +463,7 @@ export async function startBridge(): Promise<void> {
     },
   });
 
-  heartbeat.registerTask({
-    name: "browse-checker",
-    execute: async () => { await ensureBrowserIpc(); checkBrowseTasks(); },
-  });
+  // browse-checker is now registered by browser capability
 
   // --- Skill hot-reload ---
   const skillWatcher = new SkillWatcher(
@@ -558,6 +557,17 @@ export async function startBridge(): Promise<void> {
   }
 
   // Run once on startup, then start periodic
+  // Wire capability-registered commands
+  const { registerCommand } = await import("./components/command-handlers.js");
+  for (const [name, handler] of bridge.capabilities.commands) {
+    registerCommand(name, handler);
+  }
+
+  // Wire capability-registered heartbeat tasks
+  for (const task of bridge.capabilities.heartbeatTasks) {
+    heartbeat.registerTask(task);
+  }
+
   checkBrowseTasks();
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);
