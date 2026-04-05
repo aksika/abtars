@@ -70,7 +70,6 @@ Telegram/Discord → PlatformAdapter.start() → onMessage callback
 
 | Component | Source | Purpose |
 |-----------|--------|---------|
-| `SleepQueue` | `src/components/sleep-queue.ts` | Unused — main transport available during sleep |
 | `CodingMode` | `src/components/coding-mode.ts` | Lazy AcpTransport lifecycle for coding agent |
 | `IdleSave` | `src/components/idle-save.ts` | Timer management + chat save on idle |
 
@@ -482,7 +481,7 @@ If the model returns `ValidationException` or error code `-32603` (context too l
 | File | Purpose |
 |------|---------|
 | `src/components/compaction.ts` | Compaction prompt + summary extraction |
-| `src/components/session-memory.ts` | Memory context block builder |
+| `src/memory/session-memory.ts` | Memory context block builder |
 | `src/components/message-pipeline.ts` | Graduated thresholds, auto-compact trigger, circuit breaker |
 | `src/components/command-handlers.ts` | `/compact` command handler |
 
