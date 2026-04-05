@@ -11,8 +11,9 @@
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { MemoryManager } from "../memory/memory-manager.js";
+import { createMemoryBackend } from "../memory/backend-factory.js";
 import { loadMemoryConfig } from "../memory/memory-config.js";
+import { agentBridgeHome } from "../paths.js";
 import type { InstantStoreParams } from "../types/index.js";
 
 const TAG = "retro-extract";
@@ -78,8 +79,7 @@ function saveProcessed(retroDir: string, processed: Set<string>): void {
 
 async function main(): Promise<void> {
   const flags = parseArgs(process.argv);
-  const config = loadMemoryConfig();
-  const retroDir = join(config.memoryDir, "retrospectives");
+  const retroDir = join(agentBridgeHome(), "memory", "retrospectives");
 
   if (!existsSync(retroDir)) {
     if (flags.verbose) console.log(`[${TAG}] No retrospectives directory`);
@@ -95,9 +95,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const memory = new MemoryManager(config);
+  const backend = await createMemoryBackend(loadMemoryConfig());
   try {
-    await memory.initialize({ skipEmbeddingCheck: true });
 
     let totalStored = 0;
 
@@ -123,7 +122,7 @@ async function main(): Promise<void> {
           classification: 0,
         };
 
-        const result = await memory.editor.instantStore(params);
+        const result = await backend.instantStore(params);
         if (result.stored) totalStored++;
         if (flags.verbose) console.log(`[${TAG}]   ${result.stored ? "✓" : "✗"} ${item.memoryType}: ${item.content.slice(0, 80)}`);
       }
@@ -136,7 +135,7 @@ async function main(): Promise<void> {
       console.log(`[${TAG}] Stored ${totalStored} items from ${unprocessed.length} retro file(s)`);
     }
   } finally {
-    memory.close();
+    await backend.close();
   }
 }
 
