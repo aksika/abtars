@@ -16,12 +16,15 @@ export type HeartbeatConfig = {
 const TAG = "heartbeat";
 const MIN_GUARD_MS = 3 * 60 * 1000; // 3 min minimum delay before first tick
 
+export type TaskStatus = "✓" | "✗" | "—" | "?";
+
 export class HeartbeatSystem {
   private timer: ReturnType<typeof setInterval> | null = null;
   private initTimeout: ReturnType<typeof setTimeout> | null = null;
   private tasks: HeartbeatTask[] = [];
   private running = false;
   private lastTickAt = 0;
+  private readonly taskStatuses = new Map<string, TaskStatus>();
 
   constructor(private config: HeartbeatConfig) {}
 
@@ -84,6 +87,11 @@ export class HeartbeatSystem {
     return this.tasks.map(t => t.name);
   }
 
+  /** Get last-run status for each task. */
+  getTaskStatuses(): ReadonlyMap<string, TaskStatus> {
+    return this.taskStatuses;
+  }
+
   /** Execute all registered tasks with error isolation. */
   private async tick(): Promise<void> {
     const now = Date.now();
@@ -108,13 +116,16 @@ export class HeartbeatSystem {
       try {
         if (task.heavy && (heavyRan || sleepBlocking)) {
           logDebug(TAG, `Skipping heavy task "${task.name}" — ${sleepBlocking ? "sleep in progress" : "another heavy task already ran"}`);
+          this.taskStatuses.set(task.name, "—");
           continue;
         }
         const result = await task.execute();
         if (task.heavy && result === true) heavyRan = true;
+        this.taskStatuses.set(task.name, "✓");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logWarn(TAG, `Task "${task.name}" failed: ${msg}`);
+        this.taskStatuses.set(task.name, "✗");
       }
     }
 

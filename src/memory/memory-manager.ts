@@ -168,7 +168,7 @@ export class MemoryManager {
   setHeartbeat(hb: HeartbeatSystem): void { this.heartbeat = hb; }
   stopHeartbeat(): void { this.heartbeat?.stop(); this.heartbeat = null; }
 
-  getCronInfo(): { heartbeatRunning: boolean; intervalMs: number; tasks: string[]; lastSleepAudit: string | null } {
+  getCronInfo(): { heartbeatRunning: boolean; intervalMs: number; tasks: string[]; taskStatuses: ReadonlyMap<string, string>; lastSleepAudit: string | null } {
     const auditDir = join(this.config.memoryDir, "sleep");
     let lastAudit: string | null = null;
     try {
@@ -179,6 +179,7 @@ export class MemoryManager {
       heartbeatRunning: this.heartbeat !== null,
       intervalMs: this.heartbeat?.intervalMs ?? 0,
       tasks: this.heartbeat?.getTaskNames() ?? [],
+      taskStatuses: this.heartbeat?.getTaskStatuses() ?? new Map(),
       lastSleepAudit: lastAudit,
     };
   }

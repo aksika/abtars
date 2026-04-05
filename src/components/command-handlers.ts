@@ -426,6 +426,10 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     lines.push(
       `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
     );
+    if (cronInfo.taskStatuses.size > 0) {
+      const statusLine = [...cronInfo.taskStatuses.entries()].map(([name, s]) => `${name} ${s}`).join(" | ");
+      lines.push(`   ${statusLine}`);
+    }
     if (ctx.loadedCapabilities?.length) {
       lines.push(`🔌 Capabilities: ${ctx.loadedCapabilities.join(", ")}`);
     }
