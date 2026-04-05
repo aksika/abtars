@@ -7,16 +7,21 @@
 # Usage:
 #   ./scripts/deploy.sh          # full deploy (build + env + steering + launcher)
 #   ./scripts/deploy.sh --quick  # env + steering + launcher only (skip build)
+#   ./scripts/deploy.sh --full   # full deploy + pull latest Docker images (Lightpanda)
 
 set -euo pipefail
 
 AB_HOME="${HOME}/.agentbridge"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 QUICK=false
+FULL=false
 
-if [[ "${1:-}" == "--quick" ]]; then
-  QUICK=true
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --quick) QUICK=true ;;
+    --full) FULL=true ;;
+  esac
+done
 
 echo "🚀 Deploying agentbridge..."
 echo "   Project: $PROJECT_DIR"
@@ -185,6 +190,10 @@ chmod +x "$AB_HOME/agentbridge.sh"
   tail -n +3 "$PROJECT_DIR/scripts/browser-docker.sh"
 } > "$AB_HOME/browser-docker.sh"
 chmod +x "$AB_HOME/browser-docker.sh"
+
+# Deploy lightpanda-docker.sh
+cp "$PROJECT_DIR/scripts/lightpanda-docker.sh" "$AB_HOME/lightpanda-docker.sh"
+chmod +x "$AB_HOME/lightpanda-docker.sh"
 mkdir -p "$AB_HOME/scripts"
 for script in daily-backup.sh doctor.sh upgrade-deps.sh; do
   cp "$PROJECT_DIR/scripts/$script" "$AB_HOME/scripts/$script"
@@ -232,7 +241,17 @@ if grep -q "^EMBEDDING_ENABLED=true" "$AB_HOME/.env" 2>/dev/null; then
   fi
 fi
 
-# 5. Done
+# 5. Docker image pulls (--full only)
+if [ "$FULL" = true ]; then
+  echo "📦 Pulling latest Docker images..."
+  if command -v docker &>/dev/null; then
+    docker pull lightpanda/browser:nightly 2>/dev/null && echo "   ✅ Lightpanda nightly pulled" || echo "   ⚠️  Lightpanda pull failed"
+  else
+    echo "   ⚠️  Docker not installed — skipping image pulls"
+  fi
+fi
+
+# 6. Done
 echo ""
 echo "✅ Deploy complete."
 echo ""
