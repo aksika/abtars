@@ -16,6 +16,7 @@ const validMemoryType = fc.oneof(
   fc.constant("event" as const),
   fc.constant("lesson" as const),
   fc.constant("feedback" as const),
+    fc.constant("story" as const),
 );
 
 /** Generate a non-empty string (at least 1 printable char). */

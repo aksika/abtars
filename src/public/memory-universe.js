@@ -14,6 +14,7 @@
     event:      [0.2, 1.0, 0.4],   // green
     lesson:     [1.0, 0.15, 0.15], // red
     feedback:   [1.0, 0.85, 0.2],  // gold
+    story:      [0.3, 0.5, 1.0],   // blue
   };
 
   window.initMemoryUniverse = function(token) {
@@ -148,7 +149,7 @@
       var brightnesses = new Float32Array(count);
       var hasEmbeddings = new Float32Array(count);
 
-      var PULSE_MAP = { fact: 0.0, decision: 0.75, preference: 1.5, event: 3.0, lesson: 2.0, feedback: 1.0 };
+      var PULSE_MAP = { fact: 0.0, decision: 0.75, preference: 1.5, event: 3.0, lesson: 2.0, feedback: 1.0, story: 0.5 };
 
       var now = Date.now();
       var oldest = memories.reduce(function(a, m) { return Math.min(a, m.created_at || now); }, now);
