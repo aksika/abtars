@@ -1437,3 +1437,39 @@ Download community skills from ClawHub (clawhub.ai) into `~/.agentbridge/skills/
 **Status:** ✅ Done (2026-04-05)
 
 Sleep cycle emits `PROGRESS:<pct>:<step-name>` on stdout. Bridge parses via piped stdout in sleep capability. `/status` shows progress when active.
+
+## 81. Dual Browser Engine — Lightpanda + Patchright
+
+**Priority:** HIGH
+**Status:** In progress
+
+### Problem
+Current browser uses Patchright (stealth Chromium) in Docker for all tasks. Heavy resource usage (~500MB RAM) for simple scraping that doesn't need stealth.
+
+### Design
+Two browser engines behind the same `agentbridge-browse` CLI:
+
+| Engine | Use case | Technology | Container |
+|--------|----------|------------|-----------|
+| Lightpanda (default) | News, research, scraping, simple sites | Zig-based headless, CDP | `lightpanda/browser:nightly` |
+| Patchright (fallback) | X.com, authenticated sites, bot-protected | Stealth Chromium fork | Existing Docker setup |
+
+**Fallback strategy:** Agent tries Lightpanda first. If site breaks or bot detection triggered (empty content, "verify you're human" page), retry with `--engine patchright`.
+
+**CLI:** `agentbridge-browse --task "..." --chat-id 123 [--engine lightpanda|patchright]`
+Default engine: lightpanda. Skill instructs fallback pattern.
+
+**Architecture:**
+- Both engines expose CDP WebSocket endpoints
+- `browser-manager.ts` connects to the selected engine's CDP endpoint
+- `pending_browse.json` format unchanged — engine is transparent to browse-checker
+- SSRF guard applies to both engines
+
+**Action items:**
+- [ ] Add Lightpanda Docker container management (start/stop alongside Patchright)
+- [ ] Add `--engine` flag to `agentbridge-browse` CLI
+- [ ] Update `browser-manager.ts` to connect via CDP endpoint (not launch Chromium directly)
+- [ ] Update browse skill to instruct fallback pattern
+- [ ] Test with common browse tasks (news sites, X.com)
+
+**Effort:** Medium. **Risk:** Low (additive — Patchright stays as-is, Lightpanda is new option).
