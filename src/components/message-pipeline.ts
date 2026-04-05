@@ -5,13 +5,12 @@
  */
 
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
-import { handleCommand, type CommandContext, type Reply } from "./command-handlers.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction } from "./compaction.js";
 import { buildSessionStartContext } from "../memory/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { TELEGRAM_ALLOWED_REACTIONS, REACTION_FALLBACK_MAP } from "./reaction-signal.js";
-import { transcribeAudio, type SttConfig } from "./stt.js";
+import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason, readAndClearRestartReason } from "./restart-reason.js";
 import type { IKiroTransport } from "./kiro-transport.js";
@@ -34,7 +33,7 @@ const COMPACT_MAX_FAILURES = 3;
 const ctxWarned = new Set<string>();
 const compactFailures = new Map<string, number>();
 /** Sessions currently being compacted (for coffee message). */
-export const compactingSessions = new Set<string>();
+export { compactingSessions } from "./pipeline/busy-guard.js";
 /** Reset by bridge-app on inbound message to re-enable floating compaction. */
 export let resetIdleCompactFlag: (() => void) | null = null;
 export function setIdleCompactReset(fn: () => void): void { resetIdleCompactFlag = fn; }
@@ -88,93 +87,23 @@ export async function handleInboundMessage(
   adapter: PlatformAdapter,
   deps: PipelineDeps,
 ): Promise<void> {
+  // Run early middleware (voice → commands → busy guard)
+  const { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, busyGuardMiddleware } = await import("./pipeline/index.js");
+  const ctx = createMessageContext(msg, adapter, deps);
+  await runPipeline(ctx, [voiceMiddleware, commandMiddleware, busyGuardMiddleware]);
+  if (ctx.handled) return;
+
+  // --- Core transport/response handling (will become middleware incrementally) ---
   const {
-    transport, codingMode, memory, memoryConfig, nlmConfig,
-    idleSave, conversationBuffer, config, startedAt,
-    sttConfig, ttsConfig,
+    transport, codingMode, memory, memoryConfig,
+    idleSave, conversationBuffer,
+    ttsConfig,
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
   } = deps;
 
-  const { sessionKey, channelId, text: rawText, isVoice, isGroup } = msg;
-  const chatId = parseInt(channelId, 10) || 0;
-  let text = rawText;
-
-  // --- Voice transcription ---
-  if (isVoice && msg.voiceFileId && adapter.downloadVoice && sttConfig) {
-    try {
-      if (adapter.setReaction && msg.messageId) {
-        await adapter.setReaction(channelId, msg.messageId, "👀");
-      }
-      const audioBuffer = await adapter.downloadVoice(msg.voiceFileId);
-      const transcript = await transcribeAudio(audioBuffer, "voice.ogg", sttConfig);
-      if (!transcript) {
-        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "");
-        await adapter.sendMessage(channelId, "🤷 Couldn't transcribe the voice note.", { threadId: msg.threadId });
-        return;
-      }
-      text = transcript;
-    } catch (err) {
-      logError(TAG, "Voice transcription failed", err);
-      if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "");
-      await adapter.sendMessage(channelId, "❌ Voice transcription failed.", { threadId: msg.threadId });
-      return;
-    }
-  } else if (isVoice && !sttConfig) {
-    await adapter.sendMessage(channelId, "🎤 Voice notes require STT (set GROQ_API_KEY).", { threadId: msg.threadId });
-    return;
-  }
-
-  // --- Command handling ---
-  const reply: Reply = (replyText, opts) => adapter.sendMessage(channelId, replyText, { threadId: msg.threadId, ...opts });
-  const cmdCtx: CommandContext = {
-    sessionKey, chatId, platform: msg.platform, reply,
-    transport, config, startedAt,
-    memory, memoryConfig, nlmConfig,
-    codingMode, idleSave,
-    busyChats, fullModeChats, pendingSessionStart,
-    updateCtxStart,
-    cronCurrentJob: deps.cronCurrentJob?.() ?? null,
-    enqueueCron: deps.enqueueCron,
-    requestShutdown: deps.requestShutdown,
-    conversationBuffer: isGroup ? conversationBuffer : undefined,
-    bufKey: isGroup ? `${msg.platform}:${channelId}` : undefined,
-  };
-  if (await handleCommand(text, cmdCtx)) return;
-
-  // // prefix → transport-specific command or pass-through to Kiro
-  if (text.startsWith("//")) {
-    text = text.slice(1); // pass-through: strip one /
-  }
-
-  // Transport-specific commands (e.g. /usage, /model for kiro)
-  const cmd = text.split(/\s/)[0]!;
-  if (transport.transportCommands.includes(cmd) && transport.executeCommand) {
-    const result = await transport.executeCommand(text);
-    await adapter.sendMessage(channelId, result, { threadId: msg.threadId });
-    return;
-  }
-
-  // --- Busy check ---
-  if (busyChats.has(sessionKey)) {
-    const isWait = text.trim().toLowerCase().startsWith("wait");
-    if (isWait) {
-      // "WAIT" → cancel current, process this message immediately
-      logInfo(TAG, `WAIT interrupt — cancelling current prompt for ${sessionKey}`);
-      await transport.sendInterrupt();
-      busyChats.delete(sessionKey);
-    } else {
-      // Queue the message for processing after current completes
-      const queue = deps.messageQueue.get(sessionKey) ?? [];
-      queue.push({ msg, adapter });
-      deps.messageQueue.set(sessionKey, queue);
-      logDebug(TAG, `Queued "${text.slice(0, 40)}" for ${sessionKey} (${queue.length} pending)`);
-      const queueMsg = compactingSessions.has(sessionKey)
-        ? "☕ Hold on, just tidying up my thoughts over coffee... I'll get to you in a moment!"
-        : `⏳ Queued (${queue.length}) — will process after current response.`;
-      await adapter.sendMessage(channelId, queueMsg, { threadId: msg.threadId });
-      return;
-    }
-  }
+  const { sessionKey, channelId, isVoice, isGroup } = msg;
+  const chatId = ctx.chatId;
+  const text = ctx.text;
 
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   try {
