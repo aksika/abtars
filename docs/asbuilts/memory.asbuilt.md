@@ -620,7 +620,7 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | emotion-utils | `emotion-utils.ts` | `clampEmotionScore()` — clamps to -5..+5 range. |
 | SessionContext | `session-context.ts` | `buildSessionStartContext()` — session-start context injection. |
 | PromptScanner | `prompt-scanner.ts` (in `src/components/`) | 22-pattern prompt injection detector. Used by store, edit, A2A. |
-| SleepTrigger | `sleep-trigger.ts` (in `src/components/`) | `hasSleepAuditToday()` — guard against re-run |
+| SleepTrigger | `sleep-trigger.ts` (in `src/components/`) | `hasSleepAuditToday()` — guard against re-run. |
 | SleepStateGatherer | `sleep-state-gatherer.ts` (in `src/components/`) | Gathers DB stats, FTS5 health, disk usage for sleep prompt. |
 | agentbridge-recall | `cli/agentbridge-recall.ts` | CLI wrapper for recall-engine. |
 | agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete (delegates to MemoryEditor). |
