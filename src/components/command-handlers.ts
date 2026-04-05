@@ -336,17 +336,6 @@ async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<bool
     }
   } catch { /* */ }
 
-  // Loaded capabilities
-  if (ctx.loadedCapabilities?.length) {
-    lines.push("", `🔌 Capabilities: ${ctx.loadedCapabilities.join(", ")}`);
-  }
-
-  // Sleep progress
-  const sp = ctx.sleepProgress?.();
-  if (sp) {
-    lines.push(`😴 Sleep: ${sp.percent}% (${sp.step})`);
-  }
-
   await ctx.reply(lines.join("\n"));
   return true;
 }
@@ -489,7 +478,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
       const r = ce.filter(e => e.schedule && !e.paused).length;
       const p = ce.filter(e => !e.fired && !e.schedule).length;
       const pa = ce.filter(e => e.paused).length;
-      lines.push(`⏰ Cron: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
+      lines.push(`⏰ Tasks: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
     } catch { /* */ }
     try {
       const bd = join(homedir(), ".backup-agentbridge");
