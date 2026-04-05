@@ -178,6 +178,15 @@ child.stderr.on("data", c => { try { appendFileSync(logFile, c); } catch {} });
 const rl = createInterface({ input: child.stdout });
 let reqId = 0;
 const send = msg => child.stdin.write(JSON.stringify(msg) + "\\n");
+// Auto-approve all permission requests (browse subagent is trusted)
+rl.on("line", line => {
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === "RequestPermissionRequest") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { approved: true } });
+    }
+  } catch {}
+});
 const waitRes = (id, ms) => new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error("timeout")), ms);
   const h = line => { try { const p = JSON.parse(line); if (p.id === id) { clearTimeout(t); rl.off("line", h); p.error ? reject(new Error(p.error.message)) : resolve(p.result); } } catch {} };
