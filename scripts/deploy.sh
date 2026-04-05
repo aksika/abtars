@@ -243,9 +243,12 @@ fi
 
 # 5. Docker image pulls (--full only)
 if [ "$FULL" = true ]; then
-  echo "📦 Pulling latest Docker images..."
+  echo "📦 Pulling/rebuilding Docker images..."
   if command -v docker &>/dev/null; then
     docker pull lightpanda/browser:nightly 2>/dev/null && echo "   ✅ Lightpanda nightly pulled" || echo "   ⚠️  Lightpanda pull failed"
+    if [ -f "$AB_HOME/browser-docker.sh" ]; then
+      "$AB_HOME/browser-docker.sh" build 2>/dev/null && echo "   ✅ Patchright browser rebuilt" || echo "   ⚠️  Patchright build failed"
+    fi
   else
     echo "   ⚠️  Docker not installed — skipping image pulls"
   fi
