@@ -76,6 +76,7 @@ export interface PipelineDeps {
   enqueueCron?: (entryId: string) => string | null;
   requestShutdown?: () => void;
   sleepProgress?: () => { percent: number; step: string } | null;
+  loadedCapabilities?: string[];
 }
 
 /**

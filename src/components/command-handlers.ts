@@ -42,6 +42,7 @@ export interface CommandContext {
   enqueueCron?: PipelineDeps["enqueueCron"];
   requestShutdown?: PipelineDeps["requestShutdown"];
   sleepProgress?: PipelineDeps["sleepProgress"];
+  loadedCapabilities?: PipelineDeps["loadedCapabilities"];
   // Per-message (optional)
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
@@ -424,9 +425,11 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     const mins = Math.round(cronInfo.intervalMs / 60000);
     lines.push(
       `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
-      `📋 Tasks: ${cronInfo.tasks.join(", ") || "(none)"}`,
-      `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
     );
+    if (ctx.loadedCapabilities?.length) {
+      lines.push(`🔌 Capabilities: ${ctx.loadedCapabilities.join(", ")}`);
+    }
+    lines.push(`😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`);
     const sp = ctx.sleepProgress?.();
     if (sp) {
       lines.push(`😴 Sleep: ${sp.percent}% (${sp.step})`);

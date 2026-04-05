@@ -278,6 +278,7 @@ export async function startBridge(): Promise<void> {
     },
     requestShutdown: () => process.exit(0),
     sleepProgress: () => sleepHandle?.progress ?? null,
+    loadedCapabilities: [],
   };
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
@@ -375,7 +376,10 @@ export async function startBridge(): Promise<void> {
   const { discoverCapabilities } = await import("./capabilities/capability.js");
   const capDir = join(import.meta.dirname, "capabilities");
   const loaded = await discoverCapabilities(bridge.capabilities, config, memory, transport, capDir);
-  if (loaded.length > 0) logInfo("main", `🔌 Capabilities: ${loaded.join(", ")}`);
+  if (loaded.length > 0) {
+    logInfo("main", `🔌 Capabilities: ${loaded.join(", ")}`);
+    pipelineDeps.loadedCapabilities = ["sleep", ...loaded];
+  }
 
   // MCP daemon
   // mcpDaemonStarted is on bridge
