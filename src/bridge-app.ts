@@ -1,8 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { readEntry as cronReadEntry } from "./components/cron-db.js";
-import { spawn, execFileSync, execSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { execFileSync, execSync } from "node:child_process";
 import { loadAndValidateConfig } from "./components/config.js";
 import { agentBridgeHome } from "./paths.js";
 
@@ -27,9 +26,7 @@ import { MemorySearchController } from "./components/memory-search-controller.js
 import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
 import { loadNLMConfig } from "./components/nlm-command-handler.js";
-import { hasSleepAuditToday } from "./components/sleep-trigger.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
-import { SkillWatcher } from "./components/skill-watcher.js";
 import { writeRestartReason } from "./components/restart-reason.js";
 import { isDailyCycleDue } from "./components/daily-cycle.js";
 import { classifyResume } from "./components/platform-detect.js";
@@ -105,7 +102,6 @@ export class Bridge {
   browserIpc: BrowserIpcServer | null = null;
   /** @deprecated Browser is now a capability — this field is only used by shutdown. */
   browserManager: BrowserManager | null = null;
-  sleepChild: import("node:child_process").ChildProcess | null = null;
   mcpDaemonStarted = false;
   cronQueue!: CronQueue;
 
@@ -226,7 +222,9 @@ export async function startBridge(): Promise<void> {
   }
 
   // Sleep state
-  // bridge.sleepChild is on bridge
+  // sleepChild tracked via sleepHandle (created after heartbeat start)
+  let sleepHandle: import("./capabilities/sleep/index.js").SleepHandle | null = null;
+  const isSleepActive = (): boolean => sleepHandle?.child !== null && sleepHandle?.child !== undefined && !sleepHandle.child.killed;
   const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
   const sleepAuditDir = join(memoryConfig.memoryDir, "sleep");
 
@@ -367,6 +365,10 @@ export async function startBridge(): Promise<void> {
   const { register: registerBrowser } = await import("./capabilities/browser/index.js");
   bridge.registerCapability(registerBrowser);
 
+  // Skills capability (hot-reload)
+  const { register: registerSkills } = await import("./capabilities/skills/index.js");
+  bridge.registerCapability(registerSkills);
+
   // MCP daemon
   // mcpDaemonStarted is on bridge
   if (config.mcpDaemon) {
@@ -426,7 +428,7 @@ export async function startBridge(): Promise<void> {
   const heartbeat = new HeartbeatSystem({
     enabled: true,
     intervalMs: hbIntervalMs,
-    sleepActive: () => bridge.sleepChild !== null && !bridge.sleepChild.killed,
+    sleepActive: isSleepActive,
     onStandbyResume: (gapMs) => {
       // L1: Platform-specific check
       const resumeKind = classifyResume();
@@ -436,7 +438,7 @@ export async function startBridge(): Promise<void> {
       }
 
       // L2: Daily cycle check
-      if (isDailyCycleDue({ sleepHour: SLEEP_HOUR, bridgeLockPath, memory, busyChats, isSleepActive: () => bridge.sleepChild !== null && !bridge.sleepChild.killed })) {
+      if (isDailyCycleDue({ sleepHour: SLEEP_HOUR, bridgeLockPath, memory, busyChats, isSleepActive })) {
         logInfo("main", `🔄 Standby resume (${Math.round(gapMs / 60000)}min) + daily cycle due — restarting`);
         writeRestartReason(`daily-cycle: standby-resume ${Math.round(gapMs / 60000)}min`);
         try { unlinkSync(bridgeLockPath); } catch { /* */ }
@@ -465,26 +467,7 @@ export async function startBridge(): Promise<void> {
 
   // browse-checker is now registered by browser capability
 
-  // --- Skill hot-reload ---
-  const skillWatcher = new SkillWatcher(
-    join(agentBridgeHome(), "skills"),
-    join(agentBridgeHome(), "skills", "TOOLS.md"),
-  );
-  heartbeat.registerTask({
-    name: "skill-reloader",
-    execute: async () => {
-      const changed = skillWatcher.checkForChanges();
-      for (const skill of changed) {
-        skillWatcher.appendToTools(skill);
-        const chatId = [...config.telegram.allowedUserIds][0];
-        if (chatId) {
-          const msg = `[NEW SKILL AVAILABLE] ${skill.name}: ${skill.description}. Read ${skill.path} if you need it.`;
-          await transport.sendPrompt(`telegram:${chatId}`, msg);
-          logInfo("skill-reloader", `Injected: ${skill.name}`);
-        }
-      }
-    },
-  });
+  // skill-reloader is now registered by skills capability
 
   heartbeat.registerTask({
     name: "reminder-injector",
@@ -514,7 +497,6 @@ export async function startBridge(): Promise<void> {
 
   // --- DB integrity check (hourly) ---
   const SLEEP_HOUR = parseInt(process.env["SLEEP_TIME"]?.split(":")[0] ?? "6", 10);
-  const isSleepActive = (): boolean => bridge.sleepChild !== null && !bridge.sleepChild.killed;
 
   // --- Floating compaction (idle-triggered) ---
   if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
@@ -573,45 +555,15 @@ export async function startBridge(): Promise<void> {
   memory?.setHeartbeat(heartbeat);
   logInfo("main", "💓 Heartbeat started (5-min interval)");
 
-  // --- Startup sleep (background, with retry) ---
-  const SLEEP_MAX_RETRIES = 3;
-  const SLEEP_RETRY_MS = 5 * 60 * 1000;
-  let sleepAttempts = 0;
-
-  function spawnSleep(): void {
-    if (new Date().getHours() < SLEEP_HOUR) {
-      logDebug("main", `😴 Before SLEEP_TIME (${SLEEP_HOUR}:00) — skip`);
-      return;
-    }
-    if (hasSleepAuditToday(sleepAuditDir)) {
-      logDebug("main", "😴 Sleep already done today — skip");
-      return;
-    }
-    if (bridge.sleepChild && !bridge.sleepChild.killed) return;
-    sleepAttempts++;
-    try {
-      const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
-      const child = spawn(process.execPath, [sleepScript], { stdio: "ignore" });
-      bridge.sleepChild = child;
-      child.on("exit", (code) => {
-        bridge.sleepChild = null;
-        if (code === 0) {
-          logInfo("main", `😴 Sleep finished successfully (attempt ${sleepAttempts})`);
-          if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
-        } else if (sleepAttempts < SLEEP_MAX_RETRIES) {
-          logWarn("main", `😴 Sleep failed (code=${code}, attempt ${sleepAttempts}/${SLEEP_MAX_RETRIES}) — retry in 5min`);
-          setTimeout(spawnSleep, SLEEP_RETRY_MS);
-        } else {
-          logWarn("main", `😴 Sleep failed (code=${code}) — exhausted ${SLEEP_MAX_RETRIES} attempts`);
-        }
-      });
-      logInfo("main", `😴 Sleep spawned (pid=${child.pid}, attempt ${sleepAttempts})`);
-    } catch (err) {
-      logWarn("main", `😴 Sleep spawn failed: ${err instanceof Error ? err.message : String(err)}`);
-      if (sleepAttempts < SLEEP_MAX_RETRIES) setTimeout(spawnSleep, SLEEP_RETRY_MS);
-    }
-  }
-  spawnSleep();
+  // --- Sleep capability (background, with retry) ---
+  const { createSleepHandle } = await import("./capabilities/sleep/index.js");
+  sleepHandle = createSleepHandle({
+    sleepHour: SLEEP_HOUR,
+    sleepAuditDir,
+    memoryEnabled: memoryConfig.memoryEnabled,
+    onComplete: () => resetAllCtxStarts(memoryConfig.memoryDir),
+  });
+  sleepHandle.spawn();
 
   // --- Web Dashboard wiring (conditional) ---
   let dashboardServer: DashboardServer | null = null; // local ref, wired to bridge at end
