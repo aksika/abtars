@@ -1360,6 +1360,30 @@ Option D (hybrid). Phase 1 is a code change in `acp-transport.ts` auto-approve l
 - Config: `SANDBOX_BLOCKED_PATHS`, `SANDBOX_ALLOWED_WRITE_PATHS` in `.env`
 - Log all blocked attempts at WARN level
 
+### Phase 2 — NemoClaw-style Docker isolation (from refactor #9)
+
+**Context:** All refactor prerequisites are now complete — Bridge class, capability plugin system, pluggable memory backends, CLI IPC. The architectural seams exist to split bridge (host) from agent (sandbox).
+
+**Architecture:**
+```
+Host (unsandboxed): Bridge core, memory, platforms, dashboard
+  │ ACP over stdio (already exists)
+Sandbox (Docker): kiro-cli, agent tools, browser
+  - Network: deny-by-default egress, allow kiro API only
+  - Filesystem: read-only except /sandbox
+  - No access to .env, memory.db, bridge code
+```
+
+**Action items:**
+- [ ] Dockerfile for agent sandbox (reference: NemoClaw's 4-layer defense)
+- [ ] Network policy (allow kiro API endpoint, block internal network)
+- [ ] Credential isolation (secrets stay on host, agent gets tokens via ACP)
+- [ ] Filesystem policy (read-only system, writable /sandbox only)
+- [ ] Update ACP transport to spawn inside container instead of locally
+
+**Reference:** NemoClaw — Landlock LSM, seccomp filters, capability drops, gateway proxy.
+**Effort:** High. **Risk:** Medium. **Depends on:** All refactor items (done).
+
 ## 78. Enhanced Testing Strategy
 
 **Priority:** HIGH
@@ -1391,3 +1415,32 @@ Verify ACP protocol compatibility between our transport and CLI providers:
 - **Gemini contract**: same flow but with Gemini-specific behaviors — `cancelled` stopReason on concurrent prompts, no `contextUsagePercentage` metadata, `--acp -y` flags.
 - Run against recorded fixtures (not live CLIs) for speed and determinism.
 - Update fixtures when CLI versions change.
+
+## 79. ClawHub Skill Sync
+
+**Priority:** HIGH
+**Status:** Not started
+
+Download community skills from ClawHub (clawhub.ai) into `~/.agentbridge/skills/clawhub/`. SkillWatcher already hot-reloads — just need a download CLI.
+
+**Action items:**
+- [ ] Research ClawHub API (endpoints, auth, skill format)
+- [ ] Create `src/cli/agentbridge-clawhub.ts` with install/list/update/remove
+- [ ] Add `/clawhub` command handler for agent-initiated installs
+- [ ] Optional: heartbeat task for daily auto-update
+
+**Effort:** Low-medium. **Risk:** Low.
+
+## 80. Progress Protocol for Long-Running CLIs
+
+**Priority:** MEDIUM
+**Status:** Not started
+
+Sleep cycle runs 55 minutes across 14 steps with zero visibility. Emit `PROGRESS:<pct>:<label>` on stdout. Bridge parses for `/status`, dashboard, and watchdog stuck-step detection. Inspired by NemoClaw's runner protocol.
+
+**Action items:**
+- [ ] Add `PROGRESS:` lines to `agentbridge-sleep.ts` at each step boundary
+- [ ] Parse progress lines in bridge sleep spawn handler
+- [ ] Expose in `/status` and dashboard WebSocket push
+
+**Effort:** Low (~30 lines). **Risk:** None.
