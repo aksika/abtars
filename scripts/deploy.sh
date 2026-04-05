@@ -246,8 +246,8 @@ if [ "$FULL" = true ]; then
   echo "📦 Pulling/rebuilding Docker images..."
   if command -v docker &>/dev/null; then
     docker pull lightpanda/browser:nightly 2>/dev/null && echo "   ✅ Lightpanda nightly pulled" || echo "   ⚠️  Lightpanda pull failed"
-    if [ -f "$AB_HOME/browser-docker.sh" ]; then
-      "$AB_HOME/browser-docker.sh" build 2>/dev/null && echo "   ✅ Patchright browser rebuilt" || echo "   ⚠️  Patchright build failed"
+    if [ -d "$PROJECT_DIR/docker/browser" ]; then
+      DOCKER_BUILDKIT=0 docker build -t agentbridge-browser -f "$PROJECT_DIR/docker/browser/Dockerfile" "$PROJECT_DIR" 2>&1 | tail -3 && echo "   ✅ Patchright browser image rebuilt" || echo "   ⚠️  Patchright build failed"
     fi
   else
     echo "   ⚠️  Docker not installed — skipping image pulls"
