@@ -33,10 +33,19 @@ function makeDeps(opts?: {
   memoryIndex?: ReturnType<typeof mockMemoryIndex>;
   db?: ReturnType<typeof mockDb>;
 }): MemorySearchDeps {
-  return {
-    memoryIndex: (opts?.memoryIndex ?? mockMemoryIndex()) as unknown as MemorySearchDeps["memoryIndex"],
-    db: (opts?.db ?? mockDb()) as unknown as MemorySearchDeps["db"],
-  };
+  const db = (opts?.db ?? mockDb()) as any;
+  const mi = (opts?.memoryIndex ?? mockMemoryIndex()) as any;
+  const mockMemory = {
+    store: {
+      getDistinctChatIds: () => (db.prepare("SELECT DISTINCT chat_id FROM messages ORDER BY chat_id").all() as Array<{ chat_id: number }>).map((r: any) => r.chat_id),
+      getAllExtractedMemories: () => db.prepare("SELECT * FROM extracted_memories ORDER BY created_at DESC").all(),
+      getAllEntities: () => db.prepare("SELECT id, name, type, summary FROM entities").all(),
+      getAllEntityLinks: () => db.prepare("SELECT memory_id, entity_id FROM memory_entities").all(),
+    },
+    getDatabase: () => db,
+    getMemoryIndex: () => mi,
+  } as unknown as MemorySearchDeps["memory"];
+  return { memory: mockMemory };
 }
 
 function params(obj: Record<string, string>): URLSearchParams {

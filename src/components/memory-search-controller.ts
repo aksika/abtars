@@ -5,8 +5,7 @@
  * Returns per-stage breakdown for dashboard investigation.
  */
 
-import type Database from "better-sqlite3";
-import type { MemoryIndex } from "../memory/memory-index.js";
+import type { MemoryManager } from "../memory/memory-manager.js";
 import { logWarn } from "./logger.js";
 import type { MemorySearchResponse } from "./dashboard-config.js";
 import { recallSearch } from "../memory/recall-engine.js";
@@ -15,8 +14,7 @@ import type { RecallHit } from "../memory/recall-engine.js";
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export type MemorySearchDeps = {
-  memoryIndex: MemoryIndex;
-  db: Database.Database;
+  memory: MemoryManager;
   memoryDir?: string;
   ctxStartPath?: string;
 };
@@ -36,10 +34,8 @@ export class MemorySearchController {
   /** List distinct chat IDs that have stored messages. */
   listChats(): { status: number; body: object } {
     try {
-      const rows = this.deps.db
-        .prepare("SELECT DISTINCT chat_id FROM messages ORDER BY chat_id")
-        .all() as Array<{ chat_id: number }>;
-      return { status: 200, body: { chatIds: rows.map((r) => r.chat_id) } };
+      const chatIds = this.deps.memory.store.getDistinctChatIds();
+      return { status: 200, body: { chatIds } };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `listChats failed: ${msg}`);
@@ -50,17 +46,9 @@ export class MemorySearchController {
   /** All extracted memories + entities + links for visualization. */
   listAll(): { status: number; body: object } {
     try {
-      const memories = this.deps.db.prepare(
-        `SELECT id, content_en, content_original, memory_type, created_at, emotion_score,
-                recall_count, relevance_score, classification, trust, integrity, credibility,
-                CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_embedding
-         FROM extracted_memories ORDER BY created_at DESC`
-      ).all() as Array<Record<string, unknown>>;
-
-      const entities = this.deps.db.prepare("SELECT id, name, type, summary FROM entities").all() as Array<Record<string, unknown>>;
-
-      const links = this.deps.db.prepare("SELECT memory_id, entity_id FROM memory_entities").all() as Array<Record<string, unknown>>;
-
+      const memories = this.deps.memory.store.getAllExtractedMemories();
+      const entities = this.deps.memory.store.getAllEntities();
+      const links = this.deps.memory.store.getAllEntityLinks();
       return { status: 200, body: { memories, entities, links } };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -104,10 +92,14 @@ export class MemorySearchController {
     const entity = params.get("entity")?.trim() || undefined;
 
     try {
+      const db = this.deps.memory.getDatabase();
+      const index = this.deps.memory.getMemoryIndex();
+      if (!db || !index) return { status: 500, body: { error: "Memory not initialized" } };
+
       const result = await recallSearch(
         {
-          db: this.deps.db,
-          index: this.deps.memoryIndex,
+          db,
+          index,
           memoryDir: this.deps.memoryDir ?? "",
           ctxStartPath: this.deps.ctxStartPath ?? "",
         },
@@ -115,7 +107,7 @@ export class MemorySearchController {
       );
 
       // Bump recall count
-      this.deps.memoryIndex.bumpRecallCount(result.extractedIds);
+      index.bumpRecallCount(result.extractedIds);
 
       // Map to dashboard response format
       const webResults = result.results.map(hitToWebResult);

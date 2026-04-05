@@ -1434,13 +1434,6 @@ Download community skills from ClawHub (clawhub.ai) into `~/.agentbridge/skills/
 ## 80. Progress Protocol for Long-Running CLIs
 
 **Priority:** MEDIUM
-**Status:** Not started
+**Status:** ✅ Done (2026-04-05)
 
-Sleep cycle runs 55 minutes across 14 steps with zero visibility. Emit `PROGRESS:<pct>:<label>` on stdout. Bridge parses for `/status`, dashboard, and watchdog stuck-step detection. Inspired by NemoClaw's runner protocol.
-
-**Action items:**
-- [ ] Add `PROGRESS:` lines to `agentbridge-sleep.ts` at each step boundary
-- [ ] Parse progress lines in bridge sleep spawn handler
-- [ ] Expose in `/status` and dashboard WebSocket push
-
-**Effort:** Low (~30 lines). **Risk:** None.
+Sleep cycle emits `PROGRESS:<pct>:<step-name>` on stdout. Bridge parses via piped stdout in sleep capability. `/status` shows progress when active.

@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { MemoryConfig } from "../memory/memory-config.js";
+import type { MemoryManager } from "../memory/memory-manager.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { logInfo, logWarn, logError } from "./logger.js";
@@ -60,10 +61,15 @@ export interface StateSnapshot {
 }
 
 export class SleepStateGatherer {
+  private db: Database.Database;
   constructor(
-    private db: Database.Database,
+    memory: MemoryManager,
     private config: MemoryConfig,
-  ) {}
+  ) {
+    const db = memory.getDatabase();
+    if (!db) throw new Error("Database not initialized");
+    this.db = db;
+  }
 
   async gather(): Promise<StateSnapshot> {
     const timestamp = new Date().toISOString();

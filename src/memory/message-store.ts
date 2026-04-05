@@ -109,4 +109,36 @@ export class MessageStore {
       return rows.map(r => r.content_en);
     } catch { return []; }
   }
+
+  /** Get all extracted memories with attributes (for dashboard visualization). */
+  getAllExtractedMemories(): Array<Record<string, unknown>> {
+    try {
+      return this.db.prepare(
+        `SELECT id, content_en, content_original, memory_type, created_at, emotion_score,
+                recall_count, relevance_score, classification, trust, integrity, credibility,
+                CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_embedding
+         FROM extracted_memories ORDER BY created_at DESC`
+      ).all() as Array<Record<string, unknown>>;
+    } catch { return []; }
+  }
+
+  /** Get all entities. */
+  getAllEntities(): Array<Record<string, unknown>> {
+    try { return this.db.prepare("SELECT id, name, type, summary FROM entities").all() as Array<Record<string, unknown>>; }
+    catch { return []; }
+  }
+
+  /** Get all memory-entity links. */
+  getAllEntityLinks(): Array<Record<string, unknown>> {
+    try { return this.db.prepare("SELECT memory_id, entity_id FROM memory_entities").all() as Array<Record<string, unknown>>; }
+    catch { return []; }
+  }
+
+  /** Get distinct chat IDs from messages. */
+  getDistinctChatIds(): number[] {
+    try {
+      return (this.db.prepare("SELECT DISTINCT chat_id FROM messages ORDER BY chat_id").all() as Array<{ chat_id: number }>)
+        .map(r => r.chat_id);
+    } catch { return []; }
+  }
 }

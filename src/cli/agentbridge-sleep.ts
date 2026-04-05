@@ -630,7 +630,7 @@ async function main(): Promise<number> {
     const isResume = existingState !== null && Object.values(existingState.steps).some(s => s.status === "ok");
 
     // Gather state
-    const gatherer = new SleepStateGatherer(db, memoryConfig);
+    const gatherer = new SleepStateGatherer(memory, memoryConfig);
     const snapshot = await gatherer.gather();
     if (flags.verbose) logInfo(TAG, `State gathered: ${buildSnapshotSummary(snapshot)}`);
 

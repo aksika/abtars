@@ -638,8 +638,7 @@ export async function startBridge(): Promise<void> {
     const authGate = new AuthGate(dashConfig.webAuthToken);
     const memorySearchController = memory
       ? new MemorySearchController({
-          memoryIndex: memory.getMemoryIndex()!,
-          db: memory.getDatabase()!,
+          memory,
           memoryDir: memoryConfig.memoryDir,
           ctxStartPath: join(memoryConfig.memoryDir, "context-window-start.json"),
         })
