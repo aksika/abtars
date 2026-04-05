@@ -1,0 +1,21 @@
+[Unit]
+Description=AgentBridge — AI agent bridge for Telegram/Discord
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=%h/.agentbridge
+ExecStart=%h/.agentbridge/agentbridge.sh --all
+Restart=always
+RestartSec=60
+Environment=NODE_ENV=production
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentbridge
+
+[Install]
+WantedBy=default.target
