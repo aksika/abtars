@@ -32,23 +32,23 @@ export class SqliteBackend implements MemoryBackend {
     return this.memory.editor.instantStore(params);
   }
 
-  editMemory(params: EditMemoryParams): EditMemoryResult {
+  async editMemory(params: EditMemoryParams): Promise<EditMemoryResult> {
     return this.memory.editor.editMemory(params);
   }
 
-  reclassifyMemory(id: number, level: number, userOverride: boolean): void {
+  async reclassifyMemory(id: number, level: number, userOverride: boolean): Promise<void> {
     this.memory.editor.reclassifyMemory(id, level, userOverride);
   }
 
-  adjustRelevance(id: number, delta: number): void {
+  async adjustRelevance(id: number, delta: number): Promise<void> {
     this.memory.editor.adjustRelevance(id, delta);
   }
 
-  mergeMemories(idA: number, idB: number): MergeResult {
+  async mergeMemories(idA: number, idB: number): Promise<MergeResult> {
     return this.memory.editor.mergeMemories(idA, idB) as MergeResult;
   }
 
-  cascadeDelete(messageIds: number[], chatId: number): ForgetResult {
+  async cascadeDelete(messageIds: number[], chatId: number): Promise<ForgetResult> {
     return this.memory.editor.cascadeDelete(messageIds, chatId);
   }
 

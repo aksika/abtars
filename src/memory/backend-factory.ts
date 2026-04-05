@@ -1,21 +1,27 @@
 /**
  * Backend factory — creates the configured MemoryBackend.
- * CLI tools call this instead of new MemoryManager().
+ * Tries IPC socket first (fast), falls back to SQLite (standalone).
  */
 
 import type { MemoryBackend } from "./memory-backend.js";
 import type { MemoryConfig } from "./memory-config.js";
 import { SqliteBackend } from "./sqlite-backend.js";
 
-/** Create and initialize a MemoryBackend based on MEMORY_BACKEND env var. */
+/** Create and initialize a MemoryBackend. Tries IPC socket first, falls back to SQLite. */
 export async function createMemoryBackend(config: MemoryConfig): Promise<MemoryBackend> {
   const backendType = process.env["MEMORY_BACKEND"] ?? "sqlite";
+  if (backendType !== "sqlite") {
+    throw new Error(`Unknown MEMORY_BACKEND: ${backendType}. Supported: sqlite`);
+  }
 
-  switch (backendType) {
-    case "sqlite":
-      break;
-    default:
-      throw new Error(`Unknown MEMORY_BACKEND: ${backendType}. Supported: sqlite`);
+  // Try IPC first (bridge is running, DB already open)
+  if (process.env["MEMORY_IPC"] !== "0") {
+    try {
+      const { IpcBackend } = await import("./memory-ipc-client.js");
+      const ipc = new IpcBackend();
+      await ipc.initialize();
+      return ipc;
+    } catch { /* socket not available — fall through to SQLite */ }
   }
 
   const backend = new SqliteBackend(config);

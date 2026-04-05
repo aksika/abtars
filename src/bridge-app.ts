@@ -284,6 +284,14 @@ export async function startBridge(): Promise<void> {
       return transport.sendPrompt("system:memory", `${prompt}\n\n${content}`);
     });
     logInfo("main", "🧠 Memory LLM callback registered");
+
+    // Start memory IPC server (CLI tools connect here instead of opening their own DB)
+    const { MemoryIpcServer } = await import("./memory/memory-ipc-server.js");
+    const { SqliteBackend } = await import("./memory/sqlite-backend.js");
+    const ipcBackend = new SqliteBackend(memoryConfig);
+    await ipcBackend.initialize();
+    const memoryIpc = new MemoryIpcServer(ipcBackend);
+    await memoryIpc.start();
   }
 
     // Unified heartbeat — single 5-min timer for all periodic tasks

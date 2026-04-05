@@ -167,7 +167,7 @@ async function main() {
   const { createMemoryBackend } = await import("../memory/backend-factory.js");
   const backend = await createMemoryBackend(config);
   try {
-    const result = backend.editMemory(params);
+    const result = await backend.editMemory(params);
     console.log(JSON.stringify(result));
     if (!result.ok) process.exit(1);
   } catch (err) {

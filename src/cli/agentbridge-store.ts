@@ -172,7 +172,7 @@ async function main() {
         process.exit(1);
       }
       const chatId = parseInt(raw.chatId, 10);
-      const result = backend.cascadeDelete(ids, chatId);
+      const result = await backend.cascadeDelete(ids, chatId);
       console.log(JSON.stringify({ deleted: true, ...result }));
       return;
     }
@@ -185,7 +185,7 @@ async function main() {
       }
       const id = parseInt(raw.id, 10);
       const level = parseInt(raw.classification, 10);
-      const result = backend.reclassifyMemory(id, level, raw.userOverride ?? false);
+      const result = await backend.reclassifyMemory(id, level, raw.userOverride ?? false);
       console.log(JSON.stringify(result));
       return;
     }
@@ -198,7 +198,7 @@ async function main() {
       }
       const id = parseInt(raw.id, 10);
       const delta = raw.boost ? 10 : -10;
-      backend.adjustRelevance(id, delta);
+      await backend.adjustRelevance(id, delta);
       console.log(JSON.stringify({ stored: true, adjusted: { id, delta } }));
       return;
     }
@@ -214,7 +214,7 @@ async function main() {
         console.log(JSON.stringify({ stored: false, error: "--merge-ids must be exactly 2 comma-separated IDs" }));
         process.exit(1);
       }
-      const result = backend.mergeMemories(ids[0]!, ids[1]!);
+      const result = await backend.mergeMemories(ids[0]!, ids[1]!);
       console.log(JSON.stringify(result));
       return;
     }

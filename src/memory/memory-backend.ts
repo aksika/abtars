@@ -1,11 +1,8 @@
 /**
  * MemoryBackend — abstract interface for memory storage.
  *
- * CLI tools (store, edit, recall) use this instead of MemoryManager directly.
- * The default implementation wraps MemoryManager + SQLite.
- * Future backends (Honcho, Redis, etc.) implement the same interface.
- *
- * Config selects the backend: MEMORY_BACKEND=sqlite (default).
+ * All methods are async to support both local (SQLite) and remote (IPC) backends.
+ * CLI tools use createMemoryBackend() from backend-factory.ts.
  */
 
 import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "../types/index.js";
@@ -23,11 +20,11 @@ export interface MemoryBackend {
   instantStore(params: InstantStoreParams): Promise<InstantStoreResult>;
 
   // Edit
-  editMemory(params: EditMemoryParams): EditMemoryResult;
-  reclassifyMemory(id: number, level: number, userOverride: boolean): void;
-  adjustRelevance(id: number, delta: number): void;
-  mergeMemories(idA: number, idB: number): MergeResult;
-  cascadeDelete(messageIds: number[], chatId: number): ForgetResult;
+  editMemory(params: EditMemoryParams): Promise<EditMemoryResult>;
+  reclassifyMemory(id: number, level: number, userOverride: boolean): Promise<void>;
+  adjustRelevance(id: number, delta: number): Promise<void>;
+  mergeMemories(idA: number, idB: number): Promise<MergeResult>;
+  cascadeDelete(messageIds: number[], chatId: number): Promise<ForgetResult>;
 
   // Recall
   recall(params: RecallParams): Promise<RecallResult>;
