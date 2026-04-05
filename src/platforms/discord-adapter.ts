@@ -16,7 +16,7 @@ import { logInfo, logWarn, logDebug } from "../components/logger.js";
 import { handleInboundMessage, type PipelineDeps } from "../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../types/platform.js";
 import type { DiscordInboundMessage } from "../types/index.js";
-import type { IKiroTransport } from "../components/kiro-transport.js";
+import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { MemoryManager } from "../memory/memory-manager.js";
 import type { ConversationBuffer } from "../components/conversation-buffer.js";
 

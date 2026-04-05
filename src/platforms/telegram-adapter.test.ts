@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { TelegramAdapter, type TelegramAdapterConfig, type TelegramAdapterDeps } from "./telegram-adapter.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
-import type { IKiroTransport } from "../components/kiro-transport.js";
+import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { InboundMessage } from "../types/platform.js";
 
 // Mock TelegramApi

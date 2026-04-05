@@ -17,7 +17,7 @@ import { handleInboundMessage, type PipelineDeps } from "../components/message-p
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../types/platform.js";
 import type { TelegramUpdate } from "../types/index.js";
 import type { ConversationBuffer } from "../components/conversation-buffer.js";
-import type { IKiroTransport } from "../components/kiro-transport.js";
+import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { MemoryManager } from "../memory/memory-manager.js";
 
 const TAG = "telegram";

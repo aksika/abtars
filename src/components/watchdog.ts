@@ -5,7 +5,7 @@
 
 import { logWarn } from "./logger.js";
 import { writeRestartReason } from "./restart-reason.js";
-import type { AcpTransport } from "./acp-transport.js";
+import type { AcpTransport } from "./transport/acp-transport.js";
 import type { HeartbeatTask } from "../types/memory.js";
 
 export function createWatchdogTask(transport: AcpTransport, requestShutdown: () => void): HeartbeatTask {

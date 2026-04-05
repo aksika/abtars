@@ -13,7 +13,7 @@ import { TELEGRAM_ALLOWED_REACTIONS, REACTION_FALLBACK_MAP } from "./reaction-si
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason, readAndClearRestartReason } from "./restart-reason.js";
-import type { IKiroTransport } from "./kiro-transport.js";
+import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "../memory/memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";

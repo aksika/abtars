@@ -9,7 +9,7 @@ import {
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import type { IKiroTransport } from "./kiro-transport.js";
-import { logInfo, logDebug, logWarn, logError } from "./logger.js";
+import { logInfo, logDebug, logWarn, logError } from "../logger.js";
 
 /**
  * ACP transport using @agentclientprotocol/sdk.

@@ -5,8 +5,8 @@ import { execFileSync, execSync } from "node:child_process";
 import { loadAndValidateConfig } from "./components/config.js";
 import { agentBridgeHome } from "./paths.js";
 
-import { TmuxClient } from "./components/tmux-client.js";
-import { AcpTransport } from "./components/acp-transport.js";
+import { TmuxClient } from "./components/transport/tmux-client.js";
+import { AcpTransport } from "./components/transport/acp-transport.js";
 import { createWatchdogTask } from "./components/watchdog.js";
 import { createSelfHealerTask } from "./components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
@@ -16,7 +16,7 @@ import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/
 import { loadMemoryConfig } from "./memory/memory-config.js";
 import { MemoryManager } from "./memory/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
-import type { IKiroTransport } from "./components/kiro-transport.js";
+import type { IKiroTransport } from "./components/transport/kiro-transport.js";
 import { parsePlatformFlags } from "./components/cli-flags.js";
 import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard/dashboard-config.js";
 import type { SubsystemRefs } from "./components/dashboard/dashboard-config.js";

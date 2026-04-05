@@ -4,7 +4,7 @@
 
 import { logInfo } from "./logger.js";
 import { buildMemoryContext } from "../memory/session-memory.js";
-import type { IKiroTransport } from "./kiro-transport.js";
+import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "../memory/memory-manager.js";
 
 const TAG = "compaction";

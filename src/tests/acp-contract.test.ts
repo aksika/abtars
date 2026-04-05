@@ -3,7 +3,7 @@
  * Uses recorded fixtures, not live CLIs.
  */
 import { describe, it, expect, vi } from "vitest";
-import { AcpTransport } from "../components/acp-transport.js";
+import { AcpTransport } from "../components/transport/acp-transport.js";
 
 describe("Contract: ACP permission handling", () => {
   it("auto-approves when allow_once option exists", async () => {

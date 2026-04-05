@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { DiscordAdapter, type DiscordAdapterConfig, type DiscordAdapterDeps } from "./discord-adapter.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
-import type { IKiroTransport } from "../components/kiro-transport.js";
+import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 
 // Mock discord.js client
 let capturedReactionHandler: Function | null = null;

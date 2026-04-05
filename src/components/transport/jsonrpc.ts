@@ -1,4 +1,4 @@
-import type { AcpRequest, AcpResponse, AcpNotification, AcpMessage } from "../types/index.js";
+import type { AcpRequest, AcpResponse, AcpNotification, AcpMessage } from "../../types/index.js";
 
 let nextId = 1;
 
