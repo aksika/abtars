@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { TelegramAdapter, type TelegramAdapterConfig, type TelegramAdapterDeps } from "./telegram-adapter.js";
-import type { PipelineDeps } from "../components/message-pipeline.js";
-import type { IKiroTransport } from "../components/transport/kiro-transport.js";
-import type { InboundMessage } from "../types/platform.js";
+import type { PipelineDeps } from "../../components/message-pipeline.js";
+import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
+import type { InboundMessage } from "../../types/platform.js";
 
 // Mock TelegramApi
-vi.mock("../components/telegram-api.js", () => ({
+vi.mock("./telegram-api.js", () => ({
   TelegramApi: vi.fn().mockImplementation(() => ({
     getMe: vi.fn().mockResolvedValue({ username: "testbot" }),
     setMyCommands: vi.fn().mockResolvedValue(undefined),
@@ -20,7 +20,7 @@ vi.mock("../components/telegram-api.js", () => ({
   })),
 }));
 
-vi.mock("../components/telegram-poller.js", () => ({
+vi.mock("./telegram-poller.js", () => ({
   TelegramPoller: vi.fn().mockImplementation((_api: unknown, _timeout: number, handler: Function) => {
     (TelegramPollerMock as any)._handler = handler;
     return {

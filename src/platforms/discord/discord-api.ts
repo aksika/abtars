@@ -7,7 +7,7 @@ import {
   type User,
   type TextChannel,
 } from "discord.js";
-import { logInfo, logError, logDebug } from "./logger.js";
+import { logInfo, logError, logDebug } from "../../components/logger.js";
 
 const TAG = "DiscordApi";
 

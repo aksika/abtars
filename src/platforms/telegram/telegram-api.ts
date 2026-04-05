@@ -1,7 +1,7 @@
 import type {
   TelegramUpdate,
   TelegramInlineKeyboardMarkup,
-} from "../types/index.js";
+} from "../../types/index.js";
 
 type SendMessageOptions = {
   parse_mode?: "MarkdownV2" | "HTML";

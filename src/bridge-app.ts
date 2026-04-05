@@ -300,12 +300,12 @@ export async function startBridge(): Promise<void> {
     // Unified heartbeat — single 5-min timer for all periodic tasks
 
   // --- Telegram service ---
-  let telegramAdapter: import("./platforms/telegram-adapter.js").TelegramAdapter | null = null;
+  let telegramAdapter: import("./platforms/telegram/telegram-adapter.js").TelegramAdapter | null = null;
 
   registry.register("telegram", {
     configured: Boolean(config.telegram.botToken && config.telegram.allowedUserIds.size > 0),
     async create() {
-      const { TelegramAdapter } = await import("./platforms/telegram-adapter.js");
+      const { TelegramAdapter } = await import("./platforms/telegram/telegram-adapter.js");
       telegramAdapter = new TelegramAdapter(
         { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
         { pipeline: pipelineDeps, conversationBuffer, transport, memory },
@@ -330,12 +330,12 @@ export async function startBridge(): Promise<void> {
   }
 
   // --- Discord service ---
-  let discordAdapter: import("./platforms/discord-adapter.js").DiscordAdapter | null = null;
+  let discordAdapter: import("./platforms/discord/discord-adapter.js").DiscordAdapter | null = null;
 
   registry.register("discord", {
     configured: Boolean(config.discord.enabled && config.discord.botToken),
     async create() {
-      const { DiscordAdapter } = await import("./platforms/discord-adapter.js");
+      const { DiscordAdapter } = await import("./platforms/discord/discord-adapter.js");
       discordAdapter = new DiscordAdapter(
         {
           botToken: config.discord.botToken!,
@@ -420,7 +420,7 @@ export async function startBridge(): Promise<void> {
         startSession(
           transport, memory, chatId, sessionKey,
           "You just came online. Output ONLY a personalized greeting message.",
-          (text) => (telegramAdapter as import("./platforms/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
+          (text) => (telegramAdapter as import("./platforms/telegram/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
         ).then(() => {
           logInfo("main", "✅ Startup session ready");
         }).catch(err => {

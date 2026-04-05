@@ -4,21 +4,21 @@
  * then delegates to the shared message pipeline.
  */
 
-import { TelegramApi } from "../components/telegram-api.js";
-import { TelegramPoller } from "../components/telegram-poller.js";
-import { SecurityGate } from "../components/security-gate.js";
-import { ResponseFormatter } from "../components/response-formatter.js";
-import { formatReactionSignal } from "../components/reaction-signal.js";
-import { routeReaction } from "../components/reaction-router.js";
-import { emojiToScore } from "../memory/emotion-utils.js";
-import { logInfo, logWarn, logError, logDebug } from "../components/logger.js";
-import { writeRestartReason } from "../components/restart-reason.js";
-import { handleInboundMessage, type PipelineDeps } from "../components/message-pipeline.js";
-import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../types/platform.js";
-import type { TelegramUpdate } from "../types/index.js";
-import type { ConversationBuffer } from "../components/conversation-buffer.js";
-import type { IKiroTransport } from "../components/transport/kiro-transport.js";
-import type { MemoryManager } from "../memory/memory-manager.js";
+import { TelegramApi } from "./telegram-api.js";
+import { TelegramPoller } from "./telegram-poller.js";
+import { SecurityGate } from "../../components/security-gate.js";
+import { ResponseFormatter } from "../../components/response-formatter.js";
+import { formatReactionSignal } from "../../components/reaction-signal.js";
+import { routeReaction } from "../../components/reaction-router.js";
+import { emojiToScore } from "../../memory/emotion-utils.js";
+import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
+import { writeRestartReason } from "../../components/restart-reason.js";
+import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
+import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
+import type { TelegramUpdate } from "../../types/index.js";
+import type { ConversationBuffer } from "../../components/conversation-buffer.js";
+import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
+import type { MemoryManager } from "../../memory/memory-manager.js";
 
 const TAG = "telegram";
 
@@ -208,7 +208,7 @@ export class TelegramAdapter implements PlatformAdapter {
           await this.setReaction(String(chatId), messageId, "👀");
           const voiceFile = message.voice || message.audio;
           const audioBuffer = await this.downloadVoice(voiceFile!.file_id);
-          const { transcribeAudio } = await import("../components/stt.js");
+          const { transcribeAudio } = await import("../../components/stt.js");
           const transcript = await transcribeAudio(audioBuffer, "voice.ogg", this.deps.pipeline.sttConfig!);
 
           if (!transcript) {
@@ -269,7 +269,7 @@ export class TelegramAdapter implements PlatformAdapter {
 
     if ((hasPhoto || hasDocument) && this.securityGate.authorize(String(message.from?.id))) {
       try {
-        const { saveInboundMedia } = await import("../components/media-utils.js");
+        const { saveInboundMedia } = await import("../../components/media-utils.js");
         let fileId: string;
         let extHint: string | undefined;
         let claimedMime: string | undefined;

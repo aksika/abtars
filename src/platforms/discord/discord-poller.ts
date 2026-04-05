@@ -1,7 +1,7 @@
 import type { Message } from "discord.js";
-import type { DiscordInboundMessage } from "../types/discord.js";
+import type { DiscordInboundMessage } from "../../types/discord.js";
 import type { DiscordApi } from "./discord-api.js";
-import { logInfo, logDebug, logWarn } from "./logger.js";
+import { logInfo, logDebug, logWarn } from "../../components/logger.js";
 
 const TAG = "DiscordPoller";
 
