@@ -12,45 +12,62 @@
 
 The `ServiceRegistry` already solves this for platforms (Telegram, Discord) — they register with a factory and can be started/stopped dynamically. But browser, cron, coding mode, and sleep don't use this pattern.
 
-**Suggestion:** A `CapabilityRegistry` that subsystems register into:
+**Reference:** OpenClaw's plugin architecture (`src/plugins/registry.ts`, `extensions/*/index.ts`). Key patterns:
+- `PluginRegistry` with typed slots: tools, commands, services, channels, hooks, httpRoutes
+- Each plugin gets a constrained `OpenClawPluginApi` with `registerTool()`, `registerCommand()`, `registerService()`, `registerChannel()`, `on()` (typed hooks)
+- Plugins live in self-contained directories (`extensions/<name>/index.ts`) exporting `register(api)`
+- Channels (Telegram, Discord, Matrix, MSTeams, etc.) are all plugins implementing `ChannelPlugin`
+
+**Suggestion:** A `CapabilityRegistry` with typed slots, adapted from OpenClaw's pattern:
 
 ```typescript
-interface Capability {
-  name: string;
-  configure(bridge: Bridge): Promise<void>;  // wire into bridge
-  heartbeatTasks?: HeartbeatTask[];           // periodic work
-  commands?: Record<string, CommandHandler>;   // slash commands
-  shutdown?(): Promise<void>;                  // cleanup
+// Registry with typed slots (inspired by OpenClaw's PluginRegistry)
+interface CapabilityRegistry {
+  commands: Map<string, CommandHandler>;
+  heartbeatTasks: HeartbeatTask[];
+  services: Map<string, ServiceFactory>;
+  platforms: Map<string, PlatformFactory>;
 }
 
-// Browser becomes a capability:
-const browserCapability: Capability = {
-  name: "browser",
-  async configure(bridge) {
-    this.manager = new BrowserManager();
-    this.tool = new BrowserTool(this.manager, DomainAllowlist.fromEnv());
-  },
-  heartbeatTasks: [browseCheckerTask],
-  commands: { "/browse": handleBrowseCommand },
-  async shutdown() { await this.manager.shutdown(); },
-};
+// Constrained API given to each capability (inspired by OpenClawPluginApi)
+interface CapabilityApi {
+  registerCommand(name: string, handler: CommandHandler): void;
+  registerHeartbeatTask(task: HeartbeatTask): void;
+  registerService(name: string, factory: ServiceFactory): void;
+  registerPlatform(name: string, factory: PlatformFactory): void;
+  config: BridgeConfig;
+  memory: MemoryManager;
+  transport: IKiroTransport;
+}
+
+// Each capability is a self-contained module (inspired by extensions/*/index.ts)
+// src/capabilities/browser/index.ts
+export function register(api: CapabilityApi): void {
+  const manager = new BrowserManager();
+  const tool = new BrowserTool(manager, DomainAllowlist.fromEnv());
+  api.registerHeartbeatTask(browseCheckerTask);
+  api.registerService("browser-ipc", { ... });
+}
 
 // bridge-app.ts becomes:
 const bridge = new Bridge(config);
-bridge.register(browserCapability);
-bridge.register(cronCapability);
-bridge.register(codingCapability);
+const api = bridge.createCapabilityApi();
+registerBrowser(api);       // src/capabilities/browser/
+registerCron(api);          // src/capabilities/cron/
+registerCodingMode(api);    // src/capabilities/coding/
 await bridge.start();
 ```
 
 **What this enables:**
-- Add a new capability (e.g. Slack, WhatsApp, calendar) by writing one file and registering it
-- Disable capabilities via config (`CAPABILITIES=telegram,memory,cron` — no browser, no coding)
-- Move `src/components/browser-*` to `src/capabilities/browser/` — self-contained module
-- Test capabilities in isolation (mock the Bridge interface)
-- The bridge core becomes ~200 lines: config → transport → registry → heartbeat → shutdown
+- Add a new capability by writing one directory and one `register()` call
+- Disable capabilities via config (`CAPABILITIES=telegram,memory,cron`)
+- Self-contained modules: `src/capabilities/browser/`, `src/capabilities/cron/`
+- Test capabilities in isolation (mock the CapabilityApi)
+- Bridge core becomes ~200 lines: config → transport → registry → start
 
-**Depends on:** #1b (Bridge as a class) — the capability needs a Bridge instance to wire into.
+**Key difference from OpenClaw:** We don't need third-party plugin loading, dynamic discovery, or plugin-SDK re-exports. First-party capabilities with static imports are sufficient.
+
+**Depends on:** #1b (Bridge as a class) — capabilities need a Bridge instance to wire into.
 
 **Effort:** High. **Risk:** Medium (incremental — migrate one capability at a time).
 
