@@ -191,76 +191,11 @@ for script in daily-backup.sh doctor.sh upgrade-deps.sh; do
   chmod +x "$AB_HOME/scripts/$script"
 done
 
-# Deploy agentbridge-recall CLI (agent-callable memory search)
-RECALL_SCRIPT="$AB_HOME/agentbridge-recall"
-echo '#!/usr/bin/env bash' > "$RECALL_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-recall.js\" \"\$@\"" >> "$RECALL_SCRIPT"
-chmod +x "$RECALL_SCRIPT"
+# Symlink all CLI wrappers from bin/ to ~/.local/bin/ (PATH accessible)
 mkdir -p "$HOME/.local/bin"
-ln -sf "$RECALL_SCRIPT" "$HOME/.local/bin/agentbridge-recall"
-
-# Deploy agentbridge-store CLI (agent-callable memory storage)
-STORE_SCRIPT="$AB_HOME/agentbridge-store"
-echo '#!/usr/bin/env bash' > "$STORE_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-store.js\" \"\$@\"" >> "$STORE_SCRIPT"
-chmod +x "$STORE_SCRIPT"
-ln -sf "$STORE_SCRIPT" "$HOME/.local/bin/agentbridge-store"
-
-# Deploy agentbridge-sleep CLI (overnight memory maintenance)
-SLEEP_SCRIPT="$AB_HOME/agentbridge-sleep"
-echo '#!/usr/bin/env bash' > "$SLEEP_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-sleep.js\" \"\$@\"" >> "$SLEEP_SCRIPT"
-chmod +x "$SLEEP_SCRIPT"
-ln -sf "$SLEEP_SCRIPT" "$HOME/.local/bin/agentbridge-sleep"
-
-# Deploy agentbridge-browser CLI (agent-callable headless browser)
-BROWSER_SCRIPT="$AB_HOME/agentbridge-browser"
-echo '#!/usr/bin/env bash' > "$BROWSER_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-browser.js\" \"\$@\"" >> "$BROWSER_SCRIPT"
-chmod +x "$BROWSER_SCRIPT"
-ln -sf "$BROWSER_SCRIPT" "$HOME/.local/bin/agentbridge-browser"
-
-# Deploy agentbridge-todo CLI (persistent todo list)
-TODO_SCRIPT="$AB_HOME/agentbridge-todo"
-echo '#!/usr/bin/env bash' > "$TODO_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-todo.js\" \"\$@\"" >> "$TODO_SCRIPT"
-chmod +x "$TODO_SCRIPT"
-ln -sf "$TODO_SCRIPT" "$HOME/.local/bin/agentbridge-todo"
-
-# Deploy agentbridge-task CLI (time-based reminders and tasks)
-CRON_SCRIPT="$AB_HOME/agentbridge-task"
-echo '#!/usr/bin/env bash' > "$CRON_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-task.js\" \"\$@\"" >> "$CRON_SCRIPT"
-chmod +x "$CRON_SCRIPT"
-ln -sf "$CRON_SCRIPT" "$HOME/.local/bin/agentbridge-task"
-
-# Deploy agentbridge-browse CLI (browser subagent launcher)
-BROWSE_SCRIPT="$AB_HOME/agentbridge-browse"
-echo '#!/usr/bin/env bash' > "$BROWSE_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-browse.js\" \"\$@\"" >> "$BROWSE_SCRIPT"
-chmod +x "$BROWSE_SCRIPT"
-ln -sf "$BROWSE_SCRIPT" "$HOME/.local/bin/agentbridge-browse"
-
-# Deploy agentbridge-expand CLI (source message lookup)
-EXPAND_SCRIPT="$AB_HOME/agentbridge-expand"
-echo '#!/usr/bin/env bash' > "$EXPAND_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-expand.js\" \"\$@\"" >> "$EXPAND_SCRIPT"
-chmod +x "$EXPAND_SCRIPT"
-ln -sf "$EXPAND_SCRIPT" "$HOME/.local/bin/agentbridge-expand"
-
-# Deploy agentbridge-tweet CLI (Twitter feed + discovery)
-TWEET_SCRIPT="$AB_HOME/agentbridge-tweet"
-echo '#!/usr/bin/env bash' > "$TWEET_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-tweet.js\" \"\$@\"" >> "$TWEET_SCRIPT"
-chmod +x "$TWEET_SCRIPT"
-ln -sf "$TWEET_SCRIPT" "$HOME/.local/bin/agentbridge-tweet"
-
-# Deploy agentbridge-rss CLI (RSS feed fetcher for finance pipeline)
-RSS_SCRIPT="$AB_HOME/agentbridge-rss"
-echo '#!/usr/bin/env bash' > "$RSS_SCRIPT"
-echo "exec node \"$AB_HOME/dist/cli/agentbridge-rss.js\" \"\$@\"" >> "$RSS_SCRIPT"
-chmod +x "$RSS_SCRIPT"
-ln -sf "$RSS_SCRIPT" "$HOME/.local/bin/agentbridge-rss"
+for wrapper in "$AB_HOME/bin/agentbridge-"*; do
+  ln -sf "$wrapper" "$HOME/.local/bin/$(basename "$wrapper")"
+done
 
 # Deploy stock watchlist (only if not already present — user manages this file)
 mkdir -p "$AB_HOME/finance"
