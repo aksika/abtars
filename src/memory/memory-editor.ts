@@ -38,7 +38,7 @@ export class MemoryEditor {
       if (params.contentOriginal != null) { sets.push("content_original = ?"); values.push(params.contentOriginal.trim()); fieldsUpdated.push("content_original"); }
       if (params.keyword !== undefined) { sets.push("preserved_keyword = ?"); values.push(params.keyword?.trim() || null); fieldsUpdated.push("keyword"); }
       if (params.memoryType != null) {
-        const valid = new Set(["fact", "decision", "preference", "event"]);
+        const valid = new Set(["fact", "decision", "preference", "event", "lesson", "feedback"]);
         if (!valid.has(params.memoryType)) return { ok: false, error: "invalid memory_type" };
         sets.push("memory_type = ?"); values.push(params.memoryType); fieldsUpdated.push("memory_type");
       }
@@ -118,7 +118,7 @@ export class MemoryEditor {
     try {
       if (!params.contentEn?.trim()) return { stored: false, memoriesCount: 0, error: "content-en is required" };
       if (!params.contentOriginal?.trim()) return { stored: false, memoriesCount: 0, error: "content-original is required" };
-      const validTypes = new Set(["fact", "decision", "preference", "event"]);
+      const validTypes = new Set(["fact", "decision", "preference", "event", "lesson", "feedback"]);
       if (!validTypes.has(params.memoryType)) return { stored: false, memoriesCount: 0, error: "invalid memory_type" };
 
       const emotionScore = clampEmotionScore(params.emotionScore);

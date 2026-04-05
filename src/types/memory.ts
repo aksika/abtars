@@ -128,7 +128,7 @@ export type ExtractedMemory = {
   chat_id: number;
   content_original: string;
   content_en: string;
-  memory_type: "fact" | "decision" | "preference" | "event";
+  memory_type: "fact" | "decision" | "preference" | "event" | "lesson" | "feedback";
   created_at: number;
   preserve_original: boolean;
   preserved_keyword?: string;
@@ -171,7 +171,7 @@ export type InstantStoreParams = {
   chatId: number;
   contentEn: string;
   contentOriginal: string;
-  memoryType: "fact" | "decision" | "preference" | "event";
+  memoryType: "fact" | "decision" | "preference" | "event" | "lesson" | "feedback";
   emotionScore: number;
   keyword?: string;
   confidence?: number;

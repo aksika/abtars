@@ -12,7 +12,7 @@ Store each with:
 
 ```bash
 agentbridge-store --translated "<consequence in English>" --original "<consequence in English>" \
-  --memory-type <fact|decision> --emotion-score <-5 to 5> --chat-id 0 \
+  --memory-type <fact|decision|preference|lesson|feedback> --emotion-score <-5 to 5> --chat-id 0 \
   --trust 2 --integrity 2 --credibility 2 --classification 1
 ```
 
@@ -20,12 +20,12 @@ agentbridge-store --translated "<consequence in English>" --original "<consequen
 
 | Category | memory_type | emotion_score | Example |
 |----------|------------|---------------|---------|
-| Mistake I made | decision | -4 to -5 | "Don't restart without asking — user got frustrated" |
-| User correction | decision | -3 to -4 | "Use local timezone CEST, not UTC" |
-| Lesson learned | fact | -2 to +2 | "Mac uses darkwake with MAGICWAKE on en1" |
-| Positive feedback | fact | +3 to +5 | "User appreciated quick fix of the cron bug" |
+| Mistake I made | lesson | -4 to -5 | "Don't restart without asking — user got frustrated" |
+| User correction | lesson | -3 to -4 | "Don't guess about origins — ask instead" |
+| Lesson learned | lesson | -2 to +2 | "Mac uses darkwake with MAGICWAKE on en1" |
+| Positive feedback | feedback | +3 to +5 | "User appreciated quick fix of the cron bug" |
 | Behavioral rule | decision | -4 to -5 | "Never pretend I did something I didn't" |
-| User preference | decision | +1 to +3 | "User prefers planning before implementation" |
+| User preference | preference | +1 to +3 | "User prefers planning before implementation" |
 
 **Dedup and escalation:**
 - Before storing, check with `agentbridge-recall --translated "<consequence>"` if a similar memory exists

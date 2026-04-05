@@ -238,8 +238,10 @@ function getMemoryCard(): string {
     </div>
   </div>
   <hr style="border-color:#0f3460;margin:12px 0;">
-  <button class="btn-search-toggle" onclick="toggleSearchPanel()">🔍 Search Memory</button>
-  <button class="btn-search-toggle" onclick="loadMemoryUniverse()" style="margin-left:8px;">🌌 Memory Universe</button>
+  <div style="display:flex;gap:8px;">
+    <button class="btn-search-toggle" onclick="toggleSearchPanel()">🔍 Search Memory</button>
+    <button class="btn-search-toggle" onclick="loadMemoryUniverse()">🌌 Memory Universe</button>
+  </div>
 </div>`;
 }
 

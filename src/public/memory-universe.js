@@ -7,11 +7,13 @@
   var V = '0.183.2';
   var CDN = 'https://cdn.jsdelivr.net/npm/three@' + V;
 
-  var CLASSIFICATION_COLORS = {
-    0: [0.0, 0.9, 0.9],   // U — cyan
-    1: [0.3, 0.5, 1.0],   // R — blue
-    2: [1.0, 0.6, 0.1],   // C — amber
-    3: [1.0, 0.15, 0.15], // S — red
+  var TYPE_COLORS = {
+    fact:       [0.0, 0.9, 0.9],   // cyan
+    decision:   [0.7, 0.3, 1.0],   // purple
+    preference: [1.0, 0.6, 0.1],   // amber
+    event:      [0.2, 1.0, 0.4],   // green
+    lesson:     [1.0, 0.15, 0.15], // red
+    feedback:   [1.0, 0.85, 0.2],  // gold
   };
 
   window.initMemoryUniverse = function(token) {
@@ -146,15 +148,14 @@
       var brightnesses = new Float32Array(count);
       var hasEmbeddings = new Float32Array(count);
 
-      var PULSE_MAP = { fact: 0.0, decision: 0.75, preference: 1.5, event: 3.0 };
+      var PULSE_MAP = { fact: 0.0, decision: 0.75, preference: 1.5, event: 3.0, lesson: 2.0, feedback: 1.0 };
 
       var now = Date.now();
       var oldest = memories.reduce(function(a, m) { return Math.min(a, m.created_at || now); }, now);
       var timeSpan = Math.max(now - oldest, 1);
 
       memories.forEach(function(mem, i) {
-        var cls = mem.classification || 0;
-        var c = CLASSIFICATION_COLORS[cls] || CLASSIFICATION_COLORS[0];
+        var c = TYPE_COLORS[mem.memory_type] || TYPE_COLORS.fact;
 
         // Position: entity cluster or random sphere
         var px, py, pz;
@@ -317,8 +318,8 @@
             var ent = entities.find(function(e) { return e.id === eid; });
             return ent ? ent.name : '?';
           });
-          var clsLabel = ['UNCLASSIFIED', 'RESTRICTED', 'CONFIDENTIAL', 'SECRET'][mem.classification || 0] || '?';
-          var clsColor = ['#0ff', '#66f', '#fa0', '#f22'][mem.classification || 0] || '#fff';
+          var typeColorMap = { fact: '#0ee', decision: '#b44ff', preference: '#fa0', event: '#3f4', lesson: '#f22', feedback: '#fd3' };
+          var typeColor = typeColorMap[mem.memory_type] || '#fff';
           infoPanel.style.display = 'block';
           infoPanel.innerHTML =
             '<div style="margin-bottom:16px;"><button onclick="document.getElementById(\'mu-info\').style.display=\'none\'" style="background:none;border:1px solid #0ff5;color:#0ff;cursor:pointer;padding:4px 10px;border-radius:3px;">✕</button></div>' +
@@ -326,8 +327,7 @@
             '<div style="margin-bottom:12px;line-height:1.5;">' + escHtml(mem.content_en || '') + '</div>' +
             (mem.content_original && mem.content_original !== mem.content_en ? '<div style="color:#888;font-size:11px;margin-bottom:12px;">' + escHtml(mem.content_original) + '</div>' : '') +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;">' +
-            '<div>Type: <span style="color:#0ff;">' + (mem.memory_type || '?') + '</span></div>' +
-            '<div>Classification: <span style="color:' + clsColor + ';">' + clsLabel + '</span></div>' +
+            '<div>Type: <span style="color:' + typeColor + ';">' + (mem.memory_type || '?') + '</span></div>' +
             '<div>Emotion: <span style="color:' + (mem.emotion_score > 0 ? '#4f4' : mem.emotion_score < 0 ? '#f44' : '#888') + ';">' + (mem.emotion_score || 0) + '</span></div>' +
             '<div>Recall: <span style="color:#0ff;">' + (mem.recall_count || 0) + '</span></div>' +
             '<div>Trust: ' + (mem.trust ?? '?') + '</div>' +
