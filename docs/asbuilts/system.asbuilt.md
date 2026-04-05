@@ -119,12 +119,11 @@ Entity clusters: memories sharing entities gravitate together with connecting li
 1. Kill orphaned `kiro-cli acp` processes from previous runs
 2. Initialize transport (ACP or tmux)
 3. Initialize memory, browser, platforms
-4. Read `bridge.lock` — if `exitReason === "standby"` and recent (< 30min) → 3-min grace period (if OS sleeps during grace, process dies quietly)
-5. Create `bridge.lock` (`{pid, startedAt}`) — tracks bridge lifecycle
-5. `startSession()` — inject SOUL + context + greeting → agent comes online
+4. Create `bridge.lock` (`{pid, startedAt}`) — tracks bridge lifecycle
+5. `startSession()` — inject SOUL + context + greeting (non-blocking, busyChats guard queues user messages until ready)
 6. Start heartbeat (clock-synced, ≥3min guard before first tick)
-7. Spawn sleep if not done today (`hasSleepAuditToday()` guard, 3 retries via setTimeout)
-8. Auto-restart on crash (LaunchAgent KeepAlive)
+7. Spawn sleep if not done today and past SLEEP_TIME (`hasSleepAuditToday()` guard, 3 retries via setTimeout)
+8. Auto-restart on crash (LaunchAgent on macOS, systemd on Linux)
 
 ### Heartbeat System
 
@@ -132,13 +131,9 @@ Single heartbeat loop controls everything: task scheduling, standby detection, w
 
 **Clock-synced:** Ticks aligned to wall-clock boundaries (`:00`, `:05`, `:10`...) based on interval. First tick delayed ≥3min from startup for network/service stabilization.
 
-**Standby detection:** Tracks `lastTickAt`. If gap between ticks > interval×3 (~15min), process was suspended (Mac standby or HB bug). Triggers: `doctor --fix` → write `exitReason: "standby"` to `bridge.lock` → `process.exit(0)` → LaunchAgent restarts.
+**Standby detection:** Tracks `lastTickAt`. If gap between ticks > interval×3 (~15min), process was suspended (OS standby). Triggers the recovery flow (see Recovery section below).
 
-**Standby grace period:** On startup, if `bridge.lock` has `exitReason === "standby"` and `exitedAt` < 30min ago → wait 3 minutes before starting. Prevents wasted restarts during brief Power Nap wakes. If OS sleeps during grace → process dies quietly.
-
-**24h fallback:** `age-check` task — if `bridge.lock.startedAt` >24h AND idle >1h → same doctor + restart sequence. Covers always-on (no standby).
-
-**bridge.lock:** `~/.agentbridge/bridge.lock` — created on startup with `{pid, startedAt}`. On standby exit: `{pid, startedAt, exitReason: "standby", exitedAt}`. LaunchAgent ThrottleInterval: 60s.
+**bridge.lock:** `~/.agentbridge/bridge.lock` — created on startup with `{pid, startedAt}`. LaunchAgent ThrottleInterval: 60s.
 
 **Task registration order:**
 ```
@@ -146,6 +141,91 @@ tasks → idle-compact(heavy) → age-check →
 db-integrity → watchdog → restart-check → self-healer →
 browse-checker → skill-reloader → reminder-injector
 ```
+
+---
+
+## Recovery
+
+All recovery mechanisms in one place. The bridge recovers from failures without unnecessary restarts.
+
+### Standby Resume (L1 → L2)
+
+When heartbeat detects a skipped tick (gap > interval×3):
+
+**Layer 1 — Platform detection** (`platform-detect.ts` → `classifyResume()`):
+- macOS: `pmset -g systemstate` → `DarkWake` detected → skip entirely (DEBUG log). Power Nap background wake — nothing to do.
+- Linux: `journalctl -b -u systemd-suspend.service --since '5 min ago'` → entries exist → system woke from suspend.
+- Unknown OS: falls through to Layer 2.
+
+**Layer 2 — Daily cycle check** (`daily-cycle.ts` → `isDailyCycleDue()`):
+- Past `SLEEP_TIME`? AND bridge started before today's `SLEEP_TIME`? AND idle >1h? AND not busy/sleeping?
+- All true → restart (daily cycle + sleep will run on next startup)
+- Any false → continue running (DEBUG log). Watchdog handles any transport breakage.
+
+No `doctor --fix`, no unconditional restart, no grace period. The bridge survives Power Nap wakes silently.
+
+### Daily Cycle (age-check)
+
+Heartbeat task that calls `isDailyCycleDue()` every tick. Catches the daily restart on always-on machines that never trigger standby detection. Same shared function as the standby handler — one decision path, no duplication.
+
+Config: `SLEEP_TIME=06:00` (default 6am). The daily restart is the ONLY scheduled restart.
+
+### Watchdog
+
+Heartbeat task (`watchdog.ts`) that monitors the ACP transport for stuck states:
+
+| Case | Detection | L1 Action | L2 Action |
+|------|-----------|-----------|-----------|
+| Tool hung | `toolInFlight` > 3min | `sendInterrupt()` + explain to agent | Reset session + re-send prompt |
+| Process dead | `agent === null` | Reinit transport + re-send prompt | — |
+| Silent | No activity > 5min | Re-send same prompt | `process.exit(0)` |
+| Endless | Active > 10min | `sendInterrupt()` + tell agent it's looping | Reset session + re-send prompt |
+
+Config: `WATCHDOG_TOOL_TIMEOUT_SEC=180`, `WATCHDOG_SILENT_SEC=300`, `WATCHDOG_ENDLESS_SEC=600`.
+
+### Context Overflow
+
+In the message pipeline catch block: if error matches `ValidationException` or `-32603`:
+- `resetAndPrepare()` — reset session, mark for SOUL re-injection
+- Tell user: "🔄 Context window full — session reset. Send your message again."
+
+### Compaction Circuit Breaker
+
+Track consecutive compaction failures per session. After 3 failures → stop trying, warn user "⚠️ Compaction failing — consider /reset". Reset counter on successful compaction or `/reset`.
+
+### Self-Healer
+
+Heartbeat task that scans `bridge.log` for recent ERROR lines. Injects bug reports to the agent via Telegram so the agent is aware of issues.
+
+### Task Failure Injection
+
+When a cron/task job fails, error details are injected to the main agent transport:
+- Agent receives: "Task X failed: [command, exit code, stderr]. Diagnose and fix if possible."
+- Max 2 auto-fix attempts per entry per day (`tryInjectFailure` in `cron-queue.ts`)
+- Prevents loops: same entry won't get more than 2 injections per day
+
+### Retry Utility
+
+Generic retry wrapper (`retry.ts` → `withRetry()`):
+- Escalating backoff with jitter (300ms → 600ms → 1.2s → ... → 30s cap)
+- `FATAL_PATTERNS` — known-unrecoverable errors (auth, model not found, account suspended) stop retrying immediately
+- `isFatal(err)` — check if error matches fatal patterns
+- `getDelayHint(err)` — extract delay from rate limit headers
+- Used by: transport prompt retry, sleep step retry
+
+### Restart Causes
+
+Typed enum (`RestartCause` in `restart-reason.ts`):
+```
+daily-cycle | deploy | user-reset | watchdog-silent | watchdog-endless | ctx-overflow | manual
+```
+Written to `.last-restart-reason` file, injected into next session start so the agent knows why it restarted.
+
+### Process Supervision
+
+- **macOS:** LaunchAgent with `KeepAlive: true`, `ThrottleInterval: 60s`
+- **Linux:** systemd service with `Restart=always`, `RestartSec=60`
+- Template: `scripts/agentbridge@.service`
 
 ### Session Start (single path)
 
@@ -464,10 +544,6 @@ Own compaction — no dependency on kiro's `/compact`. Works with any transport.
 - Active todo items
 
 **User `/compact`**: intercepted by bridge, runs full compaction. `//compact` passes through to kiro's native compact.
-
-### Circuit Breaker
-
-Track consecutive compaction failures per session. After 3 failures → stop trying, warn user "⚠️ Compaction failing — consider /reset". Reset counter on successful compaction or `/reset`.
 
 ### Auto-Reset on Overflow
 
