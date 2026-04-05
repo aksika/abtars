@@ -330,19 +330,18 @@ export async function startBridge(): Promise<void> {
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
         seenSessions.add(sessionKey);
-        let sessionReady = false;
+        busyChats.add(sessionKey);
         startSession(
           transport, memory, chatId, sessionKey,
           "You just came online. Output ONLY a personalized greeting message.",
           (text) => (telegramAdapter as import("./platforms/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
-        ).then(() => { sessionReady = true; })
-         .catch(err => { sessionReady = true; logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`); });
-        // Wait for session to be ready before accepting messages (Gemini can take minutes for large SOUL)
-        const waitStart = Date.now();
-        while (!sessionReady && Date.now() - waitStart < 5 * 60 * 1000) {
-          await new Promise(r => setTimeout(r, 500));
-        }
-        if (!sessionReady) logWarn("main", "Startup session timed out (5min) — proceeding anyway");
+        ).then(() => {
+          logInfo("main", "✅ Startup session ready");
+        }).catch(err => {
+          logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`);
+        }).finally(() => {
+          busyChats.delete(sessionKey);
+        });
       }
     }
   }
