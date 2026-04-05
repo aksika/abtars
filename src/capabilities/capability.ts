@@ -69,3 +69,44 @@ export function createCapabilityApi(
     registerService(name, factory) { registry.services.set(name, factory); },
   };
 }
+
+/** Discover and register capabilities with capability.json manifests. */
+export async function discoverCapabilities(
+  registry: CapabilityRegistry,
+  config: Config,
+  memory: MemoryManager | null,
+  transport: IKiroTransport,
+  capabilitiesDir: string,
+): Promise<string[]> {
+  const { readdirSync, existsSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+
+  const disabled = new Set(
+    (process.env["DISABLED_CAPABILITIES"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
+  );
+
+  const loaded: string[] = [];
+  let dirs: string[];
+  try { dirs = readdirSync(capabilitiesDir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name); }
+  catch { return loaded; }
+
+  for (const dir of dirs) {
+    const manifestPath = join(capabilitiesDir, dir, "capability.json");
+    if (!existsSync(manifestPath)) continue; // no manifest = core capability, skip
+
+    let manifest: { name: string; description?: string };
+    try { manifest = JSON.parse(readFileSync(manifestPath, "utf-8")); }
+    catch { continue; }
+
+    if (disabled.has(manifest.name)) continue;
+
+    try {
+      const mod = await import(join(capabilitiesDir, dir, "index.js"));
+      const api = createCapabilityApi(registry, config, memory, transport);
+      mod.register(api);
+      loaded.push(manifest.name);
+    } catch { /* skip broken capabilities */ }
+  }
+
+  return loaded;
+}

@@ -371,13 +371,11 @@ export async function startBridge(): Promise<void> {
 
   // === DEFERRED INIT: non-critical services (after platforms are accepting messages) ===
 
-  // Browser capability (lazy — IPC starts on first browse task)
-  const { register: registerBrowser } = await import("./capabilities/browser/index.js");
-  bridge.registerCapability(registerBrowser);
-
-  // Skills capability (hot-reload)
-  const { register: registerSkills } = await import("./capabilities/skills/index.js");
-  bridge.registerCapability(registerSkills);
+  // Auto-discover capabilities (browser, hotskills, etc.)
+  const { discoverCapabilities } = await import("./capabilities/capability.js");
+  const capDir = join(import.meta.dirname, "capabilities");
+  const loaded = await discoverCapabilities(bridge.capabilities, config, memory, transport, capDir);
+  if (loaded.length > 0) logInfo("main", `🔌 Capabilities: ${loaded.join(", ")}`);
 
   // MCP daemon
   // mcpDaemonStarted is on bridge
