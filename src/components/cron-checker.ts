@@ -5,10 +5,10 @@
  * Tasks     → spawns kiro-cli subprocess, calls onTaskComplete callback
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "../paths.js";
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo } from "./logger.js";
 import { CronExpressionParser } from "cron-parser";
 import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./cron-db.js";
 import type { CronEntry } from "../cli/agentbridge-task.js";
@@ -34,7 +34,7 @@ export function clearPendingReminders(): void {
   if (existsSync(remindersPath())) writeFileSync(remindersPath(), "[]", "utf-8");
 }
 
-function appendReminder(r: PendingReminder): void {
+export function appendReminder(r: PendingReminder): void {
   mkdirSync(memoryDir(), { recursive: true });
   const existing = readPendingReminders();
   existing.push(r);
@@ -99,97 +99,4 @@ export function checkCron(): CronEntry[] {
   }
 
   return dueTasks;
-}
-
-// --- Browse task checker ---
-
-import { readPendingBrowse, writePendingBrowse } from "../capabilities/browser/agentbridge-browse.js";
-import type { PendingBrowseEntry } from "../capabilities/browser/agentbridge-browse.js";
-import { localDate } from "./env-utils.js";
-
-function isProcessAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; }
-  catch { return false; }
-}
-
-/** Extract full agent response text from ACP JSON-RPC log. */
-function extractAgentText(logFile: string): string {
-  try {
-    if (!existsSync(logFile)) return "";
-    const content = readFileSync(logFile, "utf-8");
-    const chunks: string[] = [];
-    for (const line of content.split("\n")) {
-      try {
-        const msg = JSON.parse(line);
-        if (msg.method === "session/update" && msg.params?.update?.sessionUpdate === "agent_message_chunk") {
-          const text = msg.params.update.content?.text;
-          if (text) chunks.push(text);
-        }
-      } catch { /* skip non-JSON */ }
-    }
-    return chunks.join("");
-  } catch { return ""; }
-}
-
-const subagentsDir = (): string => join(agentBridgeHome(), "subagents");
-
-/** Ensure report file exists in subagents dir. Returns the file path. */
-function ensureReportFile(taskId: string): string {
-  const dir = subagentsDir();
-  mkdirSync(dir, { recursive: true });
-
-  // Check if agent already wrote the file
-  try {
-    const existing = readdirSync(dir).find(f => f.startsWith(`browse_${taskId}`));
-    if (existing) return join(dir, existing);
-  } catch { /* */ }
-
-  // Fallback: extract from log and write
-  const logFile = join(agentBridgeHome(), "logs", `browse_${taskId}.log`);
-  const text = extractAgentText(logFile);
-  const date = localDate();
-  const reportPath = join(dir, `browse_${taskId}_${date}.md`);
-  writeFileSync(reportPath, text || "(no output captured)", "utf-8");
-  return reportPath;
-}
-
-/**
- * Deliver result for a single browse task. Used by exit callback (instant) and browse-checker (safety net).
- */
-export function deliverBrowseResult(entry: PendingBrowseEntry, timedOut = false): void {
-  const reportPath = ensureReportFile(entry.taskId);
-  const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
-  const msg = timedOut
-    ? `🌐 Browse task timed out (${Math.round(entry.timeoutMs / 1000)}s): ${taskLabel}\nPartial report: ${reportPath}`
-    : `🌐 Browse task complete: ${taskLabel}\nReport: ${reportPath}`;
-  appendReminder({ chatId: entry.chatId, message: msg, createdAt: Date.now(), threadId: entry.threadId });
-  (timedOut ? logWarn : logInfo)(TAG, `🌐 Browse "${taskLabel}" ${timedOut ? "timed out" : "finished"} — ${reportPath}`);
-}
-
-/**
- * Check pending browse tasks. Safety net for timeout kills and orphaned processes.
- * Normal completion is handled by the exit callback in the browser capability.
- */
-export function checkBrowseTasks(): void {
-  const entries = readPendingBrowse();
-  if (entries.length === 0) return;
-
-  const now = Date.now();
-  const remaining: PendingBrowseEntry[] = [];
-
-  for (const entry of entries) {
-    const alive = isProcessAlive(entry.pid);
-    const elapsed = now - entry.startedAt;
-
-    if (!alive) {
-      deliverBrowseResult(entry);
-    } else if (elapsed > entry.timeoutMs) {
-      try { process.kill(entry.pid, "SIGKILL"); } catch { /* */ }
-      deliverBrowseResult(entry, true);
-    } else {
-      remaining.push(entry);
-    }
-  }
-
-  writePendingBrowse(remaining);
 }

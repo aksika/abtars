@@ -14,6 +14,7 @@
     event:      [0.2, 1.0, 0.4],   // green
     lesson:     [1.0, 0.15, 0.15], // red
     feedback:   [1.0, 0.85, 0.2],  // gold
+    story:      [0.3, 0.5, 1.0],   // blue
   };
 
   window.initMemoryUniverse = function(token) {
@@ -148,8 +149,6 @@
       var brightnesses = new Float32Array(count);
       var hasEmbeddings = new Float32Array(count);
 
-      var PULSE_MAP = { fact: 0.0, decision: 0.75, preference: 1.5, event: 3.0, lesson: 2.0, feedback: 1.0 };
-
       var now = Date.now();
       var oldest = memories.reduce(function(a, m) { return Math.min(a, m.created_at || now); }, now);
       var timeSpan = Math.max(now - oldest, 1);
@@ -173,7 +172,7 @@
           var phi = Math.acos(2 * Math.random() - 1);
           var rad = 4 + Math.random() * 10;
           px = rad * Math.sin(phi) * Math.cos(theta);
-          py = (mem.emotion_score || 0) * 0.8 + (Math.random() - 0.5) * 2;
+          py = ((mem.created_at - oldest) / timeSpan) * 12 - 6 + (Math.random() - 0.5) * 2;
           pz = rad * Math.sin(phi) * Math.sin(theta);
         }
 
@@ -190,11 +189,11 @@
         // Credibility → opacity: 1=confirmed(1.0), 6=unknown(0.3)
         opacities[i] = Math.max(0.3, 1.0 - ((mem.credibility || 6) - 1) * 0.14);
 
-        // Type → pulse rate
-        pulseRates[i] = PULSE_MAP[mem.memory_type] || 0.0;
+        // Pulse: emotion intensity (further from 0 = faster)
+        pulseRates[i] = Math.abs(mem.emotion_score || 0) * 0.6;
 
-        // Emotion → brightness: -5=0.3, 0=0.7, +5=1.5
-        brightnesses[i] = 0.7 + (mem.emotion_score || 0) * 0.16;
+        // Brightness: classification (S=1.5, C=1.1, R=0.8, U=0.5)
+        brightnesses[i] = 0.5 + (mem.classification || 0) * 0.33;
 
         // Trust → core dot: 3=bright, 0=none
         hasEmbeddings[i] = (mem.trust || 0) / 3.0;
@@ -328,6 +327,7 @@
             (mem.content_original && mem.content_original !== mem.content_en ? '<div style="color:#888;font-size:11px;margin-bottom:12px;">' + escHtml(mem.content_original) + '</div>' : '') +
             '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;">' +
             '<div>Type: <span style="color:' + typeColor + ';">' + (mem.memory_type || '?') + '</span></div>' +
+            '<div>Class: <span style="color:' + (['#0ff','#66f','#fa0','#f22'][mem.classification || 0] || '#fff') + ';">' + (['U','R','C','S'][mem.classification || 0] || '?') + '</span></div>' +
             '<div>Emotion: <span style="color:' + (mem.emotion_score > 0 ? '#4f4' : mem.emotion_score < 0 ? '#f44' : '#888') + ';">' + (mem.emotion_score || 0) + '</span></div>' +
             '<div>Recall: <span style="color:#0ff;">' + (mem.recall_count || 0) + '</span></div>' +
             '<div>Trust: ' + (mem.trust ?? '?') + '</div>' +

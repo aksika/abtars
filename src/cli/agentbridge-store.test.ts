@@ -20,6 +20,7 @@ const validRawArgs: fc.Arbitrary<RawArgs> = fc.record({
     fc.constant("event"),
     fc.constant("lesson"),
     fc.constant("feedback"),
+    fc.constant("story"),
   ),
   emotionScore: fc.integer({ min: -5, max: 5 }).map(String),
   chatId: fc.integer({ min: 1, max: 999999 }).map(String),

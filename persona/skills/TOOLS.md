@@ -9,10 +9,21 @@ Run any tool with `--help` for full usage. See linked skill for behavioral rules
 
 ```
 agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"]
-agentbridge-store --translated "English" --original "eredeti" --memory-type fact --emotion-score 0 --chat-id 7773842843 [--tags "term1,term2"]
+agentbridge-store --translated "English" --original "eredeti" --memory-type <type> --emotion-score 0 --chat-id 7773842843 [--tags "term1,term2"]
 agentbridge-edit --memory-id <N> [--credibility N] [--classification N] [--translated "..."] [--relevance-score +N] [--caller kp]
 agentbridge-expand --ids 451,452,453
 ```
+
+### memory-type values
+| Type | When to use |
+|------|-------------|
+| `fact` | Objective info: names, configs, technical details |
+| `decision` | Rules, choices, behavioral policies |
+| `preference` | User likes/dislikes, settings |
+| `event` | Things that happened, milestones |
+| `lesson` | Mistakes learned, corrections received |
+| `feedback` | User reactions to agent behavior (+/-) |
+| `story` | Jokes, riddles, anecdotes, creative content |
 
 ## All tools
 

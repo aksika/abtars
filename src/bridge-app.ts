@@ -36,7 +36,7 @@ import { BrowserManager } from "./capabilities/browser/browser-manager.js";
 import { BrowserIpcServer } from "./capabilities/browser/browser-ipc-server.js";
 import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
-import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
+import { checkCron, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
 import { CronQueue } from "./components/cron-queue.js";
 import { startSession } from "./components/message-pipeline.js";
 
@@ -562,6 +562,7 @@ export async function startBridge(): Promise<void> {
     heartbeat.registerTask(task);
   }
 
+  const { checkBrowseTasks } = await import("./capabilities/browser/browse-delivery.js");
   checkBrowseTasks();
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);
