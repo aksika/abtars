@@ -238,9 +238,55 @@ Design constraints:
 
 ---
 
+## 9. Agent sandboxing (NemoClaw-style isolation)
+
+**Problem:** The bridge and the agent run in the same process/host. The agent (LLM-generated code via execute_bash) has full access to `~/.agentbridge/.env` (secrets), the network (curl anywhere), and the filesystem. A prompt injection or rogue tool call can exfiltrate secrets or modify bridge code.
+
+**Prerequisite:** The capability plugin system (#1) creates the architectural seam between "trusted bridge" (host) and "untrusted agent" (sandboxable). Without it, everything is one monolith — nothing to sandbox.
+
+**Suggestion:** Split into two layers after the plugin refactor:
+
+```
+┌─────────────────────────────────────────┐
+│  Host (unsandboxed)                     │
+│  - Bridge core (transport, heartbeat)   │
+│  - Memory backend (SQLite)              │
+│  - Platform adapters (Telegram/Discord) │
+│  - Dashboard                            │
+└──────────────┬──────────────────────────┘
+               │ ACP over stdio (already exists)
+┌──────────────▼──────────────────────────┐
+│  Sandbox (Docker container)             │
+│  - kiro-cli / agent process             │
+│  - Browser (already Dockerized)         │
+│  - Agent tools (execute_bash, etc.)     │
+│  - Network: deny-by-default egress      │
+│  - Filesystem: read-only except /sandbox│
+│  - No access to .env, memory.db, bridge │
+└─────────────────────────────────────────┘
+```
+
+**What the refactor enables:**
+- Plugin system separates agent-facing capabilities from bridge internals
+- ACP transport already provides the IPC boundary (stdio)
+- Memory CLI tools already decouple agent from storage (#8)
+- Browser is already in Docker — just needs network policy
+
+**What's still needed (post-refactor):**
+- Dockerfile for agent sandbox (NemoClaw's as reference)
+- Network policy (allow kiro API endpoint, block internal network)
+- Credential isolation (secrets stay on host, agent gets tokens via ACP)
+- Filesystem policy (read-only system, writable /sandbox only)
+
+**Reference:** NemoClaw's 4-layer defense: network (deny-by-default egress, binary-scoped rules), filesystem (Landlock LSM, read-only mounts), process (capability drops, non-root, no-new-privileges), inference (routed through gateway, agent never sees API keys).
+
+**Effort:** High. **Risk:** Medium. **This is the end goal — every prior refactor step makes this possible without a rewrite.**
+
+---
+
 ## Priority Order
 
-If tackling these incrementally:
+Each step makes the next one easier — the sequence builds toward sandboxing:
 
 1. **#6 Schema versioning** — lowest effort, prevents future migration bugs
 2. **#7 Injectable paths** — mechanical, improves testability
@@ -248,6 +294,7 @@ If tackling these incrementally:
 4. **#5 Typed config groups** — compiler-assisted, no runtime risk
 5. **#1b Bridge class** — medium effort, prerequisite for plugin system
 6. **#1 Capability plugin system** — the big payoff: plug-and-play subsystems
-7. **#8 Pluggable memory providers** — swap memory backends without touching bridge code
+7. **#8 Pluggable memory backends** — swap memory backends without touching bridge code
 8. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
 9. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently
+10. **#9 Agent sandboxing** — the end goal: NemoClaw-style isolation for the agent layer
