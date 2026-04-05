@@ -248,13 +248,9 @@ Design constraints:
 
 ---
 
-## 11. Shared CLI arg parsing
+## ~~11. Shared CLI arg parsing~~ — DROPPED
 
-**Problem:** `agentbridge-store`, `agentbridge-edit`, `agentbridge-sleep`, `agentbridge-todo`, `agentbridge-cron`, `agentbridge-browse` all have hand-rolled switch-case arg parsing with duplicated patterns (same `--help` handling, same JSON output, same error formatting).
-
-**Suggestion:** Shared `parseCliArgs(spec)` utility that takes a spec of expected flags and returns typed results. Not a heavy framework — just a shared pattern (~40 lines) that eliminates the copy-paste.
-
-**Effort:** Low. **Risk:** None (internal refactor, CLI interface unchanged).
+Reviewed during implementation: actual duplication is ~6 lines of boilerplate per CLI (slice, help check, for-loop skeleton). Flag definitions and validation are unique to each CLI. A shared utility would be ~30 lines itself — net savings near zero. Not worth a module.
 
 ---
 
@@ -333,13 +329,12 @@ Each step makes the next one easier — the sequence builds toward sandboxing:
 1. **#6 Schema versioning** — lowest effort, prevents future migration bugs
 2. **#7 Injectable paths** — mechanical, improves testability
 3. **#10 Async status checks** — 20 lines, stops /status from freezing the bridge
-4. **#11 Shared CLI arg parsing** — eliminates copy-paste across 6 CLI tools
-5. **#12 Command dispatch table** — mechanical extraction, cleaner command handling
-6. **#3 Eliminate getDb()** — additive (add methods first, remove escape hatch after)
-7. **#5 Typed config groups** — compiler-assisted, no runtime risk
-8. **#1b Bridge class** — medium effort, prerequisite for plugin system
-9. **#1 Capability plugin system** — the big payoff: plug-and-play subsystems
-10. **#8 Pluggable memory backends** — swap memory backends without touching bridge code
-11. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
-12. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently
-13. **#9 Agent sandboxing** — the end goal: NemoClaw-style isolation for the agent layer
+4. **#12 Command dispatch table** — mechanical extraction, cleaner command handling
+5. **#3 Eliminate getDb()** — additive (add methods first, remove escape hatch after)
+6. **#5 Typed config groups** — compiler-assisted, no runtime risk
+7. **#1b Bridge class** — medium effort, prerequisite for plugin system
+8. **#1 Capability plugin system** — the big payoff: plug-and-play subsystems
+9. **#8 Pluggable memory backends** — swap memory backends without touching bridge code
+10. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
+11. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently
+12. **#9 Agent sandboxing** — the end goal: NemoClaw-style isolation for the agent layer

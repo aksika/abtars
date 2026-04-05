@@ -46,297 +46,57 @@ export interface CommandContext {
   bufKey?: string;
 }
 
+type CommandHandler = (text: string, ctx: CommandContext) => Promise<boolean>;
+
 const TAG = "cmd";
+
+// ── Exact-match commands ────────────────────────────────────────────────────
+
+const exactCommands: Record<string, CommandHandler> = {
+  "/new": handleNewReset,
+  "/reset": handleNewReset,
+  "/compact": handleCompact,
+  "/coding": handleCoding,
+  "/default": handleDefault,
+  "/status": handleStatus,
+  "/stop": handleStop,
+  "/ctrlc": handleStop,
+  "/restart": handleRestart,
+  "/full": handleFull,
+  "/short": handleShort,
+  "/facts": handleFacts,
+  "/tasks": handleTasksList,
+  "/cron": handleTasksList,
+  "/memory": handleMemory,
+  "/a2a-reset": handleA2aReset,
+  "/help": handleHelp,
+};
+
+// ── Prefix-match commands ───────────────────────────────────────────────────
+
+const prefixCommands: ReadonlyArray<{ prefix: string; handler: CommandHandler }> = [
+  { prefix: "/tasks trigger ", handler: handleTasksTrigger },
+  { prefix: "/cron trigger ", handler: handleTasksTrigger },
+  { prefix: "/tasks log ", handler: handleTasksLog },
+  { prefix: "/cron log ", handler: handleTasksLog },
+  { prefix: "/nlm", handler: handleNlm },
+];
+
+const KNOWN_COMMANDS = new Set([...Object.keys(exactCommands), ...prefixCommands.map(p => p.prefix.split(" ")[0]!)]);
 
 /** Returns true if command was handled. */
 export async function handleCommand(text: string, ctx: CommandContext): Promise<boolean> {
-  // /new, /reset
-  if (text === "/new" || text === "/reset") {
-    await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
-    if (text === "/reset" && ctx.codingMode.has(ctx.sessionKey)) {
-      await ctx.codingMode.stop(ctx.sessionKey);
-    }
-    const activeTransport = ctx.codingMode.has(ctx.sessionKey) && ctx.codingMode.getTransport()
-      ? ctx.codingMode.getTransport()! : ctx.transport;
-    await resetAndPrepare({
-      transport: activeTransport, sessionKey: ctx.sessionKey, reason: "user-reset",
-      pendingSessionStart: ctx.pendingSessionStart, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
-    });
-    if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
-    const label = text === "/reset" ? "🔄 Reset to default." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
-    await ctx.reply(label);
-    logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
-    return true;
-  }
+  const exact = exactCommands[text];
+  if (exact) return exact(text, ctx);
 
-  // /compact — trigger our own compaction
-  if (text === "/compact") {
-    await ctx.reply("📦 Compacting...");
-    try {
-      await runCompaction(ctx.transport, ctx.sessionKey, ctx.memory?.getDatabase() ?? null, ctx.memoryConfig.memoryDir);
-      ctx.pendingSessionStart.add(ctx.sessionKey);
-      if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
-      await ctx.reply("📦 Compaction complete.");
-      logInfo(TAG, `Manual compaction done`);
-    } catch (err) {
-      logError(TAG, "Manual compaction failed", err);
-      await ctx.reply("❌ Compaction failed. Try /reset to start fresh.");
-    }
-    return true;
-  }
-
-  // /coding
-  if (text === "/coding") {
-    if (ctx.codingMode.has(ctx.sessionKey)) {
-      await ctx.reply("Already in coding mode. Use /default to switch back.");
-      return true;
-    }
-    await ctx.reply("🔧 Switching to coding agent (Opus)...");
-    try {
-      await ctx.codingMode.start(ctx.sessionKey);
-      await ctx.reply("🔧 Coding agent ready. All messages now go to Opus.\nUse /default to switch back to KP.");
-      logInfo(TAG, `Coding mode activated for ${ctx.sessionKey}`);
-    } catch (err) {
-      await ctx.reply(`❌ Failed to start coding agent: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    return true;
-  }
-
-  // /default
-  if (text === "/default") {
-    if (!ctx.codingMode.has(ctx.sessionKey)) {
-      await ctx.reply("Already in default mode (KP).");
-      return true;
-    }
-    await ctx.reply("🔄 Switching back to KP...");
-    await ctx.codingMode.stop(ctx.sessionKey);
-    await ctx.reply("🔄 Back to KP.");
-    logInfo(TAG, `Default mode restored for ${ctx.sessionKey}`);
-    return true;
-  }
-
-  // /status (includes mcporter)
-  if (text === "/status") {
-    const lines = await buildStatusLines(ctx);
-    await ctx.reply(lines.join("\n"));
-    return true;
-  }
-
-  // /stop, /ctrlc
-  if (text === "/stop" || text === "/ctrlc") {
-    await ctx.transport.sendInterrupt();
-    ctx.busyChats.delete(ctx.sessionKey);
-    await ctx.reply("🛑 Ctrl+C sent to Kiro.");
-    logInfo(TAG, "Ctrl+C interrupt sent");
-    return true;
-  }
-
-  // /restart
-  if (text === "/restart") {
-    if (ctx.transport.restartSession) {
-      await ctx.reply("♻️ Restarting Kiro...");
-      ctx.busyChats.delete(ctx.sessionKey);
-      await ctx.transport.restartSession(ctx.config.workingDir, process.env["AGENT_MODEL"]);
-      ctx.pendingSessionStart.add(ctx.sessionKey);
-      await ctx.reply("✅ Kiro restarted.");
-    } else {
-      await ctx.reply("♻️ Restarting bridge...");
-      setTimeout(() => ctx.requestShutdown?.(), 500);
-    }
-    return true;
-  }
-
-  // /full (TG-only)
-  if (text === "/full") {
-    if (ctx.platform !== "telegram") return false;
-    ctx.fullModeChats.add(ctx.sessionKey);
-    await ctx.reply("📺 Full mode — sending raw output, TTS disabled.");
-    return true;
-  }
-
-  // /short (TG-only)
-  if (text === "/short") {
-    if (ctx.platform !== "telegram") return false;
-    ctx.fullModeChats.delete(ctx.sessionKey);
-    await ctx.reply("✂️ Short mode — clean responses, TTS enabled.");
-    return true;
-  }
-
-  // /facts
-  if (text === "/facts") {
-    if (ctx.memory) {
-      const facts = ctx.memory.readCoreKnowledge();
-      await ctx.reply(facts ? `📋 Core knowledge:\n\n${facts}` : "📋 No core knowledge yet.");
-    } else {
-      await ctx.reply("🧠 Memory is disabled.");
-    }
-    return true;
-  }
-
-  // /tasks (alias: /cron)
-  if (text === "/tasks" || text === "/cron") {
-    const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
-    let listing: string;
-    try {
-      const raw = await execAsync("agentbridge-task", ["list"], 5000);
-      if (!raw) throw new Error("empty");
-      const entries = JSON.parse(raw).entries ?? JSON.parse(raw);
-      const active = entries.filter((e: any) => !e.fired && !e.paused);
-      // Sort chronologically by schedule time (hour:minute from cron expr)
-      active.sort((a: any, b: any) => {
-        const timeOf = (e: any): number => {
-          const s = e.schedule;
-          if (!s) return e.fireAt ?? 0;
-          const parts = s.split(" ");
-          return (parseInt(parts[1] ?? "0", 10) * 60) + parseInt(parts[0] ?? "0", 10);
-        };
-        return timeOf(a) - timeOf(b);
-      });
-      const today = new Date();
-      const dow = today.getDay(); // 0=Sun
-      const lines = active.map((e: any) => {
-        const sched = e.schedule ?? "one-shot";
-        // Determine if task runs today based on cron day-of-week field
-        let runsToday = true;
-        if (sched !== "one-shot") {
-          const parts = sched.split(" ");
-          const dowField = parts[4] ?? "*";
-          if (dowField !== "*") {
-            const allowed = new Set<number>();
-            for (const seg of dowField.split(",")) {
-              if (seg.includes("-")) {
-                const [a, b] = seg.split("-").map(Number);
-                for (let i = a; i <= b; i++) allowed.add(i);
-              } else allowed.add(Number(seg));
-            }
-            runsToday = allowed.has(dow);
-          }
-        }
-        const succeeded = e.history?.some((h: any) => h.exitCode === 0 && new Date(h.ts).toDateString() === today.toDateString());
-        const failed = e.history?.some((h: any) => h.exitCode !== undefined && h.exitCode !== 0 && new Date(h.ts).toDateString() === today.toDateString());
-        const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
-        const running = ctx.cronCurrentJob?.entryId === e.id;
-        const tick = !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
-        const label = e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
-        return `${tick}  ${e.id}  ${sched.padEnd(15)}  ${label}`;
-      });
-      listing = lines.length > 0 ? "```\n" + lines.join("\n") + "\n```" : "(no active entries)";
-    } catch { listing = "(failed to read cron)"; }
-    let running = "";
-    if (ctx.cronCurrentJob) {
-      const j = ctx.cronCurrentJob;
-      const ago = Math.round((Date.now() - j.startedAt) / 1000);
-      running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.message}`;
-    }
-    await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "Markdown" });
-    return true;
-  }
-
-  // /tasks trigger <id> (alias: /cron trigger)
-  if (text.startsWith("/tasks trigger ") || text.startsWith("/cron trigger ")) {
-    const id = text.replace(/^\/(tasks|cron) trigger /, "").trim();
-    if (!id) { await ctx.reply("Usage: /trigger <cron-id>"); return true; }
-    const err = ctx.enqueueCron?.(id);
-    await ctx.reply(err ?? `✅ Triggered ${id}`);
-    return true;
-  }
-
-  // /tasks log <id> (alias: /cron log)
-  if (text.startsWith("/tasks log ") || text.startsWith("/cron log ")) {
-    const id = text.replace(/^\/(tasks|cron) log /, "").trim();
-    try {
-      const raw = await execAsync("agentbridge-task", ["history", id], 5000);
-      if (!raw) throw new Error("empty");
-      const data = JSON.parse(raw);
-      if (!data.ok) { await ctx.reply(`❌ ${data.error}`); return true; }
-      const runs = (data.runs as { ranAt: string; exitCode?: number }[]).slice(-5);
-      const lines = runs.map(r => `${r.ranAt}  exit=${r.exitCode ?? "?"}`);
-      await ctx.reply(`📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``, { parseMode: "Markdown" });
-    } catch { await ctx.reply("❌ Failed to read history"); }
-    return true;
-  }
-
-  // /memory
-  if (text === "/memory") {
-    if (!ctx.memory) { await ctx.reply("🧠 Memory is disabled."); return true; }
-    const stats = ctx.memory.getStats(ctx.chatId);
-    if (!stats) { await ctx.reply("⚠️ Could not retrieve memory stats."); return true; }
-    const dbMb = (stats.dbSizeBytes / (1024 * 1024)).toFixed(1);
-    const types = Object.entries(stats.extractedByType).map(([t, n]) => `  ${t}: ${n}`).join("\n") || "  (none)";
-    const msg = [
-      "🧠 Memory Status", "",
-      `💬 Raw messages: ${stats.totalMessages}`,
-      `🧩 Extracted memories: ${stats.extractedMemories}`, types,
-      `🔑 Preserved keywords: ${stats.preservedKeywords}`, "",
-      `📄 Consolidations:`,
-      `  daily: ${stats.consolidationFiles.daily}`,
-      `  weekly: ${stats.consolidationFiles.weekly}`,
-      `  quarterly: ${stats.consolidationFiles.quarterly}`, "",
-      `📄 Ingested documents: ${stats.ingestedDocuments}`,
-      `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
-      `💾 DB size: ${dbMb} MB`, "",
-      `📚 Layer 6 (NotebookLM): ${ctx.nlmConfig.enabled ? "enabled" : "disabled"}`,
-    ].join("\n");
-    await ctx.reply(msg);
-    return true;
-  }
-
-  // /nlm
-  if (text === "/nlm" || text.startsWith("/nlm ")) {
-    const args = text.slice("/nlm".length).trim();
-    const result = await handleNLMCommand(args, ctx.nlmConfig as any);
-    await ctx.reply(result.text);
-    return true;
-  }
-
-  // /a2a-reset (Discord-only)
-  if (text === "/a2a-reset") {
-    if (ctx.platform !== "discord") return false;
-    if (ctx.config.discordA2aEnabled) {
-      const a2aSessionKey = `a2a:${ctx.config.discordA2aChannelId}`;
-      await ctx.transport.resetSession(a2aSessionKey);
-      await ctx.reply("🔄 A2A session reset.");
-      logInfo(TAG, `A2A session reset`);
-    } else {
-      await ctx.reply("A2A is not enabled.");
-    }
-    return true;
-  }
-
-  // /help
-  if (text === "/help") {
-    const cmds = [
-      "/new — Fresh session (keeps current mode)",
-      "/reset — Fresh session + exit coding mode",
-      "/compact — Compact context window (summarize + fresh session)",
-      "/status — Bridge status, transport, heartbeat",
-      "/stop, /ctrlc — Stop current response",
-      "/memory — Memory storage statistics",
-      "/tasks — Scheduled tasks",
-      "/tasks log <id> — Last 5 runs for a task",
-      "/tasks trigger <id> — Manually fire a task",
-      "/facts — Core knowledge (user profile + agent notes)",
-      "/coding — Switch to coding agent",
-      "/default — Switch back to default agent",
-      "/nlm — Knowledge base (list/create/sources/query)",
-      "/restart — Restart CLI session",
-    ];
-    if (ctx.platform === "telegram") {
-      cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)");
-    }
-    if (ctx.platform === "discord" && ctx.config.discordA2aEnabled) {
-      cmds.push("/a2a-reset — Reset A2A session");
-    }
-    cmds.push("/help — Show this help");
-    await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
-    return true;
+  for (const { prefix, handler } of prefixCommands) {
+    if (text.startsWith(prefix)) return handler(text, ctx);
   }
 
   // Unknown command guard
   if (text.startsWith("/") && /^\/\w+/.test(text) && !text.startsWith("//")) {
     const cmd = text.split(/\s/)[0]!;
-    const known = ["/new", "/reset", "/status", "/stop", "/ctrlc", "/restart", "/memory", "/cron", "/facts", "/coding", "/default", "/nlm", "/full", "/short", "/a2a-reset", "/help", "/usage", "/model", "/compact"];
-    if (!known.includes(cmd)) {
+    if (!KNOWN_COMMANDS.has(cmd)) {
       await ctx.reply(`❓ Unknown command: ${cmd}\nType /help for available commands.`);
       return true;
     }
@@ -345,7 +105,270 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   return false;
 }
 
-/** Run a command asynchronously with timeout. Returns stdout or fallback on failure. */
+// ── Handler implementations ─────────────────────────────────────────────────
+
+async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
+  await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
+  if (text === "/reset" && ctx.codingMode.has(ctx.sessionKey)) {
+    await ctx.codingMode.stop(ctx.sessionKey);
+  }
+  const activeTransport = ctx.codingMode.has(ctx.sessionKey) && ctx.codingMode.getTransport()
+    ? ctx.codingMode.getTransport()! : ctx.transport;
+  await resetAndPrepare({
+    transport: activeTransport, sessionKey: ctx.sessionKey, reason: "user-reset",
+    pendingSessionStart: ctx.pendingSessionStart, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
+  });
+  if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
+  const label = text === "/reset" ? "🔄 Reset to default." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
+  await ctx.reply(label);
+  logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
+  return true;
+}
+
+async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
+  await ctx.reply("📦 Compacting...");
+  try {
+    await runCompaction(ctx.transport, ctx.sessionKey, ctx.memory?.getDatabase() ?? null, ctx.memoryConfig.memoryDir);
+    ctx.pendingSessionStart.add(ctx.sessionKey);
+    if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
+    await ctx.reply("📦 Compaction complete.");
+    logInfo(TAG, `Manual compaction done`);
+  } catch (err) {
+    logError(TAG, "Manual compaction failed", err);
+    await ctx.reply("❌ Compaction failed. Try /reset to start fresh.");
+  }
+  return true;
+}
+
+async function handleCoding(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (ctx.codingMode.has(ctx.sessionKey)) {
+    await ctx.reply("Already in coding mode. Use /default to switch back.");
+    return true;
+  }
+  await ctx.reply("🔧 Switching to coding agent (Opus)...");
+  try {
+    await ctx.codingMode.start(ctx.sessionKey);
+    await ctx.reply("🔧 Coding agent ready. All messages now go to Opus.\nUse /default to switch back to KP.");
+    logInfo(TAG, `Coding mode activated for ${ctx.sessionKey}`);
+  } catch (err) {
+    await ctx.reply(`❌ Failed to start coding agent: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return true;
+}
+
+async function handleDefault(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (!ctx.codingMode.has(ctx.sessionKey)) {
+    await ctx.reply("Already in default mode (KP).");
+    return true;
+  }
+  await ctx.reply("🔄 Switching back to KP...");
+  await ctx.codingMode.stop(ctx.sessionKey);
+  await ctx.reply("🔄 Back to KP.");
+  logInfo(TAG, `Default mode restored for ${ctx.sessionKey}`);
+  return true;
+}
+
+async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean> {
+  const lines = await buildStatusLines(ctx);
+  await ctx.reply(lines.join("\n"));
+  return true;
+}
+
+async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
+  await ctx.transport.sendInterrupt();
+  ctx.busyChats.delete(ctx.sessionKey);
+  await ctx.reply("🛑 Ctrl+C sent to Kiro.");
+  logInfo(TAG, "Ctrl+C interrupt sent");
+  return true;
+}
+
+async function handleRestart(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (ctx.transport.restartSession) {
+    await ctx.reply("♻️ Restarting Kiro...");
+    ctx.busyChats.delete(ctx.sessionKey);
+    await ctx.transport.restartSession(ctx.config.workingDir, process.env["AGENT_MODEL"]);
+    ctx.pendingSessionStart.add(ctx.sessionKey);
+    await ctx.reply("✅ Kiro restarted.");
+  } else {
+    await ctx.reply("♻️ Restarting bridge...");
+    setTimeout(() => ctx.requestShutdown?.(), 500);
+  }
+  return true;
+}
+
+async function handleFull(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (ctx.platform !== "telegram") return false;
+  ctx.fullModeChats.add(ctx.sessionKey);
+  await ctx.reply("📺 Full mode — sending raw output, TTS disabled.");
+  return true;
+}
+
+async function handleShort(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (ctx.platform !== "telegram") return false;
+  ctx.fullModeChats.delete(ctx.sessionKey);
+  await ctx.reply("✂️ Short mode — clean responses, TTS enabled.");
+  return true;
+}
+
+async function handleFacts(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (ctx.memory) {
+    const facts = ctx.memory.readCoreKnowledge();
+    await ctx.reply(facts ? `📋 Core knowledge:\n\n${facts}` : "📋 No core knowledge yet.");
+  } else {
+    await ctx.reply("🧠 Memory is disabled.");
+  }
+  return true;
+}
+
+async function handleTasksList(_text: string, ctx: CommandContext): Promise<boolean> {
+  const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
+  let listing: string;
+  try {
+    const raw = await execAsync("agentbridge-task", ["list"], 5000);
+    if (!raw) throw new Error("empty");
+    const entries = JSON.parse(raw).entries ?? JSON.parse(raw);
+    const active = entries.filter((e: any) => !e.fired && !e.paused);
+    active.sort((a: any, b: any) => {
+      const timeOf = (e: any): number => {
+        const s = e.schedule;
+        if (!s) return e.fireAt ?? 0;
+        const parts = s.split(" ");
+        return (parseInt(parts[1] ?? "0", 10) * 60) + parseInt(parts[0] ?? "0", 10);
+      };
+      return timeOf(a) - timeOf(b);
+    });
+    const today = new Date();
+    const dow = today.getDay();
+    const lines = active.map((e: any) => {
+      const sched = e.schedule ?? "one-shot";
+      let runsToday = true;
+      if (sched !== "one-shot") {
+        const parts = sched.split(" ");
+        const dowField = parts[4] ?? "*";
+        if (dowField !== "*") {
+          const allowed = new Set<number>();
+          for (const seg of dowField.split(",")) {
+            if (seg.includes("-")) {
+              const [a, b] = seg.split("-").map(Number);
+              for (let i = a; i <= b; i++) allowed.add(i);
+            } else allowed.add(Number(seg));
+          }
+          runsToday = allowed.has(dow);
+        }
+      }
+      const succeeded = e.history?.some((h: any) => h.exitCode === 0 && new Date(h.ts).toDateString() === today.toDateString());
+      const failed = e.history?.some((h: any) => h.exitCode !== undefined && h.exitCode !== 0 && new Date(h.ts).toDateString() === today.toDateString());
+      const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
+      const running = ctx.cronCurrentJob?.entryId === e.id;
+      const tick = !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
+      const label = e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
+      return `${tick}  ${e.id}  ${sched.padEnd(15)}  ${label}`;
+    });
+    listing = lines.length > 0 ? "```\n" + lines.join("\n") + "\n```" : "(no active entries)";
+  } catch { listing = "(failed to read cron)"; }
+  let running = "";
+  if (ctx.cronCurrentJob) {
+    const j = ctx.cronCurrentJob;
+    const ago = Math.round((Date.now() - j.startedAt) / 1000);
+    running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.message}`;
+  }
+  await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "Markdown" });
+  return true;
+}
+
+async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<boolean> {
+  const id = text.replace(/^\/(tasks|cron) trigger /, "").trim();
+  if (!id) { await ctx.reply("Usage: /trigger <cron-id>"); return true; }
+  const err = ctx.enqueueCron?.(id);
+  await ctx.reply(err ?? `✅ Triggered ${id}`);
+  return true;
+}
+
+async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolean> {
+  const id = text.replace(/^\/(tasks|cron) log /, "").trim();
+  try {
+    const raw = await execAsync("agentbridge-task", ["history", id], 5000);
+    if (!raw) throw new Error("empty");
+    const data = JSON.parse(raw);
+    if (!data.ok) { await ctx.reply(`❌ ${data.error}`); return true; }
+    const runs = (data.runs as { ranAt: string; exitCode?: number }[]).slice(-5);
+    const lines = runs.map(r => `${r.ranAt}  exit=${r.exitCode ?? "?"}`);
+    await ctx.reply(`📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``, { parseMode: "Markdown" });
+  } catch { await ctx.reply("❌ Failed to read history"); }
+  return true;
+}
+
+async function handleMemory(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (!ctx.memory) { await ctx.reply("🧠 Memory is disabled."); return true; }
+  const stats = ctx.memory.getStats(ctx.chatId);
+  if (!stats) { await ctx.reply("⚠️ Could not retrieve memory stats."); return true; }
+  const dbMb = (stats.dbSizeBytes / (1024 * 1024)).toFixed(1);
+  const types = Object.entries(stats.extractedByType).map(([t, n]) => `  ${t}: ${n}`).join("\n") || "  (none)";
+  const msg = [
+    "🧠 Memory Status", "",
+    `💬 Raw messages: ${stats.totalMessages}`,
+    `🧩 Extracted memories: ${stats.extractedMemories}`, types,
+    `🔑 Preserved keywords: ${stats.preservedKeywords}`, "",
+    `📄 Consolidations:`,
+    `  daily: ${stats.consolidationFiles.daily}`,
+    `  weekly: ${stats.consolidationFiles.weekly}`,
+    `  quarterly: ${stats.consolidationFiles.quarterly}`, "",
+    `📄 Ingested documents: ${stats.ingestedDocuments}`,
+    `💓 Heartbeat: ${stats.heartbeatRunning ? "running" : "stopped"}`,
+    `💾 DB size: ${dbMb} MB`, "",
+    `📚 Layer 6 (NotebookLM): ${ctx.nlmConfig.enabled ? "enabled" : "disabled"}`,
+  ].join("\n");
+  await ctx.reply(msg);
+  return true;
+}
+
+async function handleNlm(text: string, ctx: CommandContext): Promise<boolean> {
+  const args = text.slice("/nlm".length).trim();
+  const result = await handleNLMCommand(args, ctx.nlmConfig as any);
+  await ctx.reply(result.text);
+  return true;
+}
+
+async function handleA2aReset(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (ctx.platform !== "discord") return false;
+  if (ctx.config.discordA2aEnabled) {
+    const a2aSessionKey = `a2a:${ctx.config.discordA2aChannelId}`;
+    await ctx.transport.resetSession(a2aSessionKey);
+    await ctx.reply("🔄 A2A session reset.");
+    logInfo(TAG, `A2A session reset`);
+  } else {
+    await ctx.reply("A2A is not enabled.");
+  }
+  return true;
+}
+
+async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> {
+  const cmds = [
+    "/new — Fresh session (keeps current mode)",
+    "/reset — Fresh session + exit coding mode",
+    "/compact — Compact context window (summarize + fresh session)",
+    "/status — Bridge status, transport, heartbeat",
+    "/stop, /ctrlc — Stop current response",
+    "/memory — Memory storage statistics",
+    "/tasks — Scheduled tasks",
+    "/tasks log <id> — Last 5 runs for a task",
+    "/tasks trigger <id> — Manually fire a task",
+    "/facts — Core knowledge (user profile + agent notes)",
+    "/coding — Switch to coding agent",
+    "/default — Switch back to default agent",
+    "/nlm — Knowledge base (list/create/sources/query)",
+    "/restart — Restart CLI session",
+  ];
+  if (ctx.platform === "telegram") {
+    cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)");
+  }
+  if (ctx.platform === "discord" && ctx.config.discordA2aEnabled) {
+    cmds.push("/a2a-reset — Reset A2A session");
+  }
+  cmds.push("/help — Show this help");
+  await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
+  return true;
+}
 function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
     const child = execFile(cmd, args, { timeout: timeoutMs, encoding: "utf-8" }, (err, stdout) => {
