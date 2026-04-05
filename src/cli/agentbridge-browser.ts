@@ -24,10 +24,10 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import type { BrowserAction, BrowserActionType, BrowserToolResult } from "../types/browser.js";
-import { BrowserManager } from "../components/browser-manager.js";
-import { BrowserTool } from "../components/browser-tool.js";
-import { DomainAllowlist } from "../components/domain-allowlist.js";
-import { getDefaultSocketPath } from "../components/browser-ipc-server.js";
+import { BrowserManager } from "../capabilities/browser/browser-manager.js";
+import { BrowserTool } from "../capabilities/browser/browser-tool.js";
+import { DomainAllowlist } from "../capabilities/browser/domain-allowlist.js";
+import { getDefaultSocketPath } from "../capabilities/browser/browser-ipc-server.js";
 
 /** The 7 valid browser action types. */
 const VALID_ACTIONS: ReadonlySet<string> = new Set<BrowserActionType>([

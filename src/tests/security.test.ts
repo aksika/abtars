@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import { redactSecrets } from "../components/logger.js";
-import { isPrivateHost } from "../components/ssrf-guard.js";
+import { isPrivateHost } from "../capabilities/browser/ssrf-guard.js";
 import { isWithinRoot } from "../components/path-guard.js";
 
 describe("credential redaction", () => {

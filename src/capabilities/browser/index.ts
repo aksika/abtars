@@ -2,10 +2,10 @@
  * Browser capability — browse-checker heartbeat + IPC server.
  */
 
-import { BrowserManager } from "../../components/browser-manager.js";
-import { BrowserTool } from "../../components/browser-tool.js";
-import { BrowserIpcServer } from "../../components/browser-ipc-server.js";
-import { DomainAllowlist } from "../../components/domain-allowlist.js";
+import { BrowserManager } from "./browser-manager.js";
+import { BrowserTool } from "./browser-tool.js";
+import { BrowserIpcServer } from "./browser-ipc-server.js";
+import { DomainAllowlist } from "./domain-allowlist.js";
 import { checkBrowseTasks } from "../../components/cron-checker.js";
 import { logInfo } from "../../components/logger.js";
 import type { CapabilityApi } from "../capability.js";

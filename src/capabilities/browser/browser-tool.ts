@@ -1,9 +1,9 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import type { BrowserAction, BrowserToolResult, PageElement } from "../types/browser.js";
+import type { BrowserAction, BrowserToolResult, PageElement } from "../../types/browser.js";
 import type { BrowserManager } from "./browser-manager.js";
 import type { DomainAllowlist } from "./domain-allowlist.js";
-import { extractTextFromPage } from "./content-extractor.js";
+import { extractTextFromPage } from "../../components/content-extractor.js";
 
 const LOG_PREFIX = "[browser-tool]";
 

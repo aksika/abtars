@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { BrowserTool } from "./browser-tool.js";
-import type { BrowserAction, BrowserToolResult } from "../types/browser.js";
+import type { BrowserAction, BrowserToolResult } from "../../types/browser.js";
 import type { BrowserManager } from "./browser-manager.js";
 import type { DomainAllowlist } from "./domain-allowlist.js";
 

@@ -3,10 +3,10 @@
  * Standalone browser IPC server — runs inside Docker.
  * Starts BrowserManager + BrowserTool + IPC socket, then waits for SIGTERM.
  */
-import { BrowserManager } from "../components/browser-manager.js";
-import { BrowserTool } from "../components/browser-tool.js";
-import { BrowserIpcServer } from "../components/browser-ipc-server.js";
-import { DomainAllowlist } from "../components/domain-allowlist.js";
+import { BrowserManager } from "../capabilities/browser/browser-manager.js";
+import { BrowserTool } from "../capabilities/browser/browser-tool.js";
+import { BrowserIpcServer } from "../capabilities/browser/browser-ipc-server.js";
+import { DomainAllowlist } from "../capabilities/browser/domain-allowlist.js";
 
 const SOCKET_PATH = process.env["BROWSER_SOCKET_PATH"] ?? "/run/browser/browser.sock";
 

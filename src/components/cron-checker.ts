@@ -103,8 +103,8 @@ export function checkCron(): CronEntry[] {
 
 // --- Browse task checker ---
 
-import { readPendingBrowse, writePendingBrowse } from "../cli/agentbridge-browse.js";
-import type { PendingBrowseEntry } from "../cli/agentbridge-browse.js";
+import { readPendingBrowse, writePendingBrowse } from "../capabilities/browser/agentbridge-browse.js";
+import type { PendingBrowseEntry } from "../capabilities/browser/agentbridge-browse.js";
 import { localDate } from "./env-utils.js";
 
 function isProcessAlive(pid: number): boolean {

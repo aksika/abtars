@@ -1,7 +1,7 @@
 import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
-import type { BrowserSession } from "../types/browser.js";
-import { parsePositiveIntEnv, parseStringEnv } from "./env-utils.js";
+import type { BrowserSession } from "../../types/browser.js";
+import { parsePositiveIntEnv, parseStringEnv } from "../../components/env-utils.js";
 
 // ---------------------------------------------------------------------------
 // Environment variable parsing

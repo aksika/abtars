@@ -13,11 +13,11 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { agentBridgeHome } from "../paths.js";
+import { agentBridgeHome } from "../../paths.js";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
-import { localDate } from "../components/env-utils.js";
+import { localDate } from "../../components/env-utils.js";
 
 // --- Types ---
 
