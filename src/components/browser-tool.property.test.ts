@@ -136,10 +136,12 @@ let logSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  process.env["SSRF_CHECK"] = "0"; // Skip DNS resolution in tests
 });
 
 afterEach(() => {
   logSpy.mockRestore();
+  delete process.env["SSRF_CHECK"];
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

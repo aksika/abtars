@@ -59,6 +59,7 @@ describe("BrowserTool", () => {
 
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => {});
+    process.env["SSRF_CHECK"] = "0";
   });
 
   // -----------------------------------------------------------------------

@@ -89,6 +89,19 @@ export class BrowserTool {
       };
     }
 
+    // SSRF protection: reject private/internal IPs
+    if (process.env["SSRF_CHECK"] !== "0") {
+      try {
+        const { hostname } = new URL(url);
+        const { isPrivateHost } = await import("./ssrf-guard.js");
+        if (await isPrivateHost(hostname)) {
+          return { success: false, error: `Blocked: "${hostname}" resolves to a private/internal IP address` };
+        }
+      } catch {
+        return { success: false, error: "Invalid URL" };
+      }
+    }
+
     const session = await this._browserManager.getSession(action.sessionId);
     const timeout = getNavigationTimeout();
 
