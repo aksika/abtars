@@ -323,8 +323,6 @@ async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<bool
     for (const [name, status] of cronInfo.taskStatuses) {
       lines.push(`  ${status} ${name}`);
     }
-  } else {
-    lines.push("Tasks: (no ticks yet)");
   }
 
   // Last tick age
@@ -392,7 +390,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/status — Bridge status, transport, heartbeat",
     "/stop, /ctrlc — Stop current response",
     "/memory — Memory storage statistics",
-    "/heartbeat — Heartbeat diagnostics (tasks, capabilities)",
+    "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",
