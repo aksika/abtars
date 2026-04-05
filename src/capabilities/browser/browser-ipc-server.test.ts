@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { BrowserIpcServer } from "./browser-ipc-server.js";
-import type { BrowserAction, BrowserToolResult } from "../types/browser.js";
+import type { BrowserAction, BrowserToolResult } from "../../types/browser.js";
 import type { BrowserTool } from "./browser-tool.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────

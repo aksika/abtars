@@ -15,10 +15,10 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { localDate } from "../components/env-utils.js";
 
-const FINANCE_DIR = join(homedir(), ".agentbridge", "finance");
+const FINANCE_DIR = join(agentBridgeHome(), "finance");
 const FEEDS_FILE = join(FINANCE_DIR, "feeds.json");
 const WATCHLIST_FILE = join(FINANCE_DIR, "stock_watchlist.md");
 

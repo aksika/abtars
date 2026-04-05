@@ -1360,6 +1360,30 @@ Option D (hybrid). Phase 1 is a code change in `acp-transport.ts` auto-approve l
 - Config: `SANDBOX_BLOCKED_PATHS`, `SANDBOX_ALLOWED_WRITE_PATHS` in `.env`
 - Log all blocked attempts at WARN level
 
+### Phase 2 — NemoClaw-style Docker isolation (from refactor #9)
+
+**Context:** All refactor prerequisites are now complete — Bridge class, capability plugin system, pluggable memory backends, CLI IPC. The architectural seams exist to split bridge (host) from agent (sandbox).
+
+**Architecture:**
+```
+Host (unsandboxed): Bridge core, memory, platforms, dashboard
+  │ ACP over stdio (already exists)
+Sandbox (Docker): kiro-cli, agent tools, browser
+  - Network: deny-by-default egress, allow kiro API only
+  - Filesystem: read-only except /sandbox
+  - No access to .env, memory.db, bridge code
+```
+
+**Action items:**
+- [ ] Dockerfile for agent sandbox (reference: NemoClaw's 4-layer defense)
+- [ ] Network policy (allow kiro API endpoint, block internal network)
+- [ ] Credential isolation (secrets stay on host, agent gets tokens via ACP)
+- [ ] Filesystem policy (read-only system, writable /sandbox only)
+- [ ] Update ACP transport to spawn inside container instead of locally
+
+**Reference:** NemoClaw — Landlock LSM, seccomp filters, capability drops, gateway proxy.
+**Effort:** High. **Risk:** Medium. **Depends on:** All refactor items (done).
+
 ## 78. Enhanced Testing Strategy
 
 **Priority:** HIGH
@@ -1391,3 +1415,92 @@ Verify ACP protocol compatibility between our transport and CLI providers:
 - **Gemini contract**: same flow but with Gemini-specific behaviors — `cancelled` stopReason on concurrent prompts, no `contextUsagePercentage` metadata, `--acp -y` flags.
 - Run against recorded fixtures (not live CLIs) for speed and determinism.
 - Update fixtures when CLI versions change.
+
+## 79. ClawHub Skill Sync
+
+**Priority:** HIGH
+**Status:** Not started
+
+Download community skills from ClawHub (clawhub.ai) into `~/.agentbridge/skills/clawhub/`. SkillWatcher already hot-reloads — just need a download CLI.
+
+**Action items:**
+- [ ] Research ClawHub API (endpoints, auth, skill format)
+- [ ] Create `src/cli/agentbridge-clawhub.ts` with install/list/update/remove
+- [ ] Add `/clawhub` command handler for agent-initiated installs
+- [ ] Optional: heartbeat task for daily auto-update
+
+**Effort:** Low-medium. **Risk:** Low.
+
+## 80. Progress Protocol for Long-Running CLIs
+
+**Priority:** MEDIUM
+**Status:** ✅ Done (2026-04-05)
+
+Sleep cycle emits `PROGRESS:<pct>:<step-name>` on stdout. Bridge parses via piped stdout in sleep capability. `/status` shows progress when active.
+
+## 81. Dual Browser Engine — Lightpanda + Patchright
+
+**Priority:** HIGH
+**Status:** In progress
+
+### Problem
+Current browser uses Patchright (stealth Chromium) in Docker for all tasks. Heavy resource usage (~500MB RAM) for simple scraping that doesn't need stealth.
+
+### Design
+Two browser engines behind the same `agentbridge-browse` CLI:
+
+| Engine | Use case | Technology | Container |
+|--------|----------|------------|-----------|
+| Lightpanda (default) | News, research, scraping, simple sites | Zig-based headless, CDP | `lightpanda/browser:nightly` |
+| Patchright (fallback) | X.com, authenticated sites, bot-protected | Stealth Chromium fork | Existing Docker setup |
+
+**Fallback strategy:** Agent tries Lightpanda first. If site breaks or bot detection triggered (empty content, "verify you're human" page), retry with `--engine patchright`.
+
+**CLI:** `agentbridge-browse --task "..." --chat-id 123 [--engine lightpanda|patchright]`
+Default engine: lightpanda. Skill instructs fallback pattern.
+
+**Architecture:**
+- Both engines expose CDP WebSocket endpoints
+- `browser-manager.ts` connects to the selected engine's CDP endpoint
+- `pending_browse.json` format unchanged — engine is transparent to browse-checker
+- SSRF guard applies to both engines
+
+**Action items:**
+- [ ] Add Lightpanda Docker container management (start/stop alongside Patchright)
+- [ ] Add `--engine` flag to `agentbridge-browse` CLI
+- [ ] Update `browser-manager.ts` to connect via CDP endpoint (not launch Chromium directly)
+- [ ] Update browse skill to instruct fallback pattern
+- [ ] Test with common browse tasks (news sites, X.com)
+
+**Effort:** Medium. **Risk:** Low (additive — Patchright stays as-is, Lightpanda is new option).
+
+## 82. Instant Browse Result Delivery (eliminate polling delay)
+
+**Priority:** HIGH
+**Status:** Not started
+
+### Problem
+Browse tasks are spawned detached (`detached: true, unref()`). Results delivered by browse-checker polling every 5 minutes. Worst case: 4min 59s delay. Average: 2.5 minutes.
+
+### Solution
+Track the child process in the browser capability (same pattern as sleep capability). Listen for `exit` event → read log → deliver result immediately. No polling needed.
+
+**Current flow:**
+```
+agentbridge-browse → spawn detached → unref → forget
+browse-checker (every 5min) → poll pending_browse.json → pid dead? → deliver
+```
+
+**New flow:**
+```
+agentbridge-browse → spawn (tracked) → exit event → read log → deliver immediately
+browse-checker → only handles timeout kills (safety net)
+```
+
+### Action items
+- [ ] Change browse spawn from detached+unref to tracked child (like sleep capability)
+- [ ] Add exit handler that reads log file and delivers result via pending_reminders.json
+- [ ] Keep browse-checker as timeout-only safety net (kill stuck tasks)
+- [ ] Remove PID polling from browse-checker (exit handler covers normal completion)
+
+**Effort:** Low-medium. **Risk:** Low — sleep capability already proves the pattern.

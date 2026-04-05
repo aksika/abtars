@@ -5,8 +5,8 @@
 
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeForSummary } from "../memory/media-sanitizer.js";
-import { logInfo, logWarn, logDebug } from "./logger.js";
+import { sanitizeForSummary } from "../../memory/media-sanitizer.js";
+import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import type Database from "better-sqlite3";
 
 const TAG = "daily-summary";

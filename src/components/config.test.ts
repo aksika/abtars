@@ -51,13 +51,13 @@ describe("loadAndValidateConfig", () => {
 
   it("returns a valid Config with all required fields", async () => {
     const config = await loadAndValidateConfig();
-    expect(config.telegramBotToken).toBe("123456:ABC-DEF_ghi");
-    expect(config.allowedUserIds).toEqual(new Set([111, 222]));
-    expect(config.agentCliPath).toBe("kiro-cli");
-    expect(config.workingDir).toBe(process.cwd());
-    expect(config.trustMode).toBe(false);
-    expect(config.permissionTimeoutMs).toBe(60_000);
-    expect(config.pollTimeoutS).toBe(30);
+    expect(config.telegram.botToken).toBe("123456:ABC-DEF_ghi");
+    expect(config.telegram.allowedUserIds).toEqual(new Set([111, 222]));
+    expect(config.transport.agentCliPath).toBe("kiro-cli");
+    expect(config.transport.workingDir).toBe(process.cwd());
+    expect(config.transport.trustMode).toBe(false);
+    expect(config.transport.permissionTimeoutMs).toBe(60_000);
+    expect(config.telegram.pollTimeoutS).toBe(30);
   });
 
   // --- TELEGRAM_BOT_TOKEN ---
@@ -75,7 +75,7 @@ describe("loadAndValidateConfig", () => {
   it("accepts a well-formed bot token", async () => {
     process.env["TELEGRAM_BOT_TOKEN"] = "9876:xYz_123-abc";
     const config = await loadAndValidateConfig();
-    expect(config.telegramBotToken).toBe("9876:xYz_123-abc");
+    expect(config.telegram.botToken).toBe("9876:xYz_123-abc");
   });
 
   // --- ALLOWED_USER_IDS ---
@@ -93,7 +93,7 @@ describe("loadAndValidateConfig", () => {
   it("trims whitespace and ignores empty segments in user IDs", async () => {
     process.env["ALLOWED_USER_IDS"] = " 42 , , 99 ";
     const config = await loadAndValidateConfig();
-    expect(config.allowedUserIds).toEqual(new Set([42, 99]));
+    expect(config.telegram.allowedUserIds).toEqual(new Set([42, 99]));
   });
 
   // --- KIRO_CLI_PATH ---
@@ -108,7 +108,7 @@ describe("loadAndValidateConfig", () => {
     process.env["AGENT_CLI_PATH"] = "kiro-cli";
     // access should NOT be called for bare commands
     const config = await loadAndValidateConfig();
-    expect(config.agentCliPath).toBe("kiro-cli");
+    expect(config.transport.agentCliPath).toBe("kiro-cli");
   });
 
   // --- WORKING_DIR ---
@@ -130,19 +130,19 @@ describe("loadAndValidateConfig", () => {
   it("parses TRUST_MODE=true", async () => {
     process.env["TRUST_MODE"] = "true";
     const config = await loadAndValidateConfig();
-    expect(config.trustMode).toBe(true);
+    expect(config.transport.trustMode).toBe(true);
   });
 
   it("parses TRUST_MODE=1 as true", async () => {
     process.env["TRUST_MODE"] = "1";
     const config = await loadAndValidateConfig();
-    expect(config.trustMode).toBe(true);
+    expect(config.transport.trustMode).toBe(true);
   });
 
   it("parses TRUST_MODE=false as false", async () => {
     process.env["TRUST_MODE"] = "false";
     const config = await loadAndValidateConfig();
-    expect(config.trustMode).toBe(false);
+    expect(config.transport.trustMode).toBe(false);
   });
 
   // --- PERMISSION_TIMEOUT_MS ---
@@ -150,13 +150,13 @@ describe("loadAndValidateConfig", () => {
   it("parses PERMISSION_TIMEOUT_MS as a number", async () => {
     process.env["PERMISSION_TIMEOUT_MS"] = "30000";
     const config = await loadAndValidateConfig();
-    expect(config.permissionTimeoutMs).toBe(30_000);
+    expect(config.transport.permissionTimeoutMs).toBe(30_000);
   });
 
   it("falls back to default when PERMISSION_TIMEOUT_MS is not a number", async () => {
     process.env["PERMISSION_TIMEOUT_MS"] = "abc";
     const config = await loadAndValidateConfig();
-    expect(config.permissionTimeoutMs).toBe(60000);
+    expect(config.transport.permissionTimeoutMs).toBe(60000);
   });
 
   // --- POLL_TIMEOUT_S ---
@@ -164,12 +164,12 @@ describe("loadAndValidateConfig", () => {
   it("parses POLL_TIMEOUT_S as a number", async () => {
     process.env["POLL_TIMEOUT_S"] = "60";
     const config = await loadAndValidateConfig();
-    expect(config.pollTimeoutS).toBe(60);
+    expect(config.telegram.pollTimeoutS).toBe(60);
   });
 
   it("falls back to default when POLL_TIMEOUT_S is not a number", async () => {
     process.env["POLL_TIMEOUT_S"] = "nope";
     const config = await loadAndValidateConfig();
-    expect(config.pollTimeoutS).toBe(30);
+    expect(config.telegram.pollTimeoutS).toBe(30);
   });
 });

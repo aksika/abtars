@@ -24,7 +24,7 @@ For the memory subsystem, see [memory.asbuilt.md](memory.asbuilt.md).
 | **Sleep (Dreamy)** | Overnight maintenance: retrospective, GC, extraction, consolidation, fitness review. See [memory.asbuilt.md](memory.asbuilt.md). |
 | **Tasks** | Time-based scheduling for reminders and agent tasks. SQLite storage, sequential queue, priority levels, retry. User-facing: `/tasks`. CLI: `agentbridge-task`. |
 | **Todo** | File-based todo list (`todo.md`). Agent-managed via `agentbridge-todo` CLI. |
-| **Browser (Browsie)** | Detached browser subagent. Headless Chromium in Docker, autonomous navigation, non-blocking. |
+| **Browser (Browsie)** | Detached browser subagent. Headless Chromium in Docker, autonomous navigation, non-blocking. SSRF protection blocks private IPs. |
 | **Self-Healer** | Heartbeat task scanning `bridge.log` for errors, injecting bug reports to KP via Telegram. |
 | **A2A (Agent API)** | HTTP API for peer agents (Molty). HMAC challenge-response auth, consulting-only relationship. |
 | **Dashboard** | Localhost web UI: platform status, cron panel, log viewer, memory stats, 3D memory visualization. |
@@ -64,7 +64,17 @@ Telegram/Discord → PlatformAdapter.start() → onMessage callback
 
 ### Message Pipeline (`src/components/message-pipeline.ts`)
 
-`handleInboundMessage()` — shared flow for all platforms. Dependencies injected via `PipelineDeps`.
+`handleInboundMessage()` — shared flow for all platforms. Early phases (voice, commands, busy guard) run as middleware via `runPipeline()`. Core transport/response handling inline. Dependencies injected via `PipelineDeps`.
+
+### Middleware (`src/components/pipeline/`)
+
+| Middleware | File | Purpose |
+|---|---|---|
+| `voiceMiddleware` | `pipeline/voice.ts` | STT transcription |
+| `commandMiddleware` | `pipeline/commands.ts` | Slash commands + transport commands |
+| `busyGuardMiddleware` | `pipeline/busy-guard.ts` | Queue messages when transport is busy |
+
+Adding a message behavior: create a middleware in `pipeline/`, add to the chain in `handleInboundMessage()`.
 
 ### Extracted Components
 
@@ -85,10 +95,47 @@ Centralized logger with `logInfo`, `logWarn`, `logError`, `logDebug`. Console ou
 - `LOG_FORMAT=text` (default): `2026-03-27T17:15:56.888 INFO  [tag] message`
 - `LOG_FORMAT=json`: `{"ts":"...","level":"info","tag":"...","msg":"..."}`
 
+Credential redaction: `redactSecrets()` strips 15 secret patterns (OpenAI, GitHub, AWS, Telegram, Bearer, Stripe, etc.) from all file-logged lines. Secrets never reach `bridge.log`.
+
 ### Entry Point
 
 - `src/main.ts` (11 lines) — entry point, calls `startBridge()`
-- `src/bridge-app.ts` (622 lines) — all wiring: config, transport, adapters, heartbeat, dashboard, shutdown
+- `src/bridge-app.ts` — `Bridge` class (lifecycle, shutdown, subsystem fields) + `startBridge()` wiring function
+
+## Capability System
+
+Self-contained subsystems register via `CapabilityApi` — commands, heartbeat tasks, services. Capabilities are auto-discovered at startup from `src/capabilities/*/capability.json` manifests.
+
+Source: `src/capabilities/capability.ts`
+
+### Discovery
+
+On startup, `discoverCapabilities()` scans `src/capabilities/` for directories with a `capability.json` manifest. Each is dynamically imported and its `register(api)` function called. Directories without a manifest are core capabilities (loaded explicitly).
+
+Disable a capability: `DISABLED_CAPABILITIES=browser` (comma-separated names).
+
+### Capabilities
+
+| Capability | Directory | Type | What it registers |
+|---|---|---|---|
+| Browser | `src/capabilities/browser/` (17 files) | Discoverable | browse-checker heartbeat, lazy BrowserIpcServer, SSRF guard |
+| Hotskills | `src/capabilities/hotskills/` (1 file) | Discoverable | skill-reloader heartbeat (live-reload skill .md files) |
+| Sleep | `src/capabilities/sleep/` (12 files) | Core (no manifest) | Sleep spawn + retry, progress protocol |
+
+### Adding a capability
+
+1. Create `src/capabilities/<name>/capability.json`:
+   ```json
+   { "name": "<name>", "description": "..." }
+   ```
+2. Create `src/capabilities/<name>/index.ts` exporting `register(api: CapabilityApi)`
+3. Restart bridge — auto-discovered, no code changes needed
+
+### Replacing a capability
+
+1. Drop new capability directory (e.g. `browser-v2/`)
+2. Set `DISABLED_CAPABILITIES=browser`
+3. Restart — old one skipped, new one loads
 
 ### Dashboard
 
@@ -560,6 +607,8 @@ If the model returns `ValidationException` or error code `-32603` (context too l
 | `src/memory/session-memory.ts` | Memory context block builder |
 | `src/components/message-pipeline.ts` | Graduated thresholds, auto-compact trigger, circuit breaker |
 | `src/components/command-handlers.ts` | `/compact` command handler |
+| `src/components/ssrf-guard.ts` | SSRF protection — private IP blocking + DNS rebinding check |
+| `src/components/path-guard.ts` | Path traversal prevention — `isWithinRoot()` |
 
 ---
 
@@ -638,7 +687,7 @@ File: `persona/browsing_prompt.md` → deployed to `~/.agentbridge/browsing_prom
 Sections:
 - Task goal (from `--task`)
 - Full browser tool reference (`agentbridge-browser` actions: navigate, click, fill, extract_text, screenshot, get_page_info, set_cookie, close_session)
-- Docker container management (`~/.agentbridge/browser-docker.sh start`)
+- Docker container management (`~/.agentbridge/browser-patchright.sh start`)
 - Login state: navigate first, use `set_cookie` with container-internal cookie files (`/run/browser/cookies/`) if not logged in
 - Output: write findings to `~/.agentbridge/subagents/browse_<taskId>_<date>.md`
 
@@ -676,14 +725,14 @@ Rules for the professor:
 
 Container: `agentbridge-browser` — headless Chromium controlled via `agentbridge-browser` CLI over Unix socket IPC.
 
-Management script: `scripts/browser-docker.sh` → deployed to `~/.agentbridge/browser-docker.sh`
+Management script: `scripts/browser-patchright.sh` → deployed to `~/.agentbridge/browser-patchright.sh`
 
 | Command | Description |
 |---------|-------------|
-| `browser-docker.sh build` | Build image + start container |
-| `browser-docker.sh start` | Start container (existing image) |
-| `browser-docker.sh stop` | Stop + remove container |
-| `browser-docker.sh status` | Check if running |
+| `browser-patchright.sh build` | Build image + start container |
+| `browser-patchright.sh start` | Start container (existing image) |
+| `browser-patchright.sh stop` | Stop + remove container |
+| `browser-patchright.sh status` | Check if running |
 
 Docker mounts (isolated):
 ```
@@ -786,9 +835,9 @@ All commands handled by `src/components/command-handlers.ts` — single module f
 | /stop, /cancel | both | Send Ctrl+C interrupt |
 | /restart | both | Restart Kiro (tmux only) |
 | /memory | both | Memory storage statistics |
-| /cron | both | Scheduled tasks overview with status icons |
-| /cron log \<id\> | both | Last 5 runs with exit codes for a task |
-| /trigger \<id\> | both | Manually fire a cron task immediately |
+| /tasks (alias: /cron) | both | Scheduled tasks overview with status icons |
+| /tasks log \<id\> (alias: /cron log) | both | Last 5 runs with exit codes for a task |
+| /tasks trigger \<id\> (alias: /cron trigger) | both | Manually fire a cron task immediately |
 | /facts | both | Core knowledge (user profile + agent notes) |
 | /coding | both | Switch to Opus coding agent |
 | /default | both | Switch back to KP |

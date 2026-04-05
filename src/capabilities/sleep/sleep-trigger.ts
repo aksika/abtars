@@ -1,7 +1,7 @@
 import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { logDebug } from "./logger.js";
-import { localDate } from "./env-utils.js";
+import { logDebug } from "../../components/logger.js";
+import { localDate } from "../../components/env-utils.js";
 
 const TAG = "sleep-trigger";
 

@@ -14,11 +14,10 @@
  * Output: { "ok": true, "memoriesUpdated": 1, "ids": [42], "fieldsUpdated": ["content_en"] }
  */
 
-import { MemoryManager } from "../memory/memory-manager.js";
 import { loadMemoryConfig } from "../memory/memory-config.js";
 import type { EditMemoryParams } from "../types/index.js";
 import { appendFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { join } from "node:path";
 
 export type RawEditArgs = {
@@ -157,7 +156,7 @@ async function main() {
       ?? (params.contentOriginal ? scanPrompt(params.contentOriginal) : null);
     if (hit) {
       const logLine = `${new Date().toLocaleString("sv-SE")} EDIT-BLOCKED patternId=${hit.patternId} matched="${hit.matched}" caller=${params.caller ?? "unknown"}\n`;
-      const logPath = join(homedir(), ".agentbridge", "logs", "prompt_injection.log");
+      const logPath = join(agentBridgeHome(), "logs", "prompt_injection.log");
       try { appendFileSync(logPath, logLine); } catch { /* best-effort */ }
       console.log(JSON.stringify({ ok: false, error: `Prompt injection detected (${hit.patternId}): "${hit.matched}"`, blocked: true }));
       process.exit(1);
@@ -165,17 +164,17 @@ async function main() {
   }
 
   const config = loadMemoryConfig();
-  const memory = new MemoryManager(config);
+  const { createMemoryBackend } = await import("../memory/backend-factory.js");
+  const backend = await createMemoryBackend(config);
   try {
-    await memory.initialize({ skipEmbeddingCheck: true });
-    const result = memory.editor.editMemory(params);
+    const result = await backend.editMemory(params);
     console.log(JSON.stringify(result));
     if (!result.ok) process.exit(1);
   } catch (err) {
     console.log(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     process.exit(1);
   } finally {
-    memory.close();
+    backend.close();
   }
 }
 

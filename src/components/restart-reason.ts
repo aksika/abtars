@@ -4,9 +4,9 @@
  */
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { AGENT_BRIDGE_HOME } from "./config.js";
+import { agentBridgeHome } from "../paths.js";
 
-const REASON_FILE = join(AGENT_BRIDGE_HOME, ".last-restart-reason");
+const REASON_FILE = join(agentBridgeHome(), ".last-restart-reason");
 
 export type RestartCause =
   | "daily-cycle"

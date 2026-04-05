@@ -10,16 +10,7 @@
  * Legacy: --keywords is accepted as alias for --translated.
  */
 
-import Database from "better-sqlite3";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { MemoryIndex } from "../memory/memory-index.js";
-import { recallSearch } from "../memory/recall-engine.js";
 
-const MEMORY_DIR = join(homedir(), ".agentbridge", "memory");
-const DB_PATH = join(MEMORY_DIR, "memory.db");
-const CTX_START_PATH = join(MEMORY_DIR, "context-window-start.json");
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 
@@ -80,45 +71,24 @@ Options:
   return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages };
 }
 
-if (!existsSync(DB_PATH)) {
-  console.error(`Memory database not found: ${DB_PATH}`);
-  process.exit(1);
-}
-
 const params = parseArgs();
-const db = new Database(DB_PATH);
 
-// Register strip_emojis for FTS5 delete trigger compatibility
-db.function("strip_emojis", (text: unknown) => {
-  if (typeof text !== "string") return text;
-  return text.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "").replace(/ {2,}/g, " ").trim();
-});
-
-// Register strip_diacritics for accent-insensitive queries
-db.function("strip_diacritics", (text: unknown) => {
-  if (typeof text !== "string") return text;
-  return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-});
+const config = (await import("../memory/memory-config.js")).loadMemoryConfig();
+const { createMemoryBackend } = await import("../memory/backend-factory.js");
+const backend = await createMemoryBackend(config);
 
 try {
-  const index = new MemoryIndex(db);
-  const result = await recallSearch(
-    { db, index, memoryDir: MEMORY_DIR, ctxStartPath: CTX_START_PATH },
-    {
-      translated: params.translated,
-      original: params.original,
-      chatId: params.chatId,
-      limit: params.limit,
-      maxClassification: params.maxClassification,
-      timeStart: params.timeStart,
-      timeEnd: params.timeEnd,
-      stages: params.stages,
-      entity: params.entity,
-    },
-  );
-
-  // Bump recall count for extracted memories that made it into results
-  index.bumpRecallCount(result.extractedIds);
+  const result = await backend.recall({
+    translated: params.translated,
+    original: params.original,
+    chatId: params.chatId,
+    limit: params.limit,
+    maxClassification: params.maxClassification,
+    timeStart: params.timeStart,
+    timeEnd: params.timeEnd,
+    stages: params.stages,
+    entity: params.entity,
+  });
 
   // JSON output to stdout
   console.log(JSON.stringify(result.results, null, 2));
@@ -135,5 +105,5 @@ try {
     console.error(`\nHint: ${expandable.length} result(s) have source message IDs. Expand with:\n  agentbridge-expand --ids ${allIds}`);
   }
 } finally {
-  db.close();
+  backend.close();
 }

@@ -33,16 +33,10 @@ function formatRecentMessages(rows: MsgRow[]): string {
  * Wrapped in REQ-4 temporal markers.
  */
 export function buildSessionStartContext(memory: MemoryManager, chatId: number): string | null {
-  const db = memory.getDb();
-  if (!db) return null;
-
   const daily = memory.getLatestCompaction(chatId);
   const dailyTs = daily?.timestamp ?? 0;
 
-  const lastMsg = db.prepare(
-    "SELECT MAX(timestamp) as ts FROM messages WHERE role = 'user'"
-  ).get() as { ts: number | null } | undefined;
-  const lastMsgTs = lastMsg?.ts ?? 0;
+  const lastMsgTs = memory.store.getLastMessageTimestamp();
 
   const now = new Date().toISOString();
   let body: string;
@@ -50,9 +44,7 @@ export function buildSessionStartContext(memory: MemoryManager, chatId: number):
 
   if (lastMsgTs > dailyTs && dailyTs > 0) {
     // Midday restart: messages exist after the daily — inject recent messages
-    const rows = db.prepare(
-      `SELECT role, content, timestamp FROM messages WHERE timestamp > ? ORDER BY timestamp DESC LIMIT ${RECENT_MSG_LIMIT}`
-    ).all(dailyTs) as MsgRow[];
+    const rows = memory.store.getMessagesSince(dailyTs, RECENT_MSG_LIMIT);
     body = formatRecentMessages(rows);
     endedAt = new Date(lastMsgTs).toISOString();
   } else if (daily) {
@@ -61,9 +53,7 @@ export function buildSessionStartContext(memory: MemoryManager, chatId: number):
     endedAt = new Date(dailyTs).toISOString();
   } else if (lastMsgTs > 0) {
     // No daily at all — inject recent messages
-    const rows = db.prepare(
-      `SELECT role, content, timestamp FROM messages ORDER BY timestamp DESC LIMIT ${RECENT_MSG_LIMIT}`
-    ).all() as MsgRow[];
+    const rows = memory.store.getMessagesSince(0, RECENT_MSG_LIMIT);
     body = formatRecentMessages(rows);
     endedAt = new Date(lastMsgTs).toISOString();
   } else {

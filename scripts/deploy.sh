@@ -7,16 +7,21 @@
 # Usage:
 #   ./scripts/deploy.sh          # full deploy (build + env + steering + launcher)
 #   ./scripts/deploy.sh --quick  # env + steering + launcher only (skip build)
+#   ./scripts/deploy.sh --full   # full deploy + pull latest Docker images (Lightpanda)
 
 set -euo pipefail
 
 AB_HOME="${HOME}/.agentbridge"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 QUICK=false
+FULL=false
 
-if [[ "${1:-}" == "--quick" ]]; then
-  QUICK=true
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --quick) QUICK=true ;;
+    --full) FULL=true ;;
+  esac
+done
 
 echo "🚀 Deploying agentbridge..."
 echo "   Project: $PROJECT_DIR"
@@ -35,7 +40,7 @@ if [ ! -d "$AB_HOME/.git" ]; then
 .env
 agentbridge-*
 mcporter
-browser-docker.sh
+browser-patchright.sh
 agentbridge.sh
 scripts/
 dist/
@@ -178,13 +183,17 @@ echo "🚀 Deploying launcher + recall CLI..."
   tail -n +3 "$PROJECT_DIR/scripts/agentbridge.sh"
 } > "$AB_HOME/agentbridge.sh"
 chmod +x "$AB_HOME/agentbridge.sh"
-# Write browser-docker.sh pointing to AB_HOME (self-contained)
+# Write browser-patchright.sh pointing to AB_HOME (self-contained)
 {
   echo "#!/usr/bin/env bash"
   echo "PROJECT_DIR=\"$AB_HOME\""
-  tail -n +3 "$PROJECT_DIR/scripts/browser-docker.sh"
-} > "$AB_HOME/browser-docker.sh"
-chmod +x "$AB_HOME/browser-docker.sh"
+  tail -n +3 "$PROJECT_DIR/scripts/browser-patchright.sh"
+} > "$AB_HOME/browser-patchright.sh"
+chmod +x "$AB_HOME/browser-patchright.sh"
+
+# Deploy browser-lightpanda.sh
+cp "$PROJECT_DIR/scripts/browser-lightpanda.sh" "$AB_HOME/browser-lightpanda.sh"
+chmod +x "$AB_HOME/browser-lightpanda.sh"
 mkdir -p "$AB_HOME/scripts"
 for script in daily-backup.sh doctor.sh upgrade-deps.sh; do
   cp "$PROJECT_DIR/scripts/$script" "$AB_HOME/scripts/$script"
@@ -232,7 +241,20 @@ if grep -q "^EMBEDDING_ENABLED=true" "$AB_HOME/.env" 2>/dev/null; then
   fi
 fi
 
-# 5. Done
+# 5. Docker image pulls (--full only)
+if [ "$FULL" = true ]; then
+  echo "📦 Pulling/rebuilding Docker images..."
+  if command -v docker &>/dev/null; then
+    docker pull lightpanda/browser:nightly 2>/dev/null && echo "   ✅ Lightpanda nightly pulled" || echo "   ⚠️  Lightpanda pull failed"
+    if [ -d "$PROJECT_DIR/docker/browser" ]; then
+      DOCKER_BUILDKIT=0 docker build -t agentbridge-browser -f "$PROJECT_DIR/docker/browser/Dockerfile" "$PROJECT_DIR" 2>&1 | tail -3 && echo "   ✅ Patchright browser image rebuilt" || echo "   ⚠️  Patchright build failed"
+    fi
+  else
+    echo "   ⚠️  Docker not installed — skipping image pulls"
+  fi
+fi
+
+# 6. Done
 echo ""
 echo "✅ Deploy complete."
 echo ""

@@ -1,9 +1,9 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import type { BrowserAction, BrowserToolResult, PageElement } from "../types/browser.js";
+import type { BrowserAction, BrowserToolResult, PageElement } from "../../types/browser.js";
 import type { BrowserManager } from "./browser-manager.js";
 import type { DomainAllowlist } from "./domain-allowlist.js";
-import { extractTextFromPage } from "./content-extractor.js";
+import { extractTextFromPage } from "../../components/content-extractor.js";
 
 const LOG_PREFIX = "[browser-tool]";
 
@@ -87,6 +87,19 @@ export class BrowserTool {
         success: false,
         error: `Domain "${hostname}" is not in the allowed list. Allowed patterns: ${this._domainAllowlist.patterns.join(", ")}`,
       };
+    }
+
+    // SSRF protection: reject private/internal IPs
+    if (process.env["SSRF_CHECK"] !== "0") {
+      try {
+        const { hostname } = new URL(url);
+        const { isPrivateHost } = await import("./ssrf-guard.js");
+        if (await isPrivateHost(hostname)) {
+          return { success: false, error: `Blocked: "${hostname}" resolves to a private/internal IP address` };
+        }
+      } catch {
+        return { success: false, error: "Invalid URL" };
+      }
     }
 
     const session = await this._browserManager.getSession(action.sessionId);

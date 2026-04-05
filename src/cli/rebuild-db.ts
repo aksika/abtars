@@ -6,10 +6,10 @@
  */
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import Database from "better-sqlite3";
 
-const memoryDir = join(homedir(), ".agentbridge", "memory");
+const memoryDir = join(agentBridgeHome(), "memory");
 const dbPath = join(memoryDir, "memory.db");
 const transcriptsDir = join(memoryDir, "transcripts");
 const dryRun = process.argv.includes("--dry-run");

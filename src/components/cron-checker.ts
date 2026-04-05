@@ -7,14 +7,14 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { logInfo, logWarn } from "./logger.js";
 import { CronExpressionParser } from "cron-parser";
 import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./cron-db.js";
 import type { CronEntry } from "../cli/agentbridge-task.js";
 
 const TAG = "cron-checker";
-const memoryDir = (): string => join(homedir(), ".agentbridge", "memory");
+const memoryDir = (): string => join(agentBridgeHome(), "memory");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
 
 export interface PendingReminder {
@@ -103,8 +103,8 @@ export function checkCron(): CronEntry[] {
 
 // --- Browse task checker ---
 
-import { readPendingBrowse, writePendingBrowse } from "../cli/agentbridge-browse.js";
-import type { PendingBrowseEntry } from "../cli/agentbridge-browse.js";
+import { readPendingBrowse, writePendingBrowse } from "../capabilities/browser/agentbridge-browse.js";
+import type { PendingBrowseEntry } from "../capabilities/browser/agentbridge-browse.js";
 import { localDate } from "./env-utils.js";
 
 function isProcessAlive(pid: number): boolean {
@@ -131,7 +131,7 @@ function extractAgentText(logFile: string): string {
   } catch { return ""; }
 }
 
-const subagentsDir = (): string => join(homedir(), ".agentbridge", "subagents");
+const subagentsDir = (): string => join(agentBridgeHome(), "subagents");
 
 /** Ensure report file exists in subagents dir. Returns the file path. */
 function ensureReportFile(taskId: string): string {
@@ -145,7 +145,7 @@ function ensureReportFile(taskId: string): string {
   } catch { /* */ }
 
   // Fallback: extract from log and write
-  const logFile = join(homedir(), ".agentbridge", "logs", `browse_${taskId}.log`);
+  const logFile = join(agentBridgeHome(), "logs", `browse_${taskId}.log`);
   const text = extractAgentText(logFile);
   const date = localDate();
   const reportPath = join(dir, `browse_${taskId}_${date}.md`);
@@ -154,7 +154,21 @@ function ensureReportFile(taskId: string): string {
 }
 
 /**
- * Check pending browse tasks. Deliver results for completed/timed-out tasks.
+ * Deliver result for a single browse task. Used by exit callback (instant) and browse-checker (safety net).
+ */
+export function deliverBrowseResult(entry: PendingBrowseEntry, timedOut = false): void {
+  const reportPath = ensureReportFile(entry.taskId);
+  const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
+  const msg = timedOut
+    ? `🌐 Browse task timed out (${Math.round(entry.timeoutMs / 1000)}s): ${taskLabel}\nPartial report: ${reportPath}`
+    : `🌐 Browse task complete: ${taskLabel}\nReport: ${reportPath}`;
+  appendReminder({ chatId: entry.chatId, message: msg, createdAt: Date.now(), threadId: entry.threadId });
+  (timedOut ? logWarn : logInfo)(TAG, `🌐 Browse "${taskLabel}" ${timedOut ? "timed out" : "finished"} — ${reportPath}`);
+}
+
+/**
+ * Check pending browse tasks. Safety net for timeout kills and orphaned processes.
+ * Normal completion is handled by the exit callback in the browser capability.
  */
 export function checkBrowseTasks(): void {
   const entries = readPendingBrowse();
@@ -168,30 +182,11 @@ export function checkBrowseTasks(): void {
     const elapsed = now - entry.startedAt;
 
     if (!alive) {
-      // Process finished — ensure report file exists, notify with path
-      const reportPath = ensureReportFile(entry.taskId);
-      const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
-      appendReminder({
-        chatId: entry.chatId,
-        message: `🌐 Browse task complete: ${taskLabel}\nReport: ${reportPath}`,
-        createdAt: now,
-        threadId: entry.threadId,
-      });
-      logInfo(TAG, `🌐 Browse task "${taskLabel}" finished — report: ${reportPath}`);
+      deliverBrowseResult(entry);
     } else if (elapsed > entry.timeoutMs) {
-      // Timed out — kill, save partial, notify
-      try { process.kill(entry.pid, "SIGKILL"); } catch { /* already dead */ }
-      const reportPath = ensureReportFile(entry.taskId);
-      const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
-      appendReminder({
-        chatId: entry.chatId,
-        message: `🌐 Browse task timed out (${Math.round(entry.timeoutMs / 1000)}s): ${taskLabel}\nPartial report: ${reportPath}`,
-        createdAt: now,
-        threadId: entry.threadId,
-      });
-      logWarn(TAG, `🌐 Browse task "${taskLabel}" timed out — partial report: ${reportPath}`);
+      try { process.kill(entry.pid, "SIGKILL"); } catch { /* */ }
+      deliverBrowseResult(entry, true);
     } else {
-      // Still running within timeout — keep
       remaining.push(entry);
     }
   }

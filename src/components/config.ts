@@ -6,9 +6,8 @@ import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/inde
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
 import { logInfo } from "./logger.js";
 import type { LogLevel } from "./logger.js";
-
-/** ~/.agentbridge/ is the runtime config/data directory */
-export const AGENT_BRIDGE_HOME = resolve(homedir(), ".agentbridge");
+export { agentBridgeHome } from "../paths.js";
+import { agentBridgeHome } from "../paths.js";
 
 const BOT_TOKEN_REGEX = /^\d+:[A-Za-z0-9_-]+$/;
 const SNOWFLAKE_REGEX = /^\d{17,20}$/;
@@ -86,13 +85,13 @@ async function validateCliPath(cliPath: string): Promise<void> {
  */
 export async function loadAndValidateConfig(): Promise<Config> {
   // Load .env from ~/.agentbridge/.env
-  const envPath = resolve(AGENT_BRIDGE_HOME, ".env");
+  const envPath = resolve(agentBridgeHome(), ".env");
   loadDotenv({ path: envPath });
 
   // Load transport profile (e.g. transports/kiro.env) — overrides AGENT_* vars
   const transportProfile = process.env["AGENT_TRANSPORT_PROFILE"];
   if (transportProfile) {
-    const profilePath = resolve(AGENT_BRIDGE_HOME, "transports", `${transportProfile}.env`);
+    const profilePath = resolve(agentBridgeHome(), "transports", `${transportProfile}.env`);
     loadDotenv({ path: profilePath, override: true });
     logInfo("config", `Loaded transport profile: ${transportProfile}`);
   }
@@ -115,7 +114,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- AGENT_CLI_PATH ---
-  const agentCli = process.env["AGENT_CLI"] || CONFIG_DEFAULTS.agentCli;
+  const agentCli = process.env["AGENT_CLI"] || CONFIG_DEFAULTS.transport.agentCli;
   const defaultCliPath = agentCli === "gemini" ? "gemini" : agentCli === "kiro" ? "kiro-cli" : agentCli;
   const agentCliPath = process.env["AGENT_CLI_PATH"] || defaultCliPath;
   try {
@@ -125,26 +124,26 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- AGENT_TRANSPORT ---
-  const rawTransport = (process.env["AGENT_TRANSPORT"] || CONFIG_DEFAULTS.agentTransport).toLowerCase();
+  const rawTransport = (process.env["AGENT_TRANSPORT"] || CONFIG_DEFAULTS.transport.agentTransport).toLowerCase();
   if (rawTransport !== "tmux" && rawTransport !== "acp") {
     throw new Error(`AGENT_TRANSPORT must be "tmux" or "acp", got "${rawTransport}"`);
   }
   const agentTransport = rawTransport as AgentTransport;
 
   // --- AGENT_MODEL ---
-  const agentModel = process.env["AGENT_MODEL"] || CONFIG_DEFAULTS.agentModel;
+  const agentModel = process.env["AGENT_MODEL"] || CONFIG_DEFAULTS.models.agentModel;
 
   // --- AGENT_BROWSE_MODEL / BROWSING_AGENT ---
-  const agentBrowseModel = process.env["AGENT_BROWSE_MODEL"] || CONFIG_DEFAULTS.agentBrowseModel;
+  const agentBrowseModel = process.env["AGENT_BROWSE_MODEL"] || CONFIG_DEFAULTS.models.browseModel;
 
   // --- AGENT_SLEEP_MODEL / MEMORY_SUBAGENT_MODEL ---
-  const agentSleepModel = process.env["AGENT_SLEEP_MODEL"] || CONFIG_DEFAULTS.agentSleepModel;
+  const agentSleepModel = process.env["AGENT_SLEEP_MODEL"] || CONFIG_DEFAULTS.models.sleepModel;
 
   // --- AGENT_CODING_MODEL / CODING_AGENT_MODEL ---
-  const agentCodingModel = process.env["AGENT_CODING_MODEL"] || CONFIG_DEFAULTS.agentCodingModel;
+  const agentCodingModel = process.env["AGENT_CODING_MODEL"] || CONFIG_DEFAULTS.models.codingModel;
 
   // --- WORKING_DIR (optional, default cwd) ---
-  let workingDir = process.env["WORKING_DIR"] || CONFIG_DEFAULTS.workingDir;
+  let workingDir = process.env["WORKING_DIR"] || CONFIG_DEFAULTS.transport.workingDir;
   // Expand ~ to home directory (Node doesn't do this automatically)
   if (workingDir.startsWith("~")) {
     workingDir = resolve(homedir(), workingDir.slice(1).replace(/^[/\\]/, ""));
@@ -169,35 +168,35 @@ export async function loadAndValidateConfig(): Promise<Config> {
   // --- TRUST_MODE (optional boolean, default false) ---
   const trustMode = parseBoolEnv(
     "TRUST_MODE",
-    CONFIG_DEFAULTS.trustMode,
+    CONFIG_DEFAULTS.transport.trustMode,
   );
 
   // --- PERMISSION_TIMEOUT_MS (optional number, default 60000) ---
   const permissionTimeoutMs = parseNumberEnv(
     "PERMISSION_TIMEOUT_MS",
-    CONFIG_DEFAULTS.permissionTimeoutMs,
+    CONFIG_DEFAULTS.transport.permissionTimeoutMs,
   );
 
   // --- POLL_TIMEOUT_S (optional number, default 30) ---
   const pollTimeoutS = parseNumberEnv(
     "POLL_TIMEOUT_S",
-    CONFIG_DEFAULTS.pollTimeoutS,
+    CONFIG_DEFAULTS.telegram.pollTimeoutS,
   );
 
 
   // --- TMUX_SESSION (optional, default "kiro-bridge") ---
-  const tmuxSession = process.env["TMUX_SESSION"] || CONFIG_DEFAULTS.tmuxSession;
+  const tmuxSession = process.env["TMUX_SESSION"] || CONFIG_DEFAULTS.transport.tmuxSession;
 
   // --- TMUX_CAPTURE_DELAY_SEC (optional, default 3) ---
   const tmuxCaptureDelaySec = parseNumberEnv(
     "TMUX_CAPTURE_DELAY_SEC",
-    CONFIG_DEFAULTS.tmuxCaptureDelaySec,
+    CONFIG_DEFAULTS.transport.tmuxCaptureDelaySec,
   );
 
   // --- TMUX_MAX_WAIT_SEC (optional, default 300) ---
   const tmuxMaxWaitSec = parseNumberEnv(
     "TMUX_MAX_WAIT_SEC",
-    CONFIG_DEFAULTS.tmuxMaxWaitSec,
+    CONFIG_DEFAULTS.transport.tmuxMaxWaitSec,
   );
 
   // --- LOG_LEVEL (optional, default "low") ---
@@ -210,11 +209,11 @@ export async function loadAndValidateConfig(): Promise<Config> {
   // --- GROQ_API_KEY (optional, enables STT) ---
   const groqApiKey = process.env["GROQ_API_KEY"] ?? "";
   const sttEnabled = parseBoolEnv("STT_ENABLED", groqApiKey.length > 0);
-  const sttModel = process.env["STT_MODEL"] || CONFIG_DEFAULTS.sttModel;
+  const sttModel = process.env["STT_MODEL"] || CONFIG_DEFAULTS.voice.sttModel;
 
   // --- TTS (optional, default enabled) ---
-  const ttsEnabled = parseBoolEnv("TTS_ENABLED", CONFIG_DEFAULTS.ttsEnabled);
-  const ttsVoice = process.env["TTS_VOICE"] || CONFIG_DEFAULTS.ttsVoice;
+  const ttsEnabled = parseBoolEnv("TTS_ENABLED", CONFIG_DEFAULTS.voice.ttsEnabled);
+  const ttsVoice = process.env["TTS_VOICE"] || CONFIG_DEFAULTS.voice.ttsVoice;
 
   // --- DISCORD_BOT_TOKEN (optional — Discord disabled if absent) ---
   const discordBotToken = process.env["DISCORD_BOT_TOKEN"]?.trim() || undefined;
@@ -291,41 +290,51 @@ export async function loadAndValidateConfig(): Promise<Config> {
   // --- DISCORD_A2A_RATE_LIMIT_MS (optional, default 5000) ---
   const discordA2aRateLimitMs = parseNumberEnv(
     "DISCORD_A2A_RATE_LIMIT_MS",
-    CONFIG_DEFAULTS.discordA2aRateLimitMs,
+    CONFIG_DEFAULTS.discord.a2aRateLimitMs,
   );
 
   return {
-    telegramBotToken: token,
-    allowedUserIds,
-    agentCli,
-    agentCliPath,
-    agentTransport,
-    agentModel,
-    agentBrowseModel,
-    agentSleepModel,
-    agentCodingModel,
-    workingDir,
-    trustMode,
-    permissionTimeoutMs,
-    pollTimeoutS,
-    tmuxSession,
-    tmuxCaptureDelaySec,
-    tmuxMaxWaitSec,
+    telegram: {
+      botToken: token,
+      allowedUserIds,
+      pollTimeoutS,
+    },
+    discord: {
+      enabled: discordEnabled,
+      botToken: discordBotToken,
+      appId: discordAppId,
+      allowedUserIds: discordAllowedUserIds,
+      allowedChannelIds: discordAllowedChannelIds,
+      a2aEnabled: discordA2aEnabled,
+      a2aChannelId: discordA2aChannelId,
+      a2aPeerBotId: discordA2aPeerBotId,
+      a2aRateLimitMs: discordA2aRateLimitMs,
+    },
+    transport: {
+      agentTransport,
+      agentCli,
+      agentCliPath,
+      workingDir,
+      trustMode,
+      permissionTimeoutMs,
+      tmuxSession,
+      tmuxCaptureDelaySec,
+      tmuxMaxWaitSec,
+    },
+    voice: {
+      sttEnabled,
+      groqApiKey,
+      sttModel,
+      ttsEnabled,
+      ttsVoice,
+    },
+    models: {
+      agentModel,
+      browseModel: agentBrowseModel,
+      sleepModel: agentSleepModel,
+      codingModel: agentCodingModel,
+    },
     logLevel,
-    sttEnabled,
-    groqApiKey,
-    sttModel,
-    ttsEnabled,
-    ttsVoice,
-    discordBotToken,
-    discordAppId,
-    discordAllowedUserIds,
-    discordAllowedChannelIds,
-    discordA2aChannelId,
-    discordA2aPeerBotId,
-    discordA2aRateLimitMs,
-    discordEnabled,
-    discordA2aEnabled,
     mcpDaemon: parseBoolEnv("MCPORTER_DAEMON", CONFIG_DEFAULTS.mcpDaemon),
   };
 }

@@ -3,6 +3,7 @@ import { readFileSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { createHmac, randomBytes } from "crypto";
+import { agentBridgeHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./kiro-transport.js";
 import { AcpTransport } from "./acp-transport.js";
@@ -37,10 +38,17 @@ function normalizeIp(raw: string): string {
   return raw.replace(/^::ffff:/, "");
 }
 
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c) => chunks.push(c));
+    let size = 0;
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) { req.destroy(); reject(new Error("Request body too large")); return; }
+      chunks.push(c);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
     req.on("error", reject);
   });
@@ -69,7 +77,7 @@ export class AgentApiServer {
     this.workingDir = deps.workingDir;
     this.memory = deps.memory;
     this.server = createServer((req, res) => this.handle(req, res));
-    this.logDir = join(process.env.HOME ?? "", ".agentbridge/logs/agents");
+    this.logDir = join(agentBridgeHome(), "logs", "agents");
     mkdirSync(this.logDir, { recursive: true });
     this.logFile = this.newLogFile();
     try {
@@ -77,7 +85,7 @@ export class AgentApiServer {
       const name = deps.config.agentCodename;
       const candidates = [
         join(base, `../../skills/agents/${name}.md`),
-        join(process.env.HOME ?? "", `.agentbridge/skills/agents/${name}.md`),
+        join(agentBridgeHome(), "skills", "agents", `${name}.md`),
       ];
       this.agentRules = "";
       for (const p of candidates) {

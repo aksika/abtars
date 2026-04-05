@@ -7,11 +7,11 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { AGENT_BRIDGE_HOME } from "./config.js";
+import { agentBridgeHome } from "../paths.js";
 import { logInfo } from "./logger.js";
 
 const TAG = "MessageInterceptor";
-const OVERFLOW_DIR = join(AGENT_BRIDGE_HOME, "overflow");
+const OVERFLOW_DIR = join(agentBridgeHome(), "overflow");
 const DEFAULT_THRESHOLD = 8000;
 const PREVIEW_LENGTH = 500;
 

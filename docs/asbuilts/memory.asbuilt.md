@@ -233,7 +233,7 @@ Nulled automatically on content edit (re-embedded on next batch run).
 
 Source: `src/memory/recall-engine.ts`
 CLI wrapper: `src/cli/agentbridge-recall.ts`
-Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine)
+Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine, takes MemoryManager)
 
 ### Design Philosophy
 
@@ -607,11 +607,16 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | Component | File | Description |
 |-----------|------|-------------|
 | MemoryManager | `memory-manager.ts` | Top-level coordinator. Owns SQLite DB, delegates to sub-services. Search, stats, core knowledge. |
-| MessageStore | `message-store.ts` | Message recording, loading, emotion score updates. |
+| MessageStore | `message-store.ts` | Message recording, loading, emotion score updates. Dashboard queries (getAllExtractedMemories, getAllEntities, getDistinctChatIds). |
 | MemoryEditor | `memory-editor.ts` | Extracted memory mutations: editMemory(), instantStore(), merge, reclassify, cascadeDelete. |
 | MaintenanceService | `maintenance-service.ts` | Disk budget, backup pruning, auto-compact, forget operations. |
+| MemoryBackend | `memory-backend.ts` | Abstract interface for memory storage (store, edit, recall, delete, merge). |
+| SqliteBackend | `sqlite-backend.ts` | Default MemoryBackend wrapping MemoryManager. |
+| BackendFactory | `backend-factory.ts` | `createMemoryBackend()` — tries IPC socket first, falls back to SQLite. |
+| MemoryIpcServer | `memory-ipc-server.ts` | Unix socket server (`~/.agentbridge/memory.sock`). Keeps DB open for CLI tools. |
+| MemoryIpcClient | `memory-ipc-client.ts` | IPC client implementing MemoryBackend over Unix socket. |
 | MemoryIndex | `memory-index.ts` | FTS5 search + Darwinism recall counting. Emoji-stripped at index level. |
-| memory-db | `memory-db.ts` | Schema creation, all migrations (single source of truth), FTS5 triggers, custom SQL functions. |
+| memory-db | `memory-db.ts` | Schema creation, numbered migrations with `schema_version` table, FTS5 triggers, custom SQL functions (strip_emojis, strip_diacritics). |
 | memory-config | `memory-config.ts` | Env var loading + defaults for all memory settings. |
 | ollama-embed | `ollama-embed.ts` | Embedding via ollama API: embedText(), vectorSearch() (capped at 500 recent), batch embed. |
 | recall-engine | `recall-engine.ts` | 7-stage cascade (S1-S7 + Se), extracted-first, short-circuit, MMR post-processing. |
@@ -620,11 +625,11 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | emotion-utils | `emotion-utils.ts` | `clampEmotionScore()` — clamps to -5..+5 range. |
 | SessionContext | `session-context.ts` | `buildSessionStartContext()` — session-start context injection. |
 | PromptScanner | `prompt-scanner.ts` (in `src/components/`) | 22-pattern prompt injection detector. Used by store, edit, A2A. |
-| SleepTrigger | `sleep-trigger.ts` (in `src/components/`) | `hasSleepAuditToday()` — guard against re-run. |
-| SleepStateGatherer | `sleep-state-gatherer.ts` (in `src/components/`) | Gathers DB stats, FTS5 health, disk usage for sleep prompt. |
-| agentbridge-recall | `cli/agentbridge-recall.ts` | CLI wrapper for recall-engine. |
-| agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete (delegates to MemoryEditor). |
-| agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run. |
+| SleepTrigger | `sleep-trigger.ts` (in `src/capabilities/sleep/`) | `hasSleepAuditToday()` — guard against re-run. |
+| SleepStateGatherer | `sleep-state-gatherer.ts` (in `src/capabilities/sleep/`) | Gathers DB stats, FTS5 health, disk usage for sleep prompt. Takes MemoryManager. |
+| agentbridge-recall | `cli/agentbridge-recall.ts` | CLI wrapper for recall-engine. Uses `createMemoryBackend()` (IPC or SQLite). |
+| agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete. Uses `createMemoryBackend()` (IPC or SQLite). |
+| agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run. Uses `createMemoryBackend()` (IPC or SQLite). |
 | agentbridge-sleep | `cli/agentbridge-sleep.ts` | Sleep cycle orchestrator. Multi-turn conversation with Dreamy. |
 | agentbridge-embed | `cli/agentbridge-embed.ts` | Batch embed all memories with NULL embedding via ollama. |
 
@@ -644,6 +649,9 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | `MEMORY_RECALL_SHORT_CIRCUIT` | `true` | Toggle short-circuit in recall cascade |
 | `MEMORY_DISK_BUDGET_MB` | `500` | Disk budget for memory directory |
 | `MEMORY_FORGET_THRESHOLD` | `0.8` | Relevance threshold for topic-based forgetting |
+| `MEMORY_BACKEND` | `sqlite` | Memory backend type (only `sqlite` currently) |
+| `MEMORY_IPC` | `1` | Set to `0` to disable IPC socket (CLI tools open own DB) |
+| `AGENT_BRIDGE_HOME` | `~/.agentbridge` | Base directory for all runtime data (env override for paths) |
 
 ---
 
@@ -652,6 +660,7 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 ```
 ~/.agentbridge/memory/
   memory.db                    # SQLite: messages (hot buffer) + extracted_memories (permanent)
+  memory.sock                    # Unix socket for CLI IPC (bridge keeps DB open)
   context-window-start.json    # Per-chat session boundary timestamps
   .heartbeat                   # Epoch ms — written by HeartbeatSystem on each tick
   garbage.json                 # GC tracking: message_id → marked timestamp
@@ -678,7 +687,7 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 
 ## Test Coverage
 
-720 tests across 70 files.
+764 tests across 78 files.
 
 ### Test Categories
 

@@ -1,6 +1,6 @@
-import { resolve } from "node:path";
-import { homedir } from "node:os";
+import { join } from "node:path";
 import { parseBoolEnv, parseNumberEnv } from "../components/env-utils.js";
+import { agentBridgeHome } from "../paths.js";
 
 /** Configuration for the local memory layer. */
 export type MemoryConfig = {
@@ -28,7 +28,7 @@ export type MemoryConfig = {
 /** Default values for all memory configuration fields. */
 export const MEMORY_CONFIG_DEFAULTS: MemoryConfig = {
   memoryEnabled: true,
-  memoryDir: resolve(homedir(), ".agentbridge", "memory"),
+  memoryDir: join(agentBridgeHome(), "memory"),
   maxMessagesPerChat: 1000,
   diskBudgetBytes: 500 * 1024 * 1024,
   stalenessThresholdMs: 24 * 3600_000,

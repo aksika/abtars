@@ -1,18 +1,18 @@
 import { appendFileSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
-import { homedir } from "node:os";
+import { join } from "node:path";
+import { agentBridgeHome } from "../paths.js";
 
 /** Log levels: OFF = silent, LOW = operational info, DEBUG = everything */
 export type LogLevel = "off" | "low" | "debug";
 
 const LEVEL_ORDER: Record<LogLevel, number> = { off: 0, low: 1, debug: 2 };
-const LOG_DIR = resolve(homedir(), ".agentbridge", "logs");
+const LOG_DIR = join(agentBridgeHome(), "logs");
 
 /** Get today's log filename: bridge-YYYY-MM-DD.log */
 export function getLogFile(): string {
   const d = new Date();
   const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  return resolve(LOG_DIR, `bridge-${date}.log`);
+  return join(LOG_DIR, `bridge-${date}.log`);
 }
 
 let currentLevel: LogLevel = "low";
@@ -38,10 +38,39 @@ function writeToFile(line: string): void {
   if (!fileLogging) return;
   try {
     mkdirSync(LOG_DIR, { recursive: true });
-    appendFileSync(getLogFile(), line + "\n");
+    appendFileSync(getLogFile(), redactSecrets(line) + "\n");
   } catch {
     // silently ignore file write errors
   }
+}
+
+// ── Credential redaction ────────────────────────────────────────────────────
+
+const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
+  [/sk-[A-Za-z0-9_-]{20,}/g, "sk-***REDACTED***"],
+  [/ghp_[A-Za-z0-9]{36,}/g, "ghp_***REDACTED***"],
+  [/github_pat_[A-Za-z0-9_]{20,}/g, "github_pat_***REDACTED***"],
+  [/xox[baprs]-[A-Za-z0-9-]{10,}/g, "xox_-***REDACTED***"],
+  [/AIza[A-Za-z0-9_-]{30,}/g, "AIza***REDACTED***"],
+  [/AKIA[A-Z0-9]{16}/g, "AKIA***REDACTED***"],
+  [/\d{8,12}:[A-Za-z0-9_-]{35,}/g, "***BOT_TOKEN***"],
+  [/Bearer [A-Za-z0-9._-]{20,}/g, "Bearer ***REDACTED***"],
+  [/hf_[A-Za-z0-9]{20,}/g, "hf_***REDACTED***"],
+  [/npm_[A-Za-z0-9]{20,}/g, "npm_***REDACTED***"],
+  [/sk_live_[A-Za-z0-9]{20,}/g, "sk_live_***REDACTED***"],
+  [/sk_test_[A-Za-z0-9]{20,}/g, "sk_test_***REDACTED***"],
+  [/SG\.[A-Za-z0-9_-]{20,}/g, "SG.***REDACTED***"],
+  [/("(?:api[_-]?key|token|secret|password|authorization|credential)"\s*:\s*")[^"]{8,}"/gi, '$1***REDACTED***"'],
+  [/([A-Z_]*(?:KEY|TOKEN|SECRET|PASSWORD)=)[^\s]{8,}/g, "$1***REDACTED***"],
+];
+
+/** Strip known secret patterns from a log line. */
+export function redactSecrets(text: string): string {
+  let result = text;
+  for (const [pattern, replacement] of SECRET_PATTERNS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
 }
 
 const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";

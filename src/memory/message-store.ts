@@ -79,4 +79,66 @@ export class MessageStore {
       return false;
     }
   }
+
+  /** Get the timestamp of the most recent user message (optionally excluding system markers). */
+  getLastMessageTimestamp(excludeSystem = false): number {
+    try {
+      const sql = excludeSystem
+        ? "SELECT MAX(timestamp) as ts FROM messages WHERE content NOT LIKE '%[SYSTEM%'"
+        : "SELECT MAX(timestamp) as ts FROM messages WHERE role = 'user'";
+      const row = this.db.prepare(sql).get() as { ts: number | null } | undefined;
+      return row?.ts ?? 0;
+    } catch { return 0; }
+  }
+
+  /** Get recent messages since a timestamp, ordered newest first. */
+  getMessagesSince(sinceTimestamp: number, limit: number): Array<{ role: string; content: string; timestamp: number }> {
+    try {
+      return this.db.prepare(
+        "SELECT role, content, timestamp FROM messages WHERE timestamp > ? ORDER BY timestamp DESC LIMIT ?",
+      ).all(sinceTimestamp, limit) as Array<{ role: string; content: string; timestamp: number }>;
+    } catch { return []; }
+  }
+
+  /** Get recent extracted memories (English content), newest first. */
+  getRecentExtractedMemories(limit: number): string[] {
+    try {
+      const rows = this.db.prepare(
+        "SELECT content_en FROM extracted_memories ORDER BY created_at DESC LIMIT ?",
+      ).all(limit) as Array<{ content_en: string }>;
+      return rows.map(r => r.content_en);
+    } catch { return []; }
+  }
+
+  /** Get all extracted memories with attributes (for dashboard visualization). */
+  getAllExtractedMemories(): Array<Record<string, unknown>> {
+    try {
+      return this.db.prepare(
+        `SELECT id, content_en, content_original, memory_type, created_at, emotion_score,
+                recall_count, relevance_score, classification, trust, integrity, credibility,
+                CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END as has_embedding
+         FROM extracted_memories ORDER BY created_at DESC`
+      ).all() as Array<Record<string, unknown>>;
+    } catch { return []; }
+  }
+
+  /** Get all entities. */
+  getAllEntities(): Array<Record<string, unknown>> {
+    try { return this.db.prepare("SELECT id, name, type, summary FROM entities").all() as Array<Record<string, unknown>>; }
+    catch { return []; }
+  }
+
+  /** Get all memory-entity links. */
+  getAllEntityLinks(): Array<Record<string, unknown>> {
+    try { return this.db.prepare("SELECT memory_id, entity_id FROM memory_entities").all() as Array<Record<string, unknown>>; }
+    catch { return []; }
+  }
+
+  /** Get distinct chat IDs from messages. */
+  getDistinctChatIds(): number[] {
+    try {
+      return (this.db.prepare("SELECT DISTINCT chat_id FROM messages ORDER BY chat_id").all() as Array<{ chat_id: number }>)
+        .map(r => r.chat_id);
+    } catch { return []; }
+  }
 }

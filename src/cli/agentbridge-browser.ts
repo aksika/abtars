@@ -24,10 +24,10 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import type { BrowserAction, BrowserActionType, BrowserToolResult } from "../types/browser.js";
-import { BrowserManager } from "../components/browser-manager.js";
-import { BrowserTool } from "../components/browser-tool.js";
-import { DomainAllowlist } from "../components/domain-allowlist.js";
-import { getDefaultSocketPath } from "../components/browser-ipc-server.js";
+import { BrowserManager } from "../capabilities/browser/browser-manager.js";
+import { BrowserTool } from "../capabilities/browser/browser-tool.js";
+import { DomainAllowlist } from "../capabilities/browser/domain-allowlist.js";
+import { getDefaultSocketPath } from "../capabilities/browser/browser-ipc-server.js";
 
 /** The 7 valid browser action types. */
 const VALID_ACTIONS: ReadonlySet<string> = new Set<BrowserActionType>([
@@ -49,6 +49,7 @@ export type RawBrowserArgs = {
   sessionId: string;
   fullPage: boolean;
   cookieFile?: string;
+  engine?: string;
 };
 
 /**
@@ -68,6 +69,7 @@ export function parseArgs(argv: string[]): RawBrowserArgs {
       case "--session-id": parsed.sessionId = args[++i] ?? "default"; break;
       case "--full-page":  parsed.fullPage = true; break;
       case "--cookie-file": parsed.cookieFile = args[++i] ?? ""; break;
+      case "--engine":     parsed.engine = args[++i] ?? ""; break;
     }
   }
 
@@ -80,7 +82,7 @@ export function parseArgs(argv: string[]): RawBrowserArgs {
  */
 export function validateArgs(
   raw: RawBrowserArgs,
-): { ok: true; action: BrowserAction } | { ok: false; error: string } {
+): { ok: true; action: BrowserAction; raw: RawBrowserArgs } | { ok: false; error: string } {
   // Validate action is one of the 7 valid types
   if (!raw.action) {
     return { ok: false, error: "--action is required" };
@@ -114,6 +116,7 @@ export function validateArgs(
 
   return {
     ok: true,
+    raw,
     action: {
       action: actionType,
       sessionId: raw.sessionId,
@@ -183,6 +186,8 @@ async function main() {
   }
 
   // Fallback: ephemeral browser (no session persistence).
+  if (validation.raw.engine) process.env["BROWSER_ENGINE"] = validation.raw.engine;
+  else if (!process.env["BROWSER_ENGINE"]) process.env["BROWSER_ENGINE"] = "lightpanda";
   const browserManager = new BrowserManager();
   const allowlist = DomainAllowlist.fromEnv();
   const tool = new BrowserTool(browserManager, allowlist);

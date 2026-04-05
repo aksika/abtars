@@ -1,10 +1,9 @@
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { readEntry as cronReadEntry } from "./components/cron-db.js";
-import { spawn, execFileSync, execSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { execFileSync, execSync } from "node:child_process";
 import { loadAndValidateConfig } from "./components/config.js";
-import { AGENT_BRIDGE_HOME } from "./components/config.js";
+import { agentBridgeHome } from "./paths.js";
 
 import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
@@ -27,18 +26,14 @@ import { MemorySearchController } from "./components/memory-search-controller.js
 import { DashboardServer } from "./components/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard-ui.js";
 import { loadNLMConfig } from "./components/nlm-command-handler.js";
-import { hasSleepAuditToday } from "./components/sleep-trigger.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
-import { SkillWatcher } from "./components/skill-watcher.js";
 import { writeRestartReason } from "./components/restart-reason.js";
 import { isDailyCycleDue } from "./components/daily-cycle.js";
 import { classifyResume } from "./components/platform-detect.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
-import { BrowserManager } from "./components/browser-manager.js";
-import { BrowserTool } from "./components/browser-tool.js";
-import { BrowserIpcServer } from "./components/browser-ipc-server.js";
-import { DomainAllowlist } from "./components/domain-allowlist.js";
+import { BrowserManager } from "./capabilities/browser/browser-manager.js";
+import { BrowserIpcServer } from "./capabilities/browser/browser-ipc-server.js";
 import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
 import { checkCron, checkBrowseTasks, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
@@ -81,12 +76,88 @@ async function sendBackOnline(
   }
 }
 
+import type { Config } from "./types/index.js";
+import type { MemoryConfig } from "./memory/memory-config.js";
+import type { PipelineDeps } from "./components/message-pipeline.js";
+import { createCapabilityRegistry, createCapabilityApi } from "./capabilities/capability.js";
+import type { CapabilityRegistry, CapabilityRegisterFn } from "./capabilities/capability.js";
+
+/**
+ * Bridge — owns the lifecycle of all subsystems.
+ * Created by startBridge(), exposes subsystems for the future plugin system.
+ */
+export class Bridge {
+  readonly config: Config;
+  readonly memoryConfig: MemoryConfig;
+  readonly startedAt = Date.now();
+
+  transport!: IKiroTransport;
+  memory: MemoryManager | null = null;
+  heartbeat!: HeartbeatSystem;
+  registry = new ServiceRegistry();
+  pipelineDeps!: PipelineDeps;
+
+  dashboardServer: DashboardServer | null = null;
+  agentApiServer: AgentApiServer | null = null;
+  browserIpc: BrowserIpcServer | null = null;
+  /** @deprecated Browser is now a capability — this field is only used by shutdown. */
+  browserManager: BrowserManager | null = null;
+  mcpDaemonStarted = false;
+  cronQueue!: CronQueue;
+  sleepHandle: import("./capabilities/sleep/index.js").SleepHandle | null = null;
+
+  constructor(config: Config, memoryConfig: MemoryConfig) {
+    this.config = config;
+    this.memoryConfig = memoryConfig;
+  }
+
+  /** Collected registrations from all capabilities. */
+  readonly capabilities: CapabilityRegistry = createCapabilityRegistry();
+
+  /** Register a capability before start(). */
+  registerCapability(fn: CapabilityRegisterFn): void {
+    const api = createCapabilityApi(this.capabilities, this.config, this.memory, this.transport);
+    fn(api);
+  }
+
+  async shutdown(): Promise<void> {
+    logInfo("main", "🛑 Shutting down...");
+    const forceTimer = setTimeout(() => {
+      logWarn("main", "⚠️  Shutdown timed out — forcing exit");
+      process.exit(1);
+    }, 15_000);
+    forceTimer.unref();
+
+    const step = (name: string, fn: () => Promise<void> | void, ms = 3000): Promise<void> =>
+      Promise.race([
+        Promise.resolve(fn()).catch(() => {}),
+        new Promise<void>(r => { const t = setTimeout(() => { logWarn("main", `Shutdown step '${name}' timed out (${ms}ms) — skipping`); r(); }, ms); (t as NodeJS.Timeout).unref?.(); }),
+      ]);
+
+    await step("agent-api", () => this.agentApiServer?.stop());
+    await step("dashboard", () => this.dashboardServer?.stop());
+    await step("services", () => this.registry.stopAll());
+    await step("heartbeat", () => this.heartbeat.stop());
+    await step("browser-ipc", () => this.browserIpc?.shutdown());
+    await step("browser", () => this.browserManager?.shutdown(), 5000);
+    await step("memory", () => this.memory?.close());
+    await step("transport", () => this.transport.destroy());
+    if (this.mcpDaemonStarted) {
+      await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
+    }
+    process.exit(0);
+  }
+}
+
 export async function startBridge(): Promise<void> {
-  const startedAt = Date.now();
   const platforms = parsePlatformFlags();
   const config = await loadAndValidateConfig();
-  if (platforms.transport) config.agentTransport = platforms.transport;
+  if (platforms.transport) config.transport.agentTransport = platforms.transport;
   setLogLevel(config.logLevel);
+
+  const memoryConfig = loadMemoryConfig();
+  const bridge = new Bridge(config, memoryConfig);
+  const startedAt = bridge.startedAt;
 
   const enabledList = [
     platforms.telegram && "telegram",
@@ -97,11 +168,11 @@ export async function startBridge(): Promise<void> {
   // === CRITICAL PATH: Memory → Transport → Telegram (fastest path to accepting messages) ===
 
   // Initialize memory layer
-  const memoryConfig = loadMemoryConfig();
   let memory: MemoryManager | null = null;
   if (memoryConfig.memoryEnabled) {
     memory = new MemoryManager(memoryConfig);
     await memory.initialize();
+    bridge.memory = memory;
     logInfo("main", `🧠 Memory enabled (dir=${memoryConfig.memoryDir})`);
   } else {
     logInfo("main", "🧠 Memory disabled");
@@ -110,8 +181,8 @@ export async function startBridge(): Promise<void> {
   const conversationBuffer = new ConversationBuffer(50);
 
   // --- Pre-flight: start external services ---
-  if (config.agentTransport === "tmux") {
-    logInfo("main", `♻️  Starting tmux session '${config.tmuxSession}'...`);
+  if (config.transport.agentTransport === "tmux") {
+    logInfo("main", `♻️  Starting tmux session '${config.transport.tmuxSession}'...`);
     try {
       execFileSync(join(import.meta.dirname, "..", "scripts", "tmux-session.sh"), { stdio: "pipe" });
     } catch (err) {
@@ -120,38 +191,41 @@ export async function startBridge(): Promise<void> {
   }
 
   let transport: IKiroTransport;
-  if (config.agentTransport === "tmux") {
-    logInfo("main", `🖥️  tmux transport (session: ${config.tmuxSession})`);
+  if (config.transport.agentTransport === "tmux") {
+    logInfo("main", `🖥️  tmux transport (session: ${config.transport.tmuxSession})`);
     transport = new TmuxClient(
-      config.tmuxSession,
-      config.tmuxCaptureDelaySec,
-      config.tmuxMaxWaitSec,
+      config.transport.tmuxSession,
+      config.transport.tmuxCaptureDelaySec,
+      config.transport.tmuxMaxWaitSec,
     );
   } else {
     // Kill orphaned processes from previous runs
     try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
-    logInfo("main", `🔌 ACP transport (${config.agentCli})`);
+    logInfo("main", `🔌 ACP transport (${config.transport.agentCli})`);
 
     // Build CLI args based on which CLI is selected
-    const cliArgs = config.agentCli === "gemini"
+    const cliArgs = config.transport.agentCli === "gemini"
       ? ["--acp", "-y"]
       : undefined; // kiro and custom CLIs use default "acp" subcommand
 
-    transport = new AcpTransport(config.agentCliPath, config.workingDir, {
-      model: config.agentModel || undefined,
+    transport = new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, {
+      model: config.models.agentModel || undefined,
       cliArgs,
     });
   }
   await transport.initialize();
+  bridge.transport = transport;
   logInfo("main", "✅ Transport ready");
 
   // Initialize context-window-start for all known chats
   if (memoryConfig.memoryEnabled) {
-    for (const uid of config.allowedUserIds) updateCtxStart(memoryConfig.memoryDir, uid, startedAt);
+    for (const uid of config.telegram.allowedUserIds) updateCtxStart(memoryConfig.memoryDir, uid, startedAt);
   }
 
   // Sleep state
-  let sleepChild: import("node:child_process").ChildProcess | null = null;
+  // sleepChild tracked via sleepHandle (created after heartbeat start)
+  let sleepHandle: import("./capabilities/sleep/index.js").SleepHandle | null = null;
+  const isSleepActive = (): boolean => sleepHandle?.child !== null && sleepHandle?.child !== undefined && !sleepHandle.child.killed;
   const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
   const sleepAuditDir = join(memoryConfig.memoryDir, "sleep");
 
@@ -159,22 +233,22 @@ export async function startBridge(): Promise<void> {
   const pendingSessionStart = new Set<string>();
   const seenSessions = new Set<string>();
   const fullModeChats = new Set<string>();
-  const codingModeManager = new CodingMode(config.agentCliPath, config.workingDir, config.agentCodingModel);
+  const codingModeManager = new CodingMode(config.transport.agentCliPath, config.transport.workingDir, config.models.codingModel);
   const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
-  const registry = new ServiceRegistry();
+  const registry = bridge.registry;
 
   // STT/TTS config (lightweight — just reads env vars)
-  const sttConfig: SttConfig | null = config.sttEnabled
-    ? { provider: "groq", apiKey: config.groqApiKey, model: config.sttModel }
+  const sttConfig: SttConfig | null = config.voice.sttEnabled
+    ? { provider: "groq", apiKey: config.voice.groqApiKey, model: config.voice.sttModel }
     : null;
-  const ttsConfig: TtsConfig | null = config.ttsEnabled
-    ? { voice: config.ttsVoice }
+  const ttsConfig: TtsConfig | null = config.voice.ttsEnabled
+    ? { voice: config.voice.ttsVoice }
     : null;
 
   const nlmConfig = loadNLMConfig();
 
   // CronQueue must be initialized before pipelineDeps (which references it)
-  const cronQueue = new CronQueue(config.agentCliPath, config.workingDir, (entryId, command, result) => {
+  const cronQueue = new CronQueue(config.transport.agentCliPath, config.transport.workingDir, (entryId, command, result) => {
     const msg = `[System] Cron task "${entryId}" failed:\nCommand: ${command}\nResult: ${result}\n\nDiagnose and fix if possible. If you can't fix it, tell the user.`;
     transport.sendPrompt("system:cron-fix", msg).catch(err => {
       logWarn("main", `Cron auto-fix inject failed: ${err}`);
@@ -184,7 +258,12 @@ export async function startBridge(): Promise<void> {
   // Build pipeline deps (needed before platform start)
   const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
     transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
-    idleSave, conversationBuffer, config, startedAt,
+    idleSave, conversationBuffer, config: {
+      agentTransport: config.transport.agentTransport,
+      workingDir: config.transport.workingDir,
+      discordA2aEnabled: config.discord.a2aEnabled,
+      discordA2aChannelId: config.discord.a2aChannelId,
+    }, startedAt,
     sttConfig, ttsConfig,
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
     messageQueue: new Map(),
@@ -198,6 +277,8 @@ export async function startBridge(): Promise<void> {
       } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
     },
     requestShutdown: () => process.exit(0),
+    sleepProgress: () => sleepHandle?.progress ?? null,
+    loadedCapabilities: [],
   };
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
@@ -206,6 +287,14 @@ export async function startBridge(): Promise<void> {
       return transport.sendPrompt("system:memory", `${prompt}\n\n${content}`);
     });
     logInfo("main", "🧠 Memory LLM callback registered");
+
+    // Start memory IPC server (CLI tools connect here instead of opening their own DB)
+    const { MemoryIpcServer } = await import("./memory/memory-ipc-server.js");
+    const { SqliteBackend } = await import("./memory/sqlite-backend.js");
+    const ipcBackend = new SqliteBackend(memoryConfig);
+    await ipcBackend.initialize();
+    const memoryIpc = new MemoryIpcServer(ipcBackend);
+    await memoryIpc.start();
   }
 
     // Unified heartbeat — single 5-min timer for all periodic tasks
@@ -214,11 +303,11 @@ export async function startBridge(): Promise<void> {
   let telegramAdapter: import("./platforms/telegram-adapter.js").TelegramAdapter | null = null;
 
   registry.register("telegram", {
-    configured: Boolean(config.telegramBotToken && config.allowedUserIds.size > 0),
+    configured: Boolean(config.telegram.botToken && config.telegram.allowedUserIds.size > 0),
     async create() {
       const { TelegramAdapter } = await import("./platforms/telegram-adapter.js");
       telegramAdapter = new TelegramAdapter(
-        { botToken: config.telegramBotToken, allowedUserIds: config.allowedUserIds, pollTimeoutS: config.pollTimeoutS },
+        { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
         { pipeline: pipelineDeps, conversationBuffer, transport, memory },
       );
       platformAdapters.set("telegram", telegramAdapter);
@@ -244,19 +333,19 @@ export async function startBridge(): Promise<void> {
   let discordAdapter: import("./platforms/discord-adapter.js").DiscordAdapter | null = null;
 
   registry.register("discord", {
-    configured: Boolean(config.discordEnabled && config.discordBotToken),
+    configured: Boolean(config.discord.enabled && config.discord.botToken),
     async create() {
       const { DiscordAdapter } = await import("./platforms/discord-adapter.js");
       discordAdapter = new DiscordAdapter(
         {
-          botToken: config.discordBotToken!,
-          appId: config.discordAppId!,
-          allowedUserIds: config.discordAllowedUserIds!,
-          allowedChannelIds: config.discordAllowedChannelIds!,
-          a2aEnabled: config.discordA2aEnabled,
-          a2aChannelId: config.discordA2aChannelId,
-          a2aPeerBotId: config.discordA2aPeerBotId,
-          a2aRateLimitMs: config.discordA2aRateLimitMs,
+          botToken: config.discord.botToken!,
+          appId: config.discord.appId!,
+          allowedUserIds: config.discord.allowedUserIds!,
+          allowedChannelIds: config.discord.allowedChannelIds!,
+          a2aEnabled: config.discord.a2aEnabled,
+          a2aChannelId: config.discord.a2aChannelId,
+          a2aPeerBotId: config.discord.a2aPeerBotId,
+          a2aRateLimitMs: config.discord.a2aRateLimitMs,
         },
         { pipeline: pipelineDeps, transport, memory, conversationBuffer },
       );
@@ -283,24 +372,21 @@ export async function startBridge(): Promise<void> {
 
   // === DEFERRED INIT: non-critical services (after platforms are accepting messages) ===
 
-  // Browser (lazy — IPC starts on first browse task)
-  const browserManager = new BrowserManager();
-  const allowlist = DomainAllowlist.fromEnv();
-  const browserTool = new BrowserTool(browserManager, allowlist);
-  let browserIpc: BrowserIpcServer | null = null;
-  const ensureBrowserIpc = async (): Promise<void> => {
-    if (browserIpc || process.env["BROWSER_DOCKER"] === "1") return;
-    browserIpc = new BrowserIpcServer(browserTool);
-    await browserIpc.start();
-    logInfo("main", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
-  };
+  // Auto-discover capabilities (browser, hotskills, etc.)
+  const { discoverCapabilities } = await import("./capabilities/capability.js");
+  const capDir = join(import.meta.dirname, "capabilities");
+  const loaded = await discoverCapabilities(bridge.capabilities, config, memory, transport, capDir);
+  if (loaded.length > 0) {
+    logInfo("main", `🔌 Capabilities: ${loaded.join(", ")}`);
+    pipelineDeps.loadedCapabilities = ["sleep", ...loaded];
+  }
 
   // MCP daemon
-  let mcpDaemonStarted = false;
+  // mcpDaemonStarted is on bridge
   if (config.mcpDaemon) {
     try {
       execFileSync("mcporter", ["daemon", "start"], { stdio: "pipe" });
-      mcpDaemonStarted = true;
+      bridge.mcpDaemonStarted = true;
       logInfo("main", "🔌 mcporter daemon started");
     } catch {
       logWarn("main", "mcporter not found or daemon start failed — skipping");
@@ -313,11 +399,11 @@ export async function startBridge(): Promise<void> {
   // --- Startup notification (async, non-blocking) ---
   if (memoryConfig.memoryEnabled) {
     const tgSend = telegramAdapter ? async (msg: string): Promise<void> => {
-      const chatId = [...config.allowedUserIds][0];
+      const chatId = [...config.telegram.allowedUserIds][0];
       if (chatId) await telegramAdapter!.sendMessage(String(chatId), msg);
     } : undefined;
     const dcSend = discordAdapter ? async (msg: string): Promise<void> => {
-      const channelId = config.discordAllowedChannelIds ? [...config.discordAllowedChannelIds][0] : undefined;
+      const channelId = config.discord.allowedChannelIds ? [...config.discord.allowedChannelIds][0] : undefined;
       if (channelId) await discordAdapter!.sendMessage(channelId, msg);
     } : undefined;
     sendBackOnline(tgSend, dcSend).catch((err) => {
@@ -326,7 +412,7 @@ export async function startBridge(): Promise<void> {
 
     // Start session: inject SOUL + context + greeting, push response to Telegram
     if (telegramAdapter && memory) {
-      const chatId = [...config.allowedUserIds][0];
+      const chatId = [...config.telegram.allowedUserIds][0];
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
         seenSessions.add(sessionKey);
@@ -347,14 +433,14 @@ export async function startBridge(): Promise<void> {
   }
 
   // bridge.lock — track bridge lifecycle
-  const bridgeLockPath = join(AGENT_BRIDGE_HOME, "bridge.lock");
+  const bridgeLockPath = join(agentBridgeHome(), "bridge.lock");
   try { writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf-8"); } catch { /* */ }
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
   const heartbeat = new HeartbeatSystem({
     enabled: true,
     intervalMs: hbIntervalMs,
-    sleepActive: () => sleepChild !== null && !sleepChild.killed,
+    sleepActive: isSleepActive,
     onStandbyResume: (gapMs) => {
       // L1: Platform-specific check
       const resumeKind = classifyResume();
@@ -364,7 +450,7 @@ export async function startBridge(): Promise<void> {
       }
 
       // L2: Daily cycle check
-      if (isDailyCycleDue({ sleepHour: SLEEP_HOUR, bridgeLockPath, memory, busyChats, isSleepActive: () => sleepChild !== null && !sleepChild.killed })) {
+      if (isDailyCycleDue({ sleepHour: SLEEP_HOUR, bridgeLockPath, memory, busyChats, isSleepActive })) {
         logInfo("main", `🔄 Standby resume (${Math.round(gapMs / 60000)}min) + daily cycle due — restarting`);
         writeRestartReason(`daily-cycle: standby-resume ${Math.round(gapMs / 60000)}min`);
         try { unlinkSync(bridgeLockPath); } catch { /* */ }
@@ -391,31 +477,9 @@ export async function startBridge(): Promise<void> {
     },
   });
 
-  heartbeat.registerTask({
-    name: "browse-checker",
-    execute: async () => { await ensureBrowserIpc(); checkBrowseTasks(); },
-  });
+  // browse-checker is now registered by browser capability
 
-  // --- Skill hot-reload ---
-  const skillWatcher = new SkillWatcher(
-    join(AGENT_BRIDGE_HOME, "skills"),
-    join(AGENT_BRIDGE_HOME, "skills", "TOOLS.md"),
-  );
-  heartbeat.registerTask({
-    name: "skill-reloader",
-    execute: async () => {
-      const changed = skillWatcher.checkForChanges();
-      for (const skill of changed) {
-        skillWatcher.appendToTools(skill);
-        const chatId = [...config.allowedUserIds][0];
-        if (chatId) {
-          const msg = `[NEW SKILL AVAILABLE] ${skill.name}: ${skill.description}. Read ${skill.path} if you need it.`;
-          await transport.sendPrompt(`telegram:${chatId}`, msg);
-          logInfo("skill-reloader", `Injected: ${skill.name}`);
-        }
-      }
-    },
-  });
+  // skill-reloader is now registered by skills capability
 
   heartbeat.registerTask({
     name: "reminder-injector",
@@ -445,20 +509,19 @@ export async function startBridge(): Promise<void> {
 
   // --- DB integrity check (hourly) ---
   const SLEEP_HOUR = parseInt(process.env["SLEEP_TIME"]?.split(":")[0] ?? "6", 10);
-  const isSleepActive = (): boolean => sleepChild !== null && !sleepChild.killed;
 
   // --- Floating compaction (idle-triggered) ---
   if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
     heartbeat.registerTask(createIdleCompactTask({
       transport, memory, memoryDir: memoryConfig.memoryDir,
-      allowedUserIds: config.allowedUserIds, busyChats, pendingSessionStart, isSleepActive,
+      allowedUserIds: config.telegram.allowedUserIds, busyChats, pendingSessionStart, isSleepActive,
     }));
   }
 
   // --- Daily cycle: restart after SLEEP_TIME ---
   heartbeat.registerTask(createAgeCheckTask({
     memory, bridgeLockPath, sleepHour: SLEEP_HOUR, busyChats, isSleepActive,
-    doctorPath: join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh"),
+    doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
   }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
@@ -472,7 +535,7 @@ export async function startBridge(): Promise<void> {
   heartbeat.registerTask({
     name: "restart-check",
     execute: async () => {
-      const flag = join(AGENT_BRIDGE_HOME, ".restart-requested");
+      const flag = join(agentBridgeHome(), ".restart-requested");
       if (existsSync(flag)) {
         const reason = readFileSync(flag, "utf-8").trim();
         logInfo("restart-check", `Restart requested: ${reason}`);
@@ -484,57 +547,39 @@ export async function startBridge(): Promise<void> {
 
   // --- Self-healing agent: error scanner ---
   if (process.env["SELFHEAL_ENABLED"] !== "false") {
-    heartbeat.registerTask(createSelfHealerTask(() => telegramAdapter, config.allowedUserIds));
+    heartbeat.registerTask(createSelfHealerTask(() => telegramAdapter, config.telegram.allowedUserIds));
   }
 
   // Run once on startup, then start periodic
+  // Wire capability-registered commands
+  const { registerCommand } = await import("./components/command-handlers.js");
+  for (const [name, handler] of bridge.capabilities.commands) {
+    registerCommand(name, handler);
+  }
+
+  // Wire capability-registered heartbeat tasks
+  for (const task of bridge.capabilities.heartbeatTasks) {
+    heartbeat.registerTask(task);
+  }
+
   checkBrowseTasks();
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);
   logInfo("main", "💓 Heartbeat started (5-min interval)");
 
-  // --- Startup sleep (background, with retry) ---
-  const SLEEP_MAX_RETRIES = 3;
-  const SLEEP_RETRY_MS = 5 * 60 * 1000;
-  let sleepAttempts = 0;
-
-  function spawnSleep(): void {
-    if (new Date().getHours() < SLEEP_HOUR) {
-      logDebug("main", `😴 Before SLEEP_TIME (${SLEEP_HOUR}:00) — skip`);
-      return;
-    }
-    if (hasSleepAuditToday(sleepAuditDir)) {
-      logDebug("main", "😴 Sleep already done today — skip");
-      return;
-    }
-    if (sleepChild && !sleepChild.killed) return;
-    sleepAttempts++;
-    try {
-      const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "cli", "agentbridge-sleep.js");
-      const child = spawn(process.execPath, [sleepScript], { stdio: "ignore" });
-      sleepChild = child;
-      child.on("exit", (code) => {
-        sleepChild = null;
-        if (code === 0) {
-          logInfo("main", `😴 Sleep finished successfully (attempt ${sleepAttempts})`);
-          if (memoryConfig.memoryEnabled) resetAllCtxStarts(memoryConfig.memoryDir);
-        } else if (sleepAttempts < SLEEP_MAX_RETRIES) {
-          logWarn("main", `😴 Sleep failed (code=${code}, attempt ${sleepAttempts}/${SLEEP_MAX_RETRIES}) — retry in 5min`);
-          setTimeout(spawnSleep, SLEEP_RETRY_MS);
-        } else {
-          logWarn("main", `😴 Sleep failed (code=${code}) — exhausted ${SLEEP_MAX_RETRIES} attempts`);
-        }
-      });
-      logInfo("main", `😴 Sleep spawned (pid=${child.pid}, attempt ${sleepAttempts})`);
-    } catch (err) {
-      logWarn("main", `😴 Sleep spawn failed: ${err instanceof Error ? err.message : String(err)}`);
-      if (sleepAttempts < SLEEP_MAX_RETRIES) setTimeout(spawnSleep, SLEEP_RETRY_MS);
-    }
-  }
-  spawnSleep();
+  // --- Sleep capability (background, with retry) ---
+  const { createSleepHandle } = await import("./capabilities/sleep/index.js");
+  sleepHandle = createSleepHandle({
+    sleepHour: SLEEP_HOUR,
+    sleepAuditDir,
+    memoryEnabled: memoryConfig.memoryEnabled,
+    onComplete: () => resetAllCtxStarts(memoryConfig.memoryDir),
+  });
+  bridge.sleepHandle = sleepHandle;
+  sleepHandle.spawn();
 
   // --- Web Dashboard wiring (conditional) ---
-  let dashboardServer: DashboardServer | null = null;
+  let dashboardServer: DashboardServer | null = null; // local ref, wired to bridge at end
 
   if (platforms.web) {
     const dashConfig = loadDashboardConfig(process.env);
@@ -572,7 +617,7 @@ export async function startBridge(): Promise<void> {
         },
         services: svcStates,
         transport: {
-          type: config.agentTransport as "tmux" | "acp",
+          type: config.transport.agentTransport as "tmux" | "acp",
           isReady: transport.isReady,
           contextPercent: transport.contextPercent,
         },
@@ -595,8 +640,7 @@ export async function startBridge(): Promise<void> {
     const authGate = new AuthGate(dashConfig.webAuthToken);
     const memorySearchController = memory
       ? new MemorySearchController({
-          memoryIndex: memory.getMemoryIndex()!,
-          db: memory.getDatabase()!,
+          memory,
           memoryDir: memoryConfig.memoryDir,
           ctxStartPath: join(memoryConfig.memoryDir, "context-window-start.json"),
         })
@@ -616,7 +660,7 @@ export async function startBridge(): Promise<void> {
   }
 
   // --- Agent API service ---
-  let agentApiServer: AgentApiServer | null = null;
+  let agentApiServer: AgentApiServer | null = null; // local ref, wired to bridge at end
   const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
 
   registry.register("agent-api", {
@@ -624,8 +668,8 @@ export async function startBridge(): Promise<void> {
     async create() {
       agentApiServer = new AgentApiServer({
         config: agentConfig,
-        cliPath: config.agentCliPath,
-        workingDir: config.workingDir,
+        cliPath: config.transport.agentCliPath,
+        workingDir: config.transport.workingDir,
         memory,
       });
       return {
@@ -644,34 +688,12 @@ export async function startBridge(): Promise<void> {
     }
   }
 
-  async function shutdown(): Promise<void> {
-    logInfo("main", "🛑 Shutting down...");
-    const forceTimer = setTimeout(() => {
-      logWarn("main", "⚠️  Shutdown timed out — forcing exit");
-      process.exit(1);
-    }, 15_000);
-    forceTimer.unref();
+  // Wire bridge fields for shutdown
+  bridge.dashboardServer = dashboardServer;
+  bridge.agentApiServer = agentApiServer;
+  bridge.heartbeat = heartbeat;
+  bridge.cronQueue = cronQueue;
 
-    const step = (name: string, fn: () => Promise<void> | void, ms = 3000): Promise<void> =>
-      Promise.race([
-        Promise.resolve(fn()).catch(() => {}),
-        new Promise<void>(r => { const t = setTimeout(() => { logWarn("main", `Shutdown step '${name}' timed out (${ms}ms) — skipping`); r(); }, ms); (t as any).unref?.(); }),
-      ]);
-
-    await step("agent-api", () => agentApiServer?.stop());
-    await step("dashboard", () => dashboardServer?.stop());
-    await step("services", () => registry.stopAll());
-    await step("heartbeat", () => heartbeat.stop());
-    await step("browser-ipc", () => browserIpc?.shutdown());
-    await step("browser", () => browserManager.shutdown(), 5000);
-    await step("memory", () => memory?.close());
-    await step("transport", () => transport.destroy());
-    if (mcpDaemonStarted) {
-      await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
-    }
-    process.exit(0);
-  }
-
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void bridge.shutdown());
+  process.on("SIGTERM", () => void bridge.shutdown());
 }

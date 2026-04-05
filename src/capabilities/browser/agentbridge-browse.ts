@@ -13,10 +13,10 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { spawn } from "node:child_process";
+import { agentBridgeHome } from "../../paths.js";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
-import { localDate } from "../components/env-utils.js";
+import { localDate } from "../../components/env-utils.js";
 
 // --- Types ---
 
@@ -25,6 +25,7 @@ export interface BrowseArgs {
   chatId?: string;
   threadId?: string;
   timeout?: string;
+  engine?: string;
   dryRun: boolean;
 }
 
@@ -50,6 +51,7 @@ export function parseArgs(argv: string[]): BrowseArgs {
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
       case "--thread-id": parsed.threadId = args[++i] ?? ""; break;
       case "--timeout": parsed.timeout = args[++i] ?? ""; break;
+      case "--engine": parsed.engine = args[++i] ?? ""; break;
       case "--dry-run": parsed.dryRun = true; break;
     }
   }
@@ -71,7 +73,7 @@ export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId
 // --- Prompt loading ---
 
 export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string): string {
-  const path = join(homedir(), ".agentbridge", "prompts", "browsing_prompt.md");
+  const path = join(agentBridgeHome(), "prompts", "browsing_prompt.md");
 
   if (!existsSync(path)) {
     throw new Error(`browsing_prompt.md not found at ${path}`);
@@ -97,7 +99,7 @@ export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string)
 
 // --- Pending browse file ---
 
-const pendingPath = (): string => join(homedir(), ".agentbridge", "memory", "pending_browse.json");
+const pendingPath = (): string => join(agentBridgeHome(), "memory", "pending_browse.json");
 
 export function readPendingBrowse(): PendingBrowseEntry[] {
   const p = pendingPath();
@@ -107,14 +109,14 @@ export function readPendingBrowse(): PendingBrowseEntry[] {
 }
 
 export function writePendingBrowse(entries: PendingBrowseEntry[]): void {
-  const dir = join(homedir(), ".agentbridge", "memory");
+  const dir = join(agentBridgeHome(), "memory");
   mkdirSync(dir, { recursive: true });
   writeFileSync(pendingPath(), JSON.stringify(entries, null, 2), "utf-8");
 }
 
 // --- Main ---
 
-export function main(argv: string[] = process.argv): void {
+export async function main(argv: string[] = process.argv): Promise<void> {
   if (argv.includes('--help')) {
     console.log(`agentbridge-browse — spawn a browser subagent for autonomous web tasks.
 
@@ -125,7 +127,7 @@ Usage:
     process.exit(0);
   }
 
-  loadDotenv({ path: join(homedir(), ".agentbridge", ".env") });
+  loadDotenv({ path: join(agentBridgeHome(), ".env") });
   const raw = parseArgs(argv);
   const validation = validateArgs(raw);
 
@@ -144,8 +146,8 @@ Usage:
   }
 
   const taskId = randomBytes(3).toString("hex");
-  const logsDir = join(homedir(), ".agentbridge", "logs");
-  const subagentsDir = join(homedir(), ".agentbridge", "subagents");
+  const logsDir = join(agentBridgeHome(), "logs");
+  const subagentsDir = join(agentBridgeHome(), "subagents");
   mkdirSync(logsDir, { recursive: true });
   mkdirSync(subagentsDir, { recursive: true });
   const logFile = join(logsDir, `browse_${taskId}.log`);
@@ -175,6 +177,15 @@ child.stderr.on("data", c => { try { appendFileSync(logFile, c); } catch {} });
 const rl = createInterface({ input: child.stdout });
 let reqId = 0;
 const send = msg => child.stdin.write(JSON.stringify(msg) + "\\n");
+// Auto-approve all permission requests (browse subagent is trusted)
+rl.on("line", line => {
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === "RequestPermissionRequest") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { approved: true } });
+    }
+  } catch {}
+});
 const waitRes = (id, ms) => new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error("timeout")), ms);
   const h = line => { try { const p = JSON.parse(line); if (p.id === id) { clearTimeout(t); rl.off("line", h); p.error ? reject(new Error(p.error.message)) : resolve(p.result); } } catch {} };
@@ -200,18 +211,27 @@ child.on("exit", () => process.exit());
   const logFd = openSync(logFile, "w");
   closeSync(logFd); // just create the file
 
-  const child = spawn("node", [wrapperFile, logFile, promptFile], {
-    stdio: "ignore",
-    detached: true,
+  // Send spawn request to bridge via IPC (bridge owns the child → instant exit callback)
+  const browseSocket = join(agentBridgeHome(), "browse.sock");
+  const net = await import("node:net");
+  const result = await new Promise<{ ok: boolean; taskId?: string; pid?: number; error?: string }>((resolve, reject) => {
+    const conn = net.createConnection(browseSocket);
+    conn.on("connect", () => {
+      conn.write(JSON.stringify({ wrapperFile, logFile, promptFile, taskId, task, chatId, threadId, timeoutMs, engine: raw.engine }) + "\n");
+    });
+    let buf = "";
+    conn.on("data", (chunk) => {
+      buf += chunk.toString();
+      const nl = buf.indexOf("\n");
+      if (nl === -1) return;
+      conn.end();
+      try { resolve(JSON.parse(buf.slice(0, nl))); } catch (e) { reject(e); }
+    });
+    conn.on("error", reject);
+    conn.setTimeout(10_000, () => { conn.destroy(); reject(new Error("IPC timeout")); });
   });
-  child.unref();
 
-  // Record in pending_browse.json
-  const entries = readPendingBrowse();
-  entries.push({ taskId, task, chatId, threadId, pid: child.pid!, startedAt: Date.now(), timeoutMs, logFile });
-  writePendingBrowse(entries);
-
-  console.log(JSON.stringify({ ok: true, taskId, status: "spawned", pid: child.pid }));
+  console.log(JSON.stringify(result));
 }
 
 const isDirectRun = process.argv[1]?.endsWith("agentbridge-browse.ts") ||

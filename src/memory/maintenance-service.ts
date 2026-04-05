@@ -130,4 +130,14 @@ export class MaintenanceService {
       return empty;
     }
   }
+
+  /** Run SQLite integrity check. Returns "ok" or error description. */
+  checkIntegrity(): string {
+    try {
+      const result = this.db.prepare("PRAGMA integrity_check").get() as { integrity_check: string } | undefined;
+      return result?.integrity_check ?? "unknown";
+    } catch (e) {
+      return e instanceof Error ? e.message : "error";
+    }
+  }
 }

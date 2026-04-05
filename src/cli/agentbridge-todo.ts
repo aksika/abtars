@@ -12,15 +12,15 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { localDate } from "../components/env-utils.js";
 
-const todoPath = (): string => join(homedir(), ".agentbridge", "memory", "todo.md");
+const todoPath = (): string => join(agentBridgeHome(), "memory", "todo.md");
 const HEADER = "# Todo List\n";
 
 function ensureFile(): void {
   const p = todoPath();
-  const dir = join(homedir(), ".agentbridge", "memory");
+  const dir = join(agentBridgeHome(), "memory");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   if (!existsSync(p)) writeFileSync(p, HEADER, "utf-8");
 }

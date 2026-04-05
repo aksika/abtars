@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as fc from "fast-check";
 import { BrowserTool } from "./browser-tool.js";
-import type { BrowserAction, BrowserToolResult, BrowserActionType } from "../types/browser.js";
+import type { BrowserAction, BrowserToolResult, BrowserActionType } from "../../types/browser.js";
 import type { BrowserManager } from "./browser-manager.js";
 import type { DomainAllowlist } from "./domain-allowlist.js";
 
@@ -136,10 +136,12 @@ let logSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  process.env["SSRF_CHECK"] = "0"; // Skip DNS resolution in tests
 });
 
 afterEach(() => {
   logSpy.mockRestore();
+  delete process.env["SSRF_CHECK"];
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

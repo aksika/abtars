@@ -6,11 +6,11 @@
 
 import Database from "better-sqlite3";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { existsSync } from "node:fs";
 import { loadEmbedConfig, batchEmbed } from "../memory/ollama-embed.js";
 
-const DB_PATH = join(homedir(), ".agentbridge", "memory", "memory.db");
+const DB_PATH = join(agentBridgeHome(), "memory", "memory.db");
 
 if (!existsSync(DB_PATH)) {
   console.error(`Memory database not found: ${DB_PATH}`);

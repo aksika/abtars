@@ -41,7 +41,7 @@ describe("checkBrowseTasks", () => {
   }
 
   it("delivers result when pid is dead", async () => {
-    const { checkBrowseTasks } = await import("./cron-checker.js");
+    const { checkBrowseTasks } = await import("../../components/cron-checker.js");
     const logsDir = join(tmpDir, ".agentbridge", "logs");
     mkdirSync(logsDir, { recursive: true });
     const logFile = join(logsDir, "browse_abc123.log");
@@ -75,7 +75,7 @@ describe("checkBrowseTasks", () => {
   });
 
   it("kills timed-out process and reports", async () => {
-    const { checkBrowseTasks } = await import("./cron-checker.js");
+    const { checkBrowseTasks } = await import("../../components/cron-checker.js");
     // Use a non-existent pid so kill fails silently
     writeBrowse([{
       taskId: "timeout1", task: "slow task", chatId: 99,
@@ -94,7 +94,7 @@ describe("checkBrowseTasks", () => {
   });
 
   it("leaves alive process within timeout alone", async () => {
-    const { checkBrowseTasks } = await import("./cron-checker.js");
+    const { checkBrowseTasks } = await import("../../components/cron-checker.js");
     // Use our own pid — guaranteed alive
     writeBrowse([{
       taskId: "alive1", task: "running task", chatId: 1,
@@ -114,12 +114,12 @@ describe("checkBrowseTasks", () => {
   });
 
   it("handles missing pending_browse.json gracefully", async () => {
-    const { checkBrowseTasks } = await import("./cron-checker.js");
+    const { checkBrowseTasks } = await import("../../components/cron-checker.js");
     expect(() => checkBrowseTasks()).not.toThrow();
   });
 
   it("handles missing log file gracefully", async () => {
-    const { checkBrowseTasks } = await import("./cron-checker.js");
+    const { checkBrowseTasks } = await import("../../components/cron-checker.js");
     writeBrowse([{
       taskId: "nolog", task: "no log task", chatId: 7,
       pid: 999999997,

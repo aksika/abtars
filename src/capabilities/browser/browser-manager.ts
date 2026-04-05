@@ -1,7 +1,7 @@
 import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
-import type { BrowserSession } from "../types/browser.js";
-import { parsePositiveIntEnv, parseStringEnv } from "./env-utils.js";
+import type { BrowserSession } from "../../types/browser.js";
+import { parsePositiveIntEnv, parseStringEnv } from "../../components/env-utils.js";
 
 // ---------------------------------------------------------------------------
 // Environment variable parsing
@@ -15,10 +15,14 @@ const DEFAULTS = {
   WEB_SCRAPE_USER_AGENT: "Mozilla/5.0 (compatible; AgentBridge/1.0)",
 } as const;
 
+export type BrowserEngine = "patchright" | "lightpanda";
+
 export interface BrowserConfig {
   sessionTimeoutMs: number;
   maxSessions: number;
   userAgent: string;
+  engine: BrowserEngine;
+  lightpandaEndpoint: string;
 }
 
 /**
@@ -40,7 +44,10 @@ export function parseBrowserConfig(): BrowserConfig {
     DEFAULTS.WEB_SCRAPE_USER_AGENT,
   );
 
-  return { sessionTimeoutMs, maxSessions, userAgent };
+  const engine = (process.env["BROWSER_ENGINE"] ?? "patchright") as BrowserEngine;
+  const lightpandaEndpoint = process.env["LIGHTPANDA_CDP_ENDPOINT"] ?? "ws://127.0.0.1:9222";
+
+  return { sessionTimeoutMs, maxSessions, userAgent, engine, lightpandaEndpoint };
 }
 
 // ---------------------------------------------------------------------------
@@ -78,42 +85,55 @@ export class BrowserManager {
   // Browser lifecycle
   // -------------------------------------------------------------------------
 
-  /** Lazily launch or return the existing Chromium instance. */
+  /** Lazily launch or return the existing browser instance. */
   private async _ensureBrowser(): Promise<Browser> {
     if (this._browser?.isConnected()) return this._browser;
 
     // Avoid duplicate launches if multiple callers race.
     if (this._launching) return this._launching;
 
+    this._launching = (this._config.engine === "lightpanda"
+      ? this._connectLightpanda()
+      : this._launchPatchright()
+    ).then((browser) => {
+      this._browser = browser;
+      this._launching = null;
+      browser.on("disconnected", () => {
+        this._browser = null;
+        this._sessions.clear();
+      });
+      return browser;
+    }).catch((err) => {
+      this._launching = null;
+      throw err;
+    });
+
+    return this._launching;
+  }
+
+  private async _launchPatchright(): Promise<Browser> {
     const headed = process.env["BROWSER_HEADED"] === "1";
     const args = headed ? [] : ["--headless=new"];
     if (process.env["BROWSER_NO_SANDBOX"] === "1") args.push("--no-sandbox");
+    return chromium.launch({
+      headless: !headed,
+      channel: process.env["BROWSER_CHANNEL"] || undefined,
+      args,
+    });
+  }
 
-    this._launching = chromium
-      .launch({
-        headless: !headed,
-        channel: process.env["BROWSER_CHANNEL"] || undefined,
-        args,
-      })
-      .then((browser) => {
-        this._browser = browser;
-        this._launching = null;
+  private async _connectLightpanda(): Promise<Browser> {
+    // Lazy start: ensure container is running
+    try {
+      const { execFileSync } = await import("node:child_process");
+      const { join, dirname } = await import("node:path");
+      const { fileURLToPath } = await import("node:url");
+      const scriptDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts");
+      execFileSync(join(scriptDir, "browser-lightpanda.sh"), ["start"], { stdio: "pipe", timeout: 30_000 });
+    } catch { /* script missing or docker not available — try connecting anyway */ }
 
-        // Detect unexpected disconnection so we re-launch on next request.
-        browser.on("disconnected", () => {
-          this._browser = null;
-          // Invalidate all sessions — their contexts are gone.
-          this._sessions.clear();
-        });
-
-        return browser;
-      })
-      .catch((err) => {
-        this._launching = null;
-        throw err;
-      });
-
-    return this._launching;
+    console.log(`${LOG_PREFIX} Connecting to Lightpanda at ${this._config.lightpandaEndpoint}`);
+    return chromium.connectOverCDP(this._config.lightpandaEndpoint);
   }
 
   // -------------------------------------------------------------------------

@@ -40,8 +40,7 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
 
       let lastMsgTs = 0;
       try {
-        const row = deps.memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
-        lastMsgTs = row?.latest ?? 0;
+        lastMsgTs = deps.memory?.store.getLastMessageTimestamp(true) ?? 0;
       } catch { return false; }
       if (Date.now() - lastMsgTs < idleMinutes * 60 * 1000) return false;
 
@@ -53,7 +52,7 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
       deps.busyChats.add(sessionKey);
       compactingSessions.add(sessionKey);
       try {
-        await runCompaction(deps.transport, sessionKey, deps.memory?.getDb() ?? null, deps.memoryDir);
+        await runCompaction(deps.transport, sessionKey, deps.memory, deps.memoryDir);
         deps.pendingSessionStart.add(sessionKey);
         compactedThisIdle = true;
         logInfo("idle-compact", "☕ Floating compaction complete");
@@ -94,15 +93,10 @@ export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTa
     execute: async () => {
       counter++;
       if (counter % 12 !== 0) return;
-      const db = memory?.getDb();
-      if (!db) return;
-      try {
-        const result = db.prepare("PRAGMA integrity_check").get() as { integrity_check: string } | undefined;
-        if (result?.integrity_check !== "ok") {
-          logError("db-integrity", `Memory DB integrity check failed: ${result?.integrity_check}`);
-        }
-      } catch (e) {
-        logError("db-integrity", "Integrity check error", e);
+      if (!memory) return;
+      const result = memory.maintenance.checkIntegrity();
+      if (result !== "ok") {
+        logError("db-integrity", `Memory DB integrity check failed: ${result}`);
       }
     },
   };
