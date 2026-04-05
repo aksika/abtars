@@ -238,6 +238,48 @@ Design constraints:
 
 ---
 
+## 10. Async status checks (replace blocking execSync)
+
+**Problem:** `buildStatusLines()` in `command-handlers.ts` calls `execSync` 3 times: `kiro-cli settings list` (3s timeout), `mcporter list` (15s timeout), `mcporter --version` (5s timeout). These block the event loop — a slow MCP server means `/status` freezes the entire bridge for up to 15 seconds.
+
+**Suggestion:** Replace with `execFile` (async) or `spawn` with timeout. Return partial results if a check times out.
+
+**Effort:** Low (~20 lines). **Risk:** None.
+
+---
+
+## 11. Shared CLI arg parsing
+
+**Problem:** `agentbridge-store`, `agentbridge-edit`, `agentbridge-sleep`, `agentbridge-todo`, `agentbridge-cron`, `agentbridge-browse` all have hand-rolled switch-case arg parsing with duplicated patterns (same `--help` handling, same JSON output, same error formatting).
+
+**Suggestion:** Shared `parseCliArgs(spec)` utility that takes a spec of expected flags and returns typed results. Not a heavy framework — just a shared pattern (~40 lines) that eliminates the copy-paste.
+
+**Effort:** Low. **Risk:** None (internal refactor, CLI interface unchanged).
+
+---
+
+## 12. Command dispatch table (replace handleCommand if/else chain)
+
+**Problem:** `handleCommand()` in `command-handlers.ts` is a 250+ line if/else chain. Each command (`/new`, `/reset`, `/compact`, `/coding`, `/status`, etc.) is an inline block. Adding a new command means finding the right spot in the chain.
+
+**Suggestion:** Dispatch table mapping command names to handler functions:
+
+```typescript
+const commands: Record<string, (ctx: CommandContext) => Promise<boolean>> = {
+  "/new": handleNew,
+  "/reset": handleReset,
+  "/compact": handleCompact,
+  "/status": handleStatus,
+  // ...
+};
+```
+
+Prefix-match commands (`/tasks trigger`, `/tasks log`, `/nlm`) use a separate prefix table.
+
+**Effort:** Low (~30 min). **Risk:** None (mechanical extraction).
+
+---
+
 ## 9. Agent sandboxing (NemoClaw-style isolation)
 
 **Problem:** The bridge and the agent run in the same process/host. The agent (LLM-generated code via execute_bash) has full access to `~/.agentbridge/.env` (secrets), the network (curl anywhere), and the filesystem. A prompt injection or rogue tool call can exfiltrate secrets or modify bridge code.
@@ -290,11 +332,14 @@ Each step makes the next one easier — the sequence builds toward sandboxing:
 
 1. **#6 Schema versioning** — lowest effort, prevents future migration bugs
 2. **#7 Injectable paths** — mechanical, improves testability
-3. **#3 Eliminate getDb()** — additive (add methods first, remove escape hatch after)
-4. **#5 Typed config groups** — compiler-assisted, no runtime risk
-5. **#1b Bridge class** — medium effort, prerequisite for plugin system
-6. **#1 Capability plugin system** — the big payoff: plug-and-play subsystems
-7. **#8 Pluggable memory backends** — swap memory backends without touching bridge code
-8. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
-9. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently
-10. **#9 Agent sandboxing** — the end goal: NemoClaw-style isolation for the agent layer
+3. **#10 Async status checks** — 20 lines, stops /status from freezing the bridge
+4. **#11 Shared CLI arg parsing** — eliminates copy-paste across 6 CLI tools
+5. **#12 Command dispatch table** — mechanical extraction, cleaner command handling
+6. **#3 Eliminate getDb()** — additive (add methods first, remove escape hatch after)
+7. **#5 Typed config groups** — compiler-assisted, no runtime risk
+8. **#1b Bridge class** — medium effort, prerequisite for plugin system
+9. **#1 Capability plugin system** — the big payoff: plug-and-play subsystems
+10. **#8 Pluggable memory backends** — swap memory backends without touching bridge code
+11. **#4 CLI IPC** — high effort but biggest performance win for sleep cycle
+12. **#2 Event pipeline** — highest effort, only worth it if pipeline changes frequently
+13. **#9 Agent sandboxing** — the end goal: NemoClaw-style isolation for the agent layer
