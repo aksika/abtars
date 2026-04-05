@@ -751,23 +751,14 @@ async function main(): Promise<number> {
             const chatId = getPrimaryChatId(db);
             const watermarkRow = db.prepare("SELECT last_processed_timestamp FROM extraction_watermarks WHERE chat_id = ?").get(chatId) as { last_processed_timestamp: number } | undefined;
 
-            // Determine target date: if yesterday has no daily file but has messages, summarize yesterday
-            let targetDate = localDate();
-            const yesterday = new Date(Date.now() - 86400000);
-            const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, "0")}-${String(yesterday.getDate()).padStart(2, "0")}`;
-            const yesterdayDailyPath = join(memoryConfig.memoryDir, "daily", `daily_${yesterdayStr}.md`);
-            if (!existsSync(yesterdayDailyPath)) {
-              const yStart = new Date(yesterdayStr + "T00:00:00").getTime();
-              const yEnd = yStart + 86400000;
-              const yMsgCount = (db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ? AND timestamp >= ? AND timestamp < ?").get(chatId, yStart, yEnd) as { cnt: number }).cnt;
-              if (yMsgCount > 0) {
-                logInfo(TAG, `[SLEEP] Yesterday (${yesterdayStr}) has ${yMsgCount} messages but no daily — summarizing yesterday`);
-                targetDate = yesterdayStr;
-              }
-            }
+            // Determine target date from first unprocessed message
+            const watermarkTs = watermarkRow?.last_processed_timestamp ?? 0;
+            const firstMsgRow = db.prepare("SELECT MIN(timestamp) as ts FROM messages WHERE chat_id = ? AND timestamp > ?").get(chatId, watermarkTs) as { ts: number | null } | undefined;
+            const firstMsgDate = firstMsgRow?.ts ? new Date(firstMsgRow.ts) : new Date();
+            const targetDate = `${firstMsgDate.getFullYear()}-${String(firstMsgDate.getMonth() + 1).padStart(2, "0")}-${String(firstMsgDate.getDate()).padStart(2, "0")}`;
 
             const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "04a-daily-summary", flags.verbose).then(r => r ?? ""), {
-              ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs: watermarkRow?.last_processed_timestamp ?? 0,
+              ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs,
             });
             if (summary) {
               dailySummaryPath = writeDailyFile(memoryConfig.memoryDir, targetDate, summary);
