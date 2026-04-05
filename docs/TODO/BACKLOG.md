@@ -1473,3 +1473,34 @@ Default engine: lightpanda. Skill instructs fallback pattern.
 - [ ] Test with common browse tasks (news sites, X.com)
 
 **Effort:** Medium. **Risk:** Low (additive — Patchright stays as-is, Lightpanda is new option).
+
+## 82. Instant Browse Result Delivery (eliminate polling delay)
+
+**Priority:** HIGH
+**Status:** Not started
+
+### Problem
+Browse tasks are spawned detached (`detached: true, unref()`). Results delivered by browse-checker polling every 5 minutes. Worst case: 4min 59s delay. Average: 2.5 minutes.
+
+### Solution
+Track the child process in the browser capability (same pattern as sleep capability). Listen for `exit` event → read log → deliver result immediately. No polling needed.
+
+**Current flow:**
+```
+agentbridge-browse → spawn detached → unref → forget
+browse-checker (every 5min) → poll pending_browse.json → pid dead? → deliver
+```
+
+**New flow:**
+```
+agentbridge-browse → spawn (tracked) → exit event → read log → deliver immediately
+browse-checker → only handles timeout kills (safety net)
+```
+
+### Action items
+- [ ] Change browse spawn from detached+unref to tracked child (like sleep capability)
+- [ ] Add exit handler that reads log file and delivers result via pending_reminders.json
+- [ ] Keep browse-checker as timeout-only safety net (kill stuck tasks)
+- [ ] Remove PID polling from browse-checker (exit handler covers normal completion)
+
+**Effort:** Low-medium. **Risk:** Low — sleep capability already proves the pattern.
