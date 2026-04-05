@@ -24,7 +24,7 @@ For the memory subsystem, see [memory.asbuilt.md](memory.asbuilt.md).
 | **Sleep (Dreamy)** | Overnight maintenance: retrospective, GC, extraction, consolidation, fitness review. See [memory.asbuilt.md](memory.asbuilt.md). |
 | **Tasks** | Time-based scheduling for reminders and agent tasks. SQLite storage, sequential queue, priority levels, retry. User-facing: `/tasks`. CLI: `agentbridge-task`. |
 | **Todo** | File-based todo list (`todo.md`). Agent-managed via `agentbridge-todo` CLI. |
-| **Browser (Browsie)** | Detached browser subagent. Headless Chromium in Docker, autonomous navigation, non-blocking. |
+| **Browser (Browsie)** | Detached browser subagent. Headless Chromium in Docker, autonomous navigation, non-blocking. SSRF protection blocks private IPs. |
 | **Self-Healer** | Heartbeat task scanning `bridge.log` for errors, injecting bug reports to KP via Telegram. |
 | **A2A (Agent API)** | HTTP API for peer agents (Molty). HMAC challenge-response auth, consulting-only relationship. |
 | **Dashboard** | Localhost web UI: platform status, cron panel, log viewer, memory stats, 3D memory visualization. |
@@ -64,7 +64,17 @@ Telegram/Discord → PlatformAdapter.start() → onMessage callback
 
 ### Message Pipeline (`src/components/message-pipeline.ts`)
 
-`handleInboundMessage()` — shared flow for all platforms. Dependencies injected via `PipelineDeps`.
+`handleInboundMessage()` — shared flow for all platforms. Early phases (voice, commands, busy guard) run as middleware via `runPipeline()`. Core transport/response handling inline. Dependencies injected via `PipelineDeps`.
+
+### Middleware (`src/components/pipeline/`)
+
+| Middleware | File | Purpose |
+|---|---|---|
+| `voiceMiddleware` | `pipeline/voice.ts` | STT transcription |
+| `commandMiddleware` | `pipeline/commands.ts` | Slash commands + transport commands |
+| `busyGuardMiddleware` | `pipeline/busy-guard.ts` | Queue messages when transport is busy |
+
+Adding a message behavior: create a middleware in `pipeline/`, add to the chain in `handleInboundMessage()`.
 
 ### Extracted Components
 
@@ -85,10 +95,26 @@ Centralized logger with `logInfo`, `logWarn`, `logError`, `logDebug`. Console ou
 - `LOG_FORMAT=text` (default): `2026-03-27T17:15:56.888 INFO  [tag] message`
 - `LOG_FORMAT=json`: `{"ts":"...","level":"info","tag":"...","msg":"..."}`
 
+Credential redaction: `redactSecrets()` strips 15 secret patterns (OpenAI, GitHub, AWS, Telegram, Bearer, Stripe, etc.) from all file-logged lines. Secrets never reach `bridge.log`.
+
 ### Entry Point
 
 - `src/main.ts` (11 lines) — entry point, calls `startBridge()`
-- `src/bridge-app.ts` (622 lines) — all wiring: config, transport, adapters, heartbeat, dashboard, shutdown
+- `src/bridge-app.ts` — `Bridge` class (lifecycle, shutdown, subsystem fields) + `startBridge()` wiring function
+
+## Capability System
+
+Self-contained subsystems register via `CapabilityApi` — commands, heartbeat tasks, services. Bridge collects registrations and wires them into the appropriate subsystems.
+
+Source: `src/capabilities/capability.ts`
+
+| Capability | Directory | What it registers |
+|---|---|---|
+| Browser | `src/capabilities/browser/` | browse-checker heartbeat task, lazy BrowserIpcServer |
+| Skills | `src/capabilities/skills/` | skill-reloader heartbeat task (SkillWatcher) |
+| Sleep | `src/capabilities/sleep/` | Sleep spawn + retry, progress protocol (`PROGRESS:<pct>:<step>`) |
+
+Adding a capability: create `src/capabilities/<name>/index.ts`, export `register(api: CapabilityApi)`, call `bridge.registerCapability(register)` in `startBridge()`.
 
 ### Dashboard
 
@@ -560,6 +586,8 @@ If the model returns `ValidationException` or error code `-32603` (context too l
 | `src/memory/session-memory.ts` | Memory context block builder |
 | `src/components/message-pipeline.ts` | Graduated thresholds, auto-compact trigger, circuit breaker |
 | `src/components/command-handlers.ts` | `/compact` command handler |
+| `src/components/ssrf-guard.ts` | SSRF protection — private IP blocking + DNS rebinding check |
+| `src/components/path-guard.ts` | Path traversal prevention — `isWithinRoot()` |
 
 ---
 
@@ -786,9 +814,9 @@ All commands handled by `src/components/command-handlers.ts` — single module f
 | /stop, /cancel | both | Send Ctrl+C interrupt |
 | /restart | both | Restart Kiro (tmux only) |
 | /memory | both | Memory storage statistics |
-| /cron | both | Scheduled tasks overview with status icons |
-| /cron log \<id\> | both | Last 5 runs with exit codes for a task |
-| /trigger \<id\> | both | Manually fire a cron task immediately |
+| /tasks (alias: /cron) | both | Scheduled tasks overview with status icons |
+| /tasks log \<id\> (alias: /cron log) | both | Last 5 runs with exit codes for a task |
+| /tasks trigger \<id\> (alias: /cron trigger) | both | Manually fire a cron task immediately |
 | /facts | both | Core knowledge (user profile + agent notes) |
 | /coding | both | Switch to Opus coding agent |
 | /default | both | Switch back to KP |
