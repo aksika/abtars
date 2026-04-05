@@ -186,10 +186,10 @@ chmod +x "$AB_HOME/agentbridge.sh"
 } > "$AB_HOME/browser-docker.sh"
 chmod +x "$AB_HOME/browser-docker.sh"
 mkdir -p "$AB_HOME/scripts"
-cp "$PROJECT_DIR/scripts/daily-backup.sh" "$AB_HOME/scripts/daily-backup.sh"
-chmod +x "$AB_HOME/scripts/daily-backup.sh"
-cp "$PROJECT_DIR/scripts/doctor.sh" "$AB_HOME/scripts/doctor.sh"
-chmod +x "$AB_HOME/scripts/doctor.sh"
+for script in daily-backup.sh doctor.sh upgrade-deps.sh; do
+  cp "$PROJECT_DIR/scripts/$script" "$AB_HOME/scripts/$script"
+  chmod +x "$AB_HOME/scripts/$script"
+done
 
 # Deploy agentbridge-recall CLI (agent-callable memory search)
 RECALL_SCRIPT="$AB_HOME/agentbridge-recall"
