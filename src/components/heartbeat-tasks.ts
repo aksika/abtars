@@ -3,7 +3,7 @@
  * that benefit from being independently readable and testable.
  */
 
-import { readFileSync, unlinkSync } from "node:fs";
+import { unlinkSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { logInfo, logWarn, logError } from "./logger.js";
 import { writeRestartReason } from "./restart-reason.js";
@@ -12,7 +12,7 @@ import { compactingSessions, setIdleCompactReset } from "./message-pipeline.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 import type { MemoryManager } from "../memory/memory-manager.js";
 import type { HeartbeatTask } from "../types/memory.js";
-
+import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";
 export interface IdleCompactDeps {
   transport: IKiroTransport;
   memory: MemoryManager | null;
@@ -68,35 +68,14 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
   };
 }
 
-export interface AgeCheckDeps {
-  memory: MemoryManager | null;
-  bridgeLockPath: string;
-  sleepHour: number;
-  busyChats: Set<string>;
-  isSleepActive: () => boolean;
-  doctorPath: string;
-}
+export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string };
 
 /** Daily cycle — restart bridge after SLEEP_TIME if started before it. */
 export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
   return {
     name: "age-check",
     execute: async () => {
-      const now = new Date();
-      if (now.getHours() < deps.sleepHour) return;
-      try {
-        const lockData = JSON.parse(readFileSync(deps.bridgeLockPath, "utf-8"));
-        const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), deps.sleepHour).getTime();
-        if (lockData.startedAt >= todaySleepTime) return;
-      } catch { return; }
-
-      let lastMsgTs = 0;
-      try {
-        const row = deps.memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
-        lastMsgTs = row?.latest ?? 0;
-      } catch { return; }
-      if (Date.now() - lastMsgTs < 60 * 60 * 1000) return;
-      if (deps.busyChats.size > 0 || deps.isSleepActive()) return;
+      if (!isDailyCycleDue(deps)) return;
 
       logInfo("age-check", `🔄 Past SLEEP_TIME (${deps.sleepHour}:00) — daily restart`);
       writeRestartReason(`daily-cycle: SLEEP_TIME ${deps.sleepHour}:00`);
