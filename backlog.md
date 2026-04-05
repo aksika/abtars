@@ -68,3 +68,30 @@
 - [ ] Expose in `/status` and dashboard WebSocket push
 
 **Effort:** Low (~30 lines). **Risk:** None (additive, stdout lines ignored if not parsed).
+
+### [MEDIUM] Agent sandboxing (NemoClaw-style isolation)
+**Added:** 2026-04-05
+**Context:** All refactor prerequisites are now complete — Bridge class, capability plugin system, pluggable memory backends, CLI IPC. The architectural seams exist to split bridge (host) from agent (sandbox).
+
+**Goal:** Run the agent (kiro-cli) inside a Docker container with deny-by-default network, read-only filesystem, no access to secrets. Bridge stays on host.
+
+**Architecture:**
+```
+Host (unsandboxed): Bridge core, memory, platforms, dashboard
+  │ ACP over stdio (already exists)
+Sandbox (Docker): kiro-cli, agent tools, browser
+  - Network: deny-by-default egress, allow kiro API only
+  - Filesystem: read-only except /sandbox
+  - No access to .env, memory.db, bridge code
+```
+
+**Action items:**
+- [ ] Dockerfile for agent sandbox (reference: NemoClaw's 4-layer defense)
+- [ ] Network policy (allow kiro API endpoint, block internal network)
+- [ ] Credential isolation (secrets stay on host, agent gets tokens via ACP)
+- [ ] Filesystem policy (read-only system, writable /sandbox only)
+- [ ] Update ACP transport to spawn inside container instead of locally
+
+**Reference:** NemoClaw — Landlock LSM, seccomp filters, capability drops, gateway proxy.
+
+**Effort:** High. **Risk:** Medium. **Depends on:** All refactor items (done).
