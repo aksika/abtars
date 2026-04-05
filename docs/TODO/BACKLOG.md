@@ -1291,7 +1291,7 @@ Switching requires transport restart (new `--model` flag). Session resets — us
 ## 76. Standby wake grace period
 
 **Priority:** HIGH
-**Status:** In progress
+**Status:** ✅ Done (2026-04-05)
 
 ### Problem
 Mac Power Nap wakes the machine every ~30min overnight. Each wake triggers standby detection → bridge restart → agent session start → greeting. 10+ restarts per night, all wasted.
@@ -1441,7 +1441,9 @@ Sleep cycle emits `PROGRESS:<pct>:<step-name>` on stdout. Bridge parses via pipe
 ## 81. Dual Browser Engine — Lightpanda + Patchright
 
 **Priority:** HIGH
-**Status:** In progress
+**Status:** ✅ Done (2026-04-05, `refactor/architecture-v2` branch)
+
+`BrowserManager` supports `patchright` and `lightpanda` engines. `BROWSER_ENGINE` env var + `--engine` CLI flag on both `agentbridge-browse` and `agentbridge-browser`. Lazy container management via `scripts/browser-lightpanda.sh`. `agentbridge-browser` defaults to lightpanda (fast scraping), `agentbridge-browse` defaults to patchright (stealth). `deploy.sh --full` pulls Lightpanda nightly.
 
 ### Problem
 Current browser uses Patchright (stealth Chromium) in Docker for all tasks. Heavy resource usage (~500MB RAM) for simple scraping that doesn't need stealth.
@@ -1477,7 +1479,9 @@ Default engine: lightpanda. Skill instructs fallback pattern.
 ## 82. Instant Browse Result Delivery (eliminate polling delay)
 
 **Priority:** HIGH
-**Status:** Not started
+**Status:** ✅ Done (2026-04-05, `refactor/architecture-v2` branch)
+
+Browse tasks spawned via IPC (`browse.sock`). Bridge owns child process → exit callback delivers result instantly. `deliverBrowseResult()` extracted from browse-checker. Browse-checker stays as timeout-only safety net.
 
 ### Problem
 Browse tasks are spawned detached (`detached: true, unref()`). Results delivered by browse-checker polling every 5 minutes. Worst case: 4min 59s delay. Average: 2.5 minutes.
@@ -1504,3 +1508,38 @@ browse-checker → only handles timeout kills (safety net)
 - [ ] Remove PID polling from browse-checker (exit handler covers normal completion)
 
 **Effort:** Low-medium. **Risk:** Low — sleep capability already proves the pattern.
+
+## 83. Pain Point: Power Nap Restart Storm
+
+**Status:** ✅ Done (2026-04-05)
+**Source:** `docs/asbuilts/pain-points.md` PP#1
+
+`bridge.lock` carries `exitReason: "standby"` + `exitedAt` on standby exit. On startup: recent standby exit (<30min) → 3-min grace period. LaunchAgent ThrottleInterval bumped to 60s. See #76.
+
+## 84. Pain Point: Task Failures Go Unresolved
+
+**Status:** ✅ Done
+**Source:** `docs/asbuilts/pain-points.md` PP#2
+
+Self-healer heartbeat task scans bridge.log for errors, injects bug reports to agent. Max 2 auto-fix attempts per entry per day. See #42.
+
+## 85. Pain Point: Sleep Queue Blocking User Messages
+
+**Status:** ✅ Done
+**Source:** `docs/asbuilts/pain-points.md` PP#3
+
+Sleep queue removed. Sleep runs on its own AcpTransport, main transport stays responsive.
+
+## 86. Pain Point: Daily Summary Missing After-Midnight Messages
+
+**Status:** ✅ Done (2026-04-05)
+**Source:** `docs/asbuilts/pain-points.md` PP#4
+
+Date for daily summary derived from first message timestamp after the watermark, not `localDate()`. Handles cross-midnight conversations correctly.
+
+## 87. Pain Point: SOUL Injection Silently Truncated
+
+**Status:** ✅ Done
+**Source:** `docs/asbuilts/pain-points.md` PP#5
+
+Session-start prompts bypass the MessageInterceptor entirely. SOUL + context injection is expected to be large.
