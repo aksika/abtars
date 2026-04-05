@@ -41,6 +41,7 @@ export interface CommandContext {
   cronCurrentJob?: RunningJob | null;
   enqueueCron?: PipelineDeps["enqueueCron"];
   requestShutdown?: PipelineDeps["requestShutdown"];
+  sleepProgress?: PipelineDeps["sleepProgress"];
   // Per-message (optional)
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
@@ -426,6 +427,10 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
       `📋 Tasks: ${cronInfo.tasks.join(", ") || "(none)"}`,
       `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
     );
+    const sp = ctx.sleepProgress?.();
+    if (sp) {
+      lines.push(`😴 Sleep: ${sp.percent}% (${sp.step})`);
+    }
     try {
       const hbTs = parseInt(readFileSync(join(agentBridgeHome(), "memory", ".heartbeat"), "utf-8"), 10);
       if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);

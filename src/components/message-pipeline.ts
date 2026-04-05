@@ -75,6 +75,7 @@ export interface PipelineDeps {
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string) => string | null;
   requestShutdown?: () => void;
+  sleepProgress?: () => { percent: number; step: string } | null;
 }
 
 /**

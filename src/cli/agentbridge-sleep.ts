@@ -658,6 +658,14 @@ async function main(): Promise<number> {
       step.prompt = substituteVars(step.prompt, vars);
     }
 
+    // Progress protocol — emit PROGRESS:<pct>:<label> on stdout
+    const totalSteps = steps.length;
+    let stepIndex = 0;
+    const emitProgress = (label: string): void => {
+      const pct = Math.round((stepIndex / totalSteps) * 100);
+      process.stdout.write(`PROGRESS:${pct}:${label}\n`);
+    };
+
     if (flags.dryRun) {
       for (const step of steps) process.stdout.write(`\n--- ${step.filename} ---\n${step.prompt}\n`);
       return 0;
@@ -714,7 +722,11 @@ async function main(): Promise<number> {
         await runCatchUp(previousLocks, transport, db, memoryConfig, steps, flags);
       }
 
+      emitProgress("starting");
+
       for (const step of steps) {
+        emitProgress(step.name);
+        stepIndex++;
         if (timedOut) {
           state.steps[step.name] = { status: "timeout" };
           writeStateFile(statePath, state);
@@ -885,6 +897,7 @@ async function main(): Promise<number> {
       } catch (err) { logWarn(TAG, `[WIRED] flush failed: ${err instanceof Error ? err.message : String(err)}`); }
     }
 
+    emitProgress("done");
     logInfo(TAG, `[SLEEP] 🏁 ${okCount} ok, ${failCount} failed, ${skipCount} skipped | wired: ${formatWiredResults(wiredResults)} | ${totalDuration.toFixed(0)}s total`);
     return failCount;
   } finally {

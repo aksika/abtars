@@ -104,6 +104,7 @@ export class Bridge {
   browserManager: BrowserManager | null = null;
   mcpDaemonStarted = false;
   cronQueue!: CronQueue;
+  sleepHandle: import("./capabilities/sleep/index.js").SleepHandle | null = null;
 
   constructor(config: Config, memoryConfig: MemoryConfig) {
     this.config = config;
@@ -276,6 +277,7 @@ export async function startBridge(): Promise<void> {
       } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
     },
     requestShutdown: () => process.exit(0),
+    sleepProgress: () => sleepHandle?.progress ?? null,
   };
 
   // Wire LLM callback into memory so compaction and context assembly can use the LLM
@@ -571,6 +573,7 @@ export async function startBridge(): Promise<void> {
     memoryEnabled: memoryConfig.memoryEnabled,
     onComplete: () => resetAllCtxStarts(memoryConfig.memoryDir),
   });
+  bridge.sleepHandle = sleepHandle;
   sleepHandle.spawn();
 
   // --- Web Dashboard wiring (conditional) ---

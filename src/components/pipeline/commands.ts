@@ -22,6 +22,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     cronCurrentJob: deps.cronCurrentJob?.() ?? null,
     enqueueCron: deps.enqueueCron,
     requestShutdown: deps.requestShutdown,
+    sleepProgress: deps.sleepProgress,
     conversationBuffer: msg.isGroup ? conversationBuffer : undefined,
     bufKey: msg.isGroup ? `${msg.platform}:${msg.channelId}` : undefined,
   };

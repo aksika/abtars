@@ -1,5 +1,6 @@
 /**
  * Sleep capability — spawn nightly sleep cycle with retry logic.
+ * Parses PROGRESS:<pct>:<label> from stdout for visibility.
  */
 
 import { spawn } from "node:child_process";
@@ -15,8 +16,14 @@ export interface SleepOpts {
   onComplete: () => void;
 }
 
+export interface SleepProgress {
+  percent: number;
+  step: string;
+}
+
 export interface SleepHandle {
   readonly child: import("node:child_process").ChildProcess | null;
+  readonly progress: SleepProgress | null;
   spawn(): void;
 }
 
@@ -26,6 +33,7 @@ const RETRY_MS = 5 * 60 * 1000;
 export function createSleepHandle(opts: SleepOpts): SleepHandle {
   let child: import("node:child_process").ChildProcess | null = null;
   let attempts = 0;
+  let progress: SleepProgress | null = null;
 
   function spawnSleep(): void {
     if (new Date().getHours() < opts.sleepHour) {
@@ -38,12 +46,30 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
     if (child && !child.killed) return;
     attempts++;
+    progress = null;
     try {
       const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "cli", "agentbridge-sleep.js");
-      const proc = spawn(process.execPath, [sleepScript], { stdio: "ignore" });
+      const proc = spawn(process.execPath, [sleepScript], { stdio: ["ignore", "pipe", "ignore"] });
       child = proc;
+
+      // Parse PROGRESS lines from stdout
+      let buf = "";
+      proc.stdout!.on("data", (chunk: Buffer) => {
+        buf += chunk.toString();
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          const match = line.match(/^PROGRESS:(\d+):(.+)$/);
+          if (match) {
+            progress = { percent: parseInt(match[1]!, 10), step: match[2]! };
+          }
+        }
+      });
+
       proc.on("exit", (code) => {
         child = null;
+        progress = null;
         if (code === 0) {
           logInfo("sleep", `😴 Sleep finished successfully (attempt ${attempts})`);
           if (opts.memoryEnabled) opts.onComplete();
@@ -63,6 +89,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
   return {
     get child() { return child; },
+    get progress() { return progress; },
     spawn: spawnSleep,
   };
 }
