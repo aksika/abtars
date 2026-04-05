@@ -177,41 +177,64 @@ Run only migrations above current version. Store version in DB.
 
 ---
 
-## 8. Pluggable memory providers (replace hardcoded SQLite+FTS5+ollama)
+## 8. Pluggable memory backends (formalize the CLI abstraction boundary)
 
-**Problem:** The memory system is hardcoded to SQLite + FTS5 + ollama embeddings. There's no way to swap in a different backend (cloud vector DB, Honcho for session management, Mem0, etc.) without rewriting the memory layer.
+**Problem:** The CLI tools (`agentbridge-store`, `agentbridge-recall`, `agentbridge-edit`) already decouple the agent from the storage layer — the agent calls CLI tools that return JSON, it doesn't know what's underneath. But internally, every CLI tool hardcodes `new MemoryManager()` → SQLite+FTS5. There's no way to swap the backend without rewriting the CLI tools.
 
-**Reference:** Hermes Agent's `MemoryProvider` ABC (`agent/memory_provider.py`, `plugins/memory/`). Key patterns:
-- Abstract base class with lifecycle hooks: `initialize()`, `prefetch(query)`, `sync_turn(user, asst)`, `get_tool_schemas()`, `handle_tool_call()`, `shutdown()`
-- 7 providers ship as plugins in `plugins/memory/<name>/`: openviking, hindsight, retaindb, byterover, holographic, mem0, honcho
-- `MemoryManager` orchestrates: builtin always active + at most ONE external provider
-- Providers discovered via directory scan, activated by config (`memory.provider`)
-
-**Suggestion:** Define a `MemoryProvider` interface in TypeScript:
-
-```typescript
-interface MemoryProvider {
-  name: string;
-  initialize(): Promise<void>;
-  recordMessage(record: MessageRecord): void;
-  search(query: string, opts?: SearchOptions): Promise<SearchResult[]>;
-  editMemory(params: EditMemoryParams): EditMemoryResult;
-  instantStore(params: InstantStoreParams): Promise<InstantStoreResult>;
-  getStats(): MemoryStats | null;
-  shutdown(): Promise<void>;
-}
+**Current state (90% decoupled):**
+```
+Agent → execute_bash: agentbridge-store → MemoryManager → SQLite+FTS5
+Agent → execute_bash: agentbridge-recall → MemoryManager → SQLite+FTS5
+Agent → execute_bash: agentbridge-edit → MemoryManager → SQLite+FTS5
 ```
 
-The current SQLite+FTS5 implementation becomes `SqliteMemoryProvider`. New providers (e.g. cloud vector DB) implement the same interface. `MemoryManager` delegates to the active provider.
+**Suggestion:** Extract a `MemoryBackend` interface. CLI tools instantiate the configured backend instead of hardcoding MemoryManager:
 
-**What this enables:**
-- Swap memory backends via config (`MEMORY_PROVIDER=sqlite` or `MEMORY_PROVIDER=honcho`)
-- Test with in-memory provider (no SQLite dependency)
-- Future: cloud-hosted memory for multi-device sync
+```typescript
+interface MemoryBackend {
+  initialize(): Promise<void>;
+  store(params: InstantStoreParams): Promise<InstantStoreResult>;
+  edit(params: EditMemoryParams): EditMemoryResult;
+  recall(query: string, opts: RecallParams): Promise<RecallResult>;
+  close(): Promise<void>;
+}
 
-**Depends on:** #3 (eliminate getDb) — callers must use the provider interface, not raw DB access.
+// Current implementation becomes one backend:
+class SqliteBackend implements MemoryBackend { ... }
 
-**Effort:** High. **Risk:** Medium (the interface already exists implicitly in MemoryManager's public API).
+// Future backends:
+class HonchoBackend implements MemoryBackend { ... }
+class Mem0Backend implements MemoryBackend { ... }
+class RedisBackend implements MemoryBackend { ... }
+```
+
+Config selects the backend: `MEMORY_BACKEND=sqlite` (default) or `MEMORY_BACKEND=honcho`.
+CLI tools stay identical — same flags, same JSON output. Agent behavior unchanged.
+
+**New CLI: `agentbridge-massedit`**
+
+Batch operations on memories using an ORM-style query builder (no raw SQL from agent input):
+
+```bash
+agentbridge-massedit \
+  --where-keyword "preferences" \
+  --where-type "fact" \
+  --set-trust 3 \
+  --set-classification 1 \
+  --dry-run
+```
+
+Design constraints:
+- **ORM-style query builder** — all filtering via typed parameters (`--where-keyword`, `--where-type`, `--where-created-after`, `--where-emotion-range`), never raw SQL. Prevents SQL injection from agent-generated input.
+- **Dry-run by default** — shows what would change before committing. Agent must explicitly pass `--commit`.
+- **Audit trail** — logs every batch edit with timestamp, caller, filter criteria, and count of affected rows.
+- **Backend-agnostic** — uses the `MemoryBackend` interface, works with any backend.
+
+**Reference:** Hermes Agent's `MemoryProvider` ABC (`agent/memory_provider.py`) — same concept of pluggable backends behind a stable interface. 7 providers ship as plugins.
+
+**Depends on:** #3 (eliminate getDb) — callers must use the backend interface, not raw DB access.
+
+**Effort:** Medium. **Risk:** Low (additive — new interface wraps existing code, CLI tools unchanged externally).
 
 ---
 
