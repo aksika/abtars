@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as http from "node:http";
 import type { DashboardConfig, StatusSnapshot } from "./dashboard-config.js";
-import { AuthGate } from "./auth-gate.js";
+import { AuthGate } from "../auth-gate.js";
 import { DashboardServer } from "./dashboard-server.js";
 import type { DashboardServerDeps } from "./dashboard-server.js";
-import type { ServiceRegistry } from "./service-registry.js";
-import type { MemorySearchController } from "./memory-search-controller.js";
+import type { ServiceRegistry } from "../service-registry.js";
+import type { MemorySearchController } from "../memory-search-controller.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

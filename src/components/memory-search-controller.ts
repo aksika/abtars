@@ -7,7 +7,7 @@
 
 import type { MemoryManager } from "../memory/memory-manager.js";
 import { logWarn } from "./logger.js";
-import type { MemorySearchResponse } from "./dashboard-config.js";
+import type { MemorySearchResponse } from "./dashboard/dashboard-config.js";
 import { recallSearch } from "../memory/recall-engine.js";
 import type { RecallHit } from "../memory/recall-engine.js";
 

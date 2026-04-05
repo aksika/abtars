@@ -5,7 +5,7 @@
  */
 
 import { WebSocket } from "ws";
-import type { StatusSnapshot } from "./dashboard-config.js";
+import type { StatusSnapshot } from "./dashboard/dashboard-config.js";
 
 // ── StatusBroadcaster ───────────────────────────────────────────────────────
 

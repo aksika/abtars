@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { MemorySearchController } from "./memory-search-controller.js";
 import type { MemorySearchDeps } from "./memory-search-controller.js";
-import type { MemorySearchResponse } from "../components/dashboard-config.js";
+import type { MemorySearchResponse } from "../components/dashboard/dashboard-config.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
