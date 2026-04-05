@@ -104,17 +104,38 @@ Credential redaction: `redactSecrets()` strips 15 secret patterns (OpenAI, GitHu
 
 ## Capability System
 
-Self-contained subsystems register via `CapabilityApi` — commands, heartbeat tasks, services. Bridge collects registrations and wires them into the appropriate subsystems.
+Self-contained subsystems register via `CapabilityApi` — commands, heartbeat tasks, services. Capabilities are auto-discovered at startup from `src/capabilities/*/capability.json` manifests.
 
 Source: `src/capabilities/capability.ts`
 
-| Capability | Directory | What it registers |
-|---|---|---|
-| Browser | `src/capabilities/browser/` | browse-checker heartbeat task, lazy BrowserIpcServer |
-| Skills | `src/capabilities/skills/` | skill-reloader heartbeat task (SkillWatcher) |
-| Sleep | `src/capabilities/sleep/` | Sleep spawn + retry, progress protocol (`PROGRESS:<pct>:<step>`) |
+### Discovery
 
-Adding a capability: create `src/capabilities/<name>/index.ts`, export `register(api: CapabilityApi)`, call `bridge.registerCapability(register)` in `startBridge()`.
+On startup, `discoverCapabilities()` scans `src/capabilities/` for directories with a `capability.json` manifest. Each is dynamically imported and its `register(api)` function called. Directories without a manifest are core capabilities (loaded explicitly).
+
+Disable a capability: `DISABLED_CAPABILITIES=browser` (comma-separated names).
+
+### Capabilities
+
+| Capability | Directory | Type | What it registers |
+|---|---|---|---|
+| Browser | `src/capabilities/browser/` (17 files) | Discoverable | browse-checker heartbeat, lazy BrowserIpcServer, SSRF guard |
+| Hotskills | `src/capabilities/hotskills/` (1 file) | Discoverable | skill-reloader heartbeat (live-reload skill .md files) |
+| Sleep | `src/capabilities/sleep/` (12 files) | Core (no manifest) | Sleep spawn + retry, progress protocol |
+
+### Adding a capability
+
+1. Create `src/capabilities/<name>/capability.json`:
+   ```json
+   { "name": "<name>", "description": "..." }
+   ```
+2. Create `src/capabilities/<name>/index.ts` exporting `register(api: CapabilityApi)`
+3. Restart bridge — auto-discovered, no code changes needed
+
+### Replacing a capability
+
+1. Drop new capability directory (e.g. `browser-v2/`)
+2. Set `DISABLED_CAPABILITIES=browser`
+3. Restart — old one skipped, new one loads
 
 ### Dashboard
 
