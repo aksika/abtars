@@ -123,6 +123,15 @@ export class BrowserManager {
   }
 
   private async _connectLightpanda(): Promise<Browser> {
+    // Lazy start: ensure container is running
+    try {
+      const { execFileSync } = await import("node:child_process");
+      const { join, dirname } = await import("node:path");
+      const { fileURLToPath } = await import("node:url");
+      const scriptDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts");
+      execFileSync(join(scriptDir, "lightpanda-docker.sh"), ["start"], { stdio: "pipe", timeout: 30_000 });
+    } catch { /* script missing or docker not available — try connecting anyway */ }
+
     console.log(`${LOG_PREFIX} Connecting to Lightpanda at ${this._config.lightpandaEndpoint}`);
     return chromium.connectOverCDP(this._config.lightpandaEndpoint);
   }
