@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Manage the agentbridge-browser Docker container.
 # Usage:
-#   ./scripts/browser-docker.sh          # build + start (headless)
-#   ./scripts/browser-docker.sh start    # start only (no build, use existing image)
-#   ./scripts/browser-docker.sh --headed # build + start (visible via WSLg)
-#   ./scripts/browser-docker.sh stop     # stop + remove
-#   ./scripts/browser-docker.sh status   # check if running
+#   ./scripts/browser-patchright.sh          # build + start (headless)
+#   ./scripts/browser-patchright.sh start    # start only (no build, use existing image)
+#   ./scripts/browser-patchright.sh --headed # build + start (visible via WSLg)
+#   ./scripts/browser-patchright.sh stop     # stop + remove
+#   ./scripts/browser-patchright.sh status   # check if running
 set -euo pipefail
 
 IMAGE="agentbridge-browser"

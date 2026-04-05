@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Manage the Lightpanda browser Docker container (lazy start).
 # Usage:
-#   ./scripts/lightpanda-docker.sh start   # start container (pull if needed)
-#   ./scripts/lightpanda-docker.sh stop    # stop + remove
-#   ./scripts/lightpanda-docker.sh status  # check if running
-#   ./scripts/lightpanda-docker.sh pull    # pull latest nightly
+#   ./scripts/browser-lightpanda.sh start   # start container (pull if needed)
+#   ./scripts/browser-lightpanda.sh stop    # stop + remove
+#   ./scripts/browser-lightpanda.sh status  # check if running
+#   ./scripts/browser-lightpanda.sh pull    # pull latest nightly
 set -euo pipefail
 
 IMAGE="lightpanda/browser:nightly"

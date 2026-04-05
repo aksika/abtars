@@ -687,7 +687,7 @@ File: `persona/browsing_prompt.md` → deployed to `~/.agentbridge/browsing_prom
 Sections:
 - Task goal (from `--task`)
 - Full browser tool reference (`agentbridge-browser` actions: navigate, click, fill, extract_text, screenshot, get_page_info, set_cookie, close_session)
-- Docker container management (`~/.agentbridge/browser-docker.sh start`)
+- Docker container management (`~/.agentbridge/browser-patchright.sh start`)
 - Login state: navigate first, use `set_cookie` with container-internal cookie files (`/run/browser/cookies/`) if not logged in
 - Output: write findings to `~/.agentbridge/subagents/browse_<taskId>_<date>.md`
 
@@ -725,14 +725,14 @@ Rules for the professor:
 
 Container: `agentbridge-browser` — headless Chromium controlled via `agentbridge-browser` CLI over Unix socket IPC.
 
-Management script: `scripts/browser-docker.sh` → deployed to `~/.agentbridge/browser-docker.sh`
+Management script: `scripts/browser-patchright.sh` → deployed to `~/.agentbridge/browser-patchright.sh`
 
 | Command | Description |
 |---------|-------------|
-| `browser-docker.sh build` | Build image + start container |
-| `browser-docker.sh start` | Start container (existing image) |
-| `browser-docker.sh stop` | Stop + remove container |
-| `browser-docker.sh status` | Check if running |
+| `browser-patchright.sh build` | Build image + start container |
+| `browser-patchright.sh start` | Start container (existing image) |
+| `browser-patchright.sh stop` | Stop + remove container |
+| `browser-patchright.sh status` | Check if running |
 
 Docker mounts (isolated):
 ```

@@ -129,7 +129,7 @@ export class BrowserManager {
       const { join, dirname } = await import("node:path");
       const { fileURLToPath } = await import("node:url");
       const scriptDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts");
-      execFileSync(join(scriptDir, "lightpanda-docker.sh"), ["start"], { stdio: "pipe", timeout: 30_000 });
+      execFileSync(join(scriptDir, "browser-lightpanda.sh"), ["start"], { stdio: "pipe", timeout: 30_000 });
     } catch { /* script missing or docker not available — try connecting anyway */ }
 
     console.log(`${LOG_PREFIX} Connecting to Lightpanda at ${this._config.lightpandaEndpoint}`);

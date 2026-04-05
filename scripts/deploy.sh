@@ -40,7 +40,7 @@ if [ ! -d "$AB_HOME/.git" ]; then
 .env
 agentbridge-*
 mcporter
-browser-docker.sh
+browser-patchright.sh
 agentbridge.sh
 scripts/
 dist/
@@ -183,17 +183,17 @@ echo "🚀 Deploying launcher + recall CLI..."
   tail -n +3 "$PROJECT_DIR/scripts/agentbridge.sh"
 } > "$AB_HOME/agentbridge.sh"
 chmod +x "$AB_HOME/agentbridge.sh"
-# Write browser-docker.sh pointing to AB_HOME (self-contained)
+# Write browser-patchright.sh pointing to AB_HOME (self-contained)
 {
   echo "#!/usr/bin/env bash"
   echo "PROJECT_DIR=\"$AB_HOME\""
-  tail -n +3 "$PROJECT_DIR/scripts/browser-docker.sh"
-} > "$AB_HOME/browser-docker.sh"
-chmod +x "$AB_HOME/browser-docker.sh"
+  tail -n +3 "$PROJECT_DIR/scripts/browser-patchright.sh"
+} > "$AB_HOME/browser-patchright.sh"
+chmod +x "$AB_HOME/browser-patchright.sh"
 
-# Deploy lightpanda-docker.sh
-cp "$PROJECT_DIR/scripts/lightpanda-docker.sh" "$AB_HOME/lightpanda-docker.sh"
-chmod +x "$AB_HOME/lightpanda-docker.sh"
+# Deploy browser-lightpanda.sh
+cp "$PROJECT_DIR/scripts/browser-lightpanda.sh" "$AB_HOME/browser-lightpanda.sh"
+chmod +x "$AB_HOME/browser-lightpanda.sh"
 mkdir -p "$AB_HOME/scripts"
 for script in daily-backup.sh doctor.sh upgrade-deps.sh; do
   cp "$PROJECT_DIR/scripts/$script" "$AB_HOME/scripts/$script"
