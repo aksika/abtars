@@ -4,7 +4,7 @@
 
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { randomBytes } from "node:crypto";
 import { fileTypeFromBuffer } from "file-type";
 import { logInfo, logWarn } from "./logger.js";
@@ -12,8 +12,8 @@ import { logInfo, logWarn } from "./logger.js";
 const TAG = "media";
 const MAX_FILE_BYTES = 16 * 1024 * 1024; // 16MB
 
-const MEDIA_DIR = (): string => join(homedir(), ".agentbridge", "received", "media");
-const FILES_DIR = (): string => join(homedir(), ".agentbridge", "received", "files");
+const MEDIA_DIR = join(agentBridgeHome(), "received", "media");
+const FILES_DIR = join(agentBridgeHome(), "received", "files");
 
 const IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
@@ -90,7 +90,7 @@ export async function saveInboundMedia(
     logWarn(TAG, `MIME mismatch: claimed=${opts.claimedMime}, detected=${mime}`);
   }
 
-  const dir = isImage ? MEDIA_DIR() : MEDIA_DIR(); // all u2a goes to media/
+  const dir = isImage ? MEDIA_DIR : MEDIA_DIR; // all u2a goes to media/
   ensureDir(dir);
   const filename = buildFilename(chatId, ext);
   const path = join(dir, filename);
@@ -109,9 +109,9 @@ export async function saveA2AFile(buffer: Buffer, chatId: number): Promise<Saved
     return null;
   }
 
-  ensureDir(FILES_DIR());
+  ensureDir(FILES_DIR);
   const filename = buildFilename(chatId, ".txt");
-  const path = join(FILES_DIR(), filename);
+  const path = join(FILES_DIR, filename);
   writeFileSync(path, buffer);
   logInfo(TAG, `Saved A2A file: ${filename} (${buffer.length}B, forced .txt)`);
 
@@ -123,7 +123,7 @@ export async function saveA2AFile(buffer: Buffer, chatId: number): Promise<Saved
  * Returns bytes freed.
  */
 export function cleanupReceived(maxBytes = 100 * 1024 * 1024): number {
-  const baseDir = join(homedir(), ".agentbridge", "received");
+  const baseDir = join(agentBridgeHome(), "received");
   if (!existsSync(baseDir)) return 0;
 
   const files: { path: string; size: number; mtime: number }[] = [];

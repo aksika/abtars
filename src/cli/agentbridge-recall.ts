@@ -13,11 +13,11 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { MemoryIndex } from "../memory/memory-index.js";
 import { recallSearch } from "../memory/recall-engine.js";
 
-const MEMORY_DIR = join(homedir(), ".agentbridge", "memory");
+const MEMORY_DIR = join(agentBridgeHome(), "memory");
 const DB_PATH = join(MEMORY_DIR, "memory.db");
 const CTX_START_PATH = join(MEMORY_DIR, "context-window-start.json");
 const DEFAULT_LIMIT = 10;

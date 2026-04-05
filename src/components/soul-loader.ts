@@ -1,10 +1,10 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { logWarn } from "./logger.js";
+import { agentBridgeHome } from "../paths.js";
 
 const TAG = "soul-loader";
-const CORE_DIR = join(homedir(), ".agentbridge", "core");
+const CORE_DIR = join(agentBridgeHome(), "core");
 
 /**
  * Load all core files (SOUL.md, TOOLS.md, user_profile.md, agent_notes.md)

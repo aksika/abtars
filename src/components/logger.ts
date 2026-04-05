@@ -1,18 +1,18 @@
 import { appendFileSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
-import { homedir } from "node:os";
+import { join } from "node:path";
+import { agentBridgeHome } from "../paths.js";
 
 /** Log levels: OFF = silent, LOW = operational info, DEBUG = everything */
 export type LogLevel = "off" | "low" | "debug";
 
 const LEVEL_ORDER: Record<LogLevel, number> = { off: 0, low: 1, debug: 2 };
-const LOG_DIR = resolve(homedir(), ".agentbridge", "logs");
+const LOG_DIR = join(agentBridgeHome(), "logs");
 
 /** Get today's log filename: bridge-YYYY-MM-DD.log */
 export function getLogFile(): string {
   const d = new Date();
   const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  return resolve(LOG_DIR, `bridge-${date}.log`);
+  return join(LOG_DIR, `bridge-${date}.log`);
 }
 
 let currentLevel: LogLevel = "low";

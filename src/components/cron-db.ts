@@ -7,17 +7,17 @@
 import Database from "better-sqlite3";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { CronEntry } from "../cli/agentbridge-task.js";
+import { agentBridgeHome } from "../paths.js";
 
-const DB_PATH = (): string => join(homedir(), ".agentbridge", "memory", "memory.db");
-const JSON_PATH = (): string => join(homedir(), ".agentbridge", "memory", "cron.json");
+const dbPath = (): string => join(agentBridgeHome(), "memory", "memory.db");
+const jsonPath = (): string => join(agentBridgeHome(), "memory", "cron.json");
 
 let _db: Database.Database | null = null;
 
 function getDb(): Database.Database {
   if (_db) return _db;
-  _db = new Database(DB_PATH());
+  _db = new Database(dbPath());
   _db.pragma("journal_mode = WAL");
   _db.exec(`CREATE TABLE IF NOT EXISTS cron_entries (
     id TEXT PRIMARY KEY,
@@ -42,14 +42,14 @@ function getDb(): Database.Database {
 }
 
 function migrate(): void {
-  const jsonPath = JSON_PATH();
-  if (!existsSync(jsonPath)) return;
+  const jp = jsonPath();
+  if (!existsSync(jp)) return;
   const db = _db!;
   const count = (db.prepare("SELECT COUNT(*) as n FROM cron_entries").get() as { n: number }).n;
   if (count > 0) return; // already migrated
 
   try {
-    const entries: CronEntry[] = JSON.parse(readFileSync(jsonPath, "utf-8"));
+    const entries: CronEntry[] = JSON.parse(readFileSync(jp, "utf-8"));
     const insert = db.prepare(`INSERT OR IGNORE INTO cron_entries
       (id, fire_at, message, chat_id, type, executor, schedule, priority, task_file, paused, fired, created_at, last_ran_at, retry_after, retrying, history)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -61,7 +61,7 @@ function migrate(): void {
       }
     });
     tx();
-    renameSync(jsonPath, jsonPath + ".migrated");
+    renameSync(jp, jp + ".migrated");
   } catch { /* migration is best-effort */ }
 }
 

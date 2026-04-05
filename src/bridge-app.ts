@@ -4,7 +4,7 @@ import { readEntry as cronReadEntry } from "./components/cron-db.js";
 import { spawn, execFileSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAndValidateConfig } from "./components/config.js";
-import { AGENT_BRIDGE_HOME } from "./components/config.js";
+import { agentBridgeHome } from "./paths.js";
 
 import { TmuxClient } from "./components/tmux-client.js";
 import { AcpTransport } from "./components/acp-transport.js";
@@ -347,7 +347,7 @@ export async function startBridge(): Promise<void> {
   }
 
   // bridge.lock — track bridge lifecycle
-  const bridgeLockPath = join(AGENT_BRIDGE_HOME, "bridge.lock");
+  const bridgeLockPath = join(agentBridgeHome(), "bridge.lock");
   try { writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf-8"); } catch { /* */ }
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
@@ -398,8 +398,8 @@ export async function startBridge(): Promise<void> {
 
   // --- Skill hot-reload ---
   const skillWatcher = new SkillWatcher(
-    join(AGENT_BRIDGE_HOME, "skills"),
-    join(AGENT_BRIDGE_HOME, "skills", "TOOLS.md"),
+    join(agentBridgeHome(), "skills"),
+    join(agentBridgeHome(), "skills", "TOOLS.md"),
   );
   heartbeat.registerTask({
     name: "skill-reloader",
@@ -458,7 +458,7 @@ export async function startBridge(): Promise<void> {
   // --- Daily cycle: restart after SLEEP_TIME ---
   heartbeat.registerTask(createAgeCheckTask({
     memory, bridgeLockPath, sleepHour: SLEEP_HOUR, busyChats, isSleepActive,
-    doctorPath: join(AGENT_BRIDGE_HOME, "scripts", "doctor.sh"),
+    doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
   }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
@@ -472,7 +472,7 @@ export async function startBridge(): Promise<void> {
   heartbeat.registerTask({
     name: "restart-check",
     execute: async () => {
-      const flag = join(AGENT_BRIDGE_HOME, ".restart-requested");
+      const flag = join(agentBridgeHome(), ".restart-requested");
       if (existsSync(flag)) {
         const reason = readFileSync(flag, "utf-8").trim();
         logInfo("restart-check", `Restart requested: ${reason}`);

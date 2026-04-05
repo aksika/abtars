@@ -27,7 +27,7 @@ import { MemoryManager } from "../memory/memory-manager.js";
 import { loadMemoryConfig } from "../memory/memory-config.js";
 import type { InstantStoreParams } from "../types/index.js";
 import { appendFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { join } from "node:path";
 
 export type RawArgs = {
@@ -236,7 +236,7 @@ async function main() {
         ?? (validation.params.contentOriginal ? scanPrompt(validation.params.contentOriginal) : null);
       if (hit) {
         const logLine = `${new Date().toLocaleString("sv-SE")} BLOCKED patternId=${hit.patternId} matched="${hit.matched}" trust=${trust} content="${validation.params.contentEn.slice(0, 120)}"\n`;
-        const logPath = join(homedir(), ".agentbridge", "logs", "prompt_injection.log");
+        const logPath = join(agentBridgeHome(), "logs", "prompt_injection.log");
         try { appendFileSync(logPath, logLine); } catch { /* best-effort */ }
         console.log(JSON.stringify({ stored: false, error: `Prompt injection detected (${hit.patternId}): "${hit.matched}"`, blocked: true }));
         process.exit(1);

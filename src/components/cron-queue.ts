@@ -11,6 +11,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { AcpTransport } from "./acp-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
@@ -28,7 +29,7 @@ function recordRunToFile(entryId: string, exitCode?: number): void {
 
 function writeResultFile(entryId: string, content: string): string | null {
   try {
-    const dir = join(homedir(), ".agentbridge", "workspace", "task-results");
+    const dir = join(agentBridgeHome(), "workspace", "task-results");
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `${entryId}_${localDate()}.md`);
     writeFileSync(file, content, "utf-8");

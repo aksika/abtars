@@ -13,6 +13,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
@@ -71,7 +72,7 @@ export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId
 // --- Prompt loading ---
 
 export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string): string {
-  const path = join(homedir(), ".agentbridge", "prompts", "browsing_prompt.md");
+  const path = join(agentBridgeHome(), "prompts", "browsing_prompt.md");
 
   if (!existsSync(path)) {
     throw new Error(`browsing_prompt.md not found at ${path}`);
@@ -97,7 +98,7 @@ export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string)
 
 // --- Pending browse file ---
 
-const pendingPath = (): string => join(homedir(), ".agentbridge", "memory", "pending_browse.json");
+const pendingPath = (): string => join(agentBridgeHome(), "memory", "pending_browse.json");
 
 export function readPendingBrowse(): PendingBrowseEntry[] {
   const p = pendingPath();
@@ -107,7 +108,7 @@ export function readPendingBrowse(): PendingBrowseEntry[] {
 }
 
 export function writePendingBrowse(entries: PendingBrowseEntry[]): void {
-  const dir = join(homedir(), ".agentbridge", "memory");
+  const dir = join(agentBridgeHome(), "memory");
   mkdirSync(dir, { recursive: true });
   writeFileSync(pendingPath(), JSON.stringify(entries, null, 2), "utf-8");
 }
@@ -125,7 +126,7 @@ Usage:
     process.exit(0);
   }
 
-  loadDotenv({ path: join(homedir(), ".agentbridge", ".env") });
+  loadDotenv({ path: join(agentBridgeHome(), ".env") });
   const raw = parseArgs(argv);
   const validation = validateArgs(raw);
 
@@ -144,8 +145,8 @@ Usage:
   }
 
   const taskId = randomBytes(3).toString("hex");
-  const logsDir = join(homedir(), ".agentbridge", "logs");
-  const subagentsDir = join(homedir(), ".agentbridge", "subagents");
+  const logsDir = join(agentBridgeHome(), "logs");
+  const subagentsDir = join(agentBridgeHome(), "subagents");
   mkdirSync(logsDir, { recursive: true });
   mkdirSync(subagentsDir, { recursive: true });
   const logFile = join(logsDir, `browse_${taskId}.log`);

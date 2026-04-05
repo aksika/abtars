@@ -6,9 +6,8 @@ import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/inde
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
 import { logInfo } from "./logger.js";
 import type { LogLevel } from "./logger.js";
-
-/** ~/.agentbridge/ is the runtime config/data directory */
-export const AGENT_BRIDGE_HOME = resolve(homedir(), ".agentbridge");
+export { agentBridgeHome } from "../paths.js";
+import { agentBridgeHome } from "../paths.js";
 
 const BOT_TOKEN_REGEX = /^\d+:[A-Za-z0-9_-]+$/;
 const SNOWFLAKE_REGEX = /^\d{17,20}$/;
@@ -86,13 +85,13 @@ async function validateCliPath(cliPath: string): Promise<void> {
  */
 export async function loadAndValidateConfig(): Promise<Config> {
   // Load .env from ~/.agentbridge/.env
-  const envPath = resolve(AGENT_BRIDGE_HOME, ".env");
+  const envPath = resolve(agentBridgeHome(), ".env");
   loadDotenv({ path: envPath });
 
   // Load transport profile (e.g. transports/kiro.env) — overrides AGENT_* vars
   const transportProfile = process.env["AGENT_TRANSPORT_PROFILE"];
   if (transportProfile) {
-    const profilePath = resolve(AGENT_BRIDGE_HOME, "transports", `${transportProfile}.env`);
+    const profilePath = resolve(agentBridgeHome(), "transports", `${transportProfile}.env`);
     loadDotenv({ path: profilePath, override: true });
     logInfo("config", `Loaded transport profile: ${transportProfile}`);
   }

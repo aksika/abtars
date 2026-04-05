@@ -3,6 +3,7 @@ import { readFileSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { createHmac, randomBytes } from "crypto";
+import { agentBridgeHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./kiro-transport.js";
 import { AcpTransport } from "./acp-transport.js";
@@ -69,7 +70,7 @@ export class AgentApiServer {
     this.workingDir = deps.workingDir;
     this.memory = deps.memory;
     this.server = createServer((req, res) => this.handle(req, res));
-    this.logDir = join(process.env.HOME ?? "", ".agentbridge/logs/agents");
+    this.logDir = join(agentBridgeHome(), "logs", "agents");
     mkdirSync(this.logDir, { recursive: true });
     this.logFile = this.newLogFile();
     try {
@@ -77,7 +78,7 @@ export class AgentApiServer {
       const name = deps.config.agentCodename;
       const candidates = [
         join(base, `../../skills/agents/${name}.md`),
-        join(process.env.HOME ?? "", `.agentbridge/skills/agents/${name}.md`),
+        join(agentBridgeHome(), "skills", "agents", `${name}.md`),
       ];
       this.agentRules = "";
       for (const p of candidates) {

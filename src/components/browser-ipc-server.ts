@@ -1,15 +1,15 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import type { BrowserAction, BrowserToolResult } from "../types/browser.js";
 import type { BrowserTool } from "./browser-tool.js";
+import { agentBridgeHome } from "../paths.js";
 
 const LOG_PREFIX = "[browser-ipc]";
 
 /** Default socket path: ~/.agentbridge/browser.sock */
 export function getDefaultSocketPath(): string {
-  return path.join(os.homedir(), ".agentbridge", "browser-socket", "browser.sock");
+  return path.join(agentBridgeHome(), "browser-socket", "browser.sock");
 }
 
 /**

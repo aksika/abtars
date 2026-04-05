@@ -7,14 +7,14 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { logInfo, logWarn } from "./logger.js";
 import { CronExpressionParser } from "cron-parser";
 import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./cron-db.js";
 import type { CronEntry } from "../cli/agentbridge-task.js";
 
 const TAG = "cron-checker";
-const memoryDir = (): string => join(homedir(), ".agentbridge", "memory");
+const memoryDir = (): string => join(agentBridgeHome(), "memory");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
 
 export interface PendingReminder {
@@ -131,7 +131,7 @@ function extractAgentText(logFile: string): string {
   } catch { return ""; }
 }
 
-const subagentsDir = (): string => join(homedir(), ".agentbridge", "subagents");
+const subagentsDir = (): string => join(agentBridgeHome(), "subagents");
 
 /** Ensure report file exists in subagents dir. Returns the file path. */
 function ensureReportFile(taskId: string): string {
@@ -145,7 +145,7 @@ function ensureReportFile(taskId: string): string {
   } catch { /* */ }
 
   // Fallback: extract from log and write
-  const logFile = join(homedir(), ".agentbridge", "logs", `browse_${taskId}.log`);
+  const logFile = join(agentBridgeHome(), "logs", `browse_${taskId}.log`);
   const text = extractAgentText(logFile);
   const date = localDate();
   const reportPath = join(dir, `browse_${taskId}_${date}.md`);

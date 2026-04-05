@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { logInfo, logError } from "./logger.js";
 import { readEntries as cronReadEntries } from "./cron-db.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
+import { agentBridgeHome } from "../paths.js";
 import { runCompaction } from "./compaction.js";
 import { resetAndPrepare } from "./message-pipeline.js";
 import type { PipelineDeps } from "./message-pipeline.js";
@@ -375,7 +376,7 @@ function buildStatusLines(ctx: CommandContext): string[] {
       `😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`,
     );
     try {
-      const hbTs = parseInt(readFileSync(join(homedir(), ".agentbridge", "memory", ".heartbeat"), "utf-8"), 10);
+      const hbTs = parseInt(readFileSync(join(agentBridgeHome(), "memory", ".heartbeat"), "utf-8"), 10);
       if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);
     } catch { /* */ }
     try {

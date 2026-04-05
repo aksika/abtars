@@ -14,9 +14,10 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { agentBridgeHome } from "../paths.js";
 import { localDate } from "../components/env-utils.js";
 
-const AB_HOME = join(homedir(), ".agentbridge");
+const AB_HOME = agentBridgeHome();
 const TWITTER_DIR = join(AB_HOME, "twitterX");
 const COOKIE_PATH = join(AB_HOME, "titok", "cookies", "x-cookies.json");
 const BASE_FOLLOWS = join(TWITTER_DIR, "base.follows.json");
