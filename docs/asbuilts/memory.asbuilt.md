@@ -231,7 +231,7 @@ Nulled automatically on content edit (re-embedded on next batch run).
 
 ## Recall Pipeline (`recall-engine.ts`, S1-S7 + Se)
 
-Source: `src/components/recall-engine.ts`
+Source: `src/memory/recall-engine.ts`
 CLI wrapper: `src/cli/agentbridge-recall.ts`
 Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine)
 
@@ -294,7 +294,7 @@ Entities are tagged during extraction — the LLM identifies named entities per 
 ## Memory Edit Tool (`agentbridge-edit`)
 
 Source: `src/cli/agentbridge-edit.ts`
-Method: `MemoryManager.editMemory()` — single unified mutation path for all extracted_memory field updates.
+Method: `MemoryEditor.editMemory()` — single unified mutation path for all extracted_memory field updates.
 
 ### Lookup modes
 
@@ -553,7 +553,7 @@ After successful sleep, the bridge injects "You just woke up.. how did you sleep
 | `src/components/sleep-state-gatherer.ts` | Collects system state for identity prompt |
 | `src/components/sleep-daily-summary.ts` | Code-driven batched summarization (04a) |
 | `src/components/sleep-extract-daily.ts` | Code-driven extraction from daily file (04b) |
-| `src/components/media-sanitizer.ts` | Strips base64/binary/media paths from messages |
+| `src/memory/media-sanitizer.ts` | Strips base64/binary/media paths from messages |
 | `~/.agentbridge/memory/garbage.json` | GC tracking |
 | `~/.agentbridge/memory/sleep/` | Audit logs (`.md`) + state files (`.lock`) |
 | `~/.agentbridge/memory/daily/` | Daily summary files (`daily_YYYY-MM-DD.md`) |
@@ -602,25 +602,28 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 
 ## Component Inventory
 
+All memory components live in `src/memory/` (moved from `src/components/` during refactor).
+
 | Component | File | Description |
 |-----------|------|-------------|
-| MemoryManager | `memory-manager.ts` | Top-level coordinator. Owns SQLite DB, FTS index, editMemory(), instantStore(), merge, cascadeDelete. |
+| MemoryManager | `memory-manager.ts` | Top-level coordinator. Owns SQLite DB, delegates to sub-services. Search, stats, core knowledge. |
+| MessageStore | `message-store.ts` | Message recording, loading, emotion score updates. |
+| MemoryEditor | `memory-editor.ts` | Extracted memory mutations: editMemory(), instantStore(), merge, reclassify, cascadeDelete. |
+| MaintenanceService | `maintenance-service.ts` | Disk budget, backup pruning, auto-compact, forget operations. |
 | MemoryIndex | `memory-index.ts` | FTS5 search + Darwinism recall counting. Emoji-stripped at index level. |
-| memory-db | `memory-db.ts` | Schema creation, migrations, FTS5 triggers (INSERT, DELETE, UPDATE), strip_diacritics() function. |
+| memory-db | `memory-db.ts` | Schema creation, all migrations (single source of truth), FTS5 triggers, custom SQL functions. |
 | memory-config | `memory-config.ts` | Env var loading + defaults for all memory settings. |
-| ollama-embed | `ollama-embed.ts` | Embedding via ollama API: embedText(), vectorSearch(), batch embed. Se sidecar for recall. |
+| ollama-embed | `ollama-embed.ts` | Embedding via ollama API: embedText(), vectorSearch() (capped at 500 recent), batch embed. |
 | recall-engine | `recall-engine.ts` | 7-stage cascade (S1-S7 + Se), extracted-first, short-circuit, MMR post-processing. |
 | consolidation-search | `consolidation-search.ts` | Search daily/weekly/quarterly .md consolidation files on disk. |
-| reflection-engine | `reflection-engine.ts` | Generates meta-summaries (reflections) from consolidation files via LLM. |
 | mmr | `mmr.ts` | Maximal Marginal Relevance re-ranking (λ=0.7) for recall post-processing. |
 | emotion-utils | `emotion-utils.ts` | `clampEmotionScore()` — clamps to -5..+5 range. |
-| sleep-queue | `sleep-queue.ts` | Queue messages during sleep, replay via platform adapters on wake. |
-| PromptScanner | `prompt-scanner.ts` | 22-pattern prompt injection detector. Used by store, edit, A2A. |
 | SessionContext | `session-context.ts` | `buildSessionStartContext()` — session-start context injection. |
-| SleepTrigger | `sleep-trigger.ts` | `hasSleepAuditToday()` — guard against re-run |
-| SleepStateGatherer | `sleep-state-gatherer.ts` | Gathers DB stats, FTS5 health, disk usage for sleep prompt. |
+| PromptScanner | `prompt-scanner.ts` (in `src/components/`) | 22-pattern prompt injection detector. Used by store, edit, A2A. |
+| SleepTrigger | `sleep-trigger.ts` (in `src/components/`) | `hasSleepAuditToday()` — guard against re-run |
+| SleepStateGatherer | `sleep-state-gatherer.ts` (in `src/components/`) | Gathers DB stats, FTS5 health, disk usage for sleep prompt. |
 | agentbridge-recall | `cli/agentbridge-recall.ts` | CLI wrapper for recall-engine. |
-| agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete (legacy, delegating to editMemory). |
+| agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete (delegates to MemoryEditor). |
 | agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run. |
 | agentbridge-sleep | `cli/agentbridge-sleep.ts` | Sleep cycle orchestrator. Multi-turn conversation with Dreamy. |
 | agentbridge-embed | `cli/agentbridge-embed.ts` | Batch embed all memories with NULL embedding via ollama. |

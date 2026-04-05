@@ -8,6 +8,15 @@ import { AGENT_BRIDGE_HOME } from "./config.js";
 
 const REASON_FILE = join(AGENT_BRIDGE_HOME, ".last-restart-reason");
 
+export type RestartCause =
+  | "daily-cycle"
+  | "deploy"
+  | "user-reset"
+  | "watchdog-silent"
+  | "watchdog-endless"
+  | "ctx-overflow"
+  | "manual";
+
 export function writeRestartReason(reason: string): void {
   writeFileSync(REASON_FILE, `${new Date().toISOString()} ${reason}\n`);
 }
