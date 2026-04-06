@@ -489,6 +489,7 @@ Before sleep starts, `SleepStateGatherer` collects system state and injects it i
 | 11 | `12-consolidation.md` | §9 Consolidation | Weekly/quarterly rollups only (daily done in 04a) |
 | 12 | `13-media-cleanup.md` | §9.5 Media Cleanup | FIFO 100MB cleanup |
 | 13 | `14-report.md` | §10 Report | Self-review, fix missed items, write audit |
+| 14 | `15-skill-review.md` | §8d Skill Review | Review conversations for reusable patterns, create/update auto-skills via `agentbridge-skill` |
 
 ### Garbage Collection (§4)
 
@@ -632,6 +633,7 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run. Uses `createMemoryBackend()` (IPC or SQLite). |
 | agentbridge-sleep | `cli/agentbridge-sleep.ts` | Sleep cycle orchestrator. Multi-turn conversation with Dreamy. |
 | agentbridge-embed | `cli/agentbridge-embed.ts` | Batch embed all memories with NULL embedding via ollama. |
+| agentbridge-skill | `cli/agentbridge-skill.ts` | Auto-skill management. create/edit/patch/delete/list in `~/.agentbridge/skills/auto/`. Security scan on writes. |
 
 ---
 
