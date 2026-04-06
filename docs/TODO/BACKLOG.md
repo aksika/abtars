@@ -297,34 +297,6 @@ If needed later, add a heartbeat task that reviews the last N messages and spawn
 
 **Effort:** Medium. **Risk:** Low (additive — new CLI + new sleep step, nothing changes).
 
-## 89. Refactor 2b — startBridge() decomposition + PipelineDeps split
-
-**Priority:** MEDIUM
-**Status:** Not started
-**Plan:** `docs/TODO/refactor-2b-plan.md` (#4, #5)
-**Depends on:** needed by #69 (direct API transport)
-
-### What's done (refactor 2b, items #1-#3)
-- ✅ cron-checker reverse dependency eliminated
-- ✅ retro-extract migrated to backend factory
-- ✅ components/ organized into subdirectories (cron/, dashboard/, transport/)
-- ✅ platforms/ restructured (telegram/, discord/ self-contained)
-- ✅ Flaky auto-compact tests fixed
-
-### What's deferred
-
-**#4 startBridge() decomposition** — 548-line wiring function. Clean seams (initMemory, initTransport, initDashboard) could be extracted as Bridge methods. Messy seams (heartbeat, pipelineDeps, platforms) are too coupled — forced extraction adds indirection without reducing complexity. Revisit if #50 (memory decoupling) or multi-CLI creates a real need.
-
-**#5 PipelineDeps split** — 25-field grab bag interface. Natural groupings (TransportDeps, MemoryDeps, SessionState) only become clear after #4. Skip until then.
-
-### When to revisit
-- #50 (Decouple Memory) needs `initMemory()` as integration point
-- Multi-CLI support needs `initTransport()` as swap point
-- Neither is imminent — this is "next time you're in the area" work
-
-**Effort:** Medium. **Risk:** Low (mechanical, compiler-guided).
-
-
 ## 90. Skill: OpenRouter Free Tier Scout
 
 **Priority:** MEDIUM
