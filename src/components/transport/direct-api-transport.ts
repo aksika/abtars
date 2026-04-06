@@ -98,6 +98,7 @@ export class DirectApiTransport implements IKiroTransport {
         this.activeEndpoint = candidate.endpoint;
         this.activeApiKey = candidate.apiKey;
         this.activeModel = candidate.model;
+        this._lastActivityAt = Date.now(); // reset watchdog timer on fallback switch
 
         // Notify user on fallback
         if (!isPrimary(candidate) && this.onFallback) {
