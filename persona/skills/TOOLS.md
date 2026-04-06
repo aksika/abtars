@@ -3,6 +3,10 @@ alwaysApply: true
 ---
 # Tools
 
+All `agentbridge-*` tools are in `~/.agentbridge/bin/`.
+✗ `/Users/akos/.local/bin/agentbridge-tweet`
+✓ `agentbridge-tweet`
+
 Run any tool with `--help` for full usage. See linked skill for behavioral rules.
 
 ## Essential (90% of usage)
