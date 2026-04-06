@@ -202,6 +202,13 @@ export async function startBridge(): Promise<void> {
     );
   } else if (config.transport.agentTransport === "api") {
     const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
+    // Parse fallback chain: API_FALLBACK_1_ENDPOINT, API_FALLBACK_1_MODEL, etc.
+    const fallbacks: Array<{ endpoint: string; apiKey?: string; model: string }> = [];
+    for (let i = 1; i <= 5; i++) {
+      const ep = process.env[`API_FALLBACK_${i}_ENDPOINT`];
+      const m = process.env[`API_FALLBACK_${i}_MODEL`];
+      if (ep && m) fallbacks.push({ endpoint: ep, apiKey: process.env[`API_FALLBACK_${i}_KEY`], model: m });
+    }
     transport = new DirectApiTransport({
       endpoint: process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1",
       apiKey: process.env["API_KEY"],
@@ -209,6 +216,7 @@ export async function startBridge(): Promise<void> {
       maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
       maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
       maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
+      fallbacks: fallbacks.length > 0 ? fallbacks : undefined,
     });
   } else {
     // Kill orphaned processes from previous runs
@@ -234,6 +242,16 @@ export async function startBridge(): Promise<void> {
   }
   bridge.transport = transport;
   logInfo("main", "✅ Transport ready");
+
+  // Wire in-process memory for direct API transport (Phase 3 — skip CLI spawn)
+  if (config.transport.agentTransport === "api" && memory) {
+    const { setMemoryBackend } = await import("./components/transport/tool-registry.js");
+    const { SqliteBackend } = await import("./memory/sqlite-backend.js");
+    const backend = new SqliteBackend(memoryConfig);
+    await backend.initialize();
+    setMemoryBackend(backend);
+    logInfo("main", "🧠 In-process memory wired to tool registry");
+  }
 
   // Initialize context-window-start for all known chats
   if (memoryConfig.memoryEnabled) {
