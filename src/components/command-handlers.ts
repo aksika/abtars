@@ -489,6 +489,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
     "/models — List and switch models",
     "/transport — Status, /transport change to switch",
+    "/transport — Status, /transport change to switch",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",
