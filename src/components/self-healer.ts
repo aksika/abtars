@@ -15,6 +15,7 @@ const SELFHEAL_BLACKLIST = [
   "ECONNRESET", "ETIMEDOUT", "socket hang up",
   "auto-approved", "permission",
   "BUG REPORT", "[agentbridge-sleep]",
+  "API error 429",
 ];
 
 export function createSelfHealerTask(
