@@ -2,13 +2,6 @@
 
 > ⚠️ **Never delete items from this log.** Completed, cancelled, and closed items stay — they are historical record.
 
-## 8. Context Compression with Tool-Pair Integrity
-
-**Status:** ✅ Closed — out of scope
-**Priority:** Low
-
-Auto-compaction already implemented: `checkAutoCompact()` in `memory-manager.ts` triggers `/compact` to kiro-cli when context window exceeds 85%. Tool-pair integrity during compression is a kiro-cli internal concern — outside our control. Additionally, skill compression (56KB → 21KB) and session context reduction (12 → 8 messages) in 2026-03-22 significantly reduced context pressure.
-
 ## 9. Memory Store Injection Scanning (defense-in-depth)
 
 **Status:** Not started
@@ -44,11 +37,6 @@ Per-stage hit-rate logging added to `agentbridge-recall` on stderr. Format: `[re
 **Commit:** `2f9d487`
 
 Jaccard token similarity + MMR re-ranking (λ=0.7) applied as post-processing in agentbridge-recall after dedup and sort. New file: `src/components/mmr.ts`. 8 tests added.
-
-## 13. Daily Backup SQL→JSONL Export
-
-**Status:** ❌ Cancelled
-**Reason:** JSONL eliminated in R1 refactor. SQLite is the single source of truth; zip backup of memory.db is sufficient.
 
 ## 14. Translation Quality Prompt Fix
 
@@ -95,37 +83,6 @@ Add `/coding` command that routes to Claude Opus as a dedicated coding agent. Se
 **Status:** ✅ Done (2026-03-27)
 
 Covered in system engineering refactor v2: 654 tests across 66 files. Added command-handlers tests, updated cron tests for SQLite. Remaining gaps tracked in REFACTOR-V2-PLAN.md Phase E1.
-
-## 22. Picture / Media Support
-
-**Status:** Merged into #68
-**Priority:** Medium
-**Source:** OpenClaw media handling study (memory refactor), user request (2026-03-22)
-
-**Done:**
-- Telegram + Discord: photos/documents downloaded and saved to `~/.agentbridge/received/media/`
-- File path appended to prompt (`File saved at: ...`) — KP can read images via kiro-cli tools
-- Sleep §9.5 media cleanup (FIFO 100MB budget)
-
-**Remaining:**
-- KP cannot send images back to the user (no `sendPhoto` / `sendImage` on adapters)
-
-**Context window problem (2026-03-31):**
-kiro-cli reads images as a tool call (file read → base64 text into context). A 233KB JPEG = ~100K tokens — fills most of minimax-m2.5's 128K context. On retry, the image loads again, tripling the damage. Result: `-32603 ValidationException` after 3 retries, session dead.
-
-**Mitigation options:**
-1. **Downscale images** — resize to 512px max before saving. Drops ~20K tokens. Quick win.
-2. **Skip image forwarding** — tell agent "user sent an image" without file path. Agent asks if needed.
-3. **Native vision model** — Sonnet/GPT-4o handle images as image blocks, not base64 text. No context bloat.
-4. **Auto-reset on image fail** — if image read causes -32603, reset session and reply "image too large for current model".
-
-## 21. Improve Security (NemoClaw Ideas)
-
-**Status:** Merged into #77
-**Priority:** Medium
-**Reference:** NemoClaw project (NVIDIA)
-
-Review NemoClaw's security patterns and apply relevant ideas to AgentBridge — prompt hardening, input sanitization, permission boundaries, agent isolation, etc.
 
 ## 23. TOOLS.md — Always-On Recall Steering
 
@@ -310,13 +267,6 @@ The consolidation pipeline (Dreamy's daily summaries, retrospectives) flattens c
 
 Cron task descriptions (the long message strings that tell the agent what to do) currently live inside `cron.json` as inline text, and their documentation lives in `skills/`. This is wrong — skills are for the agent's conversational abilities, not for scheduled task instructions.
 
-
-## 40. NotebookLM binary location
-
-**Status:** ✅ Closed — already standalone
-**Priority:** N/A
-
-Investigated: `nlm` is installed via `pipx` as `notebooklm-mcp-cli 0.4.1` (PyPI package). Symlinked at `~/.local/bin/nlm`. No dependency on openclaw.
 
 ## 41. Recall Pipeline Improvement
 
@@ -523,23 +473,6 @@ Replaced monolith `sleeping_prompt.md` with 15 focused step files in `persona/sl
 **Commits:** `69a6486`..`7e16c04`
 
 New CLI for modifying existing extracted memories. Lookup by `--memory-id` or `--message-id`. Two-tier usage: attribute edits free, content edits require user request (translation fixes exempt). CIA-AAA attribute rules enforced. Classification guards (SECRET locked, CONFIDENTIAL only 2→1). FTS5 UPDATE triggers. `edited_at`/`edited_by` audit fields. `source_timestamp` consolidated into `created_at`. Existing methods (`adjustRelevance`, `reclassifyMemory`, `updateEmotionByPlatformId`) routed through `editMemory()`. Sleep prompt §6/§7 use `agentbridge-edit`. 11 new tests, 729→735 total.
-
-## 48. Multi-CLI Support (Kiro / Gemini CLI / Cloud9)
-
-**Status:** Merged into #69
-**Priority:** Low
-**Plan:** `docs/TODO/MULTI-CLI-PLAN.md`
-
-Phase 1: Abstract CLI spawn + env restructure (AGENT_CLI, AGENT_TRANSPORT, AGENT_MODEL).
-Phase 2: Gemini CLI — wire `gemini --experimental-acp`, test, document.
-Phase 3: Cloud9 CLI — separate project, plugs in as `AGENT_CLI=cloud9`.
-
-## 51. Cloud9 — Free LLM Transport (separate project)
-
-**Status:** Merged into #69
-**Priority:** Low
-
-Standalone MITM proxy + ACP CLI that provides free access to Google Cloud Code Assist (Gemini 2.5 Pro). Separate repo, plugs into AgentBridge as `AGENT_CLI=cloud9`. Replaces Molty/OpenClaw on Mac when ready. Based on 9Router's approach (MIT license, open source).
 
 ## 49. Cohere STT/TTS Integration
 
@@ -796,22 +729,6 @@ Messages arriving while a prompt is in-flight are queued (FIFO) instead of dropp
 
 When user replies to a message on Telegram, the quoted message text (up to 500 chars) is prepended to the prompt: `[Replying to name: "quoted text"]`. Agent sees what the user is replying to.
 
-## 63. Move sleep startup into heartbeat cycle
-
-**Status:** Superseded by Recovery v2
-**Status:** Superseded by Recovery v2
-
-Remove the special `shouldRunOnStartup()` sleep check from bridge startup. Let the heartbeat `sleep-trigger` task handle it — it already checks "should I run today?" every tick. Cleaner: one main process, one heartbeat loop, no extra startup logic. Also reduce `MIN_UPTIME_MS` from 3min to 1min — once-a-day tasks don't need 3min warmup.
-
-**Expanded scope:** Refactor `SleepTrigger` and heartbeat integration to unify all sleep lifecycle management:
-- Startup trigger → heartbeat only (no special case)
-- Cross-day catch-up already implemented in `agentbridge-sleep.ts` (commit `b1a946a`)
-- Watermark gated on `dreamySucceeded` (commit `b1a946a`)
-- Lock file lifecycle: cleanup completed, warn on failures, 3-day retention (commit `b1a946a`)
-- Remaining: remove `shouldRunOnStartup()`, wire everything through heartbeat tick
-
-See `docs/TODO/SLEEP-CATCHUP-DESIGN.md` for catch-up design.
-
 ## 64. STT gibberish detection + safe languages
 
 **Status:** Not started
@@ -819,44 +736,6 @@ See `docs/TODO/SLEEP-CATCHUP-DESIGN.md` for catch-up design.
 **Effort:** small
 
 Whisper sometimes transcribes Hungarian voice notes as other languages (e.g. "ügyes vagy" → "видясь влаге" in Russian). Add `STT_SAFE_LANGUAGES` env var (default: `hu,en`). If transcription contains non-Latin/non-Hungarian script, flag as potential STT failure. SOUL adjustment: Molty should creatively recognize gibberish and ask user to repeat ("Nem értettem a hangüzenetet, megismétled?" instead of generic "Mi van?").
-
-## 65. Recall time-decay scoring with emotion override
-
-**Status:** Deferred
-**Priority:** medium
-**Effort:** small
-
-### Problem
-All memories score equally regardless of age. A fact from 6 months ago ranks the same as yesterday's. Human memory doesn't work this way — recent memories are more accessible, but emotionally charged ones persist.
-
-### Design
-
-Apply time-decay + emotion boost to recall scoring in `recall-engine.ts`:
-
-```
-final_score = base_score * recency_factor * emotion_boost
-
-recency_factor = max(0.3, 1 - (age_days / 365))
-emotion_boost = 1 + (abs(emotion_score) * 0.1)
-```
-
-| Age | Emotion 0 | Emotion ±3 | Emotion ±5 |
-|-----|-----------|------------|------------|
-| 1 day | 1.0x | 1.3x | 1.5x |
-| 30 days | 0.92x | 1.2x | 1.38x |
-| 180 days | 0.51x | 0.66x | 0.76x |
-| 365 days | 0.3x (floor) | 0.39x | 0.45x |
-
-### Implementation
-- Modify `addHit()` or the final scoring in `recallSearch()` in `recall-engine.ts`
-- Read `created_at` and `emotion_score` from `extracted_memories` (already available in query results)
-- Apply after base FTS5/embedding scoring, before MMR re-ranking
-- Only affects S1-S3 (extracted_memories). S4-S5 (messages) already favor recent via timestamp ordering.
-
-### Config
-- `RECALL_DECAY_DAYS=365` — full decay period
-- `RECALL_DECAY_FLOOR=0.3` — minimum weight for oldest memories
-- `RECALL_EMOTION_BOOST=0.1` — boost per emotion point
 
 ## 66. In-process memory CLI interception
 
