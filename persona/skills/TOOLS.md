@@ -16,6 +16,7 @@ agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó
 agentbridge-store --translated "English" --original "eredeti" --memory-type <type> --emotion-score 0 --chat-id 7773842843 [--tags "term1,term2"]
 agentbridge-edit --memory-id <N> [--credibility N] [--classification N] [--translated "..."] [--relevance-score +N] [--caller kp]
 agentbridge-expand --ids 451,452,453
+agentbridge-skill --action create|edit|patch|delete|list --name "skill-name" --content "# Skill content..."
 ```
 
 ### memory-type values
@@ -42,3 +43,4 @@ agentbridge-expand --ids 451,452,453
 | `agentbridge-browse` | Delegate browser tasks | `browse-delegate` |
 | `agentbridge-tweet` | X/Twitter feeds | `fxtwitter` |
 | `agentbridge-rss` | RSS/Atom feed fetcher | — |
+| `agentbridge-skill` | Manage auto-created skills | — |
