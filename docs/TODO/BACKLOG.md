@@ -387,3 +387,89 @@ If needed later, add a heartbeat task that reviews the last N messages and spawn
 - Neither is imminent — this is "next time you're in the area" work
 
 **Effort:** Medium. **Risk:** Low (mechanical, compiler-guided).
+
+## 90. Cross-Transport Fallback (Recovery L3)
+
+**Priority:** MEDIUM
+**Status:** Planned
+**Depends on:** #69 (done)
+
+### Problem
+
+If the primary transport fails entirely (all API endpoints down, or kiro-cli crashes), the bridge has no recovery path except `process.exit()` → LaunchAgent restart. A restart loses conversation state and takes 30-60s.
+
+### Design — cold fallback integrated into recovery
+
+Extend the existing recovery escalation:
+
+```
+L1: interrupt/retry within same transport (existing)
+L2: reset session within same transport (existing)
+L3: swap to fallback transport (NEW)
+L4: process.exit → LaunchAgent restarts (existing)
+```
+
+**Cold initialization** — fallback transport only created when needed. No idle kiro-cli process.
+
+**Config:**
+```env
+AGENT_TRANSPORT=api                    # primary
+TRANSPORT_FALLBACK=acp                 # fallback type (acp, tmux, or api with different endpoint)
+```
+
+### TransportManager
+
+Wraps primary + fallback behind `IKiroTransport`. ~100 lines.
+
+```typescript
+class TransportManager implements IKiroTransport {
+  private primary: IKiroTransport;
+  private fallback: IKiroTransport | null = null;
+  private usingFallback = false;
+  private consecutiveFailures = 0;
+  private readonly fallbackThreshold = 3;  // swap after N consecutive failures
+
+  async sendPrompt(key, msg) {
+    try {
+      const result = await this.active.sendPrompt(key, msg);
+      this.consecutiveFailures = 0;
+      return result;
+    } catch (err) {
+      this.consecutiveFailures++;
+      if (this.consecutiveFailures >= this.fallbackThreshold && !this.usingFallback) {
+        this.fallback ??= await this.initFallback();
+        this.usingFallback = true;
+        // Inject context summary into fallback session
+        return this.fallback.sendPrompt(key, msg);
+      }
+      throw err;  // let watchdog handle if below threshold
+    }
+  }
+}
+```
+
+### Context transfer on swap
+
+Fallback transport starts with no conversation history. On swap:
+1. Build a summary from the primary's last messages (if available)
+2. Inject as first message: `[TRANSPORT FALLBACK] Previous conversation summary: ...`
+3. Include SOUL + session-start context (same as fresh session)
+
+Not perfect — but better than a full restart with zero context.
+
+### Return to primary
+
+Heartbeat task: every 5 min, if using fallback, health-check the primary endpoint. On success:
+1. Swap back to primary
+2. Log: `[recovery] Primary transport restored`
+3. Reset `consecutiveFailures`
+
+No context transfer back — primary starts fresh (same as a `/reset`).
+
+### Watchdog integration
+
+Watchdog's existing L2 (reset session) stays. If L2 fails → watchdog increments `consecutiveFailures` on the TransportManager → triggers L3 (swap). If L3 also fails → L4 (exit).
+
+### Effort
+
+~100 lines (TransportManager) + ~20 lines (watchdog wiring) + ~10 lines (config). Low risk — additive, doesn't change existing transport implementations.
