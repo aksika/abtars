@@ -1,17 +1,13 @@
 # Direct API Transport — Design Document
 
 > Status: Design phase. Backlog #69.
-> References: Claude Code study (`docs/studies/claude-code-direct-api-study.md`), Hermes Agent, 9Router audit.
+> References: Agent CLI query loop study (`docs/studies/`), agent framework streaming study, 9Router audit.
 
 ## Goal
 
 New `IKiroTransport` implementation that talks directly to any OpenAI-compatible API endpoint (`/v1/chat/completions`). No CLI dependency. The bridge becomes a fully self-contained agent.
 
 **One format, one transport, every provider.** 9Router, OpenRouter, OpenAI, Anthropic (OpenAI-compat endpoint), Ollama, vLLM — all speak the same format.
-
-**Target providers:** 9Router, OpenRouter, OpenAI, Ollama, vLLM — anything that speaks the OpenAI chat completions format. No Anthropic-native format support needed (use 9Router/OpenRouter as proxy if needed).
-
-**One format, one transport, every provider.**
 
 ## Architecture
 
@@ -120,7 +116,7 @@ async function* parseSSEStream(
 }
 ```
 
-**Robustness (from Hermes study):**
+**Robustness (from reference framework study):**
 - Request with `stream_options: { include_usage: true }` — token counts in final chunk
 - Stale stream detection: abort if no chunks for 90s (prevents silent hangs)
 - Read timeout: 60s per chunk
@@ -257,6 +253,22 @@ Phase 3 eliminates subprocess overhead — tools run in-process. This is where #
 | Watchdog refactor | ~20 | Core |
 | Config additions | ~15 | Core |
 | **Total Phase 1** | **~400** | **2-3 days** |
+
+## Nice-to-haves
+
+**Retry** — wire existing `withRetry()` utility into API calls. Exponential backoff, fatal pattern detection (auth errors, model not found), rate limit header parsing. Already built, just needs integration.
+
+**Cost tracking** — accumulate `usage.prompt_tokens + completion_tokens` per session and per day. Log totals on session end. Essential for free tier budget awareness.
+
+**Parallel tool calls** — OpenAI format can return multiple `tool_calls` in one response. Phase 1 executes sequentially (simpler). Future: parallel execution for independent read-only tools (same pattern as reference framework study).
+
+**Session persistence** — serialize conversation history to disk so sessions survive bridge restarts. Load on startup if session file exists. Simple JSON file per sessionKey.
+
+**Model capability detection** — some models don't support tool calling (older Ollama models). Detect from first API error or config flag `API_TOOLS_ENABLED=false`. Fallback: agent uses bash instructions in text instead of function calls.
+
+**Image/vision support** — GPT-4o, Claude, Gemini accept `image_url` content blocks in messages. Telegram photos could be forwarded as vision input. Ties into backlog #22/#68.
+
+**Thinking/reasoning tokens** — DeepSeek R1, QwQ return `reasoning_content` field. Log separately or display as "thinking" indicator. Non-blocking — just ignore if not present.
 
 ## Open Questions
 
