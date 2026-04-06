@@ -153,19 +153,21 @@ export class DirectApiTransport implements IKiroTransport {
     if (this.activeApiKey) headers["Authorization"] = `Bearer ${this.activeApiKey}`;
 
     const response = await withRetry(
-      () => fetch(`${this.activeEndpoint}/chat/completions`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      }),
-      { attempts: 3 },
+      async () => {
+        const res = await fetch(`${this.activeEndpoint}/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal,
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`);
+        }
+        return res;
+      },
+      { attempts: 3, minDelayMs: 3000 },
     );
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`API error ${response.status}: ${text.slice(0, 500)}`);
-    }
 
     let content = "";
     const toolCallAccumulator = new Map<string, { id: string; name: string; arguments: string }>();
