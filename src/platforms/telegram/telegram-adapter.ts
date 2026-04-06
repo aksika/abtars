@@ -59,6 +59,11 @@ export class TelegramAdapter implements PlatformAdapter {
     this.deps = deps;
   }
 
+  /** Send a system notification to a chat (fire-and-forget). */
+  sendNotification(chatId: string, text: string): void {
+    this.api.sendMessage(parseInt(chatId, 10), text).catch(() => {});
+  }
+
   async start(): Promise<void> {
     const botInfo = await this.api.getMe();
     this.botUsername = botInfo.username?.toLowerCase() ?? "";

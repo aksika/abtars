@@ -20,7 +20,7 @@ export interface DirectApiConfig {
   maxContext: number;      // token budget
   maxOutput: number;       // max output tokens per response
   maxTurns: number;        // max tool-calling iterations per prompt
-  fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string }>;
+  fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
 
 export class DirectApiTransport implements IKiroTransport {
@@ -36,11 +36,14 @@ export class DirectApiTransport implements IKiroTransport {
   private activeEndpoint: string;
   private activeApiKey?: string;
   private activeModel: string;
+  private _lastPromptTokens = 0;
 
   /** Currently active model (may differ from config if on fallback). */
   get currentModel(): string { return this.activeModel; }
 
   onIntermediateResponse?: (text: string) => void;
+  /** Called when fallback model is selected — send notification before response. */
+  onFallback?: (model: string, ctxPercent: number) => void;
 
   constructor(config: DirectApiConfig) {
     this.config = config;
@@ -73,9 +76,11 @@ export class DirectApiTransport implements IKiroTransport {
     try {
       // Build candidate list: primary + fallbacks
       const candidates = [
-        { endpoint: this.config.endpoint, apiKey: this.config.apiKey, model: this.config.model },
-        ...(this.config.fallbacks ?? []),
+        { endpoint: this.config.endpoint, apiKey: this.config.apiKey, model: this.config.model, maxContext: this.config.maxContext },
+        ...(this.config.fallbacks ?? []).map(fb => ({ ...fb, maxContext: fb.maxContext ?? this.config.maxContext })),
       ];
+
+      const isPrimary = (c: typeof candidates[0]): boolean => c.model === this.config.model && c.endpoint === this.config.endpoint;
 
       for (const candidate of candidates) {
         const bucketKey = `${candidate.endpoint}|${candidate.model}`;
@@ -84,9 +89,21 @@ export class DirectApiTransport implements IKiroTransport {
           continue;
         }
 
+        // Context fit check — skip if conversation won't fit
+        if (this._lastPromptTokens > 0 && candidate.maxContext > 0 && this._lastPromptTokens > candidate.maxContext * 0.95) {
+          logWarn(TAG, `Skipping ${candidate.model} — context too large (${this._lastPromptTokens} tokens > ${candidate.maxContext} limit)`);
+          continue;
+        }
+
         this.activeEndpoint = candidate.endpoint;
         this.activeApiKey = candidate.apiKey;
         this.activeModel = candidate.model;
+
+        // Notify user on fallback
+        if (!isPrimary(candidate) && this.onFallback) {
+          const ctxPct = candidate.maxContext > 0 ? Math.round((this._lastPromptTokens / candidate.maxContext) * 100) : -1;
+          this.onFallback(candidate.model, ctxPct);
+        }
 
         try {
           const result = await this.agentLoop(session, ac.signal);
@@ -97,6 +114,30 @@ export class DirectApiTransport implements IKiroTransport {
           const kind = classifyError(status);
           recordError(bucketKey, kind);
           logWarn(TAG, `${candidate.model} failed (${kind}, bucket: ${getBucketLevel(bucketKey)}%): ${err instanceof Error ? err.message.slice(0, 100) : String(err)}`);
+        }
+      }
+
+      // All models failed — try compacting session to fit smallest available model
+      const smallest = candidates
+        .filter(c => !shouldSkip(`${c.endpoint}|${c.model}`) && c.maxContext > 0)
+        .sort((a, b) => a.maxContext - b.maxContext)[0];
+
+      if (smallest && this._lastPromptTokens > smallest.maxContext * 0.95) {
+        logWarn(TAG, `Compacting session to fit ${smallest.model} (${smallest.maxContext} tokens)`);
+        session.truncateToFit(smallest.maxContext);
+        this.activeEndpoint = smallest.endpoint;
+        this.activeApiKey = smallest.apiKey;
+        this.activeModel = smallest.model;
+        if (this.onFallback) {
+          this.onFallback(`${smallest.model} (compacted)`, Math.round((session.estimateTokens() / smallest.maxContext) * 100));
+        }
+        try {
+          const result = await this.agentLoop(session, ac.signal);
+          this._lastAnswer = result;
+          return result;
+        } catch (err) {
+          const status = this.parseErrorStatus(err);
+          recordError(`${smallest.endpoint}|${smallest.model}`, classifyError(status));
         }
       }
 
@@ -116,6 +157,7 @@ export class DirectApiTransport implements IKiroTransport {
       if (usage) {
         session.updateTokens(usage.prompt_tokens);
         this._contextPercent = session.contextPercent;
+        this._lastPromptTokens = usage.prompt_tokens;
       }
 
       if (toolCalls.length > 0) {

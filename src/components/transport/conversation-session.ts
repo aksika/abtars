@@ -54,4 +54,17 @@ export class ConversationSession {
     this.messages = [{ role: "system", content: systemPrompt }];
     this.totalPromptTokens = 0;
   }
+
+  /** Rough token estimate: ~4 chars per token. */
+  estimateTokens(): number {
+    return Math.round(this.messages.reduce((sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0), 0) / 4);
+  }
+
+  /** Drop oldest non-system messages until estimated tokens fit within limit. */
+  truncateToFit(maxTokens: number): void {
+    while (this.messages.length > 2 && this.estimateTokens() > maxTokens * 0.85) {
+      this.messages.splice(1, 1); // remove oldest after system prompt
+    }
+    this.totalPromptTokens = this.estimateTokens();
+  }
 }

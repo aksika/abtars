@@ -165,11 +165,14 @@ export class Bridge {
       );
     } else if (config.transport.agentTransport === "api") {
       const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
-      const fallbacks: Array<{ endpoint: string; apiKey?: string; model: string }> = [];
+      const fallbacks: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }> = [];
       for (let i = 1; i <= 5; i++) {
         const ep = process.env[`API_FALLBACK_${i}_ENDPOINT`];
         const m = process.env[`API_FALLBACK_${i}_MODEL`];
-        if (ep && m) fallbacks.push({ endpoint: ep, apiKey: process.env[`API_FALLBACK_${i}_KEY`], model: m });
+        if (ep && m) fallbacks.push({
+          endpoint: ep, apiKey: process.env[`API_FALLBACK_${i}_KEY`], model: m,
+          maxContext: parseInt(process.env[`API_FALLBACK_${i}_MAX_CONTEXT`] ?? "0", 10) || undefined,
+        });
       }
       transport = new DirectApiTransport({
         endpoint: process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1",
@@ -180,6 +183,7 @@ export class Bridge {
         maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
         fallbacks: fallbacks.length > 0 ? fallbacks : undefined,
       });
+      // Fallback notification wired after bridge creation (see below)
     } else {
       try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
       logInfo("main", `🔌 ACP transport (${config.transport.agentCli})`);
@@ -376,6 +380,18 @@ export async function startBridge(): Promise<void> {
   // --- Pre-flight + transport init ---
   await bridge.initTransport();
   let transport = bridge.transport;
+
+  // Wire fallback notification for direct API transport
+  if ("onFallback" in transport) {
+    (transport as unknown as { onFallback: (model: string, ctxPct: number) => void }).onFallback = (model, ctxPct) => {
+      const msg = `⚡ Fallback: ${model}${ctxPct >= 0 ? ` (ctx: ~${ctxPct}%)` : ""}`;
+      logInfo("main", msg);
+      const chatId = [...config.telegram.allowedUserIds][0];
+      if (chatId && bridge.telegramAdapter) {
+        bridge.telegramAdapter.sendNotification(String(chatId), msg);
+      }
+    };
+  }
 
   // Initialize context-window-start for all known chats
   if (memoryConfig.memoryEnabled) {
