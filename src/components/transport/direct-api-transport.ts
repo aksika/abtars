@@ -114,6 +114,7 @@ export class DirectApiTransport implements IKiroTransport {
           const status = this.parseErrorStatus(err);
           const kind = classifyError(status);
           recordError(bucketKey, kind);
+          session.stripPendingToolCalls(); // clean up incomplete tool exchange before fallback
           logWarn(TAG, `${candidate.model} failed (${kind}, bucket: ${getBucketLevel(bucketKey)}%): ${err instanceof Error ? err.message.slice(0, 100) : String(err)}`);
         }
       }

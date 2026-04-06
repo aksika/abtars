@@ -55,6 +55,16 @@ export class ConversationSession {
     this.totalPromptTokens = 0;
   }
 
+  /** Remove trailing incomplete tool exchange (assistant with tool_calls + any tool results). */
+  stripPendingToolCalls(): void {
+    while (this.messages.length > 1) {
+      const last = this.messages[this.messages.length - 1]!;
+      if (last.role === "tool" || (last.role === "assistant" && last.tool_calls?.length)) {
+        this.messages.pop();
+      } else break;
+    }
+  }
+
   /** Rough token estimate: ~4 chars per token. */
   estimateTokens(): number {
     return Math.round(this.messages.reduce((sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0), 0) / 4);
