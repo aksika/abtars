@@ -278,6 +278,9 @@ Download community skills from ClawHub (clawhub.ai) into `~/.agentbridge/skills/
 
 `BrowserManager` supports `patchright` and `lightpanda` engines. `BROWSER_ENGINE` env var + `--engine` CLI flag on both `agentbridge-browse` and `agentbridge-browser`. Lazy container management via `scripts/browser-lightpanda.sh`. `agentbridge-browser` defaults to lightpanda (fast scraping), `agentbridge-browse` defaults to patchright (stealth). `deploy.sh --full` pulls Lightpanda nightly.
 
+### Remaining
+- Container auto-stop: detect when no browse tasks have run for N minutes, stop idle containers. Both engines independently.
+
 ### Problem
 Current browser uses Patchright (stealth Chromium) in Docker for all tasks. Heavy resource usage (~500MB RAM) for simple scraping that doesn't need stealth.
 
