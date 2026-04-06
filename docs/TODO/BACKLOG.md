@@ -97,9 +97,8 @@ Whisper sometimes transcribes Hungarian voice notes as other languages (e.g. "ü
 
 ## 66. In-process memory CLI interception
 
-**Status:** Not started
+**Status:** ✅ Done (superseded by refactor #4 — CLI IPC)
 **Priority:** high
-**Effort:** medium
 
 ### Problem
 `agentbridge-store` and `agentbridge-recall` are CLI tools. Every call spawns a new node process → full DB init → embeddings init → execute → close. During conversation, Molty may store 5-10 memories — that's 5-10 cold starts. During sleep extraction, the model calls `agentbridge-store` per memory — same overhead.
