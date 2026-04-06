@@ -55,6 +55,16 @@ export class ConversationSession {
     this.totalPromptTokens = 0;
   }
 
+  /** Roll back to last user message — remove everything after it for clean fallback. */
+  rollbackToLastUser(): void {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i]!.role === "user") {
+        this.messages.splice(i + 1);
+        return;
+      }
+    }
+  }
+
   /** Remove trailing incomplete tool exchange (assistant requested tools but results missing/partial). */
   stripPendingToolCalls(): void {
     if (this.messages.length < 2) return;
