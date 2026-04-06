@@ -588,8 +588,7 @@ If Gemini CLI routes through 9Router, we get Gemini 2.5 Pro free at 180K complet
 
 ## 54. Reliable SOUL & Core-Facts Injection (Cross-Model)
 
-**Status:** Not started — study phase
-**Priority:** HIGH
+**Status:** ✅ Done
 **Source:** Multi-CLI planning (#48), kiro free tier limitations, Gemini CLI support
 
 ### Problem
@@ -800,7 +799,7 @@ When user replies to a message on Telegram, the quoted message text (up to 500 c
 ## 63. Move sleep startup into heartbeat cycle
 
 **Priority:** high
-**Effort:** small → medium (expanded scope)
+**Status:** ✅ Done
 
 Remove the special `shouldRunOnStartup()` sleep check from bridge startup. Let the heartbeat `sleep-trigger` task handle it — it already checks "should I run today?" every tick. Cleaner: one main process, one heartbeat loop, no extra startup logic. Also reduce `MIN_UPTIME_MS` from 3min to 1min — once-a-day tasks don't need 3min warmup.
 
@@ -972,8 +971,7 @@ Add OpenRouter as a transport provider alongside kiro-cli. Enables model diversi
 ## 70. Context window management improvements
 
 **Priority:** high
-**Status:** Planned
-**Effort:** medium
+**Status:** ✅ Done
 
 Based on studies: `~/workspace/studies/claude-code-context-window-management.md`, `~/workspace/studies/gemini-cli-context-window-management.md`
 
@@ -1107,8 +1105,7 @@ Changes:
 ## 71. Floating compaction (idle-triggered)
 
 **Priority:** medium
-**Status:** Planned
-**Effort:** small
+**Status:** ✅ Done
 
 ### Problem
 Context grows during conversation but compaction only triggers at 80%. If the user stops chatting at 67%, the context stays bloated until next interaction pushes it over. Wasted context = slower responses, higher cost.
@@ -1147,8 +1144,7 @@ If ctx% ≥ `CTX_IDLE_COMPACT_PCT` (65%) and no message exchange for 10 minutes,
 ## 72. Standby-triggered restart + bridge.lock
 
 **Priority:** high
-**Status:** Planned
-**Effort:** small
+**Status:** ✅ Done
 
 ### Problem
 The daily-restart heartbeat task has issues: in-memory state lost on deploys, kills fresh sessions, complex guards. Need a simpler mechanism that handles both Mac standby resume and long-running always-on scenarios.
@@ -1212,8 +1208,7 @@ The daily-restart heartbeat task has issues: in-memory state lost on deploys, ki
 ## 73. Watchdog improvements — root cause detection
 
 **Priority:** high
-**Status:** Planned
-**Effort:** medium
+**Status:** ✅ Done
 
 ### Problem
 Current watchdog detects "stuck" by counting heartbeat cycles since prompt start. It doesn't know WHY it's stuck, applies the same escalation regardless. Doctor can't fix hung tool calls. 10 min to resolve.
@@ -1311,7 +1306,7 @@ OS-specific darkwake detection (macOS `pmset -g systemstate`, Linux suspend stat
 
 ## 77. Agent Sandbox — Restrict File/Command Access
 
-**Priority:** CRITICAL
+**Priority:** HIGH
 **Status:** Not started
 
 ### Problem
@@ -1387,7 +1382,7 @@ Sandbox (Docker): kiro-cli, agent tools, browser
 ## 78. Enhanced Testing Strategy
 
 **Priority:** HIGH
-**Status:** Not started
+**Status:** Partial — smoke + e2e tests exist, unit coverage strong (764 tests)
 
 ### Current State
 - 731 unit tests + property-based tests (fast-check)
