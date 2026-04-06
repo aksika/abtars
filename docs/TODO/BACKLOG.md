@@ -267,6 +267,14 @@ Agent automatically creates and updates skills based on conversation experience.
 | Security scan | `prompt-scanner.ts` (exists) |
 | Hot-reload after create | `SkillWatcher` hotskills capability (exists) |
 
+### Skill Types
+
+| Type | Source | Directory | Lifecycle |
+|---|---|---|---|
+| **Core** | `persona/core/skills/` → deploy copies to `~/.agentbridge/skills/` | `~/.agentbridge/skills/` | Manual, version-controlled in repo |
+| **Downloaded** | ClawHub sync (backlog #79) | `~/.agentbridge/skills/downloaded/` | Pulled from registry, updatable |
+| **Auto-created** | Agent creates during sleep cycle | `~/.agentbridge/skills/auto/` | Agent-managed, reviewable by user |
+
 ### Implementation approach — sleep-based (not real-time)
 
 Dreamy already reviews conversations for memory extraction. Add a new sleep step:
