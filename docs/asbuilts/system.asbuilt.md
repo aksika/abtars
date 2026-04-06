@@ -843,7 +843,8 @@ All persona files and CLIs deployed via `scripts/deploy.sh` (supports `--quick` 
 |--------|--------------|----------------|
 | `persona/core/` (gitignored) | `~/.agentbridge/core/` | Personal files; falls back to `persona/core_templates/` for fresh installs |
 | `persona/prompts/` | `~/.agentbridge/prompts/` | Always from repo |
-| `persona/skills/` | `~/.agentbridge/skills/` | Always from repo |
+| `persona/skills/` | `~/.agentbridge/skills/core/` | Always from repo |
+| `persona/agents/` | `~/.agentbridge/agents/` | Sub-agent rules (e.g. CODING.md) |
 | `persona/tasks/` (gitignored) | `~/.agentbridge/tasks/` | Personal; creates empty dir if missing |
 | `persona/core/.env` (gitignored) | `~/.agentbridge/.env` | Falls back to existing, then `.env.example` |
 
@@ -864,14 +865,14 @@ All `agentbridge-*` CLIs: recall, store, edit, sleep, browse, todo, cron, tweet,
 ```
 ~/.backup-agentbridge/agentbridge-YYYYMMDD.zip
 ```
-Contains: `memory/`, `core/`, `skills/`, `prompts/`, `tasks/`, `topics/`, `reports/`, `finance/`.
+Contains: `memory/`, `core/`, `skills/` (core/auto/downloaded), `agents/`, `prompts/`, `tasks/`, `topics/`, `reports/`, `finance/`.
 Excludes: WAL/SHM files, pending state. Retention: 7 days (older auto-deleted).
 
 ### Git backup (remote)
 Repository: `kiroprof-backup` on GitHub. Tracks text content only:
 - `core/` — SOUL.md, TOOLS.md, user_profile.md, agent_notes.md
 - `memory/daily|weekly|quarterly|retrospectives|audit` — summaries and reports
-- `skills/`, `prompts/`, `tasks/` — agent behavior
+- `skills/` (core/auto/downloaded), `agents/`, `prompts/`, `tasks/` — agent behavior
 - `finance/`, `reports/`, `twitterX/` — output data
 - `backup/memory.db.enc` — AES-256-CBC encrypted SQLite database
 
