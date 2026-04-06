@@ -73,11 +73,11 @@ const exactCommands: Record<string, CommandHandler> = {
   "/memory": handleMemory,
   "/heartbeat": handleHeartbeat,
   "/models": handleModels,
+  "/transport": handleTransport,
   "/a2a-reset": handleA2aReset,
   "/help": handleHelp,
   "/skills": handleSkills,
   "/skill": handleSkills,
-  "/transport": handleTransport,
 };
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
@@ -312,6 +312,7 @@ async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolea
   return true;
 }
 
+
 async function handleModels(_text: string, ctx: CommandContext): Promise<boolean> {
   const transport = ctx.transport;
   const isApi = ctx.config.agentTransport === "api";
@@ -446,6 +447,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/memory — Memory storage statistics",
     "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
     "/models — List and switch models",
+    "/transport — Transport status, /transport restore to switch back",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",
@@ -485,7 +487,24 @@ async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean
   return true;
 }
 
-async function handleTransport(_text: string, ctx: CommandContext): Promise<boolean> {
+async function handleTransport(text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = text.replace(/^\/transport\s*/i, "").trim().toLowerCase();
+
+  // /transport restore — force switch back to primary
+  if (arg === "primary" || arg === "restore") {
+    const t = ctx.transport;
+    if ("forceRestorePrimary" in t && typeof (t as { forceRestorePrimary: unknown }).forceRestorePrimary === "function") {
+      if ((t as unknown as { isOnFallback: boolean }).isOnFallback) {
+        (t as unknown as { forceRestorePrimary: () => void }).forceRestorePrimary();
+        await ctx.reply("🔌 Restored to primary transport.");
+      } else {
+        await ctx.reply("🔌 Already on primary transport.");
+      }
+    } else {
+      await ctx.reply("🔌 No fallback configured.");
+    }
+    return true;
+  }
   const profile = process.env["AGENT_TRANSPORT_PROFILE"] || "default";
   const transport = process.env["AGENT_TRANSPORT"] || "acp";
   const cli = process.env["AGENT_CLI"] || "unknown";
@@ -544,6 +563,13 @@ async function handleTransport(_text: string, ctx: CommandContext): Promise<bool
     lines.push(`  Status: ${ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected"}`);
   }
 
+  // Fallback status
+  const t = ctx.transport;
+  if ("isOnFallback" in t) {
+    const onFb = (t as unknown as { isOnFallback: boolean }).isOnFallback;
+    lines.push(onFb ? "  ⚠️ Currently on FALLBACK transport" : "  ✅ On primary transport");
+    if (onFb) lines.push("  Use /transport restore to switch back.");
+  }
   await ctx.reply(lines.join("\n"));
   return true;
 }

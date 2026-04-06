@@ -79,6 +79,17 @@ export class TransportManager implements IKiroTransport {
 
   get isReady(): boolean { return this.active.isReady; }
   get contextPercent(): number { return this.active.contextPercent; }
+
+  /** Whether currently using the fallback transport. */
+  get isOnFallback(): boolean { return this.usingFallback; }
+
+  /** Force switch back to primary transport. */
+  forceRestorePrimary(): void {
+    this.usingFallback = false;
+    this.consecutiveFailures = 0;
+    if (this.healthTimer) { clearInterval(this.healthTimer); this.healthTimer = null; }
+    logInfo(TAG, "🔄 Forced restore to primary transport");
+  }
   get answerOnly(): string { return this.active.answerOnly; }
   get intermediateDeliveredText(): string { return this.active.intermediateDeliveredText; }
   get transportCommands(): string[] { return this.active.transportCommands; }
