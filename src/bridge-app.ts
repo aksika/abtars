@@ -113,6 +113,205 @@ export class Bridge {
     this.memoryConfig = memoryConfig;
   }
 
+  /** Initialize memory layer + IPC server + LLM callback. */
+  async initMemory(): Promise<void> {
+    if (!this.memoryConfig.memoryEnabled) {
+      logInfo("main", "🧠 Memory disabled");
+      return;
+    }
+    const memory = new MemoryManager(this.memoryConfig);
+    await memory.initialize();
+    this.memory = memory;
+    logInfo("main", `🧠 Memory enabled (dir=${this.memoryConfig.memoryDir})`);
+  }
+
+  /** Wire LLM callback + start memory IPC server. Call after transport is ready. */
+  async wireMemory(): Promise<void> {
+    if (!this.memory) return;
+    this.memory.setLlmCall(async (prompt: string, content: string) => {
+      return this.transport.sendPrompt("system:memory", `${prompt}\n\n${content}`);
+    });
+    logInfo("main", "🧠 Memory LLM callback registered");
+
+    const { MemoryIpcServer } = await import("./memory/memory-ipc-server.js");
+    const { SqliteBackend } = await import("./memory/sqlite-backend.js");
+    const ipcBackend = new SqliteBackend(this.memoryConfig);
+    await ipcBackend.initialize();
+    const memoryIpc = new MemoryIpcServer(ipcBackend);
+    await memoryIpc.start();
+  }
+
+  /** Initialize transport (ACP, Direct API, or tmux) + TransportManager + in-process memory. */
+  async initTransport(): Promise<void> {
+    const config = this.config;
+
+    // Pre-flight: tmux session
+    if (config.transport.agentTransport === "tmux") {
+      logInfo("main", `♻️  Starting tmux session '${config.transport.tmuxSession}'...`);
+      try {
+        execFileSync(join(import.meta.dirname, "..", "scripts", "tmux-session.sh"), { stdio: "pipe" });
+      } catch (err) {
+        logError("main", "tmux session start failed", err);
+      }
+    }
+
+    let transport: IKiroTransport;
+    if (config.transport.agentTransport === "tmux") {
+      logInfo("main", `🖥️  tmux transport (session: ${config.transport.tmuxSession})`);
+      transport = new TmuxClient(
+        config.transport.tmuxSession,
+        config.transport.tmuxCaptureDelaySec,
+        config.transport.tmuxMaxWaitSec,
+      );
+    } else if (config.transport.agentTransport === "api") {
+      const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
+      const fallbacks: Array<{ endpoint: string; apiKey?: string; model: string }> = [];
+      for (let i = 1; i <= 5; i++) {
+        const ep = process.env[`API_FALLBACK_${i}_ENDPOINT`];
+        const m = process.env[`API_FALLBACK_${i}_MODEL`];
+        if (ep && m) fallbacks.push({ endpoint: ep, apiKey: process.env[`API_FALLBACK_${i}_KEY`], model: m });
+      }
+      transport = new DirectApiTransport({
+        endpoint: process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1",
+        apiKey: process.env["API_KEY"],
+        model: process.env["API_MODEL"] ?? config.models.agentModel ?? "gpt-4o",
+        maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
+        maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
+        maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
+        fallbacks: fallbacks.length > 0 ? fallbacks : undefined,
+      });
+    } else {
+      try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
+      logInfo("main", `🔌 ACP transport (${config.transport.agentCli})`);
+      const cliArgs = config.transport.agentCli === "gemini" ? ["--acp", "-y"] : undefined;
+      transport = new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, {
+        model: config.models.agentModel || undefined,
+        cliArgs,
+      });
+    }
+
+    await transport.initialize();
+
+    // Set system prompt for direct API transport
+    if ("setSystemPrompt" in transport && typeof (transport as { setSystemPrompt: unknown }).setSystemPrompt === "function") {
+      const { loadSoulBundle } = await import("./components/soul-loader.js");
+      const soul = loadSoulBundle();
+      if (soul) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(soul);
+    }
+
+    // Wrap with TransportManager if fallback configured
+    const fallbackType = process.env["TRANSPORT_FALLBACK"];
+    if (fallbackType && fallbackType !== config.transport.agentTransport) {
+      const { TransportManager } = await import("./components/transport/transport-manager.js");
+      transport = new TransportManager(transport, {
+        createFallback: async () => {
+          if (fallbackType === "acp") {
+            logInfo("main", "🔄 Initializing ACP fallback transport...");
+            return new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, {
+              model: config.models.agentModel || undefined,
+            });
+          } else if (fallbackType === "api") {
+            const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
+            return new DirectApiTransport({
+              endpoint: process.env["FALLBACK_API_ENDPOINT"] ?? "http://localhost:20128/v1",
+              apiKey: process.env["FALLBACK_API_KEY"],
+              model: process.env["FALLBACK_API_MODEL"] ?? "gpt-4o",
+              maxContext: 131072, maxOutput: 8192, maxTurns: 50,
+            });
+          }
+          throw new Error(`Unknown fallback transport: ${fallbackType}`);
+        },
+      });
+      logInfo("main", `🛡️ Transport fallback configured: ${fallbackType}`);
+    }
+
+    this.transport = transport;
+    logInfo("main", "✅ Transport ready");
+
+    // Wire in-process memory for direct API transport
+    if (config.transport.agentTransport === "api" && this.memory) {
+      const { setMemoryBackend } = await import("./components/transport/tool-registry.js");
+      const { SqliteBackend } = await import("./memory/sqlite-backend.js");
+      const backend = new SqliteBackend(this.memoryConfig);
+      await backend.initialize();
+      setMemoryBackend(backend);
+      logInfo("main", "🧠 In-process memory wired to tool registry");
+    }
+  }
+
+  /** Initialize web dashboard. */
+  async initDashboard(
+    platforms: { web: boolean; agent: boolean },
+    heartbeat: HeartbeatSystem,
+    nlmConfig: { enabled: boolean },
+  ): Promise<void> {
+    if (!platforms.web) return;
+
+    const dashConfig = loadDashboardConfig(process.env);
+    try {
+      validateDashboardConfig(dashConfig, true);
+    } catch (err) {
+      logError("main", err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+
+    let logoBase64 = "";
+    try {
+      const logoPath = join(process.cwd(), "logo", "KiroProfessor.jpg");
+      logoBase64 = readFileSync(logoPath).toString("base64");
+    } catch (err) {
+      logWarn("main", `Could not read logo: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const agentApiOpts = platforms.agent
+      ? (() => { try { return loadAgentApiConfig(process.env as Record<string, string | undefined>); } catch { return undefined; } })()
+      : undefined;
+    const dashboardHtml = renderDashboardHtml(logoBase64, agentApiOpts ? { agentApi: { port: agentApiOpts.port, allowedIps: agentApiOpts.allowedIps } } : undefined);
+
+    const getStatus = () => {
+      const svcStates = this.registry.getStates();
+      const refs: SubsystemRefs = {
+        startedAt: this.startedAt,
+        telegramPoller: { running: svcStates.telegram?.running ?? false },
+        discordPoller: { started: svcStates.discord?.running ?? false },
+        services: svcStates,
+        transport: {
+          type: this.config.transport.agentTransport as "tmux" | "acp" | "api",
+          isReady: this.transport.isReady,
+          contextPercent: this.transport.contextPercent,
+        },
+        memory: this.memory ? { getStats: (chatId?: number) => this.memory!.getStats(chatId) } : null,
+        heartbeat: this.memory
+          ? { running: this.memory.getStats()?.heartbeatRunning ?? false, intervalMs: heartbeat.intervalMs, tasks: heartbeat.getTaskNames().map(n => ({ name: n })) }
+          : null,
+        notebooklm: nlmConfig.enabled,
+        agentApi: this.agentApiServer ? { getTrafficLog: () => this.agentApiServer!.getTrafficLog() } : null,
+      };
+      return buildStatusSnapshot(refs);
+    };
+
+    const authGate = new AuthGate(dashConfig.webAuthToken);
+    const memorySearchController = this.memory
+      ? new MemorySearchController({
+          memory: this.memory,
+          memoryDir: this.memoryConfig.memoryDir,
+          ctxStartPath: join(this.memoryConfig.memoryDir, "context-window-start.json"),
+        })
+      : null;
+
+    this.dashboardServer = new DashboardServer({
+      config: dashConfig,
+      authGate,
+      getStatus,
+      registry: this.registry,
+      memorySearchController,
+      dashboardHtml,
+    });
+
+    await this.dashboardServer.start();
+    logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort} (token: ${dashConfig.webAuthToken})`);
+  }
+
   /** Collected registrations from all capabilities. */
   readonly capabilities: CapabilityRegistry = createCapabilityRegistry();
 
@@ -169,116 +368,14 @@ export async function startBridge(): Promise<void> {
 
   // === CRITICAL PATH: Memory → Transport → Telegram (fastest path to accepting messages) ===
 
-  // Initialize memory layer
-  let memory: MemoryManager | null = null;
-  if (memoryConfig.memoryEnabled) {
-    memory = new MemoryManager(memoryConfig);
-    await memory.initialize();
-    bridge.memory = memory;
-    logInfo("main", `🧠 Memory enabled (dir=${memoryConfig.memoryDir})`);
-  } else {
-    logInfo("main", "🧠 Memory disabled");
-  }
+  await bridge.initMemory();
+  const memory = bridge.memory;
 
   const conversationBuffer = new ConversationBuffer(50);
 
-  // --- Pre-flight: start external services ---
-  if (config.transport.agentTransport === "tmux") {
-    logInfo("main", `♻️  Starting tmux session '${config.transport.tmuxSession}'...`);
-    try {
-      execFileSync(join(import.meta.dirname, "..", "scripts", "tmux-session.sh"), { stdio: "pipe" });
-    } catch (err) {
-      logError("main", "tmux session start failed", err);
-    }
-  }
-
-  let transport: IKiroTransport;
-  if (config.transport.agentTransport === "tmux") {
-    logInfo("main", `🖥️  tmux transport (session: ${config.transport.tmuxSession})`);
-    transport = new TmuxClient(
-      config.transport.tmuxSession,
-      config.transport.tmuxCaptureDelaySec,
-      config.transport.tmuxMaxWaitSec,
-    );
-  } else if (config.transport.agentTransport === "api") {
-    const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
-    // Parse fallback chain: API_FALLBACK_1_ENDPOINT, API_FALLBACK_1_MODEL, etc.
-    const fallbacks: Array<{ endpoint: string; apiKey?: string; model: string }> = [];
-    for (let i = 1; i <= 5; i++) {
-      const ep = process.env[`API_FALLBACK_${i}_ENDPOINT`];
-      const m = process.env[`API_FALLBACK_${i}_MODEL`];
-      if (ep && m) fallbacks.push({ endpoint: ep, apiKey: process.env[`API_FALLBACK_${i}_KEY`], model: m });
-    }
-    transport = new DirectApiTransport({
-      endpoint: process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1",
-      apiKey: process.env["API_KEY"],
-      model: process.env["API_MODEL"] ?? config.models.agentModel ?? "gpt-4o",
-      maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
-      maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
-      maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
-      fallbacks: fallbacks.length > 0 ? fallbacks : undefined,
-    });
-  } else {
-    // Kill orphaned processes from previous runs
-    try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
-    logInfo("main", `🔌 ACP transport (${config.transport.agentCli})`);
-
-    // Build CLI args based on which CLI is selected
-    const cliArgs = config.transport.agentCli === "gemini"
-      ? ["--acp", "-y"]
-      : undefined; // kiro and custom CLIs use default "acp" subcommand
-
-    transport = new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, {
-      model: config.models.agentModel || undefined,
-      cliArgs,
-    });
-  }
-  await transport.initialize();
-  // Set system prompt for direct API transport (SOUL + tools)
-  if ("setSystemPrompt" in transport && typeof (transport as { setSystemPrompt: unknown }).setSystemPrompt === "function") {
-    const { loadSoulBundle } = await import("./components/soul-loader.js");
-    const soul = loadSoulBundle();
-    if (soul) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(soul);
-  }
-  bridge.transport = transport;
-  logInfo("main", "✅ Transport ready");
-
-  // Wrap with TransportManager if fallback configured
-  const fallbackType = process.env["TRANSPORT_FALLBACK"];
-  if (fallbackType && fallbackType !== config.transport.agentTransport) {
-    const { TransportManager } = await import("./components/transport/transport-manager.js");
-    transport = new TransportManager(transport, {
-      createFallback: async () => {
-        if (fallbackType === "acp") {
-          logInfo("main", "🔄 Initializing ACP fallback transport...");
-          return new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, {
-            model: config.models.agentModel || undefined,
-          });
-        } else if (fallbackType === "api") {
-          const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
-          return new DirectApiTransport({
-            endpoint: process.env["FALLBACK_API_ENDPOINT"] ?? "http://localhost:20128/v1",
-            apiKey: process.env["FALLBACK_API_KEY"],
-            model: process.env["FALLBACK_API_MODEL"] ?? "gpt-4o",
-            maxContext: 131072, maxOutput: 8192, maxTurns: 50,
-          });
-        }
-        throw new Error(`Unknown fallback transport: ${fallbackType}`);
-      },
-    });
-    bridge.transport = transport;
-    logInfo("main", `🛡️ Transport fallback configured: ${fallbackType}`);
-  }
-
-  // Wire in-process memory for direct API transport (Phase 3 — skip CLI spawn)
-  if (config.transport.agentTransport === "api" && memory) {
-    const { setMemoryBackend } = await import("./components/transport/tool-registry.js");
-    const { SqliteBackend } = await import("./memory/sqlite-backend.js");
-    const backend = new SqliteBackend(memoryConfig);
-    await backend.initialize();
-    setMemoryBackend(backend);
-    logInfo("main", "🧠 In-process memory wired to tool registry");
-  }
+  // --- Pre-flight + transport init ---
+  await bridge.initTransport();
+  let transport = bridge.transport;
 
   // Initialize context-window-start for all known chats
   if (memoryConfig.memoryEnabled) {
@@ -344,21 +441,8 @@ export async function startBridge(): Promise<void> {
     loadedCapabilities: [],
   };
 
-  // Wire LLM callback into memory so compaction and context assembly can use the LLM
-  if (memory) {
-    memory.setLlmCall(async (prompt: string, content: string) => {
-      return transport.sendPrompt("system:memory", `${prompt}\n\n${content}`);
-    });
-    logInfo("main", "🧠 Memory LLM callback registered");
-
-    // Start memory IPC server (CLI tools connect here instead of opening their own DB)
-    const { MemoryIpcServer } = await import("./memory/memory-ipc-server.js");
-    const { SqliteBackend } = await import("./memory/sqlite-backend.js");
-    const ipcBackend = new SqliteBackend(memoryConfig);
-    await ipcBackend.initialize();
-    const memoryIpc = new MemoryIpcServer(ipcBackend);
-    await memoryIpc.start();
-  }
+  // Wire memory LLM callback + IPC server
+  await bridge.wireMemory();
 
     // Unified heartbeat — single 5-min timer for all periodic tasks
 
@@ -658,85 +742,7 @@ export async function startBridge(): Promise<void> {
   sleepHandle.spawn();
 
   // --- Web Dashboard wiring (conditional) ---
-  let dashboardServer: DashboardServer | null = null; // local ref, wired to bridge at end
-
-  if (platforms.web) {
-    const dashConfig = loadDashboardConfig(process.env);
-    try {
-      validateDashboardConfig(dashConfig, true);
-    } catch (err) {
-      logError("main", err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-
-    // Read logo and base64-encode
-    let logoBase64 = "";
-    try {
-      const logoPath = join(process.cwd(), "logo", "KiroProfessor.jpg");
-      logoBase64 = readFileSync(logoPath).toString("base64");
-    } catch (err) {
-      logWarn("main", `Could not read logo: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    const agentApiOpts = platforms.agent
-      ? (() => { try { return loadAgentApiConfig(process.env as Record<string, string | undefined>); } catch { return undefined; } })()
-      : undefined;
-    const dashboardHtml = renderDashboardHtml(logoBase64, agentApiOpts ? { agentApi: { port: agentApiOpts.port, allowedIps: agentApiOpts.allowedIps } } : undefined);
-
-    // Build getStatus function that assembles StatusSnapshot from all subsystem refs
-    const getStatus = () => {
-      const svcStates = registry.getStates();
-      const refs: SubsystemRefs = {
-        startedAt,
-        telegramPoller: {
-          running: svcStates.telegram?.running ?? false,
-        },
-        discordPoller: {
-          started: svcStates.discord?.running ?? false,
-        },
-        services: svcStates,
-        transport: {
-          type: config.transport.agentTransport as "tmux" | "acp" | "api",
-          isReady: transport.isReady,
-          contextPercent: transport.contextPercent,
-        },
-        memory: memory
-          ? { getStats: (chatId?: number) => memory!.getStats(chatId) }
-          : null,
-        heartbeat: memory
-          ? {
-              running: memory.getStats()?.heartbeatRunning ?? false,
-              intervalMs: heartbeat.intervalMs,
-              tasks: heartbeat.getTaskNames().map(n => ({ name: n })),
-            }
-          : null,
-        notebooklm: nlmConfig.enabled,
-        agentApi: agentApiServer ? { getTrafficLog: () => agentApiServer!.getTrafficLog() } : null,
-      };
-      return buildStatusSnapshot(refs);
-    };
-
-    const authGate = new AuthGate(dashConfig.webAuthToken);
-    const memorySearchController = memory
-      ? new MemorySearchController({
-          memory,
-          memoryDir: memoryConfig.memoryDir,
-          ctxStartPath: join(memoryConfig.memoryDir, "context-window-start.json"),
-        })
-      : null;
-
-    dashboardServer = new DashboardServer({
-      config: dashConfig,
-      authGate,
-      getStatus,
-      registry,
-      memorySearchController,
-      dashboardHtml,
-    });
-
-    await dashboardServer.start();
-    logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort} (token: ${dashConfig.webAuthToken})`);
-  }
+  await bridge.initDashboard(platforms, heartbeat, nlmConfig);
 
   // --- Agent API service ---
   let agentApiServer: AgentApiServer | null = null; // local ref, wired to bridge at end
@@ -768,7 +774,6 @@ export async function startBridge(): Promise<void> {
   }
 
   // Wire bridge fields for shutdown
-  bridge.dashboardServer = dashboardServer;
   bridge.agentApiServer = agentApiServer;
   bridge.heartbeat = heartbeat;
   bridge.cronQueue = cronQueue;
