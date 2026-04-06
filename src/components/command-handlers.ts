@@ -73,6 +73,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/heartbeat": handleHeartbeat,
   "/a2a-reset": handleA2aReset,
   "/help": handleHelp,
+  "/skills": handleSkills,
 };
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
@@ -407,7 +408,25 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     cmds.push("/a2a-reset — Reset A2A session");
   }
   cmds.push("/help — Show this help");
+  cmds.push("/skills — List available skills");
   await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
+  return true;
+}
+
+async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
+  const dir = join(agentBridgeHome(), "skills");
+  try {
+    const files = readdirSync(dir).filter(f => f.endsWith(".md") && f !== "TOOLS.md").sort();
+    const lines = files.map(f => {
+      const name = f.replace(/\.md$/, "");
+      try {
+        const content = readFileSync(join(dir, f), "utf-8");
+        const first = content.split("\n").find(l => l.trim() && !l.startsWith("#") && !l.startsWith("---") && l.trim().length > 5);
+        return `• ${name}${first ? ` — ${first.trim().slice(0, 80)}` : ""}`;
+      } catch { return `• ${name}`; }
+    });
+    await ctx.reply(`📚 Available Skills (${files.length}):\n\n${lines.join("\n")}`);
+  } catch { await ctx.reply("📚 No skills directory found."); }
   return true;
 }
 function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string> {
