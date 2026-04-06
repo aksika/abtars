@@ -5,6 +5,7 @@ export type Platform = "telegram" | "discord" | (string & {});
 export interface SendOpts {
   threadId?: string;
   parseMode?: string;
+  reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> };
 }
 
 /** Normalized inbound message from any platform. */

@@ -440,6 +440,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/stop, /ctrlc — Stop current response",
     "/memory — Memory storage statistics",
     "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
+    "/models — List and switch models (API transport)",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",

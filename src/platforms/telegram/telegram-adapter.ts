@@ -98,6 +98,7 @@ export class TelegramAdapter implements PlatformAdapter {
     const sendOpts: Record<string, unknown> = {};
     if (opts?.threadId) sendOpts.message_thread_id = parseInt(opts.threadId, 10);
     if (opts?.parseMode) sendOpts.parse_mode = opts.parseMode;
+    if (opts?.reply_markup) sendOpts.reply_markup = opts.reply_markup;
     return this.api.sendMessage(chatId, text, sendOpts);
   }
 
@@ -158,6 +159,16 @@ export class TelegramAdapter implements PlatformAdapter {
 
     if (update.callback_query) {
       await this.api.answerCallbackQuery(update.callback_query.id);
+      const data = update.callback_query.data ?? "";
+      if (data.startsWith("model:")) {
+        const newModel = data.slice(6);
+        const transport = this.deps.transport;
+        if ("setModel" in transport && typeof (transport as { setModel: unknown }).setModel === "function") {
+          (transport as { setModel: (m: string) => void }).setModel(newModel);
+          const chatId = update.callback_query.message?.chat?.id;
+          if (chatId) await this.api.sendMessage(chatId, `🤖 Model switched → ${newModel}`);
+        }
+      }
       return;
     }
 
