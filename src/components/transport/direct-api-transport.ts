@@ -82,10 +82,13 @@ export class DirectApiTransport implements IKiroTransport {
 
       // If user manually switched model, put it first
       if (this._userModelOverride) {
-        const override = allCandidates.find(c => c.model === this._userModelOverride);
-        if (override) {
-          allCandidates.splice(allCandidates.indexOf(override), 1);
-          allCandidates.unshift(override);
+        const idx = allCandidates.findIndex(c => c.model === this._userModelOverride);
+        if (idx >= 0) {
+          const [override] = allCandidates.splice(idx, 1);
+          allCandidates.unshift(override!);
+        } else {
+          // Model not in config — add it using primary endpoint
+          allCandidates.unshift({ endpoint: this.activeEndpoint, apiKey: this.activeApiKey, model: this._userModelOverride, maxContext: this.config.maxContext });
         }
       }
       const candidates = allCandidates;
