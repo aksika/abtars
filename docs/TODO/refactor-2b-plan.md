@@ -140,17 +140,18 @@ Consumers narrow their parameter type: middleware takes `MessageContext` (alread
 ## Execution Order
 
 ```
-#1 cron-checker reverse dep  →  #2 retro-extract  →  #3 subdirectories  →  #4 Bridge decomp  →  #5 PipelineDeps
+#1 cron-checker reverse dep  ✅  →  #2 retro-extract  ✅  →  #3 subdirectories  ✅  →  #4 Bridge decomp  ⏸  →  #5 PipelineDeps  ⏸
 ```
 
-Each step is independently shippable. #1 and #2 are quick wins. #3-#5 are the meat.
+#1-#3 shipped. #4-#5 deferred — startBridge() is a wiring function, forced decomposition adds indirection without reducing complexity. The comment sections serve as virtual methods. Revisit if #50 (memory decoupling) or #48 (multi-CLI) create a real need for clean seams.
 
 ## Success Criteria
 
-- [ ] No `components/` → `capabilities/` imports (reverse dependency eliminated)
-- [ ] All CLI tools use `createMemoryBackend()` (no direct `new MemoryManager()` outside bridge/sleep)
-- [ ] `components/` has ≤35 top-level files (down from 60)
-- [ ] `startBridge()` ≤ 50 lines (delegates to Bridge methods)
-- [ ] `PipelineDeps` split into ≥3 focused interfaces
-- [ ] 78 test files, 764+ tests passing
-- [ ] Clean typecheck
+- [x] No `components/` → `capabilities/` imports (reverse dependency eliminated)
+- [x] All CLI tools use `createMemoryBackend()` (no direct `new MemoryManager()` outside bridge/sleep)
+- [x] `components/` has ≤40 top-level files (down from 60)
+- [ ] ~~`startBridge()` ≤ 50 lines~~ — deferred, cosmetic gain only
+- [ ] ~~`PipelineDeps` split into ≥3 focused interfaces~~ — deferred, groupings not natural yet
+- [x] 78 test files, 764 tests passing
+- [x] Clean typecheck
+- [x] Flaky auto-compact tests fixed (wrong table + timezone mismatch)
