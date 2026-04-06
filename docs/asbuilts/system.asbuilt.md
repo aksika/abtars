@@ -131,7 +131,7 @@ Disable a capability: `DISABLED_CAPABILITIES=browser` (comma-separated names).
 | Capability | Directory | Type | What it registers |
 |---|---|---|---|
 | Browser | `src/capabilities/browser/` (17 files) | Discoverable | browse-checker heartbeat, lazy BrowserIpcServer, SSRF guard |
-| Hotskills | `src/capabilities/hotskills/` (1 file) | Discoverable | skill-reloader heartbeat (live-reload skill .md files) |
+| Hotskills | `src/capabilities/hotskills/` (1 file) | Discoverable | skill-reloader heartbeat (live-reload skill .md files from core/auto/downloaded) |
 | Sleep | `src/capabilities/sleep/` (12 files) | Core (no manifest) | Sleep spawn + retry, progress protocol |
 
 ### Adding a capability
@@ -929,6 +929,21 @@ All commands handled by `src/components/command-handlers.ts` — single module f
 ## Sleep Garbage Collection (Dreamy)
 
 See [memory.asbuilt.md](memory.asbuilt.md) — "Sleep Cycle — Dreamy" section.
+
+### Auto-Skill Creation (Sleep Step 15)
+
+Dreamy reviews the day's conversations for skill-worthy patterns during sleep cycle:
+- Trial-and-error approaches, user corrections, multi-step workflows
+- Uses `agentbridge-skill` CLI to create/edit/patch skills in `~/.agentbridge/skills/auto/`
+- Security scan (`prompt-scanner.ts`) on every write — blocks injection attempts
+- SkillWatcher picks up new/changed files on next heartbeat tick
+
+**Skill types:**
+| Type | Directory | Source |
+|---|---|---|
+| Core | `~/.agentbridge/skills/core/` | Deployed from repo |
+| Auto-created | `~/.agentbridge/skills/auto/` | Agent creates during sleep |
+| Downloaded | `~/.agentbridge/skills/downloaded/` | ClawHub sync (future) |
 
 ---
 
