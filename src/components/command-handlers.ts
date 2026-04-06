@@ -545,7 +545,7 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
   const lines: string[] = [`🔌 Transport: ${transport} (${profile})`];
 
   if (transport === "api" && endpoint) {
-    lines.push(`  Endpoint: ${endpoint}`, `  Model: ${model}`);
+    lines.push(`  Model: ${model}`);
 
     // Connection + provider-specific info
     try {
