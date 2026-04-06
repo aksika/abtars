@@ -332,6 +332,18 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
     ? (transport as unknown as { currentModel: string }).currentModel
     : process.env["AGENT_MODEL"] ?? "unknown";
 
+  // Collect models from transport profiles
+  let profileModels: string[] = [];
+  try {
+    const transportsDir = join(agentBridgeHome(), "transports");
+    const profiles = readdirSync(transportsDir).filter(f => f.endsWith(".env"));
+    for (const f of profiles) {
+      const content = readFileSync(join(transportsDir, f), "utf-8");
+      const m = content.match(/^API_MODEL=(.+)$/m) ?? content.match(/^AGENT_MODEL=(.+)$/m);
+      if (m?.[1]) profileModels.push(m[1].trim());
+    }
+  } catch { /* no transports dir */ }
+
   // Fetch available models
   let models: string[] = [];
   if (isApi) {
@@ -342,14 +354,16 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
       if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
       const res = await fetch(`${endpoint}/models`, { headers, signal: AbortSignal.timeout(5000) });
       if (res.ok) {
-        const data = await res.json() as { data?: Array<{ id: string; created?: number }> };
+        const data = await res.json() as { data?: Array<{ id: string; created?: number; context_length?: number }> };
         const allModels = data.data ?? [];
-        // OpenRouter: filter to free models created in last 60 days
         if (endpoint.includes("openrouter")) {
+          // Free models <60 days, sorted by context length, capped at 5
           const cutoff = (Date.now() / 1000) - (60 * 86400);
           models = allModels
             .filter(m => m.id.includes(":free") && (m.created ?? 0) > cutoff)
-            .map(m => m.id).sort();
+            .sort((a, b) => (b.context_length ?? 0) - (a.context_length ?? 0))
+            .slice(0, 5)
+            .map(m => m.id);
         } else {
           models = allModels.map(m => m.id).sort();
         }
@@ -362,10 +376,13 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
     if (configured) models = configured.split(",").map(m => m.trim()).filter(Boolean);
   }
 
-  // Ensure current model is always in the list
-  if (models.length > 0 && !models.includes(currentModel)) {
-    models.unshift(currentModel);
+  // Prepend: current model + transport profile models (deduplicated)
+  const seen = new Set(models);
+  const prefix: string[] = [];
+  for (const m of [currentModel, ...profileModels]) {
+    if (!seen.has(m)) { prefix.push(m); seen.add(m); }
   }
+  models = [...prefix, ...models];
 
   if (models.length > 0) {
     const COLS = 1;
