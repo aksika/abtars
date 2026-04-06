@@ -700,7 +700,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   const fallbackTransport = process.env["TRANSPORT_FALLBACK"];
 
   const lines = [
-    `Kiro Professor v${version}${buildInfo}`,
+    `AgentBridge v${version}${buildInfo}`,
     `🤖 Model: ${model}`,
     ...(fallbackModels.length > 0 ? [`   Fallback model: ${fallbackModels.join(", ")}`] : []),
     `📊 Context window: ${ctxPct}`,
