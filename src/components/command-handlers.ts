@@ -77,6 +77,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/help": handleHelp,
   "/skills": handleSkills,
   "/skill": handleSkills,
+  "/transport": handleTransport,
 };
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
@@ -462,6 +463,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
   }
   cmds.push("/help — Show this help");
   cmds.push("/skills — List available skills");
+  cmds.push("/transport — Transport status and provider info");
   await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
   return true;
 }
@@ -482,6 +484,70 @@ async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean
   } catch { await ctx.reply("📚 No skills directory found."); }
   return true;
 }
+
+async function handleTransport(_text: string, ctx: CommandContext): Promise<boolean> {
+  const profile = process.env["AGENT_TRANSPORT_PROFILE"] || "default";
+  const transport = process.env["AGENT_TRANSPORT"] || "acp";
+  const cli = process.env["AGENT_CLI"] || "unknown";
+  const model = process.env["API_MODEL"] || process.env["AGENT_MODEL"] || "unknown";
+  const endpoint = process.env["API_ENDPOINT"] || "";
+  const lines: string[] = [`🔌 Transport: ${transport} (${profile})`];
+
+  if (transport === "api" && endpoint) {
+    lines.push(`  Endpoint: ${endpoint}`, `  Model: ${model}`);
+
+    // Connection + provider-specific info
+    try {
+      if (endpoint.includes("openrouter")) {
+        const key = process.env["API_KEY"] || "";
+        const res = await fetch("https://openrouter.ai/api/v1/auth/key", {
+          headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) {
+          const d = (await res.json() as { data: Record<string, unknown> }).data;
+          lines.push(`  Status: ✅ Connected`);
+          lines.push(`  Tier: ${d.is_free_tier ? "free" : "paid"}`);
+          lines.push(`  Credits: $${d.limit_remaining} remaining / $${d.usage} used`);
+          const rl = d.rate_limit as { requests: number } | undefined;
+          lines.push(`  Rate: ${rl?.requests === -1 ? "unlimited" : `${rl?.requests ?? "?"} req/interval`}`);
+        } else { lines.push(`  Status: ❌ Auth failed (${res.status})`); }
+      } else if (endpoint.includes("11434")) {
+        // Ollama
+        const res = await fetch(endpoint.replace("/v1", "/api/ps"), { signal: AbortSignal.timeout(3000) });
+        if (res.ok) {
+          const d = await res.json() as { models?: Array<{ name: string; size: number }> };
+          lines.push(`  Status: ✅ Connected`);
+          const running = d.models ?? [];
+          if (running.length > 0) {
+            for (const m of running) lines.push(`  Running: ${m.name} (${(m.size / 1e9).toFixed(1)}GB)`);
+          } else { lines.push(`  Running: none`); }
+          const tags = await fetch(endpoint.replace("/v1", "/api/tags"), { signal: AbortSignal.timeout(3000) });
+          if (tags.ok) {
+            const t = await tags.json() as { models?: unknown[] };
+            lines.push(`  Available: ${t.models?.length ?? 0} models`);
+          }
+        } else { lines.push(`  Status: ❌ Unreachable`); }
+      } else {
+        // Generic API (9Router etc)
+        const res = await fetch(`${endpoint}/models`, { signal: AbortSignal.timeout(3000) });
+        lines.push(res.ok ? `  Status: ✅ Connected` : `  Status: ❌ Unreachable (${res.status})`);
+        if (res.ok) {
+          const d = await res.json() as { data?: unknown[] };
+          lines.push(`  Models: ${d.data?.length ?? "?"} available`);
+        }
+      }
+    } catch { lines.push(`  Status: ❌ Unreachable`); }
+  } else {
+    // ACP transport
+    lines.push(`  CLI: ${cli}`, `  Model: ${model}`);
+    lines.push(`  Context: ${ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a"}`);
+    lines.push(`  Status: ${ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected"}`);
+  }
+
+  await ctx.reply(lines.join("\n"));
+  return true;
+}
+
 function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
     const child = execFile(cmd, args, { timeout: timeoutMs, encoding: "utf-8" }, (err, stdout) => {
