@@ -19,6 +19,7 @@ export interface DirectApiConfig {
   maxContext: number;      // token budget
   maxOutput: number;       // max output tokens per response
   maxTurns: number;        // max tool-calling iterations per prompt
+  fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string }>;
 }
 
 export class DirectApiTransport implements IKiroTransport {
@@ -31,15 +32,22 @@ export class DirectApiTransport implements IKiroTransport {
   private _intermediateText = "";
   private _promptStartedAt: number | null = null;
   private _lastActivityAt: number | null = null;
+  private activeEndpoint: string;
+  private activeApiKey?: string;
+  private activeModel: string;
 
   onIntermediateResponse?: (text: string) => void;
 
   constructor(config: DirectApiConfig) {
     this.config = config;
+    this.activeEndpoint = config.endpoint;
+    this.activeApiKey = config.apiKey;
+    this.activeModel = config.model;
   }
 
   async initialize(): Promise<void> {
-    logInfo(TAG, `🔌 Direct API transport (${this.config.endpoint}, model: ${this.config.model})`);
+    const fb = this.config.fallbacks?.length ? ` (+${this.config.fallbacks.length} fallback${this.config.fallbacks.length > 1 ? "s" : ""})` : "";
+    logInfo(TAG, `🔌 Direct API transport (${this.config.endpoint}, model: ${this.config.model}${fb})`);
   }
 
   setSystemPrompt(prompt: string): void {
@@ -61,7 +69,29 @@ export class DirectApiTransport implements IKiroTransport {
     try {
       const result = await this.agentLoop(session, ac.signal);
       this._lastAnswer = result;
+      // Restore primary on success (in case we fell back)
+      this.activeEndpoint = this.config.endpoint;
+      this.activeApiKey = this.config.apiKey;
+      this.activeModel = this.config.model;
       return result;
+    } catch (err) {
+      // Try fallbacks
+      if (this.config.fallbacks?.length && !ac.signal.aborted) {
+        for (const fb of this.config.fallbacks) {
+          logWarn(TAG, `Primary failed (${err instanceof Error ? err.message : String(err)}), trying fallback: ${fb.endpoint} / ${fb.model}`);
+          this.activeEndpoint = fb.endpoint;
+          this.activeApiKey = fb.apiKey;
+          this.activeModel = fb.model;
+          try {
+            const result = await this.agentLoop(session, ac.signal);
+            this._lastAnswer = result;
+            return result;
+          } catch (fbErr) {
+            logWarn(TAG, `Fallback ${fb.model} failed: ${fbErr instanceof Error ? fbErr.message : String(fbErr)}`);
+          }
+        }
+      }
+      throw err;
     } finally {
       this._promptStartedAt = null;
       this.abortControllers.delete(sessionKey);
@@ -111,7 +141,7 @@ export class DirectApiTransport implements IKiroTransport {
     signal: AbortSignal,
   ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
     const body = {
-      model: this.config.model,
+      model: this.activeModel,
       messages: session.messages,
       tools: getToolSchemas(),
       max_tokens: this.config.maxOutput,
@@ -120,10 +150,10 @@ export class DirectApiTransport implements IKiroTransport {
     };
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    if (this.activeApiKey) headers["Authorization"] = `Bearer ${this.activeApiKey}`;
 
     const response = await withRetry(
-      () => fetch(`${this.config.endpoint}/chat/completions`, {
+      () => fetch(`${this.activeEndpoint}/chat/completions`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
