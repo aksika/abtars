@@ -74,6 +74,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/a2a-reset": handleA2aReset,
   "/help": handleHelp,
   "/skills": handleSkills,
+  "/skill": handleSkills,
 };
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
