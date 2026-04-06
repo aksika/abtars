@@ -664,7 +664,9 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
 
   // Transport details
   const endpoint = process.env["API_ENDPOINT"];
-  const provider = mode === "API" && endpoint ? endpoint.replace(/^https?:\/\//, "").replace(/\/v1$/, "") : (process.env["AGENT_CLI"] || "kiro");
+  const provider = mode === "API" && endpoint
+    ? (process.env["AGENT_TRANSPORT_PROFILE"] || endpoint.replace(/^https?:\/\//, "").split(/[/:]/)[0]!)
+    : (process.env["AGENT_CLI"] || "kiro");
   const transportLine = `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`;
 
   // Fallback model(s)
