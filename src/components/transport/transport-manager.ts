@@ -80,6 +80,20 @@ export class TransportManager implements IKiroTransport {
   get isReady(): boolean { return this.active.isReady; }
   get contextPercent(): number { return this.active.contextPercent; }
 
+  /** Proxy currentModel from active transport if available. */
+  get currentModel(): string | undefined {
+    const t = this.active;
+    return "currentModel" in t ? (t as unknown as { currentModel: string }).currentModel : undefined;
+  }
+
+  /** Proxy setModel to active transport if available. */
+  async setModel(model: string): Promise<void> {
+    const t = this.active;
+    if ("setModel" in t && typeof (t as { setModel: unknown }).setModel === "function") {
+      await (t as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
+    }
+  }
+
   /** Whether currently using the fallback transport. */
   get isOnFallback(): boolean { return this.usingFallback; }
 

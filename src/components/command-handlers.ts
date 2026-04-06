@@ -457,7 +457,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/memory — Memory storage statistics",
     "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
     "/models — List and switch models",
-    "/transport — Transport status, /transport restore to switch back",
+    "/transport — Status, /transport change to switch",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",
@@ -475,7 +475,6 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
   }
   cmds.push("/help — Show this help");
   cmds.push("/skills — List available skills");
-  cmds.push("/transport — Status, /transport change to switch");
   await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
   return true;
 }
