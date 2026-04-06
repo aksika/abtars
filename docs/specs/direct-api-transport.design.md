@@ -73,9 +73,11 @@ class DirectApiTransport implements IKiroTransport {
 **sendPrompt() flow:**
 1. Get or create `ConversationSession` for sessionKey
 2. Append user message to session history
-3. Enter agent loop:
-   - Call `streamCompletion()` with messages + tools
+3. Enter agent loop (max `API_MAX_TURNS` iterations):
+   - Check abort signal (clean exit point before each API call)
+   - Call `streamCompletion()` with messages + tools + `stream_options: { include_usage: true }`
    - Accumulate text chunks, emit via `onChunk`
+   - Stale stream detection: abort if no chunks for 90s
    - If response has `tool_calls` → execute via tool registry → append results → loop
    - If response has content only → append assistant message → return content
 4. Update `contextPercent` from `usage.prompt_tokens / maxContextTokens`
@@ -117,6 +119,12 @@ async function* parseSSEStream(
   //        { type: 'done', usage: { prompt_tokens, completion_tokens } }
 }
 ```
+
+**Robustness (from Hermes study):**
+- Request with `stream_options: { include_usage: true }` — token counts in final chunk
+- Stale stream detection: abort if no chunks for 90s (prevents silent hangs)
+- Read timeout: 60s per chunk
+- Ollama compatibility: track tool_calls by ID not index (Ollama reuses index 0)
 
 ### 4. Tool Registry (`src/components/transport/tool-registry.ts`)
 
@@ -229,6 +237,7 @@ Compaction: same flow as today — send compaction prompt in the same session, e
 1. **Phase 1: Basic transport** — sendPrompt, streaming, tool calling loop, execute_bash only
 2. **Phase 2: Full tool registry** — all agentbridge-* CLIs as native tools
 3. **Phase 3: In-process tools** — skip CLI spawn, call memory/browse directly (performance)
+4. **Phase 4: Fallback chain** — try free model, fall back to paid on failure (Hermes pattern)
 
 Phase 1 is the MVP. The agent can do everything via `execute_bash` — it just calls `agentbridge-store`, `agentbridge-recall`, etc. as bash commands. Same as today, but without kiro-cli in the middle.
 
