@@ -71,7 +71,7 @@ Telegram/Discord → PlatformAdapter.start() → onMessage callback
 
 ### Message Pipeline (`src/components/message-pipeline.ts`)
 
-`handleInboundMessage()` — shared flow for all platforms. Early phases (voice, commands, busy guard) run as middleware via `runPipeline()`. Core transport/response handling inline. Dependencies injected via `PipelineDeps`.
+`handleInboundMessage()` — shared flow for all platforms. Early phases (voice, commands, busy guard) run as middleware via `runPipeline()`. Core transport/response handling inline. Dependencies injected via `PipelineDeps` (composed from `TransportDeps`, `MemoryDeps`, `VoiceDeps`, `SessionState`).
 
 ### Middleware (`src/components/pipeline/`)
 
@@ -107,7 +107,12 @@ Credential redaction: `redactSecrets()` strips 15 secret patterns (OpenAI, GitHu
 ### Entry Point
 
 - `src/main.ts` (11 lines) — entry point, calls `startBridge()`
-- `src/bridge-app.ts` — `Bridge` class (lifecycle, shutdown, subsystem fields) + `startBridge()` wiring function
+- `src/bridge-app.ts` — `Bridge` class + `startBridge()` wiring function
+  - `Bridge.initMemory()` — MemoryManager creation + initialize
+  - `Bridge.wireMemory()` — LLM callback + IPC server (after transport ready)
+  - `Bridge.initTransport()` — 3-way transport selection (tmux/acp/api), TransportManager wrapping, in-process memory wiring
+  - `Bridge.initDashboard()` — dashboard config, auth gate, status function, server start
+  - `startBridge()` — remaining wiring: platforms, heartbeat, sleep, agent API, capabilities
 
 ## Capability System
 
@@ -231,7 +236,7 @@ Config: `API_ENDPOINT`, `API_KEY`, `API_MODEL`, `API_MAX_CONTEXT`, `API_MAX_OUTP
 Legacy. Sends via `tmux send-keys`, reads via `tmux capture-pane`. Battle-tested, survives disconnects.
 
 ### TransportManager (`src/components/transport/transport-manager.ts`)
-Wraps primary + fallback transport. Recovery L3: after 3 consecutive failures, cold-inits fallback transport. Heartbeat health check restores primary when it recovers. Config: `TRANSPORT_FALLBACK=acp`.
+Wraps primary + fallback transport. Recovery L3: after 3 consecutive failures, cold-inits fallback transport. Heartbeat health check restores primary when it recovers. `forceRestorePrimary()` for manual override via `/transport restore`. Config: `TRANSPORT_FALLBACK=acp`.
 
 ### Fallback Chain (within Direct API)
 `API_FALLBACK_1_ENDPOINT` / `API_FALLBACK_1_MODEL` (up to 5). Tried in order if primary model fails. Restores primary on next success.
@@ -240,7 +245,14 @@ Wraps primary + fallback transport. Recovery L3: after 3 consecutive failures, c
 429s and transient errors retried with 3s exponential backoff (3 attempts). Status check inside retry loop.
 
 ### `/models` Command
-Fetches available models from `/v1/models` (API) or `AGENT_AVAILABLE_MODELS` env (ACP). Displays as Telegram inline keyboard. Tap to hot-swap: instant for API, session reset for ACP.
+Fetches available models from `/v1/models` (API) or `AGENT_AVAILABLE_MODELS` env (ACP). Displays as Telegram inline keyboard (1 column). Tap to hot-swap: instant for API, session reset for ACP.
+
+### `/transport` Command
+- `/transport` — shows current transport status, provider info, fallback state
+- `/transport change` — lists `~/.agentbridge/transports/*.env` profiles as Telegram inline keyboard. Tap to switch: writes `AGENT_TRANSPORT_PROFILE` to `.env` → bridge restarts
+- `/transport restore` — forces switch back to primary when on fallback (`TransportManager.forceRestorePrimary()`)
+
+Command dispatcher matches exact commands by first word as fallback (after prefix commands), so `/transport change` routes correctly.
 
 ### `/status` Transport Info
 Shows active transport, endpoint, model, fallback model(s), fallback transport.
