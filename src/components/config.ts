@@ -125,8 +125,8 @@ export async function loadAndValidateConfig(): Promise<Config> {
 
   // --- AGENT_TRANSPORT ---
   const rawTransport = (process.env["AGENT_TRANSPORT"] || CONFIG_DEFAULTS.transport.agentTransport).toLowerCase();
-  if (rawTransport !== "tmux" && rawTransport !== "acp") {
-    throw new Error(`AGENT_TRANSPORT must be "tmux" or "acp", got "${rawTransport}"`);
+  if (rawTransport !== "tmux" && rawTransport !== "acp" && rawTransport !== "api") {
+    throw new Error(`AGENT_TRANSPORT must be "tmux", "acp", or "api", got "${rawTransport}"`);
   }
   const agentTransport = rawTransport as AgentTransport;
 

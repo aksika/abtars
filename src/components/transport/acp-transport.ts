@@ -174,7 +174,7 @@ export class AcpTransport implements IKiroTransport {
     const sessionId = await this.getOrCreateSession(sessionKey);
     this.responseChunks.set(sessionId, []);
 
-    logDebug(this.tag, `Sending prompt to session ${sessionId}: "${message.slice(0, 80)}"`);
+    logDebug(this.tag, `Sending prompt to session ${sessionId}: "${message.replace(/\n/g, " ").slice(0, 80)}…"`);
 
     this.promptStartedAt = Date.now();
     this.lastActivityAt = Date.now();

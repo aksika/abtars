@@ -14,7 +14,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const publicDir = join(__dirname, "..", "public");
+const publicDir = join(__dirname, "..", "..", "public");
 
 let _css: string | null = null;
 let _js: string | null = null;

@@ -91,7 +91,7 @@ export type PlatformStates = {
 };
 
 export type TransportStatus = {
-  type: "tmux" | "acp";
+  type: "tmux" | "acp" | "api";
   ready: boolean;
   contextPercent: number;
 };
@@ -153,7 +153,7 @@ export type SubsystemRefs = {
   discordPoller: { started: boolean } | null;
   services: Record<string, { configured: boolean; running: boolean }>;
   transport: {
-    type: "tmux" | "acp";
+    type: "tmux" | "acp" | "api";
     isReady: boolean;
     contextPercent?: number;
   };
