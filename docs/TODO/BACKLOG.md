@@ -98,7 +98,7 @@ Covered in system engineering refactor v2: 654 tests across 66 files. Added comm
 
 ## 22. Picture / Media Support
 
-**Status:** Partial — receiving done, sending + context issues unresolved
+**Status:** Merged into #68
 **Priority:** Medium
 **Source:** OpenClaw media handling study (memory refactor), user request (2026-03-22)
 
@@ -121,7 +121,7 @@ kiro-cli reads images as a tool call (file read → base64 text into context). A
 
 ## 21. Improve Security (NemoClaw Ideas)
 
-**Status:** Not started
+**Status:** Merged into #77
 **Priority:** Medium
 **Reference:** NemoClaw project (NVIDIA)
 
@@ -526,7 +526,7 @@ New CLI for modifying existing extracted memories. Lookup by `--memory-id` or `-
 
 ## 48. Multi-CLI Support (Kiro / Gemini CLI / Cloud9)
 
-**Status:** Planning
+**Status:** Merged into #69
 **Priority:** Low
 **Plan:** `docs/TODO/MULTI-CLI-PLAN.md`
 
@@ -536,7 +536,7 @@ Phase 3: Cloud9 CLI — separate project, plugs in as `AGENT_CLI=cloud9`.
 
 ## 51. Cloud9 — Free LLM Transport (separate project)
 
-**Status:** Not started
+**Status:** Merged into #69
 **Priority:** Low
 
 Standalone MITM proxy + ACP CLI that provides free access to Google Cloud Code Assist (Gemini 2.5 Pro). Separate repo, plugs into AgentBridge as `AGENT_CLI=cloud9`. Replaces Molty/OpenClaw on Mac when ready. Based on 9Router's approach (MIT license, open source).
@@ -798,8 +798,8 @@ When user replies to a message on Telegram, the quoted message text (up to 500 c
 
 ## 63. Move sleep startup into heartbeat cycle
 
-**Priority:** high
-**Status:** ✅ Done
+**Status:** Superseded by Recovery v2
+**Status:** Superseded by Recovery v2
 
 Remove the special `shouldRunOnStartup()` sleep check from bridge startup. Let the heartbeat `sleep-trigger` task handle it — it already checks "should I run today?" every tick. Cleaner: one main process, one heartbeat loop, no extra startup logic. Also reduce `MIN_UPTIME_MS` from 3min to 1min — once-a-day tasks don't need 3min warmup.
 
@@ -822,7 +822,7 @@ Whisper sometimes transcribes Hungarian voice notes as other languages (e.g. "ü
 
 ## 65. Recall time-decay scoring with emotion override
 
-**Status:** Not started
+**Status:** Deferred
 **Priority:** medium
 **Effort:** small
 
