@@ -7,8 +7,8 @@
 import Database from "better-sqlite3";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import type { CronEntry } from "../cli/agentbridge-task.js";
-import { agentBridgeHome } from "../paths.js";
+import type { CronEntry } from "../../cli/agentbridge-task.js";
+import { agentBridgeHome } from "../../paths.js";
 
 const dbPath = (): string => join(agentBridgeHome(), "memory", "memory.db");
 const jsonPath = (): string => join(agentBridgeHome(), "memory", "cron.json");

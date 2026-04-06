@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { logInfo } from "./logger.js";
 import { getLogFile } from "./logger.js";
 import type { HeartbeatTask } from "../types/memory.js";
-import type { TelegramAdapter } from "../platforms/telegram-adapter.js";
+import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
 
 const SELFHEAL_BLACKLIST = [
   "-32603", "Transient error", "fetch failed",

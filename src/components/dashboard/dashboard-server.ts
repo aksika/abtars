@@ -13,11 +13,11 @@ import { fileURLToPath } from "node:url";
 import type { Socket } from "node:net";
 import { WebSocketServer } from "ws";
 import type { DashboardConfig, StatusSnapshot } from "./dashboard-config.js";
-import { AuthGate } from "./auth-gate.js";
-import { StatusBroadcaster } from "./status-broadcaster.js";
-import type { ServiceRegistry } from "./service-registry.js";
-import type { MemorySearchController } from "./memory-search-controller.js";
-import { logInfo, logError, getLogFile } from "./logger.js";
+import { AuthGate } from "../auth-gate.js";
+import { StatusBroadcaster } from "../status-broadcaster.js";
+import type { ServiceRegistry } from "../service-registry.js";
+import type { MemorySearchController } from "../memory-search-controller.js";
+import { logInfo, logError, getLogFile } from "../logger.js";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -342,7 +342,7 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
 
 // ── Cron Control ────────────────────────────────────────────────────────────
 
-import { readEntry as cronReadEntry, writeEntry as cronWriteEntry } from "./cron-db.js";
+import { readEntry as cronReadEntry, writeEntry as cronWriteEntry } from "../cron/cron-db.js";
 
 function handleCronAction(id: string, action: string): { ok: boolean; error?: string } {
   const entry = cronReadEntry(id);

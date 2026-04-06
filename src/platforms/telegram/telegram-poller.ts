@@ -1,6 +1,6 @@
-import type { TelegramUpdate } from "../types/index.js";
+import type { TelegramUpdate } from "../../types/index.js";
 import type { TelegramApi } from "./telegram-api.js";
-import { logError, logWarn } from "./logger.js";
+import { logError, logWarn } from "../../components/logger.js";
 
 /**
  * Long-polls the Telegram Bot API for updates. Never self-terminates —

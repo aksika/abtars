@@ -1,4 +1,4 @@
-import type { DiscordApi } from "./discord-api.js";
+import type { DiscordApi } from "../platforms/discord/discord-api.js";
 import type { DiscordInboundMessage } from "../types/discord.js";
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 

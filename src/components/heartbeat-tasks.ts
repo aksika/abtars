@@ -9,7 +9,7 @@ import { logInfo, logWarn, logError } from "./logger.js";
 import { writeRestartReason } from "./restart-reason.js";
 import { runCompaction } from "./compaction.js";
 import { compactingSessions, setIdleCompactReset } from "./message-pipeline.js";
-import type { IKiroTransport } from "./kiro-transport.js";
+import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "../memory/memory-manager.js";
 import type { HeartbeatTask } from "../types/memory.js";
 import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";

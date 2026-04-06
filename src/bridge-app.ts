@@ -1,12 +1,12 @@
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { readEntry as cronReadEntry } from "./components/cron-db.js";
+import { readEntry as cronReadEntry } from "./components/cron/cron-db.js";
 import { execFileSync, execSync } from "node:child_process";
 import { loadAndValidateConfig } from "./components/config.js";
 import { agentBridgeHome } from "./paths.js";
 
-import { TmuxClient } from "./components/tmux-client.js";
-import { AcpTransport } from "./components/acp-transport.js";
+import { TmuxClient } from "./components/transport/tmux-client.js";
+import { AcpTransport } from "./components/transport/acp-transport.js";
 import { createWatchdogTask } from "./components/watchdog.js";
 import { createSelfHealerTask } from "./components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
@@ -16,15 +16,15 @@ import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/
 import { loadMemoryConfig } from "./memory/memory-config.js";
 import { MemoryManager } from "./memory/memory-manager.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
-import type { IKiroTransport } from "./components/kiro-transport.js";
+import type { IKiroTransport } from "./components/transport/kiro-transport.js";
 import { parsePlatformFlags } from "./components/cli-flags.js";
-import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard-config.js";
-import type { SubsystemRefs } from "./components/dashboard-config.js";
+import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard/dashboard-config.js";
+import type { SubsystemRefs } from "./components/dashboard/dashboard-config.js";
 import { AuthGate } from "./components/auth-gate.js";
 import { ServiceRegistry } from "./components/service-registry.js";
 import { MemorySearchController } from "./components/memory-search-controller.js";
-import { DashboardServer } from "./components/dashboard-server.js";
-import { renderDashboardHtml } from "./components/dashboard-ui.js";
+import { DashboardServer } from "./components/dashboard/dashboard-server.js";
+import { renderDashboardHtml } from "./components/dashboard/dashboard-ui.js";
 import { loadNLMConfig } from "./components/nlm-command-handler.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
 import { writeRestartReason } from "./components/restart-reason.js";
@@ -36,8 +36,8 @@ import { BrowserManager } from "./capabilities/browser/browser-manager.js";
 import { BrowserIpcServer } from "./capabilities/browser/browser-ipc-server.js";
 import { CodingMode } from "./components/coding-mode.js";
 import { IdleSave } from "./components/idle-save.js";
-import { checkCron, readPendingReminders, clearPendingReminders } from "./components/cron-checker.js";
-import { CronQueue } from "./components/cron-queue.js";
+import { checkCron, readPendingReminders, clearPendingReminders } from "./components/cron/cron-checker.js";
+import { CronQueue } from "./components/cron/cron-queue.js";
 import { startSession } from "./components/message-pipeline.js";
 
 
@@ -105,6 +105,8 @@ export class Bridge {
   mcpDaemonStarted = false;
   cronQueue!: CronQueue;
   sleepHandle: import("./capabilities/sleep/index.js").SleepHandle | null = null;
+  telegramAdapter: import("./platforms/telegram/telegram-adapter.js").TelegramAdapter | null = null;
+  discordAdapter: import("./platforms/discord/discord-adapter.js").DiscordAdapter | null = null;
 
   constructor(config: Config, memoryConfig: MemoryConfig) {
     this.config = config;
@@ -300,20 +302,20 @@ export async function startBridge(): Promise<void> {
     // Unified heartbeat — single 5-min timer for all periodic tasks
 
   // --- Telegram service ---
-  let telegramAdapter: import("./platforms/telegram-adapter.js").TelegramAdapter | null = null;
+  
 
   registry.register("telegram", {
     configured: Boolean(config.telegram.botToken && config.telegram.allowedUserIds.size > 0),
     async create() {
-      const { TelegramAdapter } = await import("./platforms/telegram-adapter.js");
-      telegramAdapter = new TelegramAdapter(
+      const { TelegramAdapter } = await import("./platforms/telegram/telegram-adapter.js");
+      bridge.telegramAdapter = new TelegramAdapter(
         { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
         { pipeline: pipelineDeps, conversationBuffer, transport, memory },
       );
-      platformAdapters.set("telegram", telegramAdapter);
+      platformAdapters.set("telegram", bridge.telegramAdapter);
       return {
-        async start() { await telegramAdapter!.start(); },
-        stop() { telegramAdapter?.stop(); platformAdapters.delete("telegram"); telegramAdapter = null; },
+        async start() { await bridge.telegramAdapter!.start(); },
+        stop() { bridge.telegramAdapter?.stop(); platformAdapters.delete("telegram"); bridge.telegramAdapter = null; },
       };
     },
   });
@@ -330,13 +332,13 @@ export async function startBridge(): Promise<void> {
   }
 
   // --- Discord service ---
-  let discordAdapter: import("./platforms/discord-adapter.js").DiscordAdapter | null = null;
+  
 
   registry.register("discord", {
     configured: Boolean(config.discord.enabled && config.discord.botToken),
     async create() {
-      const { DiscordAdapter } = await import("./platforms/discord-adapter.js");
-      discordAdapter = new DiscordAdapter(
+      const { DiscordAdapter } = await import("./platforms/discord/discord-adapter.js");
+      bridge.discordAdapter = new DiscordAdapter(
         {
           botToken: config.discord.botToken!,
           appId: config.discord.appId!,
@@ -349,10 +351,10 @@ export async function startBridge(): Promise<void> {
         },
         { pipeline: pipelineDeps, transport, memory, conversationBuffer },
       );
-      platformAdapters.set("discord", discordAdapter);
+      platformAdapters.set("discord", bridge.discordAdapter);
       return {
-        async start() { await discordAdapter!.start(); },
-        stop() { discordAdapter?.stop(); platformAdapters.delete("discord"); discordAdapter = null; },
+        async start() { await bridge.discordAdapter!.start(); },
+        stop() { bridge.discordAdapter?.stop(); platformAdapters.delete("discord"); bridge.discordAdapter = null; },
       };
     },
   });
@@ -398,20 +400,20 @@ export async function startBridge(): Promise<void> {
 
   // --- Startup notification (async, non-blocking) ---
   if (memoryConfig.memoryEnabled) {
-    const tgSend = telegramAdapter ? async (msg: string): Promise<void> => {
+    const tgSend = bridge.telegramAdapter ? async (msg: string): Promise<void> => {
       const chatId = [...config.telegram.allowedUserIds][0];
-      if (chatId) await telegramAdapter!.sendMessage(String(chatId), msg);
+      if (chatId) await bridge.telegramAdapter!.sendMessage(String(chatId), msg);
     } : undefined;
-    const dcSend = discordAdapter ? async (msg: string): Promise<void> => {
+    const dcSend = bridge.discordAdapter ? async (msg: string): Promise<void> => {
       const channelId = config.discord.allowedChannelIds ? [...config.discord.allowedChannelIds][0] : undefined;
-      if (channelId) await discordAdapter!.sendMessage(channelId, msg);
+      if (channelId) await bridge.discordAdapter!.sendMessage(channelId, msg);
     } : undefined;
     sendBackOnline(tgSend, dcSend).catch((err) => {
       logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
     });
 
     // Start session: inject SOUL + context + greeting, push response to Telegram
-    if (telegramAdapter && memory) {
+    if (bridge.telegramAdapter && memory) {
       const chatId = [...config.telegram.allowedUserIds][0];
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
@@ -420,7 +422,7 @@ export async function startBridge(): Promise<void> {
         startSession(
           transport, memory, chatId, sessionKey,
           "You just came online. Output ONLY a personalized greeting message.",
-          (text) => (telegramAdapter as import("./platforms/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
+          (text) => (bridge.telegramAdapter as import("./platforms/telegram/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
         ).then(() => {
           logInfo("main", "✅ Startup session ready");
         }).catch(err => {
@@ -462,8 +464,8 @@ export async function startBridge(): Promise<void> {
   });
 
   const cronCallback = (chatId: number, message: string, result: string): void => {
-    if (platforms.telegram && telegramAdapter) {
-      telegramAdapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
+    if (platforms.telegram && bridge.telegramAdapter) {
+      bridge.telegramAdapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
         logWarn("main", `Cron task TG report failed: ${err}`);
       });
     }
@@ -489,8 +491,8 @@ export async function startBridge(): Promise<void> {
       clearPendingReminders();
       for (const r of reminders) {
         logInfo("main", `⏰ Injecting reminder for chat ${r.chatId}: "${r.message}"`);
-        if (telegramAdapter) {
-          telegramAdapter.injectMessage({
+        if (bridge.telegramAdapter) {
+          bridge.telegramAdapter.injectMessage({
             platform: "telegram",
             channelId: String(r.chatId),
             sessionKey: `telegram:${r.chatId}`,
@@ -547,7 +549,7 @@ export async function startBridge(): Promise<void> {
 
   // --- Self-healing agent: error scanner ---
   if (process.env["SELFHEAL_ENABLED"] !== "false") {
-    heartbeat.registerTask(createSelfHealerTask(() => telegramAdapter, config.telegram.allowedUserIds));
+    heartbeat.registerTask(createSelfHealerTask(() => bridge.telegramAdapter, config.telegram.allowedUserIds));
   }
 
   // Run once on startup, then start periodic

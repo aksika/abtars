@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { StatusBroadcaster } from "./status-broadcaster.js";
-import type { StatusSnapshot } from "./dashboard-config.js";
+import type { StatusSnapshot } from "./dashboard/dashboard-config.js";
 import { EventEmitter } from "node:events";
 import { WebSocket } from "ws";
 
@@ -323,8 +323,8 @@ describe("StatusBroadcaster — Property 12: WebSocket client list consistency",
 });
 
 // Feature: kiro-professor-webui, Property 4: Status snapshot completeness
-import { buildStatusSnapshot } from "./dashboard-config.js";
-import type { SubsystemRefs } from "./dashboard-config.js";
+import { buildStatusSnapshot } from "./dashboard/dashboard-config.js";
+import type { SubsystemRefs } from "./dashboard/dashboard-config.js";
 
 describe("buildStatusSnapshot — Property 4: Status snapshot completeness", () => {
   it("snapshot contains all required top-level fields with correct types for any subsystem state", () => {

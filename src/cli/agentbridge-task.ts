@@ -11,7 +11,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbRemoveEntry } from "../components/cron-db.js";
+import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbRemoveEntry } from "../components/cron/cron-db.js";
 
 
 export interface CronEntry {

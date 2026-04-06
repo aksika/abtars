@@ -255,10 +255,10 @@ function formatWiredResults(r: WiredResults): string {
 
 // ── Transport ───────────────────────────────────────────────────────────────
 
-async function createSleepTransport(verbose: boolean): Promise<{ transport: import("../../components/acp-transport.js").AcpTransport; model: string }> {
+async function createSleepTransport(verbose: boolean): Promise<{ transport: import("../../components/transport/acp-transport.js").AcpTransport; model: string }> {
   const { loadAndValidateConfig } = await import("../../components/config.js");
   const config = await loadAndValidateConfig();
-  const { AcpTransport } = await import("../../components/acp-transport.js");
+  const { AcpTransport } = await import("../../components/transport/acp-transport.js");
   const model = process.env["AGENT_SLEEP_MODEL"] || "auto";
   const transport = new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, { model: model !== "unknown" ? model : undefined, autoReinit: false, tag: "acp-sleep" });
   await transport.initialize();
@@ -270,7 +270,7 @@ const MAX_RETRIES = 3;
 
 /** Send a prompt with retry logic. Returns response or null on exhaustion. */
 async function sendWithRetry(
-  transport: import("../../components/acp-transport.js").AcpTransport,
+  transport: import("../../components/transport/acp-transport.js").AcpTransport,
   prompt: string,
   stepName: string,
   _verbose: boolean,
@@ -502,7 +502,7 @@ function failedEssentials(state: SleepState): string[] {
 
 async function runCatchUp(
   locks: PreviousLock[],
-  transport: import("../../components/acp-transport.js").AcpTransport,
+  transport: import("../../components/transport/acp-transport.js").AcpTransport,
   db: import("better-sqlite3").Database,
   memoryConfig: { memoryDir: string },
   steps: SleepStep[],

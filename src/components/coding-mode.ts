@@ -1,4 +1,4 @@
-import { AcpTransport } from "./acp-transport.js";
+import { AcpTransport } from "./transport/acp-transport.js";
 import { logInfo } from "./logger.js";
 
 /**

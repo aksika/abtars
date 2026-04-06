@@ -9,7 +9,7 @@
 import type { HeartbeatTask } from "../types/memory.js";
 import type { Config } from "../types/config.js";
 import type { MemoryManager } from "../memory/memory-manager.js";
-import type { IKiroTransport } from "../components/kiro-transport.js";
+import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { CommandContext } from "../components/command-handlers.js";
 
 /** Handler for a slash command registered by a capability. */

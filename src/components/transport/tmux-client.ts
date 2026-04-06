@@ -2,8 +2,8 @@ import { execSync } from "node:child_process";
 import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { IKiroTransport } from "./kiro-transport.js";
-import { logInfo, logDebug, logWarn } from "./logger.js";
-import { agentBridgeHome } from "../paths.js";
+import { logInfo, logDebug, logWarn } from "../logger.js";
+import { agentBridgeHome } from "../../paths.js";
 
 // Kiro CLI prompt pattern: "N% >" or "N% !>" where N is a number (context usage percentage)
 // The "!" appears in trust-all-tools mode

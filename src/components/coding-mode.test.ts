@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CodingMode } from "./coding-mode.js";
 
 // Mock AcpTransport
-vi.mock("./acp-transport.js", () => ({
+vi.mock("./transport/acp-transport.js", () => ({
   AcpTransport: vi.fn().mockImplementation(() => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     sendPrompt: vi.fn().mockResolvedValue("ok"),

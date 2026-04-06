@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleInboundMessage, type PipelineDeps } from "./message-pipeline.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
-import type { IKiroTransport } from "./kiro-transport.js";
+import type { IKiroTransport } from "./transport/kiro-transport.js";
 
 function mockTransport(): IKiroTransport {
   return {

@@ -11,12 +11,12 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
-import { agentBridgeHome } from "../paths.js";
-import { logInfo, logWarn, logDebug } from "./logger.js";
-import { AcpTransport } from "./acp-transport.js";
+import { agentBridgeHome } from "../../paths.js";
+import { logInfo, logWarn, logDebug } from "../logger.js";
+import { AcpTransport } from "../transport/acp-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
-import type { CronEntry } from "../cli/agentbridge-task.js";
-import { localDate } from "./env-utils.js";
+import type { CronEntry } from "../../cli/agentbridge-task.js";
+import { localDate } from "../env-utils.js";
 
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;

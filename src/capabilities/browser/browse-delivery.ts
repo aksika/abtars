@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { agentBridgeHome } from "../../paths.js";
 import { logInfo, logWarn } from "../../components/logger.js";
 import { localDate } from "../../components/env-utils.js";
-import { appendReminder } from "../../components/cron-checker.js";
+import { appendReminder } from "../../components/cron/cron-checker.js";
 import { readPendingBrowse, writePendingBrowse } from "./agentbridge-browse.js";
 import type { PendingBrowseEntry } from "./agentbridge-browse.js";
 

@@ -4,7 +4,7 @@ import type { MemoryManager } from "../../memory/memory-manager.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { logInfo, logWarn, logError } from "../../components/logger.js";
-import { readEntries as cronReadEntries } from "../../components/cron-db.js";
+import { readEntries as cronReadEntries } from "../../components/cron/cron-db.js";
 
 const TAG = "sleep-state-gatherer";
 

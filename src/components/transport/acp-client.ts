@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { EventEmitter } from "node:events";
-import type { AcpResponse, AcpNotification, AcpMessage } from "../types/index.js";
+import type { AcpResponse, AcpNotification, AcpMessage } from "../../types/index.js";
 import { serialize, parse, buildRequest } from "./jsonrpc.js";
 
 export type AcpClientEvents = {

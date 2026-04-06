@@ -56,8 +56,8 @@ export function validateDashboardConfig(
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
-import type { TrafficEntry } from "./agent-api-server.js";
-import { localIso } from "./logger.js";
+import type { TrafficEntry } from "../agent-api-server.js";
+import { localIso } from "../logger.js";
 
 export type StatusSnapshot = {
   timestamp: string;
@@ -245,7 +245,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
   };
 }
 
-import { readEntries as readCronEntries } from "./cron-db.js";
+import { readEntries as readCronEntries } from "../cron/cron-db.js";
 
 function readCronStatus(): CronEntryStatus[] {
   try {

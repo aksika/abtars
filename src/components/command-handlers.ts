@@ -8,13 +8,13 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logError } from "./logger.js";
-import { readEntries as cronReadEntries } from "./cron-db.js";
+import { readEntries as cronReadEntries } from "./cron/cron-db.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import { agentBridgeHome } from "../paths.js";
 import { runCompaction } from "./compaction.js";
 import { resetAndPrepare } from "./message-pipeline.js";
 import type { PipelineDeps } from "./message-pipeline.js";
-import type { RunningJob } from "./cron-queue.js";
+import type { RunningJob } from "./cron/cron-queue.js";
 
 import type { Platform } from "../types/platform.js";
 export type { Platform };

@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { DiscordAdapter, type DiscordAdapterConfig, type DiscordAdapterDeps } from "./discord-adapter.js";
-import type { PipelineDeps } from "../components/message-pipeline.js";
-import type { IKiroTransport } from "../components/kiro-transport.js";
+import type { PipelineDeps } from "../../components/message-pipeline.js";
+import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 
 // Mock discord.js client
 let capturedReactionHandler: Function | null = null;
 
-vi.mock("../components/discord-api.js", () => ({
+vi.mock("./discord-api.js", () => ({
   DiscordApi: vi.fn().mockImplementation(() => ({
     connect: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn(),
@@ -17,7 +17,7 @@ vi.mock("../components/discord-api.js", () => ({
   })),
 }));
 
-vi.mock("../components/discord-poller.js", () => ({
+vi.mock("./discord-poller.js", () => ({
   DiscordPoller: vi.fn().mockImplementation((_api: unknown, _appId: string, handler: Function) => {
     (DiscordPollerMock as any)._handler = handler;
     return {
