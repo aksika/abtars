@@ -133,14 +133,10 @@ export async function loadAndValidateConfig(): Promise<Config> {
   // --- AGENT_MODEL ---
   const agentModel = process.env["AGENT_MODEL"] || CONFIG_DEFAULTS.models.agentModel;
 
-  // --- AGENT_BROWSE_MODEL / BROWSING_AGENT ---
-  const agentBrowseModel = process.env["AGENT_BROWSE_MODEL"] || CONFIG_DEFAULTS.models.browseModel;
-
-  // --- AGENT_SLEEP_MODEL / MEMORY_SUBAGENT_MODEL ---
-  const agentSleepModel = process.env["AGENT_SLEEP_MODEL"] || CONFIG_DEFAULTS.models.sleepModel;
-
-  // --- AGENT_CODING_MODEL / CODING_AGENT_MODEL ---
-  const agentCodingModel = process.env["AGENT_CODING_MODEL"] || CONFIG_DEFAULTS.models.codingModel;
+  // Sub-models default to main model if not explicitly set
+  const agentBrowseModel = process.env["AGENT_BROWSE_MODEL"] || agentModel;
+  const agentSleepModel = process.env["AGENT_SLEEP_MODEL"] || agentModel;
+  const agentCodingModel = process.env["AGENT_CODING_MODEL"] || agentModel;
 
   // --- WORKING_DIR (optional, default cwd) ---
   let workingDir = process.env["WORKING_DIR"] || CONFIG_DEFAULTS.transport.workingDir;
