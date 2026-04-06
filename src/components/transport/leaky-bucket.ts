@@ -3,7 +3,7 @@
  * Bucket fills on errors, drains over time. Full bucket = skip model.
  */
 
-const LEAK_RATE_PER_MS = 0.1 / 60000; // 10% per minute
+const LEAK_RATE_PER_MS = 0.03 / 60000; // 3% per minute
 const SKIP_THRESHOLD = 0.7; // skip when bucket > 70%
 
 const FILL_AMOUNTS: Record<string, number> = {

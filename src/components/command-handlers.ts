@@ -211,7 +211,7 @@ async function handleRestart(_text: string, ctx: CommandContext): Promise<boolea
     ctx.busyChats.delete(ctx.sessionKey);
     await ctx.transport.restartSession(ctx.config.workingDir, process.env["AGENT_MODEL"]);
     ctx.pendingSessionStart.add(ctx.sessionKey);
-    await ctx.reply("✅ Kiro restarted.");
+    await ctx.reply("✓ Kiro restarted.");
   } else {
     await ctx.reply("♻️ Restarting bridge...");
     setTimeout(() => ctx.requestShutdown?.(), 500);
@@ -303,7 +303,7 @@ async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<bo
   const id = text.replace(/^\/(tasks|cron) trigger /, "").trim();
   if (!id) { await ctx.reply("Usage: /trigger <cron-id>"); return true; }
   const err = ctx.enqueueCron?.(id);
-  await ctx.reply(err ?? `✅ Triggered ${id}`);
+  await ctx.reply(err ?? `✓ Triggered ${id}`);
   return true;
 }
 
@@ -540,14 +540,18 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
   const profile = process.env["AGENT_TRANSPORT_PROFILE"] || "default";
   const transport = process.env["AGENT_TRANSPORT"] || "acp";
   const cli = process.env["AGENT_CLI"] || "unknown";
-  const model = process.env["API_MODEL"] || process.env["AGENT_MODEL"] || "unknown";
+  const configModel = process.env["API_MODEL"] || process.env["AGENT_MODEL"] || "unknown";
+  const activeModel = ("currentModel" in ctx.transport) ? (ctx.transport as unknown as { currentModel: string }).currentModel : configModel;
   const endpoint = process.env["API_ENDPOINT"] || "";
-  const providerLabel = (ep: string): string =>
-    ep.includes("openrouter") ? "openrouter" : ep.includes("11434") ? "ollama" : ep.includes("20128") ? "9router" : new URL(ep).hostname;
+  const providerLabel = (ep: string): string => {
+    try { return ep.includes("openrouter") ? "openrouter" : ep.includes("11434") ? "ollama" : ep.includes("20128") ? "9router" : new URL(ep).hostname; }
+    catch { return "unknown"; }
+  };
   const lines: string[] = [`🔌 Transport: ${transport} (${profile})`];
 
   if (transport === "api" && endpoint) {
-    lines.push(`  Model: ${model} (${providerLabel(endpoint)})`);
+    const modelDisplay = activeModel !== configModel ? `${activeModel} (fallback)` : activeModel;
+    lines.push(`  Model: ${modelDisplay}`);
 
     // Connection + provider-specific info
     try {
@@ -558,7 +562,7 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
         });
         if (res.ok) {
           const d = (await res.json() as { data: Record<string, unknown> }).data;
-          lines.push(`  Status: ✅ Connected`);
+          lines.push(`  Status: ✓ Connected`);
           lines.push(`  Tier: ${d.is_free_tier ? "free" : "paid"}`);
           lines.push(`  Credits: $${d.limit_remaining} remaining / $${d.usage} used`);
           const rl = d.rate_limit as { requests: number } | undefined;
@@ -569,7 +573,7 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
         const res = await fetch(endpoint.replace("/v1", "/api/ps"), { signal: AbortSignal.timeout(3000) });
         if (res.ok) {
           const d = await res.json() as { models?: Array<{ name: string; size: number }> };
-          lines.push(`  Status: ✅ Connected`);
+          lines.push(`  Status: ✓ Connected`);
           const running = d.models ?? [];
           if (running.length > 0) {
             for (const m of running) lines.push(`  Running: ${m.name} (${(m.size / 1e9).toFixed(1)}GB)`);
@@ -583,7 +587,7 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
       } else {
         // Generic API (9Router etc)
         const res = await fetch(`${endpoint}/models`, { signal: AbortSignal.timeout(3000) });
-        lines.push(res.ok ? `  Status: ✅ Connected` : `  Status: ❌ Unreachable (${res.status})`);
+        lines.push(res.ok ? `  Status: ✓ Connected` : `  Status: ❌ Unreachable (${res.status})`);
         if (res.ok) {
           const d = await res.json() as { data?: unknown[] };
           lines.push(`  Models: ${d.data?.length ?? "?"} available`);
@@ -592,15 +596,15 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
     } catch { lines.push(`  Status: ❌ Unreachable`); }
   } else {
     // ACP transport
-    lines.push(`  CLI: ${cli}`, `  Model: ${model}`);
+    lines.push(`  CLI: ${cli}`, `  Model: ${configModel}`);
     lines.push(`  Context: ${ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a"}`);
-    lines.push(`  Status: ${ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected"}`);
+    lines.push(`  Status: ${ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected"}`);
   }
 
   // Bucket health (API transport)
   if (transport === "api") {
     const candidates = [
-      { endpoint, model },
+      { endpoint, model: configModel },
       ...Array.from({ length: 5 }, (_, i) => ({
         endpoint: process.env[`API_FALLBACK_${i + 1}_ENDPOINT`] ?? "",
         model: process.env[`API_FALLBACK_${i + 1}_MODEL`] ?? "",
@@ -620,7 +624,7 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
   const t = ctx.transport;
   if ("isOnFallback" in t) {
     const onFb = (t as unknown as { isOnFallback: boolean }).isOnFallback;
-    lines.push(onFb ? "  ⚠️ Currently on FALLBACK transport" : "  ✅ On primary transport");
+    lines.push(onFb ? "  ⚠️ Currently on FALLBACK transport" : "  ✓ On primary transport");
     if (onFb) lines.push("  Use /transport restore to switch back.");
   }
   await ctx.reply(lines.join("\n"));
@@ -656,7 +660,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     try { model = JSON.parse(modelRaw)["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
   }
 
-  const transportStatus = ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected";
+  const transportStatus = ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected";
   const mode = ctx.config.agentTransport.toUpperCase();
   const uptime = formatUptime(Date.now() - ctx.startedAt);
   const ctxPct = ctx.transport.contextPercent >= 0

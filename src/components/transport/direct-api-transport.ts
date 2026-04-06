@@ -37,6 +37,9 @@ export class DirectApiTransport implements IKiroTransport {
   private activeApiKey?: string;
   private activeModel: string;
 
+  /** Currently active model (may differ from config if on fallback). */
+  get currentModel(): string { return this.activeModel; }
+
   onIntermediateResponse?: (text: string) => void;
 
   constructor(config: DirectApiConfig) {
