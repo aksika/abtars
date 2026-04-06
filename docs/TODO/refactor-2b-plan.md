@@ -143,7 +143,15 @@ Consumers narrow their parameter type: middleware takes `MessageContext` (alread
 #1 cron-checker reverse dep  ✅  →  #2 retro-extract  ✅  →  #3 subdirectories  ✅  →  #4 Bridge decomp  ⏸  →  #5 PipelineDeps  ⏸
 ```
 
-#1-#3 shipped. #4-#5 deferred — startBridge() is a wiring function, forced decomposition adds indirection without reducing complexity. The comment sections serve as virtual methods. Revisit if #50 (memory decoupling) or #48 (multi-CLI) create a real need for clean seams.
+#1-#3 shipped. #4-#5 deferred — startBridge() is a wiring function, forced decomposition adds indirection without reducing complexity. The comment sections serve as virtual methods.
+
+**Update (2026-04-06):** #69 (Direct API Transport) added clean transport modules without needing #4/#5:
+- Transport selection is a clean 3-way branch (tmux / api / acp) in startBridge()
+- TransportManager wrapper for cross-transport fallback (#90)
+- 4 new standalone modules in transport/ (direct-api-transport, conversation-session, sse-parser, tool-registry)
+- telegramAdapter/discordAdapter moved to Bridge fields
+
+The transport layer is effectively decomposed via new files, not method extraction. #4/#5 remain low value.
 
 ## Success Criteria
 
