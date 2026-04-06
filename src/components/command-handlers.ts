@@ -656,7 +656,9 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   ]);
 
   let model = process.env["AGENT_MODEL"] || "";
-  if (!model) {
+  if ("currentModel" in ctx.transport) {
+    model = (ctx.transport as unknown as { currentModel: string }).currentModel;
+  } else if (!model) {
     try { model = JSON.parse(modelRaw)["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
   }
 
