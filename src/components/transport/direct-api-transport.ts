@@ -244,6 +244,15 @@ export class DirectApiTransport implements IKiroTransport {
   get isReady(): boolean { return true; }
   get contextPercent(): number { return this._contextPercent; }
   get answerOnly(): string { return this._lastAnswer; }
+
+  /** Hot-swap the active model. Takes effect on next API call. */
+  setModel(model: string): void {
+    this.activeModel = model;
+    logInfo(TAG, `Model switched to: ${model}`);
+  }
+
+  /** Get current active model name. */
+  getModel(): string { return this.activeModel; }
   get intermediateDeliveredText(): string { return this._intermediateText; }
   get transportCommands(): string[] { return []; }
 

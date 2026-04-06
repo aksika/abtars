@@ -18,7 +18,7 @@ import type { RunningJob } from "./cron/cron-queue.js";
 
 import type { Platform } from "../types/platform.js";
 export type { Platform };
-export type Reply = (text: string, opts?: { parseMode?: string }) => Promise<unknown>;
+export type Reply = (text: string, opts?: { parseMode?: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }) => Promise<unknown>;
 
 export interface CommandContext {
   sessionKey: string;
@@ -68,9 +68,11 @@ const exactCommands: Record<string, CommandHandler> = {
   "/short": handleShort,
   "/facts": handleFacts,
   "/tasks": handleTasksList,
+  "/task": handleTasksList,
   "/cron": handleTasksList,
   "/memory": handleMemory,
   "/heartbeat": handleHeartbeat,
+  "/models": handleModels,
   "/a2a-reset": handleA2aReset,
   "/help": handleHelp,
   "/skills": handleSkills,
@@ -306,6 +308,51 @@ async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolea
     const lines = runs.map(r => `${r.ranAt}  exit=${r.exitCode ?? "?"}`);
     await ctx.reply(`📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``, { parseMode: "Markdown" });
   } catch { await ctx.reply("❌ Failed to read history"); }
+  return true;
+}
+
+async function handleModels(_text: string, ctx: CommandContext): Promise<boolean> {
+  const transport = ctx.transport;
+  const isApi = ctx.config.agentTransport === "api";
+
+  // Get current model
+  const currentModel = isApi && "getModel" in transport
+    ? (transport as { getModel(): string }).getModel()
+    : process.env["AGENT_MODEL"] ?? "unknown";
+
+  // Fetch available models for API transport
+  let models: string[] = [];
+  if (isApi) {
+    const endpoint = process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1";
+    const apiKey = process.env["API_KEY"];
+    try {
+      const headers: Record<string, string> = {};
+      if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+      const res = await fetch(`${endpoint}/models`, { headers, signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        const data = await res.json() as { data?: Array<{ id: string }> };
+        models = (data.data ?? []).map(m => m.id).sort();
+      }
+    } catch { /* endpoint doesn't support /models */ }
+  }
+
+  if (models.length > 0) {
+    // Send inline keyboard
+    const COLS = 2;
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < models.length; i += COLS) {
+      const row = models.slice(i, i + COLS).map(m => ({
+        text: m === currentModel ? `✓ ${m}` : m,
+        callback_data: `model:${m}`,
+      }));
+      buttons.push(row);
+    }
+    await ctx.reply(`📋 Models (${models.length}) — tap to switch:`, {
+      reply_markup: { inline_keyboard: buttons },
+    });
+  } else {
+    await ctx.reply(`🤖 Model: ${currentModel}\n\nModel list not available for ${ctx.config.agentTransport} transport.`);
+  }
   return true;
 }
 
