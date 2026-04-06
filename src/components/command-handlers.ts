@@ -354,16 +354,18 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
   }
 
   if (models.length > 0) {
+    // Telegram inline keyboard limit: cap at 50 models
+    const displayModels = models.slice(0, 50);
     const COLS = 1;
     const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
-    for (let i = 0; i < models.length; i += COLS) {
-      const row = models.slice(i, i + COLS).map(m => ({
+    for (let i = 0; i < displayModels.length; i += COLS) {
+      const row = displayModels.slice(i, i + COLS).map(m => ({
         text: m === currentModel ? `✓ ${m}` : m,
         callback_data: `model:${m}`,
       }));
       buttons.push(row);
     }
-    await ctx.reply(`📋 Models (${models.length}) — tap to switch:`, {
+    await ctx.reply(`📋 Models (${displayModels.length}${models.length > 50 ? ` of ${models.length}` : ""}) — tap to switch:`, {
       reply_markup: { inline_keyboard: buttons },
     });
   } else {
