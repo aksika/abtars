@@ -172,6 +172,27 @@ export class TelegramAdapter implements PlatformAdapter {
             if (chatId) await this.api.sendMessage(chatId, `❌ Model switch failed: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
+      } else if (data.startsWith("transport:")) {
+        const profile = data.slice(10);
+        const chatId = update.callback_query.message?.chat?.id;
+        if (chatId) await this.api.sendMessage(chatId, `🔌 Switching to ${profile}... restarting.`);
+        // Write profile to .env and restart
+        const { agentBridgeHome } = await import("../../paths.js");
+        const { writeFileSync, readFileSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const envPath = join(agentBridgeHome(), ".env");
+        try {
+          let env = readFileSync(envPath, "utf-8");
+          if (env.match(/^AGENT_TRANSPORT_PROFILE=.*/m)) {
+            env = env.replace(/^AGENT_TRANSPORT_PROFILE=.*/m, `AGENT_TRANSPORT_PROFILE=${profile}`);
+          } else {
+            env += `\nAGENT_TRANSPORT_PROFILE=${profile}\n`;
+          }
+          writeFileSync(envPath, env);
+          process.exit(0); // LaunchAgent restarts with new profile
+        } catch (err) {
+          if (chatId) await this.api.sendMessage(chatId, `❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
       return;
     }

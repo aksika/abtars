@@ -344,7 +344,7 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
   }
 
   if (models.length > 0) {
-    const COLS = 2;
+    const COLS = 1;
     const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
     for (let i = 0; i < models.length; i += COLS) {
       const row = models.slice(i, i + COLS).map(m => ({
@@ -465,7 +465,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
   }
   cmds.push("/help — Show this help");
   cmds.push("/skills — List available skills");
-  cmds.push("/transport — Transport status and provider info");
+  cmds.push("/transport — Status, /transport change to switch");
   await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
   return true;
 }
@@ -505,6 +505,29 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
     }
     return true;
   }
+
+  // /transport change — list available profiles as inline keyboard
+  if (arg === "change" || arg === "switch") {
+    const transportsDir = join(agentBridgeHome(), "transports");
+    let profiles: string[] = [];
+    try {
+      profiles = readdirSync(transportsDir).filter(f => f.endsWith(".env")).map(f => f.replace(".env", "")).sort();
+    } catch { /* dir doesn't exist */ }
+
+    if (profiles.length === 0) {
+      await ctx.reply("🔌 No transport profiles found in ~/.agentbridge/transports/");
+      return true;
+    }
+
+    const currentProfile = process.env["AGENT_TRANSPORT_PROFILE"] || "default";
+    const buttons = profiles.map(p => [{
+      text: p === currentProfile ? `✓ ${p}` : p,
+      callback_data: `transport:${p}`,
+    }]);
+    await ctx.reply("🔌 Select transport profile:", { reply_markup: { inline_keyboard: buttons } });
+    return true;
+  }
+
   const profile = process.env["AGENT_TRANSPORT_PROFILE"] || "default";
   const transport = process.env["AGENT_TRANSPORT"] || "acp";
   const cli = process.env["AGENT_CLI"] || "unknown";
