@@ -542,10 +542,12 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
   const cli = process.env["AGENT_CLI"] || "unknown";
   const model = process.env["API_MODEL"] || process.env["AGENT_MODEL"] || "unknown";
   const endpoint = process.env["API_ENDPOINT"] || "";
+  const providerLabel = (ep: string): string =>
+    ep.includes("openrouter") ? "openrouter" : ep.includes("11434") ? "ollama" : ep.includes("20128") ? "9router" : new URL(ep).hostname;
   const lines: string[] = [`🔌 Transport: ${transport} (${profile})`];
 
   if (transport === "api" && endpoint) {
-    lines.push(`  Model: ${model}`);
+    lines.push(`  Model: ${model} (${providerLabel(endpoint)})`);
 
     // Connection + provider-specific info
     try {
@@ -609,7 +611,7 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
       for (const c of candidates) {
         const lvl = getBucketLevel(`${c.endpoint}|${c.model}`);
         const bar = lvl > 70 ? "🔴" : lvl > 30 ? "🟡" : "🟢";
-        lines.push(`    ${bar} ${c.model} (${lvl}%)`);
+        lines.push(`    ${bar} ${c.model} [${providerLabel(c.endpoint)}] (${lvl}%)`);
       }
     }
   }
