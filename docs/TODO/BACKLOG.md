@@ -324,3 +324,23 @@ If needed later, add a heartbeat task that reviews the last N messages and spawn
 
 **Effort:** Medium. **Risk:** Low (mechanical, compiler-guided).
 
+
+## 90. Skill: OpenRouter Free Tier Scout
+
+**Priority:** MEDIUM
+**Status:** Not started
+
+### Problem
+OpenRouter has dozens of free-tier models (`:free` suffix) with varying quality, context windows, and rate limits. Hard to know which ones are worth using without manually checking rankings and performance pages.
+
+### Solution
+Agent skill that searches OpenRouter for the best free-tier deals:
+- Fetch model list via `GET /api/v1/models` — filter `:free` models
+- Cross-reference with rankings: https://openrouter.ai/rankings
+- Check per-model performance: https://openrouter.ai/{model}/performance
+- Score by: context window, throughput, quality ranking, rate limits
+- Output: ranked list of best free models for conversation, coding, and browsing tasks
+- Agent can recommend model switches based on current task type
+
+### Usage
+User asks "what's the best free model right now?" → agent runs the skill, returns ranked recommendations.
