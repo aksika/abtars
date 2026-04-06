@@ -5,7 +5,13 @@
 
 ## Goal
 
-New `IKiroTransport` implementation that talks directly to any OpenAI-compatible API endpoint. No CLI dependency. The bridge becomes a fully self-contained agent.
+New `IKiroTransport` implementation that talks directly to any OpenAI-compatible API endpoint (`/v1/chat/completions`). No CLI dependency. The bridge becomes a fully self-contained agent.
+
+**One format, one transport, every provider.** 9Router, OpenRouter, OpenAI, Anthropic (OpenAI-compat endpoint), Ollama, vLLM — all speak the same format.
+
+**Target providers:** 9Router, OpenRouter, OpenAI, Ollama, vLLM — anything that speaks the OpenAI chat completions format. No Anthropic-native format support needed (use 9Router/OpenRouter as proxy if needed).
+
+**One format, one transport, every provider.**
 
 ## Architecture
 
@@ -246,6 +252,5 @@ Phase 3 eliminates subprocess overhead — tools run in-process. This is where #
 ## Open Questions
 
 1. **Token counting for non-streaming responses** — some endpoints don't return usage. Fallback: estimate from character count (÷4).
-2. **Tool call format differences** — Anthropic uses `tool_use` blocks, OpenAI uses `tool_calls` array. 9Router normalizes to OpenAI format. Confirm.
-3. **System prompt caching** — Anthropic has prompt caching. OpenAI doesn't. 9Router? Affects cost but not functionality.
-4. **Rate limiting** — 9Router free tiers have limits. Need backoff + queue, or just let the retry utility handle it.
+2. **Rate limiting** — 9Router free tiers have limits. Need backoff + queue, or just let the retry utility handle it.
+3. **Per-task model routing** — main conversation on cheap model, coding mode on expensive. Config design: `CODING_API_ENDPOINT` + `CODING_API_MODEL` overrides.
