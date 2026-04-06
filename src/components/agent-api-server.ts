@@ -84,8 +84,8 @@ export class AgentApiServer {
       const base = dirname(fileURLToPath(import.meta.url));
       const name = deps.config.agentCodename;
       const candidates = [
-        join(base, `../../skills/agents/${name}.md`),
-        join(agentBridgeHome(), "skills", "agents", `${name}.md`),
+        join(base, `../../agents/${name}.md`),
+        join(agentBridgeHome(), "agents", `${name}.md`),
       ];
       this.agentRules = "";
       for (const p of candidates) {

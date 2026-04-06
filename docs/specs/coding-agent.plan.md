@@ -50,7 +50,7 @@ Per-chat:
 
 1. `src/components/config.ts` — add `codingAgentModel` field
 2. `src/main.ts` — per-chat mode map, `/coding` handler (TG only), `/default` handler (TG + Discord), modify `/reset` to force default mode, modify message routing to check active mode
-3. `skills/agents/CODING.md` — already created (git workflow, WSL boundary, docs, TS conventions, security)
+3. `agents/CODING.md` — already created (git workflow, WSL boundary, docs, TS conventions, security)
 
 ## Injected Facts (first message to coding agent)
 

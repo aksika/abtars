@@ -155,12 +155,12 @@ for f in "$PROJECT_DIR/persona/prompts/sleep/"*.md; do
 done
 
 # Skills: always from repo → core subdir
-mkdir -p "$AB_HOME/skills/core" "$AB_HOME/skills/core/agents" "$AB_HOME/skills/auto"
+mkdir -p "$AB_HOME/skills/core" "$AB_HOME/skills/auto" "$AB_HOME/agents"
 for f in "$PROJECT_DIR/persona/skills/"*.md; do
   [ -f "$f" ] && safe_cp "$f" "$AB_HOME/skills/core/$(basename "$f")"
 done
-for f in "$PROJECT_DIR/persona/skills/agents/"*.md; do
-  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/skills/core/agents/$(basename "$f")"
+for f in "$PROJECT_DIR/persona/agents/"*.md; do
+  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/agents/$(basename "$f")"
 done
 
 # Tasks (personal): deploy from persona/tasks/ if exists, else create empty dir
