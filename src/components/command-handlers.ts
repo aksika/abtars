@@ -327,8 +327,8 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
   const isApi = ctx.config.agentTransport === "api";
 
   // Get current model
-  const currentModel = "getModel" in transport
-    ? (transport as { getModel(): string }).getModel()
+  const currentModel = "currentModel" in transport
+    ? (transport as unknown as { currentModel: string }).currentModel
     : process.env["AGENT_MODEL"] ?? "unknown";
 
   // Fetch available models
@@ -480,19 +480,24 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
 }
 
 async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
-  const dir = join(agentBridgeHome(), "skills");
-  try {
-    const files = readdirSync(dir).filter(f => f.endsWith(".md") && f !== "TOOLS.md").sort();
-    const lines = files.map(f => {
-      const name = f.replace(/\.md$/, "");
-      try {
-        const content = readFileSync(join(dir, f), "utf-8");
-        const first = content.split("\n").find(l => l.trim() && !l.startsWith("#") && !l.startsWith("---") && l.trim().length > 5);
-        return `• ${name}${first ? ` — ${first.trim().slice(0, 80)}` : ""}`;
-      } catch { return `• ${name}`; }
-    });
-    await ctx.reply(`📚 Available Skills (${files.length}):\n\n${lines.join("\n")}`);
-  } catch { await ctx.reply("📚 No skills directory found."); }
+  const base = join(agentBridgeHome(), "skills");
+  const groups = ["core", "auto", "downloaded"] as const;
+  const sections: string[] = [];
+  let total = 0;
+  for (const group of groups) {
+    const dir = join(base, group);
+    try {
+      const files = readdirSync(dir, { recursive: true })
+        .map(f => String(f))
+        .filter(f => f.endsWith(".md") && !f.endsWith("TOOLS.md"))
+        .sort();
+      if (files.length > 0) {
+        total += files.length;
+        sections.push(`${group} (${files.length}):\n${files.map(f => `  • ${f.replace(/\.md$/, "")}`).join("\n")}`);
+      }
+    } catch { /* dir doesn't exist */ }
+  }
+  await ctx.reply(total > 0 ? `📚 Skills (${total}):\n\n${sections.join("\n\n")}` : "📚 No skills found.");
   return true;
 }
 
