@@ -4,7 +4,7 @@
  */
 
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { withRetry } from "../retry.js";
+import { withRetry, isFatal } from "../retry.js";
 import { ConversationSession, type ToolCall } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
@@ -178,7 +178,15 @@ export class DirectApiTransport implements IKiroTransport {
         }
         return res;
       },
-      { attempts: 3, minDelayMs: 3000 },
+      {
+        attempts: 3, minDelayMs: 3000,
+        isRecoverable: (err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          // Don't retry 429/401/402/403 — let the bucket loop handle model switching
+          if (/API error (429|401|402|403)/.test(msg)) return false;
+          return !isFatal(err);
+        },
+      },
     );
 
     let content = "";
