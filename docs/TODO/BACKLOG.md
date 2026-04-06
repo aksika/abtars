@@ -80,13 +80,6 @@ Extract the memory system into a standalone module/package, decoupled from the b
 - Bridge consumes the module via interface, not direct DB access
 - Standalone CLI tools (agentbridge-store, agentbridge-edit, agentbridge-recall) become the public API
 
-## 49. Cohere STT/TTS Integration
-
-**Status:** ⏸ Postponed — no Hungarian support
-**Priority:** Medium
-
-Cohere Transcribe supports 14 languages (EN, DE, FR, IT, ES, PT, EL, NL, PL, VI, ZH, AR, JA, KO). No Hungarian — unusable for Molty's Hunglish conversations. Revisit if they add Hungarian. No TTS offering either — Edge TTS stays.
-
 ## 64. STT gibberish detection + safe languages
 
 **Status:** Not started
@@ -94,91 +87,6 @@ Cohere Transcribe supports 14 languages (EN, DE, FR, IT, ES, PT, EL, NL, PL, VI,
 **Effort:** small
 
 Whisper sometimes transcribes Hungarian voice notes as other languages (e.g. "ügyes vagy" → "видясь влаге" in Russian). Add `STT_SAFE_LANGUAGES` env var (default: `hu,en`). If transcription contains non-Latin/non-Hungarian script, flag as potential STT failure. SOUL adjustment: Molty should creatively recognize gibberish and ask user to repeat ("Nem értettem a hangüzenetet, megismétled?" instead of generic "Mi van?").
-
-## 66. In-process memory CLI interception
-
-**Status:** ✅ Done (superseded by refactor #4 — CLI IPC)
-**Priority:** high
-
-### Problem
-`agentbridge-store` and `agentbridge-recall` are CLI tools. Every call spawns a new node process → full DB init → embeddings init → execute → close. During conversation, Molty may store 5-10 memories — that's 5-10 cold starts. During sleep extraction, the model calls `agentbridge-store` per memory — same overhead.
-
-### Current flow
-```
-Molty → bash tool call → kiro-cli spawns node process → agentbridge-store CLI
-  → new MemoryManager → open DB → init embeddings → store → close → exit
-```
-
-### Proposed flow
-```
-Molty → bash tool call → kiro-cli permission handler (bridge intercepts)
-  → parse args → call bridge's in-process MemoryManager.instantStore()
-  → return result to kiro-cli → no subprocess spawned
-```
-
-### Design
-
-**Permission handler interception:**
-- ACP transport's `onPermissionRequest` already sees every tool call with title + command
-- Match commands starting with `agentbridge-store`, `agentbridge-recall`, or `agentbridge-edit`
-- Parse CLI args from the command string
-- Route to in-process MemoryManager methods
-- Return the result as tool output
-- Auto-approve (no permission prompt needed)
-
-**For main bridge (conversation):**
-- Bridge has MemoryManager in-process, DB already open
-- Permission handler has access to it via closure
-- `agentbridge-store` → `memory.instantStore(parsedArgs)`
-- `agentbridge-recall` → `recallSearch(parsedArgs)` → format output
-- `agentbridge-edit` → `memory.editMemory(parsedArgs)` — emotion harvest, classification changes, darwinism edits
-
-**For sleep process:**
-- Sleep already has `db` open (for daily summary)
-- Create a lightweight MemoryManager in the sleep process
-- Keep it alive across all steps (don't close between steps)
-- Extraction step calls `instantStore()` directly instead of bash
-- No ACP interception needed — code-driven step calls it in-process
-
-**Arg parsing:**
-- Reuse existing CLI arg parsing from `agentbridge-store.ts` and `agentbridge-recall.ts`
-- Extract into shared `parseStoreArgs()` and `parseRecallArgs()` functions
-- Both CLI entry point and interception handler use the same parser
-
-### Benefits
-- ~500ms per store/recall instead of ~3-5s (no cold start)
-- No orphan node processes
-- No duplicate DB connections
-- Embeddings reused (already loaded in bridge)
-- Sleep extraction much faster (10 stores = 5s instead of 30-50s)
-
-### Migration
-- CLI tools still work standalone (for manual use, doctor.sh, etc.)
-- Interception is transparent — agent doesn't know the difference
-- Fallback: if interception fails, let kiro-cli spawn the CLI as before
-
-### Implementation steps
-1. Extract arg parsers from `agentbridge-store.ts`, `agentbridge-recall.ts`, `agentbridge-edit.ts` into shared modules
-2. Add interception logic to ACP permission handler in `bridge-app.ts` — match all three CLIs
-3. For sleep: keep MemoryManager alive across steps, pass to extraction + emotion harvest + darwinism
-4. Conversation emotion harvest: `agentbridge-edit --emotion-score` intercepted in-process — no subprocess for reaction-triggered edits
-5. Test: verify store/recall/edit work both via interception and standalone CLI
-
-### Research findings (2026-04-02)
-
-**Measured overhead:** ~176ms per CLI call on Mac Mini (node spawn + DB init + embedding check + store + close). Not as slow as expected.
-
-**Permission handler limitation:** ACP `RequestPermissionRequest` only allows approve/cancel — cannot replace tool output. The bridge cannot intercept and return results at the permission level.
-
-**Viable approaches:**
-1. **Local HTTP API** — bridge exposes `/memory/store` etc. CLI tools check if bridge is running, call API instead of opening DB. Simple but adds HTTP overhead.
-2. **Unix socket IPC** — bridge listens on socket, CLI tools connect. Faster than HTTP, more code.
-3. **No-init mode** — CLI tools skip embedding init with `--fast` flag. Bridge handles embedding async. Quickest win but partial.
-4. **Environment variable routing** — CLI tools check `AGENTBRIDGE_MEMORY_PORT`, if set, use HTTP to bridge instead of direct DB.
-
-**Decision:** Deferred. 176ms per call is acceptable for conversation (LLM turns take seconds). For sleep with 10 stores = 1.7s total overhead — not critical. Revisit when store frequency increases significantly or when sleep extraction moves fully in-process (step 04b already code-driven).
-
-**When to implement:** If Molty starts storing 20+ memories per conversation (proactive SOUL), the cumulative overhead becomes noticeable. Or if sleep extraction needs 50+ stores per cycle.
 
 ## 67. Multi-user Telegram support
 
@@ -298,38 +206,6 @@ Sandbox (Docker): kiro-cli, agent tools, browser
 **Reference:** NemoClaw — Landlock LSM, seccomp filters, capability drops, gateway proxy.
 **Effort:** High. **Risk:** Medium. **Depends on:** All refactor items (done).
 
-## 78. Enhanced Testing Strategy
-
-**Priority:** HIGH
-**Status:** Partial — smoke + e2e tests exist, unit coverage strong (764 tests)
-
-### Current State
-- 731 unit tests + property-based tests (fast-check)
-- 1 e2e test (memory subsystem)
-- No integration, smoke, or contract tests
-
-### Phase 1: Smoke Test
-Single test that verifies the bridge lifecycle:
-1. Start bridge with mock transport
-2. Send one message through pipeline
-3. Verify response delivered
-4. Shut down cleanly, no orphaned processes
-
-Run after every deploy. Would have caught: `setBrowserManager` crash, SOUL truncation, sleep queue blocking.
-
-### Phase 2: Integration Tests
-Test real component combinations without full bridge:
-- **Pipeline + Transport**: real message-pipeline + real AcpTransport (mocked CLI process). Verify SOUL injection reaches transport, interceptor doesn't truncate session-start, resetAndPrepare triggers re-injection.
-- **Heartbeat + Tasks**: real HeartbeatSystem + real task callbacks. Verify clock-sync, standby detection, age-check fires at SLEEP_TIME.
-- **Sleep + Memory**: real sleep spawn + real DB. Verify audit file created, watermark advanced, daily summary written.
-
-### Phase 3: Contract Tests
-Verify ACP protocol compatibility between our transport and CLI providers:
-- **Kiro contract**: initialize → newSession → prompt → response with chunks → permission request → tool calls → resetSession. Verify all message types handled.
-- **Gemini contract**: same flow but with Gemini-specific behaviors — `cancelled` stopReason on concurrent prompts, no `contextUsagePercentage` metadata, `--acp -y` flags.
-- Run against recorded fixtures (not live CLIs) for speed and determinism.
-- Update fixtures when CLI versions change.
-
 ## 79. ClawHub Skill Sync
 
 **Priority:** HIGH
@@ -439,24 +315,3 @@ If needed later, add a heartbeat task that reviews the last N messages and spawn
 - [ ] Update TOOLS.md with `agentbridge-skill` syntax
 
 **Effort:** Medium. **Risk:** Low (additive — new CLI + new sleep step, nothing changes).
-## 88. Browser Container Auto-Stop
-
-**Priority:** MEDIUM
-**Status:** Not started
-
-### Problem
-Browser Docker containers (Lightpanda, Patchright) keep running after browse tasks complete. Wastes RAM (~500MB each) on the Mac Mini when not in use.
-
-### Solution
-Detect when no browse tasks have run for N minutes, then stop idle containers. Options:
-- Heartbeat task that checks last browse timestamp and stops containers if idle
-- `BrowserManager.shutdown()` called after task completion with a grace period
-- Docker `--rm` flag for one-shot containers (Lightpanda already does this?)
-
-Should handle both engines independently — Lightpanda may be idle while Patchright is active.
-
-**Status:** ✅ Done
-**Source:** `docs/asbuilts/pain-points.md` PP#5
-
-Session-start prompts bypass the MessageInterceptor entirely. SOUL + context injection is expected to be large.
-
