@@ -72,8 +72,8 @@ const exactCommands: Record<string, CommandHandler> = {
   "/cron": handleTasksList,
   "/memory": handleMemory,
   "/heartbeat": handleHeartbeat,
-  "/models": handleModels,
   "/transport": handleTransport,
+  "/models": handleModels,
   "/a2a-reset": handleA2aReset,
   "/help": handleHelp,
   "/skills": handleSkills,
@@ -105,6 +105,14 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
 
   for (const { prefix, handler } of prefixCommands) {
     if (text.startsWith(prefix)) return handler(text, ctx);
+  }
+
+  // Fallback: match by first word for commands that accept subcommands (e.g. "/transport change")
+  const firstWord = text.split(/\s/)[0]!;
+  if (text !== firstWord) {
+    const byFirstWord = exactCommands[firstWord];
+    // Only if no prefix command matched (prefix commands take priority)
+    if (byFirstWord) return byFirstWord(text, ctx);
   }
 
   // Unknown command guard
