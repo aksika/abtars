@@ -65,35 +65,6 @@ export class ConversationSession {
     }
   }
 
-  /** Remove trailing incomplete tool exchange (assistant requested tools but results missing/partial). */
-  stripPendingToolCalls(): void {
-    if (this.messages.length < 2) return;
-    const last = this.messages[this.messages.length - 1]!;
-    // Only strip if last message is an assistant with tool_calls (no results yet)
-    if (last.role === "assistant" && last.tool_calls?.length) {
-      this.messages.pop();
-      return;
-    }
-    // Check if we have a partial tool result set (some results missing)
-    // Find last assistant with tool_calls
-    for (let i = this.messages.length - 1; i >= 0; i--) {
-      const msg = this.messages[i]!;
-      if (msg.role === "assistant" && msg.tool_calls?.length) {
-        const expectedIds = new Set(msg.tool_calls.map(tc => tc.id));
-        const gotIds = new Set<string>();
-        for (let j = i + 1; j < this.messages.length; j++) {
-          if (this.messages[j]!.role === "tool" && this.messages[j]!.tool_call_id) gotIds.add(this.messages[j]!.tool_call_id!);
-        }
-        if (gotIds.size < expectedIds.size) {
-          // Incomplete — strip from the assistant message onwards
-          this.messages.splice(i);
-        }
-        break;
-      }
-      if (msg.role === "user") break; // reached previous user turn, stop
-    }
-  }
-
   /** Rough token estimate: ~4 chars per token. */
   estimateTokens(): number {
     return Math.round(this.messages.reduce((sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0), 0) / 4);
