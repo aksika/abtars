@@ -648,9 +648,15 @@ function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<stri
 
 async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   let version = "?";
+  let buildInfo = "";
   try {
     const pkgPath = join(import.meta.dirname, "..", "..", "package.json");
     version = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+  } catch { /* */ }
+  try {
+    const biPath = join(import.meta.dirname, "..", "build-info.json");
+    const bi = JSON.parse(readFileSync(biPath, "utf-8")) as { hash: string; date: string };
+    buildInfo = ` (${bi.hash} ${bi.date.slice(0, 10)})`;
   } catch { /* */ }
 
   // Fire async checks in parallel
@@ -694,7 +700,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   const fallbackTransport = process.env["TRANSPORT_FALLBACK"];
 
   const lines = [
-    `Kiro Professor v${version}`,
+    `Kiro Professor v${version}${buildInfo}`,
     `🤖 Model: ${model}`,
     ...(fallbackModels.length > 0 ? [`   Fallback model: ${fallbackModels.join(", ")}`] : []),
     `📊 Context window: ${ctxPct}`,
