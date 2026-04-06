@@ -1441,7 +1441,7 @@ Sleep cycle emits `PROGRESS:<pct>:<step-name>` on stdout. Bridge parses via pipe
 ## 81. Dual Browser Engine — Lightpanda + Patchright
 
 **Priority:** HIGH
-**Status:** ✅ Done (2026-04-05, `refactor/architecture-v2` branch)
+**Status:** Partial (2026-04-05, `refactor/architecture-v2` branch)
 
 `BrowserManager` supports `patchright` and `lightpanda` engines. `BROWSER_ENGINE` env var + `--engine` CLI flag on both `agentbridge-browse` and `agentbridge-browser`. Lazy container management via `scripts/browser-lightpanda.sh`. `agentbridge-browser` defaults to lightpanda (fast scraping), `agentbridge-browse` defaults to patchright (stealth). `deploy.sh --full` pulls Lightpanda nightly.
 
@@ -1538,6 +1538,22 @@ Sleep queue removed. Sleep runs on its own AcpTransport, main transport stays re
 Date for daily summary derived from first message timestamp after the watermark, not `localDate()`. Handles cross-midnight conversations correctly.
 
 ## 87. Pain Point: SOUL Injection Silently Truncated
+
+## 88. Browser Container Auto-Stop
+
+**Priority:** MEDIUM
+**Status:** Not started
+
+### Problem
+Browser Docker containers (Lightpanda, Patchright) keep running after browse tasks complete. Wastes RAM (~500MB each) on the Mac Mini when not in use.
+
+### Solution
+Detect when no browse tasks have run for N minutes, then stop idle containers. Options:
+- Heartbeat task that checks last browse timestamp and stops containers if idle
+- `BrowserManager.shutdown()` called after task completion with a grace period
+- Docker `--rm` flag for one-shot containers (Lightpanda already does this?)
+
+Should handle both engines independently — Lightpanda may be idle while Patchright is active.
 
 **Status:** ✅ Done
 **Source:** `docs/asbuilts/pain-points.md` PP#5
