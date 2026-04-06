@@ -1539,6 +1539,8 @@ Date for daily summary derived from first message timestamp after the watermark,
 
 ## 87. Pain Point: SOUL Injection Silently Truncated
 
+**Status:** ✅ Done (interceptor bypass)
+
 ## 88. Browser Container Auto-Stop
 
 **Priority:** MEDIUM
