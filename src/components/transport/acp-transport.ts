@@ -72,7 +72,7 @@ export class AcpTransport implements IKiroTransport {
 
   private readonly skipAgent: boolean;
   private readonly agentName: string;
-  private readonly modelId?: string;
+  private modelId?: string;
   private readonly extraCliArgs?: string[];
   private readonly autoReinit: boolean;
   private readonly tag: string;
@@ -245,6 +245,15 @@ export class AcpTransport implements IKiroTransport {
     }
     logInfo(this.tag, "ACP transport destroyed");
   }
+
+  async setModel(model: string): Promise<void> {
+    this.modelId = model;
+    this.destroy();
+    await this.initialize();
+    logInfo(this.tag, `Model switched to: ${model} (session reset)`);
+  }
+
+  getModel(): string { return this.modelId ?? process.env["AGENT_MODEL"] ?? "unknown"; }
 
   private handleSessionUpdate(params: SessionNotification): void {
     const update = params.update;

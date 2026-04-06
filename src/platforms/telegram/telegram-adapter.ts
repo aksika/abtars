@@ -164,9 +164,13 @@ export class TelegramAdapter implements PlatformAdapter {
         const newModel = data.slice(6);
         const transport = this.deps.transport;
         if ("setModel" in transport && typeof (transport as { setModel: unknown }).setModel === "function") {
-          (transport as { setModel: (m: string) => void }).setModel(newModel);
           const chatId = update.callback_query.message?.chat?.id;
-          if (chatId) await this.api.sendMessage(chatId, `🤖 Model switched → ${newModel}`);
+          try {
+            await (transport as { setModel: (m: string) => Promise<void> | void }).setModel(newModel);
+            if (chatId) await this.api.sendMessage(chatId, `🤖 Model switched → ${newModel}`);
+          } catch (err) {
+            if (chatId) await this.api.sendMessage(chatId, `❌ Model switch failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       }
       return;

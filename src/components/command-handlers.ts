@@ -316,11 +316,11 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
   const isApi = ctx.config.agentTransport === "api";
 
   // Get current model
-  const currentModel = isApi && "getModel" in transport
+  const currentModel = "getModel" in transport
     ? (transport as { getModel(): string }).getModel()
     : process.env["AGENT_MODEL"] ?? "unknown";
 
-  // Fetch available models for API transport
+  // Fetch available models
   let models: string[] = [];
   if (isApi) {
     const endpoint = process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1";
@@ -335,9 +335,13 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
       }
     } catch { /* endpoint doesn't support /models */ }
   }
+  // Fallback: config-based list
+  if (models.length === 0) {
+    const configured = process.env["AGENT_AVAILABLE_MODELS"];
+    if (configured) models = configured.split(",").map(m => m.trim()).filter(Boolean);
+  }
 
   if (models.length > 0) {
-    // Send inline keyboard
     const COLS = 2;
     const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
     for (let i = 0; i < models.length; i += COLS) {
@@ -351,7 +355,7 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
       reply_markup: { inline_keyboard: buttons },
     });
   } else {
-    await ctx.reply(`🤖 Model: ${currentModel}\n\nModel list not available for ${ctx.config.agentTransport} transport.`);
+    await ctx.reply(`🤖 Model: ${currentModel}\n\nSet AGENT_AVAILABLE_MODELS in .env to enable model switching.`);
   }
   return true;
 }
