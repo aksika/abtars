@@ -184,6 +184,11 @@ Switching requires transport restart (new `--model` flag). Session resets — us
 ### Problem
 Agent modified source code in `~/agentbridge/` (developer repo) without permission. Agent notes say "don't modify code" but the agent ignored it. Notes are advisory — the agent can bypass them. Need enforcement, not guidance.
 
+### Deployment Modes
+`AGENT_SANDBOX=default|sandbox` env var controls permission enforcement:
+- `default` — current behavior, no restrictions (what we have today)
+- `sandbox` — permission handler enforces file/command blocklist
+
 ### Scope
 Restrict what the agent can read, write, and execute. The agent should only operate within its designated workspace.
 
