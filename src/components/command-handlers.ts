@@ -8,6 +8,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logError } from "./logger.js";
+import { getBucketLevel } from "./transport/leaky-bucket.js";
 import { readEntries as cronReadEntries } from "./cron/cron-db.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import { agentBridgeHome } from "../paths.js";
@@ -592,6 +593,25 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
     lines.push(`  CLI: ${cli}`, `  Model: ${model}`);
     lines.push(`  Context: ${ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a"}`);
     lines.push(`  Status: ${ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected"}`);
+  }
+
+  // Bucket health (API transport)
+  if (transport === "api") {
+    const candidates = [
+      { endpoint, model },
+      ...Array.from({ length: 5 }, (_, i) => ({
+        endpoint: process.env[`API_FALLBACK_${i + 1}_ENDPOINT`] ?? "",
+        model: process.env[`API_FALLBACK_${i + 1}_MODEL`] ?? "",
+      })).filter(c => c.endpoint && c.model),
+    ];
+    if (candidates.length > 1) {
+      lines.push("  Models:");
+      for (const c of candidates) {
+        const lvl = getBucketLevel(`${c.endpoint}|${c.model}`);
+        const bar = lvl > 70 ? "🔴" : lvl > 30 ? "🟡" : "🟢";
+        lines.push(`    ${bar} ${c.model} (${lvl}%)`);
+      }
+    }
   }
 
   // Fallback status

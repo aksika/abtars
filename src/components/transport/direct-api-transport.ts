@@ -8,6 +8,7 @@ import { withRetry } from "../retry.js";
 import { ConversationSession, type ToolCall } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
+import { shouldSkip, recordError, classifyError, getBucketLevel } from "./leaky-bucket.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 
 const TAG = "direct-api";
@@ -67,31 +68,36 @@ export class DirectApiTransport implements IKiroTransport {
     this.abortControllers.set(sessionKey, ac);
 
     try {
-      const result = await this.agentLoop(session, ac.signal);
-      this._lastAnswer = result;
-      // Restore primary on success (in case we fell back)
-      this.activeEndpoint = this.config.endpoint;
-      this.activeApiKey = this.config.apiKey;
-      this.activeModel = this.config.model;
-      return result;
-    } catch (err) {
-      // Try fallbacks
-      if (this.config.fallbacks?.length && !ac.signal.aborted) {
-        for (const fb of this.config.fallbacks) {
-          logWarn(TAG, `Primary failed (${err instanceof Error ? err.message : String(err)}), trying fallback: ${fb.endpoint} / ${fb.model}`);
-          this.activeEndpoint = fb.endpoint;
-          this.activeApiKey = fb.apiKey;
-          this.activeModel = fb.model;
-          try {
-            const result = await this.agentLoop(session, ac.signal);
-            this._lastAnswer = result;
-            return result;
-          } catch (fbErr) {
-            logWarn(TAG, `Fallback ${fb.model} failed: ${fbErr instanceof Error ? fbErr.message : String(fbErr)}`);
-          }
+      // Build candidate list: primary + fallbacks
+      const candidates = [
+        { endpoint: this.config.endpoint, apiKey: this.config.apiKey, model: this.config.model },
+        ...(this.config.fallbacks ?? []),
+      ];
+
+      for (const candidate of candidates) {
+        const bucketKey = `${candidate.endpoint}|${candidate.model}`;
+        if (shouldSkip(bucketKey)) {
+          logDebug(TAG, `Skipping ${candidate.model} (bucket: ${getBucketLevel(bucketKey)}%)`);
+          continue;
+        }
+
+        this.activeEndpoint = candidate.endpoint;
+        this.activeApiKey = candidate.apiKey;
+        this.activeModel = candidate.model;
+
+        try {
+          const result = await this.agentLoop(session, ac.signal);
+          this._lastAnswer = result;
+          return result;
+        } catch (err) {
+          const status = this.parseErrorStatus(err);
+          const kind = classifyError(status);
+          recordError(bucketKey, kind);
+          logWarn(TAG, `${candidate.model} failed (${kind}, bucket: ${getBucketLevel(bucketKey)}%): ${err instanceof Error ? err.message.slice(0, 100) : String(err)}`);
         }
       }
-      throw err;
+
+      throw new Error("All models exhausted");
     } finally {
       this._promptStartedAt = null;
       this.abortControllers.delete(sessionKey);
@@ -134,6 +140,12 @@ export class DirectApiTransport implements IKiroTransport {
 
     logWarn(TAG, `Max turns (${this.config.maxTurns}) reached`);
     return session.messages.at(-1)?.content ?? "(max turns reached)";
+  }
+
+  private parseErrorStatus(err: unknown): number {
+    const msg = err instanceof Error ? err.message : String(err);
+    const m = /API error (\d+)/.exec(msg);
+    return m ? parseInt(m[1]!, 10) : 0;
   }
 
   private async streamCompletion(
