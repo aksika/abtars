@@ -32,3 +32,4 @@ docs/.obsidian/
 titok/
 persona/tasks/
 .test-*
+.env.backup
