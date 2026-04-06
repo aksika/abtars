@@ -74,11 +74,21 @@ export class DirectApiTransport implements IKiroTransport {
     this.abortControllers.set(sessionKey, ac);
 
     try {
-      // Build candidate list: primary + fallbacks
-      const candidates = [
+      // Build candidate list: user override first, then primary + fallbacks
+      const allCandidates = [
         { endpoint: this.config.endpoint, apiKey: this.config.apiKey, model: this.config.model, maxContext: this.config.maxContext },
         ...(this.config.fallbacks ?? []).map(fb => ({ ...fb, maxContext: fb.maxContext ?? this.config.maxContext })),
       ];
+
+      // If user manually switched model, put it first
+      if (this._userModelOverride) {
+        const override = allCandidates.find(c => c.model === this._userModelOverride);
+        if (override) {
+          allCandidates.splice(allCandidates.indexOf(override), 1);
+          allCandidates.unshift(override);
+        }
+      }
+      const candidates = allCandidates;
 
       const isPrimary = (c: typeof candidates[0]): boolean => c.model === this.config.model && c.endpoint === this.config.endpoint;
 
@@ -98,7 +108,8 @@ export class DirectApiTransport implements IKiroTransport {
         this.activeEndpoint = candidate.endpoint;
         this.activeApiKey = candidate.apiKey;
         this.activeModel = candidate.model;
-        this._lastActivityAt = Date.now(); // reset watchdog timer on fallback switch
+        this._lastActivityAt = Date.now();
+        logDebug(TAG, `Trying model: ${candidate.model}`);
 
         // Notify user on fallback
         if (!isPrimary(candidate) && this.onFallback) {
@@ -315,9 +326,12 @@ export class DirectApiTransport implements IKiroTransport {
   get answerOnly(): string { return this._lastAnswer; }
 
   /** Hot-swap the active model. Takes effect on next API call. */
+  private _userModelOverride: string | null = null;
+
   setModel(model: string): void {
     this.activeModel = model;
-    logInfo(TAG, `Model switched to: ${model}`);
+    this._userModelOverride = model;
+    logInfo(TAG, `Model switched (user): ${model}`);
   }
 
   /** Get current active model name. */
