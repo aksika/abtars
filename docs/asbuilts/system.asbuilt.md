@@ -9,7 +9,14 @@
 
 ## Overview
 
-Kiro Professor is a standalone Node.js agent that bridges Telegram (and Discord) to [Kiro CLI](https://kiro.dev). It polls messaging platforms, forwards user messages to a kiro-cli session, and returns responses. Supports tmux and ACP (Agent Client Protocol) transports, an optional localhost web dashboard, a local memory system, a sleep maintenance cycle, and agent-callable CLI tools for memory storage, recall, browser automation, todo management, and scheduled reminders.
+Kiro Professor is a standalone Node.js agent that runs on your machine, talks to you via Telegram/Discord, and works in your codebase. Cost-effective access to frontier AI models through existing subscriptions — no per-token billing. The bridge is the agent brain — it owns memory, personality, tools, and context management. The CLIs are just model access wrappers.
+
+Supports three transport modes:
+- **ACP** (recommended) — communicates with kiro-cli or gemini-cli via Agent Client Protocol (JSON-RPC 2.0 over stdio)
+- **Direct API** — talks to any OpenAI-compatible endpoint directly (9Router, OpenRouter, OpenAI, Ollama). Tool-calling loop built into the bridge. No CLI dependency.
+- **tmux** (legacy) — runs kiro-cli in a tmux session, communicates via `send-keys` / `capture-pane`
+
+Optional: localhost web dashboard, local memory system (SQLite + FTS5 + embeddings), sleep maintenance cycle, agent-callable CLI tools, browser automation, scheduled tasks.
 
 For the memory subsystem, see [memory.asbuilt.md](memory.asbuilt.md).
 
@@ -59,8 +66,8 @@ Telegram/Discord → PlatformAdapter.start() → onMessage callback
 
 | Adapter | Source | Capabilities |
 |---------|--------|-------------|
-| `TelegramAdapter` | `src/platforms/telegram-adapter.ts` | voice, reactions, groups, typing, TTS |
-| `DiscordAdapter` | `src/platforms/discord-adapter.ts` | reactions (emoji scoring), A2A, mention stripping |
+| `TelegramAdapter` | `src/platforms/telegram/telegram-adapter.ts` | voice, reactions, groups, typing, TTS |
+| `DiscordAdapter` | `src/platforms/discord/discord-adapter.ts` | reactions (emoji scoring), A2A, mention stripping |
 
 ### Message Pipeline (`src/components/message-pipeline.ts`)
 
@@ -164,13 +171,18 @@ Entity clusters: memories sharing entities gravitate together with connecting li
 ### Startup
 
 1. Kill orphaned `kiro-cli acp` processes from previous runs
-2. Initialize transport (ACP or tmux)
-3. Initialize memory, browser, platforms
-4. Create `bridge.lock` (`{pid, startedAt}`) — tracks bridge lifecycle
-5. `startSession()` — inject SOUL + context + greeting (non-blocking, busyChats guard queues user messages until ready)
-6. Start heartbeat (clock-synced, ≥3min guard before first tick)
-7. Spawn sleep if not done today and past SLEEP_TIME (`hasSleepAuditToday()` guard, 3 retries via setTimeout)
-8. Auto-restart on crash (LaunchAgent on macOS, systemd on Linux)
+2. Initialize transport (ACP, Direct API, or tmux)
+   - ACP: spawn kiro-cli/gemini-cli with `--model` flag
+   - Direct API: configure endpoint, model, tool registry, in-process memory backend
+   - tmux: start tmux session
+3. Wrap with TransportManager if `TRANSPORT_FALLBACK` configured (cold fallback)
+4. Set system prompt for Direct API transport (SOUL bundle)
+5. Initialize memory, browser, platforms
+6. Create `bridge.lock` (`{pid, startedAt}`) — tracks bridge lifecycle
+7. `startSession()` — inject SOUL + context + greeting (non-blocking, busyChats guard queues user messages until ready)
+8. Start heartbeat (clock-synced, ≥3min guard before first tick)
+9. Spawn sleep if not done today and past SLEEP_TIME (`hasSleepAuditToday()` guard, 3 retries via setTimeout)
+10. Auto-restart on crash (LaunchAgent on macOS, systemd on Linux)
 
 ### Heartbeat System
 
@@ -190,6 +202,48 @@ browse-checker → skill-reloader → reminder-injector
 ```
 
 ---
+
+## Transport System
+
+Three transport implementations behind `IKiroTransport` interface:
+
+### AcpTransport (`src/components/transport/acp-transport.ts`)
+Spawns kiro-cli or gemini-cli as child process. JSON-RPC 2.0 over stdio. Real-time streaming via `agent_message_chunk` notifications. Permission auto-approve. `setModel()` kills CLI and respawns with new `--model` flag (session resets).
+
+### DirectApiTransport (`src/components/transport/direct-api-transport.ts`)
+Talks to any OpenAI-compatible `/v1/chat/completions` endpoint. Bridge owns the agent loop:
+
+1. Build messages (system prompt + conversation history + user message)
+2. POST with streaming (`stream: true`, `stream_options: { include_usage: true }`)
+3. Parse SSE → emit chunks for Telegram edit-in-place
+4. If `tool_calls` in response → execute via tool registry → append results → loop
+5. If content only → return as final answer
+
+**Tool registry** (`src/components/transport/tool-registry.ts`): 7 native tools — `execute_bash`, `memory_store`, `memory_recall`, `memory_edit`, `web_browse`, `todo_manage`, `task_manage`. Memory tools call in-process `MemoryBackend` when available (no CLI spawn).
+
+**SSE parser** (`src/components/transport/sse-parser.ts`): stale stream detection (90s), Ollama-compatible tool_call tracking by ID.
+
+**Conversation session** (`src/components/transport/conversation-session.ts`): per-session message history, token tracking, context% calculation.
+
+Config: `API_ENDPOINT`, `API_KEY`, `API_MODEL`, `API_MAX_CONTEXT`, `API_MAX_OUTPUT`, `API_MAX_TURNS`.
+
+### TmuxClient (`src/components/transport/tmux-client.ts`)
+Legacy. Sends via `tmux send-keys`, reads via `tmux capture-pane`. Battle-tested, survives disconnects.
+
+### TransportManager (`src/components/transport/transport-manager.ts`)
+Wraps primary + fallback transport. Recovery L3: after 3 consecutive failures, cold-inits fallback transport. Heartbeat health check restores primary when it recovers. Config: `TRANSPORT_FALLBACK=acp`.
+
+### Fallback Chain (within Direct API)
+`API_FALLBACK_1_ENDPOINT` / `API_FALLBACK_1_MODEL` (up to 5). Tried in order if primary model fails. Restores primary on next success.
+
+### Retry
+429s and transient errors retried with 3s exponential backoff (3 attempts). Status check inside retry loop.
+
+### `/models` Command
+Fetches available models from `/v1/models` (API) or `AGENT_AVAILABLE_MODELS` env (ACP). Displays as Telegram inline keyboard. Tap to hot-swap: instant for API, session reset for ACP.
+
+### `/status` Transport Info
+Shows active transport, endpoint, model, fallback model(s), fallback transport.
 
 ## Recovery
 
@@ -219,7 +273,9 @@ Config: `SLEEP_TIME=06:00` (default 6am). The daily restart is the ONLY schedule
 
 ### Watchdog
 
-Heartbeat task (`watchdog.ts`) that monitors the ACP transport for stuck states:
+Heartbeat task that monitors the transport for stuck states.
+
+**ACP transport** (`watchdog.ts`):
 
 | Case | Detection | L1 Action | L2 Action |
 |------|-----------|-----------|-----------|
@@ -227,6 +283,10 @@ Heartbeat task (`watchdog.ts`) that monitors the ACP transport for stuck states:
 | Process dead | `agent === null` | Reinit transport + re-send prompt | — |
 | Silent | No activity > 5min | Re-send same prompt | `process.exit(0)` |
 | Endless | Active > 10min | `sendInterrupt()` + tell agent it's looping | Reset session + re-send prompt |
+
+**Direct API transport**: basic stuck detection — if `promptStartedAt` set and `lastActivityAt` idle > `WATCHDOG_SILENT_SEC`, abort the request.
+
+**Recovery escalation**: L1 retry → L2 reset → L3 swap transport (TransportManager) → L4 `process.exit(0)`.
 
 Config: `WATCHDOG_TOOL_TIMEOUT_SEC=180`, `WATCHDOG_SILENT_SEC=300`, `WATCHDOG_ENDLESS_SEC=600`.
 
