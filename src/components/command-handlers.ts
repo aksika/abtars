@@ -459,20 +459,37 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     try { model = JSON.parse(modelRaw)["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
   }
 
-  const status = ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected";
+  const transportStatus = ctx.transport.isReady ? "✅ Connected" : "❌ Disconnected";
   const mode = ctx.config.agentTransport.toUpperCase();
-  const provider = process.env["AGENT_CLI"] || "unknown";
   const uptime = formatUptime(Date.now() - ctx.startedAt);
   const ctxPct = ctx.transport.contextPercent >= 0
     ? `${ctx.transport.contextPercent}%`
     : "n/a";
   const cronInfo = ctx.memory?.getCronInfo();
+
+  // Transport details
+  const endpoint = process.env["API_ENDPOINT"];
+  const provider = mode === "API" && endpoint ? endpoint.replace(/^https?:\/\//, "").replace(/\/v1$/, "") : (process.env["AGENT_CLI"] || "kiro");
+  const transportLine = `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`;
+
+  // Fallback model(s)
+  const fallbackModels: string[] = [];
+  for (let i = 1; i <= 5; i++) {
+    const fm = process.env[`API_FALLBACK_${i}_MODEL`];
+    if (fm) fallbackModels.push(fm);
+  }
+
+  // Fallback transport
+  const fallbackTransport = process.env["TRANSPORT_FALLBACK"];
+
   const lines = [
     `Kiro Professor v${version}`,
     `🤖 Model: ${model}`,
+    ...(fallbackModels.length > 0 ? [`   Fallback model: ${fallbackModels.join(", ")}`] : []),
     `📊 Context window: ${ctxPct}`,
     `⏱️ Uptime: ${uptime}`,
-    `🔌 Transport: ${mode} (${provider}) — ${status}`,
+    transportLine,
+    ...(fallbackTransport ? [`   Fallback transport: ${fallbackTransport}`] : []),
   ];
   if (cronInfo) {
     const mins = Math.round(cronInfo.intervalMs / 60000);
