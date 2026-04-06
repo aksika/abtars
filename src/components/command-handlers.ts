@@ -342,8 +342,17 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
       if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
       const res = await fetch(`${endpoint}/models`, { headers, signal: AbortSignal.timeout(5000) });
       if (res.ok) {
-        const data = await res.json() as { data?: Array<{ id: string }> };
-        models = (data.data ?? []).map(m => m.id).sort();
+        const data = await res.json() as { data?: Array<{ id: string; created?: number }> };
+        const allModels = data.data ?? [];
+        // OpenRouter: filter to free models created in last 60 days
+        if (endpoint.includes("openrouter")) {
+          const cutoff = (Date.now() / 1000) - (60 * 86400);
+          models = allModels
+            .filter(m => m.id.includes(":free") && (m.created ?? 0) > cutoff)
+            .map(m => m.id).sort();
+        } else {
+          models = allModels.map(m => m.id).sort();
+        }
       }
     } catch { /* endpoint doesn't support /models */ }
   }
@@ -353,19 +362,22 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
     if (configured) models = configured.split(",").map(m => m.trim()).filter(Boolean);
   }
 
+  // Ensure current model is always in the list
+  if (models.length > 0 && !models.includes(currentModel)) {
+    models.unshift(currentModel);
+  }
+
   if (models.length > 0) {
-    // Telegram inline keyboard limit: cap at 50 models
-    const displayModels = models.slice(0, 50);
     const COLS = 1;
     const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
-    for (let i = 0; i < displayModels.length; i += COLS) {
-      const row = displayModels.slice(i, i + COLS).map(m => ({
+    for (let i = 0; i < models.length; i += COLS) {
+      const row = models.slice(i, i + COLS).map(m => ({
         text: m === currentModel ? `✓ ${m}` : m,
         callback_data: `model:${m}`,
       }));
       buttons.push(row);
     }
-    await ctx.reply(`📋 Models (${displayModels.length}${models.length > 50 ? ` of ${models.length}` : ""}) — tap to switch:`, {
+    await ctx.reply(`📋 Models (${models.length}) — tap to switch:`, {
       reply_markup: { inline_keyboard: buttons },
     });
   } else {
