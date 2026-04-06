@@ -75,6 +75,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/heartbeat": handleHeartbeat,
   "/transport": handleTransport,
   "/models": handleModels,
+  "/model": handleModels,
   "/a2a-reset": handleA2aReset,
   "/help": handleHelp,
   "/skills": handleSkills,
