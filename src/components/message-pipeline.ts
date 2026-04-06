@@ -53,25 +53,41 @@ export async function resetAndPrepare(opts: {
   writeRestartReason(opts.reason);
 }
 
-export interface PipelineDeps {
+/** Transport + agent runtime deps. */
+export interface TransportDeps {
   transport: IKiroTransport;
   codingMode: CodingMode;
-  memory: MemoryManager | null;
-  memoryConfig: { memoryEnabled: boolean; memoryDir: string };
-  nlmConfig: { enabled: boolean; [k: string]: unknown };
-  idleSave: IdleSave;
-  conversationBuffer: ConversationBuffer;
   config: { agentTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
   startedAt: number;
+}
+
+/** Memory system deps. */
+export interface MemoryDeps {
+  memory: MemoryManager | null;
+  memoryConfig: { memoryEnabled: boolean; memoryDir: string };
+  conversationBuffer: ConversationBuffer;
+  idleSave: IdleSave;
+  nlmConfig: { enabled: boolean; [k: string]: unknown };
+  updateCtxStart: (memoryDir: string, chatId: number) => void;
+}
+
+/** Voice processing deps. */
+export interface VoiceDeps {
   sttConfig: SttConfig | null;
   ttsConfig: TtsConfig | null;
-  // Shared mutable state
+}
+
+/** Shared mutable session state. */
+export interface SessionState {
   busyChats: Set<string>;
   messageQueue: Map<string, Array<{ msg: InboundMessage; adapter: PlatformAdapter }>>;
   fullModeChats: Set<string>;
   pendingSessionStart: Set<string>;
   seenSessions: Set<string>;
-  updateCtxStart: (memoryDir: string, chatId: number) => void;
+}
+
+/** Pipeline dependencies — composed from focused interfaces. */
+export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps, SessionState {
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string) => string | null;
   requestShutdown?: () => void;
