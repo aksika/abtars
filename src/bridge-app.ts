@@ -243,6 +243,33 @@ export async function startBridge(): Promise<void> {
   bridge.transport = transport;
   logInfo("main", "✅ Transport ready");
 
+  // Wrap with TransportManager if fallback configured
+  const fallbackType = process.env["TRANSPORT_FALLBACK"];
+  if (fallbackType && fallbackType !== config.transport.agentTransport) {
+    const { TransportManager } = await import("./components/transport/transport-manager.js");
+    transport = new TransportManager(transport, {
+      createFallback: async () => {
+        if (fallbackType === "acp") {
+          logInfo("main", "🔄 Initializing ACP fallback transport...");
+          return new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, {
+            model: config.models.agentModel || undefined,
+          });
+        } else if (fallbackType === "api") {
+          const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
+          return new DirectApiTransport({
+            endpoint: process.env["FALLBACK_API_ENDPOINT"] ?? "http://localhost:20128/v1",
+            apiKey: process.env["FALLBACK_API_KEY"],
+            model: process.env["FALLBACK_API_MODEL"] ?? "gpt-4o",
+            maxContext: 131072, maxOutput: 8192, maxTurns: 50,
+          });
+        }
+        throw new Error(`Unknown fallback transport: ${fallbackType}`);
+      },
+    });
+    bridge.transport = transport;
+    logInfo("main", `🛡️ Transport fallback configured: ${fallbackType}`);
+  }
+
   // Wire in-process memory for direct API transport (Phase 3 — skip CLI spawn)
   if (config.transport.agentTransport === "api" && memory) {
     const { setMemoryBackend } = await import("./components/transport/tool-registry.js");
