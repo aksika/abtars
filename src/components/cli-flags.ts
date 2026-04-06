@@ -8,7 +8,7 @@
  *
  * Also parses --acp / --tmux to override transport (default: acp).
  */
-export function parsePlatformFlags(args?: string[]): { telegram: boolean; discord: boolean; web: boolean; agent: boolean; transport?: "tmux" | "acp" } {
+export function parsePlatformFlags(args?: string[]): { telegram: boolean; discord: boolean; web: boolean; agent: boolean; transport?: "tmux" | "acp" | "api" } {
   const argv = args ?? process.argv.slice(2);
   const transport = argv.includes("--acp") ? "acp" as const : argv.includes("--tmux") ? "tmux" as const : undefined;
   const web = argv.includes("--web") || argv.includes("--all");

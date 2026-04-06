@@ -1,0 +1,57 @@
+/**
+ * Per-session conversation state for DirectApiTransport.
+ * Manages message history and token tracking.
+ */
+
+export type ChatMessage = {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  name?: string;
+};
+
+export type ToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+export class ConversationSession {
+  messages: ChatMessage[] = [];
+  totalPromptTokens = 0;
+  private readonly maxContext: number;
+
+  constructor(systemPrompt: string, maxContext: number) {
+    this.maxContext = maxContext;
+    this.messages.push({ role: "system", content: systemPrompt });
+  }
+
+  addUser(content: string): void {
+    this.messages.push({ role: "user", content });
+  }
+
+  addAssistant(content: string | null, toolCalls?: ToolCall[]): void {
+    const msg: ChatMessage = { role: "assistant", content };
+    if (toolCalls?.length) msg.tool_calls = toolCalls;
+    this.messages.push(msg);
+  }
+
+  addToolResult(toolCallId: string, name: string, content: string): void {
+    this.messages.push({ role: "tool", content, tool_call_id: toolCallId, name });
+  }
+
+  updateTokens(promptTokens: number): void {
+    this.totalPromptTokens = promptTokens;
+  }
+
+  get contextPercent(): number {
+    if (this.maxContext <= 0) return 0;
+    return Math.round((this.totalPromptTokens / this.maxContext) * 100);
+  }
+
+  reset(systemPrompt: string): void {
+    this.messages = [{ role: "system", content: systemPrompt }];
+    this.totalPromptTokens = 0;
+  }
+}

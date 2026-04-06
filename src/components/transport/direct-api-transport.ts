@@ -1,0 +1,223 @@
+/**
+ * Direct API Transport — talks to any OpenAI-compatible endpoint.
+ * Implements IKiroTransport with its own agent loop (send → stream → tools → loop).
+ */
+
+import { logInfo, logWarn, logDebug } from "../logger.js";
+import { withRetry } from "../retry.js";
+import { ConversationSession, type ToolCall } from "./conversation-session.js";
+import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
+import { getToolSchemas, executeToolCall } from "./tool-registry.js";
+import type { IKiroTransport } from "./kiro-transport.js";
+
+const TAG = "direct-api";
+
+export interface DirectApiConfig {
+  endpoint: string;       // e.g. http://localhost:20128/v1
+  apiKey?: string;
+  model: string;
+  maxContext: number;      // token budget
+  maxOutput: number;       // max output tokens per response
+  maxTurns: number;        // max tool-calling iterations per prompt
+}
+
+export class DirectApiTransport implements IKiroTransport {
+  private readonly config: DirectApiConfig;
+  private readonly sessions = new Map<string, ConversationSession>();
+  private readonly abortControllers = new Map<string, AbortController>();
+  private systemPrompt = "";
+  private _contextPercent = -1;
+  private _lastAnswer = "";
+  private _intermediateText = "";
+  private _promptStartedAt: number | null = null;
+  private _lastActivityAt: number | null = null;
+
+  onIntermediateResponse?: (text: string) => void;
+
+  constructor(config: DirectApiConfig) {
+    this.config = config;
+  }
+
+  async initialize(): Promise<void> {
+    logInfo(TAG, `🔌 Direct API transport (${this.config.endpoint}, model: ${this.config.model})`);
+  }
+
+  setSystemPrompt(prompt: string): void {
+    this.systemPrompt = prompt;
+  }
+
+  async sendPrompt(sessionKey: string, message: string): Promise<string> {
+    const session = this.getOrCreateSession(sessionKey);
+    session.addUser(message);
+
+    this._lastAnswer = "";
+    this._intermediateText = "";
+    this._promptStartedAt = Date.now();
+    this._lastActivityAt = Date.now();
+
+    const ac = new AbortController();
+    this.abortControllers.set(sessionKey, ac);
+
+    try {
+      const result = await this.agentLoop(session, ac.signal);
+      this._lastAnswer = result;
+      return result;
+    } finally {
+      this._promptStartedAt = null;
+      this.abortControllers.delete(sessionKey);
+    }
+  }
+
+  private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
+    for (let turn = 0; turn < this.config.maxTurns; turn++) {
+      if (signal.aborted) throw new Error("Aborted");
+
+      const { content, toolCalls, usage } = await this.streamCompletion(session, signal);
+
+      if (usage) {
+        session.updateTokens(usage.prompt_tokens);
+        this._contextPercent = session.contextPercent;
+      }
+
+      if (toolCalls.length > 0) {
+        session.addAssistant(content, toolCalls);
+        logDebug(TAG, `Tool calls: ${toolCalls.map(tc => tc.function.name).join(", ")}`);
+
+        for (const tc of toolCalls) {
+          if (signal.aborted) throw new Error("Aborted");
+          this._lastActivityAt = Date.now();
+
+          let args: Record<string, string>;
+          try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
+
+          const result = await executeToolCall(tc.function.name, args);
+          session.addToolResult(tc.id, tc.function.name, result);
+        }
+        continue;
+      }
+
+      // No tool calls — final response
+      const answer = content ?? "";
+      session.addAssistant(answer);
+      return answer;
+    }
+
+    logWarn(TAG, `Max turns (${this.config.maxTurns}) reached`);
+    return session.messages.at(-1)?.content ?? "(max turns reached)";
+  }
+
+  private async streamCompletion(
+    session: ConversationSession,
+    signal: AbortSignal,
+  ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
+    const body = {
+      model: this.config.model,
+      messages: session.messages,
+      tools: getToolSchemas(),
+      max_tokens: this.config.maxOutput,
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.config.apiKey) headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+
+    const response = await withRetry(
+      () => fetch(`${this.config.endpoint}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      }),
+      { attempts: 3 },
+    );
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`API error ${response.status}: ${text.slice(0, 500)}`);
+    }
+
+    let content = "";
+    const toolCallAccumulator = new Map<string, { id: string; name: string; arguments: string }>();
+    let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
+
+    for await (const event of parseSSEStream(response, signal)) {
+      this._lastActivityAt = Date.now();
+
+      switch (event.type) {
+        case "chunk":
+          content += event.content;
+          this._intermediateText += event.content;
+          this.onIntermediateResponse?.(event.content);
+          break;
+
+        case "tool_call_delta":
+          this.accumulateToolCall(toolCallAccumulator, event);
+          break;
+
+        case "done":
+          usage = event.usage;
+          break;
+      }
+    }
+
+    const toolCalls: ToolCall[] = [...toolCallAccumulator.values()].map(tc => ({
+      id: tc.id,
+      type: "function" as const,
+      function: { name: tc.name, arguments: tc.arguments },
+    }));
+
+    return { content: content || null, toolCalls, usage };
+  }
+
+  /** Accumulate streaming tool call deltas by ID (Ollama-safe: tracks by ID not index). */
+  private accumulateToolCall(
+    acc: Map<string, { id: string; name: string; arguments: string }>,
+    delta: SSEToolCallDelta,
+  ): void {
+    // Use ID if available, fall back to index-based key
+    const key = delta.id ?? `idx:${delta.index}`;
+    const existing = acc.get(key);
+    if (existing) {
+      if (delta.arguments) existing.arguments += delta.arguments;
+    } else {
+      acc.set(key, { id: delta.id ?? `call_${acc.size}`, name: delta.name ?? "", arguments: delta.arguments ?? "" });
+    }
+  }
+
+  private getOrCreateSession(sessionKey: string): ConversationSession {
+    let session = this.sessions.get(sessionKey);
+    if (!session) {
+      session = new ConversationSession(this.systemPrompt, this.config.maxContext);
+      this.sessions.set(sessionKey, session);
+    }
+    return session;
+  }
+
+  async resetSession(sessionKey: string): Promise<void> {
+    const session = this.sessions.get(sessionKey);
+    if (session) session.reset(this.systemPrompt);
+    else this.sessions.delete(sessionKey);
+    logInfo(TAG, `Session ${sessionKey} reset`);
+  }
+
+  async sendInterrupt(): Promise<void> {
+    for (const ac of this.abortControllers.values()) ac.abort();
+  }
+
+  destroy(): void {
+    for (const ac of this.abortControllers.values()) ac.abort();
+    this.sessions.clear();
+    this.abortControllers.clear();
+  }
+
+  get isReady(): boolean { return true; }
+  get contextPercent(): number { return this._contextPercent; }
+  get answerOnly(): string { return this._lastAnswer; }
+  get intermediateDeliveredText(): string { return this._intermediateText; }
+  get transportCommands(): string[] { return []; }
+
+  // Watchdog support
+  get promptStartedAt(): number | null { return this._promptStartedAt; }
+  get lastActivityAt(): number | null { return this._lastActivityAt; }
+}

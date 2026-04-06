@@ -1,7 +1,7 @@
 import type { LogLevel } from "../components/logger.js";
 
 /** Transport method for communicating with the agent CLI. */
-export type AgentTransport = "tmux" | "acp";
+export type AgentTransport = "tmux" | "acp" | "api";
 
 export type TelegramConfig = {
   botToken: string;

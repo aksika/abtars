@@ -200,6 +200,16 @@ export async function startBridge(): Promise<void> {
       config.transport.tmuxCaptureDelaySec,
       config.transport.tmuxMaxWaitSec,
     );
+  } else if (config.transport.agentTransport === "api") {
+    const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
+    transport = new DirectApiTransport({
+      endpoint: process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1",
+      apiKey: process.env["API_KEY"],
+      model: process.env["API_MODEL"] ?? config.models.agentModel ?? "gpt-4o",
+      maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
+      maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
+      maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
+    });
   } else {
     // Kill orphaned processes from previous runs
     try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
@@ -216,6 +226,12 @@ export async function startBridge(): Promise<void> {
     });
   }
   await transport.initialize();
+  // Set system prompt for direct API transport (SOUL + tools)
+  if ("setSystemPrompt" in transport && typeof (transport as { setSystemPrompt: unknown }).setSystemPrompt === "function") {
+    const { loadSoulBundle } = await import("./components/soul-loader.js");
+    const soul = loadSoulBundle();
+    if (soul) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(soul);
+  }
   bridge.transport = transport;
   logInfo("main", "✅ Transport ready");
 
@@ -531,6 +547,21 @@ export async function startBridge(): Promise<void> {
   // --- Watchdog: detect stuck agent ---
   if (transport instanceof AcpTransport) {
     heartbeat.registerTask(createWatchdogTask(transport, () => process.exit(0)));
+  } else if ("promptStartedAt" in transport) {
+    // DirectApiTransport — basic stuck detection via promptStartedAt
+    const STUCK_MS = (parseInt(process.env["WATCHDOG_SILENT_SEC"] ?? "300", 10)) * 1000;
+    heartbeat.registerTask({
+      name: "watchdog",
+      execute: async () => {
+        const t = transport as unknown as { promptStartedAt: number | null; lastActivityAt: number | null };
+        if (!t.promptStartedAt) return;
+        const idle = Date.now() - (t.lastActivityAt ?? t.promptStartedAt);
+        if (idle > STUCK_MS) {
+          logWarn("watchdog", `Direct API prompt stuck (${Math.round(idle / 1000)}s idle) — aborting`);
+          await transport.sendInterrupt();
+        }
+      },
+    });
   }
 
   // --- Restart flag check ---
@@ -620,7 +651,7 @@ export async function startBridge(): Promise<void> {
         },
         services: svcStates,
         transport: {
-          type: config.transport.agentTransport as "tmux" | "acp",
+          type: config.transport.agentTransport as "tmux" | "acp" | "api",
           isReady: transport.isReady,
           contextPercent: transport.contextPercent,
         },
