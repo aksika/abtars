@@ -833,6 +833,65 @@ Diagnostic commands are in `skills/troubleshooting/SKILL.md` (Browser Agent sect
 
 ---
 
+## Direct API Transport & Model Fallback
+
+### Transport Profiles
+Transport profiles in `~/.agentbridge/transports/<name>.env` configure endpoint, model, and API key per provider. Active profile set by `AGENT_TRANSPORT_PROFILE` in `.env`.
+
+| Profile | Transport | Primary Model | Endpoint |
+|---------|-----------|--------------|----------|
+| `kiro` | ACP | minimax-m2.5 | kiro-cli |
+| `gemini` | ACP | gemini-2.5-flash | gemini-cli |
+| `api` | API | kimi-k2.5:cloud | Ollama + OpenRouter fallback |
+| `openrouter` | API | qwen3.6-plus:free | OpenRouter |
+| `ollama` | API | kimi-k2.5:cloud | Ollama |
+
+### Leaky Bucket Model Routing
+Each model has an in-memory error bucket (0–100%). Errors fill the bucket, time drains it.
+
+| Error | Fill | Drain |
+|-------|------|-------|
+| 429 (rate limit) | +40% | 3%/min |
+| 401/402/403 (auth) | +100% | 3%/min |
+| 500/timeout (transient) | +15% | 3%/min |
+
+**Threshold:** model skipped when bucket > 70%. Drain is lazy — calculated on access, no timers.
+
+### Fallback Flow
+```
+Prompt arrives:
+  1. User override model? → try it first
+  2. For each candidate (primary → fallback_1 → fallback_2 → ...):
+     → bucket > 70%? skip
+     → context too large for model? skip
+     → try model
+     → success: return
+     → 429: fill bucket, rollback to last user message, try next
+     → other error: fill bucket, rollback, try next
+  3. All API models exhausted:
+     → compact session to fit smallest model, retry
+  4. Still fails → TRANSPORT_FALLBACK=acp (kiro)
+```
+
+### Context-Aware Fallback
+Each fallback model has `API_FALLBACK_N_MAX_CONTEXT`. If `lastPromptTokens > maxContext * 0.95`, model is skipped. Emergency compaction (`truncateToFit`) drops oldest messages as last resort before transport switch.
+
+### User Model Switch
+`/model` command switches via `setModel()`. Override persists across prompts — bucket loop tries user's choice first. Override added as candidate even if not in configured fallback list.
+
+### Notifications
+- `⚡ Fallback: <model> (ctx: ~X%)` sent to Telegram before fallback response
+- Self-healer ignores all `API error` log lines (bucket handles them)
+
+### Commands
+| Command | Description |
+|---------|-------------|
+| `/transport` | Active model, bucket health per model (🟢🟡🔴), provider info |
+| `/transport change` | Switch transport profile (inline keyboard) |
+| `/transport restore` | Force back to primary |
+| `/model` | List + switch models (from active endpoint + fallbacks) |
+| `/status` | Shows active model, build hash+date |
+
 ## Deploy Wiring
 
 All persona files and CLIs deployed via `scripts/deploy.sh` (supports `--quick` to skip build).
