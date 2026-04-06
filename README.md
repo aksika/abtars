@@ -1,18 +1,39 @@
 # AgentBridge
 
-A standalone Node.js agent that bridges Telegram to [Kiro](https://kiro.dev) CLI. Send messages to your Telegram bot, and Kiro does the coding work in your workspace.
+A personal AI agent that runs on your machine, talks to you via Telegram/Discord, and works in your codebase. Cost-effective access to frontier AI models through existing subscriptions — no per-token billing.
 
-Supports two transport modes:
-- **tmux** (default, recommended) — runs kiro-cli in a tmux session, communicates via `send-keys` / `capture-pane`
-- **ACP** (experimental) — communicates via Agent Client Protocol (JSON-RPC 2.0 over stdio)
+## Why AgentBridge
 
-No web server, no exposed ports, no webhooks. Outbound-only traffic to Telegram's API + local communication with kiro-cli. Optionally, a localhost-only web dashboard can be enabled with `--web`.
+AI subscriptions give you access to the best models at a fixed monthly cost — but they're locked behind web UIs and CLIs with limited automation. AgentBridge turns those subscriptions into a fully autonomous agent:
+
+- **AWS Builder ID** (free) or enterprise account → Claude Sonnet via [Kiro CLI](https://kiro.dev)
+- **Google account** (free/paid) → Gemini 2.5 Pro via [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- **9Router / OpenRouter** → 40+ models including free tiers (Qwen, DeepSeek, Kimi K2)
+
+The bridge is the agent brain — it owns memory, personality, tools, and context management. The CLIs are just model access wrappers. Switch models by changing a config flag, not rewriting your agent.
 
 ```
-Telegram User ──► Telegram Bot API ──► Bridge ──► tmux session (kiro-cli)
-                                         │              │
-                                         ◄── responses ◄┘
+You (Telegram/Discord)
+  │
+  ▼
+AgentBridge (agent brain)
+  ├── Memory system (SQLite, 4-layer recall, embeddings)
+  ├── Personality (SOUL.md, skills, agent notes)
+  ├── Tools (browse, store, recall, edit, sleep cycle)
+  ├── Context window management (own compaction, graduated thresholds)
+  │
+  ├── kiro-cli     → Claude Sonnet (AWS subscription)
+  ├── gemini-cli   → Gemini 2.5 Pro (Google free tier)
+  └── direct API   → any OpenAI-compatible endpoint (planned)
 ```
+
+No web server, no exposed ports, no webhooks. Outbound-only traffic to Telegram's API + local communication with the model provider. Optionally, a localhost-only web dashboard can be enabled with `--web`.
+
+## Supported Transports
+
+- **ACP** (recommended) — communicates with kiro-cli or gemini-cli via Agent Client Protocol (JSON-RPC 2.0 over stdio). Real-time streaming, structured permission handling.
+- **tmux** (legacy) — runs kiro-cli in a tmux session, communicates via `send-keys` / `capture-pane`. Battle-tested, survives disconnects.
+- **Direct API** (planned) — talks to any OpenAI-compatible endpoint directly. No CLI dependency. Tool-calling loop built into the bridge.
 
 ## Prerequisites
 

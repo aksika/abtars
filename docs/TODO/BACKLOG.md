@@ -104,13 +104,58 @@ Support multiple Telegram users with separate sessions. Currently `ALLOWED_USER_
 
 Images sent via Telegram consume large context window chunks. Mitigations: auto-resize/compress before sending to model, strip image data from message history after processing, configurable max image size, skip images when context is above threshold.
 
-## 69. OpenRouter / 9Router integration
+## 69. Direct API Transport — 9Router / OpenRouter
 
-**Priority:** medium
-**Status:** Not started (9Router security audit done: `docs/9ROUTER-SECURITY-AUDIT.md`)
-**Effort:** medium
+**Priority:** HIGH
+**Status:** Not started
+**Depends on:** #89 (clean transport seam)
 
-Add OpenRouter as a transport provider alongside kiro-cli. Enables model diversity (Claude, GPT, Gemini, open-source) without separate CLI tools. 9Router is the self-hosted variant — security audit completed, deployment plan needed.
+### Problem reframed
+
+AgentBridge exists to provide cost-effective access to expensive AI models via existing subscriptions (AWS Builder ID → Claude, Google → Gemini). The CLIs (kiro-cli, gemini-cli) are model access wrappers, not the core intelligence. The bridge IS the agent — it owns memory, tools, context, SOUL, and session state.
+
+Currently the bridge depends on external CLIs for the tool-calling loop. A direct API transport removes this dependency entirely — the bridge talks to any OpenAI-compatible endpoint directly.
+
+### Architecture
+
+```
+Bridge (agent brain — memory, tools, context, SOUL)
+  │
+  ├── kiro-cli transport    → AWS/Claude (subscription, free tier)
+  ├── gemini-cli transport  → Google/Gemini (free/paid tier)
+  └── direct API transport  → 9Router, OpenRouter, any OpenAI-compatible API
+       └── tool-calling loop built into bridge (~100 lines)
+```
+
+### Direct API transport design
+
+1. Send conversation history + tool definitions to `/v1/chat/completions`
+2. If response has `tool_calls` → execute via existing agentbridge-* CLIs → send results back → repeat
+3. If response has `content` → final answer, return to bridge
+4. Conversation buffer (#70 Phase 3) manages history — bridge IS the history manager
+5. Token counting from API response `usage.prompt_tokens` for ctx% tracking
+
+### What this enables
+
+- **Zero CLI dependency** — no kiro-cli or gemini-cli needed
+- **Any model** — Claude, GPT, Gemini, Llama, Qwen, Mistral via 9Router/OpenRouter
+- **Free tier stacking** — 9Router aggregates free tiers from iFlow, Qwen, Kiro/AWS
+- **Fallback chains** — try free model first, fall back to paid on failure
+- **Cost control** — route simple tasks to cheap models, complex to expensive
+
+### Implementation
+
+1. New `DirectApiTransport` implementing `IKiroTransport`
+2. Tool-calling loop: send → check tool_calls → execute → loop
+3. Tool definitions generated from agentbridge-* CLI help text
+4. Conversation buffer for history management
+5. `AGENT_TRANSPORT=api`, `API_ENDPOINT=http://localhost:20128/v1`, `API_MODEL=...`
+
+### 9Router specifics
+
+Already installed on Mac (`localhost:20128`), security audited. Free models: Kimi K2, Qwen3 Coder, GLM-4.7, DeepSeek R1 via iFlow. Gemini 3 Flash at 180K completions/month.
+
+**Effort:** Medium-high. **Risk:** Medium (new transport type, but IKiroTransport interface is stable).
 
 ## 74. Model switching via /model command
 
@@ -318,9 +363,10 @@ If needed later, add a heartbeat task that reviews the last N messages and spawn
 
 ## 89. Refactor 2b — startBridge() decomposition + PipelineDeps split
 
-**Priority:** LOW
+**Priority:** MEDIUM
 **Status:** Not started
 **Plan:** `docs/TODO/refactor-2b-plan.md` (#4, #5)
+**Depends on:** needed by #69 (direct API transport)
 
 ### What's done (refactor 2b, items #1-#3)
 - ✅ cron-checker reverse dependency eliminated
