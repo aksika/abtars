@@ -327,27 +327,14 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
   const transport = ctx.transport;
   const isApi = ctx.config.agentTransport === "api";
 
-  // Get current model
   const currentModel = "currentModel" in transport
     ? (transport as unknown as { currentModel: string }).currentModel
     : process.env["AGENT_MODEL"] ?? "unknown";
 
-  // Collect models from transport profiles
-  let profileModels: string[] = [];
-  try {
-    const transportsDir = join(agentBridgeHome(), "transports");
-    const profiles = readdirSync(transportsDir).filter(f => f.endsWith(".env"));
-    for (const f of profiles) {
-      const content = readFileSync(join(transportsDir, f), "utf-8");
-      const m = content.match(/^API_MODEL=(.+)$/m) ?? content.match(/^AGENT_MODEL=(.+)$/m);
-      if (m?.[1]) profileModels.push(m[1].trim());
-    }
-  } catch { /* no transports dir */ }
-
-  // Fetch available models
+  // Fetch models from active endpoint only
   let models: string[] = [];
   if (isApi) {
-    const endpoint = process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1";
+    const endpoint = process.env["API_ENDPOINT"] ?? "";
     const apiKey = process.env["API_KEY"];
     try {
       const headers: Record<string, string> = {};
@@ -357,32 +344,33 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
         const data = await res.json() as { data?: Array<{ id: string; created?: number; context_length?: number }> };
         const allModels = data.data ?? [];
         if (endpoint.includes("openrouter")) {
-          // Free models <60 days, sorted by context length, capped at 5
           const cutoff = (Date.now() / 1000) - (60 * 86400);
           models = allModels
             .filter(m => m.id.includes(":free") && (m.created ?? 0) > cutoff)
             .sort((a, b) => (b.context_length ?? 0) - (a.context_length ?? 0))
-            .slice(0, 5)
+            .slice(0, 10)
             .map(m => m.id);
         } else {
           models = allModels.map(m => m.id).sort();
         }
       }
-    } catch { /* endpoint doesn't support /models */ }
+    } catch { /* */ }
   }
-  // Fallback: config-based list
+
+  // Fallback: AGENT_AVAILABLE_MODELS env
   if (models.length === 0) {
     const configured = process.env["AGENT_AVAILABLE_MODELS"];
     if (configured) models = configured.split(",").map(m => m.trim()).filter(Boolean);
   }
 
-  // Prepend: current model + transport profile models (deduplicated)
-  const seen = new Set(models);
-  const prefix: string[] = [];
-  for (const m of [currentModel, ...profileModels]) {
-    if (!seen.has(m)) { prefix.push(m); seen.add(m); }
+  // Also include fallback models from current transport
+  for (let i = 1; i <= 5; i++) {
+    const m = process.env[`API_FALLBACK_${i}_MODEL`];
+    if (m && !models.includes(m)) models.push(m);
   }
-  models = [...prefix, ...models];
+
+  // Ensure current model is in list
+  if (!models.includes(currentModel)) models.unshift(currentModel);
 
   if (models.length > 0) {
     const COLS = 1;
