@@ -106,6 +106,7 @@ for js in "$AB_HOME/dist/cli/agentbridge-"*.js; do
   chmod +x "$AB_HOME/bin/$name"
 done
 [ -d "$PROJECT_DIR/docker" ] && rsync -a "$PROJECT_DIR/docker/" "$AB_HOME/docker/"
+[ -d "$PROJECT_DIR/logo" ] && rsync -a "$PROJECT_DIR/logo/" "$AB_HOME/logo/"
 
 # 3. Deploy persona files
 echo "📝 Deploying persona..."
