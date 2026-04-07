@@ -64,6 +64,7 @@ export type RecallParams = {
   topic?: string;
   tier?: "core" | "general";
   includeExpired?: boolean;
+  resolution?: "signal" | "compact" | "standard" | "full";
 };
 
 export type RecallDeps = {
@@ -343,6 +344,61 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
       }
       stages["S7"] = { hits, ms: elapsed(t) };
     }
+  }
+
+  // --- Ss: Signature-based semantic search (Hamming distance) ---
+  if (activeStages.has("Ss") || activeStages.size === 0) {
+    const t = performance.now();
+    const hits: RecallHit[] = [];
+    try {
+      const { generateSignature, hammingSimilarity } = await import("./signature-generator.js");
+      const queryText = [...params.translated, params.original ?? ""].join(" ");
+      const querySig = generateSignature(queryText);
+
+      const conditions = ["signature IS NOT NULL"];
+      const bindParams: (string | number)[] = [];
+      if (params.topic) { conditions.push("topic = ?"); bindParams.push(params.topic); }
+      if (params.tier) { conditions.push("tier = ?"); bindParams.push(params.tier); }
+      if (!params.includeExpired) { conditions.push("valid_to IS NULL"); }
+
+      const rows = deps.db.prepare(
+        `SELECT id, content_en, content_compressed, content_original, memory_type, created_at, signature, emotion_score
+         FROM extracted_memories WHERE ${conditions.join(" AND ")}`
+      ).all(...bindParams) as Array<{
+        id: number; content_en: string | null; content_compressed: string | null;
+        content_original: string | null; memory_type: string | null;
+        created_at: number; signature: Buffer; emotion_score: number | null;
+      }>;
+
+      const scored: Array<{ row: typeof rows[0]; sim: number }> = [];
+      for (const row of rows) {
+        const sig = new Uint8Array(row.signature);
+        const sim = hammingSimilarity(querySig, sig);
+        // Emotional recall boost: weight by |emotion_score|
+        const emotionBoost = 1 + 0.02 * Math.abs(row.emotion_score ?? 0);
+        scored.push({ row, sim: sim * emotionBoost });
+      }
+      scored.sort((a, b) => b.sim - a.sim);
+
+      for (const { row, sim } of scored.slice(0, limit * 2)) {
+        if (sim < 0.55) break; // threshold
+        const key = `${row.created_at}:${(row.content_en ?? row.content_compressed ?? "").slice(0, 80)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const hit: RecallHit = {
+          content: row.content_compressed ?? row.content_en ?? "",
+          date: new Date(row.created_at).toISOString(),
+          source: "Ss:signature",
+          score: sim,
+          contentOriginal: row.content_original ?? undefined,
+          memoryType: row.memory_type ?? undefined,
+        };
+        hits.push(hit);
+        allResults.push(hit);
+        extractedIds.push(row.id);
+      }
+    } catch { /* signature module not available */ }
+    stages["Ss"] = { hits, ms: elapsed(t) };
   }
 
   // --- Post-processing ---
