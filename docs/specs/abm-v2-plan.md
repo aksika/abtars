@@ -103,19 +103,65 @@ checkContradiction(
 
 ## 2.6 Dynamic Wake-up (`src/memory/wake-up-builder.ts`)
 
-Build session-start context from core-tier memories.
+Build session-start context from core-tier memories + compressed dailies/weekly/quarterly.
+
+### Session start budget: 3% of context window
+
+| Component | Budget | Content |
+|---|---|---|
+| SOUL package | ~2% | SOUL.md + TOOLS.md + core_facts.md + agent_notes.md |
+| Memory context | ~1% | Core memories + dailies + weekly + quarterly (all ABM-L) |
+
+### Memory context breakdown (1% budget)
+
+| Model | 1% budget | What fits in ABM-L |
+|---|---|---|
+| 4K | 40 tokens | Top 4 core memories only |
+| 32K | 320 tokens | 30 core memories |
+| 128K | 1,280 tokens | 7 dailies + 1 weekly + 100 core memories |
+| 1M | 10,000 tokens | 7 dailies + 1 weekly + 1 quarterly + 500 core memories |
+
+### Injection logic (greedy budget fill)
 
 ```typescript
-buildWakeUp(): string
-// "[coding ↑] Clerk > Auth0 (pricing+DX) | SQLite+FTS5 | TS+Node
-//  [personal →] CET timezone | HU/EN bilingual | direct+sarcastic"
+function buildMemoryContext(ctxWindowSize: number): string {
+  const budget = Math.floor(ctxWindowSize * 0.01); // 1% of context
+  let remaining = budget;
+  const parts: string[] = [];
+
+  // Priority 1: core memories (always first)
+  const core = loadCoreTierABML();
+  parts.push(core); remaining -= tokenCount(core);
+
+  // Priority 2: latest daily
+  if (remaining > 100) {
+    const daily = loadLatestDailyABML();
+    parts.push(daily); remaining -= tokenCount(daily);
+  }
+
+  // Priority 3: more dailies (up to 7)
+  for (const d of loadRecentDailiesABML(7).slice(1)) {
+    if (remaining < 100) break;
+    parts.push(d); remaining -= tokenCount(d);
+  }
+
+  // Priority 4: weekly summary
+  if (remaining > 100) {
+    const weekly = loadLatestWeeklyABML();
+    if (weekly) { parts.push(weekly); remaining -= tokenCount(weekly); }
+  }
+
+  // Priority 5: quarterly summary
+  if (remaining > 100) {
+    const quarterly = loadLatestQuarterlyABML();
+    if (quarterly) { parts.push(quarterly); remaining -= tokenCount(quarterly); }
+  }
+
+  return parts.join("\n");
+}
 ```
 
-- `SELECT content_compressed, topic, emotion_arc FROM extracted_memories WHERE tier = 'core' AND valid_to IS NULL`
-- Group by topic, one line per topic, arc symbol prefix
-- Inject after SOUL, before session context
-- `user_profile.md` facts migrate here over time
-- Dynamic — evolves as Dreamy promotes/invalidates
+Auto-adapts to any context window. Core memories always loaded. Dailies/weekly/quarterly fill remaining budget greedily. Always ABM-L — tokens cost money regardless of context size.
 
 ## 2.7 Cross-topic Links
 
