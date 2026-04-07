@@ -76,7 +76,7 @@ export type RecallDeps = {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const ALL_STAGES = ["S1", "S2", "S3", "Se", "S4", "S5", "S6", "S7"];
+const ALL_STAGES = ["S1", "S2", "S3", "Se", "S4", "S5", "S6", "S7", "Ss"];
 const DEFAULT_LIMIT = 10;
 const DEFAULT_SHORT_CIRCUIT = 10;
 
@@ -347,7 +347,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
   }
 
   // --- Ss: Signature-based semantic search (Hamming distance) ---
-  if (activeStages.has("Ss") || activeStages.size === 0) {
+  if (activeStages.has("Ss")) {
     const t = performance.now();
     const hits: RecallHit[] = [];
     try {

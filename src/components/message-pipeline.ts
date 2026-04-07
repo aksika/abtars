@@ -437,7 +437,7 @@ export async function startSession(
   }
 }
 
-/** Single path for session-start injection: SOUL + context + restart reason. */
+/** Single path for session-start injection: SOUL + memory wake-up + context + restart reason. */
 function buildSessionStartPrompt(
   prompt: string,
   memory: MemoryManager,
@@ -448,6 +448,16 @@ function buildSessionStartPrompt(
     prompt = soul + "\n\n" + prompt;
     logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
   }
+  // ABM v2: inject core memories + dailies (1% of context budget)
+  try {
+    const { buildWakeUp } = require("../memory/wake-up-builder.js") as typeof import("../memory/wake-up-builder.js");
+    const ctxWindow = parseInt(process.env["CONTEXT_WINDOW_SIZE"] ?? "", 10) || 128000;
+    const wakeUp = buildWakeUp(memory.getDatabase(), ctxWindow);
+    if (wakeUp) {
+      prompt = prompt + "\n\n" + wakeUp;
+      logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars, budget=${Math.floor(ctxWindow * 0.01)} tokens)`);
+    }
+  } catch { /* wake-up builder not available */ }
   const ctx = buildSessionStartContext(memory, chatId);
   if (ctx) {
     prompt = ctx + "\n\n" + prompt;
