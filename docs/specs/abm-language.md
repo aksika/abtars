@@ -2,21 +2,51 @@
 
 A purpose-built symbolic language for AI memory storage, recall, and context loading. Designed to be read natively by any LLM without training — it's structured text, not a binary format.
 
-## Why a memory language?
+## The core insight
 
-Current state: memories stored in full English. Recall returns English. Wake-up loads English. This works but wastes tokens.
+**ABM-L is the PRIMARY format for LLM consumption. English is the archive.**
 
+Every memory is stored in both formats at write time. The LLM always sees ABM-L. English is preserved for human reading, deep investigation, and full-context recall when needed.
+
+This is not a compression afterthought — it's the fundamental architecture decision.
+
+## Why: the context window math
+
+| Scenario | English | ABM-L | Savings |
+|---|---|---|---|
+| 50 core memories at wake-up | ~2500 tokens | ~500 tokens | 2000 tokens |
+| 10 recalled memories per query | ~500 tokens | ~150 tokens | 350 tokens |
+| Recent session context (20 msgs) | ~800 tokens | ~250 tokens | 550 tokens |
+| **Total per session** | **~3800 tokens** | **~900 tokens** | **~2900 tokens** |
+
+For a 128K context model: nice optimization.
+For a 32K context model: significant improvement.
+For a 4K local model: the difference between "unusable" and "works well."
+
+### What fits in a 4K local model
+
+**Without ABM-L:**
 ```
-English (15 tokens):
-"We decided to use Clerk instead of Auth0 because pricing is better and developer experience is cleaner"
-
-ABM-L (6 tokens):
-[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)
+SOUL:           ~500 tokens
+Core memories:  ~1500 tokens (30 facts in English)
+Recent context: ~500 tokens
+─────────────────────────────
+Used:           2500 tokens
+Remaining:      1500 tokens for conversation ← barely usable
 ```
 
-The LLM reads both equally well. ABM-L carries the same information plus structured metadata (decision flag, topic, emotion, confidence, date) in ~40% of the tokens.
+**With ABM-L:**
+```
+SOUL:           ~500 tokens
+Core memories:  ~300 tokens (50 facts in ABM-L)
+Recent context: ~200 tokens (ABM-L compressed)
+Recent recall:  ~150 tokens (10 memories in ABM-L)
+─────────────────────────────
+Used:           1150 tokens
+Remaining:      2850 tokens for conversation ← usable
+```
 
-For wake-up context: 50 core memories in English ≈ 2500 tokens. In ABM-L ≈ 500 tokens. That's 2000 tokens freed for actual conversation.
+More memories loaded, more room for conversation. ABM-L makes small models viable.
 
 ## Format
 
@@ -136,25 +166,104 @@ Compressed English with entity references and relationship operators.
 
 ## How it's used in the system
 
-### Storage
-- `content_en` — full English (always preserved, used for deep recall)
-- `content_compressed` — ABM-L (generated during core promotion by Dreamy)
+### Store-time compression (not sleep-time)
 
-### Recall
-- Deep recall → returns `content_en` (full context)
-- Quick recall / wake-up → returns `content_compressed` (ABM-L)
-- Search operates on `content_en` (FTS5 + embeddings) — ABM-L is output format, not search format
+**Critical design decision:** Compression happens at STORE time, not during sleep. Every `agentbridge-store` call produces both formats immediately.
 
-### Wake-up
-- `buildWakeUp()` → SELECT `content_compressed` from core tier → inject after SOUL
-- LLM reads ABM-L natively — no decoder needed
+```
+agentbridge-store --translated "We decided to use Clerk..." --topic coding
+  │
+  ├── content_en = "We decided to use Clerk instead of Auth0 because pricing is better"
+  ├── emotion_tags = detectEmotions(content_en) → "conviction"
+  ├── importance_flags = detectFlags(content_en) → "decision"
+  └── content_compressed = compress(content_en, tags, flags, topic) → "[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)"
+```
+
+Cost: ~1-5ms extra per store (pure string manipulation, no LLM). We store ~10-50 times/day. We recall hundreds of times. The trade-off is massively in favor of store-time compression.
+
+### Recall returns ABM-L by default
+
+```
+agentbridge-recall --translated "auth decision" --chat-id 123
+  → returns content_compressed (ABM-L) — injected into LLM context
+
+agentbridge-recall --translated "auth decision" --chat-id 123 --full
+  → returns content_en (English) — for deep investigation
+```
+
+10 recalled memories in ABM-L ≈ 150 tokens. In English ≈ 500 tokens. Same information, 70% fewer tokens.
+
+### Wake-up loads everything
+
+Because ABM-L is compact, we can load MORE at session start:
+
+```
+buildWakeUp():
+  1. ALL core-tier memories in ABM-L (~300 tokens for 50 memories)
+  2. Recent session memories in ABM-L (~200 tokens for 20 messages)
+  3. Topic arcs (~50 tokens for emotional trajectories)
+  ─────────────────────────────────
+  Total: ~550 tokens (vs ~3000 in English)
+```
+
+The agent starts every session knowing everything important. No reactive recall needed for core facts.
+
+### Session context compression
+
+Daily summaries and recent message context also compressed to ABM-L during compaction:
+
+```
+English session summary (~300 tokens):
+"Today we worked on decoupling the memory system from the bridge. We created the IMemorySystem
+interface, moved SleepStateGatherer, added maintenance methods. All 812 tests pass."
+
+ABM-L session summary (~80 tokens):
+[M|coding|pride|4|2026-04-07] ABM Phase 0 complete — IMemorySystem interface, 27 files decoupled, 812 tests pass
+[T|coding|—|5|2026-04-07] maintenance methods: WAL+FTS+dedup+embed+cleanup+defaults on interface
+[D|coding|conviction|4|2026-04-07] sleep decoupled from memory — optional addon
+```
 
 ### Compression pipeline
+
 ```
-instant-store → content_en (English) + emotion_tags + importance_flags
-                    ↓ (during sleep, core promotion)
-Dreamy → compress(content_en, metadata) → content_compressed (ABM-L)
+                    STORE TIME                          SLEEP TIME
+                    ──────────                          ──────────
+User message → instant-store                     Dreamy reviews
+                │                                      │
+                ├── content_en (English)                ├── core promotion (general → core)
+                ├── emotion_tags (detected)             ├── re-compress if enriched
+                ├── importance_flags (detected)         ├── build emotional arcs
+                └── content_compressed (ABM-L)          └── build cross-topic links
 ```
+
+### What the LLM sees
+
+Every LLM interaction uses ABM-L for memory context:
+
+```
+[SOUL — personality, rules, tools]
+
+[CORE MEMORY — 47 entries]
+[F|personal|—|5] @user: aksika, CET, HU/EN, WSL2, direct+sarcastic
+[P|personal|—|4] @user prefers dark-mode+vim+minimal-code
+[DT|coding|convict|5] @clerk >over @auth0 (pricing+DX)
+[FT|coding|trust|5] @agentbridge: TS+Node, SQLite+FTS5+ollama
+[LT|coding|frust|4] FTS5 breaks on HU agglutination — EN for search
+...
+
+[RECENT — last session, 2026-04-07]
+[M|coding|pride|4] ABM Phase 0 done — 27 files decoupled
+[D|coding|convict|4] sleep decoupled — optional addon
+
+[RECALLED — query: "auth migration"]
+[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)
+[M|coding|fear→relief|4|2026-02] auth migration complete — stressful→good
+[L|coding|frust|3|2026-02] OAuth token refresh was the root cause
+
+[SESSION START — 2026-04-07T15:00:00]
+```
+
+Total memory context: ~700 tokens. In English: ~3000 tokens. Same information.
 
 ## ABM-L vs AAAK comparison
 

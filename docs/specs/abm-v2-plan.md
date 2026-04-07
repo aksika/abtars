@@ -65,22 +65,26 @@ buildArc(memories: { emotion_tags: string; created_at: number }[]): EmotionArc
 
 ## 2.4 Memory Compressor (`src/memory/memory-compressor.ts`)
 
-Structured compression for wake-up context.
+Structured compression to ABM-L format. Runs at STORE TIME, not sleep time.
+
+See `docs/specs/abm-language.md` for full ABM-L spec.
 
 ```typescript
 compress(memory: {
   content_en: string; topic: string;
   emotion_tags: string; importance_flags: string;
+  confidence?: number; date?: string;
 }): string
-// → "[decision|coding] Clerk > Auth0 (pricing+DX)"
+// → "[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)"
 ```
 
-- Entity abbreviation: auto-built from core-tier entities at compression time
-- Strip filler, keep facts. Prefix with `[flags|topic]`
-- Stored as `content_compressed TEXT`
-- Only on core-tier memories (Dreamy compresses during promotion)
-- Wake-up loads compressed; deep recall returns full English
-- Target: ~5-10x compression on already-concise extracted memories
+- Entity references: @user, @agent, @project-name — auto-built from core-tier
+- Relationship operators: >over, >replaces, >causes, >blocks, →
+- Compression rules: strip articles/filler, abbreviate, parentheses for reasons
+- Stored as `content_compressed TEXT` on every memory (not just core)
+- ~1-5ms per call (pure string manipulation)
+- Recall returns ABM-L by default, `--full` for English
+- Wake-up loads ALL core + recent in ABM-L (~700 tokens vs ~3000 English)
 
 ## 2.5 Contradiction Checker (`src/memory/contradiction-checker.ts`)
 
@@ -151,10 +155,15 @@ All nullable, backward compatible. v1 queries unaffected.
 
 ```
 Phase 1 sleep steps (16-18) →
-2.1 (emotion tagger) → 2.2 (importance flags) → migration v8 →
-2.3 (emotional arcs) → 2.4 (compressor) →
-2.5 (contradiction) → 2.6 (wake-up) → 2.7 (links)
+2.1 (emotion tagger) → 2.2 (importance flags) → 2.4 (compressor) → migration v8
+  ↑ these three run at STORE TIME — every memory gets tags+flags+ABM-L immediately
+2.3 (emotional arcs — sleep) → 2.5 (contradiction — sleep) →
+2.6 (wake-up — session start) → 2.7 (links — sleep) →
+brain patterns (recall boost, flashbulb, decay, source monitoring, reconsolidation,
+  semantic networks, prospective memory, interference detection)
 ```
+
+Key: 2.1 + 2.2 + 2.4 are store-time. Recall benefits from ABM-L immediately without waiting for sleep.
 
 ## What's NOT borrowed from MemPalace
 
