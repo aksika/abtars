@@ -135,9 +135,33 @@ ALTER TABLE extracted_memories ADD COLUMN importance_flags TEXT;
 ALTER TABLE extracted_memories ADD COLUMN content_compressed TEXT;
 ALTER TABLE extracted_memories ADD COLUMN emotion_arc TEXT;
 ALTER TABLE extracted_memories ADD COLUMN related_topics TEXT;
+ALTER TABLE extracted_memories ADD COLUMN signature BLOB;
+ALTER TABLE extracted_memories ADD COLUMN source_type TEXT DEFAULT 'conversation';
+ALTER TABLE extracted_memories ADD COLUMN last_recall_context TEXT;
 ```
 
 All nullable, backward compatible. v1 queries unaffected.
+
+`signature` is a 32-byte binary hash (256-bit) generated via Random Indexing at store time. Used for Hamming distance search — no ollama needed. See `docs/specs/hippocampus-study.md`.
+
+## Search modes (configurable via `memory.env`)
+
+| Mode | How it works | Needs ollama | Quality | Speed |
+|---|---|---|---|---|
+| `hybrid` (default) | Signatures pre-filter → embedding rerank | Yes | Best | Fast |
+| `embedding` | Ollama embeddings only (legacy) | Yes | Good | Medium |
+| `signature` | Binary signatures + Hamming distance only | No | Good (approximate) | Fastest |
+
+Search pipeline:
+```
+Query → generate query signature (Random Indexing, ~0.1ms)
+  │
+  ├── signature mode: Hamming distance scan → top N → return
+  ├── embedding mode: embedding cosine similarity → top N → return
+  └── hybrid mode: Hamming pre-filter (top 50) → embedding rerank (top N) → return
+```
+
+Signatures always generated at store time (cheap, ~0.1ms). Embeddings only generated when `MEMORY_SEARCH_MODE=hybrid` or `embedding`.
 
 ## Sleep steps
 

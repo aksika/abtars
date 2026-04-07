@@ -253,10 +253,19 @@ MEMORY_ORIGINAL_TTL_DAYS=14          # default: 14 days
 MEMORY_ENGLISH_TTL_DAYS=60           # default: 60 days
 MEMORY_AGING_ENABLED=true            # default: true
 
-# Embedding
+# Search mode
+MEMORY_SEARCH_MODE=hybrid            # hybrid | embedding | signature
+                                     # hybrid: signatures pre-filter + embedding rerank (best quality, needs ollama)
+                                     # embedding: ollama embeddings only (legacy, needs ollama)
+                                     # signature: binary signatures only (no ollama needed, works everywhere)
+
+# Embedding (only used when MEMORY_SEARCH_MODE=hybrid or embedding)
 EMBEDDING_ENABLED=true
 EMBEDDING_MODEL=nomic-embed-text
 EMBEDDING_URL=http://localhost:11434
+
+# Signature (always generated — used as pre-filter in hybrid, sole search in signature mode)
+SIGNATURE_BITS=256                   # default: 256 (32 bytes per memory)
 ```
 
 ### Pressure-based aging
