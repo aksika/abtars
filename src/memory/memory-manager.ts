@@ -241,4 +241,83 @@ export class MemoryManager {
       logError(TAG, "Failed to close database", err);
     }
   }
+
+  // ── Maintenance methods (for sleep addon / external tools) ──────────────
+
+  runWalCheckpoint(): boolean {
+    if (!this.db) return false;
+    try { this.db.pragma("wal_checkpoint(TRUNCATE)"); return true; } catch { return false; }
+  }
+
+  rebuildFtsIndexes(): { rebuilt: string[] } {
+    if (!this.db) return { rebuilt: [] };
+    const rebuilt: string[] = [];
+    for (const table of ["messages_fts", "extracted_memories_fts", "extracted_memories_original_fts"]) {
+      try { this.db.exec(`INSERT INTO ${table}(${table}) VALUES('integrity-check')`); }
+      catch {
+        try { this.db.exec(`INSERT INTO ${table}(${table}) VALUES('rebuild')`); rebuilt.push(table); }
+        catch { /* table may not exist */ }
+      }
+    }
+    return { rebuilt };
+  }
+
+  cleanupOldMessages(opts: { maxCount: number; maxAgeDays: number; garbageHours: number }): { deleted: number } {
+    if (!this.db) return { deleted: 0 };
+    let deleted = 0;
+    try {
+      // Age-based cleanup
+      const ageCutoff = Date.now() - opts.maxAgeDays * 86400000;
+      deleted += this.db.prepare("DELETE FROM messages WHERE timestamp < ?").run(ageCutoff).changes;
+      // Count-based cleanup (keep newest maxCount)
+      const excess = this.db.prepare("SELECT id FROM messages ORDER BY timestamp DESC LIMIT -1 OFFSET ?").all(opts.maxCount) as Array<{ id: number }>;
+      if (excess.length > 0) {
+        deleted += this.db.prepare(`DELETE FROM messages WHERE id IN (${excess.map(r => r.id).join(",")})`).run().changes;
+      }
+    } catch { /* */ }
+    return { deleted };
+  }
+
+  async backfillEmbeddings(embedFn: (text: string) => Promise<Float32Array | null>): Promise<{ embedded: number }> {
+    if (!this.db) return { embedded: 0 };
+    let embedded = 0;
+    const rows = this.db.prepare("SELECT id, content_en FROM extracted_memories WHERE embedding IS NULL").all() as Array<{ id: number; content_en: string }>;
+    for (const row of rows) {
+      const vec = await embedFn(row.content_en);
+      if (vec) { this.db.prepare("UPDATE extracted_memories SET embedding = ? WHERE id = ?").run(Buffer.from(vec.buffer), row.id); embedded++; }
+    }
+    return { embedded };
+  }
+
+  deduplicateMessages(): { removed: number } {
+    if (!this.db) return { removed: 0 };
+    try {
+      const dupes = this.db.prepare(`
+        SELECT b.id FROM messages a JOIN messages b
+        ON a.chat_id = b.chat_id AND a.role = b.role
+        AND TRIM(a.content) = TRIM(b.content)
+        AND b.id > a.id
+        AND NOT EXISTS (
+          SELECT 1 FROM messages m WHERE m.chat_id = a.chat_id AND m.id > a.id AND m.id < b.id AND m.role = a.role
+        )
+      `).all() as Array<{ id: number }>;
+      if (dupes.length > 0) {
+        this.db.prepare(`DELETE FROM messages WHERE id IN (${dupes.map(d => d.id).join(",")})`).run();
+        return { removed: dupes.length };
+      }
+    } catch { /* */ }
+    return { removed: 0 };
+  }
+
+  fixMemoryDefaults(): { fixed: number } {
+    if (!this.db) return { fixed: 0 };
+    let fixed = 0;
+    try {
+      fixed += this.db.prepare("UPDATE extracted_memories SET trust = 2 WHERE memory_type = 'decision' AND trust < 2").run().changes;
+      fixed += this.db.prepare("UPDATE extracted_memories SET classification = 1 WHERE memory_type = 'decision' AND classification = 0").run().changes;
+      fixed += this.db.prepare("UPDATE extracted_memories SET trust = 2 WHERE trust = 0 AND credibility = 6 AND integrity = 2").run().changes;
+      fixed += this.db.prepare("UPDATE extracted_memories SET credibility = 3 WHERE credibility = 6 AND created_at < ?").run(Date.now() - 7 * 86400000).changes;
+    } catch { /* */ }
+    return { fixed };
+  }
 }

@@ -46,19 +46,25 @@ Remove `getDatabase()` and `getMemoryIndex()` from public API. All access throug
 
 Memory files already in `src/memory/`. Ensure all imports go through `src/memory/index.ts`. No bridge internals leak in.
 
-### 0.4 Standalone package
+### 0.4 Standalone package boundary
 
-Extract to `@agentbridge/memory`. Bridge adds it as a dependency. CLIs (recall, store, edit, expand, embed) move with it.
+27 files, zero external imports, `index.ts` entry point, `mem-types.ts` self-contained.
 
-```
-@agentbridge/memory/
-  src/                    # All memory internals
-  cli/                    # recall, store, edit, expand, embed
-  index.ts                # IMemorySystem + MemoryManager export
-  package.json
-```
+**Status: ✅ Done (2026-04-07)**
 
-**After Phase 0:** Memory system is a standalone npm package. Bridge imports it. No feature changes — identical behavior.
+### 0.5 Decouple sleep from memory
+
+Sleep is an optional enhancement — memory core works without it.
+
+| Tier | Package | LLM needed |
+|---|---|---|
+| Core | `@agentbridge/memory` | No |
+| Core + sleep | + `@agentbridge/memory-sleep` | Yes |
+| Core + sleep + AAAK | + ABM v2 features | Yes |
+
+Add maintenance methods to `IMemorySystem` (`runWalCheckpoint`, `rebuildFtsIndexes`, `cleanupOldMessages`, `backfillEmbeddings`, `deduplicateMessages`). Sleep calls interface, not raw DB.
+
+**After Phase 0:** Memory is standalone. Sleep is optional. Ready for Phase 1.
 
 ---
 
@@ -175,7 +181,7 @@ Implement `@openclaw/memory-host-sdk` contract. Any OpenClaw agent gets persiste
 ## Implementation order
 
 ```
-Phase 0: 0.1 → 0.2 → 0.3 → 0.4 (decouple, standalone package)
+Phase 0: 0.1 → 0.2 → 0.3 → 0.4 → 0.5 (decouple, standalone, sleep optional)
 Phase 1: 1.1 → 1.2 → 1.3 → 1.4 → 1.5 → sleep steps → recall (ABM v1)
 Phase 2: 2.1 → 2.2 → 2.3 → 2.4 (ABM v2)
 Phase 3: 3.1 → 3.2 → 3.3 (universal access)

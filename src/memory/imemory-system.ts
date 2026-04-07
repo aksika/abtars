@@ -38,6 +38,14 @@ export interface IMemorySystem {
   // Heartbeat
   setHeartbeat(hb: IHeartbeat): void;
   stopHeartbeat(): void;
+
+  // Maintenance (called by sleep addon or any maintenance tool)
+  runWalCheckpoint(): boolean;
+  rebuildFtsIndexes(): { rebuilt: string[] };
+  cleanupOldMessages(opts: { maxCount: number; maxAgeDays: number; garbageHours: number }): { deleted: number };
+  backfillEmbeddings(embedFn: (text: string) => Promise<Float32Array | null>): Promise<{ embedded: number }>;
+  deduplicateMessages(): { removed: number };
+  fixMemoryDefaults(): { fixed: number };
 }
 
 /** Minimal heartbeat interface — bridge implements this, memory only knows the contract. */

@@ -184,7 +184,51 @@ Bridge's `HeartbeatSystem` implements `IHeartbeat`. Memory package only knows th
 
 **Effort:** ~30 min.
 
-## Phase 0.5: Extract to standalone package
+## Phase 0.5: Self-contained package boundary
+
+**Status: ✅ Done (2026-04-07)**
+
+Memory types moved into `src/memory/mem-types.ts`. `src/types/memory.ts` re-exports for backward compat. `src/memory/index.ts` created as single entry point. 27 files, zero external imports.
+
+## Phase 0.6: Decouple sleep from memory
+
+Sleep is an enhancement layer — it makes memory better over time, but the core memory system must work without it. This enables three tiers:
+
+| Tier | What | LLM needed |
+|---|---|---|
+| `@agentbridge/memory` (core) | Store, recall, search, embeddings | No |
+| `@agentbridge/memory-sleep` (addon) | Curation, extraction, dedup, consolidation | Yes |
+| Core + sleep + AAAK (v2) | + emotion scoring, compression, contradiction | Yes |
+
+### Current coupling (sleep → memory)
+
+Sleep communicates with memory through:
+1. **Public CLI tools** (`agentbridge-store`, `agentbridge-edit`, `agentbridge-recall`) — already clean
+2. **Raw DB maintenance** in `agentbridge-sleep.ts` — WAL checkpoint, FTS rebuild, message cleanup, embedding backfill — must become interface methods
+3. **SleepStateGatherer** — reads DB stats — already in memory package ✅
+
+### New IMemorySystem maintenance methods
+
+```typescript
+runWalCheckpoint(): void;
+rebuildFtsIndexes(): { rebuilt: string[] };
+cleanupOldMessages(opts: { maxCount: number; maxAgeDays: number }): { deleted: number };
+backfillEmbeddings(embedFn: (text: string) => Promise<Float32Array | null>): Promise<{ embedded: number }>;
+deduplicateMessages(): { removed: number };
+```
+
+### Implementation steps
+
+1. Add maintenance methods to `IMemorySystem` and `MemoryManager`
+2. Extract raw SQL from `agentbridge-sleep.ts` into those methods
+3. `agentbridge-sleep.ts` calls `memory.runWalCheckpoint()` etc. instead of `db.pragma(...)`
+4. Sleep files import from `memory/index.ts`, never from internal memory files
+
+**After 0.6:** Memory core works standalone. Sleep is an optional addon that only uses the public interface.
+
+---
+
+## Verification checklist
 
 Move `src/memory/` to a separate package. Two options:
 
@@ -236,14 +280,15 @@ Start with Option A (monorepo). Move to Option B when publishing.
 
 After Phase 0 is complete:
 
-- [ ] `@agentbridge/memory` builds independently (`npm run build` in package dir)
-- [ ] `@agentbridge/memory` has zero imports from bridge code
-- [ ] Bridge imports only from `@agentbridge/memory` (no `../memory/` paths)
-- [ ] All 20 memory files live in the package
-- [ ] All 6 CLIs live in the package and work standalone
-- [ ] `getDatabase()` and `getMemoryIndex()` removed from public API
-- [ ] `IMemorySystem` interface defined and exported
-- [ ] `MemoryManager` implements `IMemorySystem`
+- [x] `@agentbridge/memory` builds with zero bridge imports
+- [x] `IMemorySystem` interface defined and exported
+- [x] `IHeartbeat` interface replaces concrete HeartbeatSystem
+- [x] `SleepStateGatherer` in memory package
+- [x] `index.ts` single entry point
+- [x] Types self-contained (`mem-types.ts`)
+- [x] Bridge logger injected via `setLogger()`
+- [ ] Sleep uses only `IMemorySystem` methods (no raw DB)
+- [ ] Maintenance methods on interface
 - [ ] All 764+ tests pass
 - [ ] TypeScript clean (`tsc --noEmit`)
 

@@ -130,7 +130,7 @@ function writeStateFile(path: string, state: SleepState): void {
 
 // ── Wired pre-tasks ─────────────────────────────────────────────────────────
 
-async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir: string): Promise<WiredResults> {
+async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir: string, memory: MemoryManager): Promise<WiredResults> {
   const results: WiredResults = { purged: 0, deduped: 0, embedded: 0, anomaliesFixed: 0, walOk: false, ftsOk: false, logsDeleted: 0 };
 
   // 1. Purge expired garbage
@@ -142,7 +142,7 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
       const expired = Object.entries(garbage).filter(([, ts]) => new Date(ts).getTime() < cutoff);
       if (expired.length > 0) {
         const ids = expired.map(([id]) => parseInt(id, 10)).filter(n => Number.isFinite(n));
-        if (ids.length > 0) {
+        if (ids.length > 0 && db) {
           db.prepare(`DELETE FROM messages WHERE id IN (${ids.join(",")})`).run();
         }
         for (const [id] of expired) delete garbage[id];
@@ -154,31 +154,18 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
 
   // 2. Dedup consecutive exact messages
   try {
-    const dupes = db.prepare(`
-      SELECT b.id FROM messages a JOIN messages b
-      ON a.chat_id = b.chat_id AND a.role = b.role
-      AND TRIM(a.content) = TRIM(b.content)
-      AND b.id > a.id
-      AND NOT EXISTS (
-        SELECT 1 FROM messages m WHERE m.chat_id = a.chat_id AND m.id > a.id AND m.id < b.id AND m.role = a.role
-      )
-    `).all() as Array<{ id: number }>;
-    if (dupes.length > 0) {
-      db.prepare(`DELETE FROM messages WHERE id IN (${dupes.map(d => d.id).join(",")})`).run();
-      results.deduped = dupes.length;
-    }
+    const { removed } = memory.deduplicateMessages();
+    results.deduped = removed;
   } catch (err) { logWarn(TAG, `[WIRED] dedup failed: ${err instanceof Error ? err.message : String(err)}`); }
 
   // 3. WAL checkpoint
-  try { db.pragma("wal_checkpoint(TRUNCATE)"); results.walOk = true; } catch (err) { logWarn(TAG, `[WIRED] WAL checkpoint failed: ${err instanceof Error ? err.message : String(err)}`); }
+  results.walOk = memory.runWalCheckpoint();
 
   // 4. FTS rebuild if corrupt
   try {
-    for (const table of ["messages_fts", "extracted_memories_fts", "extracted_memories_original_fts"]) {
-      try { db.exec(`INSERT INTO ${table}(${table}) VALUES('integrity-check')`); }
-      catch { db.exec(`INSERT INTO ${table}(${table}) VALUES('rebuild')`); logInfo(TAG, `[WIRED] Rebuilt corrupt FTS: ${table}`); }
-    }
+    const { rebuilt } = memory.rebuildFtsIndexes();
     results.ftsOk = true;
+    for (const t of rebuilt) logInfo(TAG, `[WIRED] Rebuilt corrupt FTS: ${t}`);
   } catch (err) { logWarn(TAG, `[WIRED] FTS check failed: ${err instanceof Error ? err.message : String(err)}`); }
 
   // 5. Batch embed NULL embeddings
@@ -187,22 +174,15 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
       const { loadEmbedConfig, embedText: embedFn } = await import("../../memory/ollama-embed.js");
       const cfg = loadEmbedConfig();
       if (cfg.enabled) {
-        const rows = db.prepare("SELECT id, content_en FROM extracted_memories WHERE embedding IS NULL").all() as Array<{ id: number; content_en: string }>;
-        for (const row of rows) {
-          const vec = await embedFn(cfg, row.content_en);
-          if (vec) { db.prepare("UPDATE extracted_memories SET embedding = ? WHERE id = ?").run(Buffer.from(vec.buffer), row.id); results.embedded++; }
-        }
+        const { embedded } = await memory.backfillEmbeddings((text) => embedFn(cfg, text));
+        results.embedded = embedded;
       }
     }
   } catch (err) { logWarn(TAG, `[WIRED] embed failed: ${err instanceof Error ? err.message : String(err)}`); }
 
   // 6. Anomaly auto-fixes
   try {
-    let fixed = 0;
-    fixed += db.prepare("UPDATE extracted_memories SET trust = 2 WHERE memory_type = 'decision' AND trust < 2").run().changes;
-    fixed += db.prepare("UPDATE extracted_memories SET classification = 1 WHERE memory_type = 'decision' AND classification = 0").run().changes;
-    fixed += db.prepare("UPDATE extracted_memories SET trust = 2 WHERE trust = 0 AND credibility = 6 AND integrity = 2").run().changes;
-    fixed += db.prepare("UPDATE extracted_memories SET credibility = 3 WHERE credibility = 6 AND created_at < ?").run(Date.now() - 7 * 86400000).changes;
+    const { fixed } = memory.fixMemoryDefaults();
     results.anomaliesFixed = fixed;
   } catch (err) { logWarn(TAG, `[WIRED] anomaly fixes failed: ${err instanceof Error ? err.message : String(err)}`); }
 
@@ -645,7 +625,7 @@ async function main(): Promise<number> {
 
     // Wired pre-tasks (always run — fast, idempotent)
     logInfo(TAG, `[SLEEP] Running wired pre-tasks${isResume ? " (resume)" : ""}...`);
-    const wiredResults = await runWiredPreTasks(db, memoryConfig.memoryDir);
+    const wiredResults = await runWiredPreTasks(db, memoryConfig.memoryDir, memory);
     logInfo(TAG, `[SLEEP] Wired: ${formatWiredResults(wiredResults)}`);
 
     // Load step files + build vars
