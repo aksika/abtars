@@ -279,10 +279,77 @@ Tested on 3 academic benchmarks:
 | ChromaDB | SQLite + FTS5 + ollama is more integrated |
 | Entity registry / detection | Single-user, known context — not needed |
 | Conversation normalizer | We capture real-time, not from exports |
-| MCP server | We have our own CLI tools |
-| Auto-save hooks | We have instant-store + sleep cycle |
 | Verbatim-only storage | We extract + curate — better for long-term memory evolution |
 | Palace naming convention | Metadata, not architecture — our topic column achieves the same |
+
+## What we SHOULD borrow (revised)
+
+Previously excluded MCP server and onboarding as "we have our own tools." But the strategic goal is to **decouple the memory system from the bridge** and make it installable standalone — potentially as an OpenClaw plugin. MemPalace achieved exactly this universal access pattern.
+
+### MemPalace's universal access model
+
+```
+pip install mempalace          ← standalone package, no host app needed
+mempalace init ~/project       ← CLI works standalone
+mempalace mine ~/chats/        ← CLI works standalone
+mempalace search "query"       ← CLI works standalone
+python -m mempalace.mcp_server ← any MCP-compatible tool can use it
+```
+
+Their memory system has ZERO coupling to any specific AI tool. Claude Code, ChatGPT, Cursor, local Llama — all access the same palace through either CLI or MCP. The hooks are optional adapters, not requirements.
+
+### Our current coupling
+
+```
+agentbridge-recall     ← imports from ../memory/, lives in bridge repo
+agentbridge-store      ← imports from ../memory/, lives in bridge repo
+agentbridge-edit       ← imports from ../memory/, lives in bridge repo
+MemoryManager          ← instantiated by Bridge.initMemory()
+IPC server             ← started by Bridge.wireMemory()
+Sleep cycle            ← orchestrated by bridge's heartbeat system
+```
+
+Everything lives in the bridge repo. The CLIs import bridge internals. The memory system can't run without the bridge.
+
+### What universal access looks like for us
+
+```
+npm install @agentbridge/memory    ← standalone package
+agentbridge-memory init            ← CLI works standalone
+agentbridge-memory store ...       ← CLI works standalone
+agentbridge-memory recall ...      ← CLI works standalone
+agentbridge-memory search ...      ← CLI works standalone
+node -e "require('@agentbridge/memory').mcp()"  ← MCP server for any tool
+```
+
+Plus: OpenClaw imports `@agentbridge/memory` as a plugin via `@openclaw/memory-host-sdk`.
+
+### What needs to happen (extends existing decoupling plan)
+
+The existing `docs/specs/memory-decoupling.plan.md` covers Phases 1-4 (interface extraction → directory reorg → standalone package). What's missing:
+
+**Phase 5: Universal CLI** — rename/restructure CLIs from `agentbridge-recall` to a unified `agentbridge-memory` command with subcommands (`store`, `recall`, `edit`, `search`, `status`, `embed`). Works standalone without the bridge running.
+
+**Phase 6: MCP server** — expose memory operations as MCP tools. Any MCP-compatible AI tool (Claude Code, Cursor, Kiro CLI, OpenClaw) can use the memory system. Modeled on MemPalace's 19-tool MCP server but adapted to our architecture:
+- `memory_recall` — semantic + keyword search
+- `memory_store` — instant store with topic/tier/emotion
+- `memory_edit` — edit, boost, demote, merge, delete
+- `memory_status` — stats, layer health
+- `memory_wake_up` — core-tier context for session start
+- `memory_kg_query` — knowledge graph queries (if we add one)
+
+**Phase 7: OpenClaw plugin** — implement `@openclaw/memory-host-sdk` contract. Any OpenClaw agent gets persistent memory by adding the plugin.
+
+### MemPalace patterns to adopt for universal access
+
+| Pattern | Their implementation | Our adaptation |
+|---|---|---|
+| Single entry point | `mempalace` CLI with subcommands | `agentbridge-memory` CLI with subcommands |
+| MCP server | `python -m mempalace.mcp_server` (19 tools) | `node -m @agentbridge/memory/mcp` |
+| Zero-config start | `mempalace init` creates palace | `agentbridge-memory init` creates DB + config |
+| Status/wake-up | `mempalace status`, `mempalace wake-up` | `agentbridge-memory status`, `agentbridge-memory wake-up` |
+| Package install | `pip install mempalace` | `npm install @agentbridge/memory` |
+| No host dependency | Works without Claude Code | Works without the bridge |
 
 ---
 

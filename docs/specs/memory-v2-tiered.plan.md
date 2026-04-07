@@ -164,8 +164,7 @@ When the same entity/concept appears in multiple topics, create a link:
 
 ## Implementation order
 
-Phase 1: 1.1 (topic) → 1.2 (tier) → 1.3 (temporal) → 1.4 (core files split) → 1.5 (lower threshold) → sleep steps → recall changes
-Phase 2: 2.1 (AAAK + emotion) → 2.2 (contradiction) → 2.3 (wake-up from core + user_profile migration) → 2.4 (tunnels)
+See Phase 3 section below for the full sequence across all phases.
 
 Phase 1 is the foundation — all column additions, migration, CLI updates, sleep step changes.
 Phase 2 is enhancement — each item is independent and can be done in any order after Phase 1.
@@ -173,7 +172,52 @@ Phase 2 is enhancement — each item is independent and can be done in any order
 ## References
 
 - MemPalace project: ~/workspace/mempalace
+- MemPalace deep study: `docs/specs/mempalace-study.md`
+- Memory decoupling plan: `docs/specs/memory-decoupling.plan.md` (Phases 1-4)
 - Key insight borrowed: spatial/structural organization improves retrieval 34% (their benchmark)
 - Key insight borrowed: temporal validity on facts (their knowledge_graph.py)
 - Key insight borrowed: AAAK compression for wake-up context (their dialect.py)
+- Key insight borrowed: universal access via MCP + standalone CLI (their packaging model)
 - Key insight: two-database split rejected in favor of tier column (same benefit, less complexity)
+
+## Phase 3: Universal Access (decoupling)
+
+Extends `docs/specs/memory-decoupling.plan.md` Phases 1-4 with:
+
+### 3.1 Unified CLI
+
+Restructure CLIs from separate `agentbridge-recall`, `agentbridge-store`, etc. into a unified `agentbridge-memory` command with subcommands. Works standalone without the bridge running.
+
+```bash
+agentbridge-memory init                    # create DB + config
+agentbridge-memory store --content "..." --topic coding --memory-type decision
+agentbridge-memory recall "auth decision" --topic coding --pool core
+agentbridge-memory edit --memory-id 42 --valid-to 2026-04-07
+agentbridge-memory search "why GraphQL"    # semantic search
+agentbridge-memory status                  # stats, layer health
+agentbridge-memory wake-up                 # core-tier context dump
+```
+
+### 3.2 MCP server
+
+Expose memory operations as MCP tools. Any MCP-compatible AI tool can use the memory system.
+
+Tools (modeled on MemPalace's 19-tool server, adapted to our architecture):
+- `memory_recall` — semantic + keyword search with topic/tier filters
+- `memory_store` — instant store with topic, tier, emotion codes
+- `memory_edit` — edit, boost, demote, merge, delete
+- `memory_status` — stats, layer health, DB info
+- `memory_wake_up` — core-tier compressed context for session start
+- `memory_search` — full-text + embedding hybrid search
+
+### 3.3 OpenClaw plugin
+
+Implement `@openclaw/memory-host-sdk` contract. Package as `@agentbridge/memory`. Any OpenClaw agent gets persistent memory by adding the plugin.
+
+### Implementation order (all phases)
+
+Phase 1: 1.1 (topic) → 1.2 (tier) → 1.3 (temporal) → 1.4 (core files split) → 1.5 (lower threshold) → sleep steps → recall changes
+Phase 2: 2.1 (AAAK + emotion) → 2.2 (contradiction) → 2.3 (wake-up from core + user_profile migration) → 2.4 (tunnels)
+Phase 3: 3.1 (unified CLI) → 3.2 (MCP server) → 3.3 (OpenClaw plugin)
+
+Phase 3 depends on memory-decoupling.plan.md Phases 1-4 being complete first.

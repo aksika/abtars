@@ -278,3 +278,9 @@ User asks "what's the best free model right now?" → agent runs the skill, retu
 - Wake-up context from core tier (dynamic, replaces static core-knowledge)
 - AAAK-style compression for wake-up (~200 tokens for all core facts)
 - Cross-topic linking (tunnels)
+
+### Phase 3: Universal access (decoupling)
+- Unified `agentbridge-memory` CLI with subcommands (standalone, no bridge needed)
+- MCP server — expose memory as MCP tools for any AI tool
+- OpenClaw plugin via `@openclaw/memory-host-sdk`
+- Depends on memory-decoupling.plan.md Phases 1-4
