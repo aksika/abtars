@@ -38,6 +38,9 @@ export type RawEditArgs = {
   caller?: string;
   userOverride?: boolean;
   dryRun?: boolean;
+  topic?: string;
+  tier?: string;
+  validTo?: string;
 };
 
 export function parseEditArgs(argv: string[]): RawEditArgs {
@@ -94,6 +97,9 @@ Options:
       case "--caller": parsed.caller = args[++i] ?? ""; break;
       case "--user-override": parsed.userOverride = true; break;
       case "--dry-run": parsed.dryRun = true; break;
+      case "--topic": parsed.topic = args[++i] ?? ""; break;
+      case "--tier": parsed.tier = args[++i] ?? ""; break;
+      case "--valid-to": parsed.validTo = args[++i] ?? ""; break;
     }
   }
   return parsed;
@@ -135,6 +141,9 @@ export function buildEditParams(raw: RawEditArgs): { ok: true; params: EditMemor
   if (raw.caller) params.caller = raw.caller;
   if (raw.userOverride) params.userOverride = true;
   if (raw.dryRun) params.dryRun = true;
+  if (raw.topic) params.topic = raw.topic;
+  if (raw.tier) params.tier = raw.tier as "core" | "general";
+  if (raw.validTo !== undefined) params.validTo = raw.validTo || null;
 
   return { ok: true, params };
 }

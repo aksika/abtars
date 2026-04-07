@@ -69,6 +69,12 @@ export class MemoryEditor {
         }
         fieldsUpdated.push("relevance_score");
       }
+      if (params.topic != null) { sets.push("topic = ?"); values.push(params.topic); fieldsUpdated.push("topic"); }
+      if (params.tier != null) {
+        if (params.tier !== "core" && params.tier !== "general") return { ok: false, error: "tier must be 'core' or 'general'" };
+        sets.push("tier = ?"); values.push(params.tier); fieldsUpdated.push("tier");
+      }
+      if (params.validTo != null) { sets.push("valid_to = ?"); values.push(params.validTo || null); fieldsUpdated.push("valid_to"); }
 
       if (sets.length === 0 && params.classification == null) return { ok: false, error: "no fields to update" };
       if (params.dryRun) return { ok: true, memoriesUpdated: targetIds.length, ids: targetIds, fieldsUpdated };

@@ -223,6 +223,12 @@ export type EditMemoryParams = {
   userOverride?: boolean;
   /** Preview changes without committing. */
   dryRun?: boolean;
+  /** ABM v1: topic assignment. */
+  topic?: string;
+  /** ABM v1: tier promotion/demotion. */
+  tier?: "core" | "general";
+  /** ABM v1: temporal invalidation (ISO date or empty string to clear). */
+  validTo?: string | null;
 };
 
 /** Result of a memory edit operation. */
