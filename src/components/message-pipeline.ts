@@ -239,6 +239,11 @@ export async function handleInboundMessage(
       return;
     }
 
+    // --- Clear 👀 reaction ---
+    if (adapter.setReaction && msg.messageId) {
+      await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+    }
+
     // --- <NO_REPLY> → silently drop (group chats) ---
     if (userResponse.trim() === "<NO_REPLY>" || userResponse.trim() === "(no response)") {
       logDebug(TAG, "LLM returned <NO_REPLY>, dropping silently");
@@ -311,11 +316,6 @@ export async function handleInboundMessage(
           }
         }
       }
-    }
-
-    // --- Clear 👀 reaction after delivery ---
-    if (adapter.setReaction && msg.messageId) {
-      await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
     }
 
     // --- Record to memory ---
