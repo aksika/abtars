@@ -50,3 +50,25 @@ export { emojiToScore } from "./emotion-utils.js";
 
 // Session context
 export { buildSessionStartContext } from "./session-context.js";
+
+// ABM v2 — store-time enrichment
+export { detectEmotions } from "./emotion-tagger.js";
+export type { EmotionTag } from "./emotion-tagger.js";
+export { detectFlags } from "./importance-flagger.js";
+export type { ImportanceFlag } from "./importance-flagger.js";
+export { compress } from "./memory-compressor.js";
+export { generateSignature, hammingDistance, hammingSimilarity } from "./signature-generator.js";
+
+// ABM v2 — sleep-time intelligence
+export { buildArc } from "./emotion-arc.js";
+export { checkContradiction } from "./contradiction-checker.js";
+
+// ABM v2 — session start
+export { buildWakeUp } from "./wake-up-builder.js";
+
+// ABM v2 — brain patterns
+export { isFlashbulb, isAgingProtected, effectiveConfidence, detectInterference } from "./brain-patterns.js";
+
+// ABM v2 — config
+export { loadMemoryEnv } from "./mem-config-env.js";
+export type { SearchMode, MemoryEnvConfig } from "./mem-config-env.js";
