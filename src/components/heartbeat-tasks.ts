@@ -40,7 +40,7 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
 
       let lastMsgTs = 0;
       try {
-        lastMsgTs = deps.memory?.store.getLastMessageTimestamp(true) ?? 0;
+        lastMsgTs = deps.memory?.getLastMessageTimestamp(true) ?? 0;
       } catch { return false; }
       if (Date.now() - lastMsgTs < idleMinutes * 60 * 1000) return false;
 

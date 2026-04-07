@@ -1,10 +1,9 @@
 import type Database from "better-sqlite3";
-import type { MemoryConfig } from "../../memory/memory-config.js";
-import type { MemoryManager } from "../../memory/memory-manager.js";
+import type { MemoryConfig } from "./memory-config.js";
+import type { MemoryManager } from "./memory-manager.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { logInfo, logWarn, logError } from "../../components/logger.js";
-import { readEntries as cronReadEntries } from "../../components/cron/cron-db.js";
+import { logInfo, logWarn, logError } from "./mem-logger.js";
 
 const TAG = "sleep-state-gatherer";
 
@@ -62,13 +61,16 @@ export interface StateSnapshot {
 
 export class SleepStateGatherer {
   private db: Database.Database;
+  private cronContentsFn: (() => string | null) | null;
   constructor(
     memory: MemoryManager,
     private config: MemoryConfig,
+    cronContentsFn?: () => string | null,
   ) {
     const db = memory.getDatabase();
     if (!db) throw new Error("Database not initialized");
     this.db = db;
+    this.cronContentsFn = cronContentsFn ?? null;
   }
 
   async gather(): Promise<StateSnapshot> {
@@ -94,7 +96,7 @@ export class SleepStateGatherer {
       lastSleepTimestamp,
       wakeupDate: this.getWakeupDate(),
       todoContents: this.readFileOrNull(join(dirname(this.config.memoryDir), "memory", "todo.md")),
-      cronContents: (() => { try { return JSON.stringify(cronReadEntries()); } catch { return null; } })(),
+      cronContents: this.cronContentsFn ? this.cronContentsFn() : null,
     };
 
     logInfo(

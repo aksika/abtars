@@ -140,6 +140,11 @@ export class MemoryManager {
     catch (err) { logError(TAG, "Substring search failed", err); return []; }
   }
 
+  /** Timestamp of the most recent message. */
+  getLastMessageTimestamp(excludeSystem = false): number {
+    return this.store?.getLastMessageTimestamp(excludeSystem) ?? 0;
+  }
+
   /** Read user profile + agent notes from core/. */
   readCoreKnowledge(): string {
     if (!this.config.memoryEnabled) return "";

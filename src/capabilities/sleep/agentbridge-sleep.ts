@@ -23,12 +23,12 @@ import { join, basename } from "node:path";
 import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { MemoryManager } from "../../memory/memory-manager.js";
 import { loadMemoryConfig } from "../../memory/memory-config.js";
-import { SleepStateGatherer } from "./sleep-state-gatherer.js";
+import { SleepStateGatherer } from "../../memory/sleep-state-gatherer.js";
 import { loadSleepSteps, buildSleepVars, substituteVars } from "./sleep-prompt-loader.js";
 import { buildDailySummary, writeDailyFile } from "./sleep-daily-summary.js";
 import { extractFromDaily } from "./sleep-extract-daily.js";
 import { logInfo, logWarn, logError, setLogLevel } from "../../components/logger.js";
-import type { StateSnapshot } from "./sleep-state-gatherer.js";
+import type { StateSnapshot } from "../../memory/sleep-state-gatherer.js";
 import { localDate } from "../../components/env-utils.js";
 import type { SleepStep } from "./sleep-prompt-loader.js";
 
@@ -630,7 +630,9 @@ async function main(): Promise<number> {
     const isResume = existingState !== null && Object.values(existingState.steps).some(s => s.status === "ok");
 
     // Gather state
-    const gatherer = new SleepStateGatherer(memory, memoryConfig);
+    let cronFn: (() => string | null) | undefined;
+    try { const { readEntries } = await import("../../components/cron/cron-db.js"); cronFn = () => { try { return JSON.stringify(readEntries()); } catch { return null; } }; } catch { /* cron not available */ }
+    const gatherer = new SleepStateGatherer(memory, memoryConfig, cronFn);
     const snapshot = await gatherer.gather();
     if (flags.verbose) logInfo(TAG, `State gathered: ${buildSnapshotSummary(snapshot)}`);
 
