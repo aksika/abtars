@@ -317,3 +317,10 @@ Sleep cycle currently runs as a morning nap (triggered on wake). Should run at 2
 - After successful sleep completion (all steps OK), agent puts the Mac to sleep state via `pmset sleepnow` or `osascript -e 'tell application "System Events" to sleep'`
 - If sleep fails (essential steps incomplete), Mac stays awake — don't sleep on failure
 - Log the sleep-then-shutdown sequence in the audit file
+
+## 95. Bug: 👀 reaction not removed after agent sends response
+
+**Priority:** MEDIUM
+**Status:** Not started
+
+The "seen" (👀) emoji reaction is not deleted from the user's message after the agent sends its response. It should be removed once the reply is delivered, so only unprocessed messages show the eyes.

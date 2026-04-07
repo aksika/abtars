@@ -3,10 +3,8 @@
  * that benefit from being independently readable and testable.
  */
 
-import { unlinkSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { logInfo, logWarn, logError } from "./logger.js";
-import { writeRestartReason } from "./restart-reason.js";
 import { runCompaction } from "./compaction.js";
 import { compactingSessions, setIdleCompactReset } from "./message-pipeline.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
@@ -67,7 +65,7 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
   };
 }
 
-export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string };
+export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string; startSleep?: () => void };
 
 /** Daily cycle — restart bridge after SLEEP_TIME if started before it. */
 export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
@@ -76,11 +74,9 @@ export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
     execute: async () => {
       if (!isDailyCycleDue(deps)) return;
 
-      logInfo("age-check", `🔄 Past BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — daily restart`);
-      writeRestartReason(`daily-cycle: BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}`);
+      logInfo("age-check", `😴 BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — spawning Dreamy`);
       try { execSync(`${deps.doctorPath} --fix`, { timeout: 30000 }); } catch { /* */ }
-      try { unlinkSync(deps.bridgeLockPath); } catch { /* */ }
-      process.exit(0);
+      if (deps.startSleep) { deps.startSleep(); }
     },
   };
 }

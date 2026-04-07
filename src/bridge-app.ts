@@ -698,11 +698,12 @@ export async function startBridge(): Promise<void> {
     }
   });
 
-  // --- Daily cycle: restart after BED_TIME ---
+  // --- Daily cycle: spawn Dreamy after BED_TIME + quiet ticks ---
   heartbeat.registerTask(createAgeCheckTask({
     memory, bridgeLockPath, sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, busyChats, isSleepActive,
     doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
     onSleepWarning: () => { void sendSystemMessage("You are about to enter sleep mode. Announce to the user that in ~5 minutes the system will go to sleep for nightly maintenance. Keep it brief and friendly."); },
+    startSleep: () => { sleepHandle?.spawn(); },
   }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
