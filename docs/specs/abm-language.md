@@ -242,10 +242,72 @@ INSERT INTO extracted_memories_fts(extracted_memories_fts, rowid, content_en)
 
 ### Configuration
 
+Memory system has its own config file (`~/.agentbridge/memory.env`), separate from the bridge:
+
 ```env
-MEMORY_ORIGINAL_TTL_DAYS=14      # default: 14 days
-MEMORY_ENGLISH_TTL_DAYS=60       # default: 60 days
-MEMORY_AGING_ENABLED=true        # default: true
+# Storage limits
+MEMORY_MAX_DB_SIZE_MB=4096           # default: 4096 (4GB). 0 = unlimited.
+
+# Aging TTLs (base values — adjusted by pressure)
+MEMORY_ORIGINAL_TTL_DAYS=14          # default: 14 days
+MEMORY_ENGLISH_TTL_DAYS=60           # default: 60 days
+MEMORY_AGING_ENABLED=true            # default: true
+
+# Embedding
+EMBEDDING_ENABLED=true
+EMBEDDING_MODEL=nomic-embed-text
+EMBEDDING_URL=http://localhost:11434
+```
+
+### Pressure-based aging
+
+Aging TTLs are base values. As the database approaches `MEMORY_MAX_DB_SIZE_MB`, aging accelerates:
+
+```
+DB usage    Pressure    Original TTL    English TTL    Effect
+─────────────────────────────────────────────────────────────
+0-50%       none        14 days         60 days        normal aging
+50-75%      low         10 days         45 days        gentle acceleration
+75-90%      medium      5 days          20 days        noticeable acceleration
+90-95%      high        2 days          7 days         aggressive aging
+95-100%     critical    0 (immediate)   2 days         emergency — only ABM-L survives
+```
+
+Formula:
+```typescript
+function pressureMultiplier(usedBytes: number, maxBytes: number): number {
+  if (maxBytes === 0) return 1; // unlimited
+  const ratio = usedBytes / maxBytes;
+  if (ratio < 0.5) return 1;
+  if (ratio < 0.75) return 0.7;
+  if (ratio < 0.90) return 0.35;
+  if (ratio < 0.95) return 0.15;
+  return 0; // critical — age everything immediately
+}
+
+const effectiveTTL = baseTTL * pressureMultiplier(dbSize, maxSize);
+```
+
+Protected memories (flashbulb, core tier with high emotion) are still exempt until critical pressure (>95%). At critical, even protected memories lose their original — only ABM-L + embeddings survive.
+
+### Why this works
+
+- Small device (Raspberry Pi, 1GB limit): aggressive aging, ABM-L-heavy. Memory works fine — just less deep-investigation capability.
+- Desktop (4GB limit): relaxed aging, full fidelity for months.
+- Server (unlimited): no aging pressure, everything preserved.
+- The system self-regulates. No manual cleanup needed.
+
+### Dreamy reports pressure
+
+During sleep, Dreamy logs the current pressure level:
+```
+[SLEEP] Memory pressure: 62% (2.5GB / 4.0GB) — low pressure, aging at 0.7x
+[SLEEP] Aged: 142 originals NULLed, 38 English NULLed, freed ~45MB
+```
+
+At high pressure, Dreamy warns the user:
+```
+[SLEEP] ⚠️ Memory pressure: 91% (3.6GB / 4.0GB) — aggressive aging active
 ```
 
 ### Recall behavior with aged memories
