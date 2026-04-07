@@ -1,34 +1,118 @@
 # Memory System Decoupling — Implementation Plan
 
 **Created:** 2026-03-29
+**Updated:** 2026-04-07
 **Status:** Not started
-**Backlog:** #50
+**Backlog:** #91 (ABM Phase 0)
+**Roadmap:** [abm-roadmap.md](abm-roadmap.md)
 
-## Vision
+## Goal
 
-Extract the memory system into a standalone `@agentbridge/memory` package — like lossless-claw is to OpenClaw. The concrete goal: make KP's memory system reusable as an OpenClaw plugin so any OpenClaw agent can have persistent memory with CIA-AAA security, Darwinism, emotion scoring, and sleep maintenance.
+Extract the memory system into a standalone `@agentbridge/memory` package. The bridge imports it as a dependency. OpenClaw, MCP clients, or any Node.js app can use it independently.
 
-## Complexity Assessment
+## Current state (2026-04-07)
 
-Phases 1-3 add ~50 lines net (one interface file). No new behavior, no new dependencies, no operational changes. The system works identically before and after — it's a structural cleanup.
+### What's already done
+- **Directory reorg complete** — all 20 memory files live in `src/memory/` (was `src/components/`)
+- **IPC client/server** — CLIs communicate with running bridge via IPC, or fall back to direct SQLite
+- **Backend abstraction** — `MemoryBackend` interface with `SqliteBackend` and `IpcBackend` implementations
+- **Backend factory** — `createMemoryBackend()` auto-selects IPC or SQLite
 
-Phase 4 (standalone package) is the only phase that adds real operational complexity: two build systems, version management, publishing workflow. Only worth doing when actively building the OpenClaw plugin.
+### What's still coupled
 
-**Recommendation:** Phases 1-3 when there's a quiet afternoon. Phase 4 when the OpenClaw plugin work begins.
+**Memory → Bridge dependencies (must be severed):**
 
-## Current State
+| Import | Files | What it needs |
+|---|---|---|
+| `logger.js` | 8 memory files | `logInfo`, `logWarn`, `logError` |
+| `env-utils.js` | 3 memory files | `parseBoolEnv`, `parseNumberEnv`, `localDate` |
+| `paths.js` | 2 memory files | `agentBridgeHome()` |
+| `heartbeat-system.ts` | `memory-manager.ts` | `HeartbeatSystem` class |
+| `types/index.ts` | 6 memory files | `InstantStoreParams`, `EditMemoryParams`, `SearchResult`, etc. |
+| `types/memory.ts` | 2 memory files | `SearchResult`, `MemorySearchResult`, `HeartbeatTask` |
 
-- 15 memory-related source files all in `src/components/`
-- 8 bridge files import `MemoryManager` directly
-- Two leaky abstractions: `getDatabase()` and `getMemoryIndex()` expose DB internals
-- CLIs (recall, store, edit, expand, embed) are tightly coupled to bridge project
+**Bridge → Memory DB leaks (must be eliminated):**
 
-## Phase 1: Interface Extraction
+| Caller | What it does | Replacement |
+|---|---|---|
+| `sleep-state-gatherer.ts` | `memory.getDatabase()` — raw SQL queries for stats | Add `gatherSleepState()` to interface |
+| `agentbridge-sleep.ts` | `memory.getDatabase()` — raw SQL for watermarks | Add `getExtractionWatermark()` / `setExtractionWatermark()` |
+| `memory-search-controller.ts` | `memory.getDatabase()` + `memory.getMemoryIndex()` | Add `searchMemories()` / `getEntities()` to interface |
+| `heartbeat-tasks.ts` | `memory.store.getLastMessageTimestamp()` | Add `getLastMessageTimestamp()` to interface |
 
-Define `IMemorySystem` — the contract between bridge and memory:
+### Consumer dependency map (updated)
+
+| Bridge file | Memory methods used | Coupling level |
+|---|---|---|
+| `bridge-app.ts` | initialize, close, getDatabase, getMemoryIndex, getStats, setHeartbeat | Heavy — DB leaks |
+| `message-pipeline.ts` | recordMessage, buildSessionStartContext, getConfig | Medium — session-context is in memory/ |
+| `compaction.ts` | buildMemoryContext | Light |
+| `command-handlers.ts` | getStats, readCoreKnowledge, getCronInfo | Clean |
+| `telegram-adapter.ts` | updateEmotionByPlatformId, emojiToScore | Clean |
+| `discord-adapter.ts` | updateEmotionByPlatformId, emojiToScore | Clean |
+| `agent-api-server.ts` | recordMessage | Clean |
+| `heartbeat-tasks.ts` | store.getLastMessageTimestamp | DB leak |
+| `memory-search-controller.ts` | getDatabase, getMemoryIndex, store.* | Heavy — DB leaks |
+| `sleep-state-gatherer.ts` | getDatabase — raw SQL | Heavy — DB leak |
+| `agentbridge-sleep.ts` | getDatabase — raw SQL | Heavy — DB leak |
+| `daily-cycle.ts` | type import only | Clean |
+
+### CLIs that move with the package
+
+| CLI | What it does |
+|---|---|
+| `agentbridge-recall` | Search memories (uses backend factory) |
+| `agentbridge-store` | Instant store (uses backend factory) |
+| `agentbridge-edit` | Edit memories (uses backend factory) |
+| `agentbridge-expand` | Expand source message IDs |
+| `agentbridge-embed` | Batch embed via ollama |
+| `agentbridge-retro-extract` | Retro-extract from messages |
+
+---
+
+## Phase 0.1: Internalize bridge utilities
+
+Copy the small utilities that memory needs into the memory package. Don't import from bridge.
+
+**Logger:** Create `src/memory/logger.ts` — minimal logger (same interface, standalone). 3 functions: `logInfo`, `logWarn`, `logError`. ~15 lines.
+
+**Env utils:** Create `src/memory/env-utils.ts` — copy `parseBoolEnv`, `parseNumberEnv`, `localDate`. ~20 lines.
+
+**Paths:** Create `src/memory/paths.ts` — copy `agentBridgeHome()`. ~5 lines.
+
+**Types:** Create `src/memory/types.ts` — move all memory-related types (`InstantStoreParams`, `EditMemoryParams`, `SearchResult`, `SearchOptions`, `ForgetResult`, `MessageRecord`, `HeartbeatTask`, etc.) into memory package. Bridge re-exports from memory.
+
+**Effort:** ~1 hour. Mechanical.
+
+## Phase 0.2: Eliminate DB leaks
+
+Remove `getDatabase()` and `getMemoryIndex()` from `MemoryManager` public API.
+
+**Add to MemoryManager:**
+```typescript
+gatherSleepState(): SleepStateSnapshot;           // replaces sleep-state-gatherer raw SQL
+getExtractionWatermark(chatId: number): number;    // replaces agentbridge-sleep raw SQL
+setExtractionWatermark(chatId: number, ts: number): void;
+searchDashboard(query: string, opts: DashboardSearchOpts): DashboardSearchResult;  // replaces memory-search-controller raw SQL
+getLastMessageTimestamp(allChats?: boolean): number;  // replaces heartbeat-tasks .store access
+```
+
+**Move `SleepStateGatherer` into `src/memory/`** — it's a memory concern, not a sleep concern.
+
+**Update callers:**
+- `sleep-state-gatherer.ts` → calls `memory.gatherSleepState()` instead of raw SQL
+- `agentbridge-sleep.ts` → calls `memory.getExtractionWatermark()` / `setExtractionWatermark()`
+- `memory-search-controller.ts` → calls `memory.searchDashboard()` instead of raw SQL
+- `heartbeat-tasks.ts` → calls `memory.getLastMessageTimestamp()` instead of `.store.`
+
+**Effort:** ~2-3 hours. Some SQL moves into MemoryManager methods.
+
+## Phase 0.3: Define IMemorySystem interface
+
+Extract the public API into an interface. MemoryManager implements it.
 
 ```typescript
-interface IMemorySystem {
+export interface IMemorySystem {
   // Lifecycle
   initialize(): Promise<void>;
   close(): void;
@@ -36,6 +120,7 @@ interface IMemorySystem {
   // Messages
   recordMessage(record: MessageRecord): void;
   loadRecentMessages(chatId: number, sessionId: string, count: number): MessageRecord[];
+  getLastMessageTimestamp(allChats?: boolean): number;
 
   // Memories (CRUD)
   store(params: InstantStoreParams): Promise<InstantStoreResult>;
@@ -60,91 +145,119 @@ interface IMemorySystem {
   getCronInfo(): CronInfo;
   getConfig(): MemoryConfig;
 
+  // Sleep/maintenance
+  gatherSleepState(): SleepStateSnapshot;
+  getExtractionWatermark(chatId: number): number;
+  setExtractionWatermark(chatId: number, ts: number): void;
+
+  // Dashboard
+  searchDashboard(query: string, opts: DashboardSearchOpts): DashboardSearchResult;
+
   // Heartbeat integration
   setHeartbeat(hb: HeartbeatSystem): void;
   stopHeartbeat(): void;
 }
 ```
 
-**What disappears from the interface:**
-- `getDatabase()` → replaced by `loadRecentMessages()` (session-context)
-- `getMemoryIndex()` → recall-engine becomes internal, exposed via `recall()`
-- `setLlmCall()` / `setBrowserManager()` / `setIsBusy()` → constructor injection or config
-- `checkAutoCompact()` → internal, triggered by `recordMessage()` automatically
+**Bridge files change imports:** `MemoryManager` → `IMemorySystem` (type), still construct `MemoryManager` in `bridge-app.ts`.
 
-**Effort:** ~2-3 hours.
+**Effort:** ~1 hour. Interface file + update imports.
 
-## Phase 2: Eliminate DB Leaks
+## Phase 0.4: Remove HeartbeatSystem coupling
 
-| Caller | What it does with the DB | Replacement |
-|--------|-------------------------|-------------|
-| `bridge-app.ts` | Passes to `SleepStateGatherer` | Add `gatherSleepState()` to interface |
-| `session-context.ts` | Queries recent messages | `loadRecentMessages()` |
-| `bridge-app.ts` | Passes to recall engine | Recall is internal, exposed via `recall()` |
+`MemoryManager` currently imports `HeartbeatSystem` from bridge. This is the tightest coupling.
 
-Move SleepStateGatherer inside the memory module.
+**Options:**
+1. Pass heartbeat as a callback/event emitter instead of concrete class
+2. Define a minimal `IHeartbeat` interface in the memory package, bridge implements it
 
-**Effort:** ~1 hour.
-
-## Phase 3: Directory Reorganization
-
-Move memory files from `src/components/` to `src/memory/`:
-
-```
-src/memory/
-  index.ts                    # IMemorySystem + MemoryManager export
-  memory-manager.ts
-  memory-db.ts
-  memory-index.ts
-  memory-extractor.ts
-  recall-engine.ts
-  vector-index.ts
-  embedding-provider.ts
-  ollama-embed.ts
-  consolidation-search.ts
-  reflection-engine.ts
-  ingestion-pipeline.ts
-  emotion-utils.ts
-  mmr.ts
-  sleep-state-gatherer.ts
-  types.ts                    # All memory types consolidated
+Option 2 is cleaner:
+```typescript
+// In @agentbridge/memory
+export interface IHeartbeat {
+  registerTask(task: HeartbeatTask): void;
+  unregisterTask(id: string): void;
+}
 ```
 
-Bridge files import from `../memory/index.js` only. Internal files are not re-exported.
+Bridge's `HeartbeatSystem` implements `IHeartbeat`. Memory package only knows the interface.
 
-**Effort:** ~2 hours (mostly import path updates + tests).
+**Effort:** ~30 min.
 
-## Phase 4: Extract to Standalone Package
+## Phase 0.5: Extract to standalone package
 
-Move `src/memory/` to a separate repo/package. Bridge adds it as a dependency. CLIs (recall, store, edit, expand, embed) move with it.
+Move `src/memory/` to a separate package. Two options:
 
-Package structure (lossless-claw style):
+**Option A: Monorepo workspace** (recommended for now)
 ```
-@agentbridge/memory/
-  index.ts                    # Plugin entry point, IMemorySystem export
-  src/                        # All memory internals
-  cli/                        # recall, store, edit, expand, embed
-  package.json
-  tsconfig.json
+packages/
+  memory/
+    src/              # all memory files
+    cli/              # recall, store, edit, expand, embed, retro-extract
+    package.json      # @agentbridge/memory
+    tsconfig.json
+  bridge/
+    src/              # bridge code, imports @agentbridge/memory
+    package.json
 ```
 
-**Effort:** ~half a day. Package setup, build config, publish, update bridge dependency.
+**Option B: Separate repo** (when publishing to npm)
+```
+~/workspace/agentbridge-memory/    # standalone repo
+  src/
+  cli/
+  package.json                     # @agentbridge/memory
+```
 
-## Consumer Dependency Map
+Start with Option A (monorepo). Move to Option B when publishing.
 
-| Bridge file | Methods used | Phase 1 impact |
-|-------------|-------------|----------------|
-| `bridge-app.ts` | initialize, close, getDatabase, getMemoryIndex, getStats, setHeartbeat, setBrowserManager, setIsBusy, setLlmCall | Heaviest — needs getDatabase/getMemoryIndex eliminated (Phase 2) |
-| `message-pipeline.ts` | recordMessage, checkAutoCompact, getConfig | checkAutoCompact becomes internal |
-| `session-context.ts` | getDb, getLatestCompaction | getDb eliminated (Phase 2) |
-| `session-manager.ts` | persistSession, restoreSessions, touchSession, deactivateSession | Clean — already on interface |
-| `command-handlers.ts` | getStats, readCoreKnowledge, getCronInfo | Clean |
-| `telegram-adapter.ts` | updateEmotionByPlatformId | Clean |
-| `discord-adapter.ts` | updateEmotionByPlatformId | Clean |
-| `agent-api-server.ts` | recordMessage | Clean |
+**package.json:**
+```json
+{
+  "name": "@agentbridge/memory",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./cli/*": "./dist/cli/*.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "...",
+    "ipc-toolkit": "..."
+  }
+}
+```
 
-## Reference
+**Effort:** ~half day. Package setup, build config, import path updates, test migration.
 
-- lossless-claw: `/home/qakosal/workspace/lossless-claw` — standalone context engine plugin for OpenClaw
-- CIA-AAA model: `docs/TODO/cia-aaa-memory-model.md`
+---
+
+## Verification checklist
+
+After Phase 0 is complete:
+
+- [ ] `@agentbridge/memory` builds independently (`npm run build` in package dir)
+- [ ] `@agentbridge/memory` has zero imports from bridge code
+- [ ] Bridge imports only from `@agentbridge/memory` (no `../memory/` paths)
+- [ ] All 20 memory files live in the package
+- [ ] All 6 CLIs live in the package and work standalone
+- [ ] `getDatabase()` and `getMemoryIndex()` removed from public API
+- [ ] `IMemorySystem` interface defined and exported
+- [ ] `MemoryManager` implements `IMemorySystem`
+- [ ] All 764+ tests pass
+- [ ] TypeScript clean (`tsc --noEmit`)
+
+## Implementation order
+
+```
+0.1 (internalize utils) → 0.2 (eliminate DB leaks) → 0.3 (interface) → 0.4 (heartbeat) → 0.5 (extract package)
+```
+
+Each step is independently committable and testable. No big-bang migration.
+
+## References
+
+- ABM roadmap: `docs/specs/abm-roadmap.md`
 - Memory as-built: `docs/asbuilts/memory.asbuilt.md`
+- lossless-claw (reference standalone plugin): `~/workspace/lossless-claw`
+- OpenClaw memory SDK: `~/workspace/openclaw/packages/memory-host-sdk/`
