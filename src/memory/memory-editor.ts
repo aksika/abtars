@@ -3,6 +3,10 @@ import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemo
 import { clampEmotionScore } from "./emotion-utils.js";
 import { loadEmbedConfig, embedText } from "./ollama-embed.js";
 import { logError, logInfo } from "./mem-logger.js";
+import { detectEmotions } from "./emotion-tagger.js";
+import { detectFlags } from "./importance-flagger.js";
+import { compress } from "./memory-compressor.js";
+import { generateSignature } from "./signature-generator.js";
 
 const TAG = "memory-editor";
 
@@ -129,20 +133,33 @@ export class MemoryEditor {
 
       const emotionScore = clampEmotionScore(params.emotionScore);
       const now = Date.now();
+      const contentEn = params.contentEn.trim();
+
+      // ABM v2: store-time enrichment (~1-5ms total)
+      const emotionTags = detectEmotions(contentEn).join(",");
+      const importanceFlags = detectFlags(contentEn).join(",");
+      const topicVal = params.topic ?? "general";
+      const compressed = compress({
+        content_en: contentEn, topic: topicVal,
+        emotion_tags: emotionTags, importance_flags: importanceFlags,
+        confidence: params.confidence, date: new Date(now).toISOString().slice(0, 7),
+      });
+      const signature = Buffer.from(generateSignature(contentEn));
 
       this.db.prepare(
         `INSERT INTO extracted_memories
            (chat_id, content_original, content_en, memory_type, source_timestamp,
             preserve_original, preserved_keyword, emotion_score, created_at,
             confidence, source_message_ids, classification, trust, integrity, credibility,
-            topic, tier, valid_from)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'general', ?)`,
+            topic, tier, valid_from, emotion_tags, importance_flags, content_compressed, signature)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'general', ?, ?, ?, ?, ?)`,
       ).run(
-        params.chatId, params.contentOriginal.trim(), params.contentEn.trim(),
+        params.chatId, params.contentOriginal.trim(), contentEn,
         params.memoryType, now, 1, params.keyword?.trim() || null, emotionScore, now,
         params.confidence ?? 3, params.sourceMessageIds?.trim() || null,
         params.classification ?? 1, params.trust ?? 0, params.integrity ?? 2, params.credibility ?? 6,
-        params.topic ?? "general", new Date(now).toISOString().slice(0, 10),
+        topicVal, new Date(now).toISOString().slice(0, 10),
+        emotionTags || null, importanceFlags || null, compressed, signature,
       );
 
       this.embedNewMemory(params.contentEn.trim());

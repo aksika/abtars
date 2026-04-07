@@ -269,6 +269,24 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 8,
+    label: "ABM v2 — emotion tags, importance flags, ABM-L, signatures, brain patterns",
+    up: (db) => {
+      for (const ddl of [
+        "ALTER TABLE extracted_memories ADD COLUMN emotion_tags TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN importance_flags TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN content_compressed TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN emotion_arc TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN related_topics TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN signature BLOB",
+        "ALTER TABLE extracted_memories ADD COLUMN source_type TEXT DEFAULT 'conversation'",
+        "ALTER TABLE extracted_memories ADD COLUMN last_recall_context TEXT",
+      ]) {
+        try { db.exec(ddl); } catch { /* column already exists */ }
+      }
+    },
+  },
 ];
 
 // ── Migration runner ────────────────────────────────────────────────────────
