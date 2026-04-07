@@ -260,27 +260,31 @@ Agent skill that searches OpenRouter for the best free-tier deals:
 ### Usage
 User asks "what's the best free model right now?" → agent runs the skill, returns ranked recommendations.
 
-## 91. Memory System v2 — Tiered Memory + MemPalace Enhancements
+## 91. ABM — AgentBridge Memory System
 
 **Priority:** HIGH
 **Status:** Not started
-**Spec:** [memory-v2-tiered.plan.md](../specs/memory-v2-tiered.plan.md)
+**Roadmap:** [abm-roadmap.md](../specs/abm-roadmap.md)
+**Specs:** [memory-v2-tiered.plan.md](../specs/memory-v2-tiered.plan.md), [memory-decoupling.plan.md](../specs/memory-decoupling.plan.md), [mempalace-study.md](../specs/mempalace-study.md)
 
-### Phase 1: Foundation
-- Topic column on extracted_memories (topic-filtered recall, 34% retrieval boost per MemPalace benchmarks)
+### Phase 0: Decouple (refactor)
+- Extract `@agentbridge/memory` standalone package from bridge
+- IMemorySystem interface, eliminate DB leaks, directory reorg
+
+### Phase 1: ABM v1 — Tiered Memory
+- Topic column on extracted_memories (34% retrieval boost per MemPalace benchmarks)
 - Tier column (`core` vs `general`) — Dreamy promotes best to core during sleep, recall searches core first
 - Temporal validity (`valid_from`/`valid_to`) — invalidate stale facts instead of deleting
+- Core files restructure (core_facts.md + agent_notes.md split)
 - Lower storage threshold — store more aggressively, Dreamy curates later
-- New sleep steps: topic assignment, core promotion, temporal review
 
-### Phase 2: MemPalace-inspired
+### Phase 2: ABM v2 — MemPalace Enhancements
+- AAAK emotion scoring (40+ codes, keyword detection, arcs) + compression
 - Contradiction detection on core promotion
-- Wake-up context from core tier (dynamic, replaces static core-knowledge)
-- AAAK-style compression for wake-up (~200 tokens for all core facts)
+- Dynamic wake-up from core tier (replaces static core-knowledge)
 - Cross-topic linking (tunnels)
 
-### Phase 3: Universal access (decoupling)
-- Unified `agentbridge-memory` CLI with subcommands (standalone, no bridge needed)
+### Phase 3: Universal Access
+- Unified `agentbridge-memory` CLI (standalone, no bridge needed)
 - MCP server — expose memory as MCP tools for any AI tool
 - OpenClaw plugin via `@openclaw/memory-host-sdk`
-- Depends on memory-decoupling.plan.md Phases 1-4
