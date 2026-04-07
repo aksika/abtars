@@ -264,8 +264,8 @@ export class Bridge {
     try {
       const logoPath = join(process.cwd(), "logo", "KiroProfessor.jpg");
       logoBase64 = readFileSync(logoPath).toString("base64");
-    } catch (err) {
-      logWarn("main", `Could not read logo: ${err instanceof Error ? err.message : String(err)}`);
+    } catch {
+      // Logo is optional — dashboard works without it
     }
 
     const agentApiOpts = platforms.agent
