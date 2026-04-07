@@ -6,6 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import type { MemoryManager } from "../memory/memory-manager.js";
+import { logInfo } from "./logger.js";
 
 export interface DailyCycleDeps {
   sleepHour: number;
@@ -56,11 +57,13 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
     // New message arrived — reset counter
     lastSeenMsgTs = currentMsgTs;
     quietTickCount = 0;
+    logInfo("bedtime", `Message received — quiet counter reset (BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")})`);
     return false;
   }
 
   // No new messages this tick — increment quiet counter
   quietTickCount++;
+  logInfo("bedtime", `Quiet tick ${quietTickCount}/${QUIET_TICKS_REQUIRED} (BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")})`);
 
   return quietTickCount >= QUIET_TICKS_REQUIRED;
 }
