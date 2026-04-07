@@ -215,7 +215,7 @@ This is lightweight — just a counter on entity pairs, not ML. But it means the
 |---|---|---|---|
 | Hardware profiles (4 tiers) | AME | Medium | Enables mobile/edge/Pi deployment |
 | Multi-resolution recall (4 levels) | Hippocampus | Low | Auto-adaptive context window usage |
-| Dynamic core management (LRU) | Letta | Medium | Real-time core promotion, no sleep dependency |
+| ~~Dynamic core management~~ | Letta | — | REJECTED: day-hot topics would pollute core, Dreamy overnight review is better |
 | Embedding-free search | Hippocampus | Low | Works without ollama, faster pre-filtering |
 | Self-improving compression | Mem0 | Low | Compression quality improves over time |
 
