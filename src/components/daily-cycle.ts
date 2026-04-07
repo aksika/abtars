@@ -21,6 +21,7 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
     const lockData = JSON.parse(readFileSync(deps.bridgeLockPath, "utf-8"));
     const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), deps.sleepHour).getTime();
     if (lockData.startedAt >= todaySleepTime) return false;
+    if (Date.now() - lockData.startedAt < 5 * 60 * 1000) return false; // dark wake guard
   } catch { return false; }
 
   let lastMsgTs = 0;
