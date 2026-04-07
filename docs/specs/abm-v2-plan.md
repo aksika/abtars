@@ -221,6 +221,7 @@ Signatures always generated at store time (cheap, ~0.1ms). Embeddings only gener
 | Contradiction check | `21-contradiction.md` | Check before promotion | v2 |
 | Emotional arcs | `22-emotion-arcs.md` | Build per-topic arcs | v2 |
 | Memory aging | `23-memory-aging.md` | NULL original/English past TTL, clean FTS5 | v2 |
+| Entity review | `24-entity-review.md` | Scan ABM-L for misassigned/ambiguous/missing @references, re-compress | v2 |
 
 ## Implementation order
 
