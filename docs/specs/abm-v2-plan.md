@@ -158,8 +158,42 @@ Phase 1 sleep steps (16-18) →
 
 ## What's NOT borrowed from MemPalace
 
-- No "AAAK" naming — our format is "ABM Compact"
+- No "AAAK" naming — our language is "ABM-L" (AgentBridge Memory Language)
 - No entity registry file — auto-built at compression time
-- No zettel format — simpler `[flags|topic] condensed English`
+- No zettel format — `[FLAGS|TOPIC|EMOTIONS|CONFIDENCE|DATE] content` with @entity references
 - No 40+ emotion codes — trimmed to ~25 useful ones
 - No palace metaphor — topics, not wings/rooms/halls
+
+## Brain-inspired enhancements (all included in v2)
+
+See `docs/specs/abm-brain-patterns.md` for full study. All 8 patterns included:
+
+| Pattern | Implementation |
+|---|---|
+| Emotional recall boost | Recall ranking weighted by \|emotion_score\| |
+| Flashbulb protection | \|emotion_score\| ≥ 4 or "pivot" flag → never decayed |
+| Spaced repetition decay | Confidence decays unless recalled at intervals |
+| Source monitoring | `source_type` column: conversation/observation/correction/external/inference |
+| Reconsolidation | `last_recall_context` tracked, Dreamy enriches during sleep |
+| Semantic network activation | Real-time spreading activation across linked topics |
+| Prospective memory | Future `valid_from` memories activate when date arrives |
+| Interference detection | Flag similar-but-different memories during recall |
+
+### Additional schema (migration v8, extended)
+
+```sql
+ALTER TABLE extracted_memories ADD COLUMN source_type TEXT DEFAULT 'conversation';
+ALTER TABLE extracted_memories ADD COLUMN last_recall_context TEXT;
+```
+
+## ABM-L (Memory Language)
+
+See `docs/specs/abm-language.md` for full spec. ABM-L is the compressed format stored in `content_compressed`:
+
+```
+[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)
+[P|personal|—|4|2026-03] @user prefers dark-mode+vim+minimal-code
+[LT|coding|frustration|4|2026-03] FTS5 breaks on HU — EN for search
+```
+
+~3-5x compression on extracted memories. 50 core memories ≈ 500 tokens (vs 2500 in English).
