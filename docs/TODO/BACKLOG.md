@@ -259,3 +259,22 @@ Agent skill that searches OpenRouter for the best free-tier deals:
 
 ### Usage
 User asks "what's the best free model right now?" → agent runs the skill, returns ranked recommendations.
+
+## 91. Memory System v2 — Tiered Memory + MemPalace Enhancements
+
+**Priority:** HIGH
+**Status:** Not started
+**Spec:** [memory-v2-tiered.plan.md](../specs/memory-v2-tiered.plan.md)
+
+### Phase 1: Foundation
+- Topic column on extracted_memories (topic-filtered recall, 34% retrieval boost per MemPalace benchmarks)
+- Tier column (`core` vs `general`) — Dreamy promotes best to core during sleep, recall searches core first
+- Temporal validity (`valid_from`/`valid_to`) — invalidate stale facts instead of deleting
+- Lower storage threshold — store more aggressively, Dreamy curates later
+- New sleep steps: topic assignment, core promotion, temporal review
+
+### Phase 2: MemPalace-inspired
+- Contradiction detection on core promotion
+- Wake-up context from core tier (dynamic, replaces static core-knowledge)
+- AAAK-style compression for wake-up (~200 tokens for all core facts)
+- Cross-topic linking (tunnels)
