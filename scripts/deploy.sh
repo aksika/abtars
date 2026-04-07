@@ -78,6 +78,12 @@ else
   echo "   ℹ️  Created .env from .env.example — edit ~/.agentbridge/.env with your tokens"
 fi
 
+# memory.env (ABM config — create from example if missing)
+if [ ! -f "$AB_HOME/memory.env" ]; then
+  cp "$PROJECT_DIR/memory.env.example" "$AB_HOME/memory.env"
+  echo "   ℹ️  Created memory.env from example"
+fi
+
 # 2. Build (unless --quick)
 if [ "$QUICK" = false ]; then
   echo "🔨 Building..."

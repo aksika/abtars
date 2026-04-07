@@ -673,8 +673,8 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- DB integrity check (hourly) ---
-  const SLEEP_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? process.env["SLEEP_TIME"]?.split(":")[0] ?? "2", 10);
-  const SLEEP_MINUTE = parseInt(process.env["BED_TIME"]?.split(":")[1] ?? process.env["SLEEP_TIME"]?.split(":")[1] ?? "0", 10);
+  const SLEEP_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? "2", 10);
+  const SLEEP_MINUTE = parseInt(process.env["BED_TIME"]?.split(":")[1] ?? "0", 10);
 
   // --- Floating compaction (idle-triggered) ---
   if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
@@ -684,7 +684,7 @@ export async function startBridge(): Promise<void> {
     }));
   }
 
-  // --- Daily cycle: restart after SLEEP_TIME ---
+  // --- Daily cycle: restart after BED_TIME ---
   heartbeat.registerTask(createAgeCheckTask({
     memory, bridgeLockPath, sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, busyChats, isSleepActive,
     doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
