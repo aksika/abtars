@@ -147,9 +147,10 @@ All nullable, backward compatible. v1 queries unaffected.
 | Core promotion | `17-core-promotion.md` | Promote best general → core | Phase 1 completion |
 | Temporal review | `18-temporal-review.md` | Invalidate stale core facts | Phase 1 completion |
 | Emotion + flags backfill | `19-emotion-flags.md` | Tag untagged core memories | v2 |
-| Compression | `20-compress-core.md` | Compress core memories | v2 |
+| Compression backfill | `20-compress-backfill.md` | ABM-L compress memories lacking content_compressed | v2 |
 | Contradiction check | `21-contradiction.md` | Check before promotion | v2 |
 | Emotional arcs | `22-emotion-arcs.md` | Build per-topic arcs | v2 |
+| Memory aging | `23-memory-aging.md` | NULL original/English past TTL, clean FTS5 | v2 |
 
 ## Implementation order
 

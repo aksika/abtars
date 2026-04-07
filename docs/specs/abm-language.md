@@ -164,7 +164,111 @@ Compressed English with entity references and relationship operators.
 
 12 core memories, ~180 tokens. In English this would be ~600+ tokens.
 
-## How it's used in the system
+## Three-tier storage with progressive aging
+
+Every memory exists in three representations, each progressively more compressed:
+
+```
+Tier 1: Original    → raw user language (Hungarian, etc.)     ~200 bytes
+Tier 2: English     → translated, full description            ~150 bytes
+Tier 3: ABM-L       → compressed symbolic format              ~50 bytes
+         + metadata  → columns (emotion, flags, topic, etc.)  ~100 bytes
+```
+
+### Aging policy
+
+Memories age like human memory — sensory detail fades first, narrative next, essence persists:
+
+```
+Day 0          Tier 1 + Tier 2 + Tier 3    ~400 bytes    full fidelity
+~2 weeks       ██████  Tier 2 + Tier 3      ~200 bytes    original NULLed
+~2 months      ██████  ████████  Tier 3      ~50 bytes     English NULLed
+Forever                          Tier 3      ~50 bytes     ABM-L + metadata
+```
+
+**Storage savings over time:**
+- 10,000 memories, all tiers: ~4 MB
+- After aging: ~500 KB (87.5% reduction)
+
+### Protection from aging
+
+Not all memories age equally. Protected memories keep all tiers longer:
+
+| Condition | Original TTL | English TTL |
+|---|---|---|
+| Default | 14 days | 60 days |
+| High emotion (\|score\| ≥ 4) | 90 days | 1 year |
+| Frequently recalled (count ≥ 3) | 90 days | 1 year |
+| Core tier | 90 days | 1 year |
+| Flashbulb (\|score\| ≥ 4 AND "pivot" flag) | Never | Never |
+
+Flashbulb memories — the pivotal moments — keep full fidelity forever. Everything else gradually compresses to its essence.
+
+### What survives aging
+
+When English is NULLed, these persist:
+- `content_compressed` (ABM-L) — the fact itself
+- `embedding` BLOB — vector for semantic search (computed from English, but independent)
+- All metadata columns — emotion_tags, importance_flags, topic, tier, confidence, etc.
+- FTS5 entry removed (no text to index) — but embedding search still works
+
+### Implementation
+
+Aging is a Dreamy sleep step, not real-time:
+
+```sql
+-- Step 1: NULL originals past TTL (protected memories exempt)
+UPDATE extracted_memories
+SET content_original = NULL
+WHERE content_original IS NOT NULL
+  AND created_at < :original_cutoff
+  AND ABS(COALESCE(emotion_score, 0)) < 4
+  AND COALESCE(recall_count, 0) < 3
+  AND tier != 'core';
+
+-- Step 2: NULL English past TTL (protected memories exempt)
+UPDATE extracted_memories
+SET content_en = NULL
+WHERE content_en IS NOT NULL
+  AND created_at < :english_cutoff
+  AND ABS(COALESCE(emotion_score, 0)) < 4
+  AND COALESCE(recall_count, 0) < 3
+  AND NOT (importance_flags LIKE '%pivot%' AND ABS(COALESCE(emotion_score, 0)) >= 4);
+
+-- Step 3: Clean up FTS5 for NULLed English entries
+INSERT INTO extracted_memories_fts(extracted_memories_fts, rowid, content_en)
+  SELECT 'delete', id, '' FROM extracted_memories WHERE content_en IS NULL;
+```
+
+### Configuration
+
+```env
+MEMORY_ORIGINAL_TTL_DAYS=14      # default: 14 days
+MEMORY_ENGLISH_TTL_DAYS=60       # default: 60 days
+MEMORY_AGING_ENABLED=true        # default: true
+```
+
+### Recall behavior with aged memories
+
+```
+agentbridge-recall "auth decision"
+  │
+  ├── Memory has ABM-L + English → return ABM-L (default) or English (--full)
+  ├── Memory has ABM-L only (English aged) → return ABM-L, --full returns ABM-L too
+  └── Search: embedding search always works (vectors persist), FTS5 only for non-aged
+```
+
+The agent never notices aging — ABM-L is always there. Deep investigation (`--full`) gracefully degrades: returns English if available, ABM-L if not.
+
+### The human brain parallel
+
+| Human memory | ABM tier | Fades after |
+|---|---|---|
+| Sensory memory (exact words, tone, setting) | Original language | ~2 weeks |
+| Episodic memory (what happened, full narrative) | English description | ~2 months |
+| Semantic memory (the fact, the lesson, the decision) | ABM-L | Never |
+
+You remember THAT you decided to use Clerk and WHY (ABM-L). You forget the exact conversation where you discussed it (English). You forget what language you were speaking (Original). Just like real memory.
 
 ### Store-time compression (not sleep-time)
 
