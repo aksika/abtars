@@ -48,7 +48,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     attempts++;
     progress = null;
     try {
-      const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "cli", "agentbridge-sleep.js");
+      const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "agentbridge-sleep.js");
       const proc = spawn(process.execPath, [sleepScript], { stdio: ["ignore", "pipe", "ignore"] });
       child = proc;
 
