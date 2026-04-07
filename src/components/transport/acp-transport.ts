@@ -10,6 +10,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn, logError } from "../logger.js";
+import { writeRestartReason } from "../restart-reason.js";
 
 /**
  * ACP transport using @agentclientprotocol/sdk.
@@ -331,5 +332,72 @@ export class AcpTransport implements IKiroTransport {
     this.sessions.set(sessionKey, session.sessionId);
     logInfo(this.tag, `Created session ${session.sessionId} for ${sessionKey}`);
     return session.sessionId;
+  }
+
+  // --- Health check (called by heartbeat) ---
+
+  private _watchdogL1Done = false;
+  private _watchdogLastActionAt = 0;
+  private readonly _watchdogCooldown = 60 * 60 * 1000;
+  private readonly _toolTimeout = (parseInt(process.env["WATCHDOG_TOOL_TIMEOUT_SEC"] ?? "180", 10)) * 1000;
+  private readonly _silentTimeout = (parseInt(process.env["WATCHDOG_SILENT_SEC"] ?? "300", 10)) * 1000;
+  private readonly _endlessTimeout = (parseInt(process.env["WATCHDOG_ENDLESS_SEC"] ?? "600", 10)) * 1000;
+
+  async healthCheck(): Promise<void> {
+    if (this.promptStartedAt <= this.lastSuccessAt) { this._watchdogL1Done = false; return; }
+
+    const now = Date.now();
+    if (now - this._watchdogLastActionAt < this._watchdogCooldown && this._watchdogL1Done) return;
+
+    const silentMs = now - this.lastActivityAt;
+    const totalMs = now - this.promptStartedAt;
+
+    // Process dead
+    if (!this.isConnected) {
+      logWarn(this.tag, `[watchdog] Process dead — reinit + re-send`);
+      this._watchdogLastActionAt = now;
+      writeRestartReason("watchdog: process dead");
+      await this.initialize();
+      if (this.lastPromptText) await this.sendPrompt(this.lastSessionKey, this.lastPromptText);
+      return;
+    }
+
+    // Tool hung
+    if (this.toolInFlight && now - this.toolInFlight.startedAt > this._toolTimeout) {
+      const { title } = this.toolInFlight;
+      const dur = Math.round((now - this.toolInFlight.startedAt) / 1000);
+      logWarn(this.tag, `[watchdog] Tool "${title}" hung ${dur}s — interrupting`);
+      this._watchdogLastActionAt = now;
+      await this.sendInterrupt();
+      this.toolInFlight = null;
+      if (!this._watchdogL1Done) {
+        await this.sendPrompt(this.lastSessionKey, `[SYSTEM] Your tool call "${title}" was interrupted after ${dur} seconds. Try a different approach.`);
+        this._watchdogL1Done = true;
+      }
+      return;
+    }
+
+    // Endless loop (active but >10min)
+    if (silentMs < this._silentTimeout && totalMs > this._endlessTimeout) {
+      logWarn(this.tag, `[watchdog] Endless (${Math.round(totalMs / 1000)}s) — interrupting`);
+      this._watchdogLastActionAt = now;
+      await this.sendInterrupt();
+      if (!this._watchdogL1Done) {
+        await this.sendPrompt(this.lastSessionKey, "[SYSTEM] Interrupted — you appeared stuck in a loop. Please wrap up and respond to the user.");
+        this._watchdogL1Done = true;
+      }
+      return;
+    }
+
+    // Silent (>5min, no tool)
+    if (silentMs > this._silentTimeout && !this.toolInFlight) {
+      if (!this._watchdogL1Done) {
+        logWarn(this.tag, `[watchdog] Silent ${Math.round(silentMs / 1000)}s — re-sending`);
+        this._watchdogL1Done = true;
+        this._watchdogLastActionAt = now;
+        if (this.lastPromptText) await this.sendPrompt(this.lastSessionKey, this.lastPromptText);
+      }
+      // L2 handled by heartbeat watchdog timer (stale lastHeartbeat → restart)
+    }
   }
 }

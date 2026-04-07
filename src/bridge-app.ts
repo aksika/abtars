@@ -7,7 +7,7 @@ import { agentBridgeHome } from "./paths.js";
 
 import { TmuxClient } from "./components/transport/tmux-client.js";
 import { AcpTransport } from "./components/transport/acp-transport.js";
-import { createWatchdogTask } from "./components/watchdog.js";
+import { writeRestartReason } from "./components/restart-reason.js";
 import { createSelfHealerTask } from "./components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
 import type { SttConfig } from "./components/stt.js";
@@ -27,7 +27,6 @@ import { DashboardServer } from "./components/dashboard/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard/dashboard-ui.js";
 import { loadNLMConfig } from "./components/nlm-command-handler.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
-import { writeRestartReason } from "./components/restart-reason.js";
 import { isDailyCycleDue } from "./components/daily-cycle.js";
 import { classifyResume } from "./components/platform-detect.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
@@ -691,24 +690,23 @@ export async function startBridge(): Promise<void> {
   heartbeat.registerTask(createDbIntegrityTask(memory));
 
   // --- Watchdog: detect stuck agent ---
-  if (transport instanceof AcpTransport) {
-    heartbeat.registerTask(createWatchdogTask(transport, () => process.exit(0)));
-  } else if ("promptStartedAt" in transport) {
-    // DirectApiTransport — basic stuck detection via promptStartedAt
-    const STUCK_MS = (parseInt(process.env["WATCHDOG_SILENT_SEC"] ?? "300", 10)) * 1000;
-    heartbeat.registerTask({
-      name: "watchdog",
-      execute: async () => {
-        const t = transport as unknown as { promptStartedAt: number | null; lastActivityAt: number | null };
-        if (!t.promptStartedAt) return;
-        const idle = Date.now() - (t.lastActivityAt ?? t.promptStartedAt);
-        if (idle > STUCK_MS) {
-          logWarn("watchdog", `Direct API prompt stuck (${Math.round(idle / 1000)}s idle) — aborting`);
-          await transport.sendInterrupt();
-        }
-      },
-    });
+  if (transport.healthCheck) {
+    heartbeat.registerTask({ name: "watchdog", execute: () => transport.healthCheck!() });
   }
+
+  // --- Heartbeat watchdog: independent timer, restarts if heartbeat dies ---
+  const HB_WATCHDOG_INTERVAL = 60_000;
+  const HB_STALE_THRESHOLD = hbIntervalMs * 3;
+  setInterval(() => {
+    try {
+      const lock = JSON.parse(readFileSync(bridgeLockPath, "utf-8"));
+      if (lock.lastHeartbeat && Date.now() - lock.lastHeartbeat > HB_STALE_THRESHOLD) {
+        logWarn("hb-watchdog", `Heartbeat stale (${Math.round((Date.now() - lock.lastHeartbeat) / 60000)}min) — forcing restart`);
+        writeRestartReason("hb-watchdog: heartbeat stale");
+        process.exit(1);
+      }
+    } catch { /* lock file not ready yet */ }
+  }, HB_WATCHDOG_INTERVAL);
 
   // --- Restart flag check ---
   heartbeat.registerTask({

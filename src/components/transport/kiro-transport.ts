@@ -43,6 +43,9 @@ export interface IKiroTransport {
   /** Execute a transport-specific command. Returns output text. */
   executeCommand?(cmd: string): Promise<string>;
 
+  /** Self-heal check — called by heartbeat. Transport detects and recovers from stuck states. */
+  healthCheck?(): Promise<void>;
+
   /** Restart the CLI session (tmux-only). No-op if not supported. */
   restartSession?(workingDir: string, model?: string): Promise<void>;
 }

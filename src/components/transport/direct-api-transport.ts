@@ -345,4 +345,15 @@ export class DirectApiTransport implements IKiroTransport {
   // Watchdog support
   get promptStartedAt(): number | null { return this._promptStartedAt; }
   get lastActivityAt(): number | null { return this._lastActivityAt; }
+
+  private readonly _stuckTimeout = (parseInt(process.env["WATCHDOG_SILENT_SEC"] ?? "300", 10)) * 1000;
+
+  async healthCheck(): Promise<void> {
+    if (!this._promptStartedAt) return;
+    const idle = Date.now() - (this._lastActivityAt ?? this._promptStartedAt);
+    if (idle > this._stuckTimeout) {
+      logWarn(TAG, `[watchdog] Prompt stuck (${Math.round(idle / 1000)}s idle) — aborting`);
+      await this.sendInterrupt();
+    }
+  }
 }
