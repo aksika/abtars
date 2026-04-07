@@ -16,7 +16,7 @@
 
 import type Database from "better-sqlite3";
 import type { MemoryIndex } from "./memory-index.js";
-import type { SearchResult, MemorySearchResult } from "../types/memory.js";
+import type { SearchResult, MemorySearchResult } from "./mem-types.js";
 import { searchConsolidationFiles, getLatestConsolidationFile } from "./consolidation-search.js";
 import { applyMMR } from "./mmr.js";
 import { readFileSync } from "node:fs";

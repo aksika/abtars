@@ -4,7 +4,7 @@
  * MemoryManager is the concrete implementation.
  */
 
-import type { SearchOptions, SearchResult, MessageRecord } from "../types/index.js";
+import type { SearchOptions, SearchResult, MessageRecord } from "./mem-types.js";
 import type { MemoryConfig } from "./memory-config.js";
 
 export interface IMemorySystem {

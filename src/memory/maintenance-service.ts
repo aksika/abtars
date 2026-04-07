@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync, appendFileSync, existsSync, statSync } from "
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
-import type { ForgetResult } from "../types/index.js";
+import type { ForgetResult } from "./mem-types.js";
 import type { MemoryIndex } from "./memory-index.js";
 import type { MemoryEditor } from "./memory-editor.js";
 import { logError, logInfo, logWarn } from "./mem-logger.js";

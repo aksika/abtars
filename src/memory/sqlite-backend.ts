@@ -4,7 +4,7 @@
  */
 
 import { join } from "node:path";
-import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "../types/index.js";
+import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "./mem-types.js";
 import type { RecallParams, RecallResult } from "./recall-engine.js";
 import type { MergeResult, MemoryBackend } from "./memory-backend.js";
 import { MemoryManager } from "./memory-manager.js";

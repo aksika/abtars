@@ -5,7 +5,7 @@
  * CLI tools use createMemoryBackend() from backend-factory.ts.
  */
 
-import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "../types/index.js";
+import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "./mem-types.js";
 import type { RecallParams, RecallResult } from "./recall-engine.js";
 
 /** Merge result from combining two memories. */

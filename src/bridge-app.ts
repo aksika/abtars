@@ -13,8 +13,7 @@ import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
 import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
-import { loadMemoryConfig } from "./memory/memory-config.js";
-import { MemoryManager } from "./memory/memory-manager.js";
+import { loadMemoryConfig, MemoryManager, setLogger as setMemoryLogger } from "./memory/index.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
 import type { IKiroTransport } from "./components/transport/kiro-transport.js";
 import { parsePlatformFlags } from "./components/cli-flags.js";
@@ -76,7 +75,7 @@ async function sendBackOnline(
 }
 
 import type { Config } from "./types/index.js";
-import type { MemoryConfig } from "./memory/memory-config.js";
+import type { MemoryConfig } from "./memory/index.js";
 import type { PipelineDeps } from "./components/message-pipeline.js";
 import { createCapabilityRegistry, createCapabilityApi } from "./capabilities/capability.js";
 import type { CapabilityRegistry, CapabilityRegisterFn } from "./capabilities/capability.js";
@@ -119,8 +118,7 @@ export class Bridge {
       return;
     }
     // Inject bridge logger into memory package
-    const { setLogger } = await import("./memory/mem-logger.js");
-    setLogger({ logInfo, logWarn, logError });
+    setMemoryLogger({ logInfo, logWarn, logError });
 
     const memory = new MemoryManager(this.memoryConfig);
     await memory.initialize();

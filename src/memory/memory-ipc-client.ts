@@ -4,7 +4,7 @@
  */
 
 import * as net from "node:net";
-import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "../types/index.js";
+import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "./mem-types.js";
 import type { RecallParams, RecallResult } from "./recall-engine.js";
 import type { MergeResult, MemoryBackend } from "./memory-backend.js";
 import { getSocketPath } from "./memory-ipc-server.js";

@@ -10,7 +10,7 @@ import { MaintenanceService } from "./maintenance-service.js";
 import { loadEmbedConfig } from "./ollama-embed.js";
 import type { IHeartbeat } from "./imemory-system.js";
 import { getLatestConsolidationFile } from "./consolidation-search.js";
-import type { SearchResult, SearchOptions } from "../types/index.js";
+import type { SearchResult, SearchOptions } from "./mem-types.js";
 import { logError, logInfo, logWarn } from "./mem-logger.js";
 
 const TAG = "memory-manager";

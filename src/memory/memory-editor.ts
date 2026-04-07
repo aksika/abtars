@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "../types/index.js";
+import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "./mem-types.js";
 import { clampEmotionScore } from "./emotion-utils.js";
 import { loadEmbedConfig, embedText } from "./ollama-embed.js";
 import { logError, logInfo } from "./mem-logger.js";
