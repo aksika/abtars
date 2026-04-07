@@ -35,12 +35,33 @@ Add `valid_from TEXT` and `valid_to TEXT` to `extracted_memories`.
 - Recall defaults to `valid_to IS NULL` (current facts only)
 - Historical queries: `--include-expired` flag on recall
 
-### 1.4 Lower storage threshold
+### 1.4 Core files restructure
 
-- Instant-store during conversation: store more aggressively. Observations, context, half-formed thoughts.
-- Current bar: agent decides what's "worth remembering"
-- New bar: if it's a fact, preference, decision, event, or lesson — store it. Dreamy curates later.
-- Sleep dedup handles the noise.
+Split `agent_notes.md` and migrate `user_profile.md`:
+
+**Before:**
+```
+~/.agentbridge/core/
+├── SOUL.md           (static — personality, rules)
+├── TOOLS.md          (static — CLI reference)
+├── user_profile.md   (static — but shouldn't be)
+└── agent_notes.md    (dynamic — mixed rules + lessons)
+```
+
+**After:**
+```
+~/.agentbridge/core/
+├── SOUL.md           (static — personality, rules)
+├── TOOLS.md          (static — CLI reference)
+├── core_facts.md     (static — hard constraints, operational rules, environment facts)
+└── agent_notes.md    (dynamic — behavioral lessons, patterns, corrections. Agent writes this.)
+```
+
+- `core_facts.md` — renamed from current `agent_notes.md`, contains the static rules (e.g. `/mnt/c/ forbidden`, `A2A peers are consultants only`, `EN is search language`). Human edits or Dreamy promotes from agent_notes.
+- `agent_notes.md` — fresh file, agent writes behavioral lessons during conversation (e.g. `lead with content not process narration`, `check logs before asking user to resend`).
+- `user_profile.md` — stays for now, migrates to core-tier memories in Phase 2.3 (Dreamy keeps it current automatically).
+
+### 1.5 Lower storage threshold
 
 ### Schema migration
 
@@ -130,6 +151,7 @@ On session start, load all valid core-tier entries as compressed context:
 - Inject into session-start prompt (AAAK compressed)
 - Replaces current static core-knowledge approach
 - Dynamic: as Dreamy promotes/invalidates, wake-up context evolves automatically
+- `user_profile.md` migrates here: user facts (name, timezone, language, environment) become core-tier memories that Dreamy keeps current. The static file is removed once core-tier wake-up is live.
 
 ### 2.4 Cross-topic linking (tunnels)
 
@@ -142,8 +164,8 @@ When the same entity/concept appears in multiple topics, create a link:
 
 ## Implementation order
 
-Phase 1: 1.1 (topic) → 1.2 (tier) → 1.3 (temporal) → 1.4 (lower threshold) → sleep steps → recall changes
-Phase 2: 2.1 (AAAK + emotion) → 2.2 (contradiction) → 2.3 (wake-up from core) → 2.4 (tunnels)
+Phase 1: 1.1 (topic) → 1.2 (tier) → 1.3 (temporal) → 1.4 (core files split) → 1.5 (lower threshold) → sleep steps → recall changes
+Phase 2: 2.1 (AAAK + emotion) → 2.2 (contradiction) → 2.3 (wake-up from core + user_profile migration) → 2.4 (tunnels)
 
 Phase 1 is the foundation — all column additions, migration, CLI updates, sleep step changes.
 Phase 2 is enhancement — each item is independent and can be done in any order after Phase 1.
