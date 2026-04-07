@@ -8,7 +8,7 @@ import { MessageStore } from "./message-store.js";
 import { MemoryEditor } from "./memory-editor.js";
 import { MaintenanceService } from "./maintenance-service.js";
 import { loadEmbedConfig } from "./ollama-embed.js";
-import { HeartbeatSystem } from "../components/heartbeat-system.js";
+import type { IHeartbeat } from "./imemory-system.js";
 import { getLatestConsolidationFile } from "./consolidation-search.js";
 import type { SearchResult, SearchOptions } from "../types/index.js";
 import { logError, logInfo, logWarn } from "./mem-logger.js";
@@ -30,7 +30,7 @@ export class MemoryManager {
   private db: Database.Database | null = null;
   private memoryIndex: MemoryIndex | null = null;
   private llmCall: ((prompt: string, content: string) => Promise<string>) | null = null;
-  private heartbeat: HeartbeatSystem | null = null;
+  private heartbeat: IHeartbeat | null = null;
 
   /** Message recording and loading. Available after initialize(). */
   store!: MessageStore;
@@ -170,7 +170,7 @@ export class MemoryManager {
     } catch { return null; }
   }
 
-  setHeartbeat(hb: HeartbeatSystem): void { this.heartbeat = hb; }
+  setHeartbeat(hb: IHeartbeat): void { this.heartbeat = hb; }
   stopHeartbeat(): void { this.heartbeat?.stop(); this.heartbeat = null; }
 
   getCronInfo(): { heartbeatRunning: boolean; intervalMs: number; tasks: string[]; taskStatuses: ReadonlyMap<string, string>; lastSleepAudit: string | null } {
