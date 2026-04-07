@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createAgeCheckTask } from "../components/heartbeat-tasks.js";
 import type { AgeCheckDeps } from "../components/heartbeat-tasks.js";
+import { resetBedtimeCounter } from "../components/daily-cycle.js";
 
 let tmpDir: string;
 
@@ -66,9 +67,12 @@ describe("Integration: age-check task", () => {
     // Bridge started yesterday
     writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
 
+    resetBedtimeCounter();
     const task = createAgeCheckTask(makeDeps());
-    await task.execute();
-
+    // Need 6 quiet ticks before trigger
+    for (let i = 0; i < 5; i++) await task.execute();
+    expect(exitSpy).not.toHaveBeenCalled();
+    await task.execute(); // 6th tick
     expect(exitSpy).toHaveBeenCalledWith(0);
     vi.useRealTimers();
   });

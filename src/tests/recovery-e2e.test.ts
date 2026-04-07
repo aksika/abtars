@@ -5,7 +5,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { isDailyCycleDue, type DailyCycleDeps } from "../components/daily-cycle.js";
+import { isDailyCycleDue, resetBedtimeCounter, type DailyCycleDeps } from "../components/daily-cycle.js";
 import { classifyResume } from "../components/platform-detect.js";
 
 let tmpDir: string;
@@ -41,7 +41,11 @@ describe("Recovery E2E: standby resume + daily cycle", () => {
     // Bridge started yesterday (before today's SLEEP_TIME)
     writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
 
-    expect(isDailyCycleDue(makeDeps())).toBe(true);
+    resetBedtimeCounter();
+    const deps = makeDeps();
+    // Need 6 quiet ticks before it triggers
+    for (let i = 0; i < 5; i++) expect(isDailyCycleDue(deps)).toBe(false);
+    expect(isDailyCycleDue(deps)).toBe(true);
   });
 
   it("classifyResume returns valid wake type", () => {
@@ -58,29 +62,26 @@ describe("Recovery E2E: standby resume + daily cycle", () => {
     expect(isDailyCycleDue(makeDeps({ isSleepActive: () => true }))).toBe(false);
   });
 
-  it("full overnight: Power Nap wakes → 0 restarts before SLEEP_TIME, 1 after", () => {
+  it("full overnight: Power Nap wakes → 0 restarts before SLEEP_TIME, triggers after 6 quiet ticks", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "rec-"));
     const bridgeLockPath = join(tmpDir, "bridge.lock");
     const bridgeStartedAt = new Date(2026, 3, 4, 20, 0).getTime(); // Started 8pm yesterday
     writeFileSync(bridgeLockPath, JSON.stringify({ pid: 1, startedAt: bridgeStartedAt, lastHeartbeat: bridgeStartedAt }));
 
+    resetBedtimeCounter();
     const deps = makeDeps({ bridgeLockPath });
-    const results: boolean[] = [];
 
-    // Simulate Power Nap wakes every 30min from 2am to 7am
-    for (let hour = 2; hour <= 7; hour++) {
-      for (const min of [0, 30]) {
-        vi.setSystemTime(new Date(2026, 3, 5, hour, min));
-        results.push(isDailyCycleDue(deps));
-      }
+    // Before BED_TIME: all false
+    vi.setSystemTime(new Date(2026, 3, 5, 4, 0));
+    expect(isDailyCycleDue(deps)).toBe(false);
+
+    // After BED_TIME: accumulate 6 quiet ticks (5min each)
+    for (let tick = 0; tick < 5; tick++) {
+      vi.setSystemTime(new Date(2026, 3, 5, 6, tick * 5));
+      expect(isDailyCycleDue(deps)).toBe(false);
     }
-
-    // All before 06:00 should be false
-    const before6 = results.slice(0, 8); // 02:00 to 05:30
-    expect(before6.every(r => r === false)).toBe(true);
-
-    // First tick at or after 06:00 should be true
-    const at6 = results[8]; // 06:00
-    expect(at6).toBe(true);
+    // 6th tick triggers
+    vi.setSystemTime(new Date(2026, 3, 5, 6, 25));
+    expect(isDailyCycleDue(deps)).toBe(true);
   });
 });
