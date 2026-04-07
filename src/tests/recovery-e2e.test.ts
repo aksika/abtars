@@ -39,7 +39,7 @@ describe("Recovery E2E: standby resume + daily cycle", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "rec-"));
     vi.useFakeTimers({ now: new Date(2026, 3, 5, 8, 0) }); // 08:00
     // Bridge started yesterday (before today's SLEEP_TIME)
-    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000 }));
+    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
 
     expect(isDailyCycleDue(makeDeps())).toBe(true);
   });
@@ -62,7 +62,7 @@ describe("Recovery E2E: standby resume + daily cycle", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "rec-"));
     const bridgeLockPath = join(tmpDir, "bridge.lock");
     const bridgeStartedAt = new Date(2026, 3, 4, 20, 0).getTime(); // Started 8pm yesterday
-    writeFileSync(bridgeLockPath, JSON.stringify({ pid: 1, startedAt: bridgeStartedAt }));
+    writeFileSync(bridgeLockPath, JSON.stringify({ pid: 1, startedAt: bridgeStartedAt, lastHeartbeat: bridgeStartedAt }));
 
     const deps = makeDeps({ bridgeLockPath });
     const results: boolean[] = [];

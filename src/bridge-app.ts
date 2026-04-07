@@ -603,6 +603,7 @@ export async function startBridge(): Promise<void> {
   const heartbeat = new HeartbeatSystem({
     enabled: true,
     intervalMs: hbIntervalMs,
+    bridgeLockPath,
     sleepActive: isSleepActive,
     onStandbyResume: (gapMs) => {
       // L1: Platform-specific check

@@ -1,12 +1,11 @@
 import { logInfo, logWarn, logDebug } from "./logger.js";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { agentBridgeHome } from "../paths.js";
+import { writeFileSync, readFileSync } from "node:fs";
 import type { HeartbeatTask } from "../types/memory.js";
 
 export type HeartbeatConfig = {
   enabled: boolean;
   intervalMs: number;
+  bridgeLockPath: string;
   /** When true, skip all heavy tasks (e.g. sleep in progress — avoid model rate limits). */
   sleepActive?: () => boolean;
   /** Called when standby resume detected (gap > interval×3). Bridge should doctor + exit. */
@@ -129,9 +128,11 @@ export class HeartbeatSystem {
       }
     }
 
-    // Write heartbeat timestamp — doctor checks this on startup
+    // Update bridge.lock with lastHeartbeat
     try {
-      writeFileSync(join(agentBridgeHome(), "memory", ".heartbeat"), String(Date.now()), "utf-8");
+      const lock = JSON.parse(readFileSync(this.config.bridgeLockPath, "utf-8"));
+      lock.lastHeartbeat = Date.now();
+      writeFileSync(this.config.bridgeLockPath, JSON.stringify(lock), "utf-8");
     } catch { /* best-effort */ }
   }
 }

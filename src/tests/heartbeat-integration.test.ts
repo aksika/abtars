@@ -35,7 +35,7 @@ describe("Integration: age-check task", () => {
   it("skips when current hour is before SLEEP_TIME", async () => {
     const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     vi.useFakeTimers({ now: new Date(2026, 3, 5, 5, 0) }); // 05:00 < 06:00
-    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000 }));
+    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
 
     const task = createAgeCheckTask(makeDeps());
     await task.execute();
@@ -64,7 +64,7 @@ describe("Integration: age-check task", () => {
     const now = new Date(2026, 3, 5, 10, 0); // 10:00
     vi.useFakeTimers({ now });
     // Bridge started yesterday
-    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000 }));
+    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
 
     const task = createAgeCheckTask(makeDeps());
     await task.execute();
@@ -76,7 +76,7 @@ describe("Integration: age-check task", () => {
   it("skips when busy chats exist", async () => {
     const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     vi.useFakeTimers({ now: new Date(2026, 3, 5, 10, 0) });
-    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000 }));
+    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
 
     const task = createAgeCheckTask(makeDeps({ busyChats: new Set(["telegram:100"]) }));
     await task.execute();
@@ -88,7 +88,7 @@ describe("Integration: age-check task", () => {
   it("skips when sleep is active", async () => {
     const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
     vi.useFakeTimers({ now: new Date(2026, 3, 5, 10, 0) });
-    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000 }));
+    writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
 
     const task = createAgeCheckTask(makeDeps({ isSleepActive: () => true }));
     await task.execute();

@@ -411,9 +411,9 @@ async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<bool
 
   // Last tick age
   try {
-    const hbTs = parseInt(readFileSync(join(agentBridgeHome(), "memory", ".heartbeat"), "utf-8"), 10);
-    if (hbTs > 0) {
-      const agoMin = Math.round((Date.now() - hbTs) / 60000);
+    const lock = JSON.parse(readFileSync(join(agentBridgeHome(), "bridge.lock"), "utf-8"));
+    if (lock.lastHeartbeat > 0) {
+      const agoMin = Math.round((Date.now() - lock.lastHeartbeat) / 60000);
       lines.push("", `🫀 Last tick: ${agoMin}min ago`);
     }
   } catch { /* */ }
@@ -741,8 +741,8 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
       lines.push(`😴 Sleep: ${sp.percent}% (${sp.step})`);
     }
     try {
-      const hbTs = parseInt(readFileSync(join(agentBridgeHome(), "memory", ".heartbeat"), "utf-8"), 10);
-      if (hbTs > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - hbTs) / 60000)}min ago`);
+      const lock = JSON.parse(readFileSync(join(agentBridgeHome(), "bridge.lock"), "utf-8"));
+      if (lock.lastHeartbeat > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - lock.lastHeartbeat) / 60000)}min ago`);
     } catch { /* */ }
     try {
       const ce = cronReadEntries();

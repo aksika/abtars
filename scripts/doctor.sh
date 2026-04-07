@@ -147,11 +147,14 @@ if grep -q "^EMBEDDING_ENABLED=true" "$AB/.env" 2>/dev/null; then
 fi
 
 # 10. Heartbeat liveness (startup check — was previous session's heartbeat healthy?)
-HB_FILE="$AB/memory/.heartbeat"
-if [ -f "$HB_FILE" ]; then
-  HB_AGE=$(( ($(date +%s) - $(stat -c %Y "$HB_FILE" 2>/dev/null || echo 0)) / 60 ))
-  if [ "$HB_AGE" -gt 15 ]; then
-    warn "heartbeat was stale before restart (last tick ${HB_AGE}min ago) — heartbeat may have stopped"
+LOCK_FILE="$AB/bridge.lock"
+if [ -f "$LOCK_FILE" ]; then
+  HB_TS=$(python3 -c "import json; print(json.load(open('$LOCK_FILE')).get('lastHeartbeat',0))" 2>/dev/null || echo 0)
+  if [ "$HB_TS" -gt 0 ]; then
+    HB_AGE=$(( ($(date +%s) - HB_TS / 1000) / 60 ))
+    if [ "$HB_AGE" -gt 15 ]; then
+      warn "heartbeat was stale before restart (last tick ${HB_AGE}min ago) — heartbeat may have stopped"
+    fi
   fi
 fi
 
