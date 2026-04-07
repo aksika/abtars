@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { StateSnapshot } from "./sleep-state-gatherer.js";
+import type { StateSnapshot } from "../../memory/sleep-state-gatherer.js";
 
 // Must mock before import
 vi.mock("node:os", async () => {
