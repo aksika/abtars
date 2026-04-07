@@ -197,7 +197,11 @@ Single heartbeat loop controls everything: task scheduling, standby detection, w
 
 **Standby detection:** Tracks `lastTickAt`. If gap between ticks > interval×3 (~15min), process was suspended (OS standby). Triggers the recovery flow (see Recovery section below).
 
-**bridge.lock:** `~/.agentbridge/bridge.lock` — created on startup with `{pid, startedAt}`. LaunchAgent ThrottleInterval: 60s.
+**bridge.lock:** `~/.agentbridge/bridge.lock` — created on startup with `{pid, startedAt}`. Updated every tick with `lastHeartbeat` timestamp. Single source of truth for process health. Read by: `isDailyCycleDue`, `/heartbeat` command, `doctor.sh`, heartbeat watchdog timer.
+
+**Dark wake guard:** `isDailyCycleDue` requires `lastHeartbeat` to exist in the lock file. No successful tick = system not ready (dark wake, network down). Replaces the old 5-minute uptime heuristic.
+
+**Heartbeat watchdog timer:** Standalone `setInterval` (60s) in `bridge-app.ts`, independent of the heartbeat system. Reads `bridge.lock.lastHeartbeat` — if stale > 3× heartbeat interval (~15min), forces `process.exit(1)`. Catches dead heartbeat while process is alive. LaunchAgent restarts.
 
 **Task registration order:**
 ```
@@ -271,11 +275,11 @@ When heartbeat detects a skipped tick (gap > interval×3):
 - Unknown OS: falls through to Layer 2.
 
 **Layer 2 — Daily cycle check** (`daily-cycle.ts` → `isDailyCycleDue()`):
-- Past `SLEEP_TIME`? AND bridge started before today's `SLEEP_TIME`? AND idle >1h? AND not busy/sleeping?
+- Past `SLEEP_TIME`? AND bridge started before today's `SLEEP_TIME`? AND `lastHeartbeat` exists in lock file? AND idle >1h? AND not busy/sleeping?
 - All true → restart (daily cycle + sleep will run on next startup)
 - Any false → continue running (DEBUG log). Watchdog handles any transport breakage.
 
-No `doctor --fix`, no unconditional restart, no grace period. The bridge survives Power Nap wakes silently.
+No `doctor --fix`, no unconditional restart, no grace period. The bridge survives Power Nap / dark wakes silently — `lastHeartbeat` absent means no successful tick, so daily cycle is blocked.
 
 ### Daily Cycle (age-check)
 
@@ -285,20 +289,28 @@ Config: `SLEEP_TIME=06:00` (default 6am). The daily restart is the ONLY schedule
 
 ### Watchdog
 
-Heartbeat task that monitors the transport for stuck states.
+Each transport owns its own health check via `healthCheck()` method on `IKiroTransport`. Called by a single generic heartbeat task.
 
-**ACP transport** (`watchdog.ts`):
+**ACP transport** (`AcpTransport.healthCheck()`):
 
 | Case | Detection | L1 Action | L2 Action |
 |------|-----------|-----------|-----------|
 | Tool hung | `toolInFlight` > 3min | `sendInterrupt()` + explain to agent | Reset session + re-send prompt |
-| Process dead | `agent === null` | Reinit transport + re-send prompt | — |
-| Silent | No activity > 5min | Re-send same prompt | `process.exit(0)` |
+| Process dead | `!isConnected` | Reinit transport + re-send prompt | — |
+| Silent | No activity > 5min | Re-send same prompt | Heartbeat watchdog timer restarts bridge |
 | Endless | Active > 10min | `sendInterrupt()` + tell agent it's looping | Reset session + re-send prompt |
 
-**Direct API transport**: basic stuck detection — if `promptStartedAt` set and `lastActivityAt` idle > `WATCHDOG_SILENT_SEC`, abort the request.
+**Direct API transport** (`DirectApiTransport.healthCheck()`): if `promptStartedAt` set and idle > `WATCHDOG_SILENT_SEC`, abort the request. Model fallback and leaky bucket handle the rest.
 
-**Recovery escalation**: L1 retry → L2 reset → L3 swap transport (TransportManager) → L4 `process.exit(0)`.
+**Heartbeat watchdog timer** (standalone `setInterval` in `bridge-app.ts`): checks `bridge.lock.lastHeartbeat` every 60s. If stale > 3× heartbeat interval → `process.exit(1)`. Catches dead heartbeat, stuck event loop (partial), or any failure that kills the heartbeat but not the process.
+
+**Recovery chain:**
+```
+Transport self-heals (healthCheck)
+  → Heartbeat watchdog catches dead heartbeat (setInterval → exit)
+    → LaunchAgent catches dead process (restart)
+      → doctor.sh checks lastHeartbeat age on startup (warns if previous session unhealthy)
+```
 
 Config: `WATCHDOG_TOOL_TIMEOUT_SEC=180`, `WATCHDOG_SILENT_SEC=300`, `WATCHDOG_ENDLESS_SEC=600`.
 
