@@ -615,7 +615,7 @@ export async function startBridge(): Promise<void> {
       }
 
       // L2: Daily cycle check
-      if (isDailyCycleDue({ sleepHour: SLEEP_HOUR, bridgeLockPath, memory, busyChats, isSleepActive })) {
+      if (isDailyCycleDue({ sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, bridgeLockPath, memory, busyChats, isSleepActive })) {
         logInfo("main", `🔄 Standby resume (${Math.round(gapMs / 60000)}min) + daily cycle due — restarting`);
         writeRestartReason(`daily-cycle: standby-resume ${Math.round(gapMs / 60000)}min`);
         try { unlinkSync(bridgeLockPath); } catch { /* */ }
@@ -673,7 +673,8 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- DB integrity check (hourly) ---
-  const SLEEP_HOUR = parseInt(process.env["SLEEP_TIME"]?.split(":")[0] ?? "6", 10);
+  const SLEEP_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? process.env["SLEEP_TIME"]?.split(":")[0] ?? "2", 10);
+  const SLEEP_MINUTE = parseInt(process.env["BED_TIME"]?.split(":")[1] ?? process.env["SLEEP_TIME"]?.split(":")[1] ?? "0", 10);
 
   // --- Floating compaction (idle-triggered) ---
   if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
@@ -685,7 +686,7 @@ export async function startBridge(): Promise<void> {
 
   // --- Daily cycle: restart after SLEEP_TIME ---
   heartbeat.registerTask(createAgeCheckTask({
-    memory, bridgeLockPath, sleepHour: SLEEP_HOUR, busyChats, isSleepActive,
+    memory, bridgeLockPath, sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, busyChats, isSleepActive,
     doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
   }));
 

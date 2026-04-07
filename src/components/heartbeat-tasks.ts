@@ -76,8 +76,8 @@ export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
     execute: async () => {
       if (!isDailyCycleDue(deps)) return;
 
-      logInfo("age-check", `🔄 Past SLEEP_TIME (${deps.sleepHour}:00) — daily restart`);
-      writeRestartReason(`daily-cycle: SLEEP_TIME ${deps.sleepHour}:00`);
+      logInfo("age-check", `🔄 Past BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — daily restart`);
+      writeRestartReason(`daily-cycle: BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}`);
       try { execSync(`${deps.doctorPath} --fix`, { timeout: 30000 }); } catch { /* */ }
       try { unlinkSync(deps.bridgeLockPath); } catch { /* */ }
       process.exit(0);

@@ -12,7 +12,7 @@ let tmpDir: string;
 
 function makeDeps(overrides: Partial<DailyCycleDeps> = {}): DailyCycleDeps {
   return {
-    sleepHour: 6,
+    sleepHour: 6, sleepMinute: 0,
     bridgeLockPath: join(tmpDir, "bridge.lock"),
     memory: null,
     busyChats: new Set(),

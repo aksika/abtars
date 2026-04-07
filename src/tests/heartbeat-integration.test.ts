@@ -14,7 +14,7 @@ function makeDeps(overrides: Partial<AgeCheckDeps> = {}): AgeCheckDeps {
   return {
     memory: null,
     bridgeLockPath: join(tmpDir, "bridge.lock"),
-    sleepHour: 6,
+    sleepHour: 6, sleepMinute: 0,
     busyChats: new Set(),
     isSleepActive: () => false,
     doctorPath: "/bin/true",

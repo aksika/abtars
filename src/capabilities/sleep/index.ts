@@ -73,6 +73,16 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         if (code === 0) {
           logInfo("sleep", `😴 Sleep finished successfully (attempt ${attempts})`);
           if (opts.memoryEnabled) opts.onComplete();
+          // Put Mac to sleep after successful sleep cycle
+          if (process.env["MAC_SLEEP_AFTER_DREAMY"] === "true") {
+            logInfo("sleep", "💤 Putting Mac to sleep...");
+            try {
+              const { execSync } = require("node:child_process") as typeof import("node:child_process");
+              execSync("pmset sleepnow", { timeout: 5000 });
+            } catch (err) {
+              logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
         } else if (attempts < MAX_RETRIES) {
           logWarn("sleep", `😴 Sleep failed (code=${code}, attempt ${attempts}/${MAX_RETRIES}) — retry in 5min`);
           setTimeout(spawnSleep, RETRY_MS);

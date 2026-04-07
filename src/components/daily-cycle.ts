@@ -6,6 +6,7 @@ import type { MemoryManager } from "../memory/memory-manager.js";
 
 export interface DailyCycleDeps {
   sleepHour: number;
+  sleepMinute: number;
   bridgeLockPath: string;
   memory: MemoryManager | null;
   busyChats: Set<string>;
@@ -15,11 +16,13 @@ export interface DailyCycleDeps {
 /** Returns true if conditions are met for the daily restart + sleep cycle. */
 export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   const now = new Date();
-  if (now.getHours() < deps.sleepHour) return false;
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const sleepMinutes = deps.sleepHour * 60 + deps.sleepMinute;
+  if (nowMinutes < sleepMinutes) return false;
 
   try {
     const lockData = JSON.parse(readFileSync(deps.bridgeLockPath, "utf-8"));
-    const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), deps.sleepHour).getTime();
+    const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), deps.sleepHour, deps.sleepMinute).getTime();
     if (lockData.startedAt >= todaySleepTime) return false;
     if (!lockData.lastHeartbeat) return false; // no successful tick yet — dark wake guard
   } catch { return false; }
