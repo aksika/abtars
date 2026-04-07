@@ -38,6 +38,7 @@ export type RawArgs = {
   keyword?: string;
   confidence?: string;
   sourceMessageIds?: string;
+  topic?: string;
   boost?: boolean;
   demote?: boolean;
   id?: string;
@@ -98,6 +99,7 @@ Options:
       case "--keyword":
       case "--tags": parsed.keyword = args[++i] ?? ""; break;
       case "--confidence": parsed.confidence = args[++i] ?? ""; break;
+      case "--topic": parsed.topic = args[++i] ?? ""; break;
       case "--source-ids": parsed.sourceMessageIds = args[++i] ?? ""; break;
       case "--boost": parsed.boost = true; break;
       case "--demote": parsed.demote = true; break;
@@ -146,6 +148,7 @@ export function validateArgs(raw: RawArgs): { ok: true; params: InstantStorePara
       trust: raw.trust ? parseInt(raw.trust, 10) : undefined,
       integrity: raw.integrity ? parseInt(raw.integrity, 10) : undefined,
       credibility: raw.credibility ? parseInt(raw.credibility, 10) : undefined,
+      topic: raw.topic || undefined,
     },
   };
 }

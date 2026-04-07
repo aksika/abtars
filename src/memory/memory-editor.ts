@@ -128,13 +128,15 @@ export class MemoryEditor {
         `INSERT INTO extracted_memories
            (chat_id, content_original, content_en, memory_type, source_timestamp,
             preserve_original, preserved_keyword, emotion_score, created_at,
-            confidence, source_message_ids, classification, trust, integrity, credibility)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            confidence, source_message_ids, classification, trust, integrity, credibility,
+            topic, tier, valid_from)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'general', ?)`,
       ).run(
         params.chatId, params.contentOriginal.trim(), params.contentEn.trim(),
         params.memoryType, now, 1, params.keyword?.trim() || null, emotionScore, now,
         params.confidence ?? 3, params.sourceMessageIds?.trim() || null,
         params.classification ?? 1, params.trust ?? 0, params.integrity ?? 2, params.credibility ?? 6,
+        params.topic ?? "general", new Date(now).toISOString().slice(0, 10),
       );
 
       this.embedNewMemory(params.contentEn.trim());

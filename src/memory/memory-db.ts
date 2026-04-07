@@ -250,6 +250,25 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 7,
+    label: "ABM v1 — topic, tier, temporal validity",
+    up: (db) => {
+      for (const ddl of [
+        "ALTER TABLE extracted_memories ADD COLUMN topic TEXT DEFAULT 'general'",
+        "ALTER TABLE extracted_memories ADD COLUMN tier TEXT DEFAULT 'general'",
+        "ALTER TABLE extracted_memories ADD COLUMN valid_from TEXT",
+        "ALTER TABLE extracted_memories ADD COLUMN valid_to TEXT",
+      ]) {
+        try { db.exec(ddl); } catch { /* column already exists */ }
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_em_topic ON extracted_memories(topic);
+        CREATE INDEX IF NOT EXISTS idx_em_tier ON extracted_memories(tier);
+        CREATE INDEX IF NOT EXISTS idx_em_valid ON extracted_memories(valid_to);
+      `);
+    },
+  },
 ];
 
 // ── Migration runner ────────────────────────────────────────────────────────

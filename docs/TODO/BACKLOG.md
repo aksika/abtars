@@ -288,3 +288,9 @@ User asks "what's the best free model right now?" → agent runs the skill, retu
 - Unified `agentbridge-memory` CLI (standalone, no bridge needed)
 - MCP server — expose memory as MCP tools for any AI tool
 - OpenClaw plugin via `@openclaw/memory-host-sdk`
+
+## 92. Review Dead Code — migration versions in memory-db.ts
+
+**Priority:** LOW
+
+Review whether old migration versions in `memory-db.ts` still need to be kept. Clean up any dead migration code that's no longer needed.

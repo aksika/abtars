@@ -44,6 +44,9 @@ export type SearchOptions = {
   startTime?: number;
   endTime?: number;
   limit?: number;
+  topic?: string;
+  tier?: "core" | "general";
+  includeExpired?: boolean;
 };
 
 /** Assembled LLM context with per-tier token usage breakdown. */
@@ -134,6 +137,10 @@ export type ExtractedMemory = {
   preserved_keyword?: string;
   emotion_score: number;
   entities?: string[];
+  topic?: string;
+  tier?: "core" | "general";
+  valid_from?: string;
+  valid_to?: string | null;
 };
 
 /** Parameters for the agent-initiated memory search tool. */
@@ -180,6 +187,7 @@ export type InstantStoreParams = {
   trust?: number;
   integrity?: number;
   credibility?: number;
+  topic?: string;
 };
 
 /** Result of an instant memory store operation. */
