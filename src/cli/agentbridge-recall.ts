@@ -46,6 +46,9 @@ Options:
   let maxClassification = 2;
   let stages: string[] | undefined;
   let entity: string | undefined;
+  let topic: string | undefined;
+  let tier: "core" | "general" | undefined;
+  let includeExpired = false;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -60,6 +63,9 @@ Options:
       case "--max-classification": maxClassification = Math.min(2, Math.max(0, parseInt(args[++i] ?? "", 10))); break;
       case "--stages": stages = (args[++i] ?? "").split(",").map(s => s.trim()).filter(Boolean); break;
       case "--entity": entity = args[++i]; break;
+      case "--topic": topic = args[++i]; break;
+      case "--pool": { const v = args[++i]; if (v === "core" || v === "general") tier = v; break; }
+      case "--include-expired": includeExpired = true; break;
     }
   }
 
@@ -67,7 +73,7 @@ Options:
     console.error('Usage: agentbridge-recall --translated "kw1,kw2" --chat-id <id> [--original <kw>] [--entity "Name"] [--stages S1,S3]');
     process.exit(1);
   }
-  return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages, entity };
+  return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages, entity, topic, tier, includeExpired };
   return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages };
 }
 
@@ -88,6 +94,9 @@ try {
     timeEnd: params.timeEnd,
     stages: params.stages,
     entity: params.entity,
+    topic: params.topic,
+    tier: params.tier,
+    includeExpired: params.includeExpired,
   });
 
   // JSON output to stdout

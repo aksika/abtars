@@ -61,6 +61,9 @@ export type RecallParams = {
   stages?: string[];
   shortCircuitThreshold?: number;
   entity?: string;
+  topic?: string;
+  tier?: "core" | "general";
+  includeExpired?: boolean;
 };
 
 export type RecallDeps = {
@@ -184,6 +187,9 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
     if (params.timeStart) { conditions.push("created_at >= ?"); bindParams.push(params.timeStart); }
     if (params.timeEnd) { conditions.push("created_at <= ?"); bindParams.push(params.timeEnd); }
     if (params.maxClassification !== undefined) { conditions.push("COALESCE(classification, 0) <= ?"); bindParams.push(params.maxClassification); }
+    if (params.topic) { conditions.push("topic = ?"); bindParams.push(params.topic); }
+    if (params.tier) { conditions.push("tier = ?"); bindParams.push(params.tier); }
+    if (!params.includeExpired) { conditions.push("valid_to IS NULL"); }
     conditions.push(`(${allKw.map(kw => { bindParams.push(`%${kw}%`, `%${kw}%`, `%${kw}%`); return "(strip_diacritics(content_en) LIKE '%' || strip_diacritics(?) || '%' OR strip_diacritics(content_original) LIKE '%' || strip_diacritics(?) || '%' OR strip_diacritics(preserved_keyword) LIKE '%' || strip_diacritics(?) || '%')"; }).join(" OR ")})`);
     const rows = deps.db.prepare(
       `SELECT id, content_en, content_original, memory_type, created_at, source_message_ids, trust, integrity, credibility, classification FROM extracted_memories WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC LIMIT ?`
