@@ -11,24 +11,26 @@
 
 ## Overview
 
-Standalone memory package (`@agentbridge/memory`, ABM). 27 self-contained files in `src/memory/`, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation.
+Standalone memory package (`@agentbridge/memory`, ABM v2). 39 self-contained files in `src/memory/`, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation.
 
-SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), agent-initiated instant memory storage, unified memory editing (`agentbridge-edit`), Memory Darwinism, NATO Admiralty Code security model (CIA + AAA), emotion scoring with immediate propagation.
+SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), 256-bit binary signatures (Hamming distance search, no ollama needed), ABM-L compression (store-time), emotion tagging (25 types, keyword regex), importance flags (8 types), agent-initiated instant memory storage, unified memory editing (`agentbridge-edit`), Memory Darwinism, NATO Admiralty Code security model (CIA + AAA), emotion scoring with immediate propagation.
 
-Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods (`runWalCheckpoint`, `rebuildFtsIndexes`, `cleanupOldMessages`, `backfillEmbeddings`, `deduplicateMessages`, `fixMemoryDefaults`).
+Three-tier storage with progressive aging: Original language → English → ABM-L. Pressure-based aging accelerates as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (high emotion + pivot) never aged.
+
+Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods. Triggered by `BED_TIME` + quiet ticks (no bridge restart). 24 sleep steps including topic assignment, core promotion, temporal review, emotion/flags backfill, ABM-L compression, contradiction check, emotional arcs, memory aging, entity review.
 
 ### Package boundary
 
 | Aspect | Detail |
 |---|---|
-| Files | 27 source files in `src/memory/` |
+| Files | 39 source files in `src/memory/` |
 | External imports | Zero — fully self-contained |
 | Entry point | `src/memory/index.ts` |
 | Interface | `IMemorySystem` (lifecycle, messages, search, emotion, stats, maintenance) |
 | Heartbeat | `IHeartbeat` interface — bridge injects its implementation |
 | Logger | `setLogger()` injection — bridge injects its logger at startup |
 | Types | `mem-types.ts` — all memory types owned by the package |
-| Tests | 21 test files, 231 tests (maintenance, interface conformance, logger injection) |
+| Tests | 26 test files, 876 tests |
 
 **Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext`.
 

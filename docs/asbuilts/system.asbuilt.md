@@ -27,8 +27,8 @@ For the memory subsystem, see [memory.asbuilt.md](memory.asbuilt.md).
 | Subsystem | Description |
 |-----------|-------------|
 | **Platform Abstraction** | Telegram + Discord adapters behind a shared `PlatformAdapter` interface and unified message pipeline. |
-| **Memory** | Standalone `@agentbridge/memory` package (ABM). 27 self-contained files, `IMemorySystem` interface, zero bridge dependencies. SQLite + FTS5 + vector embeddings, CIA-AAA security, Darwinism, emotion scoring. See [memory.asbuilt.md](memory.asbuilt.md). |
-| **Sleep (Dreamy)** | Optional addon — memory works without it. Overnight maintenance: retrospective, GC, extraction, consolidation, fitness review. Calls memory via `IMemorySystem` maintenance methods. See [memory.asbuilt.md](memory.asbuilt.md). |
+| **Memory** | Standalone `@agentbridge/memory` package (ABM v2). 39 self-contained files, `IMemorySystem` interface, zero bridge dependencies. SQLite + FTS5 + vector embeddings + binary signatures (Hamming search). ABM-L compression, emotion tagging, importance flags, three-tier aging. See [memory.asbuilt.md](memory.asbuilt.md). |
+| **Sleep (Dreamy)** | Optional addon — memory works without it. Triggered by BED_TIME + quiet ticks (no restart). 24 sleep steps: retrospective, GC, extraction, consolidation, topic assignment, core promotion, temporal review, emotion/flags backfill, ABM-L compression, contradiction check, emotional arcs, memory aging, entity review, skill review. After success: optional Mac hardware sleep (`pmset sleepnow`). See [memory.asbuilt.md](memory.asbuilt.md). |
 | **Tasks** | Time-based scheduling for reminders and agent tasks. SQLite storage, sequential queue, priority levels, retry. User-facing: `/tasks`. CLI: `agentbridge-task`. |
 | **Todo** | File-based todo list (`todo.md`). Agent-managed via `agentbridge-todo` CLI. |
 | **Browser (Browsie)** | Detached browser subagent. Headless Chromium in Docker, autonomous navigation, non-blocking. SSRF protection blocks private IPs. |
@@ -275,8 +275,13 @@ When heartbeat detects a skipped tick (gap > interval×3):
 - Unknown OS: falls through to Layer 2.
 
 **Layer 2 — Daily cycle check** (`daily-cycle.ts` → `isDailyCycleDue()`):
-- Past `SLEEP_TIME`? AND bridge started before today's `SLEEP_TIME`? AND `lastHeartbeat` exists in lock file? AND idle >1h? AND not busy/sleeping?
-- All true → restart (daily cycle + sleep will run on next startup)
+- Past `BED_TIME`? AND bridge started before today's `BED_TIME`? AND `lastHeartbeat` exists in lock file? AND no new messages since last tick?
+- Quiet tick counter increments each tick with no new messages. Any message resets to 0.
+- At tick `BED_QUIET_TICKS - 1` (T-1): system message sent to agent → agent announces sleep to user.
+- At tick `BED_QUIET_TICKS`: Dreamy spawns directly (no bridge restart).
+- After Dreamy completes successfully: `pmset sleepnow` if `MAC_SLEEP_AFTER_DREAMY=true`.
+- On Mac wake: watchdog detects stale heartbeat (hours gap) → `process.exit(1)` → LaunchAgent restarts → fresh session.
+- If sleep missed today on startup (past BED_TIME, no audit): catch-up Dreamy spawns.
 - Any false → continue running (DEBUG log). Watchdog handles any transport breakage.
 
 No `doctor --fix`, no unconditional restart, no grace period. The bridge survives Power Nap / dark wakes silently — `lastHeartbeat` absent means no successful tick, so daily cycle is blocked.

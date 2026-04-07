@@ -324,3 +324,18 @@ Sleep cycle currently runs as a morning nap (triggered on wake). Should run at 2
 **Status:** Not started
 
 The "seen" (👀) emoji reaction is not deleted from the user's message after the agent sends its response. It should be removed once the reply is delivered, so only unprocessed messages show the eyes.
+
+## 95. Sleep step backoff delay to avoid rate limiting
+
+**Priority:** MEDIUM
+**Status:** Not started
+
+### Problem
+Sleep cycle runs 24 steps in rapid succession. After ~5-6 minutes of sustained prompts, model providers (Kiro/AWS, OpenRouter free tier) start returning -32603 (rate limit / internal error). Remaining steps fail.
+
+### Solution
+- Add configurable delay between sleep steps: `SLEEP_STEP_DELAY_SEC=10` (default 10s)
+- After each successful step, wait before starting the next
+- Exponential backoff on retry: 10s → 20s → 40s
+- Essential steps (daily summary, extraction) run first with no delay, non-essential steps get the delay
+- Log: `[SLEEP] Waiting 10s before next step (rate limit protection)`
