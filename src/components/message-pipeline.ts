@@ -313,6 +313,11 @@ export async function handleInboundMessage(
       }
     }
 
+    // --- Clear 👀 reaction after delivery ---
+    if (adapter.setReaction && msg.messageId) {
+      await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+    }
+
     // --- Record to memory ---
     if (memory) {
       memory.recordMessage({

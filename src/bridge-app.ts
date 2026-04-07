@@ -773,7 +773,16 @@ export async function startBridge(): Promise<void> {
     onComplete: () => resetAllCtxStarts(memoryConfig.memoryDir),
   });
   bridge.sleepHandle = sleepHandle;
-  sleepHandle.spawn();
+  // Only auto-spawn on startup if sleep hasn't run today (catch-up after wake)
+  const { hasSleepAuditToday } = await import("./capabilities/sleep/sleep-trigger.js");
+  if (!hasSleepAuditToday(sleepAuditDir)) {
+    const nowH = new Date().getHours() * 60 + new Date().getMinutes();
+    const bedM = SLEEP_HOUR * 60 + SLEEP_MINUTE;
+    if (nowH > bedM) {
+      logInfo("main", "😴 Sleep missed today — spawning catch-up Dreamy");
+      sleepHandle.spawn();
+    }
+  }
 
   // --- Web Dashboard wiring (conditional) ---
   await bridge.initDashboard(platforms, heartbeat, nlmConfig);
