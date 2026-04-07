@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import { parseBoolEnv, parseNumberEnv } from "../components/env-utils.js";
-import { agentBridgeHome } from "../paths.js";
+import { parseBoolEnv, parseNumberEnv } from "./mem-env.js";
+import { agentBridgeHome } from "./mem-paths.js";
 
 /** Configuration for the local memory layer. */
 export type MemoryConfig = {

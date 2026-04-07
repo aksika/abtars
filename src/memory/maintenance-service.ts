@@ -5,8 +5,8 @@ import type { MemoryConfig } from "./memory-config.js";
 import type { ForgetResult } from "../types/index.js";
 import type { MemoryIndex } from "./memory-index.js";
 import type { MemoryEditor } from "./memory-editor.js";
-import { logError, logInfo, logWarn } from "../components/logger.js";
-import { localDate } from "../components/env-utils.js";
+import { logError, logInfo, logWarn } from "./mem-logger.js";
+import { localDate } from "./mem-env.js";
 
 const TAG = "maintenance";
 

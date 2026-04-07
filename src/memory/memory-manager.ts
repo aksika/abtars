@@ -11,7 +11,7 @@ import { loadEmbedConfig } from "./ollama-embed.js";
 import { HeartbeatSystem } from "../components/heartbeat-system.js";
 import { getLatestConsolidationFile } from "./consolidation-search.js";
 import type { SearchResult, SearchOptions } from "../types/index.js";
-import { logError, logInfo, logWarn } from "../components/logger.js";
+import { logError, logInfo, logWarn } from "./mem-logger.js";
 
 const TAG = "memory-manager";
 

@@ -5,7 +5,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { localDate } from "../components/env-utils.js";
+import { localDate } from "./mem-env.js";
 import type { MemoryManager } from "./memory-manager.js";
 
 /** Build memory context block from memory manager + filesystem. */

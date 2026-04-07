@@ -3,7 +3,7 @@
  * Gated by EMBEDDING_ENABLED env var. When disabled, all methods return null/empty.
  */
 
-import { logInfo, logWarn } from "../components/logger.js";
+import { logInfo, logWarn } from "./mem-logger.js";
 import type Database from "better-sqlite3";
 
 const TAG = "ollama-embed";

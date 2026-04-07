@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
 import type { MessageRecord } from "../types/index.js";
 import type { MemoryIndex } from "./memory-index.js";
-import { logError } from "../components/logger.js";
+import { logError } from "./mem-logger.js";
 
 const TAG = "message-store";
 

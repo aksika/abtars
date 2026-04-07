@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { MessageRecord, SearchResult } from "../types/index.js";
 import type { ExtractedMemory, MemorySearchResult } from "../types/memory.js";
-import { logWarn } from "../components/logger.js";
+import { logWarn } from "./mem-logger.js";
 
 /** Weight applied to the log1p emotion boost in search ranking. */
 export const EMOTION_BOOST_WEIGHT = 0.5;

@@ -118,6 +118,10 @@ export class Bridge {
       logInfo("main", "🧠 Memory disabled");
       return;
     }
+    // Inject bridge logger into memory package
+    const { setLogger } = await import("./memory/mem-logger.js");
+    setLogger({ logInfo, logWarn, logError });
+
     const memory = new MemoryManager(this.memoryConfig);
     await memory.initialize();
     this.memory = memory;

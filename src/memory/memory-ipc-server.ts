@@ -6,8 +6,8 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../paths.js";
-import { logInfo } from "../components/logger.js";
+import { agentBridgeHome } from "./mem-paths.js";
+import { logInfo } from "./mem-logger.js";
 import type { MemoryBackend } from "./memory-backend.js";
 
 const TAG = "memory-ipc";
