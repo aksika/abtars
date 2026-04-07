@@ -49,6 +49,8 @@ ALTER TABLE extracted_memories ADD COLUMN topic TEXT DEFAULT 'general';
 ALTER TABLE extracted_memories ADD COLUMN tier TEXT DEFAULT 'general';
 ALTER TABLE extracted_memories ADD COLUMN valid_from TEXT;
 ALTER TABLE extracted_memories ADD COLUMN valid_to TEXT;
+ALTER TABLE extracted_memories ADD COLUMN emotion_codes TEXT;          -- Phase 2: "hope+trust+determ"
+ALTER TABLE extracted_memories ADD COLUMN content_compressed TEXT;     -- Phase 2: AAAK form
 
 CREATE INDEX idx_em_topic ON extracted_memories(topic);
 CREATE INDEX idx_em_tier ON extracted_memories(tier);
@@ -87,7 +89,25 @@ Query → core tier + topic filter (if topic detected)
 
 Builds on Phase 1 foundation. Inspired by the MemPalace project (~/workspace/mempalace).
 
-### 2.1 Contradiction detection on store
+### 2.1 AAAK-style compression + emotion scoring
+
+**Primary driver:** AAAK's emotion detection is systematic — 40+ emotion codes with keyword signals, weight scoring, and emotional arc tracking. Our current emotion scoring is a single integer -5 to +5 assigned subjectively by the LLM. AAAK gives us:
+- Granular emotion types (`vul`, `joy`, `trust`, `grief`, `hope`, `doubt`, etc.) — not just positive/negative intensity
+- Consistent detection via regex patterns — not dependent on LLM mood
+- Emotional arcs across conversations (`ARC:hope->doubt->relief`) — trajectory, not snapshots
+- Emotion-weighted retrieval — find memories by emotional signature
+
+**Compression:** Secondary benefit. Core-tier wake-up context compressed to ~200 tokens. Entity codes, structured format, flags (ORIGIN, CORE, DECISION, PIVOT, etc.).
+
+**Implementation:**
+- Port MemPalace's `dialect.py` emotion detection + compression to TypeScript
+- Entity registry: auto-built from core-tier entities (user, agent, frequent names)
+- Dreamy compresses during core promotion (not on instant-store — raw English stays in GP)
+- Core entries get both `content_en` (English) and `content_compressed` (AAAK) columns
+- Wake-up loads compressed form; deep recall returns English form
+- Emotion codes stored alongside emotion_score: `emotion_codes TEXT` column (e.g. `"hope+trust+determ"`)
+
+### 2.2 Contradiction detection on store
 
 Before Dreamy writes to core tier, check for conflicts:
 - Recall similar core entries (semantic + keyword)
@@ -95,20 +115,19 @@ Before Dreamy writes to core tier, check for conflicts:
 - Resolution: invalidate old fact (`valid_to = now`), store new one, log the change
 - Lightweight: only on core promotion, not on every instant-store
 
-### 2.2 AAAK-style compression for wake-up context
+### 2.2 Contradiction detection on store
 
-Compress the core-tier wake-up layer into structured shorthand:
-- Not full AAAK (their dialect is complex), but a simplified version
-- Entity codes: `KP` for the agent, user's name abbreviated, project codes
-- Structured format: `PREF: dark_mode+vim+minimal | PROJ: agentbridge(ts,telegram) | ...`
-- Goal: load all core facts in ~200 tokens instead of ~2000
-- The agent learns the format from session-start prompt
+Before Dreamy writes to core tier, check for conflicts:
+- Recall similar core entries (semantic + keyword)
+- If a new fact contradicts an existing one: flag, don't silently overwrite
+- Resolution: invalidate old fact (`valid_to = now`), store new one, log the change
+- Lightweight: only on core promotion, not on every instant-store
 
 ### 2.3 Wake-up context from core tier
 
 On session start, load all valid core-tier entries as compressed context:
-- `SELECT * FROM extracted_memories WHERE tier = 'core' AND valid_to IS NULL ORDER BY topic`
-- Inject into session-start prompt (compressed)
+- `SELECT content_compressed FROM extracted_memories WHERE tier = 'core' AND valid_to IS NULL ORDER BY topic`
+- Inject into session-start prompt (AAAK compressed)
 - Replaces current static core-knowledge approach
 - Dynamic: as Dreamy promotes/invalidates, wake-up context evolves automatically
 
@@ -124,7 +143,7 @@ When the same entity/concept appears in multiple topics, create a link:
 ## Implementation order
 
 Phase 1: 1.1 (topic) → 1.2 (tier) → 1.3 (temporal) → 1.4 (lower threshold) → sleep steps → recall changes
-Phase 2: 2.1 (contradiction) → 2.3 (wake-up from core) → 2.2 (compression) → 2.4 (tunnels)
+Phase 2: 2.1 (AAAK + emotion) → 2.2 (contradiction) → 2.3 (wake-up from core) → 2.4 (tunnels)
 
 Phase 1 is the foundation — all column additions, migration, CLI updates, sleep step changes.
 Phase 2 is enhancement — each item is independent and can be done in any order after Phase 1.
