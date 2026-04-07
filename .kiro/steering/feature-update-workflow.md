@@ -38,7 +38,11 @@ If the analysis reveals the same logic in multiple places:
 
 Do NOT fix the same bug in 2-3 places independently. That's a maintenance trap.
 
-## 4. Update Tests — Never Skip
+## 4. Update Tests — Scale to the Change
+
+**Small changes** (one-liner fix, config tweak, text update): don't run the full test suite, don't push test changes. Just verify the fix works.
+
+**Big changes** (refactors, architecture, new features, multi-file changes): review ALL existing tests for staleness, update broken/stale ones, write new tests for new code paths. Run the full suite. This is mandatory — no exceptions.
 
 Every behavior change requires test updates:
 - **Stale tests are lies** — a test asserting "always returns true" when the code now checks conditions will pass by accident or mislead future developers.
