@@ -15,6 +15,7 @@ export interface DailyCycleDeps {
   memory: MemoryManager | null;
   busyChats: Set<string>;
   isSleepActive: () => boolean;
+  onSleepWarning?: () => void;
 }
 
 const QUIET_TICKS_REQUIRED = parseInt(process.env["BED_QUIET_TICKS"] ?? "6", 10); // default 6 × 5min = 30min
@@ -64,6 +65,11 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   // No new messages this tick — increment quiet counter
   quietTickCount++;
   logInfo("bedtime", `Quiet tick ${quietTickCount}/${QUIET_TICKS_REQUIRED} (BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")})`);
+
+  // T-1: warn the agent one tick before sleep triggers
+  if (quietTickCount === QUIET_TICKS_REQUIRED - 1 && deps.onSleepWarning) {
+    deps.onSleepWarning();
+  }
 
   return quietTickCount >= QUIET_TICKS_REQUIRED;
 }

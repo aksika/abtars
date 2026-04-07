@@ -684,10 +684,25 @@ export async function startBridge(): Promise<void> {
     }));
   }
 
+  // --- System message sender (generic, any component can use) ---
+  const { initSystemMessage, sendSystemMessage } = await import("./components/system-message.js");
+  const primaryChatId = String([...config.telegram.allowedUserIds][0] ?? "");
+  initSystemMessage(async (prompt: string) => {
+    try {
+      const response = await transport.sendPrompt(primaryChatId, `[SYSTEM] ${prompt}`);
+      if (response && bridge.telegramAdapter) {
+        await bridge.telegramAdapter.sendNotification(primaryChatId, response);
+      }
+    } catch (err) {
+      logWarn("main", `System message failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
   // --- Daily cycle: restart after BED_TIME ---
   heartbeat.registerTask(createAgeCheckTask({
     memory, bridgeLockPath, sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, busyChats, isSleepActive,
     doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
+    onSleepWarning: () => { void sendSystemMessage("You are about to enter sleep mode. Announce to the user that in ~5 minutes the system will go to sleep for nightly maintenance. Keep it brief and friendly."); },
   }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
