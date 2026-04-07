@@ -294,3 +294,12 @@ User asks "what's the best free model right now?" → agent runs the skill, retu
 **Priority:** LOW
 
 Review whether old migration versions in `memory-db.ts` still need to be kept. Clean up any dead migration code that's no longer needed.
+
+## 93. Semantic Recall Cache
+
+**Priority:** LOW
+**Status:** Not started
+
+In-memory cache for recall results within a session. If the agent queries the same (or semantically similar) keywords twice, return cached results instead of hitting SQLite + embeddings again. Simple `Map<string, SearchResult[]>` cleared on session reset. ~10 lines. No external dependency.
+
+Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") but implemented as a trivial in-process cache.
