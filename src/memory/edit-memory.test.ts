@@ -174,3 +174,68 @@ describe("editMemory", () => {
     expect(newHits).toHaveLength(1);
   });
 });
+
+describe("editMemory — ABM v1 fields (topic, tier, valid_to)", () => {
+  let tmpDir: string;
+  let mm: MemoryManager;
+
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "edit-abm-"));
+    mm = new MemoryManager(makeMemoryTestConfig(tmpDir));
+    await mm.initialize({ skipEmbeddingCheck: true });
+  });
+
+  afterEach(() => {
+    mm.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function insert(): number {
+    const db = mm.getDatabase()!;
+    db.prepare(
+      `INSERT INTO extracted_memories (chat_id, content_original, content_en, memory_type, source_timestamp, created_at, preserve_original, emotion_score)
+       VALUES (1, 'test', 'test fact', 'fact', ?, ?, 0, 0)`,
+    ).run(Date.now(), Date.now());
+    return (db.prepare("SELECT last_insert_rowid() as id").get() as { id: number }).id;
+  }
+
+  it("sets topic via edit", () => {
+    const id = insert();
+    const result = mm.editor.editMemory({ memoryId: id, topic: "coding", caller: "dreamy" });
+    expect(result.ok).toBe(true);
+    const row = mm.getDatabase()!.prepare("SELECT topic FROM extracted_memories WHERE id = ?").get(id) as { topic: string };
+    expect(row.topic).toBe("coding");
+  });
+
+  it("promotes to core tier", () => {
+    const id = insert();
+    const result = mm.editor.editMemory({ memoryId: id, tier: "core", caller: "dreamy" });
+    expect(result.ok).toBe(true);
+    const row = mm.getDatabase()!.prepare("SELECT tier FROM extracted_memories WHERE id = ?").get(id) as { tier: string };
+    expect(row.tier).toBe("core");
+  });
+
+  it("rejects invalid tier", () => {
+    const id = insert();
+    const result = mm.editor.editMemory({ memoryId: id, tier: "invalid" as "core", caller: "dreamy" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("tier must be");
+  });
+
+  it("sets valid_to for temporal invalidation", () => {
+    const id = insert();
+    const result = mm.editor.editMemory({ memoryId: id, validTo: "2026-04-07", caller: "dreamy" });
+    expect(result.ok).toBe(true);
+    const row = mm.getDatabase()!.prepare("SELECT valid_to FROM extracted_memories WHERE id = ?").get(id) as { valid_to: string };
+    expect(row.valid_to).toBe("2026-04-07");
+  });
+
+  it("clears valid_to with empty string", () => {
+    const id = insert();
+    mm.editor.editMemory({ memoryId: id, validTo: "2026-04-07", caller: "dreamy" });
+    const result = mm.editor.editMemory({ memoryId: id, validTo: "", caller: "dreamy" });
+    expect(result.ok).toBe(true);
+    const row = mm.getDatabase()!.prepare("SELECT valid_to FROM extracted_memories WHERE id = ?").get(id) as { valid_to: string | null };
+    expect(row.valid_to).toBeNull();
+  });
+});
