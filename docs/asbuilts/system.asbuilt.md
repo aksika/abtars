@@ -27,8 +27,8 @@ For the memory subsystem, see [memory.asbuilt.md](memory.asbuilt.md).
 | Subsystem | Description |
 |-----------|-------------|
 | **Platform Abstraction** | Telegram + Discord adapters behind a shared `PlatformAdapter` interface and unified message pipeline. |
-| **Memory** | SQLite-backed persistence with FTS5, vector embeddings, CIA-AAA security model, Darwinism, emotion scoring. See [memory.asbuilt.md](memory.asbuilt.md). |
-| **Sleep (Dreamy)** | Overnight maintenance: retrospective, GC, extraction, consolidation, fitness review. See [memory.asbuilt.md](memory.asbuilt.md). |
+| **Memory** | Standalone `@agentbridge/memory` package (ABM). 27 self-contained files, `IMemorySystem` interface, zero bridge dependencies. SQLite + FTS5 + vector embeddings, CIA-AAA security, Darwinism, emotion scoring. See [memory.asbuilt.md](memory.asbuilt.md). |
+| **Sleep (Dreamy)** | Optional addon — memory works without it. Overnight maintenance: retrospective, GC, extraction, consolidation, fitness review. Calls memory via `IMemorySystem` maintenance methods. See [memory.asbuilt.md](memory.asbuilt.md). |
 | **Tasks** | Time-based scheduling for reminders and agent tasks. SQLite storage, sequential queue, priority levels, retry. User-facing: `/tasks`. CLI: `agentbridge-task`. |
 | **Todo** | File-based todo list (`todo.md`). Agent-managed via `agentbridge-todo` CLI. |
 | **Browser (Browsie)** | Detached browser subagent. Headless Chromium in Docker, autonomous navigation, non-blocking. SSRF protection blocks private IPs. |
@@ -108,7 +108,7 @@ Credential redaction: `redactSecrets()` strips 15 secret patterns (OpenAI, GitHu
 
 - `src/main.ts` (11 lines) — entry point, calls `startBridge()`
 - `src/bridge-app.ts` — `Bridge` class + `startBridge()` wiring function
-  - `Bridge.initMemory()` — MemoryManager creation + initialize
+  - `Bridge.initMemory()` — MemoryManager creation + initialize + logger injection via `setLogger()`
   - `Bridge.wireMemory()` — LLM callback + IPC server (after transport ready)
   - `Bridge.initTransport()` — 3-way transport selection (tmux/acp/api), TransportManager wrapping, in-process memory wiring
   - `Bridge.initDashboard()` — dashboard config, auth gate, status function, server start

@@ -11,7 +11,24 @@
 
 ## Overview
 
-SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), sleep-subagent-driven extraction, agent-initiated instant memory storage, unified memory editing (`agentbridge-edit`), Memory Darwinism, NATO Admiralty Code security model (CIA + AAA), emotion scoring with immediate propagation, daily retrospective with emotional attribution, and post-sleep wake-up prompt.
+Standalone memory package (`@agentbridge/memory`, ABM). 27 self-contained files in `src/memory/`, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation.
+
+SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), agent-initiated instant memory storage, unified memory editing (`agentbridge-edit`), Memory Darwinism, NATO Admiralty Code security model (CIA + AAA), emotion scoring with immediate propagation.
+
+Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods (`runWalCheckpoint`, `rebuildFtsIndexes`, `cleanupOldMessages`, `backfillEmbeddings`, `deduplicateMessages`, `fixMemoryDefaults`).
+
+### Package boundary
+
+| Aspect | Detail |
+|---|---|
+| Files | 27 source files in `src/memory/` |
+| External imports | Zero — fully self-contained |
+| Entry point | `src/memory/index.ts` |
+| Interface | `IMemorySystem` (lifecycle, messages, search, emotion, stats, maintenance) |
+| Heartbeat | `IHeartbeat` interface — bridge injects its implementation |
+| Logger | `setLogger()` injection — bridge injects its logger at startup |
+| Types | `mem-types.ts` — all memory types owned by the package |
+| Tests | 21 test files, 231 tests (maintenance, interface conformance, logger injection) |
 
 **Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext`.
 
