@@ -303,3 +303,17 @@ Review whether old migration versions in `memory-db.ts` still need to be kept. C
 In-memory cache for recall results within a session. If the agent queries the same (or semantically similar) keywords twice, return cached results instead of hitting SQLite + embeddings again. Simple `Map<string, SearchResult[]>` cleared on session reset. ~10 lines. No external dependency.
 
 Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") but implemented as a trivial in-process cache.
+
+## 94. Move sleep cycle to 2am + Mac sleep after completion
+
+**Priority:** HIGH
+**Status:** Not started
+
+### Problem
+Sleep cycle currently runs as a morning nap (triggered on wake). Should run at 2am when the user is actually asleep — the agent does its maintenance overnight, not during active hours.
+
+### Solution
+- Change sleep trigger from morning to 2am CET (cron-based or LaunchAgent schedule on Mac)
+- After successful sleep completion (all steps OK), agent puts the Mac to sleep state via `pmset sleepnow` or `osascript -e 'tell application "System Events" to sleep'`
+- If sleep fails (essential steps incomplete), Mac stays awake — don't sleep on failure
+- Log the sleep-then-shutdown sequence in the audit file
