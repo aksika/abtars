@@ -60,20 +60,18 @@ describe("Integration: age-check task", () => {
     vi.useRealTimers();
   });
 
-  it("triggers restart when past SLEEP_TIME and bridge started before it", async () => {
-    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+  it("spawns Dreamy when past BED_TIME and 6 quiet ticks", async () => {
     const now = new Date(2026, 3, 5, 10, 0); // 10:00
     vi.useFakeTimers({ now });
-    // Bridge started yesterday
     writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
 
     resetBedtimeCounter();
-    const task = createAgeCheckTask(makeDeps());
-    // Need 6 quiet ticks before trigger
+    let sleepStarted = false;
+    const task = createAgeCheckTask({ ...makeDeps(), startSleep: () => { sleepStarted = true; } });
     for (let i = 0; i < 5; i++) await task.execute();
-    expect(exitSpy).not.toHaveBeenCalled();
+    expect(sleepStarted).toBe(false);
     await task.execute(); // 6th tick
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(sleepStarted).toBe(true);
     vi.useRealTimers();
   });
 
