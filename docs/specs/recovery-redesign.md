@@ -156,10 +156,11 @@ Memory leaks solved by daily restart. No RSS tracking needed — process never l
 - Fix: periodic `process.getActiveResourcesInfo()` log in heartbeat. Warn if count grows monotonically.
 - Complexity: Low
 
-**Gap 6: AWS quota competition**
+**Gap 6: AWS quota competition** *(deferred)*
 - Bridge ACP + sleep ACP both use kiro-cli simultaneously → throttling
 - Fix: sleep uses different model (`qwen3-coder-next`) or different transport (API/Ollama). Already partially addressed by `AGENT_SLEEP_MODEL` env var.
 - Complexity: Low (config change)
+- Deferred: current config separation is sufficient, revisit if throttling recurs
 
 **Gap 7: Disk space runtime check**
 - Only checked during Dreamy sleep cycle
@@ -171,10 +172,11 @@ Memory leaks solved by daily restart. No RSS tracking needed — process never l
 - Fix: consecutive poller failure counter. After N failures, log "offline" once, reduce retry frequency. Reset on success.
 - Complexity: Low
 
-**Gap 9: Clock skew**
+**Gap 9: Clock skew** *(deferred)*
 - NTP jump could break bedtime counter (suddenly past BED_TIME) or heartbeat alignment
 - Fix: use `process.hrtime.bigint()` for interval measurement instead of `Date.now()` delta
 - Complexity: Medium (touches heartbeat core)
+- Deferred: NTP jumps are rare on always-on Mac, not worth the risk of touching heartbeat internals
 
 **Gap 10: Cascading failures**
 - One bad model/endpoint can stall the pipeline while bucket drains
