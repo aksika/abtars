@@ -278,3 +278,72 @@ See `docs/specs/abm-language.md` for full spec. ABM-L is the compressed format s
 ```
 
 ~3-5x compression on extracted memories. 50 core memories ≈ 500 tokens (vs 2500 in English).
+
+## ABM-L Compression Level 2
+
+Three enhancements to the wake-up builder and ABM-L format for deeper compression.
+
+### C1: Wake-up entity header + topic grouping
+
+Instead of repeating entities and topics per-line, declare once:
+
+```
+@: AB=agentbridge, CK=clerk, AK=aksika
+## coding ↑
+[D] CK >over auth0 (pricing+DX)
+[F] AB: TS+Node, SQLite+FTS5+ollama
+[L|frust] FTS5 breaks on HU — EN for search
+## personal →
+[F] AK: CET, HU/EN, WSL2, direct+sarcastic
+[P] dark-mode+vim+minimal-code
+```
+
+Rules:
+- Entity header: auto-built from core-tier, top N most-referenced entities get 2-letter codes
+- Topic sections: group memories by topic, topic+arc as header
+- Elide: date (unless recent <7d), confidence (unless unusual), neutral emotions
+- Only in wake-up rendering — stored ABM-L stays full format
+
+### C2: Daily summary compression
+
+Dreamy compresses daily summaries to ABM-L during sleep step 20 (compress-backfill). Wake-up builder loads compressed dailies.
+
+```
+## 2026-04-07
+[M] ABM Phase 0 complete — 27 files decoupled
+[D] sleep decoupled — optional addon
+[M] ABM v1 shipped — topic+tier+temporal
+```
+
+~80 tokens per daily vs ~400 in English. 5× compression.
+
+### C3: SOUL compression for small models
+
+Compressed SOUL variant for context windows <32K:
+
+```
+## identity
+Agent: Molty. Personal AI for aksika. HU/EN bilingual.
+## rules
+Store aggressively. Recall before "I don't know". <NO_REPLY> when not needed.
+## tools
+recall, store, edit, todo, cron, browse, tweet, rss, skill
+```
+
+~100 tokens vs ~2000. Generated from full SOUL.md by stripping examples, verbose explanations, keeping only rules and facts.
+
+### Adaptive compression in wake-up builder
+
+```typescript
+function compressionLevel(budgetTokens: number): "full" | "compact" | "ultra" {
+  if (budgetTokens > 5000) return "full";     // 128K+ models
+  if (budgetTokens > 500) return "compact";    // 32K models
+  return "ultra";                               // 4K models
+}
+```
+
+| Level | Entity header | Topic grouping | Date/confidence elision | SOUL | Dailies |
+|---|---|---|---|---|---|
+| full | No | No | No | Full SOUL.md | English markdown |
+| compact | Yes | Yes | Yes | Full SOUL.md | ABM-L compressed |
+| ultra | Yes | Yes | Yes | Compressed SOUL | ABM-L compressed |
