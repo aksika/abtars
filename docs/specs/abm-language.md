@@ -181,8 +181,8 @@ Memories age like human memory — sensory detail fades first, narrative next, e
 
 ```
 Day 0          Tier 1 + Tier 2 + Tier 3    ~400 bytes    full fidelity
-~2 weeks       ██████  Tier 2 + Tier 3      ~200 bytes    original NULLed
-~2 months      ██████  ████████  Tier 3      ~50 bytes     English NULLed
+~2 weeks       Tier 1 + ██████  Tier 3      ~250 bytes    English NULLed (ABM-L has the facts)
+~3 months      ██████  ████████  Tier 3      ~50 bytes     Original NULLed (raw words fade)
 Forever                          Tier 3      ~50 bytes     ABM-L + metadata
 ```
 
@@ -249,8 +249,8 @@ Memory system has its own config file (`~/.agentbridge/memory.env`), separate fr
 MEMORY_MAX_DB_SIZE_MB=4096           # default: 4096 (4GB). 0 = unlimited.
 
 # Aging TTLs (base values — adjusted by pressure)
-MEMORY_ORIGINAL_TTL_DAYS=14          # default: 14 days
-MEMORY_ENGLISH_TTL_DAYS=60           # default: 60 days
+MEMORY_ENGLISH_TTL_DAYS=14           # default: 14 days (redundant once ABM-L exists)
+MEMORY_ORIGINAL_TTL_DAYS=90          # default: 90 days (source of truth, kept longer)
 MEMORY_AGING_ENABLED=true            # default: true
 
 # Search mode
@@ -335,8 +335,8 @@ The agent never notices aging — ABM-L is always there. Deep investigation (`--
 
 | Human memory | ABM tier | Fades after |
 |---|---|---|
-| Sensory memory (exact words, tone, setting) | Original language | ~2 weeks |
-| Episodic memory (what happened, full narrative) | English description | ~2 months |
+| Episodic memory (translated narrative) | English description | ~2 weeks |
+| Sensory memory (exact words, tone, setting) | Original language | ~3 months |
 | Semantic memory (the fact, the lesson, the decision) | ABM-L | Never |
 
 You remember THAT you decided to use Clerk and WHY (ABM-L). You forget the exact conversation where you discussed it (English). You forget what language you were speaking (Original). Just like real memory.

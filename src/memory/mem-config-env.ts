@@ -21,8 +21,8 @@ export interface MemoryEnvConfig {
 const DEFAULTS: MemoryEnvConfig = {
   searchMode: "hybrid",
   maxDbSizeMb: 4096,
-  originalTtlDays: 14,
-  englishTtlDays: 60,
+  originalTtlDays: 90,
+  englishTtlDays: 14,
   agingEnabled: true,
   signatureBits: 256,
 };
