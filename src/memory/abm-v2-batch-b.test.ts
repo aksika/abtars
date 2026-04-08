@@ -55,7 +55,7 @@ describe("Batch B — search enhancements", () => {
       // Should find the Clerk memory, not the weather one
       expect(result.stages["Ss"]).toBeDefined();
       if (result.stages["Ss"]!.hits.length > 0) {
-        expect(result.stages["Ss"]!.hits[0]!.content).toContain("clerk");
+        expect(result.stages["Ss"]!.hits[0]!.content.toLowerCase()).toContain("clerk");
       }
     });
   });

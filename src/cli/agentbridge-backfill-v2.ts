@@ -20,8 +20,8 @@ const dbPath = join(agentBridgeHome(), "memory", "memory.db");
 
 const db = new Database(dbPath);
 const rows = db.prepare(
-  "SELECT id, content_en, topic, confidence, created_at FROM extracted_memories WHERE content_compressed IS NULL AND content_en IS NOT NULL",
-).all() as Array<{ id: number; content_en: string; topic: string | null; confidence: number | null; created_at: number }>;
+  "SELECT id, content_en, topic, confidence, created_at, memory_type FROM extracted_memories WHERE content_en IS NOT NULL",
+).all() as Array<{ id: number; content_en: string; topic: string | null; confidence: number | null; created_at: number; memory_type: string | null }>;
 
 console.log(`Found ${rows.length} memories to backfill${dryRun ? " (dry run)" : ""}`);
 
@@ -39,6 +39,7 @@ const txn = db.transaction(() => {
       topic: row.topic ?? "general",
       emotion_tags: emotionTags,
       importance_flags: importanceFlags,
+      memory_type: row.memory_type ?? "fact",
       confidence: row.confidence ?? 3,
       date: new Date(row.created_at).toISOString().slice(0, 7),
     });

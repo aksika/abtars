@@ -108,22 +108,31 @@ describe("signature-generator", () => {
   });
 });
 
-describe("memory-compressor (ABM-L)", () => {
-  it("compresses a decision", () => {
+describe("memory-compressor (ABM-L v2)", () => {
+  it("uses memory_type as primary flag", () => {
     const result = compress({
       content_en: "We decided to use Clerk instead of Auth0 because pricing is better",
       topic: "coding", emotion_tags: "conviction", importance_flags: "decision",
-      confidence: 5, date: "2026-01",
+      memory_type: "decision", confidence: 5, date: "2026-01",
     });
-    expect(result).toMatch(/^\[D\|coding\|convic\|5\|2026-01\]/);
-    expect(result.length).toBeLessThan(150);
+    expect(result).toMatch(/^\[D\|coding\|/);
   });
 
-  it("compresses a preference", () => {
+  it("lesson type gets L flag, not detected flags", () => {
+    const result = compress({
+      content_en: "Be honest about actions: Don't claim to have done something I haven't actually done",
+      topic: "general", emotion_tags: "", importance_flags: "correction,milestone",
+      memory_type: "lesson",
+    });
+    expect(result).toMatch(/^\[LC?M?\|/); // L primary, C and M secondary
+    expect(result).not.toMatch(/^\[CM\|/); // NOT CM without L
+  });
+
+  it("preference type gets P flag", () => {
     const result = compress({
       content_en: "User prefers dark mode and minimal code",
       topic: "personal", emotion_tags: "", importance_flags: "preference",
-      confidence: 4,
+      memory_type: "preference", confidence: 4,
     });
     expect(result).toMatch(/^\[P\|personal\|/);
   });
@@ -132,6 +141,7 @@ describe("memory-compressor (ABM-L)", () => {
     const result = compress({
       content_en: "The deploy script is at /home/user/scripts/deploy.sh",
       topic: "coding", emotion_tags: "", importance_flags: "technical",
+      memory_type: "fact",
     });
     expect(result).toContain("/home/user/scripts/deploy.sh");
   });
@@ -140,25 +150,58 @@ describe("memory-compressor (ABM-L)", () => {
     const result = compress({
       content_en: "API endpoint is https://openrouter.ai/api/v1",
       topic: "coding", emotion_tags: "", importance_flags: "technical",
+      memory_type: "fact",
     });
     expect(result).toContain("https://openrouter.ai/api/v1");
   });
 
-  it("defaults to F flag when no importance flags", () => {
+  it("preserves negations and pronouns", () => {
     const result = compress({
-      content_en: "Some random fact", topic: "general",
-      emotion_tags: "", importance_flags: "",
+      content_en: "Don't claim to have done something I haven't done",
+      topic: "personal", emotion_tags: "", importance_flags: "",
+      memory_type: "lesson",
     });
-    expect(result).toMatch(/^\[F\|/);
+    expect(result).toContain("Don't");
+    expect(result).toContain("I");
+    expect(result).toContain("haven't");
   });
 
-  it("truncates long content", () => {
-    const long = "word ".repeat(100);
+  it("does not @reference unknown capitalized words", () => {
     const result = compress({
-      content_en: long, topic: "general",
-      emotion_tags: "", importance_flags: "",
+      content_en: "Vincent story - ask who it is, don't make things up",
+      topic: "personal", emotion_tags: "", importance_flags: "",
+      memory_type: "lesson",
     });
-    expect(result.length).toBeLessThan(200);
+    expect(result).not.toContain("@vincent");
+  });
+
+  it("abbreviates platform names", () => {
+    const result = compress({
+      content_en: "Telegram poller failed, Discord back-online send failed",
+      topic: "coding", emotion_tags: "", importance_flags: "",
+      memory_type: "event",
+    });
+    expect(result).toContain("TG");
+    expect(result).toContain("DC");
+  });
+
+  it("infers topic from content", () => {
+    const result = compress({
+      content_en: "The database architecture uses SQLite with FTS5",
+      topic: "general", emotion_tags: "", importance_flags: "technical",
+      memory_type: "fact",
+    });
+    expect(result).toMatch(/\|coding\|/);
+  });
+
+  it("no truncation — long content preserved", () => {
+    const long = "Bug report: " + "issue description ".repeat(20);
+    const result = compress({
+      content_en: long, topic: "coding",
+      emotion_tags: "", importance_flags: "",
+      memory_type: "event",
+    });
+    expect(result).not.toContain("...");
   });
 });
 

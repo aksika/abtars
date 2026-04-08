@@ -142,6 +142,7 @@ export class MemoryEditor {
       const compressed = compress({
         content_en: contentEn, topic: topicVal,
         emotion_tags: emotionTags, importance_flags: importanceFlags,
+        memory_type: params.memoryType,
         confidence: params.confidence, date: new Date(now).toISOString().slice(0, 7),
       });
       const signature = Buffer.from(generateSignature(contentEn));
