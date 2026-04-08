@@ -27,7 +27,8 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
       const queueMsg = compactingSessions.has(msg.sessionKey)
         ? "☕ Hold on, just tidying up my thoughts over coffee... I'll get to you in a moment!"
         : `⏳ Queued (${queue.length}) — will process after current response.`;
-      await adapter.sendMessage(msg.channelId, queueMsg, { threadId: msg.threadId });
+      try { await adapter.sendMessage(msg.channelId, queueMsg, { threadId: msg.threadId }); }
+      catch { logDebug("busy-guard", `Queue notification failed for ${msg.sessionKey} — message still queued`); }
       ctx.handled = true;
       return;
     }
