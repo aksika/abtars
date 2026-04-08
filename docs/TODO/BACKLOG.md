@@ -271,21 +271,47 @@ Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") b
 **Priority:** HIGH
 **Status:** Not started
 
-### Problems found in production backfill
+1. Primary flag from memory_type (D not F for decisions, L not CM for lessons)
+2. Entity whitelist only (no @daily, @telegram, @high)
+3. Preserve negations + pronouns in filler stripping
+4. Topic inference from content when topic=general
+5. No truncation limit — wake-up builder handles length
+6. Pipe-separate list items, arrow cause→effect, abbreviations
+7. Re-run backfill after fixes
 
-1. **Flag override** — importance flagger detects "instead of" → `decision`, overriding the actual `memory_type` (lesson). The memory_type should be the primary flag, detected flags should be secondary/additive.
+## 103. ABM-L Compression Level 2 — wake-up rendering
 
-2. **Over-aggressive entity detection** — single capitalized words mid-sentence become @references ("Vincent" → `@vincent`). Should only tag known entities (user, agent, project names) or require multiple occurrences.
+**Priority:** HIGH
+**Status:** Not started
 
-3. **Grammar-breaking filler strip** — "When I don't know" → "When don't know". Lessons and rules need to stay readable. Filler stripping should be less aggressive on lesson/rule/preference memory types.
+Entity header + topic grouping + elide defaults in wake-up rendering. Daily summary compression to ABM-L. Compressed SOUL for <32K models. Adaptive full/compact/ultra based on context budget.
 
-4. **Topic not inferred** — behavioral lessons about the agent stored as `topic=general` instead of `personal` or `coding`. Compressor should infer topic from content when topic is `general`.
+## 104. ABM-L storage optimization
 
-### Fix
-- `memory-compressor.ts`: use `memory_type` as primary flag, detected flags as additive
-- `memory-compressor.ts`: entity detection whitelist (known entities only), not greedy capitalization scan
-- `memory-compressor.ts`: skip filler stripping for lesson/preference/core_belief types — keep full readability
-- Re-run backfill after fixes
+**Priority:** MEDIUM
+**Status:** Not started
+
+D2: Strip prefix from stored ABM-L, reconstruct from columns at render time. D3: ABM-L aware merge (duplicate detection on compressed content). FTS5 on content_compressed only (replace English FTS5).
+
+## 105. Embedding tiering — separate table + int8 quantization
+
+**Priority:** MEDIUM
+**Status:** Not started
+
+Move embeddings to memory_embeddings table. Quantize float32→int8 after 14 days (384 bytes vs 1536). int8 kept forever. Main table stays lean.
+
+## 106. ABM v2 wiring — connect planned features
+
+**Priority:** HIGH
+**Status:** Not started
+
+1. Wire memory.env loading into bridge startup
+2. Wire --full recall flag (return content_en when available, ABM-L when not)
+3. Wire aging SQL into maintenance methods (NULL columns, pressure calculation)
+4. Auto-promote |emotion_score| >= 4 to core tier on store
+5. Wire source_type + last_recall_context into store/recall CLIs
+6. Wire spaced repetition decay into Darwinism
+7. Update ABM-L format hint for new compression rules
 
 
 ## 100. Zombie child process reaper
