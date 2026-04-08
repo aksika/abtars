@@ -11,6 +11,11 @@ Run any tool with `--help` for full usage. See linked skill for behavioral rules
 
 ```
 agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"]
+```
+
+**CRITICAL:** `--translated` means "translated to English." ALWAYS translate the user's query to English keywords before calling recall. Never pass Hungarian or other non-English words as `--translated`. Use `--original` for the original-language keyword as a secondary search signal.
+
+```
 agentbridge-store --translated "English" --original "eredeti" --memory-type <type> --emotion-score 0 --chat-id 7773842843 [--tags "term1,term2"]
 agentbridge-edit --memory-id <N> [--credibility N] [--classification N] [--translated "..."] [--relevance-score +N] [--caller kp]
 agentbridge-expand --ids 451,452,453

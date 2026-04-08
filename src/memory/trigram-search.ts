@@ -1,0 +1,160 @@
+/**
+ * trigram-search.ts — Sf stage: three-query fuzzy search.
+ *
+ * 1. Porter FTS5 on content_en (stemmed keyword match)
+ * 2. Trigram on content_en + preserved_keyword (fuzzy/typo/substring, diacritics-stripped)
+ * 3. If results < limit: trigram on content_original (Hungarian fallback, diacritics-stripped)
+ */
+
+import type Database from "better-sqlite3";
+import { localISO } from "../utils/local-time.js";
+import type { RecallHit } from "./recall-engine.js";
+
+export type SfOptions = {
+  translated: string[];
+  original?: string;
+  chatId: number;
+  limit: number;
+  maxClassification: number;
+  timeStart?: number;
+  timeEnd?: number;
+  topic?: string;
+  tier?: string;
+  includeExpired?: boolean;
+  entityFilter?: Set<number>;
+  resolution?: string;
+};
+
+type MemRow = {
+  id: number;
+  content_en: string | null;
+  content_original: string | null;
+  memory_type: string | null;
+  created_at: number;
+  source_message_ids: string | null;
+  trust: number | null;
+  integrity: number | null;
+  credibility: number | null;
+  classification: number | null;
+  recall_count: number;
+  relevance_score: number;
+  preserved_keyword: string | null;
+};
+
+/** Strip diacritics (mirrors the SQLite function). */
+function stripDiacritics(text: string): string {
+  return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function buildWhereClause(opts: SfOptions): { where: string; params: (string | number)[] } {
+  const conditions: string[] = ["1=1"];
+  const params: (string | number)[] = [];
+  if (opts.chatId) { conditions.push("em.chat_id = ?"); params.push(opts.chatId); }
+  if (opts.timeStart) { conditions.push("em.created_at >= ?"); params.push(opts.timeStart); }
+  if (opts.timeEnd) { conditions.push("em.created_at <= ?"); params.push(opts.timeEnd); }
+  if (opts.maxClassification !== undefined) { conditions.push("COALESCE(em.classification, 0) <= ?"); params.push(opts.maxClassification); }
+  if (opts.topic) { conditions.push("em.topic = ?"); params.push(opts.topic); }
+  if (opts.tier) { conditions.push("em.tier = ?"); params.push(opts.tier); }
+  if (!opts.includeExpired) { conditions.push("em.valid_to IS NULL"); }
+  return { where: conditions.join(" AND "), params };
+}
+
+function darwinismScore(row: MemRow): number {
+  const base = 0.95;
+  const recallBoost = Math.min(row.recall_count * 0.02, 0.2);
+  const relevanceBoost = Math.min((row.relevance_score ?? 0) * 0.01, 0.1);
+  return base + recallBoost + relevanceBoost;
+}
+
+function rowToHit(row: MemRow, source: string): RecallHit {
+  return {
+    content: row.content_en ?? "",
+    date: localISO(new Date(row.created_at)),
+    source,
+    score: darwinismScore(row),
+    ...(row.source_message_ids ? { source_ids: row.source_message_ids } : {}),
+    contentOriginal: row.content_original ?? undefined,
+    memoryType: row.memory_type ?? undefined,
+    trust: row.trust ?? undefined,
+    integrity: row.integrity ?? undefined,
+    credibility: row.credibility ?? undefined,
+    classification: row.classification ?? undefined,
+  };
+}
+
+const MEM_COLS = `em.id, em.content_en, em.content_original, em.memory_type, em.created_at,
+  em.source_message_ids, em.trust, em.integrity, em.credibility, em.classification,
+  em.recall_count, COALESCE(em.relevance_score, 0) as relevance_score, em.preserved_keyword`;
+
+export function trigramSearch(db: Database.Database, opts: SfOptions): { hits: RecallHit[]; extractedIds: number[] } {
+  const seen = new Set<number>();
+  const hits: RecallHit[] = [];
+  const extractedIds: number[] = [];
+  const { where, params } = buildWhereClause(opts);
+  const fetchLimit = opts.limit * 3;
+
+  const addRow = (row: MemRow, source: string): void => {
+    if (seen.has(row.id)) return;
+    if (opts.entityFilter && !opts.entityFilter.has(row.id)) return;
+    seen.add(row.id);
+    extractedIds.push(row.id);
+    hits.push(rowToHit(row, source));
+  };
+
+  // Sf.1: Porter FTS5 on content_en (existing index)
+  const query = opts.translated.join(" ");
+  if (query.trim()) {
+    try {
+      const ftsQuery = opts.translated.map(kw => `"${kw.replace(/"/g, "")}"`).join(" OR ");
+      const rows = db.prepare(
+        `SELECT ${MEM_COLS} FROM extracted_memories_fts ft
+         JOIN extracted_memories em ON ft.rowid = em.id
+         WHERE extracted_memories_fts MATCH ? AND ${where}
+         ORDER BY rank LIMIT ?`,
+      ).all(ftsQuery, ...params, fetchLimit) as MemRow[];
+      for (const r of rows) addRow(r, "Sf:porter");
+    } catch { /* FTS5 query error */ }
+  }
+
+  // Sf.2: Trigram on content_en + preserved_keyword (diacritics-stripped)
+  if (hits.length < opts.limit) {
+    const allKw = [...opts.translated];
+    if (opts.original) allKw.push(opts.original);
+    for (const kw of allKw) {
+      if (hits.length >= opts.limit) break;
+      const stripped = stripDiacritics(kw);
+      if (stripped.length < 3) continue; // trigram needs at least 3 chars
+      try {
+        const rows = db.prepare(
+          `SELECT ${MEM_COLS} FROM content_en_trigram ft
+           JOIN extracted_memories em ON ft.rowid = em.id
+           WHERE content_en_trigram MATCH ? AND ${where}
+           ORDER BY rank LIMIT ?`,
+        ).all(`"${stripped}"`, ...params, fetchLimit) as MemRow[];
+        for (const r of rows) addRow(r, "Sf:trigram_en");
+      } catch { /* trigram query error */ }
+    }
+  }
+
+  // Sf.3: Trigram on content_original (Hungarian fallback, only if results < limit)
+  if (hits.length < opts.limit) {
+    const allKw = [...opts.translated];
+    if (opts.original) allKw.push(opts.original);
+    for (const kw of allKw) {
+      if (hits.length >= opts.limit) break;
+      const stripped = stripDiacritics(kw);
+      if (stripped.length < 3) continue;
+      try {
+        const rows = db.prepare(
+          `SELECT ${MEM_COLS} FROM content_original_trigram ft
+           JOIN extracted_memories em ON ft.rowid = em.id
+           WHERE content_original_trigram MATCH ? AND ${where}
+           ORDER BY rank LIMIT ?`,
+        ).all(`"${stripped}"`, ...params, fetchLimit) as MemRow[];
+        for (const r of rows) addRow(r, "Sf:trigram_orig");
+      } catch { /* trigram query error */ }
+    }
+  }
+
+  return { hits, extractedIds };
+}

@@ -335,6 +335,80 @@ const MIGRATIONS: readonly Migration[] = [
       } catch { /* */ }
     },
   },
+  {
+    version: 10,
+    label: "Trigram FTS5 indexes for recall pipeline simplification",
+    up: (db) => {
+      // Trigram index on content_en + preserved_keyword (diacritics-stripped)
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS content_en_trigram USING fts5(
+          content, tokenize='trigram'
+        );
+        CREATE TRIGGER IF NOT EXISTS content_en_trigram_ai AFTER INSERT ON extracted_memories BEGIN
+          INSERT INTO content_en_trigram(rowid, content)
+            VALUES (new.id, strip_diacritics(COALESCE(new.content_en, '') || ' ' || COALESCE(new.preserved_keyword, '')));
+        END;
+        CREATE TRIGGER IF NOT EXISTS content_en_trigram_ad AFTER DELETE ON extracted_memories BEGIN
+          INSERT INTO content_en_trigram(content_en_trigram, rowid, content)
+            VALUES('delete', old.id, strip_diacritics(COALESCE(old.content_en, '') || ' ' || COALESCE(old.preserved_keyword, '')));
+        END;
+        CREATE TRIGGER IF NOT EXISTS content_en_trigram_au AFTER UPDATE OF content_en, preserved_keyword ON extracted_memories BEGIN
+          INSERT INTO content_en_trigram(content_en_trigram, rowid, content)
+            VALUES('delete', old.id, strip_diacritics(COALESCE(old.content_en, '') || ' ' || COALESCE(old.preserved_keyword, '')));
+          INSERT INTO content_en_trigram(rowid, content)
+            VALUES (new.id, strip_diacritics(COALESCE(new.content_en, '') || ' ' || COALESCE(new.preserved_keyword, '')));
+        END;
+      `);
+      try {
+        db.exec(`INSERT INTO content_en_trigram(rowid, content)
+          SELECT id, strip_diacritics(COALESCE(content_en, '') || ' ' || COALESCE(preserved_keyword, ''))
+          FROM extracted_memories`);
+      } catch { /* already populated */ }
+
+      // Trigram index on content_original (diacritics-stripped)
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS content_original_trigram USING fts5(
+          content, tokenize='trigram'
+        );
+        CREATE TRIGGER IF NOT EXISTS content_original_trigram_ai AFTER INSERT ON extracted_memories BEGIN
+          INSERT INTO content_original_trigram(rowid, content)
+            VALUES (new.id, strip_diacritics(COALESCE(new.content_original, '')));
+        END;
+        CREATE TRIGGER IF NOT EXISTS content_original_trigram_ad AFTER DELETE ON extracted_memories BEGIN
+          INSERT INTO content_original_trigram(content_original_trigram, rowid, content)
+            VALUES('delete', old.id, strip_diacritics(COALESCE(old.content_original, '')));
+        END;
+        CREATE TRIGGER IF NOT EXISTS content_original_trigram_au AFTER UPDATE OF content_original ON extracted_memories BEGIN
+          INSERT INTO content_original_trigram(content_original_trigram, rowid, content)
+            VALUES('delete', old.id, strip_diacritics(COALESCE(old.content_original, '')));
+          INSERT INTO content_original_trigram(rowid, content)
+            VALUES (new.id, strip_diacritics(COALESCE(new.content_original, '')));
+        END;
+      `);
+      try {
+        db.exec(`INSERT INTO content_original_trigram(rowid, content)
+          SELECT id, strip_diacritics(COALESCE(content_original, ''))
+          FROM extracted_memories`);
+      } catch { /* already populated */ }
+
+      // Drop replaced FTS5 indexes and their triggers
+      db.exec(`
+        DROP TRIGGER IF EXISTS extracted_memories_orig_ai;
+        DROP TRIGGER IF EXISTS extracted_memories_orig_ad;
+        DROP TRIGGER IF EXISTS extracted_memories_orig_au;
+        DROP TABLE IF EXISTS extracted_memories_original_fts;
+
+        DROP TRIGGER IF EXISTS abml_fts_ai;
+        DROP TRIGGER IF EXISTS abml_fts_ad;
+        DROP TRIGGER IF EXISTS abml_fts_au;
+        DROP TABLE IF EXISTS abml_fts;
+
+        DROP TRIGGER IF EXISTS messages_ai;
+        DROP TRIGGER IF EXISTS messages_ad;
+        DROP TABLE IF EXISTS messages_fts;
+      `);
+    },
+  },
 ];
 
 // ── Migration runner ────────────────────────────────────────────────────────

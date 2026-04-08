@@ -134,8 +134,17 @@ export class MemoryIndex {
     const sanitizedQuery = sanitizeFtsQuery(query, mode);
     if (!sanitizedQuery) return [];
 
-    const conditions: string[] = ["messages_fts MATCH ?"];
-    const params: (string | number)[] = [sanitizedQuery];
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+
+    // Use LIKE since messages_fts was dropped in migration v10
+    const keywords = query.trim().split(/\s+/).filter(Boolean);
+    if (keywords.length === 0) return [];
+    const kwCondition = keywords.map(kw => {
+      params.push(`%${kw}%`);
+      return "m.content LIKE ?";
+    }).join(mode === "or" ? " OR " : " AND ");
+    conditions.push(`(${kwCondition})`);
 
     if (opts?.chatId !== undefined) {
       conditions.push("m.chat_id = ?");
@@ -154,11 +163,10 @@ export class MemoryIndex {
     params.push(limit);
 
     const sql = `
-      SELECT m.id, m.chat_id, m.session_id, m.role, m.content, m.timestamp, rank
+      SELECT m.id, m.chat_id, m.session_id, m.role, m.content, m.timestamp, 0 as rank
       FROM messages m
-      JOIN messages_fts ON messages_fts.rowid = m.id
       WHERE ${conditions.join(" AND ")}
-      ORDER BY rank ASC
+      ORDER BY m.timestamp DESC
       LIMIT ?
     `;
 
@@ -357,73 +365,6 @@ export class MemoryIndex {
     }
   }
 
-  /**
-   * Search extracted memories by original-language content using FTS5 on
-   * extracted_memories_original_fts. Optionally boosts results where
-   * preserve_original is true (score multiplied by 1.5).
-   *
-   * Returns MemorySearchResult[] with tier="extracted".
-   * Returns empty array on error.
-   */
-  searchOriginal(
-    query: string,
-    opts?: { chatId?: number; limit?: number; boostPreserved?: boolean; maxClassification?: number },
-    mode: "or" | "and" = "and",
-  ): MemorySearchResult[] {
-    try {
-      if (!query.trim()) return [];
-
-      const sanitizedQuery = sanitizeFtsQuery(query, mode);
-      if (!sanitizedQuery) return [];
-
-      const conditions: string[] = ["extracted_memories_original_fts MATCH ?"];
-      const params: (string | number)[] = [sanitizedQuery];
-
-      // Classification filter — always exclude restricted (3)
-      const maxCls = Math.min(opts?.maxClassification ?? 2, 2);
-      conditions.push("COALESCE(em.classification, 1) <= ?");
-      params.push(maxCls);
-
-      if (opts?.chatId !== undefined) {
-        conditions.push("em.chat_id = ?");
-        params.push(opts.chatId);
-      }
-
-      const limit = opts?.limit ?? 20;
-      params.push(limit);
-
-      const sql = `
-        SELECT em.id, em.content_en, em.content_original, em.memory_type,
-               em.created_at, em.preserve_original, em.emotion_score,
-               em.recall_count, em.relevance_score, em.source_message_ids,
-               em.trust, em.integrity, em.credibility, em.classification, rank
-        FROM extracted_memories em
-        JOIN extracted_memories_original_fts ON extracted_memories_original_fts.rowid = em.id
-        WHERE ${conditions.join(" AND ")}
-        ORDER BY rank * (1.0 + 0.1 * COALESCE(em.recall_count, 0))
-                      * CASE WHEN COALESCE(em.relevance_score, 0) > 0 THEN 1.2 ELSE 1.0 END
-                      / (0.5 + 0.5 * COALESCE(em.trust, 0) / 3.0)
-                      * CASE WHEN COALESCE(em.credibility, 6) <= 2 THEN 0.8 ELSE 1.0 END
-               ASC
-        LIMIT ?
-      `;
-
-      const rows = this.db.prepare(sql).all(...params) as ExtractedFtsRow[];
-
-      const boostPreserved = opts?.boostPreserved ?? false;
-
-      return rows.map((row) => {
-        const base = boostPreserved && row.preserve_original === 1
-          ? Math.abs(row.rank) * 1.5
-          : Math.abs(row.rank);
-        return mapExtractedRow(row, scoreExtractedRow(row, base));
-      });
-    } catch (err) {
-      logWarn("memory-index", `searchOriginal failed: ${err instanceof Error ? err.message : String(err)}`);
-      return [];
-    }
-  }
-
   /** Bump recall_count and last_recalled_at for the given extracted memory IDs. */
   bumpRecallCount(ids: number[]): void {
     if (ids.length === 0) return;
@@ -440,26 +381,14 @@ export class MemoryIndex {
 
   /**
    * Index an extracted memory in the FTS5 indexes.
-   *
-   * The FTS5 triggers on extracted_memories handle automatic indexing on INSERT,
-   * but this method provides a manual indexing path for cases where the triggers
-   * may not have fired (e.g., bulk imports or rebuilds).
-   *
-   * Always indexes content_en into extracted_memories_fts.
-   * Indexes content_original into extracted_memories_original_fts only when
-   * preserve_original is true.
+   * Indexes content_en into extracted_memories_fts (porter).
+   * Trigram indexes are maintained by SQLite triggers.
    */
   indexExtractedMemory(memory: ExtractedMemory & { id: number }): void {
     try {
       this.db
         .prepare("INSERT INTO extracted_memories_fts(rowid, content_en) VALUES (?, ?)")
         .run(memory.id, memory.content_en);
-
-      if (memory.preserve_original) {
-        this.db
-          .prepare("INSERT INTO extracted_memories_original_fts(rowid, content_original) VALUES (?, ?)")
-          .run(memory.id, memory.content_original);
-      }
     } catch (err) {
       logWarn("memory-index", `indexExtractedMemory failed: ${err instanceof Error ? err.message : String(err)}`);
     }

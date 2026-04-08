@@ -34,9 +34,9 @@ export interface DbStats {
 }
 
 export interface Fts5Health {
-  messages_fts: "ok" | "corrupt";
+  messages_fts: "ok" | "corrupt" | "dropped";
   extracted_memories_fts: "ok" | "corrupt";
-  extracted_memories_original_fts: "ok" | "corrupt";
+  extracted_memories_original_fts: "ok" | "corrupt" | "dropped";
 }
 
 export interface TopicFileEntry {
@@ -214,16 +214,18 @@ export class SleepStateGatherer {
         // FTS5 integrity-check: throws if the index is corrupt
         this.db.exec(`INSERT INTO ${table}(${table}) VALUES('integrity-check')`);
         return "ok";
-      } catch (err) {
-        logWarn(TAG, `FTS5 integrity-check failed for ${table}: ${err}`);
+      } catch {
         return "corrupt";
       }
     };
+    const checkExists = (table: string): "ok" | "corrupt" | "dropped" => {
+      try { return check(table); } catch { return "dropped"; }
+    };
 
     return {
-      messages_fts: check("messages_fts"),
+      messages_fts: checkExists("messages_fts"),
       extracted_memories_fts: check("extracted_memories_fts"),
-      extracted_memories_original_fts: check("extracted_memories_original_fts"),
+      extracted_memories_original_fts: checkExists("extracted_memories_original_fts"),
     };
   }
 

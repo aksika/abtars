@@ -5,7 +5,7 @@
  * Usage:
  *   agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843
  *   agentbridge-recall --translated "puppy" --original "kiskutya" --chat-id 7773842843
- *   agentbridge-recall --translated "puppy" --chat-id 123 --stages S1,S3
+ *   agentbridge-recall --translated "puppy" --chat-id 123 --stages Sf,Ss
  *
  * Legacy: --keywords is accepted as alias for --translated.
  */
@@ -21,7 +21,7 @@ function parseArgs() {
     console.log(`Usage:
   agentbridge-recall --translated "kw1,kw2" --chat-id <id>
   agentbridge-recall --translated "kw" --original "kw" --chat-id <id>
-  agentbridge-recall --translated "kw" --chat-id <id> --stages S1,S3
+  agentbridge-recall --translated "kw" --chat-id <id> --stages Sf,Ss
   agentbridge-recall --entity "Name" --chat-id <id>
 
 Options:
@@ -29,7 +29,7 @@ Options:
   --original <kw>         Original-language keyword
   --chat-id <id>          Chat ID (required)
   --entity <name>         Entity name to search
-  --stages <S1,S3>        Comma-separated stages to search
+  --stages <Sf,Ss>        Comma-separated stages to search (Sf, Ss, Se, S6)
   --limit <n>             Max results (default: 10, max: 50)
   --max-classification <n> Max classification level (default: 2)
   --time-start <epoch>    Filter by start time
