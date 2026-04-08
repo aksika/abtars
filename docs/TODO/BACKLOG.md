@@ -377,3 +377,10 @@ Before `pmset sleepnow`, check if any new messages arrived since Dreamy started:
 - If no new messages → proceed with `pmset sleepnow`
 
 This means: Dreamy always runs (maintenance is important), but Mac hardware sleep only happens if the user stayed quiet through the entire cycle.
+
+## 96. Sleep step retry backoff
+
+**Priority:** LOW
+**Status:** Not started
+
+`sendWithRetry` in `agentbridge-sleep.ts` retries immediately with no delay. Add escalating backoff: 10s → 20s → 30s between step-level retries.
