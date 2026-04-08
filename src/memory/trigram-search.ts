@@ -58,6 +58,13 @@ function substrings(word: string, minLen = 4): string[] {
   return subs;
 }
 
+/** QWERTZ↔QWERTY z/y swap variant. */
+const ZY_SWAP: Record<string, string> = { z: "y", y: "z" };
+function zyVariant(word: string): string {
+  const swapped = [...word].map(c => ZY_SWAP[c] ?? c).join("");
+  return swapped === word ? "" : swapped;
+}
+
 function trigramQuery(
   db: Database.Database, table: string, keyword: string,
   where: string, params: (string | number)[], fetchLimit: number,
@@ -73,19 +80,32 @@ function trigramQuery(
        ORDER BY rank LIMIT ?`,
     ).all(`"${stripped}"`, ...params, fetchLimit) as MemRow[];
     for (const r of rows) addRow(r, source);
-    // If full word found nothing, try substrings (fuzzy fallback for typos)
-    if (rows.length === 0) {
-      for (const sub of substrings(stripped)) {
-        try {
-          const subRows = db.prepare(
-            `SELECT ${MEM_COLS} FROM ${table} ft
-             JOIN extracted_memories em ON ft.rowid = em.id
-             WHERE ${table} MATCH ? AND ${where}
-             ORDER BY rank LIMIT ?`,
-          ).all(`"${sub}"`, ...params, fetchLimit) as MemRow[];
-          for (const r of subRows) addRow(r, source);
-        } catch { /* */ }
-      }
+    if (rows.length > 0) return;
+
+    // Fallback 1: z↔y swap (QWERTZ keyboard)
+    const zy = zyVariant(stripped);
+    if (zy) {
+      const zyRows = db.prepare(
+        `SELECT ${MEM_COLS} FROM ${table} ft
+         JOIN extracted_memories em ON ft.rowid = em.id
+         WHERE ${table} MATCH ? AND ${where}
+         ORDER BY rank LIMIT ?`,
+      ).all(`"${zy}"`, ...params, fetchLimit) as MemRow[];
+      for (const r of zyRows) addRow(r, source);
+      if (zyRows.length > 0) return;
+    }
+
+    // Fallback 2: substring windows for typo tolerance
+    for (const sub of substrings(stripped)) {
+      try {
+        const subRows = db.prepare(
+          `SELECT ${MEM_COLS} FROM ${table} ft
+           JOIN extracted_memories em ON ft.rowid = em.id
+           WHERE ${table} MATCH ? AND ${where}
+           ORDER BY rank LIMIT ?`,
+        ).all(`"${sub}"`, ...params, fetchLimit) as MemRow[];
+        for (const r of subRows) addRow(r, source);
+      } catch { /* */ }
     }
   } catch { /* trigram query error */ }
 }
