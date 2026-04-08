@@ -1435,3 +1435,98 @@ If needed later, add a heartbeat task that reviews the last N messages and spawn
 
 **Effort:** Medium. **Risk:** Low (additive — new CLI + new sleep step, nothing changes).
 
+
+## 94. Move sleep cycle to 2am + Mac sleep after completion
+
+**Priority:** HIGH
+**Status:** ✅ Done (2026-04-08)
+
+### Problem
+Sleep cycle currently runs as a morning nap (triggered on wake). Should run at 2am when the user is actually asleep — the agent does its maintenance overnight, not during active hours.
+
+### Solution
+- Change sleep trigger from morning to 2am CET (cron-based or LaunchAgent schedule on Mac)
+- After successful sleep completion (all steps OK), agent puts the Mac to sleep state via `pmset sleepnow` or `osascript -e 'tell application "System Events" to sleep'`
+- If sleep fails (essential steps incomplete), Mac stays awake — don't sleep on failure
+- Log the sleep-then-shutdown sequence in the audit file
+
+
+## 95. Sleep step backoff delay to avoid rate limiting
+
+**Priority:** MEDIUM
+**Status:** ✅ Done (2026-04-08)
+
+### Problem
+Sleep cycle runs 24 steps in rapid succession. After ~5-6 minutes of sustained prompts, model providers (Kiro/AWS, OpenRouter free tier) start returning -32603 (rate limit / internal error). Remaining steps fail.
+
+### Solution
+- Add configurable delay between sleep steps: `SLEEP_STEP_DELAY_SEC=10` (default 10s)
+- After each successful step, wait before starting the next
+- Exponential backoff on retry: 10s → 20s → 40s
+- Essential steps (daily summary, extraction) run first with no delay, non-essential steps get the delay
+- Log: `[SLEEP] Waiting 10s before next step (rate limit protection)`
+
+
+## 97. Mac sleep guard — don't sleep if user messaged during Dreamy
+
+**Priority:** HIGH
+**Status:** ✅ Done (2026-04-08)
+
+### Problem
+After Dreamy completes, `pmset sleepnow` fires immediately. But the user may have sent messages DURING the sleep cycle (e.g. woke up, can't sleep). Mac goes to sleep while user is actively chatting.
+
+### Solution
+Before `pmset sleepnow`, check if any new messages arrived since Dreamy started:
+- Record `lastMsgTs` when Dreamy spawns
+- After Dreamy completes, check current `lastMsgTs`
+- If new messages arrived during sleep → skip Mac sleep, reset bedtime quiet tick counter
+- If no new messages → proceed with `pmset sleepnow`
+
+This means: Dreamy always runs (maintenance is important), but Mac hardware sleep only happens if the user stayed quiet through the entire cycle.
+
+
+## 99. Sleep step retry backoff (duplicate of #95)
+
+**Priority:** LOW
+**Status:** Not started
+
+`sendWithRetry` in `agentbridge-sleep.ts` retries immediately with no delay. Add escalating backoff: 10s → 20s → 30s between step-level retries.
+
+## 50. Decouple Memory System from Bridge
+
+**Status:** ✅ Done (2026-04-07) — ABM Phase 0
+**Priority:** Medium
+**Source:** Memory-edit tool planning discussion (2026-03-28)
+
+**Goal:**
+Extract the memory system into a standalone module/package, decoupled from the bridge. Similar to how lossless-claw (`/home/qakosal/workspace/lossless-claw`) is a standalone plugin that handles context management independently of OpenClaw's core.
+
+**Reference architecture:** lossless-claw
+- Standalone SQLite-based persistence
+- Clean interface boundary (ContextEngine interface)
+- Own tools (lcm_grep, lcm_describe, lcm_expand)
+- Own CLI (lcm-tui)
+- Pluggable into a host system without tight coupling
+
+**Current coupling points — direct SQL UPDATEs on extracted_memories:**
+
+| # | Location | SQL | Status after edit tool |
+|---|----------|-----|----------------------|
+| 1 | `adjustRelevance()` | `SET relevance_score += ?` | → routed through editMemory |
+| 2 | `reclassifyMemory()` | `SET classification = ?` | → routed through editMemory |
+| 3 | `updateEmotionByPlatformId()` | `SET emotion_score = ? WHERE source_message_ids LIKE ...` | → routed through editMemory |
+| 4 | `mergeMemories()` | multi-field merge + DELETE | stays — different operation |
+| 5 | `embedNewMemory()` | `SET embedding = ?` | stays — internal pipeline |
+| 6 | `memory-extractor.ts` | `SET embedding = ?` | stays — internal pipeline (deduplicate with #5) |
+| 7 | `ollama-embed.ts` | `SET embedding = ?` | stays — batch embedding |
+| 8 | `memory-index.ts` bumpRecallCount | `SET recall_count += 1, last_recalled_at = ?` | stays — automatic bookkeeping |
+
+**Decoupling steps (future):**
+- All mutations go through a clean API (editMemory, instantStore, merge, delete)
+- No raw SQL outside the memory module
+- Embedding pipeline internalized (5-7 become private implementation detail)
+- Recall bookkeeping (8) internalized
+- Memory module exposes: store, edit, recall, merge, delete, stats
+- Bridge consumes the module via interface, not direct DB access
+- Standalone CLI tools (agentbridge-store, agentbridge-edit, agentbridge-recall) become the public API
+

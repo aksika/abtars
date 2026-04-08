@@ -42,44 +42,6 @@ Replace the plain text `edited_by` with a simple digital signature that proves w
 - Verification: sleep audit can check signatures match expected callers
 - Scope: only for edits, not for initial store (that's covered by trust + integrity fields)
 
-## 50. Decouple Memory System from Bridge
-
-**Status:** Not started
-**Priority:** Medium
-**Source:** Memory-edit tool planning discussion (2026-03-28)
-
-**Goal:**
-Extract the memory system into a standalone module/package, decoupled from the bridge. Similar to how lossless-claw (`/home/qakosal/workspace/lossless-claw`) is a standalone plugin that handles context management independently of OpenClaw's core.
-
-**Reference architecture:** lossless-claw
-- Standalone SQLite-based persistence
-- Clean interface boundary (ContextEngine interface)
-- Own tools (lcm_grep, lcm_describe, lcm_expand)
-- Own CLI (lcm-tui)
-- Pluggable into a host system without tight coupling
-
-**Current coupling points — direct SQL UPDATEs on extracted_memories:**
-
-| # | Location | SQL | Status after edit tool |
-|---|----------|-----|----------------------|
-| 1 | `adjustRelevance()` | `SET relevance_score += ?` | → routed through editMemory |
-| 2 | `reclassifyMemory()` | `SET classification = ?` | → routed through editMemory |
-| 3 | `updateEmotionByPlatformId()` | `SET emotion_score = ? WHERE source_message_ids LIKE ...` | → routed through editMemory |
-| 4 | `mergeMemories()` | multi-field merge + DELETE | stays — different operation |
-| 5 | `embedNewMemory()` | `SET embedding = ?` | stays — internal pipeline |
-| 6 | `memory-extractor.ts` | `SET embedding = ?` | stays — internal pipeline (deduplicate with #5) |
-| 7 | `ollama-embed.ts` | `SET embedding = ?` | stays — batch embedding |
-| 8 | `memory-index.ts` bumpRecallCount | `SET recall_count += 1, last_recalled_at = ?` | stays — automatic bookkeeping |
-
-**Decoupling steps (future):**
-- All mutations go through a clean API (editMemory, instantStore, merge, delete)
-- No raw SQL outside the memory module
-- Embedding pipeline internalized (5-7 become private implementation detail)
-- Recall bookkeeping (8) internalized
-- Memory module exposes: store, edit, recall, merge, delete, stats
-- Bridge consumes the module via interface, not direct DB access
-- Standalone CLI tools (agentbridge-store, agentbridge-edit, agentbridge-recall) become the public API
-
 ## 64. STT gibberish detection + safe languages
 
 **Status:** Not started
@@ -304,41 +266,12 @@ In-memory cache for recall results within a session. If the agent queries the sa
 
 Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") but implemented as a trivial in-process cache.
 
-## 94. Move sleep cycle to 2am + Mac sleep after completion
-
-**Priority:** HIGH
-**Status:** Not started
-
-### Problem
-Sleep cycle currently runs as a morning nap (triggered on wake). Should run at 2am when the user is actually asleep — the agent does its maintenance overnight, not during active hours.
-
-### Solution
-- Change sleep trigger from morning to 2am CET (cron-based or LaunchAgent schedule on Mac)
-- After successful sleep completion (all steps OK), agent puts the Mac to sleep state via `pmset sleepnow` or `osascript -e 'tell application "System Events" to sleep'`
-- If sleep fails (essential steps incomplete), Mac stays awake — don't sleep on failure
-- Log the sleep-then-shutdown sequence in the audit file
-
-## 95. Bug: 👀 reaction not removed after agent sends response
+## 98. Bug: 👀 reaction not removed after agent sends response
 
 **Priority:** MEDIUM
 **Status:** Not started
 
 The "seen" (👀) emoji reaction is not deleted from the user's message after the agent sends its response. It should be removed once the reply is delivered, so only unprocessed messages show the eyes.
-
-## 95. Sleep step backoff delay to avoid rate limiting
-
-**Priority:** MEDIUM
-**Status:** Not started
-
-### Problem
-Sleep cycle runs 24 steps in rapid succession. After ~5-6 minutes of sustained prompts, model providers (Kiro/AWS, OpenRouter free tier) start returning -32603 (rate limit / internal error). Remaining steps fail.
-
-### Solution
-- Add configurable delay between sleep steps: `SLEEP_STEP_DELAY_SEC=10` (default 10s)
-- After each successful step, wait before starting the next
-- Exponential backoff on retry: 10s → 20s → 40s
-- Essential steps (daily summary, extraction) run first with no delay, non-essential steps get the delay
-- Log: `[SLEEP] Waiting 10s before next step (rate limit protection)`
 
 ## 96. ABM-L compressor quality fixes
 
@@ -361,26 +294,24 @@ Sleep cycle runs 24 steps in rapid succession. After ~5-6 minutes of sustained p
 - `memory-compressor.ts`: skip filler stripping for lesson/preference/core_belief types — keep full readability
 - Re-run backfill after fixes
 
-## 97. Mac sleep guard — don't sleep if user messaged during Dreamy
 
-**Priority:** HIGH
-**Status:** Not started
-
-### Problem
-After Dreamy completes, `pmset sleepnow` fires immediately. But the user may have sent messages DURING the sleep cycle (e.g. woke up, can't sleep). Mac goes to sleep while user is actively chatting.
-
-### Solution
-Before `pmset sleepnow`, check if any new messages arrived since Dreamy started:
-- Record `lastMsgTs` when Dreamy spawns
-- After Dreamy completes, check current `lastMsgTs`
-- If new messages arrived during sleep → skip Mac sleep, reset bedtime quiet tick counter
-- If no new messages → proceed with `pmset sleepnow`
-
-This means: Dreamy always runs (maintenance is important), but Mac hardware sleep only happens if the user stayed quiet through the entire cycle.
-
-## 96. Sleep step retry backoff
+## 100. Zombie child process reaper
 
 **Priority:** LOW
 **Status:** Not started
 
-`sendWithRetry` in `agentbridge-sleep.ts` retries immediately with no delay. Add escalating backoff: 10s → 20s → 30s between step-level retries.
+Heartbeat task that checks known child refs (sleepHandle.child, browser pids). Reap dead ones, warn on accumulation. Low risk since daily restart cleans everything.
+
+## 101. Offline detection — reduce retry noise
+
+**Priority:** LOW
+**Status:** Not started
+
+Consecutive poller failure counter. After N failures, log "offline" once, reduce retry frequency. Reset on success. Prevents noisy logs when internet is down.
+
+## 102. Disk space runtime check
+
+**Priority:** LOW
+**Status:** Not started
+
+Heartbeat task checks `df` output. Warn at 90%, block new writes at 95%. Currently only checked during Dreamy sleep cycle.
