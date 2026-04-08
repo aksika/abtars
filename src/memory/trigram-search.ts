@@ -46,6 +46,50 @@ function stripDiacritics(text: string): string {
   return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
+/** Generate substring queries for fuzzy matching when full word fails.
+ *  Splits word into overlapping windows of ~half length (min 4 chars). */
+function substrings(word: string, minLen = 4): string[] {
+  if (word.length <= minLen + 2) return [];
+  const windowLen = Math.max(Math.floor(word.length / 2), minLen);
+  const subs: string[] = [];
+  for (let i = 0; i <= word.length - windowLen; i += Math.max(1, Math.floor(windowLen / 2))) {
+    subs.push(word.slice(i, i + windowLen));
+  }
+  return subs;
+}
+
+function trigramQuery(
+  db: Database.Database, table: string, keyword: string,
+  where: string, params: (string | number)[], fetchLimit: number,
+  addRow: (row: MemRow, source: string) => void, source: string,
+): void {
+  const stripped = stripDiacritics(keyword);
+  if (stripped.length < 3) return;
+  try {
+    const rows = db.prepare(
+      `SELECT ${MEM_COLS} FROM ${table} ft
+       JOIN extracted_memories em ON ft.rowid = em.id
+       WHERE ${table} MATCH ? AND ${where}
+       ORDER BY rank LIMIT ?`,
+    ).all(`"${stripped}"`, ...params, fetchLimit) as MemRow[];
+    for (const r of rows) addRow(r, source);
+    // If full word found nothing, try substrings (fuzzy fallback for typos)
+    if (rows.length === 0) {
+      for (const sub of substrings(stripped)) {
+        try {
+          const subRows = db.prepare(
+            `SELECT ${MEM_COLS} FROM ${table} ft
+             JOIN extracted_memories em ON ft.rowid = em.id
+             WHERE ${table} MATCH ? AND ${where}
+             ORDER BY rank LIMIT ?`,
+          ).all(`"${sub}"`, ...params, fetchLimit) as MemRow[];
+          for (const r of subRows) addRow(r, source);
+        } catch { /* */ }
+      }
+    }
+  } catch { /* trigram query error */ }
+}
+
 function buildWhereClause(opts: SfOptions): { where: string; params: (string | number)[] } {
   const conditions: string[] = ["1=1"];
   const params: (string | number)[] = [];
@@ -122,17 +166,7 @@ export function trigramSearch(db: Database.Database, opts: SfOptions): { hits: R
     if (opts.original) allKw.push(opts.original);
     for (const kw of allKw) {
       if (hits.length >= opts.limit) break;
-      const stripped = stripDiacritics(kw);
-      if (stripped.length < 3) continue; // trigram needs at least 3 chars
-      try {
-        const rows = db.prepare(
-          `SELECT ${MEM_COLS} FROM content_en_trigram ft
-           JOIN extracted_memories em ON ft.rowid = em.id
-           WHERE content_en_trigram MATCH ? AND ${where}
-           ORDER BY rank LIMIT ?`,
-        ).all(`"${stripped}"`, ...params, fetchLimit) as MemRow[];
-        for (const r of rows) addRow(r, "Sf:trigram_en");
-      } catch { /* trigram query error */ }
+      trigramQuery(db, "content_en_trigram", kw, where, params, fetchLimit, addRow, "Sf:trigram_en");
     }
   }
 
@@ -142,17 +176,7 @@ export function trigramSearch(db: Database.Database, opts: SfOptions): { hits: R
     if (opts.original) allKw.push(opts.original);
     for (const kw of allKw) {
       if (hits.length >= opts.limit) break;
-      const stripped = stripDiacritics(kw);
-      if (stripped.length < 3) continue;
-      try {
-        const rows = db.prepare(
-          `SELECT ${MEM_COLS} FROM content_original_trigram ft
-           JOIN extracted_memories em ON ft.rowid = em.id
-           WHERE content_original_trigram MATCH ? AND ${where}
-           ORDER BY rank LIMIT ?`,
-        ).all(`"${stripped}"`, ...params, fetchLimit) as MemRow[];
-        for (const r of rows) addRow(r, "Sf:trigram_orig");
-      } catch { /* trigram query error */ }
+      trigramQuery(db, "content_original_trigram", kw, where, params, fetchLimit, addRow, "Sf:trigram_orig");
     }
   }
 
