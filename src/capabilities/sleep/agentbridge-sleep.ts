@@ -848,10 +848,10 @@ async function main(): Promise<number> {
         // Flush garbage-marked messages >12h
         const garbagePath = join(memoryConfig.memoryDir, "garbage.json");
         if (existsSync(garbagePath)) {
-          const garbage = JSON.parse(readFileSync(garbagePath, "utf-8")) as Array<{ msg_id: number }>;
-          const oldGarbage = garbage.filter(() => true); // all garbage gets flushed
-          if (oldGarbage.length > 0) {
-            const ids = oldGarbage.map(g => g.msg_id).filter(id => typeof id === "number");
+          const raw = JSON.parse(readFileSync(garbagePath, "utf-8"));
+          const garbage: Array<{ msg_id?: number }> = Array.isArray(raw) ? raw : (Array.isArray(raw?.messages) ? raw.messages : []);
+          if (garbage.length > 0) {
+            const ids = garbage.map(g => g.msg_id).filter((id): id is number => typeof id === "number");
             if (ids.length > 0) {
               db.prepare(`DELETE FROM messages WHERE id IN (${ids.join(",")})`).run();
               logInfo(TAG, `[SLEEP] Flushed ${ids.length} garbage messages`);
