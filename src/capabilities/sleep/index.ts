@@ -3,7 +3,7 @@
  * Parses PROGRESS:<pct>:<label> from stdout for visibility.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hasSleepAuditToday } from "./sleep-trigger.js";
@@ -85,7 +85,6 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
             } else {
               logInfo("sleep", "💤 Putting Mac to sleep...");
               try {
-                const { execSync } = require("node:child_process") as typeof import("node:child_process");
                 execSync("pmset sleepnow", { timeout: 5000 });
               } catch (err) {
                 logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`);
