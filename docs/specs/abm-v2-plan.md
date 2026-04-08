@@ -394,3 +394,43 @@ Day 0:      Original + English + ABM-L + float32 + signature    ~2100 bytes
 ~90 days:   ████████ + ████████ + ABM-L + int8 + signature      ~600 bytes
 Forever:                         ABM-L + int8 + signature        ~500 bytes
 ```
+
+## ABM-L Compression Rules v2
+
+Refinements based on production data analysis. Replaces the naive compressor.
+
+### Entity rules
+- **Only @reference known entities**: user (@user), agent (@agent), project names from core-tier
+- **Never @reference**: platform names (Telegram, Discord), severity levels (High, Low), common nouns
+- **Abbreviate platforms**: Telegram→TG, Discord→DC, OpenRouter→OR
+- **Entity whitelist** built from core-tier memories at compression time, not greedy capitalization scan
+
+### Content rules
+- **Pipe-separate list items**: `bug1 | bug2 | bug3` instead of `1) bug1. 2) bug2.`
+- **Arrow for cause→effect**: `fail→self-healed`, `invalid→text fallback`
+- **Parenthetical severity/context**: `(H)`, `(L)`, `(pricing+DX)`
+- **Abbreviate known terms**: authentication→auth, configuration→config, development→dev, experience→XP
+- **No truncation limit** — let wake-up builder handle length via budget. Stored ABM-L captures everything.
+
+### Flag rules
+- **Primary flag from memory_type**: fact→F, decision→D, preference→P, event→E, lesson→L, feedback→K, story→S
+- **Secondary flags from detection**: additive, appended. `[ET|...]` = event + technical
+- **Never override memory_type** with detected flag
+
+### Filler stripping
+- Strip for all memory types (LLMs understand stripped text)
+- Preserve: paths, URLs, commands, numbers, error codes, emoji
+- Don't strip negations: "don't", "not", "never" — these change meaning
+
+### FTS5 on ABM-L only
+- Single FTS5 index on `content_compressed` (replaces `content_en` FTS5)
+- Stored ABM-L keeps `@entity` references (not short codes) — FTS5 tokenizer strips `@`, matches "clerk"
+- Short codes (CK, AB) only in wake-up rendering, never in stored ABM-L
+- English FTS5 index dropped — ABM-L + signatures + int8 embeddings cover all search paths
+
+### Search pipeline (post-migration)
+```
+Query → ABM-L FTS5 (keyword) + signature Hamming (semantic) + int8 cosine (semantic)
+  → merge + deduplicate + emotional boost → return
+```
+No English text needed at any stage.
