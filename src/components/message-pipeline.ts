@@ -434,35 +434,46 @@ function buildSessionStartPrompt(
   memory: MemoryManager,
   chatId: number,
 ): string {
+  const contextParts: string[] = [];
+
+  const reason = readAndClearRestartReason();
+  if (reason) {
+    contextParts.push(`[SESSION START REASON] ${reason}`);
+    logInfo(TAG, `Injected restart reason: ${reason}`);
+  }
+
   const soul = loadSoulBundle();
   if (soul) {
-    prompt = soul + "\n\n" + prompt;
+    contextParts.push(soul);
     logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
   }
-  // ABM v2: inject core memories + dailies (1% of context budget)
+
+  const ctx = buildSessionStartContext(memory, chatId);
+  if (ctx) {
+    contextParts.push(ctx);
+    logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
+  }
+
   try {
     const { buildWakeUp } = require("../memory/wake-up-builder.js") as typeof import("../memory/wake-up-builder.js");
     const ctxWindow = parseInt(process.env["CONTEXT_WINDOW_SIZE"] ?? "", 10) || 128000;
     const wakeUp = buildWakeUp(memory.getDatabase(), ctxWindow);
     if (wakeUp) {
-      prompt = prompt + "\n\n" + wakeUp;
+      contextParts.push(wakeUp);
       logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars, budget=${Math.floor(ctxWindow * 0.01)} tokens)`);
     }
   } catch { /* wake-up builder not available */ }
-  const ctx = buildSessionStartContext(memory, chatId);
-  if (ctx) {
-    prompt = ctx + "\n\n" + prompt;
-    logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
+
+  // Wrap all context, put user instruction after
+  const contextBlock = contextParts.length > 0
+    ? `[CONTEXT — do not respond to this section]\n${contextParts.join("\n\n")}\n[/CONTEXT]\n\n`
+    : "";
+
+  const result = contextBlock + prompt;
+  if (result.length < 5000) {
+    logWarn(TAG, `Session-start prompt suspiciously small (${result.length} chars) — SOUL may be missing`);
   }
-  const reason = readAndClearRestartReason();
-  if (reason) {
-    prompt = `[SESSION START REASON] ${reason}\n\n` + prompt;
-    logInfo(TAG, `Injected restart reason: ${reason}`);
-  }
-  if (prompt.length < 5000) {
-    logWarn(TAG, `Session-start prompt suspiciously small (${prompt.length} chars) — SOUL may be missing`);
-  }
-  return prompt;
+  return result;
 }
 
 /** Inject session-start context if pending, record user message. */
