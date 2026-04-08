@@ -21,12 +21,16 @@
 └─────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────┐
-│              WATCHDOG (60s timer)                 │
+│              WATCHDOG (60s countdown timer)       │
 │                                                  │
-│  Suspend-aware (gap detection)                   │
-│  Checks lastHeartbeat staleness                  │
-│  Safety net: heartbeat dead → exit(1)            │
-│  Also: morning restart after hardware sleep      │
+│  Counter starts at 15 min (3× heartbeat)         │
+│  Every 60s: counter -= 60s                       │
+│  Heartbeat kick: counter = 15 min (reset)        │
+│  Counter ≤ 0: system dead → exit(1)              │
+│                                                  │
+│  No file I/O, no JSON, no timestamps.            │
+│  Pure countdown + kick pattern.                  │
+│  Also serves as morning restart after hw sleep.  │
 └─────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────┐
@@ -45,7 +49,7 @@
 ~02:30  → Dreamy completes → pmset sleepnow → Mac hardware sleep
           (process frozen, heartbeat frozen, lastHeartbeat frozen)
 07:55   → pmset wakeorpoweron → Mac wakes → process resumes
-          → watchdog: lastHeartbeat 5h stale → exit(1)
+          → watchdog counter deeply negative (no kicks for hours) → exit(1)
           → LaunchAgent restarts → fresh process, clean memory
 08:00   → Bridge starts → doctor.sh → session refresh
           → Sleep already done today → skip
@@ -89,8 +93,8 @@ Memory leaks solved by daily restart. No RSS tracking needed — process never l
 #### OS / Hardware
 | Failure | Handling | Status |
 |---------|----------|--------|
-| Dark wake | classifyResume in heartbeat | ⚠️ Watchdog not aware → restart loop |
-| Full wake (morning) | Watchdog sees stale lastHeartbeat → exit(1) → fresh start | ✅ |
+| Dark wake | classifyResume in heartbeat + watchdog kick | ✅ Heartbeat kicks watchdog before it expires |
+| Full wake (morning) | Watchdog counter expired (no kicks for hours) → exit(1) → fresh start | ✅ |
 | Power loss / reboot | LaunchAgent | ✅ |
 | Disk full | Sleep cycle checks | ⚠️ No runtime check — only during Dreamy |
 | macOS update reboot | LaunchAgent | ✅ |
@@ -125,9 +129,10 @@ Memory leaks solved by daily restart. No RSS tracking needed — process never l
 
 **Gap 1: Dark wake restart loop**
 - Watchdog fires during dark wake, sees stale lastHeartbeat, kills bridge
-- Fix: gap detection in watchdog — if time since last check > 2× interval, process was suspended, skip
-- Files: `bridge-app.ts` (3 lines)
-- Status: fix committed, needs deploy
+- Fix: replace timestamp-checking watchdog with countdown+kick pattern. Watchdog counts down from 15 min. Heartbeat kicks (resets) every tick. During dark wake, heartbeat fires first (standby detection → classifyResume → "dark" → skip tick but still kicks). Watchdog gets kicked before it reaches zero. After full hardware sleep (hours), counter is deeply negative → no kick comes → exit(1) → correct morning restart.
+- Grace period: kill at ≤ -60s (not ≤ 0) to give heartbeat one interval to kick after resume.
+- Files: `bridge-app.ts` (watchdog timer), `heartbeat-system.ts` (kick call)
+- Removes: bridge.lock lastHeartbeat reads from watchdog, gap detection hack
 
 **Gap 2: Overlapping standby handlers**
 - Standby resume calls `isDailyCycleDue()` + `process.exit(0)`, duplicating age-check task
