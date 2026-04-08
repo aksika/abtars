@@ -14,6 +14,8 @@ export interface SleepOpts {
   sleepAuditDir: string;
   memoryEnabled: boolean;
   onComplete: () => void;
+  /** Returns latest user message timestamp. Used to check if user messaged during sleep. */
+  getLastMsgTs?: () => number;
 }
 
 export interface SleepProgress {
@@ -34,8 +36,10 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
   let child: import("node:child_process").ChildProcess | null = null;
   let attempts = 0;
   let progress: SleepProgress | null = null;
+  let msgTsAtSpawn = 0;
 
   function spawnSleep(): void {
+    msgTsAtSpawn = opts.getLastMsgTs?.() ?? 0;
     if (new Date().getHours() < opts.sleepHour) {
       logDebug("sleep", `😴 Before SLEEP_TIME (${opts.sleepHour}:00) — skip`);
       return;
@@ -73,14 +77,19 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         if (code === 0) {
           logInfo("sleep", `😴 Sleep finished successfully (attempt ${attempts})`);
           if (opts.memoryEnabled) opts.onComplete();
-          // Put Mac to sleep after successful sleep cycle
+          // Put Mac to sleep after successful sleep cycle — only if user stayed quiet
           if (process.env["MAC_SLEEP_AFTER_DREAMY"] === "true") {
-            logInfo("sleep", "💤 Putting Mac to sleep...");
-            try {
-              const { execSync } = require("node:child_process") as typeof import("node:child_process");
-              execSync("pmset sleepnow", { timeout: 5000 });
-            } catch (err) {
-              logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`);
+            const currentMsgTs = opts.getLastMsgTs?.() ?? 0;
+            if (currentMsgTs > msgTsAtSpawn) {
+              logInfo("sleep", "💤 Mac sleep skipped — user messaged during sleep cycle");
+            } else {
+              logInfo("sleep", "💤 Putting Mac to sleep...");
+              try {
+                const { execSync } = require("node:child_process") as typeof import("node:child_process");
+                execSync("pmset sleepnow", { timeout: 5000 });
+              } catch (err) {
+                logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
             }
           }
         } else if (attempts < MAX_RETRIES) {

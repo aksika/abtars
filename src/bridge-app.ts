@@ -771,6 +771,7 @@ export async function startBridge(): Promise<void> {
     sleepAuditDir,
     memoryEnabled: memoryConfig.memoryEnabled,
     onComplete: () => resetAllCtxStarts(memoryConfig.memoryDir),
+    getLastMsgTs: () => memory?.getLastMessageTimestamp(true) ?? 0,
   });
   bridge.sleepHandle = sleepHandle;
   // Only auto-spawn on startup if sleep hasn't run today (catch-up after wake)
