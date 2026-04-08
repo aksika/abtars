@@ -9,7 +9,7 @@ import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction } from "./compaction.js";
 import { buildSessionStartContext } from "../memory/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
-import { TELEGRAM_ALLOWED_REACTIONS, REACTION_FALLBACK_MAP } from "./reaction-signal.js";
+import { tryReaction } from "./reaction-handler.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason, readAndClearRestartReason } from "./restart-reason.js";
@@ -253,14 +253,8 @@ export async function handleInboundMessage(
     // --- Standalone emoji → try reaction, fallback to message ---
     const trimmed = userResponse.trim();
     const isEmojiOnly = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}]{1,2}$/u.test(trimmed);
-    if (isEmojiOnly && adapter.setReaction && msg.messageId) {
-      try {
-        await adapter.setReaction(channelId, msg.messageId, trimmed);
-        logDebug(TAG, `Emoji reaction: ${trimmed}`);
-      } catch {
-        await adapter.sendMessage(channelId, trimmed, { threadId: msg.threadId });
-        logDebug(TAG, `Emoji as message (reaction failed): ${trimmed}`);
-      }
+    if (isEmojiOnly) {
+      await tryReaction(adapter, channelId, msg.messageId, trimmed, msg.threadId);
       return;
     }
 
@@ -269,23 +263,8 @@ export async function handleInboundMessage(
     if (reactMatch) {
       const emoji = reactMatch[1]!;
       const remaining = reactMatch[2]?.trim() ?? "";
-      let reactionSent = false;
-      if (adapter.setReaction && msg.messageId) {
-        const fallback = TELEGRAM_ALLOWED_REACTIONS.has(emoji) ? emoji : (REACTION_FALLBACK_MAP[emoji] ?? null);
-        if (fallback) {
-          await adapter.setReaction(channelId, msg.messageId, fallback);
-          logDebug(TAG, `Reaction: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);
-          reactionSent = true;
-        }
-      }
-      if (!remaining) {
-        // No text after reaction — if reaction failed, send emoji as text message
-        if (!reactionSent) {
-          await adapter.sendMessage(channelId, emoji);
-          logDebug(TAG, `Reaction ${emoji} not supported — sent as text`);
-        }
-        return;
-      }
+      await tryReaction(adapter, channelId, msg.messageId, emoji, msg.threadId);
+      if (!remaining) return;
       userResponse = remaining;
     }
 
