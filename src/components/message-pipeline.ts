@@ -269,15 +269,24 @@ export async function handleInboundMessage(
     if (reactMatch) {
       const emoji = reactMatch[1]!;
       const remaining = reactMatch[2]?.trim() ?? "";
+      let reactionSent = false;
       if (adapter.setReaction && msg.messageId) {
         const fallback = TELEGRAM_ALLOWED_REACTIONS.has(emoji) ? emoji : (REACTION_FALLBACK_MAP[emoji] ?? null);
         if (fallback) {
           await adapter.setReaction(channelId, msg.messageId, fallback);
           logDebug(TAG, `Reaction: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);
+          reactionSent = true;
         }
       }
-      if (!remaining) return;
-      userResponse = remaining; // continue with text after reaction
+      if (!remaining) {
+        // No text after reaction — if reaction failed, send emoji as text message
+        if (!reactionSent) {
+          await adapter.sendMessage(channelId, emoji);
+          logDebug(TAG, `Reaction ${emoji} not supported — sent as text`);
+        }
+        return;
+      }
+      userResponse = remaining;
     }
 
     // --- Deliver response ---
