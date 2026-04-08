@@ -9,6 +9,7 @@
  *   agentbridge-expand --ids 451,452,453
  */
 
+import { localISO } from "../utils/local-time.js";
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -65,7 +66,7 @@ if (isMain) {
       id: r.id,
       role: r.role,
       content: r.content,
-      date: new Date(r.timestamp).toISOString(),
+      date: localISO(new Date(r.timestamp)),
       chat_id: r.chat_id,
     }));
 

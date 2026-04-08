@@ -1,3 +1,4 @@
+import { localMonth, localDate } from "../utils/local-time.js";
 import type Database from "better-sqlite3";
 import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "./mem-types.js";
 import { clampEmotionScore } from "./emotion-utils.js";
@@ -143,7 +144,7 @@ export class MemoryEditor {
         content_en: contentEn, topic: topicVal,
         emotion_tags: emotionTags, importance_flags: importanceFlags,
         memory_type: params.memoryType,
-        confidence: params.confidence, date: new Date(now).toISOString().slice(0, 7),
+        confidence: params.confidence, date: localMonth(new Date(now)),
       });
       const signature = Buffer.from(generateSignature(contentEn));
 
@@ -159,7 +160,7 @@ export class MemoryEditor {
         params.memoryType, now, 1, params.keyword?.trim() || null, emotionScore, now,
         params.confidence ?? 3, params.sourceMessageIds?.trim() || null,
         params.classification ?? 1, params.trust ?? 0, params.integrity ?? 2, params.credibility ?? 6,
-        topicVal, Math.abs(emotionScore) >= 4 ? "core" : "general", new Date(now).toISOString().slice(0, 10),
+        topicVal, Math.abs(emotionScore) >= 4 ? "core" : "general", localDate(new Date(now)),
         emotionTags || null, importanceFlags || null, compressed, signature,
       );
 

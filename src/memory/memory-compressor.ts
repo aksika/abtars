@@ -1,3 +1,4 @@
+import { localMonth } from "../utils/local-time.js";
 /**
  * memory-compressor.ts — ABM-L compression v2.
  * Converts English memory text + metadata into compact ABM-L format.
@@ -159,7 +160,7 @@ export function compress(input: CompressInput): string {
 
   const emotionShort = emotion_tags.split(",")[0]?.trim().slice(0, 6) || "—";
   const conf = confidence ?? 3;
-  const dateStr = date ?? new Date().toISOString().slice(0, 7);
+  const dateStr = date ?? localMonth();
   const prefix = `[${flags}|${topic}|${emotionShort}|${conf}|${dateStr}]`;
 
   // Compress content

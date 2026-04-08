@@ -1,3 +1,4 @@
+import { localISO } from "../utils/local-time.js";
 /**
  * Restart reason tracking — writes/reads `.last-restart-reason` so the agent
  * knows why the previous session ended.
@@ -18,7 +19,7 @@ export type RestartCause =
   | "manual";
 
 export function writeRestartReason(reason: string): void {
-  writeFileSync(REASON_FILE, `${new Date().toISOString()} ${reason}\n`);
+  writeFileSync(REASON_FILE, `${localISO()} ${reason}\n`);
 }
 
 export function readAndClearRestartReason(): string | null {

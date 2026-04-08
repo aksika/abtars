@@ -113,7 +113,7 @@ describe("buildSessionStartContext", () => {
     const result = buildSessionStartContext(manager, 1)!;
     const lines = result.split("\n");
 
-    expect(lines[0]).toMatch(/^\[LAST SESSION SUMMARY — ended \d{4}-\d{2}-\d{2}T/);
-    expect(lines[lines.length - 1]).toMatch(/^\[SESSION START — \d{4}-\d{2}-\d{2}T/);
+    expect(lines[0]).toMatch(/^\[LAST SESSION SUMMARY — ended \d{4}-\d{2}-\d{2}[ T]/);
+    expect(lines[lines.length - 1]).toMatch(/^\[SESSION START — \d{4}-\d{2}-\d{2}[ T]/);
   });
 });

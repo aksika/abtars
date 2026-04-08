@@ -3,6 +3,7 @@ import type { MemoryConfig } from "./memory-config.js";
 import type { MemoryManager } from "./memory-manager.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { localISO } from "../utils/local-time.js";
 import { logInfo, logWarn, logError } from "./mem-logger.js";
 
 const TAG = "sleep-state-gatherer";
@@ -74,7 +75,7 @@ export class SleepStateGatherer {
   }
 
   async gather(): Promise<StateSnapshot> {
-    const timestamp = new Date().toISOString();
+    const timestamp = localISO();
     logInfo(TAG, "Gathering system state snapshot");
 
     const workingDirs = this.scanWorkingDirs();
@@ -275,7 +276,7 @@ export class SleepStateGatherer {
           entries.push({
             name: file.name,
             sizeBytes: fileStat.size,
-            lastModified: fileStat.mtime.toISOString(),
+            lastModified: localISO(fileStat.mtime),
           });
         } catch (err) {
           logWarn(TAG, `Failed to stat topic file ${file.name}: ${err}`);
@@ -310,7 +311,7 @@ export class SleepStateGatherer {
       const match = files[0]!.match(/^sleep_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.md$/);
       if (!match) return null;
       const [, y, mo, d, h, mi, s] = match;
-      return new Date(+y!, +mo! - 1, +d!, +h!, +mi!, +s!).toISOString();
+      return localISO(new Date(+y!, +mo! - 1, +d!, +h!, +mi!, +s!));
     } catch {
       return null;
     }

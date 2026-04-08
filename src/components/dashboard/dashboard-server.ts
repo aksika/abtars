@@ -1,3 +1,4 @@
+import { localISO } from "../../utils/local-time.js";
 /**
  * Dashboard HTTP server with WebSocket support via the `ws` library.
  * Routes requests to controllers, serves the inline HTML dashboard,
@@ -321,7 +322,7 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
   if (!existsSync(logFile)) return [];
   const content = readFileSync(logFile, "utf-8");
   const allLines = content.split("\n").filter((l) => l.length > 0);
-  const cutoffIso = new Date(cutoffMs).toISOString().slice(0, 23);
+  const cutoffIso = localISO(new Date(cutoffMs));
 
   const filtered: string[] = [];
   for (let i = allLines.length - 1; i >= 0 && filtered.length < limit; i--) {

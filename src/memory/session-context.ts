@@ -1,13 +1,8 @@
 import type { MemoryManager } from "./memory-manager.js";
+import { localTime, localDateTime } from "../utils/local-time.js";
 
 export const RECENT_MSG_LIMIT = 8;
 export const RECENT_MSG_CAP = 2500;
-
-/** Format date in local time: YYYY-MM-DD HH:MM */
-function formatLocal(d: Date): string {
-  const pad = (n: number): string => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
 
 type MsgRow = { role: string; content: string; timestamp: number };
 
@@ -19,7 +14,7 @@ function formatRecentMessages(rows: MsgRow[]): string {
   // rows come DESC from DB — reverse to chronological, skip empty
   const chronological = [...rows].reverse().filter(r => r.content.trim());
   const lines = chronological.map(r => {
-    const time = new Date(r.timestamp).toISOString().slice(11, 16);
+    const time = localTime(new Date(r.timestamp));
     return `[${time}] ${r.role}: ${r.content}`;
   });
 
@@ -44,21 +39,21 @@ export function buildSessionStartContext(memory: MemoryManager, chatId: number):
 
   const lastMsgTs = memory.store.getLastMessageTimestamp();
 
-  const now = formatLocal(new Date());
+  const now = localDateTime(new Date());
   let body: string;
   let endedAt: string;
 
   if (lastMsgTs > dailyTs && dailyTs > 0) {
     const rows = memory.store.getMessagesSince(dailyTs, RECENT_MSG_LIMIT);
     body = formatRecentMessages(rows);
-    endedAt = formatLocal(new Date(lastMsgTs));
+    endedAt = localDateTime(new Date(lastMsgTs));
   } else if (daily) {
     body = daily.summary;
-    endedAt = formatLocal(new Date(dailyTs));
+    endedAt = localDateTime(new Date(dailyTs));
   } else if (lastMsgTs > 0) {
     const rows = memory.store.getMessagesSince(0, RECENT_MSG_LIMIT);
     body = formatRecentMessages(rows);
-    endedAt = formatLocal(new Date(lastMsgTs));
+    endedAt = localDateTime(new Date(lastMsgTs));
   } else {
     return null;
   }

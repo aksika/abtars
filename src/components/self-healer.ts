@@ -1,3 +1,4 @@
+import { localISO } from "../utils/local-time.js";
 /**
  * Self-healer heartbeat task — scans bridge log for ERROR lines
  * and injects bug reports to the agent via Telegram.
@@ -24,7 +25,7 @@ export function createSelfHealerTask(
 ): HeartbeatTask {
   const maxReports = parseInt(process.env["SELFHEAL_MAX_REPORTS"] ?? "1", 10);
   const cooldownMs = (parseInt(process.env["SELFHEAL_COOLDOWN_MIN"] ?? "30", 10)) * 60 * 1000;
-  let lastTs = new Date().toISOString().slice(0, 23);
+  let lastTs = localISO();
   const seen = new Map<string, number>();
 
   return {

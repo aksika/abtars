@@ -7,6 +7,7 @@
  * Usage: node dist/cli/agentbridge-backfill-v2.js [--dry-run]
  */
 
+import { localMonth } from "../utils/local-time.js";
 import Database from "better-sqlite3";
 import { join } from "node:path";
 import { agentBridgeHome } from "../memory/mem-paths.js";
@@ -41,7 +42,7 @@ const txn = db.transaction(() => {
       importance_flags: importanceFlags,
       memory_type: row.memory_type ?? "fact",
       confidence: row.confidence ?? 3,
-      date: new Date(row.created_at).toISOString().slice(0, 7),
+      date: localMonth(new Date(row.created_at)),
     });
     const signature = Buffer.from(generateSignature(row.content_en));
 

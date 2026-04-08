@@ -19,6 +19,7 @@
  *   1  Fatal error
  */
 
+import { localISO } from "../../utils/local-time.js";
 import { join, basename } from "node:path";
 import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { MemoryManager } from "../../memory/memory-manager.js";
@@ -843,7 +844,7 @@ async function main(): Promise<number> {
     const allResponses = stepEntries.map(([k, v]) => `[${k}] ${v.status}${v.duration ? ` (${v.duration}s)` : ""}`).join("\n");
     try {
       writeAuditLog(memoryConfig.memoryDir, {
-        timestamp: new Date().toISOString(),
+        timestamp: localISO(),
         model: modelUsed,
         stateSnapshotSummary: buildSnapshotSummary(snapshot),
         subagentResponse: `Wired: ${formatWiredResults(wiredResults)}\n${allResponses}`,

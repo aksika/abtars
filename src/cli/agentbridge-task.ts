@@ -10,6 +10,7 @@
  * File: ~/.agentbridge/memory/cron.json
  */
 
+import { localISO } from "../utils/local-time.js";
 import { randomBytes } from "node:crypto";
 import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbRemoveEntry } from "../components/cron/cron-db.js";
 
@@ -117,7 +118,7 @@ function add(args: string[]): void {
   }
 
   writeEntry(entry);
-  console.log(JSON.stringify({ ok: true, action: "added", id: entry.id, fireAt: new Date(fireAt!).toISOString(), ...(schedule ? { schedule } : {}) }));
+  console.log(JSON.stringify({ ok: true, action: "added", id: entry.id, fireAt: localISO(new Date(fireAt!)), ...(schedule ? { schedule } : {}) }));
 }
 
 function listEntries(): void {
@@ -128,7 +129,7 @@ function listEntries(): void {
   }
   const display = entries.map(e => ({
     id: e.id,
-    fireAt: new Date(e.fireAt).toISOString(),
+    fireAt: localISO(new Date(e.fireAt)),
     message: e.message,
     chatId: e.chatId,
     type: e.type,
@@ -136,7 +137,7 @@ function listEntries(): void {
     ...(e.schedule ? { schedule: e.schedule } : {}),
     ...(e.priority ? { priority: e.priority } : {}),
     ...(e.paused ? { paused: true } : {}),
-    ...(e.lastRanAt ? { lastRanAt: new Date(e.lastRanAt).toISOString() } : {}),
+    ...(e.lastRanAt ? { lastRanAt: localISO(new Date(e.lastRanAt)) } : {}),
     ...(e.history?.length ? { history: e.history } : {}),
   }));
   console.log(JSON.stringify({ ok: true, entries: display }));
@@ -167,7 +168,7 @@ function showHistory(id: string): void {
   const entry = readEntry(id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
   const runs = (entry.history ?? []).map(h => ({
-    ranAt: new Date(h.ts).toISOString(),
+    ranAt: localISO(new Date(h.ts)),
     ...(h.exitCode !== undefined ? { exitCode: h.exitCode } : {}),
   }));
   console.log(JSON.stringify({ ok: true, id, message: entry.message.slice(0, 80), runs }));

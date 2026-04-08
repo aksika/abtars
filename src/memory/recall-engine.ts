@@ -1,3 +1,4 @@
+import { localISO } from "../utils/local-time.js";
 /**
  * recall-engine — single recall pipeline shared by agentbridge-recall CLI and dashboard.
  *
@@ -137,7 +138,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
     seen.add(key);
     if (r.id !== undefined) extractedIds.push(r.id);
     const hit: RecallHit = {
-      content: r.content, date: new Date(r.created_at).toISOString(), source, score: r.score,
+      content: r.content, date: localISO(new Date(r.created_at)), source, score: r.score,
       ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}),
       contentOriginal: r.content_original, memoryType: r.memory_type,
       trust: r.trust, integrity: r.integrity, credibility: r.credibility, classification: r.classification,
@@ -152,7 +153,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
     seen.add(key);
     const hit: RecallHit = {
       content: `[${r.record.role}] ${r.record.content}`,
-      date: new Date(r.record.timestamp).toISOString(), source, score: r.score,
+      date: localISO(new Date(r.record.timestamp)), source, score: r.score,
     };
     hits.push(hit);
     allResults.push(hit);
@@ -205,7 +206,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
       seen.add(key);
       if (r.id !== undefined) extractedIds.push(r.id);
       const hit: RecallHit = {
-        content: r.content_en, date: new Date(r.created_at).toISOString(),
+        content: r.content_en, date: localISO(new Date(r.created_at)),
         source: "S3:extracted_like", score: 0.95,
         ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}),
         contentOriginal: r.content_original ?? undefined, memoryType: r.memory_type ?? undefined,
@@ -234,7 +235,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
         seen.add(key);
         extractedIds.push(r.id);
         const hit: RecallHit = {
-          content: r.content_en, date: new Date(r.created_at).toISOString(),
+          content: r.content_en, date: localISO(new Date(r.created_at)),
           source: "Se:embedding", score: r.score,
           ...(r.source_message_ids ? { source_ids: r.source_message_ids } : {}),
           contentOriginal: r.content_original ?? undefined, memoryType: r.memory_type ?? undefined,
@@ -280,7 +281,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
         const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
         if (!seen.has(key)) {
           seen.add(key);
-          const hit: RecallHit = { content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "S5:messages_like", score: 0.3 };
+          const hit: RecallHit = { content: `[${r.role}] ${r.content}`, date: localISO(new Date(r.timestamp)), source: "S5:messages_like", score: 0.3 };
           hits.push(hit);
           allResults.push(hit);
         }
@@ -301,7 +302,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
         const key = `${c.timestamp}:${c.content.slice(0, 80)}`;
         if (!seen.has(key)) {
           seen.add(key);
-          const hit: RecallHit = { content: c.content, date: new Date(c.timestamp).toISOString(), source: `S6:consolidation:${c.tier}`, score: 0.5 };
+          const hit: RecallHit = { content: c.content, date: localISO(new Date(c.timestamp)), source: `S6:consolidation:${c.tier}`, score: 0.5 };
           hits.push(hit);
           allResults.push(hit);
         }
@@ -327,7 +328,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
         const key = `${dailySummary.timestamp}:${dailySummary.content.slice(0, 80)}`;
         if (!seen.has(key)) {
           seen.add(key);
-          const hit: RecallHit = { content: dailySummary.content, date: new Date(dailySummary.timestamp).toISOString(), source: "S7:fallback:daily", score: 0.1 };
+          const hit: RecallHit = { content: dailySummary.content, date: localISO(new Date(dailySummary.timestamp)), source: "S7:fallback:daily", score: 0.1 };
           hits.push(hit);
           allResults.push(hit);
         }
@@ -336,7 +337,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
           const key = `${r.timestamp}:${r.content.slice(0, 80)}`;
           if (!seen.has(key)) {
             seen.add(key);
-            const hit: RecallHit = { content: `[${r.role}] ${r.content}`, date: new Date(r.timestamp).toISOString(), source: "S7:fallback:recent", score: 0.1 };
+            const hit: RecallHit = { content: `[${r.role}] ${r.content}`, date: localISO(new Date(r.timestamp)), source: "S7:fallback:recent", score: 0.1 };
             hits.push(hit);
             allResults.push(hit);
           }
@@ -373,7 +374,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
           const emotionBoost = 1 + 0.02 * Math.abs(r.emotion_score ?? 0);
           hits.push({
             content: params.resolution === "full" ? (r.content_en ?? r.content_compressed ?? "") : (r.content_compressed ?? r.content_en ?? ""),
-            date: new Date(r.created_at).toISOString(), source: "Sa:abml_fts", score: 0.8 * emotionBoost,
+            date: localISO(new Date(r.created_at)), source: "Sa:abml_fts", score: 0.8 * emotionBoost,
             contentOriginal: r.content_original ?? undefined, memoryType: r.memory_type ?? undefined,
           });
           allResults.push(hits[hits.length - 1]!);
@@ -427,7 +428,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
           content: params.resolution === "full"
             ? (row.content_en ?? row.content_compressed ?? "")
             : (row.content_compressed ?? row.content_en ?? ""),
-          date: new Date(row.created_at).toISOString(),
+          date: localISO(new Date(row.created_at)),
           source: "Ss:signature",
           score: sim,
           contentOriginal: row.content_original ?? undefined,
