@@ -421,6 +421,7 @@ Refinements based on production data analysis. Replaces the naive compressor.
 - Strip for all memory types (LLMs understand stripped text)
 - Preserve: paths, URLs, commands, numbers, error codes, emoji
 - Don't strip negations: "don't", "not", "never" — these change meaning
+- Don't strip pronouns: "I", "my", "me", "you", "your", "we", "our" — they indicate who the rule applies to
 
 ### FTS5 on ABM-L only
 - Single FTS5 index on `content_compressed` (replaces `content_en` FTS5)
