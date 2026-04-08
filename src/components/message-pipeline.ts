@@ -189,10 +189,13 @@ export async function handleInboundMessage(
         streamBuffer += chunk;
       };
 
+      let flushing = false;
       if (FLUSH_INTERVAL > 0) {
         streamTimer = setInterval(async () => {
+          if (flushing) return;
           const text = streamBuffer.replace(/^\[lang:\w{2}\]\s*/i, "").trim();
           if (!text || text === lastFlushed) return;
+          flushing = true;
           try {
             if (!streamMsgId) {
               streamMsgId = await adapter.sendMessage(channelId, text + " ▍", { threadId: msg.threadId });
@@ -202,6 +205,7 @@ export async function handleInboundMessage(
             }
             lastFlushed = text;
           } catch { /* edit may fail if text unchanged or too fast */ }
+          flushing = false;
         }, FLUSH_INTERVAL);
       }
     } else {
