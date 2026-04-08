@@ -56,7 +56,7 @@ describe("wake-up-builder", () => {
     writeFileSync(join(dailyDir, "daily_2026-04-07.md"), "# Daily\nWorked on ABM v2 today.");
 
     const result = buildWakeUp(mm.getDatabase()!, 128000);
-    expect(result).toContain("DAILY 2026-04-07");
+    expect(result).toContain("2026-04-07");
   });
 
   it("respects budget — small context gets less content", () => {

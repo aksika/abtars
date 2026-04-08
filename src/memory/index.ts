@@ -72,3 +72,7 @@ export { isFlashbulb, isAgingProtected, effectiveConfidence, detectInterference 
 // ABM v2 — config
 export { loadMemoryEnv } from "./mem-config-env.js";
 export type { SearchMode, MemoryEnvConfig } from "./mem-config-env.js";
+
+// ABM v2 — compression level 2
+export { renderWakeUp, compressDailySummary, compressSoul, pickLevel } from "./wake-up-renderer.js";
+export type { CompressionLevel } from "./wake-up-renderer.js";
