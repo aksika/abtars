@@ -369,6 +369,7 @@ export async function startBridge(): Promise<void> {
     platforms.telegram && "telegram",
     platforms.discord && "discord",
   ].filter(Boolean).join(", ");
+  logInfo("main", "──────────── BRIDGE START ────────────");
   logInfo("main", `🚀 Bridge starting (platforms=${enabledList}, log=${config.logLevel})`);
 
   // === CRITICAL PATH: Memory → Transport → Telegram (fastest path to accepting messages) ===
