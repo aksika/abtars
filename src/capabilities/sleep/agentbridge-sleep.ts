@@ -704,6 +704,7 @@ async function main(): Promise<number> {
       }
 
       emitProgress("starting");
+      let consecutiveFailures = 0;
 
       for (const step of steps) {
         emitProgress(step.name);
@@ -798,6 +799,16 @@ async function main(): Promise<number> {
         writeStateFile(statePath, state);
 
         logInfo(TAG, `[SLEEP] ${response ? "✓" : "✗"} ${step.name} (${(duration / 1000).toFixed(1)}s, ${response?.length ?? 0} chars)`);
+
+        // Backoff between steps: 10s → 30s → 60s on consecutive failures, reset on success
+        if (response) { consecutiveFailures = 0; } else { consecutiveFailures++; }
+        const isEssential = step.name.startsWith("04") || step.name === "00-identity";
+        if (!isEssential) {
+          const delays = [10, 30, 60];
+          const delaySec = delays[Math.min(consecutiveFailures, delays.length - 1)]!;
+          logInfo(TAG, `[SLEEP] Waiting ${delaySec}s before next step`);
+          await new Promise(r => setTimeout(r, delaySec * 1000));
+        }
       }
     } finally {
       clearTimeout(timeoutHandle);
