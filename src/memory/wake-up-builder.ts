@@ -9,7 +9,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "./mem-paths.js";
 
-const ABM_L_HINT = "Memory format: [FLAGS|topic|emotion|confidence|date] content. @name = entity. >over = chose over. → = leads to.";
+const ABM_L_HINT = "Memory format: [TYPE+FLAGS|topic|emotion|confidence|date] content. Types: F=fact D=decision P=preference E=event L=lesson. Flags: T=technical C=correction V=pivot O=origin M=milestone. @name=entity. >over=chose over. →=leads to. |=list separator.";
 
 /** Rough token estimate: ~4 chars per token. */
 function tokenCount(text: string): number {

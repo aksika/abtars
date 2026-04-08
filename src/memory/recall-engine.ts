@@ -386,7 +386,9 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
         if (seen.has(key)) continue;
         seen.add(key);
         const hit: RecallHit = {
-          content: row.content_compressed ?? row.content_en ?? "",
+          content: params.resolution === "full"
+            ? (row.content_en ?? row.content_compressed ?? "")
+            : (row.content_compressed ?? row.content_en ?? ""),
           date: new Date(row.created_at).toISOString(),
           source: "Ss:signature",
           score: sim,

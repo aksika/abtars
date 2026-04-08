@@ -66,6 +66,7 @@ Options:
       case "--topic": topic = args[++i]; break;
       case "--pool": { const v = args[++i]; if (v === "core" || v === "general") tier = v; break; }
       case "--include-expired": includeExpired = true; break;
+      case "--full": break; // handled below in output
     }
   }
 
@@ -73,8 +74,8 @@ Options:
     console.error('Usage: agentbridge-recall --translated "kw1,kw2" --chat-id <id> [--original <kw>] [--entity "Name"] [--stages S1,S3]');
     process.exit(1);
   }
-  return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages, entity, topic, tier, includeExpired };
-  return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages };
+  const fullMode = process.argv.includes("--full");
+  return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages, entity, topic, tier, includeExpired, resolution: fullMode ? "full" as const : undefined };
 }
 
 const params = parseArgs();
@@ -97,6 +98,7 @@ try {
     topic: params.topic,
     tier: params.tier,
     includeExpired: params.includeExpired,
+    resolution: params.resolution,
   });
 
   // JSON output to stdout

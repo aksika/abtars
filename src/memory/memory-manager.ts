@@ -309,6 +309,40 @@ export class MemoryManager {
     return { removed: 0 };
   }
 
+  /** Age memory tiers: NULL English after englishTtlDays, NULL original after originalTtlDays. */
+  ageMemoryTiers(opts: { englishTtlDays: number; originalTtlDays: number }): { englishNulled: number; originalNulled: number } {
+    if (!this.db) return { englishNulled: 0, originalNulled: 0 };
+    const { isAgingProtected, isFlashbulb } = require("./brain-patterns.js") as typeof import("./brain-patterns.js");
+
+    let englishNulled = 0;
+    let originalNulled = 0;
+    const englishCutoff = Date.now() - opts.englishTtlDays * 86400000;
+    const originalCutoff = Date.now() - opts.originalTtlDays * 86400000;
+
+    // Age English (content_en) — skip protected memories
+    const enRows = this.db.prepare(
+      "SELECT id, emotion_score, recall_count, tier, importance_flags FROM extracted_memories WHERE content_en IS NOT NULL AND content_compressed IS NOT NULL AND created_at < ?",
+    ).all(englishCutoff) as Array<{ id: number; emotion_score: number; recall_count: number; tier: string; importance_flags: string | null }>;
+    for (const r of enRows) {
+      if (isFlashbulb(r.emotion_score, r.importance_flags ?? "")) continue;
+      if (isAgingProtected(r.emotion_score, r.recall_count, r.tier)) continue;
+      this.db.prepare("UPDATE extracted_memories SET content_en = NULL WHERE id = ?").run(r.id);
+      englishNulled++;
+    }
+
+    // Age Original (content_original) — only flashbulb protected
+    const origRows = this.db.prepare(
+      "SELECT id, emotion_score, importance_flags FROM extracted_memories WHERE content_original IS NOT NULL AND content_compressed IS NOT NULL AND created_at < ?",
+    ).all(originalCutoff) as Array<{ id: number; emotion_score: number; importance_flags: string | null }>;
+    for (const r of origRows) {
+      if (isFlashbulb(r.emotion_score, r.importance_flags ?? "")) continue;
+      this.db.prepare("UPDATE extracted_memories SET content_original = NULL WHERE id = ?").run(r.id);
+      originalNulled++;
+    }
+
+    return { englishNulled, originalNulled };
+  }
+
   fixMemoryDefaults(): { fixed: number } {
     if (!this.db) return { fixed: 0 };
     let fixed = 0;

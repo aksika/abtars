@@ -153,13 +153,13 @@ export class MemoryEditor {
             preserve_original, preserved_keyword, emotion_score, created_at,
             confidence, source_message_ids, classification, trust, integrity, credibility,
             topic, tier, valid_from, emotion_tags, importance_flags, content_compressed, signature)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'general', ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         params.chatId, params.contentOriginal.trim(), contentEn,
         params.memoryType, now, 1, params.keyword?.trim() || null, emotionScore, now,
         params.confidence ?? 3, params.sourceMessageIds?.trim() || null,
         params.classification ?? 1, params.trust ?? 0, params.integrity ?? 2, params.credibility ?? 6,
-        topicVal, new Date(now).toISOString().slice(0, 10),
+        topicVal, Math.abs(emotionScore) >= 4 ? "core" : "general", new Date(now).toISOString().slice(0, 10),
         emotionTags || null, importanceFlags || null, compressed, signature,
       );
 
