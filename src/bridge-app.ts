@@ -26,7 +26,6 @@ import { DashboardServer } from "./components/dashboard/dashboard-server.js";
 import { renderDashboardHtml } from "./components/dashboard/dashboard-ui.js";
 import { loadNLMConfig } from "./components/nlm-command-handler.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
-import { isDailyCycleDue } from "./components/daily-cycle.js";
 import { classifyResume } from "./components/platform-detect.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
@@ -602,28 +601,27 @@ export async function startBridge(): Promise<void> {
   try { writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf-8"); } catch { /* */ }
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
+
+  // Watchdog: countdown+kick pattern (variables declared here, timer started after heartbeat)
+  const WD_COUNTDOWN_MS = hbIntervalMs * 3;
+  let wdCountdown = WD_COUNTDOWN_MS;
+  const kickWatchdog = (): void => { wdCountdown = WD_COUNTDOWN_MS; };
+
   const heartbeat = new HeartbeatSystem({
     enabled: true,
     intervalMs: hbIntervalMs,
     bridgeLockPath,
     sleepActive: isSleepActive,
+    onTick: kickWatchdog,
     onStandbyResume: (gapMs) => {
-      // L1: Platform-specific check
       const resumeKind = classifyResume();
       if (resumeKind === "dark") {
-        logDebug("main", `⏸️ Darkwake resume (${Math.round(gapMs / 60000)}min) — skipping`);
+        logDebug("main", `⏸️ Darkwake resume (${Math.round(gapMs / 60000)}min) — skipping tick`);
+        kickWatchdog(); // keep watchdog alive during dark wakes
         return;
       }
-
-      // L2: Daily cycle check
-      if (isDailyCycleDue({ sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, bridgeLockPath, memory, busyChats, isSleepActive })) {
-        logInfo("main", `🔄 Standby resume (${Math.round(gapMs / 60000)}min) + daily cycle due — restarting`);
-        writeRestartReason(`daily-cycle: standby-resume ${Math.round(gapMs / 60000)}min`);
-        try { unlinkSync(bridgeLockPath); } catch { /* */ }
-        process.exit(0);
-      }
-
-      logDebug("main", `⏸️ Standby resume (${Math.round(gapMs / 60000)}min) — continuing`);
+      logInfo("main", `⏸️ Standby resume (${Math.round(gapMs / 60000)}min, ${resumeKind}) — continuing`);
+      // No restart, no isDailyCycleDue. Age-check task handles bedtime. Watchdog handles stale process.
     },
   });
 
@@ -714,25 +712,18 @@ export async function startBridge(): Promise<void> {
     heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });
   }
 
-  // --- Heartbeat watchdog: independent timer, restarts if heartbeat dies ---
-  const HB_WATCHDOG_INTERVAL = 60_000;
-  const HB_STALE_THRESHOLD = hbIntervalMs * 3;
-  let lastWatchdogCheck = Date.now();
+  // --- Heartbeat watchdog timer: countdown+kick ---
+  const WD_CHECK_INTERVAL = 60_000;
+  const WD_GRACE_MS = -60_000;
+
   setInterval(() => {
-    const now = Date.now();
-    const gap = now - lastWatchdogCheck;
-    lastWatchdogCheck = now;
-    // Skip if process was suspended (gap > 2× interval = woke from sleep)
-    if (gap > HB_WATCHDOG_INTERVAL * 2) return;
-    try {
-      const lock = JSON.parse(readFileSync(bridgeLockPath, "utf-8"));
-      if (lock.lastHeartbeat && now - lock.lastHeartbeat > HB_STALE_THRESHOLD) {
-        logWarn("watchdog", `Heartbeat stale (${Math.round((now - lock.lastHeartbeat) / 60000)}min) — forcing restart`);
-        writeRestartReason("watchdog: heartbeat stale");
-        process.exit(1);
-      }
-    } catch { /* lock file not ready yet */ }
-  }, HB_WATCHDOG_INTERVAL);
+    wdCountdown -= WD_CHECK_INTERVAL;
+    if (wdCountdown <= WD_GRACE_MS) {
+      logWarn("watchdog", `No heartbeat kick for ${Math.round((WD_COUNTDOWN_MS - wdCountdown) / 60000)}min — forcing restart`);
+      writeRestartReason("watchdog: no heartbeat kick");
+      process.exit(1);
+    }
+  }, WD_CHECK_INTERVAL);
 
   // --- Restart flag check ---
   heartbeat.registerTask({

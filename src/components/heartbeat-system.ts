@@ -10,6 +10,8 @@ export type HeartbeatConfig = {
   sleepActive?: () => boolean;
   /** Called when standby resume detected (gap > interval×3). Bridge should doctor + exit. */
   onStandbyResume?: (gapMs: number) => void;
+  /** Called after every successful tick — used to kick the watchdog. */
+  onTick?: () => void;
 };
 
 const TAG = "heartbeat";
@@ -134,5 +136,8 @@ export class HeartbeatSystem {
       lock.lastHeartbeat = Date.now();
       writeFileSync(this.config.bridgeLockPath, JSON.stringify(lock), "utf-8");
     } catch { /* best-effort */ }
+
+    // Kick the watchdog
+    this.config.onTick?.();
   }
 }

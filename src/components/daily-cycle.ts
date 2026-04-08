@@ -4,9 +4,9 @@
  * After BED_TIME, counts quiet ticks (no new messages). After 6 quiet ticks
  * (~30min at 5min heartbeat), triggers sleep. Any new message resets the counter.
  */
-import { readFileSync } from "node:fs";
 import type { MemoryManager } from "../memory/memory-manager.js";
 import { logInfo } from "./logger.js";
+import { safeReadJson } from "./safe-json.js";
 
 export interface DailyCycleDeps {
   sleepHour: number;
@@ -38,12 +38,10 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
     return false;
   }
 
-  try {
-    const lockData = JSON.parse(readFileSync(deps.bridgeLockPath, "utf-8"));
-    const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), deps.sleepHour, deps.sleepMinute).getTime();
-    if (lockData.startedAt >= todaySleepTime) return false;
-    if (!lockData.lastHeartbeat) return false; // no successful tick yet — dark wake guard
-  } catch { return false; }
+  const lockData = safeReadJson<{ startedAt?: number; lastHeartbeat?: number }>(deps.bridgeLockPath, {});
+  const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), deps.sleepHour, deps.sleepMinute).getTime();
+  if (!lockData.startedAt || lockData.startedAt >= todaySleepTime) return false;
+  if (!lockData.lastHeartbeat) return false; // no successful tick yet — dark wake guard
 
   if (deps.busyChats.size > 0 || deps.isSleepActive()) return false;
 
