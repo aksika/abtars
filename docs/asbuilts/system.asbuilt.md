@@ -263,71 +263,147 @@ Shows active transport, endpoint, model, fallback model(s), fallback transport.
 
 ## Recovery
 
-All recovery mechanisms in one place. The bridge recovers from failures without unnecessary restarts.
+## Recovery System
 
-### Standby Resume (L1 → L2)
+Three independent layers with no overlap. Each layer owns one responsibility.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│              HEARTBEAT (5 min ticks)             │
+│                                                  │
+│  Standby detection → classifyResume()            │
+│    dark  → skip tick, kick watchdog              │
+│    full  → log, run normal tick                  │
+│                                                  │
+│  Tasks: transport.healthCheck, age-check,        │
+│         self-healer, db-integrity, ...           │
+│                                                  │
+│  After all tasks: write lastHeartbeat, kick WD   │
+└─────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────┐
+│          WATCHDOG (countdown+kick, 60s timer)    │
+│                                                  │
+│  Counter starts at 15min (3× heartbeat)          │
+│  Every 60s: counter -= 60s                       │
+│  Heartbeat kick: counter = 15min (reset)         │
+│  Counter ≤ -60s (grace): exit(1)                 │
+│                                                  │
+│  No file I/O, no JSON, no timestamps.            │
+│  Pure countdown + kick pattern.                  │
+│  Morning restart after hardware sleep.           │
+└─────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────┐
+│          EXTERNAL (LaunchAgent + doctor.sh)       │
+│                                                  │
+│  Process dead → restart                          │
+│  Startup → doctor.sh checks previous health      │
+│  14 diagnostic checks including schema version   │
+└─────────────────────────────────────────────────┘
+```
+
+### Layer 1 — Standby Resume
 
 When heartbeat detects a skipped tick (gap > interval×3):
 
-**Layer 1 — Platform detection** (`platform-detect.ts` → `classifyResume()`):
-- macOS: `pmset -g systemstate` → `DarkWake` detected → skip entirely (DEBUG log). Power Nap background wake — nothing to do.
-- Linux: `journalctl -b -u systemd-suspend.service --since '5 min ago'` → entries exist → system woke from suspend.
-- Unknown OS: falls through to Layer 2.
+**Platform detection** (`platform-detect.ts` → `classifyResume()`):
+- macOS: `DarkWake` → skip tick, kick watchdog (stays alive during Power Nap)
+- macOS: `FullWake` → log and continue (normal tick runs)
+- Linux: `journalctl` suspend check
+- Unknown: falls through to normal tick
 
-**Layer 2 — Daily cycle check** (`daily-cycle.ts` → `isDailyCycleDue()`):
-- Past `BED_TIME`? AND bridge started before today's `BED_TIME`? AND `lastHeartbeat` exists in lock file? AND no new messages since last tick?
-- Quiet tick counter increments each tick with no new messages. Any message resets to 0.
-- At tick `BED_QUIET_TICKS - 1` (T-1): system message sent to agent → agent announces sleep to user.
-- At tick `BED_QUIET_TICKS`: Dreamy spawns directly (no bridge restart).
-- After Dreamy completes successfully: `pmset sleepnow` if `MAC_SLEEP_AFTER_DREAMY=true`.
-- On Mac wake: watchdog detects stale heartbeat (hours gap) → `process.exit(1)` → LaunchAgent restarts → fresh session.
-- If sleep missed today on startup (past BED_TIME, no audit): catch-up Dreamy spawns.
-- Any false → continue running (DEBUG log). Watchdog handles any transport breakage.
+Standby resume does NOT call `isDailyCycleDue` or `process.exit`. It only classifies and logs. Age-check task owns bedtime. Watchdog owns stale process.
 
-No `doctor --fix`, no unconditional restart, no grace period. The bridge survives Power Nap / dark wakes silently — `lastHeartbeat` absent means no successful tick, so daily cycle is blocked.
+### Layer 2 — Watchdog (countdown+kick)
 
-### Daily Cycle (age-check)
+Pure countdown timer, independent of heartbeat:
+- Counter starts at 15min (`hbIntervalMs × 3`)
+- Every 60s: counter decrements by 60s
+- Every heartbeat tick: counter resets to 15min (kick)
+- Dark wakes: heartbeat fires → kicks watchdog → stays alive
+- Hardware sleep (hours): no kicks → counter deeply negative → first 60s check after wake → `exit(1)`
+- Grace period: kills at ≤ -60s (not ≤ 0), gives heartbeat one interval to kick after resume
 
-Heartbeat task that calls `isDailyCycleDue()` every tick. Catches the daily restart on always-on machines that never trigger standby detection. Same shared function as the standby handler — one decision path, no duplication.
+No file I/O, no JSON parsing, no timestamps. Replaces the old timestamp-checking watchdog.
 
-Config: `SLEEP_TIME=06:00` (default 6am). The daily restart is the ONLY scheduled restart.
+### Layer 3 — Bedtime Flow (age-check task)
 
-### Watchdog
+Heartbeat task that calls `isDailyCycleDue()` every tick:
 
-Each transport owns its own health check via `healthCheck()` method on `IKiroTransport`. Called by a single generic heartbeat task.
-
-**ACP transport** (`AcpTransport.healthCheck()`):
-
-| Case | Detection | L1 Action | L2 Action |
-|------|-----------|-----------|-----------|
-| Tool hung | `toolInFlight` > 3min | `sendInterrupt()` + explain to agent | Reset session + re-send prompt |
-| Process dead | `!isConnected` | Reinit transport + re-send prompt | — |
-| Silent | No activity > 5min | Re-send same prompt | Heartbeat watchdog timer restarts bridge |
-| Endless | Active > 10min | `sendInterrupt()` + tell agent it's looping | Reset session + re-send prompt |
-
-**Direct API transport** (`DirectApiTransport.healthCheck()`): if `promptStartedAt` set and idle > `WATCHDOG_SILENT_SEC`, abort the request. Model fallback and leaky bucket handle the rest.
-
-**Heartbeat watchdog timer** (standalone `setInterval` in `bridge-app.ts`): checks `bridge.lock.lastHeartbeat` every 60s. If stale > 3× heartbeat interval → `process.exit(1)`. Catches dead heartbeat, stuck event loop (partial), or any failure that kills the heartbeat but not the process.
-
-**Recovery chain:**
 ```
-Transport self-heals (healthCheck)
-  → Heartbeat watchdog catches dead heartbeat (setInterval → exit)
-    → LaunchAgent catches dead process (restart)
-      → doctor.sh checks lastHeartbeat age on startup (warns if previous session unhealthy)
+BED_TIME passes → quiet tick counter starts
+  Any message → counter resets to 0
+  Tick N-1 (T-1) → system message: agent announces sleep to user
+  Tick N → Dreamy spawns directly (no bridge restart)
+  Dreamy completes → check if user messaged during sleep
+    Yes → skip Mac sleep, log "user active"
+    No → pmset sleepnow (if MAC_SLEEP_AFTER_DREAMY=true)
+  Mac wakes → watchdog fires (no kicks for hours) → exit(1)
+  LaunchAgent restarts → fresh session
+  If sleep missed today on startup → catch-up Dreamy spawns
 ```
+
+Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `MAC_SLEEP_AFTER_DREAMY` (default false).
+
+### Transport Health Checks
+
+Each transport owns its own health check via `healthCheck()` on `IKiroTransport`.
+
+| Transport | Case | Detection | Action |
+|-----------|------|-----------|--------|
+| ACP | Tool hung | `toolInFlight` > 3min | `sendInterrupt()` |
+| ACP | Process dead | `!isConnected` | Reinit + re-send |
+| ACP | Silent | No activity > 5min | Re-send prompt |
+| ACP | Endless | Active > 10min | `sendInterrupt()` |
+| Direct API | Silent | idle > `WATCHDOG_SILENT_SEC` | Abort request |
 
 Config: `WATCHDOG_TOOL_TIMEOUT_SEC=180`, `WATCHDOG_SILENT_SEC=300`, `WATCHDOG_ENDLESS_SEC=600`.
+
+### Recovery Chain
+
+```
+Transport self-heals (healthCheck)
+  → Heartbeat kicks watchdog (countdown reset)
+    → Watchdog catches dead heartbeat (countdown expired → exit(1))
+      → LaunchAgent catches dead process (restart)
+        → doctor.sh checks previous health (14 checks)
+```
 
 ### Context Overflow
 
 In the message pipeline catch block: if error matches `ValidationException` or `-32603`:
 - `resetAndPrepare()` — reset session, mark for SOUL re-injection
-- Tell user: "🔄 Context window full — session reset. Send your message again."
+- Tell user: "🔄 Context window full — session reset."
 
 ### Compaction Circuit Breaker
 
-Track consecutive compaction failures per session. After 3 failures → stop trying, warn user "⚠️ Compaction failing — consider /reset". Reset counter on successful compaction or `/reset`.
+Track consecutive compaction failures per session. After 3 failures → stop trying, warn user. Reset counter on successful compaction or `/reset`.
+
+### System Message Sender
+
+Generic module (`system-message.ts`) for any component to send a prompt to the agent with response delivered to user. Used by bedtime T-1 warning. No-op if not initialized (tests, standalone).
+
+### Doctor Checks (14 steps)
+
+| # | Check | Fix mode |
+|---|-------|----------|
+| 1 | Required directories | Create missing |
+| 2 | .env required keys | Warn |
+| 3 | Node.js ≥ 22 | Warn |
+| 4 | kiro-cli in PATH | Warn |
+| 5 | tmux installed | Warn |
+| 6 | memory.db integrity | Warn |
+| 7 | memory.db size | Warn >500MB |
+| 8 | FTS5 health | Rebuild |
+| 9 | Orphaned tmux sessions | Kill |
+| 10 | Heartbeat liveness | Warn if stale |
+| 11 | Core files size | Warn >15 lines |
+| 12 | Schema version ≥ 8 | Warn if pending |
+| 13 | memory.env exists | Warn |
+| 14 | Orphaned kiro-cli | Kill extras |
 
 ### Self-Healer
 
