@@ -122,7 +122,7 @@ export class HeartbeatSystem {
         if (task.heavy && result === true) heavyRan = true;
         this.taskStatuses.set(task.name, "✓");
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = err instanceof Error ? err.message : JSON.stringify(err);
         logWarn(TAG, `Task "${task.name}" failed: ${msg}`);
         this.taskStatuses.set(task.name, "✗");
       }
