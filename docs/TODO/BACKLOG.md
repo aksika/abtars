@@ -360,3 +360,20 @@ Sleep cycle runs 24 steps in rapid succession. After ~5-6 minutes of sustained p
 - `memory-compressor.ts`: entity detection whitelist (known entities only), not greedy capitalization scan
 - `memory-compressor.ts`: skip filler stripping for lesson/preference/core_belief types — keep full readability
 - Re-run backfill after fixes
+
+## 97. Mac sleep guard — don't sleep if user messaged during Dreamy
+
+**Priority:** HIGH
+**Status:** Not started
+
+### Problem
+After Dreamy completes, `pmset sleepnow` fires immediately. But the user may have sent messages DURING the sleep cycle (e.g. woke up, can't sleep). Mac goes to sleep while user is actively chatting.
+
+### Solution
+Before `pmset sleepnow`, check if any new messages arrived since Dreamy started:
+- Record `lastMsgTs` when Dreamy spawns
+- After Dreamy completes, check current `lastMsgTs`
+- If new messages arrived during sleep → skip Mac sleep, reset bedtime quiet tick counter
+- If no new messages → proceed with `pmset sleepnow`
+
+This means: Dreamy always runs (maintenance is important), but Mac hardware sleep only happens if the user stayed quiet through the entire cycle.
