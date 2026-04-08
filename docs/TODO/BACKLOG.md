@@ -266,13 +266,6 @@ In-memory cache for recall results within a session. If the agent queries the sa
 
 Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") but implemented as a trivial in-process cache.
 
-## 98. Bug: 👀 reaction not removed after agent sends response
-
-**Priority:** MEDIUM
-**Status:** Not started
-
-The "seen" (👀) emoji reaction is not deleted from the user's message after the agent sends its response. It should be removed once the reply is delivered, so only unprocessed messages show the eyes.
-
 ## 96. ABM-L compressor quality fixes
 
 **Priority:** HIGH

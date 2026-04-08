@@ -1530,3 +1530,14 @@ Extract the memory system into a standalone module/package, decoupled from the b
 - Bridge consumes the module via interface, not direct DB access
 - Standalone CLI tools (agentbridge-store, agentbridge-edit, agentbridge-recall) become the public API
 
+
+## 98. Bug: 👀 reaction not removed after agent sends response
+
+**Priority:** MEDIUM
+**Status:** ✅ Done
+
+**Priority:** MEDIUM
+**Status:** Not started
+
+The "seen" (👀) emoji reaction is not deleted from the user's message after the agent sends its response. It should be removed once the reply is delivered, so only unprocessed messages show the eyes.
+
