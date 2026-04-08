@@ -55,4 +55,13 @@ const txn = db.transaction(() => {
 
 txn();
 console.log(`Done: ${count} memories backfilled${dryRun ? " (dry run — no changes written)" : ""}`);
+
+// Rebuild ABM-L FTS5 index (backfill bypasses triggers)
+if (!dryRun) {
+  try {
+    db.exec("INSERT INTO abml_fts(abml_fts) VALUES('rebuild')");
+    console.log("ABM-L FTS5 index rebuilt");
+  } catch { console.log("ABM-L FTS5 rebuild skipped (table may not exist — run bridge once first)"); }
+}
+
 db.close();
