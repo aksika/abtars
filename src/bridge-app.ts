@@ -717,11 +717,17 @@ export async function startBridge(): Promise<void> {
   // --- Heartbeat watchdog: independent timer, restarts if heartbeat dies ---
   const HB_WATCHDOG_INTERVAL = 60_000;
   const HB_STALE_THRESHOLD = hbIntervalMs * 3;
+  let lastWatchdogCheck = Date.now();
   setInterval(() => {
+    const now = Date.now();
+    const gap = now - lastWatchdogCheck;
+    lastWatchdogCheck = now;
+    // Skip if process was suspended (gap > 2× interval = woke from sleep)
+    if (gap > HB_WATCHDOG_INTERVAL * 2) return;
     try {
       const lock = JSON.parse(readFileSync(bridgeLockPath, "utf-8"));
-      if (lock.lastHeartbeat && Date.now() - lock.lastHeartbeat > HB_STALE_THRESHOLD) {
-        logWarn("hb-watchdog", `Heartbeat stale (${Math.round((Date.now() - lock.lastHeartbeat) / 60000)}min) — forcing restart`);
+      if (lock.lastHeartbeat && now - lock.lastHeartbeat > HB_STALE_THRESHOLD) {
+        logWarn("hb-watchdog", `Heartbeat stale (${Math.round((now - lock.lastHeartbeat) / 60000)}min) — forcing restart`);
         writeRestartReason("hb-watchdog: heartbeat stale");
         process.exit(1);
       }
