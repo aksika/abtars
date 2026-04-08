@@ -99,7 +99,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           logWarn("sleep", `😴 Sleep failed (code=${code}) — exhausted ${MAX_RETRIES} attempts`);
         }
       });
-      logInfo("sleep", `😴 Sleep spawned (pid=${proc.pid}, attempt ${attempts})`);
+      logInfo("sleep", `😴 Sleep spawned (pid=${proc.pid}, attempt ${attempts}, model=${process.env["AGENT_SLEEP_MODEL"] ?? "auto"})`);
     } catch (err) {
       logWarn("sleep", `😴 Sleep spawn failed: ${err instanceof Error ? err.message : String(err)}`);
       if (attempts < MAX_RETRIES) setTimeout(spawnSleep, RETRY_MS);

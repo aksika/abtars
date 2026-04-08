@@ -781,7 +781,7 @@ export async function startBridge(): Promise<void> {
     const nowH = new Date().getHours() * 60 + new Date().getMinutes();
     const bedM = SLEEP_HOUR * 60 + SLEEP_MINUTE;
     if (nowH > bedM) {
-      logInfo("main", "😴 Sleep missed today — spawning catch-up Dreamy");
+      logInfo("main", `😴 Sleep missed today — spawning catch-up Dreamy (model: ${process.env["AGENT_SLEEP_MODEL"] ?? "auto"})`);
       sleepHandle.spawn();
     }
   }
