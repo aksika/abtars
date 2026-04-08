@@ -226,7 +226,7 @@ export async function handleInboundMessage(
 
     // --- Extract clean answer ---
     const cleanAnswer = transport.answerOnly;
-    const userResponse = (fullModeChats.has(sessionKey) ? response : (cleanAnswer || response))
+    let userResponse = (fullModeChats.has(sessionKey) ? response : (cleanAnswer || response))
       .replace(/^\[lang:\w{2}\]\s*/i, ""); // strip lang tag from display
 
     // --- Empty response ---
@@ -264,22 +264,20 @@ export async function handleInboundMessage(
       return;
     }
 
-    // --- [REACT:emoji] ---
-    const reactMatch = userResponse.trim().match(/^\[REACT:(.+)\]$/);
+    // --- [REACT:emoji] — extract reaction, deliver remaining text if any ---
+    const reactMatch = userResponse.trim().match(/^\[REACT:(.+?)\]\s*([\s\S]*)/);
     if (reactMatch) {
       const emoji = reactMatch[1]!;
+      const remaining = reactMatch[2]?.trim() ?? "";
       if (adapter.setReaction && msg.messageId) {
         const fallback = TELEGRAM_ALLOWED_REACTIONS.has(emoji) ? emoji : (REACTION_FALLBACK_MAP[emoji] ?? null);
         if (fallback) {
           await adapter.setReaction(channelId, msg.messageId, fallback);
           logDebug(TAG, `Reaction: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);
-          return;
         }
       }
-      // No messageId (injected/system message) or unsupported emoji — send as standalone
-      await adapter.sendMessage(channelId, emoji, { threadId: msg.threadId });
-      logDebug(TAG, `Reaction as message: ${emoji}`);
-      return;
+      if (!remaining) return;
+      userResponse = remaining; // continue with text after reaction
     }
 
     // --- Deliver response ---
