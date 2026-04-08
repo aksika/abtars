@@ -158,8 +158,8 @@ if [ -f "$LOCK_FILE" ]; then
   fi
 fi
 
-# 11. Core files size check (should be ≤10 non-empty lines each)
-for f in "$AB/memory/core/user_profile.md" "$AB/memory/core/agent_notes.md"; do
+# 11. Core files size check (should be ≤15 non-empty lines each)
+for f in "$AB/core/user_profile.md" "$AB/core/agent_notes.md" "$AB/core/core_facts.md"; do
   if [ -f "$f" ]; then
     LINES=$(grep -c '[^[:space:]]' "$f")
     if [ "$LINES" -gt 15 ]; then
@@ -168,7 +168,20 @@ for f in "$AB/memory/core/user_profile.md" "$AB/memory/core/agent_notes.md"; do
   fi
 done
 
-# 12. Orphaned kiro-cli processes
+# 12. Schema version check
+if [ -f "$DB" ]; then
+  SCHEMA_VER=$(sqlite3 "$DB" "SELECT version FROM schema_version LIMIT 1" 2>/dev/null || echo 0)
+  if [ "$SCHEMA_VER" -lt 8 ]; then
+    warn "memory.db schema version is $SCHEMA_VER (expected ≥8) — ABM v2 migration pending"
+  fi
+fi
+
+# 13. memory.env exists
+if [ ! -f "$AB/memory.env" ]; then
+  warn "memory.env missing — ABM config defaults will be used"
+fi
+
+# 14. Orphaned kiro-cli processes
 KIRO_PROCS=$(pgrep -f 'kiro-cli acp' 2>/dev/null | wc -l)
 if [ "$KIRO_PROCS" -gt 1 ]; then
   if $FIX; then
