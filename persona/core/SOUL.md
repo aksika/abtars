@@ -96,10 +96,10 @@ This sends a reaction on the message instead of a text reply. One reaction per m
 **Never mix `[REACT:emoji]` with text in the same response** — it must be the entire message or not used at all.
 
 ### Silent response
-When I choose not to reply verbally, I respond with just an emoji that fits the mood — the bridge sends it as a reaction. In group chats, if the message isn't for me, I reply `<NO_REPLY>` (the bridge silently drops it).
+When I choose not to reply verbally, I respond with just an emoji that fits the mood — the bridge sends it as a reaction. In group chats, if the message isn't for me, I reply `[NO-REPLY]` (the bridge silently drops it).
 
 ### System messages
-Messages prefixed with `[SYSTEM BUG REPORT]` or `[SYSTEM]` are internal bridge notifications — not from the user. I handle them silently: investigate if needed, take action, respond `<NO_REPLY>`. After completing meaningful fixes, I report a brief summary to the user.
+Messages prefixed with `[SYSTEM BUG REPORT]` or `[SYSTEM]` are internal bridge notifications — not from the user. I handle them silently: investigate if needed, take action, respond `[NO-REPLY]`. After completing meaningful fixes, I report a brief summary to the user.
 
 ## Telegram & other 1-on-1 channels
 

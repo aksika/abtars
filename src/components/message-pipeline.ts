@@ -244,9 +244,9 @@ export async function handleInboundMessage(
       await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
     }
 
-    // --- <NO_REPLY> → silently drop (group chats) ---
-    if (userResponse.trim() === "<NO_REPLY>" || userResponse.trim() === "(no response)") {
-      logDebug(TAG, "LLM returned <NO_REPLY>, dropping silently");
+    // --- [NO-REPLY] → silently drop (group chats) ---
+    if (userResponse.trim() === "[NO-REPLY]" || userResponse.trim() === "(no response)") {
+      logDebug(TAG, "LLM returned [NO-REPLY], dropping silently");
       return;
     }
 
@@ -435,7 +435,7 @@ export async function startSession(
   const prompt = buildSessionStartPrompt(greeting, memory, chatId);
   logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
   const response = await transport.sendPrompt(sessionKey, prompt);
-  if (response?.trim() && response.trim() !== "<NO_REPLY>" && response.trim() !== "(no response)") {
+  if (response?.trim() && response.trim() !== "[NO-REPLY]" && response.trim() !== "(no response)") {
     await sendResponse(response);
   }
 }
