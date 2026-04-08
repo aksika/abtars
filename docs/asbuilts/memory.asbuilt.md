@@ -509,6 +509,15 @@ Before sleep starts, `SleepStateGatherer` collects system state and injects it i
 | 12 | `13-media-cleanup.md` | §9.5 Media Cleanup | FIFO 100MB cleanup |
 | 13 | `14-report.md` | §10 Report | Self-review, fix missed items, write audit |
 | 14 | `15-skill-review.md` | §8d Skill Review | Review conversations for reusable patterns, create/update auto-skills via `agentbridge-skill` |
+| 15 | `16-topic-assignment.md` | §8e Topic Assignment | Tag untagged memories with topics via `agentbridge-edit --topic` |
+| 16 | `17-core-promotion.md` | §8f Core Promotion | Promote best general → core tier via `agentbridge-edit --tier core` (budget: 100 entries) |
+| 17 | `18-temporal-review.md` | §8g Temporal Review | Invalidate stale core facts via `agentbridge-edit --valid-to` |
+| 18 | `19-emotion-flags.md` | §8h Emotion/Flags Backfill | Backfill emotion_tags + importance_flags on legacy memories |
+| 19 | `20-compress-backfill.md` | §8i Compression Backfill | ABM-L compress memories lacking content_compressed |
+| 20 | `21-contradiction.md` | §8j Contradiction Check | Check core entries for conflicts before promotion |
+| 21 | `22-emotion-arcs.md` | §8k Emotional Arcs | Build per-topic emotional trajectory (↑↓↕→) |
+| 22 | `23-memory-aging.md` | §8l Memory Aging | Three-tier aging: NULL original/English past TTL, pressure-based |
+| 23 | `24-entity-review.md` | §8m Entity Review | Fix ABM-L @reference anomalies, re-compress |
 
 ### Garbage Collection (§4)
 
@@ -653,6 +662,80 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | agentbridge-sleep | `cli/agentbridge-sleep.ts` | Sleep cycle orchestrator. Multi-turn conversation with Dreamy. |
 | agentbridge-embed | `cli/agentbridge-embed.ts` | Batch embed all memories with NULL embedding via ollama. |
 | agentbridge-skill | `cli/agentbridge-skill.ts` | Auto-skill management. create/edit/patch/delete/list in `~/.agentbridge/skills/auto/`. Security scan on writes. |
+| agentbridge-backfill-v2 | `cli/agentbridge-backfill-v2.ts` | One-time migration: fills emotion_tags, importance_flags, content_compressed (ABM-L), signature on all existing memories. No LLM, pure regex. |
+
+### ABM v2 Store-Time Pipeline
+
+Every `agentbridge-store` call runs these enrichments (~1-5ms total, no LLM):
+
+| Module | Output column | What |
+|---|---|---|
+| `emotion-tagger.ts` | `emotion_tags` | 25 emotion types via keyword regex (joy, fear, conviction, etc.) |
+| `importance-flagger.ts` | `importance_flags` | 8 flag types (decision, pivot, origin, milestone, etc.) |
+| `memory-compressor.ts` | `content_compressed` | ABM-L format: `[FLAGS\|topic\|emotion\|confidence\|date] @entity content` |
+| `signature-generator.ts` | `signature` | 256-bit binary hash via Random Indexing for Hamming distance search |
+
+### ABM-L (Memory Language)
+
+Compressed symbolic format for LLM consumption. See `docs/specs/abm-language.md`.
+
+```
+[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)
+[P|personal|—|4|2026-03] @user prefers dark-mode+vim+minimal-code
+[LT|coding|frust|4|2026-03] FTS5 breaks on HU — EN for search
+```
+
+Flags: D=decision, P=preference, F=fact, L=lesson, O=origin, V=pivot, M=milestone, C=correction, T=technical, B=core belief. @references for entities. >over, >replaces, → for relationships.
+
+### Search Modes (`memory.env`)
+
+| Mode | How | Needs ollama |
+|---|---|---|
+| `hybrid` (default) | Signatures pre-filter → embedding rerank | Yes |
+| `embedding` | Ollama embeddings only (legacy) | Yes |
+| `signature` | Binary signatures + Hamming distance | No |
+
+Signature search (Ss stage) runs on every recall alongside existing stages (S1-S7, Se). Returns `content_compressed` (ABM-L) with emotional recall boost (score weighted by \|emotion_score\|).
+
+### Three-Tier Aging
+
+| Tier | Column | Base TTL | Protected by |
+|---|---|---|---|
+| Original | `content_original` | 14 days | \|emotion\| ≥ 4, recall ≥ 3, core tier |
+| English | `content_en` | 60 days | Flashbulb (\|emotion\| ≥ 4 + pivot flag) |
+| ABM-L | `content_compressed` | Never | — |
+| Embedding | `embedding` | Never | — |
+| Signature | `signature` | Never | — |
+
+Pressure-based acceleration: aging TTLs multiply by pressure factor as DB approaches `MEMORY_MAX_DB_SIZE_MB` (0-50%: 1×, 50-75%: 0.7×, 75-90%: 0.35×, 90-95%: 0.15×, 95%+: immediate).
+
+### Brain Patterns
+
+| Pattern | Module | What |
+|---|---|---|
+| Emotional recall boost | `recall-engine.ts` (Ss stage) | Score weighted by \|emotion_score\| |
+| Flashbulb protection | `brain-patterns.ts` | \|emotion\| ≥ 4 + pivot → never aged/decayed |
+| Spaced repetition decay | `brain-patterns.ts` | Confidence decays unless recalled at intervals |
+| Interference detection | `brain-patterns.ts` | Flag similar-but-different memories in same topic |
+
+### Session Start (Wake-Up Builder)
+
+`wake-up-builder.ts` builds memory context for session start. Budget: 1% of `CONTEXT_WINDOW_SIZE`.
+
+Priority fill: core memories → latest daily → 7 dailies → weekly → quarterly. All ABM-L. Auto-adapts to context window (4K model gets top core facts only, 128K gets full week).
+
+### Bedtime Flow
+
+```
+BED_TIME passes → quiet tick counter starts
+  Any message → counter resets to 0
+  Tick N-1 → agent announces sleep to user (system message)
+  Tick N → Dreamy spawns directly (no bridge restart)
+  Dreamy completes → pmset sleepnow (if MAC_SLEEP_AFTER_DREAMY=true)
+  Mac wakes → watchdog detects stale heartbeat → exit(1) → LaunchAgent restarts
+```
+
+Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `MAC_SLEEP_AFTER_DREAMY` (default false).
 
 ---
 
