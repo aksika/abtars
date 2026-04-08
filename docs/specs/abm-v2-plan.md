@@ -435,3 +435,39 @@ Query → ABM-L FTS5 (keyword) + signature Hamming (semantic) + int8 cosine (sem
   → merge + deduplicate + emotional boost → return
 ```
 No English text needed at any stage.
+
+## D3: ABM-L aware merge
+
+Dreamy's existing merge step (step 11) works on English. With ABM-L, merging is easier — the compressed format strips noise, making duplicates more obvious.
+
+### Detection
+Two memories are merge candidates when:
+- Same topic
+- Same memory_type (or compatible: fact+fact, event+event)
+- ABM-L content body has >50% keyword overlap
+- OR same entities referenced with same relationships
+
+### Merge rules
+- Keep the higher-confidence/higher-credibility version as base
+- Append unique facts from the other
+- Pipe-separate combined items: `task1 | task2 | task3`
+- Preserve the stronger emotion_score
+- Union the importance_flags
+- Keep the newer created_at
+- Delete the duplicate row
+
+### Example
+```
+Before (2 rows, 260 chars, truncated):
+  #66:  [F|work] schedule: 10:00 AI report, 10:15 weekly...
+  #219: [F|work] periodic tasks: daily AI report (10:00), weekly AI report...
+
+After (1 row, 165 chars, complete):
+  [F|work] cron schedule: AI report 10:00 daily + 10:15 Sun | finance AI 13-17 weekdays | backup 01:00 daily | deps 01:05 Sun | GDrive 01:15 Fri | tweet 09:30
+```
+
+### Benefits for Dreamy consolidation
+- ABM-L is already stripped of filler → duplicate detection is more accurate
+- Pipe-separated format makes merging mechanical (concatenate pipes)
+- Dreamy reads less text per memory → faster sleep cycle
+- Weekly/quarterly consolidation operates on ABM-L → more memories fit in context
