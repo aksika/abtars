@@ -347,3 +347,50 @@ function compressionLevel(budgetTokens: number): "full" | "compact" | "ultra" {
 | full | No | No | No | Full SOUL.md | English markdown |
 | compact | Yes | Yes | Yes | Full SOUL.md | ABM-L compressed |
 | ultra | Yes | Yes | Yes | Compressed SOUL | ABM-L compressed |
+
+## D5: Embedding tiering — separate table + int8 quantization
+
+### Problem
+Embedding BLOB (1536 bytes float32) is 73% of each row. Dominates storage, bloats main table pages, slows non-embedding queries.
+
+### Solution
+
+**Separate table:**
+```sql
+CREATE TABLE memory_embeddings (
+  memory_id INTEGER PRIMARY KEY,
+  embedding BLOB,
+  quantized INTEGER DEFAULT 0  -- 0=float32, 1=int8
+);
+```
+
+**Tiered aging:**
+```
+Day 0:      float32 (1536 bytes) + signature (32 bytes)
+~14 days:   int8 (384 bytes) + signature (32 bytes)      ← quantize, 4× smaller
+Forever:    int8 (384 bytes) + signature (32 bytes)       ← keep forever, good quality
+```
+
+int8 quantization: map float32 range to -128..127 per dimension. ~1-2% recall quality drop. 384 bytes per memory — negligible at any scale.
+
+**Config:**
+```env
+MEMORY_EMBEDDING_QUANTIZE_DAYS=14    # quantize float32→int8 after N days
+```
+
+No drop — int8 persists forever. Only float32 gets aged.
+
+**Storage projection:**
+
+| Scale | Current (float32 in main) | Separate + int8 at 14d |
+|---|---|---|
+| 10K memories | 15MB embeddings | ~4MB average |
+| 100K memories | 150MB | ~40MB |
+
+**Full per-memory aging:**
+```
+Day 0:      Original + English + ABM-L + float32 + signature    ~2100 bytes
+~14 days:   Original + ████████ + ABM-L + int8 + signature      ~900 bytes
+~90 days:   ████████ + ████████ + ABM-L + int8 + signature      ~600 bytes
+Forever:                         ABM-L + int8 + signature        ~500 bytes
+```
