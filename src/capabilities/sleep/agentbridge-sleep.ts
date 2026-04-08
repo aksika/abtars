@@ -685,10 +685,9 @@ async function main(): Promise<number> {
     state.wiredResults = wiredResults;
 
     // 20-min wall-clock timeout
-    let timedOut = false;
     const timeoutHandle = setTimeout(() => {
-      timedOut = true;
-      logError(TAG, `[SLEEP] ⏰ ${Math.round(SLEEP_TIMEOUT_MS / 60000)}-minute timeout reached — killing transport`);
+      logError(TAG, `[SLEEP] ⏰ ${Math.round(SLEEP_TIMEOUT_MS / 60000)}-minute timeout reached — aborting`);
+      process.exit(1);
     }, SLEEP_TIMEOUT_MS);
 
     const { transport, model: modelUsed } = await createSleepTransport(flags.verbose);
@@ -709,11 +708,6 @@ async function main(): Promise<number> {
       for (const step of steps) {
         emitProgress(step.name);
         stepIndex++;
-        if (timedOut) {
-          state.steps[step.name] = { status: "timeout" };
-          writeStateFile(statePath, state);
-          continue;
-        }
 
         // Resume: skip already completed steps
         if (isResume && existingState?.steps[step.name]?.status === "ok") {
@@ -849,7 +843,7 @@ async function main(): Promise<number> {
     }
 
     // Wired post-task: flush old messages (keep max 500, age out >7 days, garbage 12h)
-    if (dreamySucceeded && !timedOut) {
+    if (dreamySucceeded) {
       try {
         // Flush garbage-marked messages >12h
         const garbagePath = join(memoryConfig.memoryDir, "garbage.json");
