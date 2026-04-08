@@ -218,14 +218,17 @@ export class SleepStateGatherer {
         return "corrupt";
       }
     };
-    const checkExists = (table: string): "ok" | "corrupt" | "dropped" => {
-      try { return check(table); } catch { return "dropped"; }
+    const checkDropped = (table: string): "ok" | "corrupt" | "dropped" => {
+      try {
+        this.db.exec(`SELECT count(*) FROM ${table} LIMIT 1`);
+        return check(table);
+      } catch { return "dropped"; }
     };
 
     return {
-      messages_fts: checkExists("messages_fts"),
+      messages_fts: checkDropped("messages_fts"),
       extracted_memories_fts: check("extracted_memories_fts"),
-      extracted_memories_original_fts: checkExists("extracted_memories_original_fts"),
+      extracted_memories_original_fts: checkDropped("extracted_memories_original_fts"),
     };
   }
 

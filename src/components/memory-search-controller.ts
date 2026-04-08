@@ -20,7 +20,7 @@ export type MemorySearchDeps = {
 };
 
 const TAG = "memory-search-ctrl";
-const VALID_STAGES = new Set(["S1", "S2", "S3", "S4", "S5", "S6", "S7", "Se"]);
+const VALID_STAGES = new Set(["Sf", "Ss", "Se", "S6"]);
 
 // ── Controller ──────────────────────────────────────────────────────────────
 

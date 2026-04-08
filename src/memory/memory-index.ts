@@ -163,7 +163,7 @@ export class MemoryIndex {
     params.push(limit);
 
     const sql = `
-      SELECT m.id, m.chat_id, m.session_id, m.role, m.content, m.timestamp, 0 as rank
+      SELECT m.id, m.chat_id, m.session_id, m.role, m.content, m.timestamp, -1.0 as rank
       FROM messages m
       WHERE ${conditions.join(" AND ")}
       ORDER BY m.timestamp DESC

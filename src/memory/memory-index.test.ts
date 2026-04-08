@@ -44,10 +44,11 @@ describe("MemoryIndex", () => {
 
     expect(names).toContain("sessions");
     expect(names).toContain("messages");
-    expect(names).toContain("messages_fts");
+    expect(names).toContain("content_en_trigram");
+    expect(names).toContain("content_original_trigram");
     expect(names).toContain("embeddings");
-    expect(names).toContain("messages_ai");
-    expect(names).toContain("messages_ad");
+    expect(names).toContain("content_en_trigram_ai");
+    expect(names).toContain("content_original_trigram_ai");
   });
 
   it("index inserts a message and returns its id", () => {

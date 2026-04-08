@@ -1,98 +1,85 @@
 import { describe, it, expect, vi } from "vitest";
 import { recallSearch } from "./recall-engine.js";
 import type { RecallDeps, RecallParams } from "./recall-engine.js";
+import { initializeDatabase } from "./memory-db.js";
+import { MemoryIndex } from "./memory-index.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function mockIndex(overrides?: {
-  searchExtracted?: ReturnType<typeof vi.fn>;
-  searchOriginal?: ReturnType<typeof vi.fn>;
-  search?: ReturnType<typeof vi.fn>;
-  bumpRecallCount?: ReturnType<typeof vi.fn>;
-}) {
-  return {
-    searchExtracted: overrides?.searchExtracted ?? vi.fn(() => []),
-    searchOriginal: overrides?.searchOriginal ?? vi.fn(() => []),
-    search: overrides?.search ?? vi.fn(() => []),
-    bumpRecallCount: overrides?.bumpRecallCount ?? vi.fn(),
-  };
+function setupDb(): RecallDeps {
+  const db = initializeDatabase(":memory:");
+  const index = new MemoryIndex(db);
+  return { db, index, memoryDir: "/tmp/test-memory", ctxStartPath: "/tmp/test-ctx.json" };
 }
 
-function mockDb(rows: unknown[] = []) {
-  return {
-    prepare: vi.fn(() => ({ all: vi.fn(() => rows) })),
-  };
-}
-
-function makeDeps(opts?: { index?: ReturnType<typeof mockIndex>; db?: ReturnType<typeof mockDb> }): RecallDeps {
-  return {
-    db: (opts?.db ?? mockDb()) as unknown as RecallDeps["db"],
-    index: (opts?.index ?? mockIndex()) as unknown as RecallDeps["index"],
-    memoryDir: "/tmp/test-memory",
-    ctxStartPath: "/tmp/test-ctx.json",
-  };
+function insertMemory(deps: RecallDeps, id: number, contentEn: string, opts?: {
+  contentOriginal?: string; preservedKeyword?: string; createdAt?: number; chatId?: number;
+}): void {
+  const now = opts?.createdAt ?? Date.now();
+  deps.db.prepare(`INSERT INTO extracted_memories
+    (id, content_en, content_original, preserved_keyword, memory_type, created_at, source_timestamp, chat_id, confidence, emotion_score, recall_count, relevance_score)
+    VALUES (?, ?, ?, ?, 'fact', ?, ?, ?, 3, 0, 0, 0)`).run(
+    id, contentEn, opts?.contentOriginal ?? contentEn, opts?.preservedKeyword ?? null,
+    now, now, opts?.chatId ?? 123,
+  );
 }
 
 function baseParams(overrides?: Partial<RecallParams>): RecallParams {
   return { translated: ["puppy"], chatId: 123, ...overrides };
 }
 
-// ── Stage execution ─────────────────────────────────────────────────────────
+// ── Sf stage ────────────────────────────────────────────────────────────────
 
-describe("recallSearch — stage execution", () => {
-  it("runs S1 (searchExtracted) by default", async () => {
-    const idx = mockIndex();
-    await recallSearch(makeDeps({ index: idx }), baseParams());
-    expect(idx.searchExtracted).toHaveBeenCalled();
+describe("recallSearch — Sf stage", () => {
+  it("finds memories via porter FTS5 (stemmed match)", async () => {
+    const deps = setupDb();
+    insertMemory(deps, 1, "The puppy was running in the garden");
+    const result = await recallSearch(deps, baseParams({ translated: ["puppy"] }));
+    expect(result.stages["Sf"]).toBeDefined();
+    expect(result.stages["Sf"]!.hits.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("runs S2 (searchOriginal) when original is provided", async () => {
-    const idx = mockIndex();
-    await recallSearch(makeDeps({ index: idx }), baseParams({ original: "kiskutya" }));
-    expect(idx.searchOriginal).toHaveBeenCalledWith("kiskutya", expect.any(Object));
+  it("finds memories via trigram (substring match)", async () => {
+    const deps = setupDb();
+    insertMemory(deps, 1, "The deployment was successful on the server");
+    // "deploy" is a substring — trigram matches it
+    const result = await recallSearch(deps, baseParams({ translated: ["deploy"] }));
+    expect(result.results.some(r => r.content.includes("deployment"))).toBe(true);
   });
 
-  it("skips S2 when original is not provided", async () => {
-    const idx = mockIndex();
-    await recallSearch(makeDeps({ index: idx }), baseParams());
-    expect(idx.searchOriginal).not.toHaveBeenCalled();
+  it("falls back to content_original trigram when content_en has no match", async () => {
+    const deps = setupDb();
+    insertMemory(deps, 1, "Swedish switchman story", { contentOriginal: "A svéd váltókezelő története" });
+    // Search in Hungarian — should find via content_original trigram
+    const result = await recallSearch(deps, baseParams({ translated: ["switchman"], original: "valtokezelo" }));
+    expect(result.results.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("runs S4 (messages FTS) by default", async () => {
-    const idx = mockIndex();
-    await recallSearch(makeDeps({ index: idx }), baseParams());
-    expect(idx.search).toHaveBeenCalled();
-  });
-
-  it("only runs requested stages when --stages is provided", async () => {
-    const idx = mockIndex();
-    await recallSearch(makeDeps({ index: idx }), baseParams({ stages: ["S1"] }));
-    expect(idx.searchExtracted).toHaveBeenCalled();
-    expect(idx.search).not.toHaveBeenCalled();
+  it("includes preserved_keyword in trigram search", async () => {
+    const deps = setupDb();
+    insertMemory(deps, 1, "User has a small dog", { preservedKeyword: "kiskutya" });
+    const result = await recallSearch(deps, baseParams({ translated: ["kiskutya"] }));
+    expect(result.results.length).toBeGreaterThanOrEqual(1);
   });
 });
 
 // ── Short-circuit ───────────────────────────────────────────────────────────
 
 describe("recallSearch — short-circuit", () => {
-  it("short-circuits after S3 when enough results", async () => {
-    const hits = Array.from({ length: 12 }, (_, i) => ({
-      id: i, content: `memory ${i}`, created_at: i * 1000,
-      score: 5.0, tier: "extracted" as const,
-    }));
-    const idx = mockIndex({ searchExtracted: vi.fn(() => hits) });
-    const result = await recallSearch(makeDeps({ index: idx }), baseParams());
-    expect(result.shortCircuitAfter).toBe("S3");
-    expect(idx.search).not.toHaveBeenCalled(); // S4 skipped
+  it("sets shortCircuitAfter=Sf when Sf fills the limit", async () => {
+    const deps = setupDb();
+    for (let i = 1; i <= 15; i++) {
+      insertMemory(deps, i, `Memory about puppies number ${i}`);
+    }
+    const result = await recallSearch(deps, baseParams({ limit: 10 }));
+    expect(result.shortCircuitAfter).toBe("Sf");
   });
 
   it("does not short-circuit with few results", async () => {
-    const idx = mockIndex({
-      searchExtracted: vi.fn(() => [{ id: 1, content: "one", created_at: 1000, score: 5.0, tier: "extracted" as const }]),
-    });
-    const result = await recallSearch(makeDeps({ index: idx }), baseParams());
+    const deps = setupDb();
+    insertMemory(deps, 1, "One puppy memory");
+    const result = await recallSearch(deps, baseParams({ limit: 10 }));
     expect(result.shortCircuitAfter).toBeNull();
-    expect(idx.search).toHaveBeenCalled(); // S4 runs
   });
 });
 
@@ -100,24 +87,17 @@ describe("recallSearch — short-circuit", () => {
 
 describe("recallSearch — per-stage results", () => {
   it("returns per-stage hits and timing", async () => {
-    const idx = mockIndex({
-      searchExtracted: vi.fn(() => [
-        { id: 1, content: "test", created_at: 1000, score: 5.0, tier: "extracted" as const },
-      ]),
-    });
-    const result = await recallSearch(makeDeps({ index: idx }), baseParams({ stages: ["S1"] }));
-    expect(result.stages["S1"]).toBeDefined();
-    expect(result.stages["S1"]!.hits.length).toBe(1);
-    expect(typeof result.stages["S1"]!.ms).toBe("number");
+    const deps = setupDb();
+    insertMemory(deps, 1, "A puppy was found in the park");
+    const result = await recallSearch(deps, baseParams());
+    expect(result.stages["Sf"]).toBeDefined();
+    expect(typeof result.stages["Sf"]!.ms).toBe("number");
   });
 
   it("collects extractedIds for recall count bumping", async () => {
-    const idx = mockIndex({
-      searchExtracted: vi.fn(() => [
-        { id: 42, content: "test", created_at: 1000, score: 5.0, tier: "extracted" as const },
-      ]),
-    });
-    const result = await recallSearch(makeDeps({ index: idx }), baseParams({ stages: ["S1"] }));
+    const deps = setupDb();
+    insertMemory(deps, 42, "A puppy named Rex");
+    const result = await recallSearch(deps, baseParams());
     expect(result.extractedIds).toContain(42);
   });
 });
@@ -125,15 +105,12 @@ describe("recallSearch — per-stage results", () => {
 // ── Dedup ───────────────────────────────────────────────────────────────────
 
 describe("recallSearch — deduplication", () => {
-  it("deduplicates by timestamp:content prefix across stages", async () => {
-    const hit = { id: 1, content: "same memory", created_at: 1000, score: 5.0, tier: "extracted" as const };
-    const idx = mockIndex({
-      searchExtracted: vi.fn(() => [hit]),
-      searchOriginal: vi.fn(() => [hit]),
-    });
-    const result = await recallSearch(makeDeps({ index: idx }), baseParams({ original: "same", stages: ["S1", "S2"] }));
-    // Same content+timestamp should appear only once in merged results
-    const matching = result.results.filter(r => r.content === "same memory");
+  it("deduplicates by memory ID across stages", async () => {
+    const deps = setupDb();
+    insertMemory(deps, 1, "A puppy was found");
+    const result = await recallSearch(deps, baseParams());
+    // Same memory should appear only once even if multiple sub-queries find it
+    const matching = result.results.filter(r => r.content.includes("puppy"));
     expect(matching.length).toBe(1);
   });
 });
@@ -142,67 +119,48 @@ describe("recallSearch — deduplication", () => {
 
 describe("recallSearch — limit", () => {
   it("respects limit parameter", async () => {
-    const hits = Array.from({ length: 20 }, (_, i) => ({
-      id: i, content: `memory ${i}`, created_at: i * 1000,
-      score: 20 - i, tier: "extracted" as const,
-    }));
-    const idx = mockIndex({ searchExtracted: vi.fn(() => hits) });
-    const result = await recallSearch(makeDeps({ index: idx }), baseParams({ limit: 5 }));
+    const deps = setupDb();
+    for (let i = 1; i <= 20; i++) {
+      insertMemory(deps, i, `Puppy memory number ${i}`);
+    }
+    const result = await recallSearch(deps, baseParams({ limit: 5 }));
     expect(result.results.length).toBeLessThanOrEqual(5);
   });
 });
 
-// ── S3 LIKE fallback ────────────────────────────────────────────────────────
-
-describe("recallSearch — S3 LIKE fallback", () => {
-  it("runs LIKE query on extracted_memories", async () => {
-    const db = mockDb();
-    const result = await recallSearch(makeDeps({ db }), baseParams({ stages: ["S3"] }));
-    expect(result.stages["S3"]).toBeDefined();
-    expect((db.prepare as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
-  });
-
-  it("includes original keyword in LIKE search", async () => {
-    const db = mockDb();
-    await recallSearch(makeDeps({ db }), baseParams({ original: "kiskutya", stages: ["S3"] }));
-    const prepareCall = (db.prepare as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
-    expect(prepareCall).toContain("LIKE");
-  });
-});
+// ── Entity filter ───────────────────────────────────────────────────────────
 
 describe("recallSearch — entity filter", () => {
   it("filters results by entity when --entity provided", async () => {
-    const idx = mockIndex({
-      searchExtracted: vi.fn(() => [
-        { id: 1, content: "about Molty", created_at: 1000, score: 5.0, tier: "extracted" as const },
-        { id: 2, content: "about pizza", created_at: 2000, score: 4.0, tier: "extracted" as const },
-      ]),
-    });
-    // Mock DB: entity filter query returns only memory_id=1
-    const db = mockDb();
-    (db.prepare as ReturnType<typeof vi.fn>).mockImplementation((sql: string) => ({
-      all: vi.fn(() => {
-        if (sql.includes("memory_entities")) return [{ memory_id: 1 }];
-        return [];
-      }),
-    }));
-    const result = await recallSearch(
-      makeDeps({ index: idx, db }),
-      baseParams({ entity: "Molty", stages: ["S1"] }),
-    );
-    // Only memory id=1 should pass the entity filter
+    const deps = setupDb();
+    insertMemory(deps, 1, "Molty is a puppy AI agent");
+    insertMemory(deps, 2, "Pizza is a puppy food");
+    // Create entity and link
+    deps.db.exec(`INSERT INTO entities (id, name, created_at) VALUES (1, 'Molty', ${Date.now()})`);
+    deps.db.exec(`INSERT INTO memory_entities (memory_id, entity_id) VALUES (1, 1)`);
+    const result = await recallSearch(deps, baseParams({ entity: "Molty" }));
     expect(result.results.length).toBe(1);
-    expect(result.results[0]!.content).toBe("about Molty");
+    expect(result.results[0]!.content).toContain("Molty");
   });
 
   it("returns all results when --entity not provided", async () => {
-    const idx = mockIndex({
-      searchExtracted: vi.fn(() => [
-        { id: 1, content: "a", created_at: 1000, score: 5.0, tier: "extracted" as const },
-        { id: 2, content: "b", created_at: 2000, score: 4.0, tier: "extracted" as const },
-      ]),
-    });
-    const result = await recallSearch(makeDeps({ index: idx }), baseParams({ stages: ["S1"] }));
+    const deps = setupDb();
+    insertMemory(deps, 1, "A puppy named Alpha");
+    insertMemory(deps, 2, "A puppy named Beta");
+    const result = await recallSearch(deps, baseParams());
     expect(result.results.length).toBe(2);
+  });
+});
+
+// ── Stage selection ─────────────────────────────────────────────────────────
+
+describe("recallSearch — stage selection", () => {
+  it("only runs requested stages", async () => {
+    const deps = setupDb();
+    insertMemory(deps, 1, "A puppy in the park");
+    const result = await recallSearch(deps, baseParams({ stages: ["Sf"] }));
+    expect(result.stages["Sf"]).toBeDefined();
+    expect(result.stages["Ss"]).toBeUndefined();
+    expect(result.stages["S6"]).toBeUndefined();
   });
 });

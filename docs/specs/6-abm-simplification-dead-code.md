@@ -57,11 +57,13 @@ Reasoning:
 - `last_recall_context` was for reconsolidation (E4 brain pattern). No clear path to implementation. Remove.
 - `related_topics` was for cross-topic linking (C7). No clear path to implementation. Remove.
 
-### Functions: remove or keep?
+### Functions: wire or keep?
 
-**Remove `detectInterference()` and `buildArc()`.** No runtime caller, no near-term implementation plan. Tests deleted with them. Can be re-implemented from the spec if needed.
+**Wire `effectiveConfidence()` into Darwinism sleep step.** ~10 lines of integration. Memories that haven't been recalled in months decay in confidence, making them candidates for pruning. Self-organizing memory. Clear value, trivial effort.
 
-**Keep `effectiveConfidence()`.** It's a pure function in `brain-patterns.ts` alongside `isFlashbulb()` and `isAgingProtected()` which ARE used. It has a clear integration point (Darwinism fitness review during sleep). Low cost to keep, likely to be wired soon.
+**Keep `detectInterference()` — wire with recall pipeline simplification (item #1).** Runs on recall result set (max 10 results, 45 pair comparisons — negligible). Flags similar-but-different memories in the same topic so the agent can clarify. Needs a warning field in recall output. Medium effort, best done alongside the recall pipeline rewrite.
+
+**Keep `buildArc()` — wire with sleep simplification (item #4).** Sleep step calls `buildArc()` per topic, writes result to `emotion_arc` column. Wake-up builder already reads it (currently gets NULL). Best done when sleep steps are reorganized into phases.
 
 ### Principle going forward
 
@@ -79,13 +81,12 @@ Add this as a steering rule in `.kiro/steering/`.
 | # | Task | Effort | Depends on |
 |---|---|---|---|
 | 1 | Migration: drop `last_recall_context` and `related_topics` columns | 15min | — |
-| 2 | Remove `detectInterference()` from `brain-patterns.ts` + its tests from `abm-v2-batch-e.test.ts` + export from `index.ts` | 15min | — |
-| 3 | Remove `buildArc()` from `emotion-arc.ts` + its tests from `abm-v2-batch-c.test.ts` + export from `index.ts`. If `emotion-arc.ts` is now empty, delete the file. | 15min | — |
-| 4 | Fix `wake-up-builder.ts`: stop selecting `emotion_arc` column (it's always NULL). Simplify the SELECT to not reference it. | 10min | — |
-| 5 | Update as-built: remove dead columns/functions from documentation, update "Schema-Only Columns" and "Not Yet Implemented" sections | 15min | 1-4 |
-| 6 | Add steering rule: `.kiro/steering/no-speculative-schema.md` — the principle above | 10min | — |
+| 2 | Wire `effectiveConfidence()` into Darwinism sleep step — use decayed confidence in fitness review pruning threshold | 20min | — |
+| 3 | Fix `wake-up-builder.ts`: stop selecting `emotion_arc` column (it's always NULL until `buildArc` is wired in item #4) | 10min | — |
+| 4 | Update as-built: remove dead columns from documentation, update "Schema-Only Columns" and "Not Yet Implemented" sections, mark `effectiveConfidence` as wired | 15min | 1-3 |
+| 5 | Add steering rule: `.kiro/steering/no-speculative-schema.md` — the principle above | 10min | — |
 
-**Total: ~1.5hr**
+**Total: ~1hr**
 
 All tasks are independent (can be done in parallel).
 
@@ -95,9 +96,18 @@ Branch: `simplify/dead-code-cleanup`
 
 ## What stays
 
+| Item | Why | Action |
+|---|---|---|
+| `source_type` column | Sensible default, future use in trust model | Keep as-is |
+| `emotion_arc` column | Wake-up builder reads it, ready for arc building | Keep, stop selecting until wired (item #4) |
+| `effectiveConfidence()` | Spaced repetition decay for Darwinism | **Wire now** — task #2 |
+| `detectInterference()` | Flags similar-but-different memories during recall | Keep, wire with recall pipeline rewrite (item #1) |
+| `buildArc()` | Per-topic emotional trajectory for wake-up | Keep, wire with sleep simplification (item #4) |
+| `isFlashbulb()`, `isAgingProtected()` | Live — called by `ageMemoryTiers()` | Already wired |
+
+## What's removed
+
 | Item | Why |
 |---|---|
-| `source_type` column | Sensible default, future use in trust model |
-| `emotion_arc` column | Wake-up builder reads it, ready for arc building if implemented |
-| `effectiveConfidence()` | Pure function, clear integration point (Darwinism), low cost |
-| `isFlashbulb()`, `isAgingProtected()` | Live — called by `ageMemoryTiers()` |
+| `last_recall_context` column | Reconsolidation feature — full feature build needed, no near-term path. One-line migration to re-add if needed. |
+| `related_topics` column | Cross-topic linking — full feature build needed, no near-term path. One-line migration to re-add if needed. |

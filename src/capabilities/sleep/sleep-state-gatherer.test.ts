@@ -89,9 +89,9 @@ describe("SleepStateGatherer", () => {
   describe("fts5Health", () => {
     it("reports ok for healthy indexes", async () => {
       const snapshot = await makeGatherer().gather();
-      expect(snapshot.fts5Health.messages_fts).toBe("ok");
+      expect(snapshot.fts5Health.messages_fts).toBe("dropped");
       expect(snapshot.fts5Health.extracted_memories_fts).toBe("ok");
-      expect(snapshot.fts5Health.extracted_memories_original_fts).toBe("ok");
+      expect(snapshot.fts5Health.extracted_memories_original_fts).toBe("dropped");
     });
   });
 

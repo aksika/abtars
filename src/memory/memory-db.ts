@@ -349,12 +349,10 @@ const MIGRATIONS: readonly Migration[] = [
             VALUES (new.id, strip_diacritics(COALESCE(new.content_en, '') || ' ' || COALESCE(new.preserved_keyword, '')));
         END;
         CREATE TRIGGER IF NOT EXISTS content_en_trigram_ad AFTER DELETE ON extracted_memories BEGIN
-          INSERT INTO content_en_trigram(content_en_trigram, rowid, content)
-            VALUES('delete', old.id, strip_diacritics(COALESCE(old.content_en, '') || ' ' || COALESCE(old.preserved_keyword, '')));
+          DELETE FROM content_en_trigram WHERE rowid = old.id;
         END;
         CREATE TRIGGER IF NOT EXISTS content_en_trigram_au AFTER UPDATE OF content_en, preserved_keyword ON extracted_memories BEGIN
-          INSERT INTO content_en_trigram(content_en_trigram, rowid, content)
-            VALUES('delete', old.id, strip_diacritics(COALESCE(old.content_en, '') || ' ' || COALESCE(old.preserved_keyword, '')));
+          DELETE FROM content_en_trigram WHERE rowid = old.id;
           INSERT INTO content_en_trigram(rowid, content)
             VALUES (new.id, strip_diacritics(COALESCE(new.content_en, '') || ' ' || COALESCE(new.preserved_keyword, '')));
         END;
@@ -375,12 +373,10 @@ const MIGRATIONS: readonly Migration[] = [
             VALUES (new.id, strip_diacritics(COALESCE(new.content_original, '')));
         END;
         CREATE TRIGGER IF NOT EXISTS content_original_trigram_ad AFTER DELETE ON extracted_memories BEGIN
-          INSERT INTO content_original_trigram(content_original_trigram, rowid, content)
-            VALUES('delete', old.id, strip_diacritics(COALESCE(old.content_original, '')));
+          DELETE FROM content_original_trigram WHERE rowid = old.id;
         END;
         CREATE TRIGGER IF NOT EXISTS content_original_trigram_au AFTER UPDATE OF content_original ON extracted_memories BEGIN
-          INSERT INTO content_original_trigram(content_original_trigram, rowid, content)
-            VALUES('delete', old.id, strip_diacritics(COALESCE(old.content_original, '')));
+          DELETE FROM content_original_trigram WHERE rowid = old.id;
           INSERT INTO content_original_trigram(rowid, content)
             VALUES (new.id, strip_diacritics(COALESCE(new.content_original, '')));
         END;

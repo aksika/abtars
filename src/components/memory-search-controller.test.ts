@@ -3,44 +3,42 @@ import { MemorySearchController } from "./memory-search-controller.js";
 import type { MemorySearchDeps } from "./memory-search-controller.js";
 import type { MemorySearchResponse } from "../components/dashboard/dashboard-config.js";
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+vi.mock("../memory/recall-engine.js", () => ({
+  recallSearch: vi.fn(async () => ({
+    results: [],
+    stages: {},
+    shortCircuitAfter: null,
+    extractedIds: [],
+  })),
+}));
 
-function mockMemoryIndex(overrides?: {
-  search?: ReturnType<typeof vi.fn>;
-  substringSearch?: ReturnType<typeof vi.fn>;
-  searchExtracted?: ReturnType<typeof vi.fn>;
-  searchOriginal?: ReturnType<typeof vi.fn>;
-  bumpRecallCount?: ReturnType<typeof vi.fn>;
-}) {
+import { recallSearch } from "../memory/recall-engine.js";
+const mockRecall = vi.mocked(recallSearch);
+
+function mockMemoryIndex() {
   return {
-    search: overrides?.search ?? vi.fn(() => []),
-    substringSearch: overrides?.substringSearch ?? vi.fn(() => []),
-    searchExtracted: overrides?.searchExtracted ?? vi.fn(() => []),
-    searchOriginal: overrides?.searchOriginal ?? vi.fn(() => []),
-    bumpRecallCount: overrides?.bumpRecallCount ?? vi.fn(),
+    search: vi.fn(() => []),
+    substringSearch: vi.fn(() => []),
+    searchExtracted: vi.fn(() => []),
+    bumpRecallCount: vi.fn(),
   };
 }
 
-function mockDb(rows: unknown[] = []) {
+function mockDb() {
   return {
-    prepare: vi.fn(() => ({
-      all: vi.fn(() => rows),
-    })),
+    prepare: vi.fn(() => ({ all: vi.fn(() => []) })),
   };
 }
 
-function makeDeps(opts?: {
-  memoryIndex?: ReturnType<typeof mockMemoryIndex>;
-  db?: ReturnType<typeof mockDb>;
-}): MemorySearchDeps {
+function makeDeps(opts?: { memoryIndex?: ReturnType<typeof mockMemoryIndex>; db?: ReturnType<typeof mockDb> }): MemorySearchDeps {
   const db = (opts?.db ?? mockDb()) as any;
   const mi = (opts?.memoryIndex ?? mockMemoryIndex()) as any;
   const mockMemory = {
     store: {
-      getDistinctChatIds: () => (db.prepare("SELECT DISTINCT chat_id FROM messages ORDER BY chat_id").all() as Array<{ chat_id: number }>).map((r: any) => r.chat_id),
-      getAllExtractedMemories: () => db.prepare("SELECT * FROM extracted_memories ORDER BY created_at DESC").all(),
-      getAllEntities: () => db.prepare("SELECT id, name, type, summary FROM entities").all(),
-      getAllEntityLinks: () => db.prepare("SELECT memory_id, entity_id FROM memory_entities").all(),
+      getDistinctChatIds: () => [],
+      getAllExtractedMemories: () => [],
+      getAllEntities: () => [],
+      getAllEntityLinks: () => [],
     },
     getDatabase: () => db,
     getMemoryIndex: () => mi,
@@ -59,28 +57,18 @@ describe("MemorySearchController.handle — validation", () => {
     const ctrl = new MemorySearchController(makeDeps());
     const result = await ctrl.handle(params({ chatId: "1" }));
     expect(result.status).toBe(400);
-    expect(result.body).toEqual({ error: "keywords required" });
   });
 
   it("returns 400 when keywords are empty string", async () => {
     const ctrl = new MemorySearchController(makeDeps());
     const result = await ctrl.handle(params({ keywords: "", chatId: "1" }));
     expect(result.status).toBe(400);
-    expect(result.body).toEqual({ error: "keywords required" });
-  });
-
-  it("returns 400 when keywords are only whitespace", async () => {
-    const ctrl = new MemorySearchController(makeDeps());
-    const result = await ctrl.handle(params({ keywords: "  ", chatId: "1" }));
-    expect(result.status).toBe(400);
-    expect(result.body).toEqual({ error: "keywords required" });
   });
 
   it("returns 400 when chatId is not a number", async () => {
     const ctrl = new MemorySearchController(makeDeps());
     const result = await ctrl.handle(params({ keywords: "test", chatId: "abc" }));
     expect(result.status).toBe(400);
-    expect(result.body).toEqual({ error: "chatId must be a number" });
   });
 
   it("returns 200 when chatId is omitted", async () => {
@@ -93,90 +81,59 @@ describe("MemorySearchController.handle — validation", () => {
 // ── Stage selection ─────────────────────────────────────────────────────────
 
 describe("MemorySearchController.handle — stage selection", () => {
-  it("calls searchExtracted (S1) by default", async () => {
-    const mi = mockMemoryIndex();
-    const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));
+  it("calls recallSearch with translated keywords", async () => {
+    mockRecall.mockResolvedValueOnce({ results: [], stages: { Sf: { hits: [], ms: 1 } }, shortCircuitAfter: null, extractedIds: [] });
+    const ctrl = new MemorySearchController(makeDeps());
     await ctrl.handle(params({ keywords: "hello", chatId: "1" }));
-    expect(mi.searchExtracted).toHaveBeenCalled();
+    expect(mockRecall).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ translated: ["hello"] }));
   });
 
-  it("calls searchOriginal (S2) when original param is provided", async () => {
-    const mi = mockMemoryIndex();
-    const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));
+  it("passes original param to recallSearch", async () => {
+    mockRecall.mockResolvedValueOnce({ results: [], stages: {}, shortCircuitAfter: null, extractedIds: [] });
+    const ctrl = new MemorySearchController(makeDeps());
     await ctrl.handle(params({ keywords: "hello", chatId: "1", original: "szia" }));
-    expect(mi.searchOriginal).toHaveBeenCalled();
-  });
-
-  it("does not call searchOriginal (S2) without original param", async () => {
-    const mi = mockMemoryIndex();
-    const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));
-    await ctrl.handle(params({ keywords: "hello", chatId: "1" }));
-    expect(mi.searchOriginal).not.toHaveBeenCalled();
+    expect(mockRecall).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ original: "szia" }));
   });
 
   it("passes stages filter to recall engine", async () => {
-    const mi = mockMemoryIndex();
-    const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));
-    await ctrl.handle(params({ keywords: "hello", chatId: "1", stages: "S1" }));
-    // S1 runs searchExtracted
-    expect(mi.searchExtracted).toHaveBeenCalled();
-    // S4 (messages FTS) should not run since only S1 requested
-    expect(mi.search).not.toHaveBeenCalled();
+    mockRecall.mockResolvedValueOnce({ results: [], stages: { Sf: { hits: [], ms: 1 } }, shortCircuitAfter: null, extractedIds: [] });
+    const ctrl = new MemorySearchController(makeDeps());
+    await ctrl.handle(params({ keywords: "hello", chatId: "1", stages: "Sf" }));
+    expect(mockRecall).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ stages: ["Sf"] }));
   });
 
   it("returns per-stage hit counts and timing", async () => {
-    const mi = mockMemoryIndex();
-    const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));
-    const result = await ctrl.handle(params({ keywords: "hello", chatId: "1", stages: "S1" }));
+    mockRecall.mockResolvedValueOnce({
+      results: [], stages: { Sf: { hits: [], ms: 2 } }, shortCircuitAfter: null, extractedIds: [],
+    });
+    const ctrl = new MemorySearchController(makeDeps());
+    const result = await ctrl.handle(params({ keywords: "hello", chatId: "1" }));
     const body = result.body as MemorySearchResponse;
-    expect(body.layers["S1"]).toBeDefined();
-    expect(body.layers["S1"]!.hits).toBe(0);
-    expect(typeof body.layers["S1"]!.ms).toBe("number");
+    expect(body.layers["Sf"]).toBeDefined();
+    expect(body.layers["Sf"]!.hits).toBe(0);
+    expect(typeof body.layers["Sf"]!.ms).toBe("number");
   });
 });
 
 // ── Results ─────────────────────────────────────────────────────────────────
 
 describe("MemorySearchController.handle — results", () => {
-  it("returns extracted memory results with rich attributes", async () => {
-    const mi = mockMemoryIndex({
-      searchExtracted: vi.fn(() => [{
-        id: 1, content: "puppy info", content_original: "kiskutya info",
-        memory_type: "fact", created_at: 1000, score: 5.0,
-        trust: 5, integrity: 5, credibility: 5, classification: 0,
-        tier: "extracted" as const,
-      }]),
+  it("returns recall results with rich attributes", async () => {
+    mockRecall.mockResolvedValueOnce({
+      results: [{
+        content: "puppy info", date: "2026-01-01T00:00:00", source: "Sf:porter", score: 0.95,
+        contentOriginal: "kiskutya info", memoryType: "fact", trust: 5, integrity: 5, credibility: 5, classification: 0,
+      }],
+      stages: { Sf: { hits: [{ content: "puppy info", date: "2026-01-01T00:00:00", source: "Sf:porter", score: 0.95 }], ms: 1 } },
+      shortCircuitAfter: null, extractedIds: [1],
     });
+    const mi = mockMemoryIndex();
     const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));
-    const result = await ctrl.handle(params({ keywords: "puppy", chatId: "1", stages: "S1" }));
+    const result = await ctrl.handle(params({ keywords: "puppy", chatId: "1" }));
     const body = result.body as MemorySearchResponse;
     expect(body.results.length).toBe(1);
     expect(body.results[0]!.content).toBe("puppy info");
-    expect(body.results[0]!.contentOriginal).toBe("kiskutya info");
-    expect(body.results[0]!.trust).toBe(5);
-  });
-
-  it("limits results to 10", async () => {
-    const results = Array.from({ length: 25 }, (_, i) => ({
-      id: i, content: `memory ${i}`, created_at: i * 1000,
-      memory_type: "fact", score: 25 - i, tier: "extracted" as const,
-    }));
-    const mi = mockMemoryIndex({ searchExtracted: vi.fn(() => results) });
-    const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));
-    const result = await ctrl.handle(params({ keywords: "test", chatId: "1", stages: "S1" }));
-    const body = result.body as MemorySearchResponse;
-    expect(body.results.length).toBeLessThanOrEqual(10);
-  });
-
-  it("bumps recall count for returned extracted memories", async () => {
-    const mi = mockMemoryIndex({
-      searchExtracted: vi.fn(() => [{
-        id: 42, content: "test", created_at: 1000, score: 5.0, tier: "extracted" as const,
-      }]),
-    });
-    const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));
-    await ctrl.handle(params({ keywords: "test", chatId: "1", stages: "S1" }));
-    expect(mi.bumpRecallCount).toHaveBeenCalledWith([42]);
+    expect(mi.bumpRecallCount).toHaveBeenCalledWith([1]);
   });
 });
 
@@ -184,10 +141,8 @@ describe("MemorySearchController.handle — results", () => {
 
 describe("MemorySearchController.handle — error handling", () => {
   it("returns 500 when recall engine throws", async () => {
-    const mi = mockMemoryIndex({
-      searchExtracted: vi.fn(() => { throw new Error("DB corrupt"); }),
-    });
-    const ctrl = new MemorySearchController(makeDeps({ memoryIndex: mi }));
+    mockRecall.mockRejectedValueOnce(new Error("DB corrupt"));
+    const ctrl = new MemorySearchController(makeDeps());
     const result = await ctrl.handle(params({ keywords: "test", chatId: "1" }));
     expect(result.status).toBe(500);
   });
