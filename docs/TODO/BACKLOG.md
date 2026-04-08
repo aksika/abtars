@@ -334,3 +334,10 @@ Consecutive poller failure counter. After N failures, log "offline" once, reduce
 **Status:** Not started
 
 Heartbeat task checks `df` output. Warn at 90%, block new writes at 95%. Currently only checked during Dreamy sleep cycle.
+
+## 103. Keyboard-adjacent typo correction for recall
+
+**Priority:** LOW
+**Status:** Not started
+
+Adjacent-key typos (QWERTZ: z↔y, s↔a, doubled/missed chars) could be handled by a keyboard-layout-aware correction layer before trigram search. E.g. "hogz" → "hogy", "eyg" → "egy". However: (1) every language has its own layout, (2) the substring fallback already catches most cases for longer words, (3) the agent translates to English before recall (SOUL fix) which bypasses Hungarian typos entirely, (4) Ss signatures catch semantic meaning regardless of spelling. Not worth the complexity unless short-word recall failures become a pattern.

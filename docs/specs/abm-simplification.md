@@ -96,16 +96,18 @@ Dead columns and functions — schema ran ahead of code. Creates false confidenc
 
 ---
 
-### 7. Emotion: 25 Types → Single Score
+### 7. Emotion: Improve, Don't Drop
 
-25 emotion types via keyword regex + separate emotion_score + emotion_arc + emotional recall boost. MemPalace benchmark showed the 34% retrieval boost came from topic filtering, not emotion.
+25 emotion types via keyword regex are already stored on every memory (~1ms, no LLM). The problem isn't the tagger — it's that nothing reads the tags. The system is half-built.
 
-**Proposed:** Keep `emotion_score` (-5 to +5, LLM-assigned). Drop 25-type tagger. Use emotion for one thing: flashbulb protection.
+**Solution:** Wire the existing emotion infrastructure + add emotional wake-up. Key additions:
+- **Emotional highlights in wake-up** — top 10 memories by |emotion_score| ≥ 3 loaded after core tier, before dailies. The agent starts every session knowing the stories that matter, not just the facts. Inspired by MemPalace's L1 (top 15 by emotional_weight).
+- **Emotion recall filter** — `--emotion "frustration"` searches by emotional context
+- **Wire buildArc()** — per-topic emotional trajectory (↑↓↕→) written by Dreamy, displayed in wake-up
+- **Cross-session emotional tone** — last session's dominant emotions in session-start context
 
-**Counter-argument:** Emotion tags are cheap (~1ms) and provide structured data for arc building. The tagger is already shipped and tested.
-
-**Detail:** _not yet created_
-**Decision:** ⏳ Pending — agreed per counter-discussion, low-risk
+**Detail:** `7-abm-simplification-emotion.md`
+**Decision:** ⏳ Pending — direction agreed (improve, not drop), tasks defined
 
 ---
 
@@ -191,7 +193,7 @@ From `abm-simplification-counter.md`:
 | 4 | Sleep phases | ⏳ Pending — after #1 | | |
 | 5 | IPC layer | ⏳ Pending — skeptical | | |
 | 6 | Speculative schema | ✅ Approved — drop 2 columns, wire effectiveConfidence, keep 2 functions | 2026-04-09 | `6-abm-simplification-dead-code.md` |
-| 7 | Emotion model | ⏳ Pending — agreed, low-risk | | |
+| 7 | Emotion model | ⏳ Direction agreed — improve, not drop. Tasks defined. | 2026-04-09 | `7-abm-simplification-emotion.md` |
 
 ---
 
@@ -205,3 +207,4 @@ From `abm-simplification-counter.md`:
 | `1-abm-simplification-evidence.md` | Item #1 benchmark analysis |
 | `1-abm-simplification-baseline.json` | Item #1 raw benchmark data |
 | `6-abm-simplification-dead-code.md` | Item #6 detailed plan + tasks |
+| `7-abm-simplification-emotion.md` | Item #7 detailed plan + tasks |
