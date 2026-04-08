@@ -11,11 +11,11 @@
 
 ## Overview
 
-Standalone memory package (`@agentbridge/memory`, ABM v2). 39 self-contained files in `src/memory/`, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation.
+Standalone memory package (`@agentbridge/memory`, ABM v2). 38 source + 29 test files in `src/memory/`, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation.
 
-SQLite-backed persistence with FTS5 full-text search, ollama vector embeddings (Se sidecar), 256-bit binary signatures (Hamming distance search, no ollama needed), ABM-L compression (store-time), emotion tagging (25 types, keyword regex), importance flags (8 types), agent-initiated instant memory storage, unified memory editing (`agentbridge-edit`), Memory Darwinism, NATO Admiralty Code security model (CIA + AAA), emotion scoring with immediate propagation.
+SQLite-backed persistence with dual FTS5 (content_en + ABM-L), ollama vector embeddings with int8 quantization (1536→384 bytes after 14d) in separate `memory_embeddings` table, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L v2 compressor (entity whitelist, topic inference, no truncation), emotion tagging (25 types), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security.
 
-Three-tier storage with progressive aging: Original language → English → ABM-L. Pressure-based aging accelerates as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (high emotion + pivot) never aged.
+Three-tier aging: English NULLed after 14d (ABM-L has the facts), Original after 90d (source of truth kept longer), ABM-L + int8 embeddings + signatures persist forever. Pressure-based acceleration as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (|emotion| ≥ 4 + pivot/correction) never aged.
 
 Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods. Triggered by `BED_TIME` + quiet ticks (no bridge restart). 24 sleep steps including topic assignment, core promotion, temporal review, emotion/flags backfill, ABM-L compression, contradiction check, emotional arcs, memory aging, entity review.
 
@@ -23,14 +23,14 @@ Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sle
 
 | Aspect | Detail |
 |---|---|
-| Files | 39 source files in `src/memory/` |
+| Files | 38 source + 29 test files in `src/memory/` |
 | External imports | Zero — fully self-contained |
 | Entry point | `src/memory/index.ts` |
 | Interface | `IMemorySystem` (lifecycle, messages, search, emotion, stats, maintenance) |
 | Heartbeat | `IHeartbeat` interface — bridge injects its implementation |
 | Logger | `setLogger()` injection — bridge injects its logger at startup |
 | Types | `mem-types.ts` — all memory types owned by the package |
-| Tests | 26 test files, 876 tests |
+| Tests | 29 test files, 912 tests |
 
 **Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext`.
 
@@ -695,16 +695,17 @@ Flags: D=decision, P=preference, F=fact, L=lesson, O=origin, V=pivot, M=mileston
 | `embedding` | Ollama embeddings only (legacy) | Yes |
 | `signature` | Binary signatures + Hamming distance | No |
 
-Signature search (Ss stage) runs on every recall alongside existing stages (S1-S7, Se). Returns `content_compressed` (ABM-L) with emotional recall boost (score weighted by \|emotion_score\|).
+Search stages: S1-S7 (FTS5 on content_en), Se (embedding cosine), Sa (FTS5 on ABM-L — survives aging), Ss (signature Hamming). All run by default. Sa and Ss return `content_compressed` with emotional recall boost. `--full` flag returns `content_en` when available.
 
 ### Three-Tier Aging
 
 | Tier | Column | Base TTL | Protected by |
 |---|---|---|---|
-| Original | `content_original` | 14 days | \|emotion\| ≥ 4, recall ≥ 3, core tier |
-| English | `content_en` | 60 days | Flashbulb (\|emotion\| ≥ 4 + pivot flag) |
+| English | `content_en` | 14 days | \|emotion\| ≥ 4, recall ≥ 3, core tier |
+| Original | `content_original` | 90 days | Flashbulb (\|emotion\| ≥ 4 + pivot/correction) |
+| float32 embedding | `memory_embeddings` | 14 days (quantized to int8) | — |
+| int8 embedding | `memory_embeddings` | Never | — |
 | ABM-L | `content_compressed` | Never | — |
-| Embedding | `embedding` | Never | — |
 | Signature | `signature` | Never | — |
 
 Pressure-based acceleration: aging TTLs multiply by pressure factor as DB approaches `MEMORY_MAX_DB_SIZE_MB` (0-50%: 1×, 50-75%: 0.7×, 75-90%: 0.35×, 90-95%: 0.15×, 95%+: immediate).
@@ -720,9 +721,20 @@ Pressure-based acceleration: aging TTLs multiply by pressure factor as DB approa
 
 ### Session Start (Wake-Up Builder)
 
-`wake-up-builder.ts` builds memory context for session start. Budget: 1% of `CONTEXT_WINDOW_SIZE`.
+`wake-up-builder.ts` + `wake-up-renderer.ts` build memory context for session start. Budget: 1% of `CONTEXT_WINDOW_SIZE`.
 
-Priority fill: core memories → latest daily → 7 dailies → weekly → quarterly. All ABM-L. Auto-adapts to context window (4K model gets top core facts only, 128K gets full week).
+Priority fill: core memories → latest daily → 7 dailies → weekly → quarterly. All ABM-L.
+
+Adaptive compression levels:
+- `full` (>5K tokens): raw ABM-L, no tricks
+- `compact` (>500 tokens): entity header (2-letter codes for 3+ refs), topic grouping, elide default confidence/neutral emotion
+- `ultra` (<500 tokens): all of compact + compressed SOUL (rules only, ~100 tokens)
+
+Daily summaries compressed via `compressDailySummary()` (markdown → ABM-L bullets, 5× compression). SOUL compressed via `compressSoul()` for ultra mode (20× compression).
+
+### Embedding Tiering
+
+Separate `memory_embeddings` table (migration v9). float32 quantized to int8 after 14 days via `embedding-quantize.ts`. int8 (384 bytes) kept forever. `cosineSimInt8()` for similarity search on quantized vectors.
 
 ### Bedtime Flow
 
