@@ -339,3 +339,24 @@ Sleep cycle runs 24 steps in rapid succession. After ~5-6 minutes of sustained p
 - Exponential backoff on retry: 10s → 20s → 40s
 - Essential steps (daily summary, extraction) run first with no delay, non-essential steps get the delay
 - Log: `[SLEEP] Waiting 10s before next step (rate limit protection)`
+
+## 96. ABM-L compressor quality fixes
+
+**Priority:** HIGH
+**Status:** Not started
+
+### Problems found in production backfill
+
+1. **Flag override** — importance flagger detects "instead of" → `decision`, overriding the actual `memory_type` (lesson). The memory_type should be the primary flag, detected flags should be secondary/additive.
+
+2. **Over-aggressive entity detection** — single capitalized words mid-sentence become @references ("Vincent" → `@vincent`). Should only tag known entities (user, agent, project names) or require multiple occurrences.
+
+3. **Grammar-breaking filler strip** — "When I don't know" → "When don't know". Lessons and rules need to stay readable. Filler stripping should be less aggressive on lesson/rule/preference memory types.
+
+4. **Topic not inferred** — behavioral lessons about the agent stored as `topic=general` instead of `personal` or `coding`. Compressor should infer topic from content when topic is `general`.
+
+### Fix
+- `memory-compressor.ts`: use `memory_type` as primary flag, detected flags as additive
+- `memory-compressor.ts`: entity detection whitelist (known entities only), not greedy capitalization scan
+- `memory-compressor.ts`: skip filler stripping for lesson/preference/core_belief types — keep full readability
+- Re-run backfill after fixes
