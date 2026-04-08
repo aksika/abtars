@@ -76,3 +76,6 @@ export type { SearchMode, MemoryEnvConfig } from "./mem-config-env.js";
 // ABM v2 — compression level 2
 export { renderWakeUp, compressDailySummary, compressSoul, pickLevel } from "./wake-up-renderer.js";
 export type { CompressionLevel } from "./wake-up-renderer.js";
+
+// ABM v2 — embedding quantization
+export { quantizeToInt8, cosineSimInt8 } from "./embedding-quantize.js";

@@ -76,7 +76,7 @@ export type RecallDeps = {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const ALL_STAGES = ["S1", "S2", "S3", "Se", "S4", "S5", "S6", "S7", "Ss"];
+const ALL_STAGES = ["S1", "S2", "S3", "Se", "S4", "S5", "S6", "S7", "Ss", "Sa"];
 const DEFAULT_LIMIT = 10;
 const DEFAULT_SHORT_CIRCUIT = 10;
 
@@ -344,6 +344,44 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
       }
       stages["S7"] = { hits, ms: elapsed(t) };
     }
+  }
+
+  // --- Sa: ABM-L FTS5 search (keyword match on compressed content) ---
+  if (activeStages.has("Sa")) {
+    const t = performance.now();
+    const hits: RecallHit[] = [];
+    try {
+      const allKw = [...params.translated];
+      if (params.original) allKw.push(params.original);
+      const ftsQuery = allKw.map(kw => `"${kw.replace(/"/g, "")}"`).join(" OR ");
+      if (ftsQuery) {
+        const rows = deps.db.prepare(
+          `SELECT em.id, em.content_compressed, em.content_en, em.content_original, em.memory_type, em.created_at,
+                  em.emotion_score, em.topic, em.tier, em.valid_to
+           FROM abml_fts ft JOIN extracted_memories em ON ft.rowid = em.id
+           WHERE abml_fts MATCH ? ${!params.includeExpired ? "AND em.valid_to IS NULL" : ""}
+           ${params.topic ? "AND em.topic = ?" : ""} ${params.tier ? "AND em.tier = ?" : ""}
+           LIMIT ?`,
+        ).all(...[ftsQuery, ...(params.topic ? [params.topic] : []), ...(params.tier ? [params.tier] : []), limit * 2].filter(Boolean)) as Array<{
+          id: number; content_compressed: string | null; content_en: string | null; content_original: string | null;
+          memory_type: string | null; created_at: number; emotion_score: number | null;
+        }>;
+        for (const r of rows) {
+          const key = `${r.created_at}:${(r.content_compressed ?? r.content_en ?? "").slice(0, 80)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const emotionBoost = 1 + 0.02 * Math.abs(r.emotion_score ?? 0);
+          hits.push({
+            content: params.resolution === "full" ? (r.content_en ?? r.content_compressed ?? "") : (r.content_compressed ?? r.content_en ?? ""),
+            date: new Date(r.created_at).toISOString(), source: "Sa:abml_fts", score: 0.8 * emotionBoost,
+            contentOriginal: r.content_original ?? undefined, memoryType: r.memory_type ?? undefined,
+          });
+          allResults.push(hits[hits.length - 1]!);
+          extractedIds.push(r.id);
+        }
+      }
+    } catch { /* abml_fts table may not exist yet */ }
+    stages["Sa"] = { hits, ms: elapsed(t) };
   }
 
   // --- Ss: Signature-based semantic search (Hamming distance) ---

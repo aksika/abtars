@@ -287,6 +287,54 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 9,
+    label: "ABM-L FTS5 index + embedding separation",
+    up: (db) => {
+      // FTS5 on content_compressed (ABM-L) — survives aging
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS abml_fts USING fts5(
+          content_compressed,
+          content=extracted_memories,
+          content_rowid=id,
+          tokenize='porter unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS abml_fts_ai AFTER INSERT ON extracted_memories BEGIN
+          INSERT INTO abml_fts(rowid, content_compressed) VALUES (new.id, COALESCE(new.content_compressed, ''));
+        END;
+        CREATE TRIGGER IF NOT EXISTS abml_fts_ad AFTER DELETE ON extracted_memories BEGIN
+          INSERT INTO abml_fts(abml_fts, rowid, content_compressed) VALUES('delete', old.id, COALESCE(old.content_compressed, ''));
+        END;
+        CREATE TRIGGER IF NOT EXISTS abml_fts_au AFTER UPDATE OF content_compressed ON extracted_memories BEGIN
+          INSERT INTO abml_fts(abml_fts, rowid, content_compressed) VALUES('delete', old.id, COALESCE(old.content_compressed, ''));
+          INSERT INTO abml_fts(rowid, content_compressed) VALUES (new.id, COALESCE(new.content_compressed, ''));
+        END;
+      `);
+
+      // Populate ABM-L FTS from existing data
+      try {
+        db.exec("INSERT INTO abml_fts(rowid, content_compressed) SELECT id, COALESCE(content_compressed, '') FROM extracted_memories");
+      } catch { /* already populated */ }
+
+      // Separate embedding table
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS memory_embeddings (
+          memory_id INTEGER PRIMARY KEY,
+          embedding BLOB,
+          quantized INTEGER DEFAULT 0
+        );
+      `);
+
+      // Migrate existing embeddings to separate table
+      try {
+        db.exec(`
+          INSERT OR IGNORE INTO memory_embeddings (memory_id, embedding, quantized)
+          SELECT id, embedding, 0 FROM extracted_memories WHERE embedding IS NOT NULL
+        `);
+      } catch { /* */ }
+    },
+  },
 ];
 
 // ── Migration runner ────────────────────────────────────────────────────────

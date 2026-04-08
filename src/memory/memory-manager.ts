@@ -310,12 +310,13 @@ export class MemoryManager {
   }
 
   /** Age memory tiers: NULL English after englishTtlDays, NULL original after originalTtlDays. */
-  ageMemoryTiers(opts: { englishTtlDays: number; originalTtlDays: number }): { englishNulled: number; originalNulled: number } {
-    if (!this.db) return { englishNulled: 0, originalNulled: 0 };
+  ageMemoryTiers(opts: { englishTtlDays: number; originalTtlDays: number; embeddingQuantizeDays?: number }): { englishNulled: number; originalNulled: number; embeddingsQuantized: number } {
+    if (!this.db) return { englishNulled: 0, originalNulled: 0, embeddingsQuantized: 0 };
     const { isAgingProtected, isFlashbulb } = require("./brain-patterns.js") as typeof import("./brain-patterns.js");
 
     let englishNulled = 0;
     let originalNulled = 0;
+    let embeddingsQuantized = 0;
     const englishCutoff = Date.now() - opts.englishTtlDays * 86400000;
     const originalCutoff = Date.now() - opts.originalTtlDays * 86400000;
 
@@ -340,7 +341,25 @@ export class MemoryManager {
       originalNulled++;
     }
 
-    return { englishNulled, originalNulled };
+    // Quantize float32 embeddings to int8 after quantizeDays
+    if (opts.embeddingQuantizeDays != null) {
+      const quantizeCutoff = Date.now() - opts.embeddingQuantizeDays * 86400000;
+      try {
+        const { quantizeToInt8 } = require("./embedding-quantize.js") as typeof import("./embedding-quantize.js");
+        const rows = this.db.prepare(
+          "SELECT memory_id, embedding FROM memory_embeddings WHERE quantized = 0 AND memory_id IN (SELECT id FROM extracted_memories WHERE created_at < ?)",
+        ).all(quantizeCutoff) as Array<{ memory_id: number; embedding: Buffer }>;
+        const updateStmt = this.db.prepare("UPDATE memory_embeddings SET embedding = ?, quantized = 1 WHERE memory_id = ?");
+        for (const r of rows) {
+          const float32 = new Float32Array(r.embedding.buffer, r.embedding.byteOffset, r.embedding.byteLength / 4);
+          const int8 = quantizeToInt8(float32);
+          updateStmt.run(Buffer.from(int8.buffer), r.memory_id);
+          embeddingsQuantized++;
+        }
+      } catch { /* memory_embeddings table may not exist yet */ }
+    }
+
+    return { englishNulled, originalNulled, embeddingsQuantized };
   }
 
   fixMemoryDefaults(): { fixed: number } {
