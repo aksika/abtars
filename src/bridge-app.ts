@@ -118,7 +118,7 @@ export class Bridge {
     }
     setMemoryLogger({ logInfo, logWarn, logError });
 
-    // Load ABM memory.env config
+    // Load ABM .env.memory config
     const { loadMemoryEnv } = await import("./memory/mem-config-env.js");
     const memEnv = loadMemoryEnv();
     logInfo("main", `🧠 ABM config: search=${memEnv.searchMode}, maxDB=${memEnv.maxDbSizeMb}MB, aging=${memEnv.agingEnabled}`);

@@ -1,6 +1,6 @@
 /**
- * mem-config.ts — Standalone memory.env config loader.
- * Separate from bridge config. Reads from ~/.agentbridge/memory.env.
+ * mem-config.ts — Standalone .env.memory config loader.
+ * Separate from bridge config. Reads from ~/.agentbridge/.env.memory.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -27,9 +27,9 @@ const DEFAULTS: MemoryEnvConfig = {
   signatureBits: 256,
 };
 
-/** Load memory.env from ~/.agentbridge/memory.env. Falls back to defaults. */
+/** Load .env.memory from ~/.agentbridge/.env.memory. Falls back to defaults. */
 export function loadMemoryEnv(): MemoryEnvConfig {
-  const envPath = join(agentBridgeHome(), "memory.env");
+  const envPath = join(agentBridgeHome(), ".env.memory");
   if (existsSync(envPath)) {
     const lines = readFileSync(envPath, "utf-8").split("\n");
     for (const line of lines) {

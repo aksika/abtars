@@ -176,9 +176,9 @@ if [ -f "$DB" ]; then
   fi
 fi
 
-# 13. memory.env exists
-if [ ! -f "$AB/memory.env" ]; then
-  warn "memory.env missing — ABM config defaults will be used"
+# 13. .env.memory exists
+if [ ! -f "$AB/.env.memory" ]; then
+  warn ".env.memory missing — ABM config defaults will be used"
 fi
 
 # 14. Orphaned kiro-cli processes

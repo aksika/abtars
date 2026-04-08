@@ -21,7 +21,7 @@ describe("Batch B — search enhancements", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  describe("memory.env config", () => {
+  describe(".env.memory config", () => {
     it("loads defaults when no file exists", () => {
       const cfg = loadMemoryEnv();
       expect(cfg.searchMode).toBe("hybrid");
