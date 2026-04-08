@@ -5,7 +5,8 @@
 
 /** E1: Flashbulb protection — is this memory protected from decay/aging? */
 export function isFlashbulb(emotionScore: number, importanceFlags: string): boolean {
-  return Math.abs(emotionScore) >= 4 && importanceFlags.includes("pivot");
+  if (Math.abs(emotionScore) < 4) return false;
+  return importanceFlags.includes("pivot") || importanceFlags.includes("correction");
 }
 
 /** E1: Is this memory protected from aging (broader than flashbulb)? */

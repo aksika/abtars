@@ -8,10 +8,16 @@ describe("brain-patterns", () => {
       expect(isFlashbulb(-4, "pivot")).toBe(true);
     });
 
-    it("rejects low emotion or missing pivot", () => {
+    it("marks high emotion + correction as flashbulb", () => {
+      expect(isFlashbulb(-5, "correction")).toBe(true);
+      expect(isFlashbulb(4, "correction,lesson")).toBe(true);
+    });
+
+    it("rejects low emotion or missing pivot/correction", () => {
       expect(isFlashbulb(3, "pivot")).toBe(false);
       expect(isFlashbulb(5, "decision")).toBe(false);
       expect(isFlashbulb(2, "milestone")).toBe(false);
+      expect(isFlashbulb(-3, "correction")).toBe(false);
     });
   });
 
