@@ -30,7 +30,7 @@ Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sle
 | Heartbeat | `IHeartbeat` interface — bridge injects its implementation |
 | Logger | `setLogger()` injection — bridge injects its logger at startup |
 | Types | `mem-types.ts` — all memory types owned by the package |
-| Tests | 29 test files, 912 tests |
+| Tests | 90 test files, ~902 tests |
 
 **Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext`.
 
@@ -44,7 +44,7 @@ Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sle
 | C1 | Consolidated Summaries | Markdown files | Sleep subagent | Consolidation search, sleep subagent | Persistent — promoted up tiers |
 | C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store, agentbridge-edit | agentbridge-recall | messages: hot buffer (max 1000, aged >10d). extracted_memories: persistent |
 | C4 | Markdown Knowledge Files | Flat files | Agent, retrospective | Sleep subagent | Persistent |
-| C5 | Embeddings | `memory.db` (`extracted_memories.embedding` BLOB) | ollama nomic-embed-text (on insert + batch) | recall-engine Se sidecar | Persistent — gated by `EMBEDDING_ENABLED` |
+| C5 | Embeddings | `memory.db` (`memory_embeddings` table) | ollama nomic-embed-text (on insert + batch) | recall-engine Se sidecar | Persistent — float32 quantized to int8 after 14d. Gated by `EMBEDDING_ENABLED` |
 | C6 | Retrospectives | Markdown files | Sleep subagent | Sleep subagent, agent (via recall) | Persistent |
 
 ### Data Flow
@@ -61,7 +61,7 @@ User Message
 | (agent   |               +----------+
 |  decides |                     ^
 |  when to |                     |
-|  search) |--- recall --------->|  (single path: agentbridge-recall, 7 stages)
+|  search) |--- recall --------->|  (single path: agentbridge-recall, S1-S7 + Se + Sa + Ss)
 |          |                     |
 |          |               +----------+
 |          |               | C1       |  daily/weekly/quarterly summaries
@@ -248,7 +248,7 @@ Nulled automatically on content edit (re-embedded on next batch run).
 
 ---
 
-## Recall Pipeline (`recall-engine.ts`, S1-S7 + Se)
+## Recall Pipeline (`recall-engine.ts`, S1-S7 + Se + Sa + Ss)
 
 Source: `src/memory/recall-engine.ts`
 CLI wrapper: `src/cli/agentbridge-recall.ts`
@@ -270,6 +270,8 @@ The pipeline is layered from conservative (high-precision, few false positives) 
 | S5 | messages | SQL LIKE with `strip_diacritics()` | Broad — accent-insensitive | 0.9 (fixed) | Wide net on messages. Only fires if results < limit. |
 | S6 | daily/weekly/quarterly .md files | Substring match on file content | Broad | 0.5 (fixed) | Searches consolidation summaries on disk. |
 | S7 | messages or latest daily | No keyword — returns recent | Fallback | 0.1 (fixed) | Only fires when ALL other stages return zero results. Returns recent messages or latest daily summary. |
+| Sa | extracted_memories.content_compressed | FTS5 on `abml_fts` table | Conservative — token match on ABM-L | 0.8 × emotion boost | Keyword search on compressed content. Survives aging (ABM-L never NULLed). Joined via `abml_fts.rowid = em.id`. |
+| Ss | extracted_memories.signature | Hamming distance (256-bit binary) | Broad — semantic approximate | 0.0-1.0 (similarity × emotion boost) | No ollama needed. Full table scan of signatures, threshold 0.55. Emotional recall boost: `1 + 0.02 × \|emotion_score\|`. |
 
 ```
 Se: async embedding sidecar ─────────────┐  (fires at S1 start, ollama nomic-embed-text)
@@ -284,6 +286,12 @@ S4: Messages — FTS5 (conservative)
 S5: Messages — LIKE (broad)
 S6: Consolidation files (broad)
 S7: Keyword-free fallback (last resort, zero results only)
+
+Sa: ABM-L FTS5 (keyword match on content_compressed via abml_fts)
+Ss: Signature Hamming (semantic approximate, no ollama)
+  → Sa and Ss always run (not affected by short-circuit)
+  → Both apply emotional recall boost: 1 + 0.02 × |emotion_score|
+  → Both respect resolution param: ABM-L by default, content_en when --full
 ```
 
 Post-processing: dedup by content hash → temporal decay → MMR re-ranking (λ=0.7).
@@ -300,7 +308,7 @@ Model: `nomic-embed-text` via ollama (768 dimensions, CPU-only, ~20-50ms/query, 
 | `agentbridge-embed` CLI | One-time batch embed of all memories with NULL embedding |
 | Recall (Se sidecar) | `embedText(query)` fired async at S1, cosine similarity after S3 |
 
-Storage: `embedding` BLOB column on `extracted_memories` (768 × 4 bytes = 3KB per memory). Threshold: 0.5 cosine similarity.
+Storage: separate `memory_embeddings` table (memory_id PK, embedding BLOB, quantized INTEGER). float32 (768 × 4 = 3KB) quantized to int8 (384 bytes) after `MEMORY_EMBEDDING_QUANTIZE_DAYS` (default 14d) via `ageMemoryTiers()`. Threshold: 0.5 cosine similarity. int8 search via `cosineSimInt8()`.
 
 ### Entity Linking
 
@@ -712,12 +720,13 @@ Pressure-based acceleration: aging TTLs multiply by pressure factor as DB approa
 
 ### Brain Patterns
 
-| Pattern | Module | What |
-|---|---|---|
-| Emotional recall boost | `recall-engine.ts` (Ss stage) | Score weighted by \|emotion_score\| |
-| Flashbulb protection | `brain-patterns.ts` | \|emotion\| ≥ 4 + pivot → never aged/decayed |
-| Spaced repetition decay | `brain-patterns.ts` | Confidence decays unless recalled at intervals |
-| Interference detection | `brain-patterns.ts` | Flag similar-but-different memories in same topic |
+| Pattern | Module | What | Wired |
+|---|---|---|---|
+| Emotional recall boost | `recall-engine.ts` (Sa + Ss stages) | Score weighted by \|emotion_score\| — `1 + 0.02 × \|emotion\|` | ✅ Applied in Sa and Ss scoring |
+| Flashbulb protection | `brain-patterns.ts` → `memory-manager.ts` | \|emotion\| ≥ 4 + pivot/correction → never aged/decayed | ✅ Called by `ageMemoryTiers()` |
+| Aging protection | `brain-patterns.ts` → `memory-manager.ts` | \|emotion\| ≥ 4 OR recall ≥ 3 OR core tier → skip aging | ✅ Called by `ageMemoryTiers()` |
+| Spaced repetition decay | `brain-patterns.ts` | `effectiveConfidence()` — confidence decays unless recalled at intervals | ⚠️ Exported, tested, NOT called at runtime |
+| Interference detection | `brain-patterns.ts` | `detectInterference()` — flag similar-but-different memories in same topic | ⚠️ Exported, tested, NOT called at runtime |
 
 ### Session Start (Wake-Up Builder)
 
@@ -803,15 +812,15 @@ Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `MAC_S
 
 ## Test Coverage
 
-764 tests across 78 files.
+~902 tests across 90 files.
 
 ### Test Categories
 
 | Category | Files | Tests | What they cover |
 |----------|-------|-------|-----------------|
-| Unit tests | ~55 files | ~690 | Individual components: FTS5 indexing, emotion utils, MMR, config parsing, formatters, security gate, session manager, etc. |
+| Unit tests | ~65 files | ~750 | Individual components: FTS5 indexing, emotion utils, MMR, config parsing, formatters, security gate, session manager, ABM v2 batch A-E, etc. |
 | Property-based tests | 8 files | ~40 | Invariant verification with randomized inputs: browser IPC, domain allowlist, content extractor, web scraper, browser tool. |
-| Integration tests | 2 files | ~17 | Multi-component flows with real SQLite: memory lifecycle (record→search→restore→context), recall pipeline S1-S7+Se. |
+| Integration tests | 2 files | ~17 | Multi-component flows with real SQLite: memory lifecycle (record→search→restore→context), recall pipeline S1-S7+Se+Sa+Ss. |
 | CLI tests | 6 files | ~35 | Arg parsing + validation for agentbridge-store, recall, cron, todo, browse, expand. |
 
 ### Recall Pipeline Integration (`recall-integration.test.ts`)
@@ -825,8 +834,37 @@ Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `MAC_S
 - S6: Consolidation file search
 - S7: Keyword-free fallback
 - Se: Semantic embedding search (optional — requires ollama, skips if unavailable)
+- Sa: ABM-L FTS5 (keyword match on content_compressed)
+- Ss: Signature Hamming distance search
 - Full pipeline: merged results + deduplication
 
 ### Optional Tests
 
 Se (embedding) tests require a running ollama instance with `nomic-embed-text`. They gracefully skip when ollama is unavailable — CI runs without them, local dev includes them.
+
+---
+
+## Schema-Only Columns (Not Yet Wired)
+
+Columns that exist in the DB schema (via migrations) but have no code reading or writing them at runtime.
+
+| Column | Migration | Intended purpose | What's missing |
+|---|---|---|---|
+| `source_type` | v8 (default `'conversation'`) | Track memory origin: conversation/observation/correction/external/inference | `instantStore()` doesn't set it. No `--source-type` CLI flag. Default value written by SQLite on INSERT. |
+| `last_recall_context` | v8 | Track what was being discussed when a memory was recalled, for Dreamy enrichment | Not read or written by recall-engine, memory-editor, or any sleep step. |
+| `related_topics` | v8 | Cross-topic linking for recall expansion | Not populated by any store/sleep step. Not used by recall-engine for link-following. |
+
+---
+
+## Not Yet Implemented
+
+Features described in specs (`docs/specs/abm-*.md`) that have no implementation in source.
+
+| Feature | Spec | Status |
+|---|---|---|
+| Semantic network activation (E7) | `abm-brain-patterns.md` | No code. Real-time spreading activation across linked topics during recall. |
+| Prospective memory (E5) | `abm-brain-patterns.md` | No code. Wake-up builder doesn't check for future `valid_from` dates. |
+| Multi-resolution recall (signal/compact) | `abm-competitive-analysis.md` | `resolution` param exists on `RecallParams` but only `"full"` vs default (ABM-L) is differentiated. `"signal"` and `"compact"` modes fall through to same ABM-L output. |
+| Hardware profiles | `abm-competitive-analysis.md` | No `MEMORY_PROFILE` config. No profile-based pipeline adaptation (server/desktop/mobile/edge). |
+| Self-improving compression | `abm-competitive-analysis.md` | No entity relationship stability tracking. No correction feedback loop into compressor. |
+| Phase 3: Universal Access | `abm-roadmap.md` | No unified `agentbridge-memory` CLI, no MCP server, no OpenClaw plugin. |

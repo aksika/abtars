@@ -3,6 +3,12 @@ import type { MemoryManager } from "./memory-manager.js";
 export const RECENT_MSG_LIMIT = 8;
 export const RECENT_MSG_CAP = 2500;
 
+/** Format date in local time: YYYY-MM-DD HH:MM */
+function formatLocal(d: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 type MsgRow = { role: string; content: string; timestamp: number };
 
 /**
@@ -38,24 +44,21 @@ export function buildSessionStartContext(memory: MemoryManager, chatId: number):
 
   const lastMsgTs = memory.store.getLastMessageTimestamp();
 
-  const now = new Date().toISOString();
+  const now = formatLocal(new Date());
   let body: string;
   let endedAt: string;
 
   if (lastMsgTs > dailyTs && dailyTs > 0) {
-    // Midday restart: messages exist after the daily — inject recent messages
     const rows = memory.store.getMessagesSince(dailyTs, RECENT_MSG_LIMIT);
     body = formatRecentMessages(rows);
-    endedAt = new Date(lastMsgTs).toISOString();
+    endedAt = formatLocal(new Date(lastMsgTs));
   } else if (daily) {
-    // Overnight: use the full daily summary (sleep prompt caps these at ~3000 chars)
     body = daily.summary;
-    endedAt = new Date(dailyTs).toISOString();
+    endedAt = formatLocal(new Date(dailyTs));
   } else if (lastMsgTs > 0) {
-    // No daily at all — inject recent messages
     const rows = memory.store.getMessagesSince(0, RECENT_MSG_LIMIT);
     body = formatRecentMessages(rows);
-    endedAt = new Date(lastMsgTs).toISOString();
+    endedAt = formatLocal(new Date(lastMsgTs));
   } else {
     return null;
   }
