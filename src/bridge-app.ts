@@ -711,7 +711,7 @@ export async function startBridge(): Promise<void> {
 
   // --- Watchdog: detect stuck agent ---
   if (transport.healthCheck) {
-    heartbeat.registerTask({ name: "watchdog", execute: () => transport.healthCheck!() });
+    heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });
   }
 
   // --- Heartbeat watchdog: independent timer, restarts if heartbeat dies ---
@@ -727,8 +727,8 @@ export async function startBridge(): Promise<void> {
     try {
       const lock = JSON.parse(readFileSync(bridgeLockPath, "utf-8"));
       if (lock.lastHeartbeat && now - lock.lastHeartbeat > HB_STALE_THRESHOLD) {
-        logWarn("hb-watchdog", `Heartbeat stale (${Math.round((now - lock.lastHeartbeat) / 60000)}min) — forcing restart`);
-        writeRestartReason("hb-watchdog: heartbeat stale");
+        logWarn("watchdog", `Heartbeat stale (${Math.round((now - lock.lastHeartbeat) / 60000)}min) — forcing restart`);
+        writeRestartReason("watchdog: heartbeat stale");
         process.exit(1);
       }
     } catch { /* lock file not ready yet */ }

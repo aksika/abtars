@@ -352,7 +352,7 @@ export class DirectApiTransport implements IKiroTransport {
     if (!this._promptStartedAt) return;
     const idle = Date.now() - (this._lastActivityAt ?? this._promptStartedAt);
     if (idle > this._stuckTimeout) {
-      logWarn(TAG, `[watchdog] Prompt stuck (${Math.round(idle / 1000)}s idle) — aborting`);
+      logWarn(TAG, `[transport-health] Prompt stuck (${Math.round(idle / 1000)}s idle) — aborting`);
       await this.sendInterrupt();
     }
   }

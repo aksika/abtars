@@ -354,7 +354,7 @@ export class AcpTransport implements IKiroTransport {
 
     // Process dead
     if (!this.isConnected) {
-      logWarn(this.tag, `[watchdog] Process dead — reinit + re-send`);
+      logWarn(this.tag, `[transport-health] Process dead — reinit + re-send`);
       this._watchdogLastActionAt = now;
       writeRestartReason("watchdog: process dead");
       await this.initialize();
@@ -366,7 +366,7 @@ export class AcpTransport implements IKiroTransport {
     if (this.toolInFlight && now - this.toolInFlight.startedAt > this._toolTimeout) {
       const { title } = this.toolInFlight;
       const dur = Math.round((now - this.toolInFlight.startedAt) / 1000);
-      logWarn(this.tag, `[watchdog] Tool "${title}" hung ${dur}s — interrupting`);
+      logWarn(this.tag, `[transport-health] Tool "${title}" hung ${dur}s — interrupting`);
       this._watchdogLastActionAt = now;
       await this.sendInterrupt();
       this.toolInFlight = null;
@@ -379,7 +379,7 @@ export class AcpTransport implements IKiroTransport {
 
     // Endless loop (active but >10min)
     if (silentMs < this._silentTimeout && totalMs > this._endlessTimeout) {
-      logWarn(this.tag, `[watchdog] Endless (${Math.round(totalMs / 1000)}s) — interrupting`);
+      logWarn(this.tag, `[transport-health] Endless (${Math.round(totalMs / 1000)}s) — interrupting`);
       this._watchdogLastActionAt = now;
       await this.sendInterrupt();
       if (!this._watchdogL1Done) {
@@ -392,7 +392,7 @@ export class AcpTransport implements IKiroTransport {
     // Silent (>5min, no tool)
     if (silentMs > this._silentTimeout && !this.toolInFlight) {
       if (!this._watchdogL1Done) {
-        logWarn(this.tag, `[watchdog] Silent ${Math.round(silentMs / 1000)}s — re-sending`);
+        logWarn(this.tag, `[transport-health] Silent ${Math.round(silentMs / 1000)}s — re-sending`);
         this._watchdogL1Done = true;
         this._watchdogLastActionAt = now;
         if (this.lastPromptText) await this.sendPrompt(this.lastSessionKey, this.lastPromptText);
