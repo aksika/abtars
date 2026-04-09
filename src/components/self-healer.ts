@@ -28,7 +28,7 @@ export function createSelfHealerTask(
   const cooldownMs = (parseInt(process.env["SELFHEAL_COOLDOWN_MIN"] ?? "30", 10)) * 60 * 1000;
   let lastTs = localISO();
   const seen = new Map<string, number>();
-  let enabled = true;
+  let enabled = process.env["SELFHEAL_ENABLED"] === "true";
 
   const task: HeartbeatTask & { enabled: boolean } = {
     name: "self-healer",
