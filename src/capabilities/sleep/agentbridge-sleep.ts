@@ -97,7 +97,7 @@ export interface AuditLogEntry {
 // ── State file types ────────────────────────────────────────────────────────
 
 type StepStatus = "ok" | "failed" | "skipped" | "pending" | "timeout";
-type StepResult = { status: StepStatus; duration?: number; attempts?: number };
+type StepResult = { status: StepStatus; duration?: number; attempts?: number; ctxBefore?: number; ctxAfter?: number };
 type WiredResults = { purged: number; deduped: number; embedded: number; anomaliesFixed: number; walOk: boolean; ftsOk: boolean; logsDeleted: number };
 type SleepStatus = "ongoing" | "completed" | "suspended" | "failed";
 type SleepState = { status: SleepStatus; pid: number; startedAt: number; llmCalls: number; wiredResults?: WiredResults; steps: Record<string, StepResult> };
@@ -879,14 +879,16 @@ async function main(): Promise<number> {
         }
 
         // Standard prompt-driven step
+        const ctxBefore = transport.contextPercent;
         const response = await sendWithRetry(transport, step.prompt, step.name, flags.verbose, budget);
+        const ctxAfter = transport.contextPercent;
         const duration = Date.now() - start;
 
         if (response) {
-          state.steps[step.name] = { status: "ok", duration: Math.round(duration / 100) / 10 };
+          state.steps[step.name] = { status: "ok", duration: Math.round(duration / 100) / 10, ctxBefore, ctxAfter };
           writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), response, "utf-8");
         } else {
-          state.steps[step.name] = { status: "failed", duration: Math.round(duration / 100) / 10, attempts: MAX_RETRIES };
+          state.steps[step.name] = { status: "failed", duration: Math.round(duration / 100) / 10, attempts: MAX_RETRIES, ctxBefore, ctxAfter };
           dreamySucceeded = false;
         }
         writeStateFile(statePath, state);
