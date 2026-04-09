@@ -324,14 +324,32 @@ function formatWiredResults(r: WiredResults): string {
 
 // ── Transport ───────────────────────────────────────────────────────────────
 
-async function createSleepTransport(verbose: boolean): Promise<{ transport: import("../../components/transport/acp-transport.js").AcpTransport; model: string }> {
+async function createSleepTransport(verbose: boolean): Promise<{ transport: import("../../components/transport/kiro-transport.js").IKiroTransport | import("../../components/transport/direct-api-transport.js").DirectApiTransport; model: string }> {
   const { loadAndValidateConfig } = await import("../../components/config.js");
   const config = await loadAndValidateConfig();
+  const model = process.env["AGENT_SLEEP_MODEL"] || config.models.agentModel || "auto";
+
+  if (config.transport.agentTransport === "api") {
+    // Use same transport as main agent (Ollama, OpenRouter, etc.)
+    const { DirectApiTransport } = await import("../../components/transport/direct-api-transport.js");
+    const transport = new DirectApiTransport({
+      endpoint: process.env["API_ENDPOINT"] ?? "http://localhost:11434/v1",
+      apiKey: process.env["API_KEY"],
+      model,
+      maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
+      maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
+      maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
+    });
+    await transport.initialize();
+    if (verbose) logInfo(TAG, `DirectAPI sleep transport initialized (model=${model})`);
+    return { transport, model };
+  }
+
+  // Fallback: ACP (kiro-cli)
   const { AcpTransport } = await import("../../components/transport/acp-transport.js");
-  const model = process.env["AGENT_SLEEP_MODEL"] || "auto";
   const transport = new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, { model: model !== "unknown" ? model : undefined, autoReinit: false, tag: "acp-sleep" });
   await transport.initialize();
-  if (verbose) logInfo(TAG, `ACP transport initialized (model=${model})`);
+  if (verbose) logInfo(TAG, `ACP sleep transport initialized (model=${model})`);
   return { transport, model };
 }
 
@@ -364,7 +382,7 @@ class LlmBudget {
 }
 
 async function sendWithRetry(
-  transport: import("../../components/transport/acp-transport.js").AcpTransport,
+  transport: import("../../components/transport/kiro-transport.js").IKiroTransport,
   prompt: string,
   stepName: string,
   _verbose: boolean,
@@ -601,7 +619,7 @@ function failedEssentials(state: SleepState): string[] {
 
 async function runCatchUp(
   locks: PreviousLock[],
-  transport: import("../../components/transport/acp-transport.js").AcpTransport,
+  transport: import("../../components/transport/kiro-transport.js").IKiroTransport,
   db: import("better-sqlite3").Database,
   memoryConfig: { memoryDir: string },
   steps: SleepStep[],
