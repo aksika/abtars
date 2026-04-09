@@ -98,22 +98,6 @@ describe("isDailyCycleDue — quiet tick counter", () => {
     expect(isDailyCycleDue(deps)).toBe(true);
   });
 
-  it("fires onSleepWarning at tick N-1", () => {
-    let warned = false;
-    const deps = makeDeps({
-      sleepHour: 0, sleepMinute: 0,
-      onSleepWarning: () => { warned = true; },
-    });
-    // Ticks 1-4: no warning
-    for (let i = 0; i < 4; i++) {
-      isDailyCycleDue(deps);
-      expect(warned).toBe(false);
-    }
-    // Tick 5 (N-1): warning fires
-    isDailyCycleDue(deps);
-    expect(warned).toBe(true);
-  });
-
   it("returns false when busyChats is non-empty", () => {
     const deps = makeDeps({ sleepHour: 0, sleepMinute: 0, busyChats: new Set(["chat:1"]) });
     for (let i = 0; i < 10; i++) {

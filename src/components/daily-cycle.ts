@@ -64,10 +64,5 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   quietTickCount++;
   logInfo("bedtime", `Quiet tick ${quietTickCount}/${QUIET_TICKS_REQUIRED} (BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")})`);
 
-  // T-1: warn the agent one tick before sleep triggers
-  if (quietTickCount === QUIET_TICKS_REQUIRED - 1 && deps.onSleepWarning) {
-    deps.onSleepWarning();
-  }
-
   return quietTickCount >= QUIET_TICKS_REQUIRED;
 }

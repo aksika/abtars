@@ -16,6 +16,8 @@ export interface SleepOpts {
   onComplete: () => void;
   /** Returns latest user message timestamp. Used to check if user messaged during sleep. */
   getLastMsgTs?: () => number;
+  /** Send a system message to the agent (for sleep announcement). */
+  sendSystemMessage?: (prompt: string) => Promise<void>;
 }
 
 export interface SleepProgress {
@@ -84,10 +86,19 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
               logInfo("sleep", "💤 Mac sleep skipped — user messaged during sleep cycle");
             } else {
               logInfo("sleep", "💤 Putting Mac to sleep...");
-              try {
-                execSync("pmset sleepnow", { timeout: 5000 });
-              } catch (err) {
-                logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`);
+              if (opts.sendSystemMessage) {
+                opts.sendSystemMessage("Dreamy finished. Announce to the user that the system is going to sleep now for the night. Keep it brief and friendly.")
+                  .catch(() => {})
+                  .finally(() => {
+                    try { execSync("pmset sleepnow", { timeout: 5000 }); }
+                    catch (err) { logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`); }
+                  });
+              } else {
+                try {
+                  execSync("pmset sleepnow", { timeout: 5000 });
+                } catch (err) {
+                  logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`);
+                }
               }
             }
           }
