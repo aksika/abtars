@@ -20,10 +20,10 @@ function tokenCount(text: string): number {
 /** Load core-tier ABM-L memories from DB. */
 function loadCoreTier(db: Database.Database, level: ReturnType<typeof pickLevel>): string {
   const rows = db.prepare(
-    `SELECT content_compressed, topic FROM extracted_memories
+    `SELECT content_compressed, topic, emotion_arc FROM extracted_memories
      WHERE tier = 'core' AND valid_to IS NULL AND content_compressed IS NOT NULL
      ORDER BY topic, created_at DESC`,
-  ).all() as Array<{ content_compressed: string; topic: string }>;
+  ).all() as Array<{ content_compressed: string; topic: string; emotion_arc: string | null }>;
 
   if (rows.length === 0) return "";
   return renderWakeUp(rows, level);

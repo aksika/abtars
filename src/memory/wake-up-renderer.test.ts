@@ -10,9 +10,9 @@ describe("wake-up-renderer", () => {
 
   describe("renderWakeUp", () => {
     const entries = [
-      { content_compressed: "[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)", topic: "coding" },
+      { content_compressed: "[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)", topic: "coding", emotion_arc: "↑" },
       { content_compressed: "[FT|coding|trust|5|2026-04] @agentbridge: TS+Node", topic: "coding" },
-      { content_compressed: "[F|personal|—|5|2026-01] @user: aksika, CET", topic: "personal" },
+      { content_compressed: "[F|personal|—|5|2026-01] @user: aksika, CET", topic: "personal", emotion_arc: "→" },
     ];
 
     it("full mode returns raw ABM-L", () => {
@@ -23,8 +23,8 @@ describe("wake-up-renderer", () => {
 
     it("compact mode groups by topic", () => {
       const result = renderWakeUp(entries, "compact");
-      expect(result).toContain("## coding");
-      expect(result).toContain("## personal");
+      expect(result).toContain("## coding ↑");
+      expect(result).toContain("## personal →");
     });
 
     it("compact mode elides default confidence", () => {

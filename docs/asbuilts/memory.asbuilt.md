@@ -160,23 +160,40 @@ One-way chain: can only move toward compacted (higher number). Exception: transl
 
 Conflict resolution: higher trust wins → higher credibility wins → more recent wins → ask aksika.
 
-### Emotion Score
+### Emotion System (unified: tags as truth)
 
-| Column | Type | Default | Scale | Description |
-|--------|------|---------|-------|-------------|
-| `emotion_score` | INTEGER | 0 | -5 to +5 | Emotional weight. Negative = frustration/anger, positive = satisfaction/joy. |
+| Column | Type | Default | Description |
+|--------|------|---------|-------------|
+| `emotion_score` | INTEGER | 0 | -5 to +5. Auto-derived from `emotion_tags` via `scoreFromTags()` (max absolute valence). Cached for SQL performance. |
+| `emotion_tags` | TEXT | NULL | Comma-separated tags (25 types). Single source of truth. Regex-detected at store time, LLM can override via `--emotion-tags`. |
+| `emotion_context` | TEXT | NULL | Short cause phrase (3-5 words). E.g. "deploy failures", "successful launch". LLM-provided via `--emotion-context`. |
+| `emotion_arc` | TEXT | NULL | Per-topic trajectory symbol (↑↓↕→). Written by `buildArc()` during sleep. |
+
+**`scoreFromTags()`**: derives score using max absolute valence — compound emotions (pride+grief) score high, don't cancel to zero.
+
+**`effectiveEmotion()`**: recency-decayed score. 6-month half-life, floor 0.2. Old emotions fade, recent ones are vivid. Used by wake-up ranking.
 
 #### How emotions enter the system
 
 | Source | Path | When |
 |--------|------|------|
-| Emoji reactions | `updateEmotionByPlatformId()` → `editMemory()` | Runtime — user reacts on Telegram/Discord |
-| Instant store | `agentbridge-store --emotion-score N` | Runtime — agent stores emotionally significant memory |
-| Extraction | LLM assigns emotion during Dreamy sleep extraction | Sleep §4 step 5 |
-| Verbal harvest | `agentbridge-edit --memory-id N --emotion-score N --caller dreamy` | Sleep §6 — Dreamy scans for verbal emotional reactions |
-| Retro extract | `agentbridge-store --emotion-score N` or `agentbridge-edit --emotion-score N` | Sleep §5.5 — lessons/mistakes from retrospective. Repeated mistakes escalate by -2. |
+| Regex tagger | `detectEmotions()` → `emotion_tags` → `scoreFromTags()` | Store time — baseline, ~1ms |
+| LLM override | `--emotion-tags "pride,bittersweet"` → replaces regex tags → score recomputed | Store time — when agent senses nuance |
+| Emoji reactions | `emojiToTag()` → adds tag → score recomputed | Runtime — user reacts on Telegram/Discord |
+| Emotion context | `--emotion-context "deploy failures"` | Store time — LLM provides cause phrase |
+| Emotion arcs | `buildArc()` per topic → `emotion_arc` column | Sleep — code-driven, per topic |
 
-Emoji reactions propagate immediately: message table updated → cascade to linked extracted_memories via `editMemory()`. Verbal emotions (e.g. "fasza!", "goddamn it!") are harvested during sleep and applied to the nearest relevant memory.
+#### Emotion in wake-up
+
+Emotional highlights (top 10 by |emotion_score| ≥ 3, not in core) loaded after core memories, before dailies. Includes `emotion_context` when available. Topic headers show arc symbol: `## coding ↑`.
+
+#### Emotion in recall
+
+`--emotion "frustration"` filters by tag. Groups: `positive`, `negative`, `high-energy` expand to tag sets.
+
+#### Cross-session emotional tone
+
+Session-start context includes one-line summary of last session's dominant emotions + contexts.
 
 ### Memory Darwinism
 

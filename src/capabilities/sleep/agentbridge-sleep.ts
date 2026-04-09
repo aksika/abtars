@@ -239,6 +239,31 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
     }
   } catch (err) { logWarn(TAG, `[WIRED] confidence decay failed: ${err instanceof Error ? err.message : String(err)}`); }
 
+  // 10. Build emotion arcs per topic
+  try {
+    const { buildArc } = await import("../../memory/emotion-arc.js");
+    const topics = db.prepare(
+      `SELECT DISTINCT topic FROM extracted_memories WHERE topic IS NOT NULL AND emotion_tags IS NOT NULL AND emotion_tags != ''`,
+    ).all() as Array<{ topic: string }>;
+    let arcsWritten = 0;
+    for (const { topic } of topics) {
+      const memories = db.prepare(
+        `SELECT emotion_tags, created_at FROM extracted_memories WHERE topic = ? AND emotion_tags IS NOT NULL AND emotion_tags != '' ORDER BY created_at ASC`,
+      ).all(topic) as Array<{ emotion_tags: string; created_at: number }>;
+      if (memories.length < 2) continue;
+      const arc = buildArc(memories);
+      // Write arc symbol to the most recent core memory for this topic
+      const target = db.prepare(
+        `SELECT id FROM extracted_memories WHERE topic = ? AND tier = 'core' AND valid_to IS NULL ORDER BY created_at DESC LIMIT 1`,
+      ).get(topic) as { id: number } | undefined;
+      if (target) {
+        db.prepare("UPDATE extracted_memories SET emotion_arc = ? WHERE id = ?").run(arc.symbol, target.id);
+        arcsWritten++;
+      }
+    }
+    if (arcsWritten > 0) logInfo(TAG, `[WIRED] ${arcsWritten} emotion arcs updated`);
+  } catch (err) { logWarn(TAG, `[WIRED] emotion arcs failed: ${err instanceof Error ? err.message : String(err)}`); }
+
   return results;
 }
 

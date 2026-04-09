@@ -10,14 +10,18 @@ Run any tool with `--help` for full usage. See linked skill for behavioral rules
 ## Essential (90% of usage)
 
 ```
-agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"]
+agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"] [--emotion "frustration"]
 ```
 
 **CRITICAL:** `--translated` means "translated to English." ALWAYS translate the user's query to English keywords before calling recall. Never pass Hungarian or other non-English words as `--translated`. Use `--original` for the original-language keyword as a secondary search signal.
 
+**Emotion filter:** `--emotion "frustration"` filters by tag. Groups: `--emotion "positive"` (joy,pride,excitement...), `--emotion "negative"` (frustration,anger,fear...), `--emotion "high-energy"` (excitement,anger,determination...).
+
 ```
-agentbridge-store --translated "English" --original "eredeti" --memory-type <type> --emotion-score 0 --chat-id 7773842843 [--tags "term1,term2"]
+agentbridge-store --translated "English" --original "eredeti" --memory-type <type> --emotion-score 0 --chat-id 7773842843 [--tags "term1,term2"] [--emotion-tags "pride,determination"] [--emotion-context "successful launch"]
 ```
+
+**Emotion tags:** Override regex-detected tags with `--emotion-tags` when you sense nuance the regex misses. `--emotion-context` is a 3-5 word cause phrase ("deploy failures", "successful launch").
 
 **CRITICAL for store:** `--translated` = English version of the memory. `--original` = the user's ACTUAL words in WHATEVER language they used. If the user spoke English, `--original` is English too. NEVER fabricate a translation — `--original` is verbatim what was said.
 
