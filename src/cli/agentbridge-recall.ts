@@ -48,6 +48,7 @@ Options:
   let entity: string | undefined;
   let topic: string | undefined;
   let tier: "core" | "general" | undefined;
+  let emotion: string | undefined;
   let includeExpired = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -64,6 +65,7 @@ Options:
       case "--stages": stages = (args[++i] ?? "").split(",").map(s => s.trim()).filter(Boolean); break;
       case "--entity": entity = args[++i]; break;
       case "--topic": topic = args[++i]; break;
+      case "--emotion": emotion = args[++i]; break;
       case "--pool": { const v = args[++i]; if (v === "core" || v === "general") tier = v; break; }
       case "--include-expired": includeExpired = true; break;
       case "--full": break; // handled below in output
@@ -75,7 +77,7 @@ Options:
     process.exit(1);
   }
   const fullMode = process.argv.includes("--full");
-  return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages, entity, topic, tier, includeExpired, resolution: fullMode ? "full" as const : undefined };
+  return { translated, original, timeStart, timeEnd, chatId, limit, maxClassification, stages, entity, topic, tier, emotion, includeExpired, resolution: fullMode ? "full" as const : undefined };
 }
 
 const params = parseArgs();

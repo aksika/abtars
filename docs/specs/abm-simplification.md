@@ -197,10 +197,10 @@ No other memory system does emotional trajectories across sessions.
 | 1 | Recall pipeline | ✅ Implemented — 4 stages (Sf+Ss+Se+S6), porter kept, trigrams added | 2026-04-09 | `1-abm-simplification-plan.md` |
 | 2 | ABM-L render layer + timelines | ⏳ Reopened — render on read, narrative compression, timeline-based dedup | 2026-04-09 | `2-abm-simplification-render-layer.md` |
 | 3 | CIA-AAA | 🅿️ Parked — not broken, not blocking | 2026-04-09 | |
-| 4 | Sleep phases | ⏳ Planned — bug fixes ship now, phase refactor after #7 | 2026-04-09 | `4-abm-simplification-sleep.md` |
+| 4 | Sleep phases | ✅ Bug fixes shipped — retro watermark, garbage filter, telemetry, HARDWARE_SLEEP rename, LLM call budget, sleep cleanup. Phase refactor planned. | 2026-04-09 | `4-abm-simplification-sleep.md` |
 | 5 | IPC layer | 🅿️ Parked — solves real problem | 2026-04-09 | |
 | 6 | Speculative schema | ✅ Implemented — drop 2 columns, wire effectiveConfidence, keep 2 functions | 2026-04-09 | `6-abm-simplification-dead-code.md` |
-| 7 | Emotion model | 🔜 Next — improve, not drop | 2026-04-09 | `7-abm-simplification-emotion.md` |
+| 7 | Emotion model | 🔧 In progress — SOUL updated, code being implemented | 2026-04-09 | `7-abm-simplification-emotion.md` |
 
 ---
 

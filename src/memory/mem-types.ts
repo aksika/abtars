@@ -180,6 +180,8 @@ export type InstantStoreParams = {
   contentOriginal: string;
   memoryType: "fact" | "decision" | "preference" | "event" | "lesson" | "feedback" | "story";
   emotionScore: number;
+  emotionTags?: string;
+  emotionContext?: string;
   keyword?: string;
   confidence?: number;
   sourceMessageIds?: string;
@@ -210,6 +212,8 @@ export type EditMemoryParams = {
   keyword?: string;
   memoryType?: "fact" | "decision" | "preference" | "event";
   emotionScore?: number;
+  emotionTags?: string;
+  emotionContext?: string;
   confidence?: number;
   trust?: number;
   integrity?: number;

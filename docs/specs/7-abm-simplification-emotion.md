@@ -10,26 +10,45 @@
 
 Original proposal: drop the 25-type emotion tagger, keep only emotion_score for flashbulb protection.
 
-**New direction: keep the tagger, wire the arc system, add emotion-aware recall and wake-up.**
+**New direction: unify to tags-only. Keep the tagger, wire the arc system, add emotion-aware recall and wake-up. Derive emotion_score from tags automatically.**
 
-The emotion system is half-built, not over-built. The tagger runs and stores 25 emotion types on every memory (~1ms, no LLM). But nothing reads the tags. The fix is wiring, not removal.
+### Emotion unification: tags as single source of truth
 
-Emotion over time is what no other system does. MemPalace has 40+ emotion codes but uses them only for per-memory scoring. OpenClaw has no emotion system at all. ABM's unique opportunity: **emotional trajectories across sessions** — arcs, continuity, proactive behavior. That's the human-like quality.
+Two parallel emotion systems is redundant. `emotion_score` (LLM-assigned integer) and `emotion_tags` (regex-detected types) measure the same thing differently.
+
+**New model:**
+- `emotion_tags` is the single source of truth
+- Regex tagger runs at store time as baseline (free, instant, consistent)
+- LLM can override via `--emotion-tags "pride,bittersweet"` when it senses nuance regex misses
+- `emotion_score` column stays but becomes auto-derived from tags (cached for SQL performance)
+- Nobody sets `emotion_score` directly — it's always computed from tags via `scoreFromTags()`
+- Emoji reactions map to tags: ❤️→`love`, 🔥→`excitement`, 😂→`humor`
+
+```
+Store path:  regex detects tags → scoreFromTags() → both written to DB
+LLM override: --emotion-tags "pride,bittersweet" → replaces regex tags → score recomputed
+Emoji react: ❤️ → adds "love" to tags → score recomputed
+Read path:   SQL queries use emotion_score (cached) for filtering/ranking
+```
+
+One system. Tags are truth. Score is a materialized cache for SQL performance.
 
 ---
 
 ## What exists vs what's wired
 
-| Component | Exists | Wired | Gap |
+| Component | Exists | Wired | Change |
 |---|---|---|---|
-| `emotion_score` (-5 to +5) | ✅ | ✅ Flashbulb, recall boost, emoji reactions | None |
-| `emotion_tags` (25 types) | ✅ Stored on every memory | ❌ Never read | Wire into recall filter + wake-up |
+| `emotion_tags` (25 types) | ✅ Stored on every memory | ❌ Never read by recall/wake-up | Wire into recall filter + wake-up. Becomes single source of truth. |
+| `emotion_score` (-5 to +5) | ✅ | ✅ Flashbulb, recall boost, emoji reactions | Becomes auto-derived from tags. No longer LLM-assigned. Column stays as cached value. |
 | `emotion_arc` column | ✅ In schema | ❌ Never written | Wire buildArc() in sleep |
 | `buildArc()` function | ✅ Tested | ❌ Never called | Wire in sleep step |
 | Wake-up renderer arc display | ✅ Reads emotion_arc | ❌ Always gets NULL | Needs data from buildArc() |
 | Emotion-aware wake-up | ❌ | ❌ | New: emotionally strong memories in wake-up |
 | Emotion recall filter | ❌ | ❌ | New: `--emotion` flag on recall |
 | Cross-session emotional tone | ❌ | ❌ | New: last session's emotion in session-start |
+| LLM tag override | ❌ | ❌ | New: `--emotion-tags` on agentbridge-store |
+| Emoji → tags mapping | ❌ | ❌ | New: emoji reactions add tags instead of setting score |
 
 ---
 
@@ -119,11 +138,11 @@ If a topic's arc is ↓ for 3+ sessions, the agent proactively checks in. Not fo
 
 ## What we're NOT changing
 
-- **emotion_score** stays as-is — LLM-assigned, -5 to +5, used for flashbulb + recall boost
-- **emotion tagger** stays as-is — 25 types, regex-based, ~1ms, runs at store time
+- **emotion tagger** stays as-is — 25 types, regex-based, ~1ms, runs at store time (now the baseline, LLM can override)
 - **importance_flags** stay as-is — 8 types, used for flashbulb detection
-- **Flashbulb protection** stays as-is — |emotion| ≥ 4 + pivot → never aged
-- **Emotional recall boost** stays as-is — Sa/Ss weight by |emotion_score|
+- **Flashbulb protection** stays as-is — derived score ≥ 4 + pivot → never aged
+- **Emotional recall boost** stays as-is — SQL uses cached emotion_score column
+- **emotion_score column** stays in schema — but becomes auto-derived cache, never set directly
 
 ---
 
@@ -145,15 +164,37 @@ ABM goes beyond MemPalace on the temporal dimension — arcs, trajectories, cont
 
 ## Implementation Tasks
 
+### Core (memory system)
+
 | # | Task | Effort | Depends on |
 |---|---|---|---|
-| 1 | Emotional wake-up: add `loadEmotionalHighlights()` to `wake-up-builder.ts` — top 10 by \|emotion_score\| ≥ 3, not in core tier. Insert after core, before dailies. | 30min | — |
-| 2 | Emotion recall filter: add `emotion` param to `RecallParams`, add WHERE clause to Sf in `recall-engine.ts`, add `--emotion` flag to `agentbridge-recall` CLI | 30min | Item #1 recall pipeline |
-| 3 | Wire `buildArc()` in sleep: code-driven step that queries per-topic emotion_tags, calls buildArc(), writes result to `emotion_arc` column via `agentbridge-edit` | 45min | — |
-| 4 | Cross-session emotional tone: in `buildSessionStartContext()`, query recent memories' emotion_tags, build one-line summary, prepend to session context | 30min | — |
-| 5 | Update as-built: document emotional wake-up, recall filter, arc wiring, session tone | 15min | 1-4 |
+| -1 | Migration: reverse-derive emotion_tags from emotion_score for existing memories that have score but no tags. Map score ranges to tag sets (e.g. score +4 → `"pride"`, score -3 → `"frustration"`). One-time backfill. Prerequisite for tag-derived scoring. | 30min | — |
+| 0 | `scoreFromTags()` function: derive emotion_score from emotion_tags using **max absolute valence** (not sum — compound emotions like pride+grief should score high, not cancel to zero). Update `instantStore()` to compute score from tags. Update `editMemory()` to recompute score when tags change. | 30min | -1 |
+| 0b | `effectiveEmotion()` function: apply recency decay to derived emotion_score. Same pattern as `effectiveConfidence()` — `score × recencyFactor(daysSinceCreated)`. Old emotions fade, recent ones are vivid. Used by wake-up ranking and recall boost. Doesn't change stored data — computed on read. | 20min | 0 |
+| 1 | Emoji → tags mapping: update `emojiToScore()` to `emojiToTags()`. ❤️→`love`, 🔥→`excitement`, 😂→`humor`, etc. Reaction updates tags, score auto-derives. | 30min | 0 |
+| 2 | `--emotion-tags` override on `agentbridge-store` CLI: if provided, replaces regex-detected tags. Score auto-derives. Also accept optional `--emotion-context "deploy failures"` — short cause phrase (3-5 words). Stored as `emotion_context TEXT` column. Regex tagger can't produce this; LLM provides it on override. | 30min | 0 |
+| 3 | Emotion groups in recall filter: `--emotion "positive"` expands to joy,pride,excitement,relief,gratitude,love,hope,humor. `--emotion "negative"` expands to frustration,anger,fear,grief,anxiety,exhaustion,doubt. `--emotion "high-energy"` expands to excitement,anger,determination,surprise. Exact tags still work: `--emotion "frustration"`. | 30min | Item #1 recall pipeline |
+| 4 | Emotional wake-up: add `loadEmotionalHighlights()` to `wake-up-builder.ts` — top 10 by `effectiveEmotion()` ≥ 3, not in core tier. Insert after core, before dailies. Include `emotion_context` when available for richer context. | 30min | 0b |
+| 5 | Wire `buildArc()` in sleep: code-driven step that queries per-topic emotion_tags, calls buildArc(), writes result to `emotion_arc` column via `agentbridge-edit`. **Re-add `emotion_arc` to wake-up builder SELECT** (removed in #6 because it was always NULL — now it has data). | 45min | — |
+| 6 | Cross-session emotional tone: in `buildSessionStartContext()`, query recent memories' emotion_tags + emotion_context, build one-line summary, prepend to session context. E.g. "Last session: frustration (deploy failures), then relief (fixed)." | 30min | — |
 
-**Total: ~2.5hr**
+### Dreamy sleep task
+
+| # | Task | Effort | Depends on |
+|---|---|---|---|
+| 7 | User emotional profile: new Dreamy sleep task (code-driven). Analyze emotion_tags + emotion_context across topics and time. Extract patterns: frustration triggers, recovery patterns, peak positive contexts, communication style shifts. Write to `user_profile.md` emotional patterns section. Runs weekly (normal tier) or nightly (ultimate). | 1hr | 5 (needs arcs) |
+| 7b | Emotion context backfill: Dreamy sleep task. For memories with emotion_tags but no emotion_context, infer the cause from memory content + tags. E.g. memory "FTS5 breaks on Hungarian" + tags "frustration" → context "Hungarian FTS5 limitation". LLM-driven (needs to read content and reason about cause). Runs during curation phase. | 30min | 2 |
+
+### SOUL / prompt behavior
+
+| # | Task | Effort | Depends on |
+|---|---|---|---|
+| 8 | Real-time emotion detection: add to SOUL.md — "Detect emotional signals in the user's current message (swearing, short messages, exclamation marks, emoji, Hungarian expressions like 'fasza', 'basszus'). When frustration detected: respond with empathy + immediate solution, no meta-commentary. When excitement detected: match the energy, celebrate with the user." | 15min | — |
+| 9 | Emotional mirroring: add to SOUL.md — "Mirror the user's emotional tone. If they're analytical and calm, be precise and measured. If they're excited and fast-paced, be energetic and concise. If they're frustrated, be empathetic and action-oriented. Don't be cheerful when they're angry. Don't be flat when they're celebrating." | 15min | — |
+| 10 | Update TOOLS.md: document `--emotion-tags` override, `--emotion` groups (positive/negative/high-energy), remove `--emotion-score` guidance | 15min | 2, 3 |
+| 11 | Update as-built: document unified emotion model, tag-derived score, emoji→tags, emotional profile, SOUL changes | 15min | 0-10 |
+
+**Total: ~7hr**
 
 Branch: `improve/emotion-system`
 

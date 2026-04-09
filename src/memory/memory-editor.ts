@@ -1,7 +1,7 @@
 import { localMonth, localDate } from "../utils/local-time.js";
 import type Database from "better-sqlite3";
 import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "./mem-types.js";
-import { clampEmotionScore } from "./emotion-utils.js";
+import { clampEmotionScore, scoreFromTags } from "./emotion-utils.js";
 import { loadEmbedConfig, embedText } from "./ollama-embed.js";
 import { logError, logInfo } from "./mem-logger.js";
 import { detectEmotions } from "./emotion-tagger.js";
@@ -47,7 +47,13 @@ export class MemoryEditor {
         if (!valid.has(params.memoryType)) return { ok: false, error: "invalid memory_type" };
         sets.push("memory_type = ?"); values.push(params.memoryType); fieldsUpdated.push("memory_type");
       }
-      if (params.emotionScore != null) { sets.push("emotion_score = ?"); values.push(clampEmotionScore(params.emotionScore)); fieldsUpdated.push("emotion_score"); }
+      if (params.emotionTags != null) {
+        sets.push("emotion_tags = ?"); values.push(params.emotionTags); fieldsUpdated.push("emotion_tags");
+        sets.push("emotion_score = ?"); values.push(scoreFromTags(params.emotionTags)); fieldsUpdated.push("emotion_score");
+      } else if (params.emotionScore != null) {
+        sets.push("emotion_score = ?"); values.push(clampEmotionScore(params.emotionScore)); fieldsUpdated.push("emotion_score");
+      }
+      if (params.emotionContext != null) { sets.push("emotion_context = ?"); values.push(params.emotionContext); fieldsUpdated.push("emotion_context"); }
       if (params.confidence != null) { sets.push("confidence = ?"); values.push(params.confidence); fieldsUpdated.push("confidence"); }
       if (params.trust != null) {
         if (params.trust < 0 || params.trust > 3) return { ok: false, error: "trust must be 0-3" };
@@ -132,12 +138,12 @@ export class MemoryEditor {
       const validTypes = new Set(["fact", "decision", "preference", "event", "lesson", "feedback", "story"]);
       if (!validTypes.has(params.memoryType)) return { stored: false, memoriesCount: 0, error: "invalid memory_type" };
 
-      const emotionScore = clampEmotionScore(params.emotionScore);
       const now = Date.now();
       const contentEn = params.contentEn.trim();
 
       // ABM v2: store-time enrichment (~1-5ms total)
-      const emotionTags = detectEmotions(contentEn).join(",");
+      const emotionTags = params.emotionTags ?? detectEmotions(contentEn).join(",");
+      const emotionScore = scoreFromTags(emotionTags) || clampEmotionScore(params.emotionScore);
       const importanceFlags = detectFlags(contentEn).join(",");
       const topicVal = params.topic ?? "general";
       const compressed = compress({
@@ -153,15 +159,15 @@ export class MemoryEditor {
            (chat_id, content_original, content_en, memory_type, source_timestamp,
             preserve_original, preserved_keyword, emotion_score, created_at,
             confidence, source_message_ids, classification, trust, integrity, credibility,
-            topic, tier, valid_from, emotion_tags, importance_flags, content_compressed, signature)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            topic, tier, valid_from, emotion_tags, importance_flags, content_compressed, signature, emotion_context)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         params.chatId, params.contentOriginal.trim(), contentEn,
         params.memoryType, now, 1, params.keyword?.trim() || null, emotionScore, now,
         params.confidence ?? 3, params.sourceMessageIds?.trim() || null,
         params.classification ?? 1, params.trust ?? 0, params.integrity ?? 2, params.credibility ?? 6,
         topicVal, Math.abs(emotionScore) >= 4 ? "core" : "general", localDate(new Date(now)),
-        emotionTags || null, importanceFlags || null, compressed, signature,
+        emotionTags || null, importanceFlags || null, compressed, signature, params.emotionContext?.trim() || null,
       );
 
       this.embedNewMemory(params.contentEn.trim());

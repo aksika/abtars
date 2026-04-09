@@ -34,6 +34,8 @@ export type RawArgs = {
   contentOriginal?: string;
   memoryType?: string;
   emotionScore?: string;
+  emotionTags?: string;
+  emotionContext?: string;
   chatId?: string;
   keyword?: string;
   confidence?: string;
@@ -95,6 +97,8 @@ Options:
       case "--content-original": parsed.contentOriginal = args[++i] ?? ""; break;
       case "--memory-type": parsed.memoryType = args[++i] ?? ""; break;
       case "--emotion-score": parsed.emotionScore = args[++i] ?? ""; break;
+      case "--emotion-tags": parsed.emotionTags = args[++i] ?? ""; break;
+      case "--emotion-context": parsed.emotionContext = args[++i] ?? ""; break;
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
       case "--keyword":
       case "--tags": parsed.keyword = args[++i] ?? ""; break;
@@ -143,6 +147,8 @@ export function validateArgs(raw: RawArgs): { ok: true; params: InstantStorePara
       contentOriginal: raw.contentOriginal,
       memoryType: raw.memoryType as InstantStoreParams["memoryType"],
       emotionScore: parseInt(raw.emotionScore, 10) || 0,
+      emotionTags: raw.emotionTags || undefined,
+      emotionContext: raw.emotionContext || undefined,
       keyword: raw.keyword,
       classification: raw.classification ? parseInt(raw.classification, 10) : undefined,
       trust: raw.trust ? parseInt(raw.trust, 10) : undefined,

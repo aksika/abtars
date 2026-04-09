@@ -66,6 +66,22 @@ function loadSummary(type: "weekly" | "quarterly"): string | null {
  * Build memory context for session start.
  * Budget: 1% of context window. Greedy fill by priority.
  */
+/** Load emotionally strong memories not in core tier. */
+function loadEmotionalHighlights(db: Database.Database): string {
+  const rows = db.prepare(
+    `SELECT content_compressed, topic, emotion_tags, emotion_context FROM extracted_memories
+     WHERE valid_to IS NULL AND content_compressed IS NOT NULL
+       AND ABS(COALESCE(emotion_score, 0)) >= 3 AND tier != 'core'
+     ORDER BY ABS(emotion_score) DESC, created_at DESC LIMIT 10`,
+  ).all() as Array<{ content_compressed: string; topic: string; emotion_tags: string | null; emotion_context: string | null }>;
+  if (rows.length === 0) return "";
+  const lines = rows.map(r => {
+    const ctx = r.emotion_context ? ` (${r.emotion_context})` : "";
+    return `${r.content_compressed}${ctx}`;
+  });
+  return `[EMOTIONAL HIGHLIGHTS — ${rows.length} entries]\n${lines.join("\n")}`;
+}
+
 export function buildWakeUp(db: Database.Database | null, ctxWindowSize: number): string {
   if (!db) return "";
 
@@ -93,7 +109,16 @@ export function buildWakeUp(db: Database.Database | null, ctxWindowSize: number)
     if (partial) { parts.push(partial.trim()); remaining -= tokenCount(partial); }
   }
 
-  // Priority 2-3: dailies (up to 7)
+  // Priority 2: emotional highlights (not in core)
+  if (remaining > 100) {
+    const emotional = loadEmotionalHighlights(db);
+    if (emotional) {
+      const tc = tokenCount(emotional);
+      if (tc <= remaining) { parts.push(emotional); remaining -= tc; }
+    }
+  }
+
+  // Priority 3-4: dailies (up to 7)
   if (remaining > 100) {
     for (const daily of loadDailies(7)) {
       if (remaining < 100) break;

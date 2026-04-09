@@ -413,6 +413,30 @@ const MIGRATIONS: readonly Migration[] = [
       db.exec(`ALTER TABLE extracted_memories DROP COLUMN related_topics`);
     },
   },
+  {
+    version: 12,
+    label: "Emotion context column + backfill tags from scores",
+    up: (db) => {
+      db.exec(`ALTER TABLE extracted_memories ADD COLUMN emotion_context TEXT`);
+      // Backfill: memories with score but no tags get a default tag derived from score
+      const rows = db.prepare(
+        `SELECT id, emotion_score FROM extracted_memories WHERE (emotion_tags IS NULL OR emotion_tags = '') AND emotion_score != 0`,
+      ).all() as Array<{ id: number; emotion_score: number }>;
+      if (rows.length > 0) {
+        const tagMap = (score: number): string => {
+          if (score >= 4) return "pride";
+          if (score >= 2) return "joy";
+          if (score === 1) return "gratitude";
+          if (score >= -2) return "doubt";
+          if (score >= -4) return "frustration";
+          return "anger";
+        };
+        const stmt = db.prepare("UPDATE extracted_memories SET emotion_tags = ? WHERE id = ?");
+        for (const r of rows) stmt.run(tagMap(r.emotion_score), r.id);
+        logInfo(TAG, `Backfilled emotion_tags on ${rows.length} memories from emotion_score`);
+      }
+    },
+  },
 ];
 
 // ── Migration runner ────────────────────────────────────────────────────────

@@ -60,5 +60,32 @@ export function buildSessionStartContext(memory: MemoryManager, chatId: number):
 
   if (!body) return null;
 
-  return `[LAST SESSION SUMMARY — ended ${endedAt}]\n${body}\n[SESSION START — ${now}]`;
+  // Emotional tone of last session
+  let emotionalTone = "";
+  try {
+    const db = memory.getDatabase();
+    if (db) {
+      const rows = db.prepare(
+        `SELECT emotion_tags, emotion_context FROM extracted_memories
+         WHERE chat_id = ? AND emotion_tags IS NOT NULL AND emotion_tags != ''
+         ORDER BY created_at DESC LIMIT 5`,
+      ).all(chatId) as Array<{ emotion_tags: string; emotion_context: string | null }>;
+      if (rows.length > 0) {
+        const tagCounts = new Map<string, number>();
+        for (const r of rows) {
+          for (const t of r.emotion_tags.split(",")) {
+            const tag = t.trim();
+            if (tag) tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+          }
+        }
+        const top = [...tagCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([t]) => t);
+        const contexts = rows.map(r => r.emotion_context).filter(Boolean).slice(0, 2);
+        if (top.length > 0) {
+          emotionalTone = `\n[Last session tone: ${top.join(", ")}${contexts.length > 0 ? ` (${contexts.join("; ")})` : ""}]`;
+        }
+      }
+    }
+  } catch { /* */ }
+
+  return `[LAST SESSION SUMMARY — ended ${endedAt}]\n${body}${emotionalTone}\n[SESSION START — ${now}]`;
 }

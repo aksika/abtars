@@ -63,6 +63,7 @@ export type RecallParams = {
   entity?: string;
   topic?: string;
   tier?: "core" | "general";
+  emotion?: string;
   includeExpired?: boolean;
   resolution?: "signal" | "compact" | "standard" | "full";
 };
@@ -133,6 +134,7 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
       timeEnd: params.timeEnd,
       topic: params.topic,
       tier: params.tier,
+      emotion: params.emotion,
       includeExpired: params.includeExpired,
       entityFilter: entityFilter ?? undefined,
       resolution: params.resolution,

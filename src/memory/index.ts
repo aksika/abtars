@@ -46,7 +46,7 @@ export type { StateSnapshot } from "./sleep-state-gatherer.js";
 export { recallSearch } from "./recall-engine.js";
 
 // Emotion utils
-export { emojiToScore } from "./emotion-utils.js";
+export { emojiToScore, emojiToTag, scoreFromTags, effectiveEmotion, tagFromScore } from "./emotion-utils.js";
 
 // Session context
 export { buildSessionStartContext } from "./session-context.js";

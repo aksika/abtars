@@ -20,6 +20,7 @@ export type SfOptions = {
   timeEnd?: number;
   topic?: string;
   tier?: string;
+  emotion?: string;
   includeExpired?: boolean;
   entityFilter?: Set<number>;
   resolution?: string;
@@ -110,6 +111,16 @@ function trigramQuery(
   } catch { /* trigram query error */ }
 }
 
+const EMOTION_GROUPS: Record<string, string[]> = {
+  positive: ["joy", "pride", "excitement", "relief", "gratitude", "love", "hope", "humor"],
+  negative: ["frustration", "anger", "fear", "grief", "anxiety", "exhaustion", "doubt"],
+  "high-energy": ["excitement", "anger", "determination", "surprise"],
+};
+
+function expandEmotionFilter(emotion: string): string[] {
+  return EMOTION_GROUPS[emotion] ?? emotion.split(",").map(s => s.trim()).filter(Boolean);
+}
+
 function buildWhereClause(opts: SfOptions): { where: string; params: (string | number)[] } {
   const conditions: string[] = ["1=1"];
   const params: (string | number)[] = [];
@@ -120,6 +131,10 @@ function buildWhereClause(opts: SfOptions): { where: string; params: (string | n
   if (opts.topic) { conditions.push("em.topic = ?"); params.push(opts.topic); }
   if (opts.tier) { conditions.push("em.tier = ?"); params.push(opts.tier); }
   if (!opts.includeExpired) { conditions.push("em.valid_to IS NULL"); }
+  if (opts.emotion) {
+    const tags = expandEmotionFilter(opts.emotion);
+    conditions.push(`(${tags.map(t => { params.push(`%${t}%`); return "em.emotion_tags LIKE ?"; }).join(" OR ")})`);
+  }
   return { where: conditions.join(" AND "), params };
 }
 
