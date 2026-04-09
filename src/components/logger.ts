@@ -119,7 +119,7 @@ export function logWarn(tag: string, msg: string): void {
 /** LOW: errors (always shown unless OFF) */
 export function logError(tag: string, msg: string, err?: unknown): void {
   if (!shouldLog("low")) return;
-  const errStr = err instanceof Error ? err.message : String(err ?? "");
+  const errStr = err instanceof Error ? err.message : (typeof err === "object" && err !== null ? JSON.stringify(err) : String(err ?? ""));
   const fullMsg = errStr ? `${msg} — ${errStr}` : msg;
   const line = formatLine("error", tag, fullMsg);
   if (err) console.error(`[${tag}] ${msg}`, err);
