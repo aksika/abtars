@@ -1,0 +1,224 @@
+[acp] [permission auto-approved] Running: ls -la ~/.agentbridge/ | head -20
+[acp] [tool update] tooluse_ug8arXM1kXk6R8qRJK1dUX: completed
+[acp] [ext] _kiro.dev/session/update
+[acp] [tool] Running: grep BED_TIME ~/.agentbridge/.env (undefined)
+[acp] [permission auto-approved] Running: grep BED_TIME ~/.agentbridge/.env
+[acp] [tool update] tooluse_akGbDXdxA46ZmbveUGVpvW: completed
+[acp] [ext] _kiro.dev/session/update
+[acp] [tool] Running: cat ~/.agentbridge/.env (undefined)
+[acp] [permission auto-approved] Running: cat ~/.agentbridge/.env
+[acp] [tool update] tooluse_Xg9fz62P1IlxknnYNhTSto: completed
+[acp] [stderr]
+WARNING: Retry #2, retrying within 10.0s..
+[acp] [ext] _kiro.dev/metadata
+[acp] Prompt complete (stopReason: end_turn, ctx: 10%)
+[pipeline] Response (97 chars): "Nincs `BED_TIME` a `.env`-ben — szóval a defaul
+t `2:00` van érvényben.
+
+Beállítsam?"
+[pipeline] Sending 1 chunk(s)
+[pipeline] → [telegram] Response delivered (ctx: 10%)
+[heartbeat] Tick — executing 8 task(s)
+[heartbeat] Tick — executing 8 task(s)
+[heartbeat] Tick — executing 8 task(s)
+[heartbeat] Tick — executing 8 task(s)
+[heartbeat] Tick — executing 8 task(s)
+[heartbeat] Tick — executing 8 task(s)
+[heartbeat] Tick — executing 8 task(s)
+[heartbeat] Tick — executing 8 task(s)
+[bedtime] Message received — quiet counter reset (BED_TIME 2:00)
+[main] 🛑 Shutting down...
+[service-registry] Stopped service: telegram
+[DiscordApi] Disconnecting from Discord Gateway…
+[DiscordPoller] Stopped
+[service-registry] Stopped service: discord
+[service-registry] Stopped service: agent-api
+[heartbeat] Heartbeat stopped
+[memory-manager] Memory manager closed
+[acp] ACP transport destroyed
+Bridge exited cleanly.
+🚀 AgentBridge launcher
+   Args:     --all --web --agent
+   Node:     v25.9.0
+
+   [doctor] WARN: /Users/akos/.agentbridge/titok permissions not 700
+   [doctor] WARN: /Users/akos/.agentbridge/titok/cookies permissions not 700
+   [doctor] WARN: /Users/akos/.agentbridge/memory permissions not 700
+   [doctor] FIX:  pulled nomic-embed-text model
+   [doctor] WARN: memory.env missing — ABM config defaults will be used
+   [doctor] Done. 1 fixes applied, 4 warnings.
+
+🌉 Starting bridge...
+[main] ──────────── BRIDGE START ────────────
+[main] 🚀 Bridge starting (platforms=telegram, discord, log=debug)
+[main] 🧠 ABM config: search=hybrid, maxDB=4096MB, aging=true
+[memory-db] Migration 10: Trigram FTS5 indexes for recall pipeline simplificatio
+n
+[memory-db] Database initialized at /Users/akos/.agentbridge/memory/memory.db
+[memory-manager] Embedding enabled: nomic-embed-text via ollama (Se sidecar read
+y)
+[memory-manager] Memory manager initialized
+[main] 🧠 Memory enabled (dir=/Users/akos/.agentbridge/memory)
+[main] 🔌 ACP transport (kiro)
+[acp] Initializing ACP connection
+[acp] ACP initialized (agent: Kiro CLI Agent)
+[main] ✅ Transport ready
+[main] 🧠 Memory LLM callback registered
+[memory-db] Database initialized at /Users/akos/.agentbridge/memory/memory.db
+[memory-manager] Memory manager initialized
+[memory-ipc] Listening on /Users/akos/.agentbridge/memory.sock
+[telegram] 🤖 Bot: @AksMoltyBot
+[service-registry] Started service: telegram
+[main] 📡 Telegram polling started
+[DiscordApi] Connecting to Discord Gateway…
+[DiscordApi] Connected as Kiro Professor#3729
+[DiscordPoller] Started — listening for Discord messages
+[service-registry] Started service: discord
+[main] 📡 Discord polling started
+[main] 🎤 STT enabled (groq/whisper-large-v3)
+[main] 🔊 TTS enabled (Edge TTS / hu-HU-TamasNeural)
+[main] Startup: Back online notification sent
+[pipeline] Injected soul bundle (10944 chars)
+[pipeline] Injected session-start context (918 chars)
+[pipeline] Session start for telegram:7773842843 — prompt 11986 chars
+[system-msg] System message sender initialized
+[heartbeat] Starting heartbeat — interval=300000ms, first tick at 02:05:00 (276s
+), tasks=[tasks, reminder-injector, idle-compact, age-check, db-integrity, trans
+port-health, restart-check, self-healer]
+[main] 💓 Heartbeat started (5-min interval)
+[dashboard-server] Dashboard listening on 127.0.0.1:3000
+[main] 🌐 Web dashboard enabled on 127.0.0.1:3000 (token: b6f89dc3b34bbc227673a3
+138832ae427274f5aaeab61f7a25b774b9f857c390)
+[service-registry] Started service: agent-api
+[main] 🤖 Agent API enabled on 0.0.0.0:3001 (allowed: 100.82.167.127, 192.168.1.
+128)
+[acp] [ext] _kiro.dev/metadata
+[acp] Created session a6c77205-a5d3-493b-9961-24cbe89ae461 for telegram:77738428
+43
+[acp] Sending prompt to session a6c77205-a5d3-493b-9961-24cbe89ae461: "[CONTEXT
+— do not respond to this section] # SOUL.md - Who am I?  _I am not a ch…"
+[acp] [ext] _kiro.dev/commands/available
+[acp] [ext] _kiro.dev/metadata
+[acp] Prompt complete (stopReason: end_turn, ctx: 6%)
+[main] ✅ Startup session ready
+[heartbeat] Tick — executing 8 task(s)
+[telegram] Update: {"update_id":297747530,"message":{"message_id":3311,"from":{"
+id":7773842843,"is_bot":false,"first_name":"aksika","language_code":"en"},"chat"
+:{"id":7773842843,"first_name":"aksika","type":"private"},"
+[pipeline] ← [telegram] "valtokezelos vicc megvan?" (ctx: 6%)
+[acp] Sending prompt to session a6c77205-a5d3-493b-9961-24cbe89ae461: "[Telegram
+] valtokezelos vicc megvan?…"
+[acp] [ext] _kiro.dev/session/update
+[telegram] Update: {"update_id":297747531,"message_reaction":{"chat":{"id":77738
+42843,"first_name":"aksika","type":"private"},"message_id":3310,"user":{"id":777
+3842843,"is_bot":false,"first_name":"aksika","language_code
+[telegram] Reaction 👍 from aksika on msg 3310
+[acp] Sending prompt to session a6c77205-a5d3-493b-9961-24cbe89ae461: "[aksika r
+eaction: 👍]…"
+[acp] Transient error (code -32603), retry 1/2
+[acp] [tool] Running: agentbridge-recall --translated "valtokezeles joke" --chat
+-id 7773842843 (undefined)
+[acp] [permission auto-approved] Running: agentbridge-recall --translated "valto
+kezeles joke" --chat-id 7773842843
+[acp] [tool update] tooluse_9wIIBTy8NSU142kbTKX4sR: completed
+[acp] Transient error (code -32603), retry 2/2
+[telegram] Failed to send reaction signal for chat 7773842843 {
+  code: -32603,
+  message: 'Internal error',
+  data: 'Prompt already in progress'
+}
+[acp] [stderr]
+WARNING: Retry #2, retrying within 10.0s..
+[acp] [ext] _kiro.dev/session/update
+[acp] [tool] Running: agentbridge-recall --translated "vicc joke magyar" --chat-
+id 7773842843 (undefined)
+[acp] [permission auto-approved] Running: agentbridge-recall --translated "vicc
+joke magyar" --chat-id 7773842843
+[acp] [tool update] tooluse_t3tUNFFfLh1GivSUGG9d5x: completed
+[acp] [ext] _kiro.dev/session/update
+[acp] [tool] Running: agentbridge-recall --translated "valto kezeles switch stat
+ement joke" --chat-id 7773842843 (undefined)
+[acp] [permission auto-approved] Running: agentbridge-recall --translated "valto
+ kezeles switch statement joke" --chat-id 7773842843
+[acp] [tool update] tooluse_1syMhY6VoxviO8i2F72oZA: completed
+[acp] [ext] _kiro.dev/session/update
+[acp] [tool] Running: agentbridge-recall --translated "switch case joke hungaria
+n programming" --chat-id 7773842843 (undefined)
+[acp] [permission auto-approved] Running: agentbridge-recall --translated "switc
+h case joke hungarian programming" --chat-id 7773842843
+[acp] [tool update] tooluse_N2JRK6PnSuGGSbLyAp8zf8: completed
+[acp] [ext] _kiro.dev/session/update
+[acp] [tool] Running: agentbridge-recall --translated "code joke switch" --chat-
+id 7773842843 (undefined)
+[acp] [permission auto-approved] Running: agentbridge-recall --translated "code
+joke switch" --chat-id 7773842843
+[acp] [tool update] tooluse_6eJ3AN4dhn0Wo4nfrhdR7x: completed
+[acp] [ext] _kiro.dev/session/update
+[acp] [tool] Running: agentbridge-recall --translated "programming joke hungaria
+n developer" --chat-id 7773842843 (undefined)
+[acp] [permission auto-approved] Running: agentbridge-recall --translated "progr
+amming joke hungarian developer" --chat-id 7773842843
+[acp] [tool update] tooluse_8lT2XHlI9pBuH9jG8GD8KH: completed
+[heartbeat] Tick — executing 8 task(s)
+[telegram] Update: {"update_id":0,"message":{"message_id":0,"from":{"id":7773842
+843,"is_bot":false,"first_name":"queued"},"chat":{"id":7773842843,"type":"privat
+e"},"date":1775693400,"text":"[SYSTEM BUG REPORT] 2026-04-0
+[self-healer] Reported error to KP: telegram:Failed to send reaction signal for
+chat 7773842843 — [object Object]
+[busy-guard] Queued "[SYSTEM BUG REPORT] 2026-04-09T02:05:53." for telegram:7773
+842843 (1 pending)
+[acp] [ext] _kiro.dev/metadata
+[acp] Prompt complete (stopReason: end_turn, ctx: 10%)
+[pipeline] Response (92 chars): "Nem találtam. Nem emlékszem ilyenre. Meséld el
+újra, hadd jegyezzem meg! 🦆"
+[pipeline] Sending 1 chunk(s)
+[pipeline] → [telegram] Response delivered (ctx: 10%)
+[pipeline] Draining queued message for telegram:7773842843 (0 remaining)
+[pipeline] ← [telegram] "[SYSTEM BUG REPORT] 2026-04-09T02:05:53.265 ERROR [tele
+gram]" (ctx: 10%)
+[acp] Sending prompt to session a6c77205-a5d3-493b-9961-24cbe89ae461: "[Telegram
+] [SYSTEM BUG REPORT] 2026-04-09T02:05:53.265 ERROR [telegram] Failed t…"
+[acp] [ext] _kiro.dev/session/update
+[acp] [tool] Running: tail -50 ~/.agentbridge/logs/agentbridge.log 2>/dev/null |
+| tail -50 /Users/akos/agentbridge/logs/agentbridge.log 2>/dev/null || find ~ -n
+ame "agentbridge.log" 2>/dev/null | head -1 | xargs tail -50 (undefined)
+[acp] [permission auto-approved] Running: tail -50 ~/.agentbridge/logs/agentbrid
+ge.log 2>/dev/null || tail -50 /Users/akos/agentbridge/logs/agentbridge.log 2>/d
+ev/null || find ~ -name "agentbridge.log" 2>/dev/null | head -1 | xargs tail -50
+[telegram] Update: {"update_id":297747532,"message":{"message_id":3314,"from":{"
+id":7773842843,"is_bot":false,"first_name":"aksika","language_code":"en"},"chat"
+:{"id":7773842843,"first_name":"aksika","type":"private"},"
+[busy-guard] Queued "holnap" for telegram:7773842843 (1 pending)
+[heartbeat] Tick — executing 8 task(s)
+[acp] [transport-health] Tool "Running: tail -50 ~/.agentbridge/logs/agentbridge
+.log 2>/dev/null || tail -50 /Users/akos/agentbridge/logs/agentbridge.log 2>/dev
+/null || find ~ -name "agentbridge.log" 2>/dev/null | head -1 | xargs tail -50"
+hung 216s — interrupting
+[acp] Sending prompt to session a6c77205-a5d3-493b-9961-24cbe89ae461: "[SYSTEM]
+Your tool call "Running: tail -50 ~/.agentbridge/logs/agentbridge.log 2…"
+[acp] [ext] _kiro.dev/metadata
+[acp] Prompt complete (stopReason: refusal, ctx: 11%)
+[pipeline] Response (13 chars): "(no response)"
+[pipeline] LLM returned [NO-REPLY], dropping silently
+[pipeline] Draining queued message for telegram:7773842843 (0 remaining)
+[pipeline] ← [telegram] "holnap" (ctx: 11%)
+[acp] Sending prompt to session a6c77205-a5d3-493b-9961-24cbe89ae461: "[Telegram
+] holnap…"
+[acp] Transient error (code -32603), retry 1/2
+[acp] Transient error (code -32603), retry 2/2
+[pipeline] Error for telegram:7773842843 — {"code":-32603,"message":"Internal er
+ror","data":"Prompt already in progress"}
+[pipeline] Context overflow detected — auto-resetting session
+[acp] ACP transport destroyed
+[acp] Initializing ACP connection
+[acp] kiro-cli exited (code=null, signal=SIGTERM)
+[acp] ACP initialized (agent: Kiro CLI Agent)
+[acp] [stderr]
+WARNING: Retry #2, retrying within 10.0s..
+[acp] [stderr]
+WARNING: Retry #3, retrying within 10.0s..
+[acp] [ext] _kiro.dev/metadata
+[acp] Prompt complete (stopReason: end_turn, ctx: 11%)
+[heartbeat] Tick — executing 8 task(s)
+[bedtime] Message received — quiet counter reset (BED_TIME 2:05)
+akos@molty:~/agentbridge$

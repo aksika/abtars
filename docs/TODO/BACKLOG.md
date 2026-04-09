@@ -341,3 +341,24 @@ Heartbeat task checks `df` output. Warn at 90%, block new writes at 95%. Current
 **Status:** Not started
 
 Adjacent-key typos (QWERTZ: z↔y, s↔a, doubled/missed chars) could be handled by a keyboard-layout-aware correction layer before trigram search. E.g. "hogz" → "hogy", "eyg" → "egy". However: (1) every language has its own layout, (2) the substring fallback already catches most cases for longer words, (3) the agent translates to English before recall (SOUL fix) which bypasses Hungarian typos entirely, (4) Ss signatures catch semantic meaning regardless of spelling. Not worth the complexity unless short-word recall failures become a pattern.
+
+## 104. Self-healer investigation fills context window
+
+**Priority:** HIGH
+**Status:** Not started
+
+**Evidence:** `docs/logs/2026-04-09-ctx-overflow-investigation.log`
+
+Self-healer filed a `[SYSTEM BUG REPORT]` for a `[object Object]` error from the previous process. The agent took it seriously — ran `tail -50` on logs, `grep`, `find` — each tool call dumping log content into the context window. Went from 10% to 100% context, triggered overflow reset, user got "send your message again."
+
+**Problems:**
+1. Self-healer shouldn't investigate errors from before the current process started (pre-restart errors are stale)
+2. Agent investigation of log files is unbounded — no limit on how much log content enters the context
+3. `[SYSTEM BUG REPORT]` bypasses the user's conversation — the agent prioritizes self-diagnosis over user messages
+4. Context overflow during investigation loses the user's queued message ("holnap")
+
+**Possible fixes:**
+- Self-healer: only scan logs after `BRIDGE START` marker (ignore pre-restart errors)
+- Cap tool output size for log-reading commands (truncate at N chars)
+- Don't auto-investigate bug reports — just log them and notify the user, let them decide
+- Queue bug reports as LOW priority, process only when idle
