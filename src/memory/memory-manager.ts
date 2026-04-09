@@ -322,7 +322,7 @@ export class MemoryManager {
 
     // Age Original (content_original) — only flashbulb protected
     const origRows = this.db.prepare(
-      "SELECT id, emotion_score, importance_flags FROM extracted_memories WHERE content_original IS NOT NULL AND content_compressed IS NOT NULL AND created_at < ?",
+      "SELECT id, emotion_score, importance_flags FROM extracted_memories WHERE content_original IS NOT NULL AND content_en IS NOT NULL AND created_at < ?",
     ).all(originalCutoff) as Array<{ id: number; emotion_score: number; importance_flags: string | null }>;
     for (const r of origRows) {
       if (isFlashbulb(r.emotion_score, r.importance_flags ?? "")) continue;

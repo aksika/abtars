@@ -206,7 +206,7 @@ describe("memory-compressor (ABM-L v2)", () => {
 });
 
 describe("store integration — v2 columns populated", () => {
-  it("instant-store populates emotion_tags, importance_flags, content_compressed, signature", async () => {
+  it("instant-store populates emotion_tags, importance_flags, signature", async () => {
     const { mkdtempSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
@@ -224,13 +224,12 @@ describe("store integration — v2 columns populated", () => {
     });
 
     const db = mm.getDatabase()!;
-    const row = db.prepare("SELECT emotion_tags, importance_flags, content_compressed, signature FROM extracted_memories ORDER BY id DESC LIMIT 1").get() as {
-      emotion_tags: string | null; importance_flags: string | null; content_compressed: string | null; signature: Buffer | null;
+    const row = db.prepare("SELECT emotion_tags, importance_flags, signature FROM extracted_memories ORDER BY id DESC LIMIT 1").get() as {
+      emotion_tags: string | null; importance_flags: string | null; signature: Buffer | null;
     };
 
     expect(row.emotion_tags).toBeTruthy();
     expect(row.importance_flags).toContain("decision");
-    expect(row.content_compressed).toMatch(/^\[/); // ABM-L starts with [
     expect(row.signature).toBeInstanceOf(Buffer);
     expect(row.signature!.length).toBe(32);
 
