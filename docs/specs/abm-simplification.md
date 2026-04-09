@@ -1,7 +1,7 @@
 # ABM Simplification — Master Plan
 
 **Date:** 2026-04-08
-**Status:** Planning — working through items 1-by-1
+**Status:** In progress — #1 and #6 implemented, working through remaining items
 
 ---
 
@@ -25,7 +25,7 @@ Full-system review after verifying as-built against specs and source code. The s
 
 **Detail:** `1-abm-simplification-plan.md`
 **Evidence:** `1-abm-simplification-evidence.md`, `1-abm-simplification-baseline.json`
-**Decision:** ✅ Approved (2026-04-08) — 9 tasks, ~7hr
+**Decision:** ✅ Implemented (2026-04-09) — 9 tasks, ~7hr
 
 ---
 
@@ -92,7 +92,7 @@ Dead columns and functions — schema ran ahead of code. Creates false confidenc
 **Solution:** Drop 2 dead columns (`last_recall_context`, `related_topics`). Wire `effectiveConfidence()` into Darwinism. Keep `detectInterference()` and `buildArc()` for wiring with items #1 and #4. Add "no speculative schema" steering rule.
 
 **Detail:** `6-abm-simplification-dead-code.md`
-**Decision:** ✅ Approved (2026-04-09) — 5 tasks, ~1hr
+**Decision:** ✅ Implemented (2026-04-09) — 5 tasks, ~1hr
 
 ---
 
@@ -115,13 +115,13 @@ Dead columns and functions — schema ran ahead of code. Creates false confidenc
 
 From `abm-simplification-counter.md`:
 
-| Priority | Item | Rationale |
-|---|---|---|
-| 1 | #1 Recall pipeline | Fixes real user-facing bug, biggest simplification |
-| 2 | #6 Dead schema | Free cleanup, no risk |
-| 3 | #7 Emotion | Low-risk simplification |
-| 4 | #4 Sleep phases | High impact but high effort — do after #1 is stable |
-| 5 | #2, #3, #5 | Lower priority, valid counter-arguments exist |
+| Priority | Item | Status | Rationale |
+|---|---|---|---|
+| 1 | #1 Recall pipeline | ✅ Done | Fixes real user-facing bug, biggest simplification |
+| 2 | #6 Dead schema | ✅ Done | Free cleanup, no risk |
+| 3 | #7 Emotion | 🔜 Next | Improve, not drop — wire existing infrastructure |
+| 4 | #4 Sleep phases | ⏳ Planned | High impact but high effort — do after #1 is stable |
+| 5 | #2, #3, #5 | ⏳ Pending | Lower priority, valid counter-arguments exist |
 
 ---
 
@@ -187,13 +187,13 @@ From `abm-simplification-counter.md`:
 
 | # | Item | Decision | Date | Notes |
 |---|---|---|---|---|
-| 1 | Recall pipeline | ✅ Approved — 4 stages (Sf+Ss+Se+S6), porter kept, trigrams added | 2026-04-08 | `1-abm-simplification-plan.md` |
+| 1 | Recall pipeline | ✅ Implemented — 4 stages (Sf+Ss+Se+S6), porter kept, trigrams added | 2026-04-09 | `1-abm-simplification-plan.md` |
 | 2 | Store vs compress | ⏳ Pending — lower priority | | |
 | 3 | CIA-AAA | ⏳ Pending — skeptical | | |
 | 4 | Sleep phases | ⏳ Planned — incremental rollout, after #1 | 2026-04-09 | `4-abm-simplification-sleep.md` |
 | 5 | IPC layer | ⏳ Pending — skeptical | | |
-| 6 | Speculative schema | ✅ Approved — drop 2 columns, wire effectiveConfidence, keep 2 functions | 2026-04-09 | `6-abm-simplification-dead-code.md` |
-| 7 | Emotion model | ⏳ Direction agreed — improve, not drop. Tasks defined. | 2026-04-09 | `7-abm-simplification-emotion.md` |
+| 6 | Speculative schema | ✅ Implemented — drop 2 columns, wire effectiveConfidence, keep 2 functions | 2026-04-09 | `6-abm-simplification-dead-code.md` |
+| 7 | Emotion model | 🔜 Next — improve, not drop. Tasks defined. | 2026-04-09 | `7-abm-simplification-emotion.md` |
 
 ---
 

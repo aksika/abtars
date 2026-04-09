@@ -10,9 +10,9 @@ describe("wake-up-renderer", () => {
 
   describe("renderWakeUp", () => {
     const entries = [
-      { content_compressed: "[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)", topic: "coding", emotion_arc: "↑" },
-      { content_compressed: "[FT|coding|trust|5|2026-04] @agentbridge: TS+Node", topic: "coding", emotion_arc: null },
-      { content_compressed: "[F|personal|—|5|2026-01] @user: aksika, CET", topic: "personal", emotion_arc: "→" },
+      { content_compressed: "[D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)", topic: "coding" },
+      { content_compressed: "[FT|coding|trust|5|2026-04] @agentbridge: TS+Node", topic: "coding" },
+      { content_compressed: "[F|personal|—|5|2026-01] @user: aksika, CET", topic: "personal" },
     ];
 
     it("full mode returns raw ABM-L", () => {
@@ -23,13 +23,13 @@ describe("wake-up-renderer", () => {
 
     it("compact mode groups by topic", () => {
       const result = renderWakeUp(entries, "compact");
-      expect(result).toContain("## coding ↑");
-      expect(result).toContain("## personal →");
+      expect(result).toContain("## coding");
+      expect(result).toContain("## personal");
     });
 
     it("compact mode elides default confidence", () => {
       const result = renderWakeUp([
-        { content_compressed: "[F|general|—|3|2026-04] some fact", topic: "general", emotion_arc: null },
+        { content_compressed: "[F|general|—|3|2026-04] some fact", topic: "general" },
       ], "compact");
       // Confidence 3 is default, should be elided
       expect(result).not.toContain("|3|");
@@ -37,7 +37,7 @@ describe("wake-up-renderer", () => {
 
     it("compact mode keeps non-default confidence", () => {
       const result = renderWakeUp([
-        { content_compressed: "[D|coding|convict|5|2026-01] important decision", topic: "coding", emotion_arc: null },
+        { content_compressed: "[D|coding|convict|5|2026-01] important decision", topic: "coding" },
       ], "compact");
       expect(result).toContain("|5]");
     });

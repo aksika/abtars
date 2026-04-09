@@ -351,6 +351,27 @@ export class MemoryManager {
     return { englishNulled, originalNulled, embeddingsQuantized };
   }
 
+  /** Compute decayed confidence for all memories. Returns candidates for pruning (effective confidence < 1). */
+  computeDecayedConfidence(): Array<{ id: number; confidence: number; effectiveConfidence: number; recallCount: number; daysSinceRecall: number }> {
+    if (!this.db) return [];
+    const { effectiveConfidence } = require("./brain-patterns.js") as typeof import("./brain-patterns.js");
+    const now = Date.now();
+    const rows = this.db.prepare(
+      `SELECT id, confidence, recall_count, last_recalled_at, created_at FROM extracted_memories WHERE valid_to IS NULL`,
+    ).all() as Array<{ id: number; confidence: number; recall_count: number; last_recalled_at: number | null; created_at: number }>;
+
+    const candidates: Array<{ id: number; confidence: number; effectiveConfidence: number; recallCount: number; daysSinceRecall: number }> = [];
+    for (const r of rows) {
+      const lastRecall = r.last_recalled_at ?? r.created_at;
+      const daysSinceRecall = Math.round((now - lastRecall) / 86400000);
+      const eff = effectiveConfidence(r.confidence, daysSinceRecall, r.recall_count);
+      if (eff < 1) {
+        candidates.push({ id: r.id, confidence: r.confidence, effectiveConfidence: eff, recallCount: r.recall_count, daysSinceRecall });
+      }
+    }
+    return candidates.sort((a, b) => a.effectiveConfidence - b.effectiveConfidence);
+  }
+
   fixMemoryDefaults(): { fixed: number } {
     if (!this.db) return { fixed: 0 };
     let fixed = 0;

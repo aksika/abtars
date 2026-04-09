@@ -16,7 +16,6 @@ export function pickLevel(budgetTokens: number): CompressionLevel {
 interface MemoryEntry {
   content_compressed: string;
   topic: string;
-  emotion_arc: string | null;
 }
 
 /** Build entity header from recurring @references. */
@@ -55,11 +54,11 @@ function parsePrefix(abml: string): { flags: string; topic: string; emotion: str
 
 /** Render entries at "compact" level: topic grouping, elide defaults, entity codes. */
 function renderCompact(entries: ReadonlyArray<MemoryEntry>, entityReplace: Map<string, string>): string {
-  const byTopic = new Map<string, { arc: string; lines: string[] }>();
+  const byTopic = new Map<string, { lines: string[] }>();
 
   for (const e of entries) {
     const parsed = parsePrefix(e.content_compressed);
-    if (!byTopic.has(e.topic)) byTopic.set(e.topic, { arc: e.emotion_arc ?? "", lines: [] });
+    if (!byTopic.has(e.topic)) byTopic.set(e.topic, { lines: [] });
 
     // Elide: date (unless <7d), confidence (unless != 3), neutral emotion
     let prefix = `[${parsed.flags}`;
@@ -77,9 +76,8 @@ function renderCompact(entries: ReadonlyArray<MemoryEntry>, entityReplace: Map<s
   }
 
   const parts: string[] = [];
-  for (const [topic, { arc, lines }] of byTopic) {
-    const arcSymbol = arc || "";
-    parts.push(`## ${topic}${arcSymbol ? " " + arcSymbol : ""}`);
+  for (const [topic, { lines }] of byTopic) {
+    parts.push(`## ${topic}`);
     for (const line of lines) parts.push(line);
   }
   return parts.join("\n");

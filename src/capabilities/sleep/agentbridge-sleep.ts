@@ -223,6 +223,16 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
     }
   } catch (err) { logWarn(TAG, `[WIRED] lock cleanup failed: ${err instanceof Error ? err.message : String(err)}`); }
 
+  // 9. Compute decayed confidence — write candidates for Darwinism step
+  try {
+    const candidates = memory.computeDecayedConfidence();
+    if (candidates.length > 0) {
+      const candidatesPath = join(memoryDir, "sleep", "darwinism-candidates.json");
+      writeFileSync(candidatesPath, JSON.stringify(candidates, null, 2));
+      logInfo(TAG, `[WIRED] ${candidates.length} Darwinism prune candidates (effective confidence < 1)`);
+    }
+  } catch (err) { logWarn(TAG, `[WIRED] confidence decay failed: ${err instanceof Error ? err.message : String(err)}`); }
+
   return results;
 }
 

@@ -405,6 +405,14 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 11,
+    label: "Drop dead columns: last_recall_context, related_topics",
+    up: (db) => {
+      db.exec(`ALTER TABLE extracted_memories DROP COLUMN last_recall_context`);
+      db.exec(`ALTER TABLE extracted_memories DROP COLUMN related_topics`);
+    },
+  },
 ];
 
 // ── Migration runner ────────────────────────────────────────────────────────

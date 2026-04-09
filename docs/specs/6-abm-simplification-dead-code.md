@@ -81,7 +81,7 @@ Add this as a steering rule in `.kiro/steering/`.
 | # | Task | Effort | Depends on |
 |---|---|---|---|
 | 1 | Migration: drop `last_recall_context` and `related_topics` columns | 15min | — |
-| 2 | Wire `effectiveConfidence()` into Darwinism sleep step — use decayed confidence in fitness review pruning threshold | 20min | — |
+| 2 | Wire `effectiveConfidence()` as code-driven pre-pass: compute decayed confidence for all memories, write candidates list to temp file. Darwinism prompt reads pre-computed data instead of raw SQL. Aligns with #4 direction (extract computation from LLM conversation). Don't mutate the `confidence` column — keep original LLM-assigned value. | 30min | — |
 | 3 | Fix `wake-up-builder.ts`: stop selecting `emotion_arc` column (it's always NULL until `buildArc` is wired in item #4) | 10min | — |
 | 4 | Update as-built: remove dead columns from documentation, update "Schema-Only Columns" and "Not Yet Implemented" sections, mark `effectiveConfidence` as wired | 15min | 1-3 |
 | 5 | Add steering rule: `.kiro/steering/no-speculative-schema.md` — the principle above | 10min | — |

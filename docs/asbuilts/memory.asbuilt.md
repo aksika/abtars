@@ -736,7 +736,7 @@ Pressure-based acceleration: aging TTLs multiply by pressure factor as DB approa
 | Emotional recall boost | `recall-engine.ts` (Sa + Ss stages) | Score weighted by \|emotion_score\| — `1 + 0.02 × \|emotion\|` | ✅ Applied in Sa and Ss scoring |
 | Flashbulb protection | `brain-patterns.ts` → `memory-manager.ts` | \|emotion\| ≥ 4 + pivot/correction → never aged/decayed | ✅ Called by `ageMemoryTiers()` |
 | Aging protection | `brain-patterns.ts` → `memory-manager.ts` | \|emotion\| ≥ 4 OR recall ≥ 3 OR core tier → skip aging | ✅ Called by `ageMemoryTiers()` |
-| Spaced repetition decay | `brain-patterns.ts` | `effectiveConfidence()` — confidence decays unless recalled at intervals | ⚠️ Exported, tested, NOT called at runtime |
+| Spaced repetition decay | `brain-patterns.ts` → `memory-manager.ts` | `effectiveConfidence()` — confidence decays unless recalled at intervals | ✅ Wired: `computeDecayedConfidence()` writes candidates to `darwinism-candidates.json` during sleep pre-tasks |
 | Interference detection | `brain-patterns.ts` | `detectInterference()` — flag similar-but-different memories in same topic | ⚠️ Exported, tested, NOT called at runtime |
 
 ### Session Start (Wake-Up Builder)
@@ -854,9 +854,8 @@ Columns that exist in the DB schema (via migrations) but have no code reading or
 
 | Column | Migration | Intended purpose | What's missing |
 |---|---|---|---|
-| `source_type` | v8 (default `'conversation'`) | Track memory origin: conversation/observation/correction/external/inference | `instantStore()` doesn't set it. No `--source-type` CLI flag. Default value written by SQLite on INSERT. |
-| `last_recall_context` | v8 | Track what was being discussed when a memory was recalled, for Dreamy enrichment | Not read or written by recall-engine, memory-editor, or any sleep step. |
-| `related_topics` | v8 | Cross-topic linking for recall expansion | Not populated by any store/sleep step. Not used by recall-engine for link-following. |
+| `source_type` | v8 (default `'conversation'`) | Track memory origin: conversation/observation/correction/external/inference | `instantStore()` doesn't set it. No `--source-type` CLI flag. Default value written by SQLite on INSERT. Reserved for future trust model. |
+| `emotion_arc` | v8 | Per-topic emotional trajectory (↑↓↕→) | Not populated by any sleep step. `buildArc()` exists but not wired. Will be wired with sleep simplification (item #4). |
 
 ---
 
