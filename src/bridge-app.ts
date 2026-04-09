@@ -703,9 +703,8 @@ export async function startBridge(): Promise<void> {
 
   // --- Daily cycle: spawn Dreamy after BED_TIME + quiet ticks ---
   heartbeat.registerTask(createAgeCheckTask({
-    memory, bridgeLockPath, sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, busyChats, isSleepActive,
+    memory, bridgeLockPath, sleepAuditDir, sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, busyChats, isSleepActive,
     doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
-    onSleepWarning: undefined,
     startSleep: () => { sleepHandle?.spawn(); },
   }));
 

@@ -10,6 +10,8 @@ agentbridge-store --translated "English" --original "original" --memory-type fac
 agentbridge-edit --memory-id <N> [--credibility N] [--classification N] [--caller kp]
 ```
 
+**CRITICAL:** `--translated` = English version. `--original` = user's ACTUAL words in whatever language they used. If user spoke English, `--original` is English. NEVER fabricate a translation.
+
 ## Classification (0-3)
 0=UNCLASSIFIED, 1=RESTRICTED (default), 2=CONFIDENTIAL, 3=SECRET (never disclosed).
 Decisions are always ≥1. SECRET is permanent.

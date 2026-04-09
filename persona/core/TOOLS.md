@@ -17,6 +17,11 @@ agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó
 
 ```
 agentbridge-store --translated "English" --original "eredeti" --memory-type <type> --emotion-score 0 --chat-id 7773842843 [--tags "term1,term2"]
+```
+
+**CRITICAL for store:** `--translated` = English version of the memory. `--original` = the user's ACTUAL words in WHATEVER language they used. If the user spoke English, `--original` is English too. NEVER fabricate a translation — `--original` is verbatim what was said.
+
+```
 agentbridge-edit --memory-id <N> [--credibility N] [--classification N] [--translated "..."] [--relevance-score +N] [--caller kp]
 agentbridge-expand --ids 451,452,453
 ```
