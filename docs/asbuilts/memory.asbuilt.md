@@ -13,9 +13,9 @@
 
 Standalone memory package (`@agentbridge/memory`, ABM v2). 38 source + 29 test files in `src/memory/`, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation.
 
-SQLite-backed persistence with dual FTS5 (content_en + ABM-L), ollama vector embeddings with int8 quantization (1536→384 bytes after 14d) in separate `memory_embeddings` table, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L v2 compressor (entity whitelist, topic inference, no truncation), emotion tagging (25 types), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security.
+SQLite-backed persistence with FTS5 (porter on content_en) + trigram FTS5 (content_en + content_original, diacritics-stripped), ollama vector embeddings with int8 quantization (1536→384 bytes after 14d) in separate `memory_embeddings` table, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L v2 compressor (entity whitelist, topic inference, no truncation), emotion tagging (25 types), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security.
 
-Three-tier aging: English NULLed after 14d (ABM-L has the facts), Original after 90d (source of truth kept longer), ABM-L + int8 embeddings + signatures persist forever. Pressure-based acceleration as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (|emotion| ≥ 4 + pivot/correction) never aged.
+Two-tier aging: Original NULLed after 90d (source of truth kept longer), content_en preserved forever (trigram search depends on it). ABM-L + int8 embeddings + signatures persist forever. Pressure-based acceleration as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (|emotion| ≥ 4 + pivot/correction) never aged.
 
 Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods. Triggered by `BED_TIME` + quiet ticks (no bridge restart). 24 sleep steps including topic assignment, core promotion, temporal review, emotion/flags backfill, ABM-L compression, contradiction check, emotional arcs, memory aging, entity review.
 
@@ -61,7 +61,7 @@ User Message
 | (agent   |               +----------+
 |  decides |                     ^
 |  when to |                     |
-|  search) |--- recall --------->|  (single path: agentbridge-recall, S1-S7 + Se + Sa + Ss)
+|  search) |--- recall --------->|  (single path: agentbridge-recall, Sf + Ss + Se + S6)
 |          |                     |
 |          |               +----------+
 |          |               | C1       |  daily/weekly/quarterly summaries
@@ -214,7 +214,8 @@ Nulled automatically on content edit (re-embedded on next batch run).
 | Table | Indexed column | Tokenizer | Triggers |
 |-------|---------------|-----------|----------|
 | `extracted_memories_fts` | `content_en` | porter unicode61 | INSERT, DELETE, UPDATE |
-| `extracted_memories_original_fts` | `content_original` | unicode61 | INSERT, DELETE, UPDATE (preserve_original=1 only) |
+| `content_en_trigram` | `strip_diacritics(content_en \|\| preserved_keyword)` | trigram | INSERT, DELETE, UPDATE |
+| `content_original_trigram` | `strip_diacritics(content_original)` | trigram | INSERT, DELETE, UPDATE |
 
 ---
 
@@ -227,7 +228,7 @@ Nulled automatically on content edit (re-embedded on next batch run).
 |  sleep-prompt-loader, sleeping_prompt.md template                    |
 +---------------------------------------------------------------------+
 |  Layer 5: Agent-Initiated Recall (single path)                       |
-|  agentbridge-recall ONLY (7-stage cascade, extracted-first)          |
+|  agentbridge-recall ONLY (4-stage: Sf + Ss + Se + S6)                |
 +---------------------------------------------------------------------+
 |  Layer 4: Storage & Mutation                                        |
 |  agentbridge-store (Instant Store),                                  |
@@ -238,8 +239,9 @@ Nulled automatically on content edit (re-embedded on next batch run).
 |  working → daily → weekly → quarterly                                |
 +---------------------------------------------------------------------+
 |  Layer 2: Indexing & Search Primitives                              |
-|  MemoryIndex (FTS5), ollama-embed (Se sidecar)                      |
-|  FTS5 triggers: INSERT, DELETE, UPDATE (content_en + content_original)|
+|  MemoryIndex (FTS5 porter), trigram-search (FTS5 trigram),          |
+|  ollama-embed (Se sidecar), signature-generator (Ss)                |
+|  FTS5 triggers: INSERT, DELETE, UPDATE (porter + trigram)            |
 +---------------------------------------------------------------------+
 |  Layer 1: Storage & Persistence                                     |
 |  SQLite ONLY (memory.db), File System                               |
@@ -248,53 +250,61 @@ Nulled automatically on content edit (re-embedded on next batch run).
 
 ---
 
-## Recall Pipeline (`recall-engine.ts`, S1-S7 + Se + Sa + Ss)
+## Recall Pipeline (`recall-engine.ts`, Sf + Ss + Se + S6)
 
-Source: `src/memory/recall-engine.ts`
+Source: `src/memory/recall-engine.ts`, `src/memory/trigram-search.ts`
 CLI wrapper: `src/cli/agentbridge-recall.ts`
 Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine, takes MemoryManager)
 
 ### Design Philosophy
 
-The pipeline is layered from conservative (high-precision, few false positives) to broad (high-recall, tolerates false positives). Earlier stages produce higher-scored results; later stages are safety nets.
+Four non-overlapping stages, each using a fundamentally different search method on a distinct data source. No redundancy. Priority ordering with MMR reranking for diversity.
 
 ### Stages
 
-| Stage | Source | Method | Precision | Score | Description |
-|-------|--------|--------|-----------|-------|-------------|
-| S1 | extracted_memories.content_en | FTS5 (porter + unicode61) | Conservative — token match, stemmed | Darwinism-boosted | Primary search. Handles accents via unicode61 normalization. Prefers false negatives over false positives. |
-| S2 | extracted_memories.content_original | FTS5 (unicode61) | Conservative | Darwinism-boosted | Original-language search. Only fires when `--original` provided. Only indexes `preserve_original=1` memories. |
-| S3 | extracted_memories (both columns + preserved_keyword) | SQL LIKE with `strip_diacritics()` | Broad — substring, accent-insensitive | 0.95 (fixed) | Safety net for compound words, partial matches, tag matches. Tolerates false positives. Also searches `preserved_keyword` column for `--keyword` tags. |
-| Se | extracted_memories.embedding | Cosine similarity (ollama) | Broadest — semantic | 0.0-1.0 (similarity) | Handles typos, synonyms, paraphrasing, cross-language meaning. Async, merged after S3. |
-| S4 | messages | FTS5 (relaxed OR) | Conservative | FTS5 rank | Raw message search. Falls through to messages when extracted memories don't cover it. |
-| S5 | messages | SQL LIKE with `strip_diacritics()` | Broad — accent-insensitive | 0.9 (fixed) | Wide net on messages. Only fires if results < limit. |
-| S6 | daily/weekly/quarterly .md files | Substring match on file content | Broad | 0.5 (fixed) | Searches consolidation summaries on disk. |
-| S7 | messages or latest daily | No keyword — returns recent | Fallback | 0.1 (fixed) | Only fires when ALL other stages return zero results. Returns recent messages or latest daily summary. |
-| Sa | extracted_memories.content_compressed | FTS5 on `abml_fts` table | Conservative — token match on ABM-L | 0.8 × emotion boost | Keyword search on compressed content. Survives aging (ABM-L never NULLed). Joined via `abml_fts.rowid = em.id`. |
-| Ss | extracted_memories.signature | Hamming distance (256-bit binary) | Broad — semantic approximate | 0.0-1.0 (similarity × emotion boost) | No ollama needed. Full table scan of signatures, threshold 0.55. Emotional recall boost: `1 + 0.02 × \|emotion_score\|`. |
+| Stage | Source | Method | What it catches | Score |
+|-------|--------|--------|-----------------|-------|
+| Sf.1 | `extracted_memories_fts` | Porter FTS5 on content_en | Morphological variants: deploy/deployed/deploying | Darwinism-boosted |
+| Sf.2 | `content_en_trigram` | Trigram FTS5 (diacritics-stripped) on content_en + preserved_keyword | Substrings, accent-insensitive matches, agent-flagged terms | Darwinism-boosted |
+| Sf.3 | `content_original_trigram` | Trigram FTS5 (diacritics-stripped) on content_original (fallback) | Untranslated Hungarian queries, typos in original language | Darwinism-boosted |
+| Ss | `extracted_memories.signature` | Binary signature Hamming distance (cap 5, threshold 0.65) | Semantic similarity without ollama | 0.0-1.0 similarity |
+| Se | `memory_embeddings` | Embedding cosine similarity (ollama) | Best semantic quality | 0.0-1.0 similarity |
+| S6 | daily/weekly/quarterly .md files | Substring match on file content | Consolidation summaries, narrative context | 0.5 (fixed) |
+
+### Pipeline Flow
 
 ```
-Se: async embedding sidecar ─────────────┐  (fires at S1 start, ollama nomic-embed-text)
-                                           │
-S1: Extracted — English FTS5 (conservative)│
-S2: Extracted — Original FTS5 (conserv.)   │
-S3: Extracted — LIKE (broad safety net)    │
-  → merge Se results here ◄───────────────┘
-  → Short-circuit: if S1+S2+S3+Se ≥ 10 results → skip S4-S7
-
-S4: Messages — FTS5 (conservative)
-S5: Messages — LIKE (broad)
-S6: Consolidation files (broad)
-S7: Keyword-free fallback (last resort, zero results only)
-
-Sa: ABM-L FTS5 (keyword match on content_compressed via abml_fts)
-Ss: Signature Hamming (semantic approximate, no ollama)
-  → Sa and Ss always run (not affected by short-circuit)
-  → Both apply emotional recall boost: 1 + 0.02 × |emotion_score|
-  → Both respect resolution param: ABM-L by default, content_en when --full
+Query → strip_diacritics(query)
+  │
+  ├── Se: fire async at start (optional, needs ollama)
+  │
+  ├── Sf: three-query fuzzy search
+  │     1. Porter FTS5 on content_en (stemmed keyword match, ~1ms)
+  │     2. Trigram on content_en + preserved_keyword (diacritics-stripped, ~1ms)
+  │        Fallback chain: full word → z↔y QWERTZ swap → substring windows
+  │     3. If results < limit: trigram on content_original (Hungarian fallback, ~1ms)
+  │        Same fallback chain: full word → z↔y swap → substring windows
+  │
+  ├── Ss: signature Hamming (skip if Sf filled limit)
+  │     Threshold 0.65, capped at 5 results
+  │
+  ├── Se: await + merge (skip if Sf filled limit)
+  │
+  ├── S6: consolidation grep (always runs — different data source)
+  │
+  ├── Dedup: by memory ID (higher-priority stage wins)
+  │
+  └── MMR reranking (λ=0.7) — prevents topic clustering
+      No S7 fallback — return empty on zero results.
 ```
 
-Post-processing: dedup by content hash → temporal decay → MMR re-ranking (λ=0.7).
+### Trigram Fallback Chain
+
+When a full-word trigram query returns zero results:
+1. **z↔y QWERTZ swap** — "hogz" → "hogy" (Hungarian keyboard layout)
+2. **Substring windows** — split word into overlapping half-length windows. "válókezelő" → "valok", "okeze", "kezel", "ezelo". Common suffix "kezelo" matches "valtokezelo" despite the typo.
+
+Each fallback only fires if the previous returned nothing. Zero latency cost on normal queries.
 
 ### Embedding Lifecycle (C5)
 
@@ -656,7 +666,8 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | memory-db | `memory-db.ts` | Schema creation, numbered migrations with `schema_version` table, FTS5 triggers, custom SQL functions (strip_emojis, strip_diacritics). |
 | memory-config | `memory-config.ts` | Env var loading + defaults for all memory settings. |
 | ollama-embed | `ollama-embed.ts` | Embedding via ollama API: embedText(), vectorSearch() (capped at 500 recent), batch embed. |
-| recall-engine | `recall-engine.ts` | 7-stage cascade (S1-S7 + Se), extracted-first, short-circuit, MMR post-processing. |
+| recall-engine | `recall-engine.ts` | 4-stage pipeline (Sf + Ss + Se + S6), priority ordering, MMR post-processing. |
+| trigram-search | `trigram-search.ts` | Sf stage: porter FTS5 + trigram (content_en + content_original) with z↔y swap and substring fallback. |
 | consolidation-search | `consolidation-search.ts` | Search daily/weekly/quarterly .md consolidation files on disk. |
 | mmr | `mmr.ts` | Maximal Marginal Relevance re-ranking (λ=0.7) for recall post-processing. |
 | emotion-utils | `emotion-utils.ts` | `clampEmotionScore()` — clamps to -5..+5 range. |
@@ -703,13 +714,13 @@ Flags: D=decision, P=preference, F=fact, L=lesson, O=origin, V=pivot, M=mileston
 | `embedding` | Ollama embeddings only (legacy) | Yes |
 | `signature` | Binary signatures + Hamming distance | No |
 
-Search stages: S1-S7 (FTS5 on content_en), Se (embedding cosine), Sa (FTS5 on ABM-L — survives aging), Ss (signature Hamming). All run by default. Sa and Ss return `content_compressed` with emotional recall boost. `--full` flag returns `content_en` when available.
+Search stages: Sf (porter FTS5 + trigram with z↔y and substring fallback), Se (embedding cosine), Ss (signature Hamming, cap 5, threshold 0.65), S6 (consolidation files). Sf always runs. Ss and Se skipped if Sf fills the limit. S6 always runs (different data source).
 
-### Three-Tier Aging
+### Two-Tier Aging
 
 | Tier | Column | Base TTL | Protected by |
 |---|---|---|---|
-| English | `content_en` | 14 days | \|emotion\| ≥ 4, recall ≥ 3, core tier |
+| English | `content_en` | Never (preserved for trigram search) | — |
 | Original | `content_original` | 90 days | Flashbulb (\|emotion\| ≥ 4 + pivot/correction) |
 | float32 embedding | `memory_embeddings` | 14 days (quantized to int8) | — |
 | int8 embedding | `memory_embeddings` | Never | — |
@@ -825,18 +836,11 @@ Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `MAC_S
 
 ### Recall Pipeline Integration (`recall-integration.test.ts`)
 
-14 tests covering every search stage with a real SQLite DB:
-- S1: English FTS5 (keyword match, accent normalization, classification filter)
-- S2: Original-language FTS5
-- S3: LIKE fallback (partial match, preserved_keyword tags, accent-stripped)
-- S4: Message FTS5
-- S5: Message LIKE
+8 tests covering the recall pipeline with a real SQLite DB:
+- Sf: Porter FTS5 (keyword match), trigram (preserved_keyword, content_original fallback), classification filter
 - S6: Consolidation file search
-- S7: Keyword-free fallback
+- Full pipeline: merged results, deduplication, empty on zero results (no S7 fallback)
 - Se: Semantic embedding search (optional — requires ollama, skips if unavailable)
-- Sa: ABM-L FTS5 (keyword match on content_compressed)
-- Ss: Signature Hamming distance search
-- Full pipeline: merged results + deduplication
 
 ### Optional Tests
 

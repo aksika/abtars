@@ -92,7 +92,7 @@ Adding a message behavior: create a middleware in `pipeline/`, add to the chain 
 
 ### Timestamps
 
-All user-facing timestamps use local time (not UTC). `localDate()` in `env-utils.ts` for YYYY-MM-DD, `localIso()` in `logger.ts` for full timestamps. Data storage (memory DB, recall) stays UTC.
+All timestamps use local time (system timezone). Shared helpers in `src/utils/local-time.ts`: `localISO()` (YYYY-MM-DDTHH:MM:SS), `localDateTime()` (YYYY-MM-DD HH:MM), `localTime()` (HH:MM), `localDate()` (YYYY-MM-DD), `localMonth()` (YYYY-MM). No `toISOString()` anywhere in the codebase — replaced globally.
 
 ### Logging
 
@@ -402,7 +402,7 @@ Generic module (`system-message.ts`) for any component to send a prompt to the a
 | 10 | Heartbeat liveness | Warn if stale |
 | 11 | Core files size | Warn >15 lines |
 | 12 | Schema version ≥ 8 | Warn if pending |
-| 13 | memory.env exists | Warn |
+| 13 | .env.memory exists | Warn |
 | 14 | Orphaned kiro-cli | Kill extras |
 
 ### Self-Healer
@@ -441,7 +441,7 @@ Written to `.last-restart-reason` file, injected into next session start so the 
 
 ### Session Start (single path)
 
-All session resets converge to one function: `preparePrompt()` in `message-pipeline.ts`.
+All session resets converge to one function: `buildSessionStartPrompt()` in `message-pipeline.ts`.
 
 **Triggers that set `pendingSessionStart`:**
 - `/new`, `/reset`, `/restart` commands
@@ -450,10 +450,19 @@ All session resets converge to one function: `preparePrompt()` in `message-pipel
 - Auto-reset on ctx overflow (ValidationException/-32603)
 - Floating compaction (idle-triggered)
 
-**On next message, `preparePrompt()` injects:**
-1. SOUL bundle (identity, tools, steering)
-2. Session-start context (daily summary + recent messages)
-3. Restart reason (if any)
+**Prompt structure:**
+```
+[CONTEXT — do not respond to this section]
+[SESSION START REASON] ...          (if restart reason exists)
+<SOUL bundle>                       (identity, tools, steering)
+<session-start context>             (daily summary + recent messages)
+<ABM wake-up memories>              (core memories, 1% context budget)
+[/CONTEXT]
+
+<user instruction or greeting>
+```
+
+The `[CONTEXT]` wrapper prevents the agent from responding to injected context as if it were a user message. The user instruction (greeting or actual message) appears clearly after the block.
 
 First message to a new session also triggers injection (`!seen.has(sessionKey)`). One path, every time.
 
