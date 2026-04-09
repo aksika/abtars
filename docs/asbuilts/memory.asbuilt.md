@@ -763,11 +763,11 @@ BED_TIME passes → quiet tick counter starts
   Any message → counter resets to 0
   Tick N-1 → agent announces sleep to user (system message)
   Tick N → Dreamy spawns directly (no bridge restart)
-  Dreamy completes → pmset sleepnow (if MAC_SLEEP_AFTER_DREAMY=true)
+  Dreamy completes → platform sleep (if HARDWARE_SLEEP_AFTER_DREAMY=true)
   Mac wakes → watchdog detects stale heartbeat → exit(1) → LaunchAgent restarts
 ```
 
-Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `MAC_SLEEP_AFTER_DREAMY` (default false).
+Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `HARDWARE_SLEEP_AFTER_DREAMY` (default false).
 
 ---
 

@@ -340,13 +340,13 @@ BED_TIME passes → quiet tick counter starts
   Tick N → Dreamy spawns directly (no bridge restart)
   Dreamy completes → check if user messaged during sleep
     Yes → skip Mac sleep, log "user active"
-    No → pmset sleepnow (if MAC_SLEEP_AFTER_DREAMY=true)
+    No → platform sleep (if HARDWARE_SLEEP_AFTER_DREAMY=true)
   Mac wakes → watchdog fires (no kicks for hours) → exit(1)
   LaunchAgent restarts → fresh session
   If sleep missed today on startup → catch-up Dreamy spawns
 ```
 
-Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `MAC_SLEEP_AFTER_DREAMY` (default false).
+Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `HARDWARE_SLEEP_AFTER_DREAMY` (default false).
 
 ### Transport Health Checks
 

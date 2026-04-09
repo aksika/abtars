@@ -149,7 +149,8 @@ Dreamy's job ends after Phase 3. The Professor reviews the audit immediately aft
 - Audit injected to Professor as system message
 - Professor sends user a natural "dream report": "Oh I had a dream: extracted 5 memories, promoted 2 to core..."
 - **Flagged issues listed prominently** — contradictions, failed steps, suspicious deletions, anything Dreamy was unsure about
-- User has 5-min window before hardware sleep to react or intervene
+- **Gated on `HARDWARE_SLEEP_AFTER_DREAMY`:** if false → dream report only, no sleep announcement, no hardware sleep. Platform-agnostic (replaces `MAC_SLEEP_AFTER_DREAMY`).
+- **Gated on `MAC_SLEEP_AFTER_DREAMY`:** if false → dream report only, no sleep announcement, no `pmset sleepnow`
 - Future: Professor can trigger targeted phase re-run if user flags an issue
 - Hardware sleep timer already implemented
 
@@ -268,7 +269,7 @@ Each step is independently shippable and testable.
 | 3b | Per-phase state snapshots: split `SleepStateGatherer` output into phase-relevant subsets. Phase 1 gets message counts + watermarks. Phase 2 gets memory stats + untagged counts + merge candidates. Phase 3 gets disk usage + consolidation dates. Less tokens per prompt, more focused LLM. Phase result files already persist for a day — Phase 2 reads Phase 1's output from disk. | 1hr | 3 |
 | 4 | Batch Phase 2 curation: pre-query candidates, batch into 2-3 focused prompts (10-15 memories each). Don't overload one prompt with 50 memories — sloppy results. E.g. prompt 1: topics+promote+contradict, prompt 2: merge+translate+darwinism, prompt 3: entity+feedback. | 2hr | 3 |
 | 5 | Make Phase 3 conditional: skip if no consolidation due + no anomalies | 30min | 3 |
-| 6 | Phase 4 review: code writes raw audit file after Phase 3. Inject audit to Professor as system message (immediately after sleep). Professor reviews, sends user a natural "dream report" message with summary. Must highlight flagged issues prominently — contradictions, failed steps, suspicious deletions. User has 5-min window before hardware sleep to react. Already implemented: hardware sleep timer + wake-up announcement. | 1hr | 3 |
+| 6 | Phase 4 review: code writes raw audit file after Phase 3. Inject audit to Professor as system message (immediately after sleep). Professor reviews, sends user a natural "dream report" message with summary. Must highlight flagged issues prominently — contradictions, failed steps, suspicious deletions. **Gate on `HARDWARE_SLEEP_AFTER_DREAMY`:** if true → include "going to sleep in 5 min" + platform-specific sleep call (pmset on Mac, systemctl suspend on Linux). If false → dream report only, skip sleep announcement and hardware sleep. Rename from `MAC_SLEEP_AFTER_DREAMY` — platform-agnostic. Already implemented: hardware sleep timer + wake-up announcement. | 1hr | 3 |
 | 7 | Update lock file format: phase-based instead of step-based. Existing lock tracking + global state infrastructure stays — just update granularity from 24 steps to 4 phases. Per-phase token limits as normal control. **Keep global 12-call hard cap as emergency brake** — belt and suspenders, justified after burning a night of tokens. | 1hr | 3 |
 | 8 | Implement SLEEP_QUALITY tiering (budget/normal/ultimate) + SLEEP_CURATION_DAY config. Model selection uses existing `SLEEP_MODEL` env — no new config. | 1hr | 3-5 |
 | 9 | Run parallel comparison: old 24-step vs new 4-phase for 1 week, compare audit outputs | ongoing | 4-8 |
