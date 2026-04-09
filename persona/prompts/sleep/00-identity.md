@@ -50,4 +50,4 @@ ${WIRED_RESULTS}
 
 ${RESUME_CONTEXT}
 
-Acknowledge you understand your role and the system state. Then wait for the first task.
+Acknowledge you understand your role and the system state. Reply with OK only — do not elaborate.

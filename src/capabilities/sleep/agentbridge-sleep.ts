@@ -707,6 +707,10 @@ async function main(): Promise<number> {
       emitProgress("starting");
       let consecutiveFailures = 0;
 
+      // Create day directory for per-step logs
+      const stepLogDir = join(sleepDir, dateStr);
+      mkdirSync(stepLogDir, { recursive: true });
+
       for (const step of steps) {
         emitProgress(step.name);
         stepIndex++;
@@ -753,6 +757,7 @@ async function main(): Promise<number> {
             if (summary) {
               dailySummaryPath = writeDailyFile(memoryConfig.memoryDir, targetDate, summary);
               state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
+              writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), summary, "utf-8");
             } else {
               state.steps[step.name] = { status: "skipped" };
             }
@@ -777,6 +782,7 @@ async function main(): Promise<number> {
             const chatId = getPrimaryChatId(db);
             const result = await extractFromDaily(dailySummaryPath, chatId, (p) => sendWithRetry(transport, p, "04b-extract", flags.verbose).then(r => r ?? ""));
             state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
+            writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), result, "utf-8");
             logInfo(TAG, `[SLEEP] ✓ ${step.name} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
           } catch (err) {
             logWarn(TAG, `[SLEEP] 04b failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -793,6 +799,7 @@ async function main(): Promise<number> {
 
         if (response) {
           state.steps[step.name] = { status: "ok", duration: Math.round(duration / 100) / 10 };
+          writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), response, "utf-8");
         } else {
           state.steps[step.name] = { status: "failed", duration: Math.round(duration / 100) / 10, attempts: MAX_RETRIES };
           dreamySucceeded = false;

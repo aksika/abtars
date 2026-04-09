@@ -67,7 +67,7 @@ Four security dimensions (classification 0-3, trust 0-3, integrity 0-3, credibil
 
 **Counter-argument:** Biggest refactor on the list. Current 24 steps are battle-tested. Do AFTER #1 is validated. See `abm-simplification-counter.md`.
 
-**Detail:** _not yet created_
+**Detail:** `4-abm-simplification-sleep.md`
 **Decision:** ⏳ Pending — do after #1 is stable
 
 ---
@@ -190,7 +190,7 @@ From `abm-simplification-counter.md`:
 | 1 | Recall pipeline | ✅ Approved — 4 stages (Sf+Ss+Se+S6), porter kept, trigrams added | 2026-04-08 | `1-abm-simplification-plan.md` |
 | 2 | Store vs compress | ⏳ Pending — lower priority | | |
 | 3 | CIA-AAA | ⏳ Pending — skeptical | | |
-| 4 | Sleep phases | ⏳ Pending — after #1 | | |
+| 4 | Sleep phases | ⏳ Planned — incremental rollout, after #1 | 2026-04-09 | `4-abm-simplification-sleep.md` |
 | 5 | IPC layer | ⏳ Pending — skeptical | | |
 | 6 | Speculative schema | ✅ Approved — drop 2 columns, wire effectiveConfidence, keep 2 functions | 2026-04-09 | `6-abm-simplification-dead-code.md` |
 | 7 | Emotion model | ⏳ Direction agreed — improve, not drop. Tasks defined. | 2026-04-09 | `7-abm-simplification-emotion.md` |
@@ -208,3 +208,4 @@ From `abm-simplification-counter.md`:
 | `1-abm-simplification-baseline.json` | Item #1 raw benchmark data |
 | `6-abm-simplification-dead-code.md` | Item #6 detailed plan + tasks |
 | `7-abm-simplification-emotion.md` | Item #7 detailed plan + tasks |
+| `4-abm-simplification-sleep.md` | Item #4 detailed plan + tasks |
