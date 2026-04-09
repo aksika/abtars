@@ -20,19 +20,30 @@ export function hasSleepAuditToday(auditDir: string): boolean {
       try {
         const state = JSON.parse(readFileSync(join(auditDir, lockFile), "utf-8"));
 
-        // Lock has a pid — check if that process is still alive
-        if (state.pid) {
-          try { process.kill(state.pid as number, 0); logDebug(TAG, `Sleep process ${state.pid} still running`); return true; }
-          catch { /* process dead — fall through to step check */ }
+        // Check top-level status first (new format)
+        if (state.status === "completed" || state.status === "suspended") {
+          logDebug(TAG, `Sleep ${state.status as string} — no retry today`);
+          return true;
+        }
+        if (state.status === "ongoing") {
+          // Check if pid is still alive
+          if (state.pid) {
+            try { process.kill(state.pid as number, 0); logDebug(TAG, `Sleep process ${state.pid as number} still running`); return true; }
+            catch { logDebug(TAG, "Sleep process dead — retry allowed"); return false; }
+          }
+        }
+        if (state.status === "failed") {
+          logDebug(TAG, "Sleep failed — retry allowed");
+          return false;
         }
 
+        // Legacy format (no status field) — fall back to step inspection
         const steps = Object.values(state.steps ?? {}) as Array<{ status: string }>;
         const hasFailed = steps.some(s => s.status === "failed" || s.status === "pending" || s.status === "timeout");
         if (hasFailed) {
           logDebug(TAG, "Lock file has incomplete steps — retry allowed");
           return false;
         }
-        // All steps ok/skipped → sleep completed
         return steps.length > 0;
       } catch { return false; }
     }

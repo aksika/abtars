@@ -99,9 +99,11 @@ export interface AuditLogEntry {
 type StepStatus = "ok" | "failed" | "skipped" | "pending" | "timeout";
 type StepResult = { status: StepStatus; duration?: number; attempts?: number };
 type WiredResults = { purged: number; deduped: number; embedded: number; anomaliesFixed: number; walOk: boolean; ftsOk: boolean; logsDeleted: number };
-type SleepState = { pid: number; startedAt: number; wiredResults?: WiredResults; steps: Record<string, StepResult> };
+type SleepStatus = "ongoing" | "completed" | "suspended" | "failed";
+type SleepState = { status: SleepStatus; pid: number; startedAt: number; llmCalls: number; wiredResults?: WiredResults; steps: Record<string, StepResult> };
 
 const SLEEP_TIMEOUT_MS = (parseInt(process.env["SLEEP_TIMEOUT_MIN"] ?? "", 10) || 55) * 60 * 1000; // default 55 minutes
+const SLEEP_MAX_LLM_CALLS = parseInt(process.env["SLEEP_MAX_LLM_CALLS"] ?? "", 10) || 12;
 
 /** Get the primary chat ID from DB, falling back to ALLOWED_USER_IDS env var. */
 function getPrimaryChatId(db: import("better-sqlite3").Database): number {
@@ -119,9 +121,11 @@ function readStateFile(path: string): SleepState | null {
   try {
     if (!existsSync(path)) return null;
     const raw = JSON.parse(readFileSync(path, "utf-8"));
-    // Validate it's a proper state file (not old PID-only format)
     if (typeof raw !== "object" || raw === null || !raw.steps) return null;
-    return raw;
+    // Backfill defaults for legacy lock files
+    if (!raw.status) raw.status = "ongoing";
+    if (raw.llmCalls == null) raw.llmCalls = 0;
+    return raw as SleepState;
   } catch { return null; }
 }
 
@@ -250,13 +254,43 @@ async function createSleepTransport(verbose: boolean): Promise<{ transport: impo
 const MAX_RETRIES = 3;
 
 /** Send a prompt with retry logic. Returns response or null on exhaustion. */
+/** Budget tracker — shared across all sendWithRetry calls in a sleep cycle. */
+class LlmBudget {
+  private state: SleepState;
+  private readonly statePath: string;
+  exhausted = false;
+
+  constructor(state: SleepState, statePath: string) {
+    this.state = state;
+    this.statePath = statePath;
+  }
+
+  /** Increment counter, return false if budget exhausted. */
+  consume(): boolean {
+    this.state.llmCalls = (this.state.llmCalls ?? 0) + 1;
+    writeStateFile(this.statePath, this.state);
+    if (this.state.llmCalls > SLEEP_MAX_LLM_CALLS) {
+      this.exhausted = true;
+      return false;
+    }
+    return true;
+  }
+
+  get calls(): number { return this.state.llmCalls ?? 0; }
+}
+
 async function sendWithRetry(
   transport: import("../../components/transport/acp-transport.js").AcpTransport,
   prompt: string,
   stepName: string,
   _verbose: boolean,
+  budget?: LlmBudget,
 ): Promise<string | null> {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    if (budget && !budget.consume()) {
+      logWarn(TAG, `[BUDGET] LLM call limit (${SLEEP_MAX_LLM_CALLS}) reached at step ${stepName} — suspending`);
+      return null;
+    }
     try {
       const response = await transport.sendPrompt("system:sleep", prompt);
       return response;
@@ -488,6 +522,7 @@ async function runCatchUp(
   memoryConfig: { memoryDir: string },
   steps: SleepStep[],
   flags: RawArgs,
+  budget?: LlmBudget,
 ): Promise<void> {
   for (const lock of locks) {
     if (lock.ageDays > CATCHUP_MAX_AGE_DAYS) {
@@ -513,7 +548,7 @@ async function runCatchUp(
         const chatId = getPrimaryChatId(db);
         const dayStart = dateStrToMs(lock.dateStr);
         const dayEnd = dayStart + 86400000;
-        const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "catch-up-04a", flags.verbose).then(r => r ?? ""), {
+        const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "catch-up-04a", flags.verbose, budget).then(r => r ?? ""), {
           ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs: 0,
           dateRange: { startTs: dayStart, endTs: dayEnd },
         });
@@ -541,7 +576,7 @@ async function runCatchUp(
         const start = Date.now();
         try {
           const chatId = getPrimaryChatId(db);
-          const result = await extractFromDaily(dailyPath, chatId, (p) => sendWithRetry(transport, p, "catch-up-04b", flags.verbose).then(r => r ?? ""));
+          const result = await extractFromDaily(dailyPath, chatId, (p) => sendWithRetry(transport, p, "catch-up-04b", flags.verbose, budget).then(r => r ?? ""));
           lock.state.steps["04b-extract-from-daily"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
           logInfo(TAG, `[CATCH-UP] ✓ 04b-extract-from-daily for ${lock.dateStr} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
         } catch (err) {
@@ -558,7 +593,7 @@ async function runCatchUp(
       const step = steps.find(s => s.name === stepName);
       if (!step) { logWarn(TAG, `[CATCH-UP] Step file not found: ${stepName}`); continue; }
       const start = Date.now();
-      const response = await sendWithRetry(transport, step.prompt, `catch-up-${stepName}`, flags.verbose);
+      const response = await sendWithRetry(transport, step.prompt, `catch-up-${stepName}`, flags.verbose, budget);
       if (response) {
         lock.state.steps[stepName] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
         logInfo(TAG, `[CATCH-UP] ✓ ${stepName} (${((Date.now() - start) / 1000).toFixed(1)}s)`);
@@ -678,11 +713,15 @@ async function main(): Promise<number> {
 
     // Initialize state file
     const state: SleepState = existingState ?? {
+      status: "ongoing",
       pid: process.pid,
       startedAt: Date.now(),
+      llmCalls: 0,
       wiredResults,
       steps: {},
     };
+    state.status = "ongoing";
+    state.pid = process.pid;
     state.wiredResults = wiredResults;
 
     // 20-min wall-clock timeout
@@ -696,12 +735,15 @@ async function main(): Promise<number> {
     let dailySummaryPath: string | null = null;
 
     try {
+      // ── LLM call budget (hard safety limit) ──
+      const budget = new LlmBudget(state, statePath);
+
       // ── Catch-up: recover failed essentials from previous days ──
       const sleepDir = join(memoryConfig.memoryDir, "sleep");
       const previousLocks = scanPreviousLocks(sleepDir, dateStr);
       if (previousLocks.length > 0) {
         logInfo(TAG, `[CATCH-UP] Found ${previousLocks.length} previous lock(s)`);
-        await runCatchUp(previousLocks, transport, db, memoryConfig, steps, flags);
+        await runCatchUp(previousLocks, transport, db, memoryConfig, steps, flags, budget);
       }
 
       emitProgress("starting");
@@ -712,6 +754,14 @@ async function main(): Promise<number> {
       mkdirSync(stepLogDir, { recursive: true });
 
       for (const step of steps) {
+        // Hard safety: LLM call budget exhausted → suspend
+        if (budget.exhausted) {
+          logWarn(TAG, `[BUDGET] Suspending sleep — ${budget.calls}/${SLEEP_MAX_LLM_CALLS} LLM calls used`);
+          state.status = "suspended";
+          writeStateFile(statePath, state);
+          break;
+        }
+
         emitProgress(step.name);
         stepIndex++;
 
@@ -751,7 +801,7 @@ async function main(): Promise<number> {
             const firstMsgDate = firstMsgRow?.ts ? new Date(firstMsgRow.ts) : new Date();
             const targetDate = `${firstMsgDate.getFullYear()}-${String(firstMsgDate.getMonth() + 1).padStart(2, "0")}-${String(firstMsgDate.getDate()).padStart(2, "0")}`;
 
-            const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "04a-daily-summary", flags.verbose).then(r => r ?? ""), {
+            const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "04a-daily-summary", flags.verbose, budget).then(r => r ?? ""), {
               ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs,
             });
             if (summary) {
@@ -780,7 +830,7 @@ async function main(): Promise<number> {
           }
           try {
             const chatId = getPrimaryChatId(db);
-            const result = await extractFromDaily(dailySummaryPath, chatId, (p) => sendWithRetry(transport, p, "04b-extract", flags.verbose).then(r => r ?? ""));
+            const result = await extractFromDaily(dailySummaryPath, chatId, (p) => sendWithRetry(transport, p, "04b-extract", flags.verbose, budget).then(r => r ?? ""));
             state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
             writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), result, "utf-8");
             logInfo(TAG, `[SLEEP] ✓ ${step.name} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
@@ -794,7 +844,7 @@ async function main(): Promise<number> {
         }
 
         // Standard prompt-driven step
-        const response = await sendWithRetry(transport, step.prompt, step.name, flags.verbose);
+        const response = await sendWithRetry(transport, step.prompt, step.name, flags.verbose, budget);
         const duration = Date.now() - start;
 
         if (response) {
@@ -821,6 +871,12 @@ async function main(): Promise<number> {
     } finally {
       clearTimeout(timeoutHandle);
       try { transport.destroy(); } catch { /* */ }
+    }
+
+    // Set final status
+    if (state.status === "ongoing") {
+      state.status = dreamySucceeded ? "completed" : "failed";
+      writeStateFile(statePath, state);
     }
 
     // Advance extraction watermark — only when all steps succeeded
