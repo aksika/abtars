@@ -3,6 +3,13 @@ import { handleCommand, type CommandContext } from "./command-handlers.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 
+vi.mock("node:child_process", () => ({
+  execFile: vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
+    cb(null, "{}");
+    return { stderr: { resume: vi.fn() } };
+  }),
+}));
+
 function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
   return {
     sessionKey: "telegram:123",

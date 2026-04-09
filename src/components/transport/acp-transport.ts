@@ -52,6 +52,7 @@ export class AcpTransport implements IKiroTransport {
   lastActivityAt = 0;
   /** Currently in-flight tool call (null if none). */
   toolInFlight: { title: string; startedAt: number } | null = null;
+  private _promptActive = false;
   /** Last prompt sent (for watchdog re-send). */
   lastPromptText = "";
   /** Last session key used (for watchdog re-send). */
@@ -182,17 +183,22 @@ export class AcpTransport implements IKiroTransport {
     this.toolInFlight = null;
     this.lastPromptText = message;
     this.lastSessionKey = sessionKey;
+    this._promptActive = true;
 
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.
-    const result = await this.promptWithRetry(sessionId, message);
+    try {
+      const result = await this.promptWithRetry(sessionId, message);
 
-    logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
-    this.lastSuccessAt = Date.now();
+      logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
+      this.lastSuccessAt = Date.now();
 
-    const chunks = this.responseChunks.get(sessionId) ?? [];
-    this.responseChunks.delete(sessionId);
-    return chunks.join("") || "(no response)";
+      const chunks = this.responseChunks.get(sessionId) ?? [];
+      this.responseChunks.delete(sessionId);
+      return chunks.join("") || "(no response)";
+    } finally {
+      this._promptActive = false;
+    }
   }
 
   private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
@@ -389,8 +395,8 @@ export class AcpTransport implements IKiroTransport {
       return;
     }
 
-    // Silent (>5min, no tool)
-    if (silentMs > this._silentTimeout && !this.toolInFlight) {
+    // Silent (>5min, no tool) — but only if no prompt is actively awaiting
+    if (silentMs > this._silentTimeout && !this.toolInFlight && !this._promptActive) {
       if (!this._watchdogL1Done) {
         logWarn(this.tag, `[transport-health] Silent ${Math.round(silentMs / 1000)}s — re-sending`);
         this._watchdogL1Done = true;

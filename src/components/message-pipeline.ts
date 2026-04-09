@@ -390,12 +390,19 @@ export async function handleInboundMessage(
       await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
     }
 
-    // Auto-reset on context window overflow (ValidationException / -32603 repeated)
+    // Auto-reset on context window overflow (ValidationException or actual context errors)
     const errStr = String(err instanceof Error ? err.message : JSON.stringify(err));
-    if (errStr.includes("ValidationException") || errStr.includes("-32603")) {
+    const isContextOverflow = errStr.includes("ValidationException")
+      || (errStr.includes("context window") || errStr.includes("token limit") || errStr.includes("maximum context"));
+    const isTimeout = errStr.includes("timed out") || errStr.includes("Prompt already in progress");
+
+    if (isContextOverflow) {
       logWarn(TAG, `Context overflow detected — auto-resetting session`);
       await resetAndPrepare({ transport, sessionKey, reason: `ctx-overflow: ${errStr.slice(0, 100)}`, pendingSessionStart });
       await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(() => {});
+    } else if (isTimeout) {
+      logWarn(TAG, `Request timeout — not resetting session`);
+      await adapter.sendMessage(channelId, "⏱️ Request timed out. Try again or /reset if stuck.", { threadId: msg.threadId }).catch(() => {});
     } else {
       await adapter.sendMessage(channelId, "❌ Something went wrong. Try /reset to start fresh.", { threadId: msg.threadId }).catch(() => {});
     }
