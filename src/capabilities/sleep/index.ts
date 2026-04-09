@@ -85,21 +85,22 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
             if (currentMsgTs > msgTsAtSpawn) {
               logInfo("sleep", "💤 Mac sleep skipped — user messaged during sleep cycle");
             } else {
-              logInfo("sleep", "💤 Putting Mac to sleep...");
+              logInfo("sleep", "💤 Announcing sleep — will sleep after 1 tick if user stays quiet");
+              const announceMsgTs = opts.getLastMsgTs?.() ?? 0;
               if (opts.sendSystemMessage) {
-                opts.sendSystemMessage("Dreamy finished. Announce to the user that the system is going to sleep now for the night. Keep it brief and friendly.")
-                  .catch(() => {})
-                  .finally(() => {
-                    try { execSync("pmset sleepnow", { timeout: 5000 }); }
-                    catch (err) { logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`); }
-                  });
-              } else {
-                try {
-                  execSync("pmset sleepnow", { timeout: 5000 });
-                } catch (err) {
-                  logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`);
-                }
+                opts.sendSystemMessage("Dreamy finished nightly maintenance. Announce to the user that the system is going to sleep in ~5 minutes. If they need anything, now is the time. Keep it brief and friendly.").catch(() => {});
               }
+              // Wait one heartbeat tick (5 min), then check if user interrupted
+              setTimeout(() => {
+                const postAnnounceMsgTs = opts.getLastMsgTs?.() ?? 0;
+                if (postAnnounceMsgTs > announceMsgTs) {
+                  logInfo("sleep", "💤 Mac sleep cancelled — user messaged after announcement");
+                  return;
+                }
+                logInfo("sleep", "💤 Putting Mac to sleep...");
+                try { execSync("pmset sleepnow", { timeout: 5000 }); }
+                catch (err) { logWarn("sleep", `💤 Mac sleep failed: ${err instanceof Error ? err.message : String(err)}`); }
+              }, 5 * 60 * 1000);
             }
           }
         } else if (attempts < MAX_RETRIES) {
