@@ -1,15 +1,13 @@
 # §1 Retrospective
 
-Read the full messages table for the period since last sleep. This must happen FIRST — before any garbage collection deletes messages.
+Here are the messages from today's conversations (noise-stripped, since last sleep):
 
-```sql
-sqlite3 ~/.agentbridge/memory/memory.db "SELECT role, content, emotion_score FROM messages WHERE timestamp > ${LAST_SLEEP_TS} ORDER BY timestamp;"
-```
+${RETRO_MESSAGES}
 
 Answer these 5 questions honestly and write to `~/.agentbridge/memory/retrospectives/retro_${WAKEUP_DATE}.md`:
 
 1. **What went well?** — Conversations where I was helpful, accurate, or efficient. What patterns worked?
-2. **What went wrong?** — Misunderstandings, errors, wasted effort, frustrated user reactions (check emotion_score < 0). What failed?
+2. **What went wrong?** — Misunderstandings, errors, wasted effort, frustrated user reactions (check emotion scores < 0). What failed?
 3. **How can I improve?** — Concrete behavioral changes for tomorrow. Not vague aspirations.
 4. **Emotional attribution** — For negative moments: was it my fault (wrong answer, slow, misunderstood) or external (unclear request, changed requirements, tool failure)? Be honest — don't blame externals when I was wrong.
 5. **What did I learn?** — New facts, preferences, workflows, or corrections from the user.

@@ -681,6 +681,31 @@ async function main(): Promise<number> {
       ? `This is a RESUMED sleep cycle. Steps already completed: ${Object.entries(existingState!.steps).filter(([, s]) => s.status === "ok" || s.status === "skipped").map(([k]) => k).join(", ")}. Only pending/failed steps will run.`
       : "Fresh sleep cycle — all steps will run.";
 
+    // Pre-query messages for retro (watermark-scoped, noise-stripped)
+    const lastSleepTs = snapshot.lastSleepTimestamp ?? 0;
+    try {
+      const garbagePath = join(memoryConfig.memoryDir, "garbage.json");
+      const garbageIds = new Set<number>();
+      try {
+        const raw = JSON.parse(readFileSync(garbagePath, "utf-8"));
+        const entries = Array.isArray(raw) ? raw : (raw?.messages ?? []);
+        for (const e of entries) { if (e?.messageId) garbageIds.add(e.messageId); }
+      } catch { /* no garbage file */ }
+
+      const msgs = db.prepare(
+        `SELECT id, role, content, emotion_score FROM messages WHERE timestamp > ? ORDER BY timestamp`,
+      ).all(lastSleepTs) as Array<{ id: number; role: string; content: string; emotion_score: number | null }>;
+
+      const lines = msgs
+        .filter(m => !garbageIds.has(m.id) && !m.content.startsWith("[SYSTEM"))
+        .map(m => `[${m.role}]${m.emotion_score ? ` (emotion:${m.emotion_score})` : ""} ${m.content.slice(0, 500)}`);
+
+      vars.RETRO_MESSAGES = lines.length > 0
+        ? `${lines.length} messages since last sleep:\n\n${lines.join("\n")}`
+        : "No messages since last sleep.";
+      logInfo(TAG, `[SLEEP] Pre-queried ${lines.length} messages for retro (${msgs.length} total, ${garbageIds.size} garbage filtered)`);
+    } catch { vars.RETRO_MESSAGES = "Error loading messages — use agentbridge-recall to search."; }
+
     const steps = loadSleepSteps(snapshot);
     for (const step of steps) {
       step.prompt = substituteVars(step.prompt, vars);

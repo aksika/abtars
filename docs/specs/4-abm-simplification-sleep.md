@@ -39,6 +39,8 @@
 
 **Reordered from current:** GC noise runs first (was step 4c, now first). Daily summary + extraction run before retro (was after). Retro now reads clean, watermark-scoped messages instead of all messages including noise. This is why the current retro takes 20 minutes on slower models — it reads everything.
 
+**⚠️ GC → Daily Summary dependency:** GC marks messages in `garbage.json` but `buildDailySummary` doesn't filter them out (bug — task 0c). After fix: daily summary skips garbage-marked messages, retro reads only clean data. Both bugs (0b watermark + 0c garbage filter) must ship before the reordering has effect.
+
 **Key property:** Steps have ordering dependencies (GC before daily, daily before retro, retro before retro-extract). Must run sequentially within the phase.
 
 **Essential steps:** 4a, 4b, 1, 9. If these fail, catch-up is needed.
@@ -94,63 +96,62 @@
 ```
 Sleep trigger
   │
-  ├── State snapshot (SleepStateGatherer — unchanged)
+  ├── State snapshot (SleepStateGatherer — per-phase subsets)
   │
-  ├── Phase 1: EXTRACT (1 kiro-cli session)
-  │     ├── Identity prompt (Dreamy rules + state snapshot)
-  │     ├── GC Noise prompt (strip garbage FIRST — clean data for retro)
-  │     ├── Daily Summary (code-driven, batched, watermark-scoped)
-  │     ├── Extract from Daily (code-driven)
-  │     ├── Retrospective prompt (NEW messages only, noise-stripped, watermark-scoped)
-  │     ├── Retro Extract prompt (extract lessons from retro)
-  │     └── Reminders prompt
-  │     Session destroyed after phase completes.
+  ├── Phase 1: EXTRACT (1 agent session, Dreamy role)
+  │     ├── [bridge-injected: Dreamy persona + Phase 1 state snapshot]
+  │     ├── 🤖 GC Noise (strip garbage FIRST — clean data for retro)
+  │     ├── 🤖 Daily Summary (code-driven orchestrator, watermark-scoped)
+  │     ├── 🤖 Extract from Daily (code-driven orchestrator)
+  │     ├── 🤖 Retrospective (NEW messages only, noise-stripped)
+  │     ├── 🤖 Retro Extract (lessons from retro)
+  │     └── 🤖 Reminders
+  │     Session destroyed. Results written to disk.
   │
-  ├── Code-driven maintenance (NO kiro-cli needed)
-  │     ├── Emotion/Flags backfill (pure regex)
-  │     ├── Compression backfill (pure regex)
-  │     ├── Emotional arcs (buildArc per topic)
-  │     ├── Memory aging (pure SQL)
-  │     ├── Media cleanup (filesystem)
-  │     └── effectiveConfidence decay (pure math)
+  ├── Code-driven maintenance (NO agent session needed)
+  │     ├── ⚙️ Emotion/Flags backfill (pure regex)
+  │     ├── ⚙️ Compression backfill (pure regex)
+  │     ├── ⚙️ Emotional arcs (buildArc per topic)
+  │     ├── ⚙️ Memory aging (pure SQL)
+  │     ├── ⚙️ Media cleanup (filesystem)
+  │     └── ⚙️ effectiveConfidence decay (pure math)
   │
-  ├── Phase 2: CURATE (1 kiro-cli session)
-  │     ├── Identity prompt (Dreamy rules + state snapshot + Phase 1 results)
-  │     ├── Single curation prompt:
-  │     │     "Here are memories needing curation. For each:
-  │     │      - Assign topics to untagged
-  │     │      - Promote worthy to core (budget: 100)
-  │     │      - Check contradictions in core
-  │     │      - Merge near-duplicates (max 5)
-  │     │      - Fix translations
-  │     │      - Review entity references
-  │     │      - Prune weak memories (Darwinism)
-  │     │      - Boost/demote based on recall feedback"
-  │     ├── Core knowledge review prompt
-  │     └── Skill review prompt
-  │     Session destroyed after phase completes.
+  ├── Phase 2: CURATE (1 agent session, Dreamy role)
+  │     ├── [bridge-injected: Dreamy persona + Phase 2 snapshot + Phase 1 results]
+  │     ├── 🤖 Batched curation (topics, promote, contradict, merge,
+  │     │       translate, entity review, darwinism, feedback)
+  │     ├── 🤖 Core knowledge review
+  │     └── 🤖 Skill review
+  │     Session destroyed. Results written to disk.
   │
-  ├── Phase 3: MAINTAIN (1 kiro-cli session, only if needed)
-  │     ├── Consolidation (weekly/quarterly rollups)
-  │     ├── Anomaly audit
-  │     ├── Cron verify
-  │     └── Topic reorg
-  │     Skip entire phase if no consolidation due + no anomalies + no cron changes.
+  ├── Phase 3: MAINTAIN (1 agent session, Dreamy role — CONDITIONAL)
+  │     ├── [bridge-injected: Dreamy persona + Phase 3 snapshot]
+  │     ├── 🤖 Consolidation (weekly/quarterly rollups)
+  │     ├── 🤖 Anomaly audit
+  │     ├── 🤖 Cron verify
+  │     └── 🤖 Topic reorg
+  │     Skip entire phase if nothing needs doing.
   │
-  └── Phase 4: REVIEW (main agent, after sleep completes)
-        ├── Code writes raw audit file (aggregate phases 1-3 results)
-        ├── Audit injected to main agent as system message (immediately, not at wake-up)
-        ├── Main agent reviews what Dreamy did, flags issues to user
-        └── Future: main agent can trigger targeted phase re-run if issues found
+  └── Phase 4: REVIEW (Professor agent, not Dreamy)
+        ├── ⚙️ Code writes raw audit file (aggregate phases 1-3)
+        ├── 🧠 Audit injected to Professor as system message
+        ├── 💬 Professor sends user "dream report" with summary
+        ├── ⚠️ Flagged issues listed prominently
+        ├── ⏱️ User has 5-min window before hardware sleep
+        └── 🔮 Future: Professor triggers phase re-run if user flags issue
 ```
 
-### Phase 4: Main agent as supervisor
+### Phase 4: Professor as supervisor
 
-Dreamy's job ends after Phase 3. The main agent reviews the audit immediately after sleep completes — not at next wake-up. This makes the main agent the **supervisor** of the sleep cycle:
+Dreamy's job ends after Phase 3. The Professor reviews the audit immediately after sleep completes:
 
-- Dreamy does the work (phases 1-3)
-- Main agent quality-checks it (phase 4)
-- Future enhancement: if the main agent spots an issue (e.g. stale fact promoted to core), it can trigger a targeted re-run of that specific phase without waiting for the next night
+- Code writes raw audit file (aggregate phases 1-3 results)
+- Audit injected to Professor as system message
+- Professor sends user a natural "dream report": "Oh I had a dream: extracted 5 memories, promoted 2 to core..."
+- **Flagged issues listed prominently** — contradictions, failed steps, suspicious deletions, anything Dreamy was unsure about
+- User has 5-min window before hardware sleep to react or intervene
+- Future: Professor can trigger targeted phase re-run if user flags an issue
+- Hardware sleep timer already implemented
 
 ### Key changes from current
 
@@ -182,6 +183,54 @@ By prompt 14, the context has 13 previous responses. Most of that is noise — "
 
 Dreamy gets one focused prompt with the data already prepared. Less tool-calling, less context waste, more focused LLM attention.
 
+
+## Prompt file disposition
+
+28 files in `persona/prompts/sleep/`. What happens to each:
+
+### Kept (used by Phase 1)
+
+| File | Phase 1 step |
+|---|---|
+| `04c-gc-noise.md` | GC Noise (1st prompt) |
+| `01-retrospective.md` | Retrospective (update: watermark-scoped, noise-filtered) |
+| `10-retro-extract.md` | Retro Extract |
+| `03-reminders.md` | Reminders |
+
+`04a-daily-summary.md` and `04b-extract-from-daily.md` are already code-driven — prompts used internally by the orchestrator, not as standalone step files. Kept as-is.
+
+### Merged into batched curation prompts (Phase 2)
+
+These 14 files become 2-3 focused prompts:
+
+| Files merged | New prompt |
+|---|---|
+| `02-feedback.md`, `16-topic-assignment.md`, `17-core-promotion.md`, `18-temporal-review.md`, `21-contradiction.md` | `phase2-curation-promote.md` — topics, promote, contradict, temporal, feedback |
+| `11-merge.md`, `08c-translation-check.md`, `08a-darwinism.md`, `24-entity-review.md` | `phase2-curation-quality.md` — merge, translate, darwinism, entity review |
+| `08b-core-knowledge.md`, `15-skill-review.md` | Kept as separate prompts (distinct tasks) |
+
+### Kept (used by Phase 3)
+
+| File | Phase 3 step |
+|---|---|
+| `12-consolidation.md` | Consolidation |
+| `09-anomaly-audit.md` | Anomaly audit |
+| `06-cron-verify.md` | Cron verify |
+| `07-topic-reorg.md` | Topic reorg |
+
+### Removed (replaced by code-driven steps)
+
+| File | Replaced by |
+|---|---|
+| `00-identity.md` | Bridge-injected session context (future: agent registry) |
+| `19-emotion-flags.md` | Code-driven: `detectEmotions()` + `detectFlags()` |
+| `20-compress-backfill.md` | Code-driven: `compress()` |
+| `22-emotion-arcs.md` | Code-driven: `buildArc()` |
+| `23-memory-aging.md` | Code-driven: `ageMemoryTiers()` |
+| `13-media-cleanup.md` | Code-driven: filesystem FIFO |
+| `14-report.md` | Code-driven: audit aggregation + Professor review |
+
+---
 ---
 
 ## Risk mitigation
@@ -209,17 +258,23 @@ Each step is independently shippable and testable.
 
 | # | Task | Effort | Depends on |
 |---|---|---|---|
+| 0 | ~~Unified agent registry~~ **Moved to separate backlog item.** Good infrastructure but not a sleep simplification — benefits all agents. Sleep orchestrator creates fresh transports per phase the same way it does now. | — | — |
+| 0b | **BUG FIX — ship immediately:** Retro reads ALL messages instead of watermark-scoped. Must only read messages since `last_sleep_timestamp`, noise-stripped. This is why retro takes 20+ minutes on slower models. Standalone fix, no dependency on phase refactor. | 30min | — |
+| 0c | **BUG FIX:** `buildDailySummary` doesn't filter garbage-marked messages. Load `garbage.json`, exclude those IDs from the daily summary query. Without this, GC → Daily Summary reordering doesn't help. | 30min | — |
+| 0d | **Telemetry — ship immediately:** Log `transport.contextPercent` before and after each sleep step. One line per step in the lock file: `{ status, duration, ctxBefore, ctxAfter }`. One night of data validates SLEEP_QUALITY token estimates and shows exactly where tokens go. Trivial — transport already tracks `contextPercent`. | 15min | — |
 | 1 | Extract code-driven steps into standalone functions: emotion/flags backfill, compression backfill, emotional arcs (buildArc), memory aging, media cleanup, effectiveConfidence decay | 2hr | Item #6 (effectiveConfidence wiring) |
 | 2 | Modify orchestrator to run code-driven steps between LLM prompts (no behavior change — same steps, just TypeScript instead of LLM) | 1hr | 1 |
 | 3 | Split into 2 sessions: Extract (steps 1-9) + Curate+Maintain (steps 10-24). Fresh context for session 2. | 1.5hr | 2 |
-| 4 | Batch Phase 2 curation: pre-query candidates, single focused prompt instead of 14 separate prompts | 2hr | 3 |
+| 3b | Per-phase state snapshots: split `SleepStateGatherer` output into phase-relevant subsets. Phase 1 gets message counts + watermarks. Phase 2 gets memory stats + untagged counts + merge candidates. Phase 3 gets disk usage + consolidation dates. Less tokens per prompt, more focused LLM. Phase result files already persist for a day — Phase 2 reads Phase 1's output from disk. | 1hr | 3 |
+| 4 | Batch Phase 2 curation: pre-query candidates, batch into 2-3 focused prompts (10-15 memories each). Don't overload one prompt with 50 memories — sloppy results. E.g. prompt 1: topics+promote+contradict, prompt 2: merge+translate+darwinism, prompt 3: entity+feedback. | 2hr | 3 |
 | 5 | Make Phase 3 conditional: skip if no consolidation due + no anomalies | 30min | 3 |
-| 6 | Phase 4 review: code writes raw audit file after Phase 3. Inject audit to main agent as system message (immediately after sleep, not at wake-up). Main agent reviews and flags issues. | 1hr | 3 |
-| 7 | Update lock file format: phase-based instead of step-based | 1hr | 3 |
-| 8 | Run parallel comparison: old 24-step vs new 4-phase for 1 week, compare audit outputs | ongoing | 4-7 |
-| 9 | Update as-built doc | 30min | 8 |
+| 6 | Phase 4 review: code writes raw audit file after Phase 3. Inject audit to Professor as system message (immediately after sleep). Professor reviews, sends user a natural "dream report" message with summary. Must highlight flagged issues prominently — contradictions, failed steps, suspicious deletions. User has 5-min window before hardware sleep to react. Already implemented: hardware sleep timer + wake-up announcement. | 1hr | 3 |
+| 7 | Update lock file format: phase-based instead of step-based. Existing lock tracking + global state infrastructure stays — just update granularity from 24 steps to 4 phases. Per-phase token limits as normal control. **Keep global 12-call hard cap as emergency brake** — belt and suspenders, justified after burning a night of tokens. | 1hr | 3 |
+| 8 | Implement SLEEP_QUALITY tiering (budget/normal/ultimate) + SLEEP_CURATION_DAY config. Model selection uses existing `SLEEP_MODEL` env — no new config. | 1hr | 3-5 |
+| 9 | Run parallel comparison: old 24-step vs new 4-phase for 1 week, compare audit outputs | ongoing | 4-8 |
+| 10 | Update as-built doc | 30min | 9 |
 
-**Total: ~10hr** (spread across incremental rollout)
+**Total: ~14hr** (spread across incremental rollout, task 0b ships immediately)
 
 Branch: `simplify/sleep-phases`
 
@@ -233,3 +288,90 @@ Branch: `simplify/sleep-phases`
 - **Wall time:** Measure total sleep duration (old vs new)
 - **Completion rate:** Track phase success/failure rates over 1 week
 - **Catch-up:** Verify phase-based catch-up works for missed days
+
+---
+
+## SLEEP_QUALITY Tiering
+
+```env
+SLEEP_QUALITY=normal          # budget | normal | ultimate
+SLEEP_CURATION_DAY=sunday     # which day Phase 2 runs (normal tier only)
+SLEEP_MODEL=<existing env>    # model for Dreamy — unchanged
+```
+
+### Budget — minimum viable sleep
+
+```
+Phase 1 (minimal extraction):
+  🤖 GC Noise
+  🤖 Daily Summary
+  🤖 Extract from Daily
+
+Code-driven (free, every night):
+  ⚙️ all 6 steps
+
+Phase 2: skip
+Phase 3: skip
+Phase 4: code audit only (no Professor review)
+
+→ 3 LLM calls/night
+  Facts captured. No self-reflection, no lessons, no curation.
+```
+
+### Normal (default) — daily extraction, weekly curation
+
+```
+Phase 1 (full, every night):
+  🤖 GC Noise
+  🤖 Daily Summary
+  🤖 Extract from Daily
+  🤖 Retrospective
+  🤖 Retro Extract
+  🤖 Reminders
+
+Code-driven (free, every night):
+  ⚙️ all 6 steps
+
+Phase 2 (weekly, on SLEEP_CURATION_DAY):
+  🤖 Batched curation
+  🤖 Core knowledge review
+  🤖 Skill review
+
+Phase 3: when needed (consolidation due, anomalies)
+Phase 4: code audit + Professor dream report
+
+→ 6 LLM calls/night, +3 on curation day
+  Full extraction + reflection daily. Curation weekly.
+```
+
+### Ultimate — everything, every night
+
+```
+Phase 1 (full):               6 LLM calls
+Code-driven (free):           0 LLM calls
+Phase 2 (full):               3 LLM calls
+Phase 3 (when needed):        0-4 LLM calls
+Phase 4: code audit + Professor dream report
+
+→ 9-13 LLM calls/night. Everything, every night.
+```
+
+### Token estimates
+
+| Tier | LLM calls/night | Est. tokens/night | Monthly (30 nights) |
+|---|---|---|---|
+| Budget | 3 | ~8-15K | ~250-450K |
+| Normal | 6 (+3 weekly) | ~15-30K | ~550K-1M |
+| Ultimate | 9-13 | ~30-55K | ~1-1.8M |
+
+### What runs on ALL tiers (free, code-driven)
+
+Every night, regardless of SLEEP_QUALITY:
+- Emotion/flags backfill (pure regex)
+- Compression backfill (pure regex)
+- Emotional arcs — buildArc per topic (pure math)
+- Memory aging — three-tier, pressure-based (pure SQL)
+- Media cleanup — FIFO 100MB (filesystem)
+- effectiveConfidence decay (pure math)
+
+Zero LLM cost. ~300ms total. Memory stays healthy even on Budget.

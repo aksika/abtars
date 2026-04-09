@@ -3,11 +3,24 @@
  * Reads messages from DB, batches by token budget, accumulates summary.
  */
 
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeForSummary } from "../../memory/media-sanitizer.js";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import type Database from "better-sqlite3";
+
+/** Load garbage-marked message IDs from garbage.json. */
+function loadGarbageIds(memoryDir: string): Set<number> {
+  const ids = new Set<number>();
+  try {
+    const garbagePath = join(memoryDir, "garbage.json");
+    if (!existsSync(garbagePath)) return ids;
+    const raw = JSON.parse(readFileSync(garbagePath, "utf-8"));
+    const entries = Array.isArray(raw) ? raw : (raw?.messages ?? []);
+    for (const e of entries) { if (e?.messageId) ids.add(e.messageId); }
+  } catch { /* */ }
+  return ids;
+}
 
 const TAG = "daily-summary";
 
@@ -145,15 +158,19 @@ export async function buildDailySummary(
   sendPrompt: SendPromptFn,
   config: DailySummaryConfig,
 ): Promise<string | null> {
-  const messages = config.dateRange
+  const rawMessages = config.dateRange
     ? readMessagesByDateRange(db, config.chatId, config.dateRange.startTs, config.dateRange.endTs)
     : readMessages(db, config.chatId, config.watermarkTs);
+
+  // Filter garbage-marked messages
+  const garbageIds = loadGarbageIds(config.memoryDir);
+  const messages = rawMessages.filter(m => !garbageIds.has(m.id) && !m.content.startsWith("[SYSTEM"));
   if (messages.length === 0) {
-    logInfo(TAG, "No messages to summarize");
+    logInfo(TAG, `No messages to summarize (${rawMessages.length} raw, ${garbageIds.size} garbage filtered)`);
     return null;
   }
 
-  logInfo(TAG, `Processing ${messages.length} messages`);
+  logInfo(TAG, `Processing ${messages.length} messages (${rawMessages.length - messages.length} garbage/system filtered)`);
 
   // Estimate total tokens
   const totalTokens = messages.reduce(
