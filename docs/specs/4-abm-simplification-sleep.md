@@ -1,7 +1,7 @@
 # ABM Simplification #4 — Sleep: 24 Steps → 4 Phases
 
 **Date:** 2026-04-09
-**Status:** Planning
+**Status:** Planning — tasks 0b/0c/0d shipped, awaiting telemetry data before phase refactor
 **Master plan:** `abm-simplification.md`
 **Caveat from counter-discussion:** Biggest refactor on the list. Current 24 steps are battle-tested. Do AFTER #1 is validated. Don't rush.
 
@@ -259,9 +259,9 @@ Each step is independently shippable and testable.
 | # | Task | Effort | Depends on |
 |---|---|---|---|
 | 0 | ~~Unified agent registry~~ **Moved to separate backlog item.** Good infrastructure but not a sleep simplification — benefits all agents. Sleep orchestrator creates fresh transports per phase the same way it does now. | — | — |
-| 0b | **BUG FIX — ship immediately:** Retro reads ALL messages instead of watermark-scoped. Must only read messages since `last_sleep_timestamp`, noise-stripped. This is why retro takes 20+ minutes on slower models. Standalone fix, no dependency on phase refactor. | 30min | — |
-| 0c | **BUG FIX:** `buildDailySummary` doesn't filter garbage-marked messages. Load `garbage.json`, exclude those IDs from the daily summary query. Without this, GC → Daily Summary reordering doesn't help. | 30min | — |
-| 0d | **Telemetry — ship immediately:** Log `transport.contextPercent` before and after each sleep step. One line per step in the lock file: `{ status, duration, ctxBefore, ctxAfter }`. One night of data validates SLEEP_QUALITY token estimates and shows exactly where tokens go. Trivial — transport already tracks `contextPercent`. | 15min | — |
+| 0b | **BUG FIX — ✅ SHIPPED:** Retro reads pre-queried watermark-scoped messages. `${RETRO_MESSAGES}` injected into prompt — LLM no longer queries DB directly. Garbage-filtered, system messages stripped. | 30min | — |
+| 0c | **BUG FIX — ✅ SHIPPED:** `buildDailySummary` filters garbage-marked messages via `loadGarbageIds()`. GC → Daily Summary reordering now works. | 30min | — |
+| 0d | **Telemetry — ✅ SHIPPED:** `ctxBefore`/`ctxAfter` per step in lock file. First night of data validates tiering estimates. | 15min | — |
 | 1 | Extract code-driven steps into standalone functions: emotion/flags backfill, compression backfill, emotional arcs (buildArc), memory aging, media cleanup, effectiveConfidence decay | 2hr | Item #6 (effectiveConfidence wiring) |
 | 2 | Modify orchestrator to run code-driven steps between LLM prompts (no behavior change — same steps, just TypeScript instead of LLM) | 1hr | 1 |
 | 3 | Split into 2 sessions: Extract (steps 1-9) + Curate+Maintain (steps 10-24). Fresh context for session 2. | 1.5hr | 2 |
@@ -375,3 +375,29 @@ Every night, regardless of SLEEP_QUALITY:
 - effectiveConfidence decay (pure math)
 
 Zero LLM cost. ~300ms total. Memory stays healthy even on Budget.
+
+---
+
+## Decision Log
+
+| # | Item | Decision | Date | Notes |
+|---|---|---|---|---|
+| 0 | Agent registry | Moved to backlog | 2026-04-09 | Not a sleep simplification |
+| 0b | Retro watermark fix | ✅ Shipped | 2026-04-09 | `${RETRO_MESSAGES}` pre-queried |
+| 0c | Daily summary garbage filter | ✅ Shipped | 2026-04-09 | `loadGarbageIds()` in buildDailySummary |
+| 0d | Sleep telemetry | ✅ Shipped | 2026-04-09 | ctxBefore/ctxAfter per step |
+| 1-10 | Phase refactor | Approved | 2026-04-09 | Incremental rollout, start after telemetry data |
+
+## Already shipped (infrastructure)
+
+These were shipped as part of the sleep stability work before the phase refactor:
+
+| Item | What | Date |
+|---|---|---|
+| Lock file global status | `status: ongoing\|completed\|suspended\|failed` | 2026-04-09 |
+| LLM call budget | `SLEEP_MAX_LLM_CALLS=12` hard cap, `suspended` on exhaust | 2026-04-09 |
+| Duplicate spawn prevention | `hasSleepAuditToday()` checks pid alive + status | 2026-04-09 |
+| Bedtime tick loop fix | `isDailyCycleDue()` checks lock status, stops at completed/suspended | 2026-04-09 |
+| Sleep announcement timing | Post-Dreamy + 5min grace period, user can interrupt | 2026-04-09 |
+| Per-step log files | `sleep/<YYYYMMDD>/<NN>-<step-name>.md` | 2026-04-09 |
+| Sleep model | Changed to `qwen3-coder-next` (5x cheaper than deepseek-3.2) | 2026-04-09 |
