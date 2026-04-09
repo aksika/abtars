@@ -437,6 +437,13 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 13,
+    label: "Drop content_compressed column — ABM-L rendered on the fly",
+    up: (db) => {
+      db.exec(`ALTER TABLE extracted_memories DROP COLUMN content_compressed`);
+    },
+  },
 ];
 
 // ── Migration runner ────────────────────────────────────────────────────────

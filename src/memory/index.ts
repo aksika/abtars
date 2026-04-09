@@ -62,6 +62,8 @@ export { generateSignature, hammingDistance, hammingSimilarity } from "./signatu
 // ABM v2 — sleep-time intelligence
 export { buildArc } from "./emotion-arc.js";
 export { checkContradiction } from "./contradiction-checker.js";
+export { buildTimelines, renderTimeline, renderTimelines } from "./timeline-builder.js";
+export type { Timeline, RenderedTimeline, TimelineMemory } from "./timeline-builder.js";
 
 // ABM v2 — session start
 export { buildWakeUp } from "./wake-up-builder.js";

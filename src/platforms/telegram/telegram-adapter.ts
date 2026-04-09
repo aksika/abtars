@@ -89,6 +89,7 @@ export class TelegramAdapter implements PlatformAdapter {
       { command: "restart", description: "Restart CLI session" },
       { command: "full", description: "Raw output, TTS off" },
       { command: "short", description: "Clean output, TTS on" },
+      { command: "healing", description: "Toggle self-healer on/off" },
       { command: "help", description: "Show all commands" },
     ]).catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
 

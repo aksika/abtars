@@ -1,20 +1,33 @@
-# §8 Memory Merge
+# §8 Memory Merge (Timeline-Based)
 
-Review the top most-recalled extracted memories for near-duplicates:
+Review memories grouped by topic + entity for near-duplicates. Timelines make duplicates obvious — two entries in the same timeline saying the same thing.
+
+## Step 1: Find timeline groups
 
 ```sql
-SELECT id, content_en, recall_count, relevance_score
-FROM extracted_memories WHERE recall_count > 0 ORDER BY recall_count DESC LIMIT 30;
+SELECT id, content_en, topic, recall_count, relevance_score, created_at
+FROM extracted_memories
+WHERE valid_to IS NULL AND content_en IS NOT NULL
+ORDER BY topic, created_at;
 ```
 
-For each pair that expresses the same fact in different words:
+## Step 2: Within each topic group, identify duplicates
+
+Look for memories that:
+- Same topic AND same entity referenced
+- Express the same fact in different words
+- One supersedes the other (later date = more current)
+
+## Step 3: Merge
+
 ```bash
-agentbridge-store --merge --merge-ids <id_A>,<id_B>
+agentbridge-store --merge --merge-ids <older_id>,<newer_id>
 ```
 
 Rules:
 - Max 5 merges per sleep cycle
-- Only merge when confident both express the same fact
+- Only merge within the same topic group
+- If one contradicts the other → invalidate the older one (`agentbridge-edit --memory-id <older> --valid-to <date>`) instead of merging
 - When in doubt, skip — false merges lose information
 
 Respond with merges performed (or "no duplicates found").

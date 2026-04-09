@@ -36,6 +36,7 @@ export type RecallHit = {
   integrity?: number;
   credibility?: number;
   classification?: number;
+  timelineContext?: string;
 };
 
 export type StageResult = {
@@ -248,9 +249,43 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
   // --- Merge in priority order, MMR rerank ---
   const allResults = [...sfHits, ...seHits, ...ssHits, ...s6Hits];
   const reranked = applyMMR(allResults, 0.7);
+  const finalResults = reranked.slice(0, limit);
+
+  // --- Timeline context enrichment ---
+  if (extractedIds.length > 0) {
+    try {
+      const { buildTimelines, renderTimeline } = await import("./timeline-builder.js");
+      // Load sibling memories for recalled IDs (same topic)
+      const topics = new Set<string>();
+      for (const hit of finalResults) {
+        const topicMatch = hit.content.match(/\|([a-z]+)\|/);
+        if (topicMatch) topics.add(topicMatch[1]!);
+      }
+      if (topics.size > 0) {
+        const topicList = [...topics].map(t => `'${t}'`).join(",");
+        const siblings = deps.db.prepare(
+          `SELECT id, content_en, topic, memory_type, emotion_tags, importance_flags, confidence, created_at, emotion_context
+           FROM extracted_memories WHERE topic IN (${topicList}) AND valid_to IS NULL AND content_en IS NOT NULL
+           ORDER BY created_at`,
+        ).all() as Array<{ id: number; content_en: string; topic: string; memory_type: string | null; emotion_tags: string | null; importance_flags: string | null; confidence: number | null; created_at: number; emotion_context: string | null }>;
+        const timelines = buildTimelines(siblings);
+        const idToTimeline = new Map<number, string>();
+        for (const tl of timelines) {
+          const rendered = renderTimeline(tl);
+          for (const id of rendered.memoryIds) idToTimeline.set(id, rendered.rendered);
+        }
+        for (let i = 0; i < finalResults.length; i++) {
+          const id = extractedIds[i];
+          if (id !== undefined && idToTimeline.has(id)) {
+            finalResults[i]!.timelineContext = idToTimeline.get(id);
+          }
+        }
+      }
+    } catch { /* timeline builder not available */ }
+  }
 
   return {
-    results: reranked.slice(0, limit),
+    results: finalResults,
     stages,
     shortCircuitAfter: sfFull ? "Sf" : null,
     extractedIds,

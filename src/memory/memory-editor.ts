@@ -1,4 +1,4 @@
-import { localMonth, localDate } from "../utils/local-time.js";
+import { localDate } from "../utils/local-time.js";
 import type Database from "better-sqlite3";
 import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "./mem-types.js";
 import { clampEmotionScore, scoreFromTags } from "./emotion-utils.js";
@@ -6,7 +6,6 @@ import { loadEmbedConfig, embedText } from "./ollama-embed.js";
 import { logError, logInfo } from "./mem-logger.js";
 import { detectEmotions } from "./emotion-tagger.js";
 import { detectFlags } from "./importance-flagger.js";
-import { compress } from "./memory-compressor.js";
 import { generateSignature } from "./signature-generator.js";
 
 const TAG = "memory-editor";
@@ -146,12 +145,6 @@ export class MemoryEditor {
       const emotionScore = scoreFromTags(emotionTags) || clampEmotionScore(params.emotionScore);
       const importanceFlags = detectFlags(contentEn).join(",");
       const topicVal = params.topic ?? "general";
-      const compressed = compress({
-        content_en: contentEn, topic: topicVal,
-        emotion_tags: emotionTags, importance_flags: importanceFlags,
-        memory_type: params.memoryType,
-        confidence: params.confidence, date: localMonth(new Date(now)),
-      });
       const signature = Buffer.from(generateSignature(contentEn));
 
       this.db.prepare(
@@ -159,15 +152,15 @@ export class MemoryEditor {
            (chat_id, content_original, content_en, memory_type, source_timestamp,
             preserve_original, preserved_keyword, emotion_score, created_at,
             confidence, source_message_ids, classification, trust, integrity, credibility,
-            topic, tier, valid_from, emotion_tags, importance_flags, content_compressed, signature, emotion_context)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            topic, tier, valid_from, emotion_tags, importance_flags, signature, emotion_context)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         params.chatId, params.contentOriginal.trim(), contentEn,
         params.memoryType, now, 1, params.keyword?.trim() || null, emotionScore, now,
         params.confidence ?? 3, params.sourceMessageIds?.trim() || null,
         params.classification ?? 1, params.trust ?? 0, params.integrity ?? 2, params.credibility ?? 6,
         topicVal, Math.abs(emotionScore) >= 4 ? "core" : "general", localDate(new Date(now)),
-        emotionTags || null, importanceFlags || null, compressed, signature, params.emotionContext?.trim() || null,
+        emotionTags || null, importanceFlags || null, signature, params.emotionContext?.trim() || null,
       );
 
       this.embedNewMemory(params.contentEn.trim());
