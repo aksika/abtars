@@ -93,6 +93,7 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps, Sess
   requestShutdown?: () => void;
   sleepProgress?: () => { percent: number; step: string } | null;
   loadedCapabilities?: string[];
+  selfHealerTask?: { enabled: boolean } | null;
 }
 
 /**

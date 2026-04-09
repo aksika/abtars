@@ -24,6 +24,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     requestShutdown: deps.requestShutdown,
     sleepProgress: deps.sleepProgress,
     loadedCapabilities: deps.loadedCapabilities,
+    selfHealerTask: deps.selfHealerTask,
     conversationBuffer: msg.isGroup ? conversationBuffer : undefined,
     bufKey: msg.isGroup ? `${msg.platform}:${msg.channelId}` : undefined,
   };

@@ -44,6 +44,7 @@ export interface CommandContext {
   requestShutdown?: PipelineDeps["requestShutdown"];
   sleepProgress?: PipelineDeps["sleepProgress"];
   loadedCapabilities?: PipelineDeps["loadedCapabilities"];
+  selfHealerTask?: { enabled: boolean } | null;
   // Per-message (optional)
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
@@ -67,6 +68,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/restart": handleRestart,
   "/full": handleFull,
   "/short": handleShort,
+  "/healing": handleHealing,
   "/facts": handleFacts,
   "/tasks": handleTasksList,
   "/task": handleTasksList,
@@ -231,6 +233,14 @@ async function handleShort(_text: string, ctx: CommandContext): Promise<boolean>
   if (ctx.platform !== "telegram") return false;
   ctx.fullModeChats.delete(ctx.sessionKey);
   await ctx.reply("✂️ Short mode — clean responses, TTS enabled.");
+  return true;
+}
+
+async function handleHealing(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (!ctx.selfHealerTask) { await ctx.reply("🩺 Self-healer not available."); return true; }
+  ctx.selfHealerTask.enabled = !ctx.selfHealerTask.enabled;
+  await ctx.reply(ctx.selfHealerTask.enabled ? "🩺 Self-healing ON" : "🩺 Self-healing OFF");
+  logInfo(TAG, `Self-healer ${ctx.selfHealerTask.enabled ? "enabled" : "disabled"} by user`);
   return true;
 }
 
@@ -488,7 +498,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/restart — Restart CLI session",
   ];
   if (ctx.platform === "telegram") {
-    cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)");
+    cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");
   }
   if (ctx.platform === "discord" && ctx.config.discordA2aEnabled) {
     cmds.push("/a2a-reset — Reset A2A session");

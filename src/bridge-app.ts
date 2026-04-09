@@ -102,6 +102,7 @@ export class Bridge {
   mcpDaemonStarted = false;
   cronQueue!: CronQueue;
   sleepHandle: import("./capabilities/sleep/index.js").SleepHandle | null = null;
+  selfHealerTask: { enabled: boolean } | null = null;
   telegramAdapter: import("./platforms/telegram/telegram-adapter.js").TelegramAdapter | null = null;
   discordAdapter: import("./platforms/discord/discord-adapter.js").DiscordAdapter | null = null;
 
@@ -460,6 +461,7 @@ export async function startBridge(): Promise<void> {
     requestShutdown: () => process.exit(0),
     sleepProgress: () => sleepHandle?.progress ?? null,
     loadedCapabilities: [],
+    selfHealerTask: null, // set after heartbeat registration
   };
 
   // Wire memory LLM callback + IPC server
@@ -743,9 +745,13 @@ export async function startBridge(): Promise<void> {
   });
 
   // --- Self-healing agent: error scanner ---
+  let selfHealerTask: ReturnType<typeof createSelfHealerTask> | null = null;
   if (process.env["SELFHEAL_ENABLED"] !== "false") {
-    heartbeat.registerTask(createSelfHealerTask(() => bridge.telegramAdapter, config.telegram.allowedUserIds));
+    selfHealerTask = createSelfHealerTask(() => bridge.telegramAdapter, config.telegram.allowedUserIds);
+    heartbeat.registerTask(selfHealerTask);
   }
+  bridge.selfHealerTask = selfHealerTask;
+  pipelineDeps.selfHealerTask = selfHealerTask;
 
   // Run once on startup, then start periodic
   // Wire capability-registered commands

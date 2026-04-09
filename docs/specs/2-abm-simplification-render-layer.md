@@ -161,9 +161,9 @@ The format hint (`Memory format: [TYPE+FLAGS|topic|emotion|confidence|date]...`)
 | Component | Current | After |
 |---|---|---|
 | `instantStore()` | Runs compressor, stores `content_compressed` | Stores English only. Tagger + flagger + signature still run. |
-| `content_compressed` column | Written at store time, read by wake-up + recall | Repurposed as render cache (optional) or dropped |
-| Wake-up builder | Reads `content_compressed` from DB | Renders ABM-L/timeline on the fly from `content_en` |
-| Recall engine | Returns `content_compressed` by default | Renders ABM-L on the fly, returns English with `--full` |
+| `content_compressed` column | Written at store time, read by wake-up + recall | **Dropped** via migration |
+| Wake-up builder | Reads `content_compressed` from DB | Renders ABM-L/timeline on the fly from `content_en`. Model-adaptive. ABM-L hint conditional. |
+| Recall engine | Returns `content_compressed` by default | Renders ABM-L on the fly from `content_en`. `--full` returns English. Timeline context included when available. |
 | Sleep: compress-backfill | Runs nightly | Eliminated |
 | Sleep: entity-review | Runs nightly | Eliminated |
 | Sleep: merge | Compares all pairs for overlap | Timeline-based: group → compare within group |

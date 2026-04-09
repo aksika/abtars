@@ -24,7 +24,7 @@ const DETECTED_FLAG: Record<ImportanceFlag, string> = {
  * - Negations (don't, not, never, no, won't, can't, haven't, shouldn't, isn't, aren't, wasn't, weren't)
  * - Pronouns (I, my, me, you, your, we, our, they, their)
  */
-const FILLER = /\b(the|a|an|is|are|was|were|be|been|being|have|has|had|do|does|did|will|would|could|should|may|might|shall|can|basically|essentially|actually|really|very|just|quite|rather|simply|that|this|these|those|it|its|also|so|then|well|some|about|there)\b/gi;
+const FILLER = /\b(basically|essentially|actually|really|very|just|quite|rather|simply|that|this|these|those|its|also|so|then|well|some|about|there)\b/gi;
 const MULTI_SPACE = /\s{2,}/g;
 
 /** Platform/term abbreviations. */

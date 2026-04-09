@@ -23,15 +23,19 @@ const SELFHEAL_BLACKLIST = [
 export function createSelfHealerTask(
   getTelegramAdapter: () => TelegramAdapter | null,
   allowedUserIds: Set<number>,
-): HeartbeatTask {
+): HeartbeatTask & { enabled: boolean } {
   const maxReports = parseInt(process.env["SELFHEAL_MAX_REPORTS"] ?? "1", 10);
   const cooldownMs = (parseInt(process.env["SELFHEAL_COOLDOWN_MIN"] ?? "30", 10)) * 60 * 1000;
   let lastTs = localISO();
   const seen = new Map<string, number>();
+  let enabled = true;
 
-  return {
+  const task: HeartbeatTask & { enabled: boolean } = {
     name: "self-healer",
+    get enabled() { return enabled; },
+    set enabled(v: boolean) { enabled = v; },
     execute: async () => {
+      if (!enabled) return;
       const logFile = getLogFile();
       try {
         const content = readFileSync(logFile, "utf-8");
@@ -87,4 +91,5 @@ export function createSelfHealerTask(
       } catch { /* log file not readable — skip */ }
     },
   };
+  return task;
 }
