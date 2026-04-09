@@ -16,7 +16,8 @@ const SELFHEAL_BLACKLIST = [
   "ECONNRESET", "ETIMEDOUT", "socket hang up",
   "auto-approved", "permission",
   "BUG REPORT", "[agentbridge-sleep]",
-  "API error",
+  "API error", "exhausted", "quota", "rate limit",
+  "timed out", "Bridge prompt timeout",
 ];
 
 export function createSelfHealerTask(
