@@ -29,6 +29,8 @@ export type RawEditArgs = {
   keyword?: string;
   memoryType?: string;
   emotionScore?: string;
+  emotionTags?: string;
+  emotionContext?: string;
   confidence?: string;
   trust?: string;
   integrity?: string;
@@ -88,6 +90,8 @@ Options:
       case "--tags": parsed.keyword = args[++i] ?? ""; break;
       case "--memory-type": parsed.memoryType = args[++i] ?? ""; break;
       case "--emotion-score": parsed.emotionScore = args[++i] ?? ""; break;
+      case "--emotion-tags": parsed.emotionTags = args[++i] ?? ""; break;
+      case "--emotion-context": parsed.emotionContext = args[++i] ?? ""; break;
       case "--confidence": parsed.confidence = args[++i] ?? ""; break;
       case "--trust": parsed.trust = args[++i] ?? ""; break;
       case "--integrity": parsed.integrity = args[++i] ?? ""; break;
@@ -132,6 +136,8 @@ export function buildEditParams(raw: RawEditArgs): { ok: true; params: EditMemor
   if (raw.keyword !== undefined) params.keyword = raw.keyword;
   if (raw.memoryType) params.memoryType = raw.memoryType as EditMemoryParams["memoryType"];
   if (raw.emotionScore) params.emotionScore = parseInt(raw.emotionScore, 10);
+  if (raw.emotionTags) params.emotionTags = raw.emotionTags;
+  if (raw.emotionContext) params.emotionContext = raw.emotionContext;
   if (raw.confidence) params.confidence = parseInt(raw.confidence, 10);
   if (raw.trust) params.trust = parseInt(raw.trust, 10);
   if (raw.integrity) params.integrity = parseInt(raw.integrity, 10);

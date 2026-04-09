@@ -264,6 +264,49 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
     if (arcsWritten > 0) logInfo(TAG, `[WIRED] ${arcsWritten} emotion arcs updated`);
   } catch (err) { logWarn(TAG, `[WIRED] emotion arcs failed: ${err instanceof Error ? err.message : String(err)}`); }
 
+  // 11. Emotional profile — analyze patterns, write to user_profile.md
+  try {
+    const rows = db.prepare(
+      `SELECT topic, emotion_tags, emotion_context, created_at FROM extracted_memories
+       WHERE emotion_tags IS NOT NULL AND emotion_tags != '' ORDER BY created_at DESC LIMIT 200`,
+    ).all() as Array<{ topic: string; emotion_tags: string; emotion_context: string | null; created_at: number }>;
+
+    if (rows.length >= 10) {
+      const topicEmotions = new Map<string, { positive: number; negative: number; tags: Map<string, number>; contexts: string[] }>();
+      const positiveTags = new Set(["joy", "pride", "excitement", "relief", "gratitude", "love", "hope", "humor"]);
+
+      for (const r of rows) {
+        let entry = topicEmotions.get(r.topic);
+        if (!entry) { entry = { positive: 0, negative: 0, tags: new Map<string, number>(), contexts: [] as string[] }; topicEmotions.set(r.topic, entry); }
+        for (const tag of r.emotion_tags.split(",").map(t => t.trim()).filter(Boolean)) {
+          entry.tags.set(tag, (entry.tags.get(tag) ?? 0) + 1);
+          if (positiveTags.has(tag)) entry.positive++; else entry.negative++;
+        }
+        if (r.emotion_context) entry.contexts.push(r.emotion_context);
+        topicEmotions.set(r.topic, entry);
+      }
+
+      const lines: string[] = ["## Emotional Patterns (auto-generated)", ""];
+      for (const [topic, data] of [...topicEmotions.entries()].sort((a, b) => (b[1].positive + b[1].negative) - (a[1].positive + a[1].negative)).slice(0, 5)) {
+        const topTags = [...data.tags.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([t, c]) => `${t}(${c})`);
+        const ratio = data.positive + data.negative > 0 ? Math.round(data.positive / (data.positive + data.negative) * 100) : 50;
+        const topContexts = [...new Set(data.contexts)].slice(0, 3);
+        lines.push(`- **${topic}**: ${ratio}% positive. Top: ${topTags.join(", ")}${topContexts.length > 0 ? `. Triggers: ${topContexts.join(", ")}` : ""}`);
+      }
+
+      // Append/replace in user_profile.md
+      const profilePath = join(memoryDir, "core", "user_profile.md");
+      if (existsSync(profilePath)) {
+        let content = readFileSync(profilePath, "utf-8");
+        const marker = "## Emotional Patterns (auto-generated)";
+        const idx = content.indexOf(marker);
+        if (idx >= 0) content = content.slice(0, idx).trimEnd();
+        writeFileSync(profilePath, content + "\n\n" + lines.join("\n") + "\n", "utf-8");
+      }
+      logInfo(TAG, `[WIRED] Emotional profile updated (${topicEmotions.size} topics analyzed)`);
+    }
+  } catch (err) { logWarn(TAG, `[WIRED] emotional profile failed: ${err instanceof Error ? err.message : String(err)}`); }
+
   return results;
 }
 
