@@ -359,6 +359,8 @@ Self-healer filed a `[SYSTEM BUG REPORT]` for a `[object Object]` error from the
 
 **Possible fixes:**
 - Self-healer: only scan logs after `BRIDGE START` marker (ignore pre-restart errors)
+- Non-critical errors: report to user with Investigate / Ignore choice instead of auto-investigating. Agent says "I noticed an error: [summary]. Want me to look into it?" User decides.
 - Cap tool output size for log-reading commands (truncate at N chars)
 - Don't auto-investigate bug reports — just log them and notify the user, let them decide
 - Queue bug reports as LOW priority, process only when idle
+- Context pressure guard: at ctx >70%, agent should stop investigation and warn user ("I'm running low on context, should I reset and continue or stop here?"). Options: (a) auto-reset at threshold, (b) ask user, (c) refuse new tool calls above threshold. Leaning toward (b) — user stays in control.
