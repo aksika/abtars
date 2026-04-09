@@ -201,14 +201,22 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
+  private readonly _promptTimeoutMs = parseInt(process.env["PROMPT_TIMEOUT_SEC"] ?? "180", 10) * 1000; // default 3 min
+
   private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         if (!this.client) throw new Error("ACP not initialized");
-        return await this.client.prompt({
-          sessionId,
-          prompt: [{ type: "text", text: message }],
-        });
+        const result = await Promise.race([
+          this.client.prompt({
+            sessionId,
+            prompt: [{ type: "text", text: message }],
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Bridge prompt timeout — model unresponsive")), this._promptTimeoutMs),
+          ),
+        ]);
+        return result;
       } catch (err: unknown) {
         const code = (err as { code?: number }).code;
         if (code === -32603 && attempt < maxRetries) {
