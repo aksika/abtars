@@ -21,7 +21,7 @@
 
 import { localISO } from "../../utils/local-time.js";
 import { join, basename } from "node:path";
-import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync, statSync, rmSync } from "node:fs";
 import { MemoryManager } from "../../memory/memory-manager.js";
 import { loadMemoryConfig } from "../../memory/memory-config.js";
 import { SleepStateGatherer } from "../../memory/sleep-state-gatherer.js";
@@ -207,21 +207,27 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
     }
   } catch (err) { logWarn(TAG, `[WIRED] log rotation failed: ${err instanceof Error ? err.message : String(err)}`); }
 
-  // 8. Delete old sleep lock files (>2 days)
+  // 8. Delete old sleep files (locks + step log dirs) older than 3 days
   try {
     const sleepDir = join(memoryDir, "sleep");
     if (existsSync(sleepDir)) {
-      const cutoff = Date.now() - 2 * 86400000;
+      const cutoff = Date.now() - 3 * 86400000;
       for (const f of readdirSync(sleepDir)) {
-        if (!f.endsWith(".lock")) continue;
-        const match = f.match(/sleep_(\d{4})(\d{2})(\d{2})\.lock/);
-        if (match && new Date(`${match[1]}-${match[2]}-${match[3]}`).getTime() < cutoff) {
-          unlinkSync(join(sleepDir, f));
+        const match = f.match(/^(?:sleep_)?(\d{4})(\d{2})(\d{2})/);
+        if (!match) continue;
+        if (new Date(`${match[1]}-${match[2]}-${match[3]}`).getTime() >= cutoff) continue;
+        const fullPath = join(sleepDir, f);
+        const stat = statSync(fullPath);
+        if (stat.isDirectory()) {
+          rmSync(fullPath, { recursive: true, force: true });
+          logInfo(TAG, `[WIRED] Deleted old step logs: ${f}/`);
+        } else if (f.endsWith(".lock")) {
+          unlinkSync(fullPath);
           logInfo(TAG, `[WIRED] Deleted old lock: ${f}`);
         }
       }
     }
-  } catch (err) { logWarn(TAG, `[WIRED] lock cleanup failed: ${err instanceof Error ? err.message : String(err)}`); }
+  } catch (err) { logWarn(TAG, `[WIRED] sleep cleanup failed: ${err instanceof Error ? err.message : String(err)}`); }
 
   // 9. Compute decayed confidence — write candidates for Darwinism step
   try {
