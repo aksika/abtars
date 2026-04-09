@@ -426,11 +426,19 @@ export class TelegramAdapter implements PlatformAdapter {
       logDebug(TAG, `Buffered reaction signal for group ${chatId}`);
     } else {
       const sessionKey = `telegram:${chatId}`;
-      try {
-        await this.deps.transport.sendPrompt(sessionKey, signal);
-        logDebug(TAG, `Sent reaction signal to transport for chat ${chatId}`);
-      } catch (err) {
-        logError(TAG, `Failed to send reaction signal for chat ${chatId}`, err);
+      const { busyChats, messageQueue } = this.deps.pipeline;
+      if (busyChats.has(sessionKey)) {
+        const queue = messageQueue.get(sessionKey) ?? [];
+        queue.push({ msg: { sessionKey, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this });
+        messageQueue.set(sessionKey, queue);
+        logDebug(TAG, `Queued reaction signal for busy ${sessionKey} (${queue.length} pending)`);
+      } else {
+        try {
+          await this.deps.transport.sendPrompt(sessionKey, signal);
+          logDebug(TAG, `Sent reaction signal to transport for chat ${chatId}`);
+        } catch (err) {
+          logError(TAG, `Failed to send reaction signal for chat ${chatId}`, err);
+        }
       }
     }
   }
