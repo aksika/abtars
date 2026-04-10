@@ -203,7 +203,9 @@ Single heartbeat loop controls everything: task scheduling, standby detection, w
 
 **Dark wake guard:** `isDailyCycleDue` requires `lastHeartbeat` to exist in the lock file. No successful tick = system not ready (dark wake, network down). Replaces the old 5-minute uptime heuristic.
 
-**Heartbeat watchdog timer:** Standalone `setInterval` (60s) in `bridge-app.ts`, independent of the heartbeat system. Reads `bridge.lock.lastHeartbeat` — if stale > 3× heartbeat interval (~15min), forces `process.exit(1)`. Catches dead heartbeat while process is alive. LaunchAgent restarts.
+**Heartbeat watchdog timer:** Standalone `setInterval` (60s) in `bridge-app.ts`, independent of the heartbeat system. Countdown+kick pattern — counter starts at 15min, heartbeat kicks reset it, counter ≤ -60s → `process.exit(1)`. No file I/O.
+
+**DB integrity:** Runs every 72 ticks (~6 hours). Checks SQLite integrity + FTS5 health. Auto-rebuilds corrupt FTS indexes on detection. Sleep pre-tasks also rebuild nightly.
 
 **Task registration order:**
 ```
