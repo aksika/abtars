@@ -268,6 +268,9 @@ Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") b
 
 ## 96. ABM-L compressor quality fixes
 
+**Status:** ✅ Done (2026-04-10)
+**Completed by:** ABM Simplification #2 — filler bug fixed (stopped stripping meaningful verbs)
+
 **Priority:** HIGH
 **Status:** Not started
 
@@ -281,12 +284,18 @@ Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") b
 
 ## 103. ABM-L Compression Level 2 — wake-up rendering
 
+**Status:** ✅ Done (2026-04-10)
+**Completed by:** ABM Simplification #2 — ABM-L rendered on the fly, multi-resolution (signal/ultra/compact/full), timelines
+
 **Priority:** HIGH
 **Status:** Not started
 
 Entity header + topic grouping + elide defaults in wake-up rendering. Daily summary compression to ABM-L. Compressed SOUL for <32K models. Adaptive full/compact/ultra based on context budget.
 
 ## 104. ABM-L storage optimization
+
+**Status:** ✅ Done (2026-04-10)
+**Completed by:** ABM Simplification #2 — content_compressed column dropped, ABM-L rendered on read from content_en
 
 **Priority:** MEDIUM
 **Status:** Not started
@@ -301,6 +310,9 @@ D2: Strip prefix from stored ABM-L, reconstruct from columns at render time. D3:
 Move embeddings to memory_embeddings table. Quantize float32→int8 after 14 days (384 bytes vs 1536). int8 kept forever. Main table stays lean.
 
 ## 106. ABM v2 wiring — connect planned features
+
+**Status:** ✅ Done (2026-04-10)
+**Completed by:** ABM Simplification #6 + #7 — effectiveConfidence wired into Darwinism, buildArc wired into sleep, emotion tags unified as source of truth, emotion_context added
 
 **Priority:** HIGH
 **Status:** Not started
@@ -335,14 +347,17 @@ Consecutive poller failure counter. After N failures, log "offline" once, reduce
 
 Heartbeat task checks `df` output. Warn at 90%, block new writes at 95%. Currently only checked during Dreamy sleep cycle.
 
-## 103. Keyboard-adjacent typo correction for recall
+## 110. Keyboard-adjacent typo correction for recall
+
+**Status:** ✅ Done (2026-04-09)
+**Completed by:** ABM Simplification #1 — trigram FTS5 indexes handle typos, accents, and substrings natively
 
 **Priority:** LOW
 **Status:** Not started
 
 Adjacent-key typos (QWERTZ: z↔y, s↔a, doubled/missed chars) could be handled by a keyboard-layout-aware correction layer before trigram search. E.g. "hogz" → "hogy", "eyg" → "egy". However: (1) every language has its own layout, (2) the substring fallback already catches most cases for longer words, (3) the agent translates to English before recall (SOUL fix) which bypasses Hungarian typos entirely, (4) Ss signatures catch semantic meaning regardless of spelling. Not worth the complexity unless short-word recall failures become a pattern.
 
-## 104. Self-healer investigation fills context window
+## 111. Self-healer investigation fills context window
 
 **Priority:** HIGH
 **Status:** Not started
@@ -365,7 +380,10 @@ Self-healer filed a `[SYSTEM BUG REPORT]` for a `[object Object]` error from the
 - Queue bug reports as LOW priority, process only when idle
 - Context pressure guard: at ctx >70%, agent should stop investigation and warn user ("I'm running low on context, should I reset and continue or stop here?"). Options: (a) auto-reset at threshold, (b) ask user, (c) refuse new tool calls above threshold. Leaning toward (b) — user stays in control.
 
-## 105. Unified Agent Registry
+## 112. Unified Agent Registry
+
+**Status:** ✅ Done (2026-04-10)
+**Completed by:** ABM Simplification — createAgentTransport() factory, 5 callers replaced
 
 **Status:** Not started
 **Priority:** High
@@ -373,7 +391,7 @@ Self-healer filed a `[SYSTEM BUG REPORT]` for a `[object Object]` error from the
 
 Single `createAgentTransport(role, config)` factory for all agent roles (professor/dreamy/browsie/coding). Each role has a universal agent config: persona (SOUL), rules, model preference, available tools, trust level. Bridge-injected context — NOT kiro steering files, NOT CLI-specific. Transport-agnostic (kiro-cli ACP, gemini-cli, direct API). Replaces 5 scattered `new AcpTransport()` calls across bridge-app, agentbridge-sleep, coding-mode, cron-queue, agent-api-server.
 
-## 106. Bidirectional ABM-L
+## 113. Bidirectional ABM-L
 
 **Status:** Not started
 **Priority:** Low
@@ -381,7 +399,10 @@ Single `createAgentTransport(role, config)` factory for all agent roles (profess
 
 Agent writes memories directly in ABM-L format (`--abml "[D|coding|convict|5] @clerk >over @auth0 (pricing+DX)"`). No compression step — agent thinks in memory language. Needs format validation + English fallback if malformed. Low priority — needs more thought on validation strategy.
 
-## 107. Weekly Timeline from Dailies
+## 114. Weekly Timeline from Dailies
+
+**Status:** ✅ Done (2026-04-10)
+**Completed by:** ABM Simplification #2b — compress 7 dailies into 1 narrative timeline in wake-up
 
 **Status:** Not started
 **Priority:** Medium
@@ -389,7 +410,10 @@ Agent writes memories directly in ABM-L format (`--abml "[D|coding|convict|5] @c
 
 Compress a week of daily summaries into one narrative timeline instead of loading 7 separate daily files. ~100 tokens instead of ~560. Reuse `buildTimelines()` on daily summary content. Each daily becomes a "memory" with date as created_at, extract key events + emotions. Render as single timeline in wake-up.
 
-## 108. L0 Signal Level — Memory Tag Cloud
+## 115. L0 Signal Level — Memory Tag Cloud
+
+**Status:** ✅ Done (2026-04-10)
+**Completed by:** ABM Simplification #2b — tag cloud for <100 token budget models
 
 **Status:** Not started
 **Priority:** Medium
@@ -397,7 +421,10 @@ Compress a week of daily summaries into one narrative timeline instead of loadin
 
 For tiny models (<500 token budget), render ALL memories as a structured tag cloud: topics, entity counts, memory type distribution. ~50 tokens. Agent sees its entire memory as a structured overview. Enables "what do I know about X?" meta-queries. Add as new level in `pickLevel()`.
 
-## 109. Cross-Topic Timelines
+## 116. Cross-Topic Timelines
+
+**Status:** ✅ Done (2026-04-10)
+**Completed by:** ABM Simplification #2b — entities tracked across topic boundaries (XTL format)
 
 **Status:** Not started
 **Priority:** Medium
