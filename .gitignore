@@ -9,7 +9,7 @@ dist/
 
 # Environment secrets
 .env
-.env.local
+.env.skills
 
 # IDE
 .vscode/
