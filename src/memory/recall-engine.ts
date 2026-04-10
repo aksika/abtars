@@ -37,6 +37,7 @@ export type RecallHit = {
   credibility?: number;
   classification?: number;
   timelineContext?: string;
+  interferenceWarning?: string;
 };
 
 export type StageResult = {
@@ -283,6 +284,22 @@ export async function recallSearch(deps: RecallDeps, params: RecallParams): Prom
       }
     } catch { /* timeline builder not available */ }
   }
+
+  // --- Interference detection: flag similar-but-different results ---
+  try {
+    const { detectInterference } = await import("./brain-patterns.js");
+    for (let i = 0; i < finalResults.length; i++) {
+      for (let j = i + 1; j < finalResults.length; j++) {
+        const a = finalResults[i]!, b = finalResults[j]!;
+        const topicA = a.content.match(/\|([a-z]+)\|/)?.[1] ?? "";
+        const topicB = b.content.match(/\|([a-z]+)\|/)?.[1] ?? "";
+        if (detectInterference(a.content, b.content, topicA, topicB)) {
+          a.interferenceWarning = `⚠️ Conflicts with another result — verify which is current`;
+          b.interferenceWarning = `⚠️ Conflicts with another result — verify which is current`;
+        }
+      }
+    }
+  } catch { /* brain-patterns not available */ }
 
   return {
     results: finalResults,
