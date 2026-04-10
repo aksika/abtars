@@ -33,3 +33,5 @@ titok/
 persona/tasks/
 .test-*
 .env.backup
+.env.kp
+.env.molty

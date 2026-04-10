@@ -67,12 +67,24 @@ GITIGNORE
   echo "   ✅ Git repo initialized — add remote with: cd ~/.agentbridge && git remote add origin <url>"
 fi
 
-# 1. Sync .env (from persona/core/ — gitignored, personal)
+# 1. Sync .env — pick the right profile based on hostname
 echo "📋 Syncing .env..."
-if [ -f "$PROJECT_DIR/persona/core/.env" ]; then
+HOSTNAME=$(hostname)
+if echo "$HOSTNAME" | grep -qi "molty\|mac\|akos"; then
+  ENV_FILE="$PROJECT_DIR/.env.molty"
+  ENV_LABEL="molty (Mac)"
+else
+  ENV_FILE="$PROJECT_DIR/.env.kp"
+  ENV_LABEL="kp (WSL)"
+fi
+
+if [ -f "$ENV_FILE" ]; then
+  cp "$ENV_FILE" "$AB_HOME/.env"
+  echo "   ✓ Using $ENV_LABEL profile"
+elif [ -f "$PROJECT_DIR/persona/core/.env" ]; then
   cp "$PROJECT_DIR/persona/core/.env" "$AB_HOME/.env"
 elif [ -f "$AB_HOME/.env" ]; then
-  echo "   ⏭  No persona/core/.env — keeping existing"
+  echo "   ⏭  No env profile found — keeping existing"
 else
   cp "$PROJECT_DIR/.env.example" "$AB_HOME/.env"
   echo "   ℹ️  Created .env from .env.example — edit ~/.agentbridge/.env with your tokens"
