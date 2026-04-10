@@ -5,7 +5,8 @@ describe("wake-up-renderer", () => {
   describe("pickLevel", () => {
     it("full for large budgets", () => expect(pickLevel(10000)).toBe("full"));
     it("compact for medium", () => expect(pickLevel(1000)).toBe("compact"));
-    it("ultra for tiny", () => expect(pickLevel(100)).toBe("ultra"));
+    it("ultra for tiny", () => expect(pickLevel(200)).toBe("ultra"));
+    it("signal for minimal", () => expect(pickLevel(50)).toBe("signal"));
   });
 
   describe("renderWakeUp", () => {

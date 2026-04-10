@@ -162,7 +162,7 @@ export function buildWakeUp(db: Database.Database | null, ctxWindowSize: number)
     if (partial) { parts.push(partial.trim()); remaining -= tokenCount(partial); }
   }
 
-  // Priority 2: memory timelines (narrative arcs from general-tier)
+  // Priority 2: memory timelines (narrative arcs from general-tier) + cross-topic
   if (remaining > 200) {
     const tlRows = db.prepare(
       `SELECT id, content_en, topic, memory_type, emotion_tags, importance_flags, confidence, created_at, emotion_context
@@ -171,9 +171,10 @@ export function buildWakeUp(db: Database.Database | null, ctxWindowSize: number)
        ORDER BY topic, created_at DESC`,
     ).all() as TimelineMemory[];
     if (tlRows.length >= 2) {
-      const { timelines } = renderTimelines(tlRows);
-      if (timelines.length > 0) {
-        const tlText = `[TIMELINES — ${timelines.length} arcs]\n${timelines.map(t => t.rendered).join("\n")}`;
+      const { timelines, crossTopic } = renderTimelines(tlRows);
+      const allTl = [...timelines, ...crossTopic];
+      if (allTl.length > 0) {
+        const tlText = `[TIMELINES — ${timelines.length} topic + ${crossTopic.length} cross-topic]\n${allTl.map(t => t.rendered).join("\n")}`;
         const tc = tokenCount(tlText);
         if (tc <= remaining) { parts.push(tlText); remaining -= tc; }
       }

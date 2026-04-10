@@ -79,6 +79,64 @@ export function buildTimelines(memories: ReadonlyArray<TimelineMemory>): Timelin
   return timelines.sort((a, b) => b.entries.length - a.entries.length);
 }
 
+/** Build cross-topic timelines: follow an entity across topic boundaries. */
+export function buildCrossTopicTimelines(memories: ReadonlyArray<TimelineMemory>): Timeline[] {
+  // Group by entity only (across all topics)
+  const entityGroups = new Map<string, TimelineMemory[]>();
+  for (const m of memories) {
+    const entity = primaryEntity(m.content_en);
+    if (entity === "_") continue;
+    const group = entityGroups.get(entity);
+    if (group) group.push(m);
+    else entityGroups.set(entity, [m]);
+  }
+
+  const timelines: Timeline[] = [];
+  for (const [entity, mems] of entityGroups) {
+    // Only build cross-topic if entity spans 2+ topics
+    const topics = new Set(mems.map(m => m.topic));
+    if (topics.size < 2 || mems.length < 3) continue;
+    const sorted = mems.sort((a, b) => a.created_at - b.created_at);
+    timelines.push({
+      topic: [...topics].join("+"),
+      entity,
+      entries: sorted,
+      arc: buildArc(sorted.map(m => ({ emotion_tags: m.emotion_tags ?? "", created_at: m.created_at }))),
+      current: sorted[sorted.length - 1]!,
+    });
+  }
+
+  return timelines.sort((a, b) => b.entries.length - a.entries.length);
+}
+
+/** Render a cross-topic timeline entry with topic prefixes. */
+function renderCrossTransition(m: TimelineMemory): string {
+  const date = new Date(m.created_at);
+  const month = date.toLocaleString("en", { month: "short" });
+  const abml = compress({
+    content_en: m.content_en, topic: m.topic,
+    emotion_tags: m.emotion_tags ?? "", importance_flags: m.importance_flags ?? "",
+    memory_type: m.memory_type ?? "fact", confidence: m.confidence ?? 3,
+    date: localMonth(date),
+  });
+  const body = abml.replace(/^\[[^\]]*\]\s*/, "").slice(0, 35).trim();
+  return `${m.topic}:${body}(${month})`;
+}
+
+/** Render a cross-topic timeline. */
+export function renderCrossTopicTimeline(tl: Timeline): RenderedTimeline {
+  const transitions = tl.entries.map(renderCrossTransition).join("→");
+  const arcStr = tl.arc.tags.length > 0 ? tl.arc.tags.slice(0, 4).join("→") : "—";
+  const line1 = `[XTL|${tl.entity}] ${transitions}`;
+  const line2 = `  arc: ${arcStr} ${tl.arc.symbol} | topics: ${tl.topic}`;
+  return {
+    topic: tl.topic,
+    entity: tl.entity,
+    rendered: `${line1}\n${line2}`,
+    memoryIds: tl.entries.map(e => e.id),
+  };
+}
+
 // ── Timeline rendering ──────────────────────────────────────────────────────
 
 /** Render a single timeline entry as a short transition phrase. */
@@ -116,10 +174,12 @@ export function renderTimeline(tl: Timeline): RenderedTimeline {
 }
 
 /** Render all timelines for a set of memories. Returns rendered timelines + IDs of memories consumed by timelines. */
-export function renderTimelines(memories: ReadonlyArray<TimelineMemory>): { timelines: RenderedTimeline[]; consumedIds: Set<number> } {
+export function renderTimelines(memories: ReadonlyArray<TimelineMemory>): { timelines: RenderedTimeline[]; crossTopic: RenderedTimeline[]; consumedIds: Set<number> } {
   const tls = buildTimelines(memories);
   const rendered = tls.map(renderTimeline);
+  const crossTls = buildCrossTopicTimelines(memories);
+  const crossRendered = crossTls.map(renderCrossTopicTimeline);
   const consumedIds = new Set<number>();
-  for (const r of rendered) for (const id of r.memoryIds) consumedIds.add(id);
-  return { timelines: rendered, consumedIds };
+  for (const r of [...rendered, ...crossRendered]) for (const id of r.memoryIds) consumedIds.add(id);
+  return { timelines: rendered, crossTopic: crossRendered, consumedIds };
 }
