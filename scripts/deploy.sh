@@ -67,16 +67,8 @@ GITIGNORE
   echo "   ✅ Git repo initialized — add remote with: cd ~/.agentbridge && git remote add origin <url>"
 fi
 
-# 1. Sync .env — merge-based deploy (never overwrites existing values)
+# 1. Sync .env — merge new keys from .env.example, never overwrite existing values
 echo "📋 Syncing .env..."
-HOSTNAME=$(hostname)
-if echo "$HOSTNAME" | grep -qi "molty\|mac\|akos"; then
-  ENV_FILE="$PROJECT_DIR/.env.molty"
-  ENV_LABEL="molty (Mac)"
-else
-  ENV_FILE="$PROJECT_DIR/.env.kp"
-  ENV_LABEL="kp (WSL)"
-fi
 
 merge_env() {
   local source="$1"
@@ -84,7 +76,8 @@ merge_env() {
 
   if [ ! -f "$target" ]; then
     cp "$source" "$target"
-    echo "   ✓ Created .env from source"
+    chmod 600 "$target"
+    echo "   ✓ Created .env from .env.example — edit ~/.agentbridge/.env with your tokens"
     return
   fi
 
@@ -92,7 +85,6 @@ merge_env() {
 
   # Add new keys from source that don't exist in target
   while IFS= read -r line || [ -n "$line" ]; do
-    # Skip comments and empty lines
     case "$line" in \#*|"") continue ;; esac
     key="${line%%=*}"
     [ -z "$key" ] && continue
@@ -105,29 +97,10 @@ merge_env() {
     fi
   done < "$source"
 
-  # Flag obsolete keys in target that don't exist in source
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in \#*|"") continue ;; esac
-    key="${line%%=*}"
-    [ -z "$key" ] && continue
-    if ! grep -q "^${key}=" "$source" 2>/dev/null; then
-      obsolete=$((obsolete + 1))
-      echo "   ⚠️  Obsolete: $key"
-    fi
-  done < "$target"
-
-  echo "   ✓ $ENV_LABEL: ${added} added, ${preserved} preserved, ${obsolete} obsolete"
+  echo "   ✓ .env: ${added} added, ${preserved} preserved"
 }
 
-if [ -f "$ENV_FILE" ]; then
-  merge_env "$ENV_FILE" "$AB_HOME/.env"
-elif [ -f "$AB_HOME/.env" ]; then
-  echo "   ⏭  No env profile found — keeping existing"
-else
-  cp "$PROJECT_DIR/.env.example" "$AB_HOME/.env"
-  echo "   ℹ️  Created .env from .env.example — edit ~/.agentbridge/.env with your tokens"
-fi
-chmod 600 "$AB_HOME/.env" 2>/dev/null
+merge_env "$PROJECT_DIR/.env.example" "$AB_HOME/.env"
 
 # .env.memory (ABM config — create from example if missing)
 if [ ! -f "$AB_HOME/.env.memory" ]; then
