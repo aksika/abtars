@@ -88,6 +88,10 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const envPath = resolve(agentBridgeHome(), ".env");
   loadDotenv({ path: envPath });
 
+  // Load .env.local (local-only overrides — HA_, TOGETHERAI_, custom integrations)
+  const localEnvPath = resolve(agentBridgeHome(), ".env.local");
+  loadDotenv({ path: localEnvPath, override: true });
+
   // Load transport profile (e.g. transports/kiro.env) — overrides AGENT_* vars
   const transportProfile = process.env["AGENT_TRANSPORT_PROFILE"];
   if (transportProfile) {
