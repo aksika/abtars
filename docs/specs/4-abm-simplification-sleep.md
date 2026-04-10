@@ -167,13 +167,62 @@ New:
   1. runCodeMaintenance(db, memory)     → all mechanical tasks + candidate lists
   2. for each prompt 01-14:
        if candidates[prompt] is empty → skip
-       inject candidates into prompt template
+       if previous dependency failed → skip (mark in lock)
+       inject candidates into prompt template (substituteVars)
        send prompt → log result
   3. writeAuditFile(results)
   4. injectToMainAgent(auditFile)
 ```
 
-The orchestrator becomes a simple loop with a pre-pass. No phases, no session splits, no complex state management.
+### Prompt ordering dependencies
+
+Some prompts depend on previous prompt output, not just pre-pass data:
+
+```
+01-gc-noise        → independent
+02-daily-summary   → independent
+03-extract-from-daily → DEPENDS ON 02 (needs daily file)
+04-retrospective   → independent (reads messages, not daily file)
+05-retro-extract   → DEPENDS ON 04 (needs retro file)
+06-14              → independent (use pre-pass data only)
+```
+
+If a dependency fails, the dependent prompt is skipped and marked `skipped:dependency` in the lock file.
+
+### Identity injection
+
+When `createAgentTransport("dreamy", ...)` creates a session, the agent registry constructs the identity context (Dreamy persona + state snapshot + wired results). This is prepended to prompt 01 (GC noise) as a single message — identity + first task in one LLM call. Not a separate identity step.
+
+### Pre-loaded data format
+
+Prompts use variable substitution via existing `substituteVars()`. The code pre-pass populates variables:
+
+```
+${UNTAGGED_MEMORIES}     → list of memories without topics (for 07-topic-assignment)
+${PROMOTION_CANDIDATES}  → memories with high recall + general tier (for 08-core-promotion)
+${MERGE_CANDIDATES}      → similar memory pairs (for 09-merge)
+${TRANSLATION_ISSUES}    → bilingual quality flags (for 10-translation)
+${EMOTION_CONTEXT_GAPS}  → memories with tags but no context (for 14-emotion-context)
+```
+
+If a variable is empty, the corresponding prompt is skipped.
+
+### Watermark advancement
+
+- Watermark advances ONLY after prompt 03 (extract-from-daily) succeeds
+- Essential prompts: 01-05. If any fail, watermark stays put
+- Prompts 06-14 are idempotent — failure doesn't affect watermark
+
+### Watermark recovery (stuck forever protection)
+
+If the watermark hasn't advanced in 3+ days (consecutive sleep failures):
+1. **Auto-advance** watermark to `now - 24h`. Accept data loss for the stuck period. Log ERROR.
+2. **Flag to user** after 2 consecutive failures: Professor reports "Sleep extraction has failed 2 nights. Messages since [date] haven't been processed." User can intervene.
+3. Daily summary targets the watermark date and processes forward to present — may contain multiple days if catching up.
+
+### Catch-up for missed days
+
+Daily summary is dated from where the watermark points. If watermark is 2 days behind, the daily summary covers 2 days of messages up to present. The file is named with the watermark date. Watermark advances to present after successful extraction.
 
 ---
 

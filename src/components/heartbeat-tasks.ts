@@ -93,6 +93,8 @@ export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTa
       const result = memory.maintenance.checkIntegrity();
       if (result !== "ok") {
         logError("db-integrity", `Memory DB integrity check failed: ${result}`);
+        const { rebuilt } = memory.rebuildFtsIndexes();
+        if (rebuilt.length > 0) logInfo("db-integrity", `Auto-rebuilt FTS indexes: ${rebuilt.join(", ")}`);
       }
     },
   };
