@@ -110,6 +110,14 @@ if [ ! -f "$AB_HOME/.env.memory" ]; then
 fi
 chmod 600 "$AB_HOME/.env.memory" 2>/dev/null
 
+# .env.skills (skill/integration config — create from example if missing)
+if [ ! -f "$AB_HOME/.env.skills" ]; then
+  cp "$PROJECT_DIR/.env.skills.example" "$AB_HOME/.env.skills"
+  chmod 600 "$AB_HOME/.env.skills"
+  echo "   ℹ️  Created .env.skills from example — edit with your integration keys"
+fi
+chmod 600 "$AB_HOME/.env.skills" 2>/dev/null
+
 # 2. Build (unless --quick)
 if [ "$QUICK" = false ]; then
   echo "🔨 Building..."

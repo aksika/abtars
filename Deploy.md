@@ -55,12 +55,12 @@ Creates bash scripts for `agentbridge-recall`, `agentbridge-store`, `agentbridge
 ## Env file hierarchy (load order)
 
 ```
-~/.agentbridge/.env          ← core config (managed by deploy merge)
-~/.agentbridge/.env.local    ← local overrides (HA_, TOGETHERAI_, custom — never touched by deploy)
+~/.agentbridge/.env              ← bridge config (managed by deploy merge)
+~/.agentbridge/.env.skills       ← skill/integration config + secrets (HA, Groq, NLM — never touched by deploy)
 ~/.agentbridge/transports/*.env  ← transport profile overrides (AGENT_TRANSPORT_PROFILE selects which)
 ```
 
-Bridge loads in this order: `.env` → `.env.local` (overrides) → transport profile (overrides `AGENT_*` vars).
+Bridge loads in this order: `.env` → `.env.skills` (overrides) → transport profile (overrides `AGENT_*` vars).
 
 ## Starting the bridge
 
