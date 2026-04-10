@@ -432,12 +432,6 @@ For tiny models (<500 token budget), render ALL memories as a structured tag clo
 
 Follow an entity across topic boundaries. Currently timelines are per-topic. But "@clerk" appears in coding, work, and finance. Cross-topic timeline shows the full entity story with topic prefixes. Second pass in `buildTimelines()` grouping by entity only for entities in 3+ topics.
 
-## 117. Web port config in .env
-
-**Status:** Not started
-**Priority:** Low
-
-Web dashboard port should be configurable per deployment via `.env.kp` / `.env.molty` (e.g. `WEB_PORT=3000`). Avoids port conflicts when multiple deployments run on the same machine.
 
 ## 118. Model Health Check + Subagent Fallback
 
