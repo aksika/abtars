@@ -199,6 +199,8 @@ Single heartbeat loop controls everything: task scheduling, standby detection, w
 
 **bridge.lock:** `~/.agentbridge/bridge.lock` — created on startup with `{pid, startedAt}`. Updated every tick with `lastHeartbeat` timestamp. Single source of truth for process health. Read by: `isDailyCycleDue`, `/heartbeat` command, `doctor.sh`, heartbeat watchdog timer.
 
+**bridge.pid:** `~/.agentbridge/bridge.pid` — written by launcher, cleaned up on exit via `trap`. Used by PID guard to prevent multiple instances.
+
 **Dark wake guard:** `isDailyCycleDue` requires `lastHeartbeat` to exist in the lock file. No successful tick = system not ready (dark wake, network down). Replaces the old 5-minute uptime heuristic.
 
 **Heartbeat watchdog timer:** Standalone `setInterval` (60s) in `bridge-app.ts`, independent of the heartbeat system. Reads `bridge.lock.lastHeartbeat` — if stale > 3× heartbeat interval (~15min), forces `process.exit(1)`. Catches dead heartbeat while process is alive. LaunchAgent restarts.
@@ -329,22 +331,69 @@ Pure countdown timer, independent of heartbeat:
 
 No file I/O, no JSON parsing, no timestamps. Replaces the old timestamp-checking watchdog.
 
+### Layer 2b — Launcher PID Guard
+
+The launcher script (`agentbridge.sh`) prevents multiple instances:
+
+```
+Start → check bridge.pid → process alive? → exit 0 (already running)
+                          → process dead?  → clean up, start new
+```
+
+- `bridge.pid` written on start, cleaned up via `trap EXIT`
+- No internal restart loop — LaunchAgent is the single restart supervisor
+- Prevents dark wake restart storm: Mac wakes → LaunchAgent fires launcher → PID guard sees running bridge → exits silently
+
+Previously: launcher had `while true` restart loop (MAX_RESTARTS=10) AND LaunchAgent restarted. During dark wake, multiple launcher instances killed each other's bridges (SIGTERM), causing 15+ restarts.
+
+### Layer 2c — Prompt Timeout
+
+Bridge-level hard timeout on any LLM prompt (`PROMPT_TIMEOUT_SEC`, default 180s). Wraps `client.prompt()` with `Promise.race`. If model backend is unresponsive, user sees error in 3 min instead of waiting 15+ min for kiro-cli's internal retry cycle.
+
+### Layer 2d — Error Classification
+
+Pipeline distinguishes timeout from context overflow:
+- `ValidationException` or `context window`/`token limit` → session reset + "Context window full"
+- `timed out` or `Prompt already in progress` → no reset + "Request timed out"
+- Previously: any `-32603` error triggered session reset, losing conversation state on timeouts.
+
+### Layer 2e — Transport Health Guard
+
+`AcpTransport.healthCheck()` respects `_promptActive` flag. Silent re-send only fires when no prompt is actively awaiting a response. Previously: health check re-sent prompts while kiro-cli was retrying to backend → `-32603 Prompt already in progress` cascade.
+
+### Layer 2f — Self-Healer
+
+Scans bridge log for ERROR lines, injects `[SYSTEM BUG REPORT]` to agent via Telegram. Defaults to OFF (`SELFHEAL_ENABLED=true` to enable, `/healing` to toggle at runtime).
+
+Blacklisted errors (never reported): transient `-32603`, quota exhaustion, timeouts, rate limits, fetch failures. Prevents bug report loops when model is down.
+
+Cooldown: 30 min per unique error. Max 1 report per heartbeat tick.
+
 ### Layer 3 — Bedtime Flow (age-check task)
 
 Heartbeat task that calls `isDailyCycleDue()` every tick:
 
 ```
 BED_TIME passes → quiet tick counter starts
+  isDailyCycleDue() checks lock file status first (completed/suspended → stop)
   Any message → counter resets to 0
-  Tick N-1 (T-1) → system message: agent announces sleep to user
   Tick N → Dreamy spawns directly (no bridge restart)
-  Dreamy completes → check if user messaged during sleep
-    Yes → skip Mac sleep, log "user active"
-    No → platform sleep (if HARDWARE_SLEEP_AFTER_DREAMY=true)
+  Dreamy completes → announce "going to sleep in ~5 minutes"
+  Wait 5 min → check if user messaged during grace period
+    Yes → cancel hardware sleep, log "user active"
+    No → platform sleep (pmset on Mac, systemctl suspend on Linux)
   Mac wakes → watchdog fires (no kicks for hours) → exit(1)
-  LaunchAgent restarts → fresh session
+  LaunchAgent restarts → PID guard allows (old process dead) → fresh session
   If sleep missed today on startup → catch-up Dreamy spawns
 ```
+
+**Sleep spawn guard:** `hasSleepAuditToday()` is the single decision point. Checks lock file `status` field:
+- `completed` / `suspended` → done for today, no spawn
+- `ongoing` + pid alive → already running, no spawn
+- `ongoing` + pid dead → retry allowed
+- `failed` → retry allowed
+
+**LLM call budget:** `SLEEP_MAX_LLM_CALLS=15` hard cap per day. Counter in lock file, survives restarts. Budget exhausted → `status: suspended`, no retry until next day.
 
 Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `HARDWARE_SLEEP_AFTER_DREAMY` (default false).
 
