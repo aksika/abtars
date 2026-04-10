@@ -58,3 +58,15 @@ ps aux | grep -E "agentbridge|kiro-cli" | grep -v grep
 ```
 
 If issues found, suggest `doctor.sh --fix` or `doctor.sh --fix-full`.
+
+## 10. Model Availability
+```bash
+# Check which models are configured
+grep "AGENT_MAIN_MODEL\|AGENT_SLEEP_MODEL\|AGENT_BROWSE_MODEL\|AGENT_CODING_MODEL" ~/.agentbridge/transports/*.env 2>/dev/null
+grep "AGENT_MAIN_MODEL" ~/.agentbridge/.env 2>/dev/null
+
+# Ping each model (Direct API only)
+curl -s http://localhost:11434/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"MODEL_NAME","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' | head -c 200
+```
+
+Replace `MODEL_NAME` with each configured model. If 404 → model not found (wrong name). If 429 → rate limited. Subagents fall back to main model on failure.

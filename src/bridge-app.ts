@@ -182,7 +182,7 @@ export class Bridge {
       transport = new DirectApiTransport({
         endpoint: process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1",
         apiKey: process.env["API_KEY"],
-        model: process.env["API_MODEL"] ?? config.models.agentModel ?? "gpt-4o",
+        model: process.env["AGENT_MAIN_MODEL"] ?? config.models.mainModel ?? "gpt-4o",
         maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
         maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
         maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
@@ -196,7 +196,7 @@ export class Bridge {
         cliPath: config.transport.agentCliPath,
         workingDir: config.transport.workingDir,
         agentCli: config.transport.agentCli,
-        model: config.models.agentModel || undefined,
+        model: config.models.mainModel || undefined,
       });
     }
 
@@ -220,7 +220,7 @@ export class Bridge {
             return createAgentTransport("professor", {
               cliPath: config.transport.agentCliPath,
               workingDir: config.transport.workingDir,
-              model: config.models.agentModel || undefined,
+              model: config.models.mainModel || undefined,
             });
           } else if (fallbackType === "api") {
             const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
@@ -767,6 +767,48 @@ export async function startBridge(): Promise<void> {
   for (const task of bridge.capabilities.heartbeatTasks) {
     heartbeat.registerTask(task);
   }
+
+  // Model health check — runs once on first tick, skipped on dark wake (dark wake skips all tasks)
+  let modelHealthDone = false;
+  heartbeat.registerTask({
+    name: "model-health",
+    execute: async () => {
+      if (modelHealthDone) return;
+      modelHealthDone = true;
+      if (config.transport.agentTransport !== "api") return; // only ping Direct API models
+      const models: Array<{ label: string; model: string }> = [
+        { label: "AGENT_MAIN_MODEL", model: config.models.mainModel },
+      ];
+      if (config.models.sleepModel !== config.models.mainModel) models.push({ label: "AGENT_SLEEP_MODEL", model: config.models.sleepModel });
+      if (config.models.browseModel !== config.models.mainModel) models.push({ label: "AGENT_BROWSE_MODEL", model: config.models.browseModel });
+      if (config.models.codingModel !== config.models.mainModel) models.push({ label: "AGENT_CODING_MODEL", model: config.models.codingModel });
+      const endpoint = process.env["API_ENDPOINT"] ?? "http://localhost:11434/v1";
+      const apiKey = process.env["API_KEY"];
+      const warnings: string[] = [];
+      for (const { label, model } of models) {
+        try {
+          const res = await fetch(`${endpoint}/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+            body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!res.ok) {
+            warnings.push(`⚠️ ${label}=${model} — ${res.status} ${res.statusText}`);
+            logWarn("model-health", `${label}=${model} failed: ${res.status}`);
+          } else {
+            logInfo("model-health", `✓ ${label}=${model}`);
+          }
+        } catch (err) {
+          warnings.push(`⚠️ ${label}=${model} — ${err instanceof Error ? err.message : String(err)}`);
+          logWarn("model-health", `${label}=${model} unreachable: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (warnings.length > 0 && bridge.telegramAdapter) {
+        bridge.telegramAdapter.sendNotification(primaryChatId, `🏥 Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
+      }
+    },
+  });
 
   const { checkBrowseTasks } = await import("./capabilities/browser/browse-delivery.js");
   checkBrowseTasks();

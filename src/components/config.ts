@@ -135,12 +135,12 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const agentTransport = rawTransport as AgentTransport;
 
   // --- AGENT_MODEL ---
-  const agentModel = process.env["AGENT_MODEL"] || CONFIG_DEFAULTS.models.agentModel;
+  const mainModel = process.env["AGENT_MAIN_MODEL"] || CONFIG_DEFAULTS.models.mainModel;
 
   // Sub-models default to main model if not explicitly set
-  const agentBrowseModel = process.env["AGENT_BROWSE_MODEL"] || agentModel;
-  const agentSleepModel = process.env["AGENT_SLEEP_MODEL"] || agentModel;
-  const agentCodingModel = process.env["AGENT_CODING_MODEL"] || agentModel;
+  const agentBrowseModel = process.env["AGENT_BROWSE_MODEL"] || mainModel;
+  const agentSleepModel = process.env["AGENT_SLEEP_MODEL"] || mainModel;
+  const agentCodingModel = process.env["AGENT_CODING_MODEL"] || mainModel;
 
   // --- WORKING_DIR (optional, default cwd) ---
   let workingDir = process.env["WORKING_DIR"] || CONFIG_DEFAULTS.transport.workingDir;
@@ -329,7 +329,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
       ttsVoice,
     },
     models: {
-      agentModel,
+      mainModel,
       browseModel: agentBrowseModel,
       sleepModel: agentSleepModel,
       codingModel: agentCodingModel,

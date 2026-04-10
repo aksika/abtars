@@ -1,4 +1,4 @@
-# Backlog #119 — Smart Model Fallback for Free Tiers
+# Backlog #119 — Smart Model Fallback Improvements
 
 **Date:** 2026-04-10
 **Status:** Ready to implement
@@ -8,66 +8,61 @@
 
 ## Problem
 
-Free tier models (OpenRouter, Together, DeepSeek) hit 429 constantly. Current leaky bucket:
-- 429 fills 40% → two 429s = 80% = model skipped for ~13 minutes
-- Drain is 3%/min — too slow for free tiers with 2 RPM limits
-- No `Retry-After` header parsing — ignores the server telling us when to retry
-- 402 (quota exceeded) treated as permanent auth error — should be temporary on free tiers
-- "All models exhausted" gives no detail
+Free tier models hit 429 constantly. Two 429s = model blacklisted for ~13 minutes. Too aggressive.
 
-## Solution
+## Changes (minimal, no architecture change)
 
-### 1. Error classification refinement
+### 1. Progressive fill in leaky bucket
 
-| Status | Current | After |
-|---|---|---|
-| 429 | `rate_limit` (0.4 fill) | `rate_limit` — parse `Retry-After` header, use as cooldown |
-| 401 | `auth` (1.0 fill) | `auth_permanent` — skip permanently, never retry |
-| 402 | `auth` (1.0 fill) | `quota_exceeded` — treat like rate_limit (temporary on free tiers) |
-| 403 | `auth` (1.0 fill) | `auth_permanent` — skip permanently |
-| 404 | `transient` (0.15) | `not_found` — skip permanently (model doesn't exist) |
-| 500/502/503 | `transient` (0.15) | `transient` — light fill, fast drain |
-| timeout | `transient` (0.15) | `transient` — same |
+Add `consecutiveErrors` counter to `Bucket`. Fill amount scales with consecutive errors. Reset on success.
 
-### 2. Retry-After aware cooldown
+```
+1st 429 → fill 0.1  (recovers in ~2 min)
+2nd 429 → fill 0.2  (recovers in ~4 min)
+3rd 429 → fill 0.4  (recovers in ~8 min)
+4th+ 429 → fill 0.8 (backs off hard)
+```
 
-When 429 includes `Retry-After: 30` header:
-- Don't fill the bucket — set a cooldown timer instead
-- Skip the model until cooldown expires
-- Probe once after cooldown to verify recovery
-- If no `Retry-After` header, fall back to bucket fill (current behavior)
+One field added to `Bucket`, one change in `recordError`. ~10 lines.
 
-### 3. Faster drain for rate limits
+### 2. Treat 402 as temporary
 
-Current: 3%/min (13 min to recover from 80%)
-After: 10%/min for rate_limit errors (4 min recovery). Keep 3%/min for transient.
+Change `classifyError(402)` from `auth` (1.0 fill = permanent) to `rate_limit` (progressive fill). Free tier quota resets are temporary.
 
-### 4. Structured failure summary
+One line change in `classifyError`.
+
+### 3. Structured failure summary
+
+When all models fail, throw with per-candidate detail:
 
 ```
 All models exhausted:
-  - deepseek-chat: rate_limit (bucket: 85%, retry in 30s)
-  - qwen-2.5: auth_permanent (401 — key revoked)
-  - gemini-flash: quota_exceeded (bucket: 60%, draining)
+  - deepseek-chat: rate_limit (bucket: 45%)
+  - qwen-2.5: auth (401)
+  - gemini-flash: rate_limit (bucket: 30%)
 ```
 
-### 5. Probe on cooldown expiry
-
-When a rate-limited model's cooldown expires, send a lightweight probe (empty completion with max_tokens=1) before routing real traffic. If probe fails → extend cooldown. If probe succeeds → model is back.
+~10 lines in the catch-all block of `direct-api-transport.ts`.
 
 ---
 
-## Implementation Tasks
+## What we're NOT doing
 
-| # | Task | Effort | Depends on |
+- No cooldown probing (adds background timer complexity)
+- No same-provider sibling fallback (changes candidate selection logic)
+- No fallback transition notifications (nice UX but not critical)
+- No Retry-After header parsing (would need response header access in error path)
+
+These are valid ideas from OpenClaw but overkill for now. The three changes above fix the main pain: too-aggressive blacklisting on free tiers.
+
+---
+
+## Implementation
+
+| # | Task | Effort | File |
 |---|---|---|---|
-| 1 | Refine `classifyError()` — add `quota_exceeded`, `auth_permanent`, `not_found`. Parse 402 as temporary. | 15min | — |
-| 2 | Add `Retry-After` header parsing in `direct-api-transport.ts` — extract from error response, pass to `recordError()` | 20min | — |
-| 3 | Update `leaky-bucket.ts` — cooldown timer per bucket (from Retry-After), faster drain for rate_limit (10%/min), permanent skip for auth/not_found | 30min | 1, 2 |
-| 4 | Structured failure summary — collect per-candidate error + bucket state, throw descriptive error | 15min | 3 |
-| 5 | Probe on cooldown expiry — lightweight completion check before routing real traffic | 30min | 3 |
-| 6 | Tests | 30min | 1-5 |
+| 1 | Progressive fill: add `consecutiveErrors` to Bucket, scale fill, reset on success | 15min | `leaky-bucket.ts` |
+| 2 | 402 as temporary: change `classifyError(402)` to `rate_limit` | 1min | `leaky-bucket.ts` |
+| 3 | Structured failure summary: collect per-candidate errors, throw descriptive | 10min | `direct-api-transport.ts` |
 
-**Total: ~2.5hr**
-
-Branch: `fix/smart-fallback`
+**Total: ~30min**

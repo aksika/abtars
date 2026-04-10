@@ -13,6 +13,7 @@ const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 export interface FallbackConfig {
   createFallback: () => Promise<IKiroTransport>;
   threshold?: number; // consecutive failures before swap (default 3)
+  onFallbackActivated?: () => void;
 }
 
 export class TransportManager implements IKiroTransport {
@@ -53,6 +54,7 @@ export class TransportManager implements IKiroTransport {
           }
           this.usingFallback = true;
           this.startHealthCheck();
+          this.fallbackConfig.onFallbackActivated?.();
           logInfo(TAG, "✅ Fallback transport active");
           return this.fallback.sendPrompt(sessionKey, message);
         } catch (fbErr) {
