@@ -67,7 +67,7 @@ GITIGNORE
   echo "   ✅ Git repo initialized — add remote with: cd ~/.agentbridge && git remote add origin <url>"
 fi
 
-# 1. Sync .env — pick the right profile based on hostname
+# 1. Sync .env — merge-based deploy (never overwrites existing values)
 echo "📋 Syncing .env..."
 HOSTNAME=$(hostname)
 if echo "$HOSTNAME" | grep -qi "molty\|mac\|akos"; then
@@ -78,11 +78,49 @@ else
   ENV_LABEL="kp (WSL)"
 fi
 
+merge_env() {
+  local source="$1"
+  local target="$2"
+
+  if [ ! -f "$target" ]; then
+    cp "$source" "$target"
+    echo "   ✓ Created .env from source"
+    return
+  fi
+
+  local added=0 preserved=0 obsolete=0
+
+  # Add new keys from source that don't exist in target
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Skip comments and empty lines
+    case "$line" in \#*|"") continue ;; esac
+    key="${line%%=*}"
+    [ -z "$key" ] && continue
+    if ! grep -q "^${key}=" "$target" 2>/dev/null; then
+      echo "$line" >> "$target"
+      added=$((added + 1))
+      echo "   + Added: $key"
+    else
+      preserved=$((preserved + 1))
+    fi
+  done < "$source"
+
+  # Flag obsolete keys in target that don't exist in source
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in \#*|"") continue ;; esac
+    key="${line%%=*}"
+    [ -z "$key" ] && continue
+    if ! grep -q "^${key}=" "$source" 2>/dev/null; then
+      obsolete=$((obsolete + 1))
+      echo "   ⚠️  Obsolete: $key"
+    fi
+  done < "$target"
+
+  echo "   ✓ $ENV_LABEL: ${added} added, ${preserved} preserved, ${obsolete} obsolete"
+}
+
 if [ -f "$ENV_FILE" ]; then
-  cp "$ENV_FILE" "$AB_HOME/.env"
-  echo "   ✓ Using $ENV_LABEL profile"
-elif [ -f "$PROJECT_DIR/persona/core/.env" ]; then
-  cp "$PROJECT_DIR/persona/core/.env" "$AB_HOME/.env"
+  merge_env "$ENV_FILE" "$AB_HOME/.env"
 elif [ -f "$AB_HOME/.env" ]; then
   echo "   ⏭  No env profile found — keeping existing"
 else
