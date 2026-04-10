@@ -903,6 +903,29 @@ async function main(): Promise<number> {
 
     // Skip logic — candidate-driven (empty = skip)
     const skipSet = new Set<string>();
+
+    // SLEEP_QUALITY tiering — controls which prompts are eligible
+    const quality = (process.env["SLEEP_QUALITY"] ?? "normal").toLowerCase();
+    const curationDay = (process.env["SLEEP_CURATION_DAY"] ?? "sunday").toLowerCase();
+    const today = new Date().toLocaleDateString("en", { weekday: "long" }).toLowerCase();
+    const isCurationDay = today === curationDay;
+
+    const BUDGET_ONLY = new Set(["gc-noise", "daily-summary", "extract-from-daily"]);
+    const WEEKLY_ONLY = new Set(["skill-review", "core-knowledge", "consolidation"]);
+
+    if (quality === "budget") {
+      for (const step of steps) {
+        if (!BUDGET_ONLY.has(step.name)) skipSet.add(step.name);
+      }
+      logInfo(TAG, `[SLEEP] Quality=budget — only essential extraction`);
+    } else if (quality === "normal" && !isCurationDay) {
+      for (const name of WEEKLY_ONLY) skipSet.add(name);
+      logInfo(TAG, `[SLEEP] Quality=normal — weekly prompts skipped (curation day: ${curationDay})`);
+    } else {
+      logInfo(TAG, `[SLEEP] Quality=${quality}${isCurationDay ? " (curation day)" : ""} — all eligible`);
+    }
+
+    // Candidate-driven skips (empty = nothing to do)
     if (!candidates.recallFeedback) skipSet.add("feedback");
     if (!candidates.untaggedMemories) skipSet.add("topic-assignment");
     if (!candidates.promotionCandidates) skipSet.add("core-promotion");
