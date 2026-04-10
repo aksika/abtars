@@ -1,3 +1,5 @@
+.env*
+!.env*.example
 # Reference project — read only
 openclaw/
 
@@ -8,8 +10,6 @@ node_modules/
 dist/
 
 # Environment secrets
-.env
-.env.skills
 
 # IDE
 .vscode/
@@ -32,6 +32,3 @@ docs/.obsidian/
 titok/
 persona/tasks/
 .test-*
-.env.backup
-.env.kp
-.env.molty
