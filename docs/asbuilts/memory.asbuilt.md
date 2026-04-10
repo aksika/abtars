@@ -13,11 +13,11 @@
 
 Standalone memory package (`@agentbridge/memory`, ABM v2). 38 source + 29 test files in `src/memory/`, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation.
 
-SQLite-backed persistence with FTS5 (porter on content_en) + trigram FTS5 (content_en + content_original, diacritics-stripped), ollama vector embeddings with int8 quantization (1536→384 bytes after 14d) in separate `memory_embeddings` table, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L v2 compressor (entity whitelist, topic inference, no truncation), emotion tagging (25 types), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security.
+SQLite-backed persistence with FTS5 (porter on content_en) + trigram FTS5 (content_en + content_original, diacritics-stripped), ollama vector embeddings with int8 quantization (1536→384 bytes after 14d) in separate `memory_embeddings` table, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L rendered on the fly from content_en (no stored content_compressed), emotion tagging (25 types, source of truth — score derived from tags), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security. Memory timelines group related memories into narrative arcs. Cross-topic timelines follow entities across topic boundaries.
 
-Two-tier aging: Original NULLed after 90d (source of truth kept longer), content_en preserved forever (trigram search depends on it). ABM-L + int8 embeddings + signatures persist forever. Pressure-based acceleration as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (|emotion| ≥ 4 + pivot/correction) never aged.
+Two-tier aging: Original NULLed after 90d (source of truth kept longer), content_en preserved forever (trigram search depends on it). Int8 embeddings + signatures persist forever. Pressure-based acceleration as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (|emotion| ≥ 4 + pivot/correction) never aged.
 
-Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods. Triggered by `BED_TIME` + quiet ticks (no bridge restart). 24 sleep steps including topic assignment, core promotion, temporal review, emotion/flags backfill, ABM-L compression, contradiction check, emotional arcs, memory aging, entity review.
+Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods. Triggered by `BED_TIME` + quiet ticks (between BED_TIME and WAKE_TIME only). 14 sleep prompts with code pre-pass. Candidate-driven skip logic — prompts only fire when pre-pass finds work. SLEEP_QUALITY tiering: budget (3-5 calls), normal (6-11), ultimate (8-15).
 
 ### Package boundary
 
@@ -30,7 +30,7 @@ Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sle
 | Heartbeat | `IHeartbeat` interface — bridge injects its implementation |
 | Logger | `setLogger()` injection — bridge injects its logger at startup |
 | Types | `mem-types.ts` — all memory types owned by the package |
-| Tests | 90 test files, ~902 tests |
+| Tests | 90 test files, ~900 tests |
 
 **Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext`.
 
@@ -526,33 +526,40 @@ Before sleep starts, `SleepStateGatherer` collects system state and injects it i
 | # | File | Step | Behavior |
 |---|------|------|----------|
 | 0 | `00-identity.md` | Identity | Who Dreamy is, rules, tools, state snapshot |
-| 1 | `01-retrospective.md` | §1 Retrospective | Read messages, write retro, emotional attribution, update agent_notes |
-| 2 | `02-feedback.md` | §2 Feedback | Boost/demote recalled memories via `agentbridge-edit` |
-| 3 | `03-reminders.md` | §3 Reminders | Extract todos via `agentbridge-todo` |
-| 4a | `04a-daily-summary.md` | §4a Daily Summary | **Code-driven.** Batched summarization → `daily/daily_YYYYMMDD.md`. If yesterday has no daily file but has messages, targets yesterday (human day cycle: midnight–2am is still "today"). |
-| 4b | `04b-extract-from-daily.md` | §4b Extract from Daily | **Code-driven.** Model reads daily file, calls `agentbridge-store` |
-| 4c | `04c-gc-noise.md` | §4c GC Noise | Mark small talk/noise as garbage |
-| 5 | `06-cron-verify.md` | §5 Cron Verify | Cross-check reminders against cron entries |
-| 6 | `07-topic-reorg.md` | §6 Topic Reorg | Topic file maintenance |
-| 7 | `08a-darwinism.md` | §7 Darwinism | Fitness review, prune weak memories |
-| 7b | `08b-core-knowledge.md` | §7b Core Knowledge | Review core knowledge files |
-| 7c | `08c-translation-check.md` | §7c Translation | Fix bilingual memory quality |
-| 8 | `09-anomaly-audit.md` | §7.5 Anomaly Audit | CIA-AAA attribute audit (daily) |
-| 9 | `10-retro-extract.md` | §5.5 Retro Extract | Extract lessons/mistakes from retro with emotion scoring. Dedup via recall, escalate emotion on repeated mistakes. |
-| 10 | `11-merge.md` | §8 Merge | Near-duplicate memory merge (max 5) |
-| 11 | `12-consolidation.md` | §9 Consolidation | Weekly/quarterly rollups only (daily done in 04a) |
-| 12 | `13-media-cleanup.md` | §9.5 Media Cleanup | FIFO 100MB cleanup |
-| 13 | `14-report.md` | §10 Report | Self-review, fix missed items, write audit |
-| 14 | `15-skill-review.md` | §8d Skill Review | Review conversations for reusable patterns, create/update auto-skills via `agentbridge-skill` |
-| 15 | `16-topic-assignment.md` | §8e Topic Assignment | Tag untagged memories with topics via `agentbridge-edit --topic` |
-| 16 | `17-core-promotion.md` | §8f Core Promotion | Promote best general → core tier via `agentbridge-edit --tier core` (budget: 100 entries) |
-| 17 | `18-temporal-review.md` | §8g Temporal Review | Invalidate stale core facts via `agentbridge-edit --valid-to` |
-| 18 | `19-emotion-flags.md` | §8h Emotion/Flags Backfill | Backfill emotion_tags + importance_flags on legacy memories |
-| 19 | `20-compress-backfill.md` | §8i Compression Backfill | ABM-L compress memories lacking content_compressed |
-| 20 | `21-contradiction.md` | §8j Contradiction Check | Check core entries for conflicts before promotion |
-| 21 | `22-emotion-arcs.md` | §8k Emotional Arcs | Build per-topic emotional trajectory (↑↓↕→) |
-| 22 | `23-memory-aging.md` | §8l Memory Aging | Three-tier aging: NULL original/English past TTL, pressure-based |
-| 23 | `24-entity-review.md` | §8m Entity Review | Fix ABM-L @reference anomalies, re-compress |
+### Code Pre-Pass (runs before any LLM prompt, ~500ms)
+
+Garbage purge, message dedup, WAL checkpoint, FTS rebuild, embedding backfill, anomaly auto-fixes, emotion/flags backfill, emotional arcs (buildArc), memory aging, media cleanup, effectiveConfidence decay, user emotional profile (weekly). Outputs candidate lists for conditional prompts.
+
+### LLM Prompts (14 files, conditional — skip if no candidates)
+
+| # | File | Step | Fires when |
+|---|------|------|------------|
+| 01 | `01-gc-noise.md` | GC Noise | Always (messages exist) |
+| 02 | `02-daily-summary.md` | Daily Summary | Always (code-driven batches) |
+| 03 | `03-extract-from-daily.md` | Extract from Daily | Daily file written (depends on 02) |
+| 04 | `04-retrospective.md` | Retrospective | Always (watermark-scoped, noise-stripped) |
+| 05 | `05-retro-extract.md` | Retro Extract | Retro file written (depends on 04) |
+| 06 | `06-feedback.md` | Feedback | Recalls happened today |
+| 07 | `07-topic-assignment.md` | Topic Assignment | Untagged memories found by pre-pass |
+| 08 | `08-core-promotion.md` | Core Promotion | Promotion candidates found by pre-pass |
+| 09 | `09-merge.md` | Merge | Duplicate candidates found by pre-pass (timeline-based) |
+| 10 | `10-translation.md` | Translation | Bilingual quality issues found |
+| 11 | `11-skill-review.md` | Skill Review | Weekly (SLEEP_CURATION_DAY) |
+| 12 | `12-core-knowledge.md` | Core Knowledge | Weekly (SLEEP_CURATION_DAY) |
+| 13 | `13-consolidation.md` | Consolidation | Weekly/quarterly due |
+| 14 | `14-emotion-context.md` | Emotion Context | Memories without emotion_context |
+
+### SLEEP_QUALITY Tiering
+
+| Tier | Prompts | LLM calls |
+|---|---|---|
+| Budget | 01-03 only | 3-5 |
+| Normal | 01-10 always, 11-13 weekly | 6-11 |
+| Ultimate | 01-14 all eligible | 8-15 |
+
+### Post-Sleep: Professor Dream Report
+
+Code writes raw audit file → inject to Professor as system message → Professor sends user "dream report" with summary + flagged issues → 5-min window before hardware sleep (gated on `HARDWARE_SLEEP_AFTER_DREAMY`).
 
 ### Garbage Collection (§4)
 
@@ -700,26 +707,49 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | agentbridge-skill | `cli/agentbridge-skill.ts` | Auto-skill management. create/edit/patch/delete/list in `~/.agentbridge/skills/auto/`. Security scan on writes. |
 | agentbridge-backfill-v2 | `cli/agentbridge-backfill-v2.ts` | One-time migration: fills emotion_tags, importance_flags, content_compressed (ABM-L), signature on all existing memories. No LLM, pure regex. |
 
-### ABM v2 Store-Time Pipeline
+### Store-Time Pipeline
 
 Every `agentbridge-store` call runs these enrichments (~1-5ms total, no LLM):
 
 | Module | Output column | What |
 |---|---|---|
-| `emotion-tagger.ts` | `emotion_tags` | 25 emotion types via keyword regex (joy, fear, conviction, etc.) |
+| `emotion-tagger.ts` | `emotion_tags` | 25 emotion types via keyword regex. Source of truth — `emotion_score` derived from tags via `scoreFromTags()` (max absolute valence). LLM can override with `--emotion-tags`. |
 | `importance-flagger.ts` | `importance_flags` | 8 flag types (decision, pivot, origin, milestone, etc.) |
-| `memory-compressor.ts` | `content_compressed` | ABM-L format: `[FLAGS\|topic\|emotion\|confidence\|date] @entity content` |
 | `signature-generator.ts` | `signature` | 256-bit binary hash via Random Indexing for Hamming distance search |
+
+ABM-L is NOT stored — rendered on the fly from `content_en` at read time (wake-up builder, recall engine). `content_compressed` column dropped (migration v13).
 
 ### ABM-L (Memory Language)
 
-Compressed symbolic format for LLM consumption. See `docs/specs/abm-language.md`.
+Compressed symbolic format rendered on the fly for LLM consumption. See `docs/specs/abm-language.md`.
 
 ```
 [D|coding|convict|5|2026-01] @clerk >over @auth0 (pricing+DX)
 [P|personal|—|4|2026-03] @user prefers dark-mode+vim+minimal-code
 [LT|coding|frust|4|2026-03] FTS5 breaks on HU — EN for search
 ```
+
+### Memory Timelines
+
+Related memories grouped into narrative arcs. Rendered on the fly by `timeline-builder.ts`.
+
+```
+[TL|coding|auth] @auth0→issues(OAuth)→@clerk(pricing+DX)→back @auth0(reversed)
+  arc: fear→relief→conviction→reversal | current: @auth0
+```
+
+Cross-topic timelines follow entities across topic boundaries (`[XTL|@entity]` format).
+
+### Wake-Up Rendering Levels
+
+| Level | Tokens/memory | When |
+|---|---|---|
+| Signal (L0) | ~3 | <100 token budget — tag cloud of topics+entities |
+| Ultra | ~10 | 100-500 tokens — ABM-L with entity header + topic grouping |
+| Compact | ~10 | 500-5K tokens — same as ultra |
+| Full | ~10 | >5K tokens — raw ABM-L |
+
+Wake-up priority: core memories → timelines → emotional highlights → dailies (weekly timeline if budget tight) → weekly → quarterly.
 
 Flags: D=decision, P=preference, F=fact, L=lesson, O=origin, V=pivot, M=milestone, C=correction, T=technical, B=core belief. @references for entities. >over, >replaces, → for relationships.
 
@@ -741,7 +771,6 @@ Search stages: Sf (porter FTS5 + trigram with z↔y and substring fallback), Se 
 | Original | `content_original` | 90 days | Flashbulb (\|emotion\| ≥ 4 + pivot/correction) |
 | float32 embedding | `memory_embeddings` | 14 days (quantized to int8) | — |
 | int8 embedding | `memory_embeddings` | Never | — |
-| ABM-L | `content_compressed` | Never | — |
 | Signature | `signature` | Never | — |
 
 Pressure-based acceleration: aging TTLs multiply by pressure factor as DB approaches `MEMORY_MAX_DB_SIZE_MB` (0-50%: 1×, 50-75%: 0.7×, 75-90%: 0.35×, 90-95%: 0.15×, 95%+: immediate).
@@ -865,26 +894,21 @@ Se (embedding) tests require a running ollama instance with `nomic-embed-text`. 
 
 ---
 
-## Schema-Only Columns (Not Yet Wired)
+## Schema-Only Columns
 
-Columns that exist in the DB schema (via migrations) but have no code reading or writing them at runtime.
-
-| Column | Migration | Intended purpose | What's missing |
-|---|---|---|---|
-| `source_type` | v8 (default `'conversation'`) | Track memory origin: conversation/observation/correction/external/inference | `instantStore()` doesn't set it. No `--source-type` CLI flag. Default value written by SQLite on INSERT. Reserved for future trust model. |
-| `emotion_arc` | v8 | Per-topic emotional trajectory (↑↓↕→) | Not populated by any sleep step. `buildArc()` exists but not wired. Will be wired with sleep simplification (item #4). |
+| Column | Migration | Status |
+|---|---|---|
+| `source_type` | v8 (default `'conversation'`) | Reserved for future trust model. Default value written by SQLite on INSERT. |
 
 ---
 
 ## Not Yet Implemented
 
-Features described in specs (`docs/specs/abm-*.md`) that have no implementation in source.
-
 | Feature | Spec | Status |
 |---|---|---|
 | Semantic network activation (E7) | `abm-brain-patterns.md` | No code. Real-time spreading activation across linked topics during recall. |
 | Prospective memory (E5) | `abm-brain-patterns.md` | No code. Wake-up builder doesn't check for future `valid_from` dates. |
-| Multi-resolution recall (signal/compact) | `abm-competitive-analysis.md` | `resolution` param exists on `RecallParams` but only `"full"` vs default (ABM-L) is differentiated. `"signal"` and `"compact"` modes fall through to same ABM-L output. |
-| Hardware profiles | `abm-competitive-analysis.md` | No `MEMORY_PROFILE` config. No profile-based pipeline adaptation (server/desktop/mobile/edge). |
-| Self-improving compression | `abm-competitive-analysis.md` | No entity relationship stability tracking. No correction feedback loop into compressor. |
+| Hardware profiles | `abm-competitive-analysis.md` | No `MEMORY_PROFILE` config. No profile-based pipeline adaptation. |
 | Phase 3: Universal Access | `abm-roadmap.md` | No unified `agentbridge-memory` CLI, no MCP server, no OpenClaw plugin. |
+| Transport Suppliers | `119-smart-fallback.md` | Named suppliers (openrouter/together/ollama) with provider-level fallback. Designed, not implemented. |
+| Bidirectional ABM-L | Backlog #113 | Agent writes ABM-L directly. Needs format validation. Low priority. |
