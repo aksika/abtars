@@ -231,7 +231,7 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
 
   // 9. Compute decayed confidence — write candidates for Darwinism step
   try {
-    const candidates = memory.computeDecayedConfidence();
+    const candidates = await memory.computeDecayedConfidence();
     if (candidates.length > 0) {
       const candidatesPath = join(memoryDir, "sleep", "darwinism-candidates.json");
       writeFileSync(candidatesPath, JSON.stringify(candidates, null, 2));

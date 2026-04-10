@@ -352,9 +352,9 @@ export class MemoryManager {
   }
 
   /** Compute decayed confidence for all memories. Returns candidates for pruning (effective confidence < 1). */
-  computeDecayedConfidence(): Array<{ id: number; confidence: number; effectiveConfidence: number; recallCount: number; daysSinceRecall: number }> {
+  async computeDecayedConfidence(): Promise<Array<{ id: number; confidence: number; effectiveConfidence: number; recallCount: number; daysSinceRecall: number }>> {
     if (!this.db) return [];
-    const { effectiveConfidence } = require("./brain-patterns.js") as typeof import("./brain-patterns.js");
+    const { effectiveConfidence } = await import("./brain-patterns.js");
     const now = Date.now();
     const rows = this.db.prepare(
       `SELECT id, confidence, recall_count, last_recalled_at, created_at FROM extracted_memories WHERE valid_to IS NULL`,

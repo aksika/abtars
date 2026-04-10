@@ -431,3 +431,24 @@ For tiny models (<500 token budget), render ALL memories as a structured tag clo
 **Source:** ABM Simplification #2b nice-to-have
 
 Follow an entity across topic boundaries. Currently timelines are per-topic. But "@clerk" appears in coding, work, and finance. Cross-topic timeline shows the full entity story with topic prefixes. Second pass in `buildTimelines()` grouping by entity only for entities in 3+ topics.
+
+## 117. Web port config in .env
+
+**Status:** Not started
+**Priority:** Low
+
+Web dashboard port should be configurable per deployment via `.env.kp` / `.env.molty` (e.g. `WEB_PORT=3000`). Avoids port conflicts when multiple deployments run on the same machine.
+
+## 118. Model Health Check + Subagent Fallback
+
+**Priority:** HIGH
+**Status:** Not started
+
+**Problem:** If a subagent model (sleep, browse, coding) is misconfigured or unavailable (404, 429), the subagent burns through all retries and fails completely. We hit this with `nemotron-3:cloud` (wrong name → 404 × 18 attempts) and `qwen3-coder-next` (not available → "all models exhausted").
+
+**Solution:**
+1. Startup health check: verify all configured models respond (lightweight ping, not full prompt)
+2. Runtime fallback: if a subagent model returns 404/429, fall back to the main agent model
+3. Log clearly which model was unavailable and what it fell back to
+
+**Affected models:** `AGENT_SLEEP_MODEL`, `AGENT_BROWSE_MODEL`, `AGENT_CODING_MODEL`

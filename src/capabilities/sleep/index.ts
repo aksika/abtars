@@ -44,9 +44,21 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
   function spawnSleep(): void {
     msgTsAtSpawn = opts.getLastMsgTs?.() ?? 0;
-    if (new Date().getHours() < opts.sleepHour) {
-      logDebug("sleep", `😴 Before SLEEP_TIME (${opts.sleepHour}:00) — skip`);
-      return;
+    const hour = new Date().getHours();
+    const WAKE_HOUR = parseInt(process.env["WAKE_TIME"] ?? "7", 10);
+    // Only sleep between BED_TIME and WAKE_TIME
+    if (opts.sleepHour <= WAKE_HOUR) {
+      // BED_TIME is after midnight (e.g. 2:00) — sleep window is sleepHour..WAKE_HOUR
+      if (hour < opts.sleepHour || hour >= WAKE_HOUR) {
+        logDebug("sleep", `😴 Outside sleep window (${opts.sleepHour}:00-${WAKE_HOUR}:00) — skip`);
+        return;
+      }
+    } else {
+      // BED_TIME is before midnight (e.g. 23:00) — sleep window is sleepHour..midnight + midnight..WAKE_HOUR
+      if (hour < opts.sleepHour && hour >= WAKE_HOUR) {
+        logDebug("sleep", `😴 Outside sleep window (${opts.sleepHour}:00-${WAKE_HOUR}:00) — skip`);
+        return;
+      }
     }
     if (hasSleepAuditToday(opts.sleepAuditDir)) {
       logDebug("sleep", "😴 Sleep already done today — skip");
