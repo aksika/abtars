@@ -8,7 +8,7 @@ import { withRetry, isFatal } from "../retry.js";
 import { ConversationSession, type ToolCall } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
-import { shouldSkip, recordError, classifyError, getBucketLevel } from "./leaky-bucket.js";
+import { shouldSkip, recordError, recordSuccess, classifyError, getBucketLevel } from "./leaky-bucket.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 
 const TAG = "direct-api";
@@ -94,6 +94,7 @@ export class DirectApiTransport implements IKiroTransport {
       const candidates = allCandidates;
 
       const isPrimary = (c: typeof candidates[0]): boolean => c.model === this.config.model && c.endpoint === this.config.endpoint;
+      const failedAttempts: Array<{ model: string; kind: string; bucket: number }> = [];
 
       for (const candidate of candidates) {
         const bucketKey = `${candidate.endpoint}|${candidate.model}`;
@@ -123,13 +124,16 @@ export class DirectApiTransport implements IKiroTransport {
         try {
           const result = await this.agentLoop(session, ac.signal);
           this._lastAnswer = result;
+          recordSuccess(bucketKey);
           return result;
         } catch (err) {
           const status = this.parseErrorStatus(err);
           const kind = classifyError(status);
-          recordError(bucketKey, kind);
+          const retryAfterMs = this.parseRetryAfter(err);
+          recordError(bucketKey, kind, retryAfterMs);
+          failedAttempts.push({ model: candidate.model, kind, bucket: getBucketLevel(bucketKey) });
           session.rollbackToLastUser(); // clean slate for fallback model
-          logWarn(TAG, `${candidate.model} failed (${kind}, bucket: ${getBucketLevel(bucketKey)}%): ${err instanceof Error ? err.message.slice(0, 100) : String(err)}`);
+          logWarn(TAG, `${candidate.model} failed (${kind}, bucket: ${getBucketLevel(bucketKey)}%${retryAfterMs ? `, retry-after: ${Math.round(retryAfterMs / 1000)}s` : ""}): ${err instanceof Error ? err.message.slice(0, 100) : String(err)}`);
         }
       }
 
@@ -150,14 +154,19 @@ export class DirectApiTransport implements IKiroTransport {
         try {
           const result = await this.agentLoop(session, ac.signal);
           this._lastAnswer = result;
+          const bk = `${smallest.endpoint}|${smallest.model}`;
+          recordSuccess(bk);
           return result;
         } catch (err) {
           const status = this.parseErrorStatus(err);
-          recordError(`${smallest.endpoint}|${smallest.model}`, classifyError(status));
+          const bk = `${smallest.endpoint}|${smallest.model}`;
+          recordError(bk, classifyError(status));
+          failedAttempts.push({ model: smallest.model, kind: classifyError(status), bucket: getBucketLevel(bk) });
         }
       }
 
-      throw new Error("All models exhausted");
+      const summary = failedAttempts.map(a => `  - ${a.model}: ${a.kind} (bucket: ${a.bucket}%)`).join("\n");
+      throw new Error(`All models exhausted:\n${summary}`);
     } finally {
       this._promptStartedAt = null;
       this.abortControllers.delete(sessionKey);
@@ -207,6 +216,23 @@ export class DirectApiTransport implements IKiroTransport {
     const msg = err instanceof Error ? err.message : String(err);
     const m = /API error (\d+)/.exec(msg);
     return m ? parseInt(m[1]!, 10) : 0;
+  }
+
+  /** Extract Retry-After from error (seconds or date). Returns ms or undefined. */
+  private parseRetryAfter(err: unknown): number | undefined {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Look for retry_after in JSON body: "retry_after":30 or "retry-after":"30"
+    const jsonMatch = /retry[_-]after["\s:]+(\d+(?:\.\d+)?)/i.exec(msg);
+    if (jsonMatch) return Math.ceil(parseFloat(jsonMatch[1]!) * 1000);
+    // Look for x-ratelimit-reset (unix timestamp)
+    const resetMatch = /x-ratelimit-reset["\s:]+(\d{10,13})/i.exec(msg);
+    if (resetMatch) {
+      const ts = parseInt(resetMatch[1]!, 10);
+      const ms = ts < 1e12 ? ts * 1000 : ts; // seconds vs milliseconds
+      const delta = ms - Date.now();
+      return delta > 0 ? delta : undefined;
+    }
+    return undefined;
   }
 
   private async streamCompletion(
