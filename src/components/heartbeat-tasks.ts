@@ -88,7 +88,7 @@ export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTa
     name: "db-integrity",
     execute: async () => {
       counter++;
-      if (counter % 12 !== 0) return;
+      if (counter % 72 !== 0) return; // every 72 ticks = ~6 hours
       if (!memory) return;
       const result = memory.maintenance.checkIntegrity();
       if (result !== "ok") {
