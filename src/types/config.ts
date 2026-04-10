@@ -42,7 +42,7 @@ export type VoiceConfig = {
 };
 
 export type ModelConfig = {
-  agentModel: string;
+  mainModel: string;
   browseModel: string;
   sleepModel: string;
   codingModel: string;
@@ -88,7 +88,7 @@ export const CONFIG_DEFAULTS = {
     ttsVoice: "en-US-AndrewMultilingualNeural",
   },
   models: {
-    agentModel: "claude-sonnet-4.6",
+    mainModel: "claude-sonnet-4.6",
     browseModel: "claude-sonnet-4.6",
     sleepModel: "claude-opus-4.6",
     codingModel: "claude-opus-4.6",

@@ -395,25 +395,53 @@ function formatWiredResults(r: WiredResults): string {
 async function createSleepTransport(verbose: boolean): Promise<{ transport: import("../../components/transport/kiro-transport.js").IKiroTransport | import("../../components/transport/direct-api-transport.js").DirectApiTransport; model: string }> {
   const { loadAndValidateConfig } = await import("../../components/config.js");
   const config = await loadAndValidateConfig();
-  const model = process.env["AGENT_SLEEP_MODEL"] || config.models.agentModel || "auto";
+  const model = process.env["AGENT_SLEEP_MODEL"] || config.models.mainModel || "auto";
+  const { readBridgeLockTransport } = await import("../../components/transport/bridge-lock-transport.js");
 
   if (config.transport.agentTransport === "api") {
-    // Use same transport as main agent (Ollama, OpenRouter, etc.)
     const { DirectApiTransport } = await import("../../components/transport/direct-api-transport.js");
+    const endpoint = process.env["API_ENDPOINT"] ?? "http://localhost:11434/v1";
+    const apiKey = process.env["API_KEY"];
+    const maxCtx = parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10);
+
+    // Fall back to main agent's model via bridge.lock if sleep model fails
+    const mainTransport = readBridgeLockTransport();
+    const fallbacks = mainTransport?.type === "api" && mainTransport.model !== model
+      ? [{ endpoint: mainTransport.endpoint ?? endpoint, apiKey, model: mainTransport.model, maxContext: maxCtx }]
+      : undefined;
+
     const transport = new DirectApiTransport({
-      endpoint: process.env["API_ENDPOINT"] ?? "http://localhost:11434/v1",
-      apiKey: process.env["API_KEY"],
-      model,
-      maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
+      endpoint, apiKey, model,
+      maxContext: maxCtx,
       maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
       maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
+      fallbacks,
     });
     await transport.initialize();
-    if (verbose) logInfo(TAG, `DirectAPI sleep transport initialized (model=${model})`);
+    if (verbose) logInfo(TAG, `DirectAPI sleep transport initialized (model=${model}${fallbacks ? `, fallback=${mainTransport!.model}` : ""})`);
     return { transport, model };
   }
 
-  // Fallback: ACP (kiro-cli)
+  // ACP config — but check if main agent actually fell back to Direct API
+  const mainTransport = readBridgeLockTransport();
+  if (mainTransport?.type === "api") {
+    logInfo(TAG, `Main agent on Direct API — sleep using Direct API too (model=${model}, fallback=${mainTransport.model})`);
+    const { DirectApiTransport } = await import("../../components/transport/direct-api-transport.js");
+    const fallbacks = mainTransport.model !== model
+      ? [{ endpoint: mainTransport.endpoint!, apiKey: process.env["API_KEY"], model: mainTransport.model }]
+      : undefined;
+    const transport = new DirectApiTransport({
+      endpoint: mainTransport.endpoint!, apiKey: process.env["API_KEY"], model,
+      maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
+      maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
+      maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
+      fallbacks,
+    });
+    await transport.initialize();
+    return { transport, model };
+  }
+
+  // ACP (kiro-cli)
   const { createAgentTransport } = await import("../../components/agent-registry.js");
   const transport = createAgentTransport("dreamy", {
     cliPath: config.transport.agentCliPath,

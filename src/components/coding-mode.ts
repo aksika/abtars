@@ -1,6 +1,7 @@
-import { AcpTransport } from "./transport/acp-transport.js";
 import { createAgentTransport } from "./agent-registry.js";
 import { logInfo } from "./logger.js";
+import { readBridgeLockTransport } from "./transport/bridge-lock-transport.js";
+import type { IKiroTransport } from "./transport/kiro-transport.js";
 
 /**
  * Manages the coding agent transport lifecycle.
@@ -9,7 +10,7 @@ import { logInfo } from "./logger.js";
  */
 export class CodingMode {
   private readonly sessions = new Set<string>();
-  private transport: AcpTransport | null = null;
+  private transport: IKiroTransport | null = null;
   private readonly cliPath: string;
   private readonly workingDir: string;
   private readonly model: string;
@@ -24,17 +25,33 @@ export class CodingMode {
     return this.sessions.has(sessionKey);
   }
 
-  getTransport(): AcpTransport | null {
+  getTransport(): IKiroTransport | null {
     return this.transport;
   }
 
   async start(sessionKey: string): Promise<void> {
     if (!this.transport) {
-      this.transport = createAgentTransport("coding", {
-        cliPath: this.cliPath,
-        workingDir: this.workingDir,
-        model: this.model,
-      });
+      // Check if main agent is on Direct API — use that instead of ACP
+      const mainTransport = readBridgeLockTransport();
+      if (mainTransport?.type === "api") {
+        const { DirectApiTransport } = await import("./transport/direct-api-transport.js");
+        this.transport = new DirectApiTransport({
+          endpoint: mainTransport.endpoint!, apiKey: process.env["API_KEY"],
+          model: this.model || mainTransport.model,
+          maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
+          maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
+          maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
+          fallbacks: this.model && this.model !== mainTransport.model
+            ? [{ endpoint: mainTransport.endpoint!, apiKey: process.env["API_KEY"], model: mainTransport.model }]
+            : undefined,
+        });
+      } else {
+        this.transport = createAgentTransport("coding", {
+          cliPath: this.cliPath,
+          workingDir: this.workingDir,
+          model: this.model,
+        });
+      }
       await this.transport.initialize();
     }
     this.sessions.add(sessionKey);

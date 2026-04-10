@@ -212,7 +212,7 @@ async function handleRestart(_text: string, ctx: CommandContext): Promise<boolea
   if (ctx.transport.restartSession) {
     await ctx.reply("♻️ Restarting Kiro...");
     ctx.busyChats.delete(ctx.sessionKey);
-    await ctx.transport.restartSession(ctx.config.workingDir, process.env["AGENT_MODEL"]);
+    await ctx.transport.restartSession(ctx.config.workingDir, process.env["AGENT_MAIN_MODEL"]);
     ctx.pendingSessionStart.add(ctx.sessionKey);
     await ctx.reply("✓ Kiro restarted.");
   } else {
@@ -339,7 +339,7 @@ async function handleModels(_text: string, ctx: CommandContext): Promise<boolean
 
   const currentModel = "currentModel" in transport
     ? (transport as unknown as { currentModel: string }).currentModel
-    : process.env["AGENT_MODEL"] ?? "unknown";
+    : process.env["AGENT_MAIN_MODEL"] ?? "unknown";
 
   // Fetch models from active endpoint only
   let models: string[] = [];
@@ -575,7 +575,7 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
   const profile = process.env["AGENT_TRANSPORT_PROFILE"] || "default";
   const transport = process.env["AGENT_TRANSPORT"] || "acp";
   const cli = process.env["AGENT_CLI"] || "unknown";
-  const configModel = process.env["API_MODEL"] || process.env["AGENT_MODEL"] || "unknown";
+  const configModel = process.env["AGENT_MAIN_MODEL"] || process.env["AGENT_MAIN_MODEL"] || "unknown";
   const activeModel = ("currentModel" in ctx.transport) ? (ctx.transport as unknown as { currentModel: string }).currentModel : configModel;
   const endpoint = process.env["API_ENDPOINT"] || "";
   const providerLabel = (ep: string): string => {
@@ -690,13 +690,13 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
 
   // Fire async checks in parallel
   const [modelRaw, mcpRaw] = await Promise.all([
-    process.env["AGENT_MODEL"]
+    process.env["AGENT_MAIN_MODEL"]
       ? Promise.resolve("")
       : execAsync("kiro-cli", ["settings", "list", "--format", "json"], 3000),
     execAsync("mcporter", ["list", "--json"], 15_000),
   ]);
 
-  let model = process.env["AGENT_MODEL"] || "";
+  let model = process.env["AGENT_MAIN_MODEL"] || "";
   if ("currentModel" in ctx.transport) {
     model = (ctx.transport as unknown as { currentModel: string }).currentModel;
   } else if (!model) {

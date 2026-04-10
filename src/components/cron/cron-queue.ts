@@ -14,6 +14,8 @@ import { homedir } from "node:os";
 import { agentBridgeHome } from "../../paths.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { createAgentTransport } from "../agent-registry.js";
+import { readBridgeLockTransport } from "../transport/bridge-lock-transport.js";
+import { DirectApiTransport } from "../transport/direct-api-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
 import type { CronEntry } from "../../cli/agentbridge-task.js";
 import { localDate } from "../env-utils.js";
@@ -261,7 +263,19 @@ export class CronQueue {
 
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
 
-    const transport = createAgentTransport("cron", { cliPath: this.cliPath, workingDir: this.workingDir });
+    let transport: import("../transport/kiro-transport.js").IKiroTransport;
+    const mainTransport = readBridgeLockTransport();
+    if (mainTransport?.type === "api") {
+      transport = new DirectApiTransport({
+        endpoint: mainTransport.endpoint!, apiKey: process.env["API_KEY"],
+        model: mainTransport.model,
+        maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
+        maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
+        maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
+      });
+    } else {
+      transport = createAgentTransport("cron", { cliPath: this.cliPath, workingDir: this.workingDir });
+    }
     const sessionKey = `cron:${entry.id}`;
 
     // 30-min hard timeout
