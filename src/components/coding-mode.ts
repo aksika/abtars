@@ -1,4 +1,5 @@
 import { AcpTransport } from "./transport/acp-transport.js";
+import { createAgentTransport } from "./agent-registry.js";
 import { logInfo } from "./logger.js";
 
 /**
@@ -29,8 +30,9 @@ export class CodingMode {
 
   async start(sessionKey: string): Promise<void> {
     if (!this.transport) {
-      this.transport = new AcpTransport(this.cliPath, this.workingDir, {
-        agent: "coding-agent",
+      this.transport = createAgentTransport("coding", {
+        cliPath: this.cliPath,
+        workingDir: this.workingDir,
         model: this.model,
       });
       await this.transport.initialize();

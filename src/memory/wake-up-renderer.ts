@@ -4,13 +4,14 @@
  * Operates on stored ABM-L, produces ultra-compact output.
  */
 
-export type CompressionLevel = "full" | "compact" | "ultra";
+export type CompressionLevel = "signal" | "full" | "compact" | "ultra";
 
 /** Pick compression level based on token budget. */
 export function pickLevel(budgetTokens: number): CompressionLevel {
   if (budgetTokens > 5000) return "full";
   if (budgetTokens > 500) return "compact";
-  return "ultra";
+  if (budgetTokens > 100) return "ultra";
+  return "signal";
 }
 
 interface MemoryEntry {
@@ -95,6 +96,7 @@ function renderFull(entries: ReadonlyArray<MemoryEntry>): string {
 export function renderWakeUp(entries: ReadonlyArray<MemoryEntry>, level: CompressionLevel): string {
   if (entries.length === 0) return "";
 
+  if (level === "signal") return renderSignal(entries);
   if (level === "full") return `[CORE MEMORY — ${entries.length} entries]\n${renderFull(entries)}`;
 
   // compact and ultra both use topic grouping + entity header
@@ -102,6 +104,30 @@ export function renderWakeUp(entries: ReadonlyArray<MemoryEntry>, level: Compres
   const body = renderCompact(entries, replace);
   const headerLine = header ? header + "\n" : "";
   return `[CORE MEMORY — ${entries.length} entries]\n${headerLine}${body}`;
+}
+
+/** Render L0 signal level: structured tag cloud. ~50 tokens for entire memory. */
+function renderSignal(entries: ReadonlyArray<MemoryEntry>): string {
+  const topics = new Map<string, { types: Map<string, number>; entities: Set<string> }>();
+
+  for (const e of entries) {
+    if (!topics.has(e.topic)) topics.set(e.topic, { types: new Map(), entities: new Set() });
+    const t = topics.get(e.topic)!;
+    const parsed = parsePrefix(e.content_compressed);
+    const flag = parsed.flags.charAt(0) || "F";
+    t.types.set(flag, (t.types.get(flag) ?? 0) + 1);
+    const refs = e.content_compressed.match(/@[\w-]+/g) ?? [];
+    for (const ref of refs) t.entities.add(ref);
+  }
+
+  const lines: string[] = [`[MEMORY MAP — ${entries.length} entries]`];
+  for (const [topic, { types, entities }] of [...topics.entries()].sort((a, b) => b[1].types.size - a[1].types.size)) {
+    const count = [...types.values()].reduce((a, b) => a + b, 0);
+    const entityStr = [...entities].slice(0, 4).join(" ");
+    const typeStr = [...types.entries()].map(([f, c]) => `${f}:${c}`).join(" ");
+    lines.push(`${topic}(${count}): ${entityStr} — ${typeStr}`);
+  }
+  return lines.join("\n");
 }
 
 /**

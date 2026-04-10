@@ -346,8 +346,12 @@ async function createSleepTransport(verbose: boolean): Promise<{ transport: impo
   }
 
   // Fallback: ACP (kiro-cli)
-  const { AcpTransport } = await import("../../components/transport/acp-transport.js");
-  const transport = new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, { model: model !== "unknown" ? model : undefined, autoReinit: false, tag: "acp-sleep" });
+  const { createAgentTransport } = await import("../../components/agent-registry.js");
+  const transport = createAgentTransport("dreamy", {
+    cliPath: config.transport.agentCliPath,
+    workingDir: config.transport.workingDir,
+    model: model !== "unknown" ? model : undefined,
+  });
   await transport.initialize();
   if (verbose) logInfo(TAG, `ACP sleep transport initialized (model=${model})`);
   return { transport, model };

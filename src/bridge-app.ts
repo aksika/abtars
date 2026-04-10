@@ -6,7 +6,7 @@ import { loadAndValidateConfig } from "./components/config.js";
 import { agentBridgeHome } from "./paths.js";
 
 import { TmuxClient } from "./components/transport/tmux-client.js";
-import { AcpTransport } from "./components/transport/acp-transport.js";
+import { createAgentTransport } from "./components/agent-registry.js";
 import { writeRestartReason } from "./components/restart-reason.js";
 import { createSelfHealerTask } from "./components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
@@ -192,10 +192,11 @@ export class Bridge {
     } else {
       try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
       logInfo("main", `🔌 ACP transport (${config.transport.agentCli})`);
-      const cliArgs = config.transport.agentCli === "gemini" ? ["--acp", "-y"] : undefined;
-      transport = new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, {
+      transport = createAgentTransport("professor", {
+        cliPath: config.transport.agentCliPath,
+        workingDir: config.transport.workingDir,
+        agentCli: config.transport.agentCli,
         model: config.models.agentModel || undefined,
-        cliArgs,
       });
     }
 
@@ -216,7 +217,9 @@ export class Bridge {
         createFallback: async () => {
           if (fallbackType === "acp") {
             logInfo("main", "🔄 Initializing ACP fallback transport...");
-            return new AcpTransport(config.transport.agentCliPath, config.transport.workingDir, {
+            return createAgentTransport("professor", {
+              cliPath: config.transport.agentCliPath,
+              workingDir: config.transport.workingDir,
               model: config.models.agentModel || undefined,
             });
           } else if (fallbackType === "api") {

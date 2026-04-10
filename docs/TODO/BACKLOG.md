@@ -364,3 +364,43 @@ Self-healer filed a `[SYSTEM BUG REPORT]` for a `[object Object]` error from the
 - Don't auto-investigate bug reports — just log them and notify the user, let them decide
 - Queue bug reports as LOW priority, process only when idle
 - Context pressure guard: at ctx >70%, agent should stop investigation and warn user ("I'm running low on context, should I reset and continue or stop here?"). Options: (a) auto-reset at threshold, (b) ask user, (c) refuse new tool calls above threshold. Leaning toward (b) — user stays in control.
+
+## 105. Unified Agent Registry
+
+**Status:** Not started
+**Priority:** High
+**Source:** ABM Simplification #4 (moved from sleep refactor — benefits all agents)
+
+Single `createAgentTransport(role, config)` factory for all agent roles (professor/dreamy/browsie/coding). Each role has a universal agent config: persona (SOUL), rules, model preference, available tools, trust level. Bridge-injected context — NOT kiro steering files, NOT CLI-specific. Transport-agnostic (kiro-cli ACP, gemini-cli, direct API). Replaces 5 scattered `new AcpTransport()` calls across bridge-app, agentbridge-sleep, coding-mode, cron-queue, agent-api-server.
+
+## 106. Bidirectional ABM-L
+
+**Status:** Not started
+**Priority:** Low
+**Source:** ABM Simplification #2 nice-to-have
+
+Agent writes memories directly in ABM-L format (`--abml "[D|coding|convict|5] @clerk >over @auth0 (pricing+DX)"`). No compression step — agent thinks in memory language. Needs format validation + English fallback if malformed. Low priority — needs more thought on validation strategy.
+
+## 107. Weekly Timeline from Dailies
+
+**Status:** Not started
+**Priority:** Medium
+**Source:** ABM Simplification #2b nice-to-have
+
+Compress a week of daily summaries into one narrative timeline instead of loading 7 separate daily files. ~100 tokens instead of ~560. Reuse `buildTimelines()` on daily summary content. Each daily becomes a "memory" with date as created_at, extract key events + emotions. Render as single timeline in wake-up.
+
+## 108. L0 Signal Level — Memory Tag Cloud
+
+**Status:** Not started
+**Priority:** Medium
+**Source:** ABM Simplification #2b nice-to-have
+
+For tiny models (<500 token budget), render ALL memories as a structured tag cloud: topics, entity counts, memory type distribution. ~50 tokens. Agent sees its entire memory as a structured overview. Enables "what do I know about X?" meta-queries. Add as new level in `pickLevel()`.
+
+## 109. Cross-Topic Timelines
+
+**Status:** Not started
+**Priority:** Medium
+**Source:** ABM Simplification #2b nice-to-have
+
+Follow an entity across topic boundaries. Currently timelines are per-topic. But "@clerk" appears in coding, work, and finance. Cross-topic timeline shows the full entity story with topic prefixes. Second pass in `buildTimelines()` grouping by entity only for entities in 3+ topics.

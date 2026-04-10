@@ -7,6 +7,7 @@ import { agentBridgeHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./transport/kiro-transport.js";
 import { AcpTransport } from "./transport/acp-transport.js";
+import { createAgentTransport } from "./agent-registry.js";
 import { MemoryManager } from "../memory/memory-manager.js";
 import { scanPrompt } from "./prompt-scanner.js";
 import { logInfo, logWarn } from "./logger.js";
@@ -114,7 +115,7 @@ export class AgentApiServer {
       return this.agentTransport;
     }
     logInfo(TAG, "Spawning dedicated kiro-cli for A2A");
-    this.agentTransport = new AcpTransport(this.cliPath, this.workingDir, { skipAgent: true });
+    this.agentTransport = createAgentTransport("browsie", { cliPath: this.cliPath, workingDir: this.workingDir });
     await this.agentTransport.initialize();
     this.resetIdleTimer();
     return this.agentTransport;

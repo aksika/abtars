@@ -61,10 +61,45 @@ function loadDailies(maxDays: number): string[] {
   return files.map(f => {
     const content = readFileSync(join(dailyDir, f), "utf-8").trim();
     const date = f.replace("daily_", "").replace(".md", "");
-    // Compress daily to ABM-L bullet points
     const compressed = compressDailySummary(content, date);
     return compressed || `[DAILY ${date}]\n${content.length > 400 ? content.slice(0, 397) + "..." : content}`;
   });
+}
+
+/** Compress 7 dailies into a single weekly narrative timeline. */
+function loadWeeklyTimeline(): string | null {
+  const dailyDir = join(agentBridgeHome(), "memory", "daily");
+  if (!existsSync(dailyDir)) return null;
+
+  const files = readdirSync(dailyDir)
+    .filter(f => f.startsWith("daily_") && f.endsWith(".md"))
+    .sort()
+    .reverse()
+    .slice(0, 7);
+
+  if (files.length < 2) return null;
+
+  const days: string[] = [];
+  for (const f of files.reverse()) {
+    const content = readFileSync(join(dailyDir, f), "utf-8").trim();
+    const date = f.replace("daily_", "").replace(".md", "");
+    const dayName = new Date(date + "T12:00:00").toLocaleDateString("en", { weekday: "short" });
+    // Extract first 2-3 key lines from daily
+    const lines = content.split("\n")
+      .filter(l => l.trim() && !l.startsWith("#"))
+      .map(l => l.replace(/^[-*]\s*/, "").trim())
+      .filter(l => l.length > 15)
+      .slice(0, 2);
+    if (lines.length > 0) {
+      const summary = lines.map(l => l.length > 50 ? l.slice(0, 47) + "..." : l).join(", ");
+      days.push(`${dayName}: ${summary}`);
+    }
+  }
+
+  if (days.length < 2) return null;
+  const firstDate = files[files.length - 1]!.replace("daily_", "").replace(".md", "");
+  const lastDate = files[0]!.replace("daily_", "").replace(".md", "");
+  return `[WEEK ${firstDate}→${lastDate}]\n${days.join(" → ")}`;
 }
 
 /** Load latest weekly/quarterly summary. */
@@ -154,12 +189,20 @@ export function buildWakeUp(db: Database.Database | null, ctxWindowSize: number)
     }
   }
 
-  // Priority 4: dailies (up to 7)
+  // Priority 4: dailies — weekly timeline if budget tight, individual dailies if generous
   if (remaining > 100) {
-    for (const daily of loadDailies(7)) {
-      if (remaining < 100) break;
-      const tc = tokenCount(daily);
-      if (tc <= remaining) { parts.push(daily); remaining -= tc; }
+    const weeklyTl = loadWeeklyTimeline();
+    if (weeklyTl && remaining < 800) {
+      // Budget tight: use weekly timeline (~100 tokens instead of ~560)
+      const tc = tokenCount(weeklyTl);
+      if (tc <= remaining) { parts.push(weeklyTl); remaining -= tc; }
+    } else {
+      // Budget generous: load individual dailies
+      for (const daily of loadDailies(7)) {
+        if (remaining < 100) break;
+        const tc = tokenCount(daily);
+        if (tc <= remaining) { parts.push(daily); remaining -= tc; }
+      }
     }
   }
 

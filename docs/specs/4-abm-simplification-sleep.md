@@ -402,3 +402,107 @@ These were shipped as part of the sleep stability work before the phase refactor
 | Sleep announcement timing | Post-Dreamy + 5min grace period, user can interrupt | 2026-04-09 |
 | Per-step log files | `sleep/<YYYYMMDD>/<NN>-<step-name>.md` | 2026-04-09 |
 | Sleep model | Changed to `qwen3-coder-next` (5x cheaper than deepseek-3.2) | 2026-04-09 |
+
+---
+
+## First Night Telemetry (2026-04-10)
+
+Real data from the first night with telemetry, budget safety, and retro watermark fix.
+
+### Raw results
+
+```
+Status: suspended (LLM budget hit at call 13/12)
+Model: minimax-m2.5:cloud (BUG: used main model, not AGENT_SLEEP_MODEL)
+
+Step                  Status    Duration   Context
+identity              ok          0.8s     -1% → 1%
+retrospective         ok         39.8s      1% → 14%    ← was 20min before watermark fix!
+feedback              ok         63.4s     14% → 20%
+reminders             ok         10.7s     20% → 23%
+04a-daily-summary     ok         31.8s     (code-driven, separate ctx)
+04b-extract           ok         30.1s     (code-driven, separate ctx)
+04c-gc-noise          ok        112.6s     27% → 32%
+cron-verify           ok          7.0s     32% → 33%
+topic-reorg           skipped
+darwinism             ok         28.8s     33% → 34%
+core-knowledge        ok          5.5s     34% → 35%
+translation-check     ok          6.8s     35% → 35%
+anomaly-audit         ok         20.3s     35% → 37%
+retro-extract         failed               37% → 37%    ← budget exhausted here
+```
+
+13 LLM calls, 12 steps attempted, context peaked at 37%. Total wall time: ~6 min.
+
+### How 4-phase design would have performed
+
+**Phase 1: EXTRACT (fresh session)**
+```
+GC noise          112.6s   0% → 5%     (runs first — clean data for retro)
+04a daily summary  31.8s   (code-driven)
+04b extract        30.1s   (code-driven)
+retrospective      39.8s   5% → 18%    (reads clean, watermark-scoped messages)
+retro-extract       ?.?s   18% → ~22%  (would have succeeded — budget not hit yet)
+reminders          10.7s   22% → ~25%
+                                        Session destroyed. 6 LLM calls.
+```
+
+**Code-driven (free, no session)**
+```
+Emotion/flags backfill, compression, arcs, aging, cleanup, confidence decay
+~300ms total, 0 LLM calls
+```
+
+**Phase 2: CURATE (fresh session — weekly only on normal tier)**
+```
+feedback           63.4s   0% → 6%     (fresh context!)
+darwinism          28.8s   6% → 7%
+core-knowledge      5.5s   7% → 8%
+translation-check   6.8s   8% → 8%
+anomaly-audit      20.3s   8% → 10%
+                                        Session destroyed. 5 LLM calls.
+```
+
+**Phase 3: MAINTAIN (conditional — skip if nothing needed)**
+```
+cron-verify         7.0s   (only step — could be code-driven)
+                                        1 LLM call, or skip entirely.
+```
+
+### Comparison
+
+| Metric | Current (single session) | 4-phase design |
+|---|---|---|
+| LLM calls | 13 (suspended at 12) | 12 (all complete) |
+| Peak context | 37% (accumulated) | ~25% Phase 1, ~10% Phase 2 |
+| retro-extract | ❌ Failed (budget) | ✅ Would succeed (within Phase 1 budget) |
+| Context waste | Steps 10-13 see 30%+ of irrelevant prior responses | Each phase starts fresh |
+| Wall time | ~6 min | ~6 min (same steps, different order) |
+
+### With SLEEP_QUALITY tiering
+
+| Tier | What runs | LLM calls | Would complete? |
+|---|---|---|---|
+| Budget | GC + daily + extract only | 3 | ✅ Yes, well within 12 |
+| Normal | Phase 1 full (6) + Phase 2 weekly (5) | 6 nightly, 11 on curation day | ✅ Yes |
+| Ultimate | All phases every night | 12 | ✅ Yes, exactly at budget |
+
+### Validated estimates
+
+The token estimates from the plan were close:
+- Budget (3 calls): confirmed feasible
+- Normal (6+3 weekly): confirmed — Phase 1 is 6 calls
+- Ultimate (9-13): confirmed — 12 calls covers everything
+
+### Bugs found
+
+1. **Sleep model override not working**: `DirectApiTransport` used main model (`minimax-m2.5:cloud`) instead of `AGENT_SLEEP_MODEL=qwen3-coder-next`. The `createSleepTransport()` passes the model but DirectApiTransport config needs it in the constructor.
+2. **15 BRIDGE STARTs**: Dark wake restart loop still happening (watchdog issue — separate from sleep).
+3. **GC noise ran after retro**: Current step order has GC at step 4c (after retro). Phase 1 reorders GC first — retro reads cleaner data.
+
+### Retro watermark fix impact
+
+**Before fix (2026-04-09):** identity step took 1252s (20 min) — retro read ALL messages.
+**After fix (2026-04-10):** retrospective took 39.8s — reads only watermark-scoped, noise-stripped messages.
+
+**32× faster.** The single highest-impact fix in the entire sleep redesign.

@@ -13,7 +13,7 @@ import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import { agentBridgeHome } from "../../paths.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { AcpTransport } from "../transport/acp-transport.js";
+import { createAgentTransport } from "../agent-registry.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
 import type { CronEntry } from "../../cli/agentbridge-task.js";
 import { localDate } from "../env-utils.js";
@@ -261,7 +261,7 @@ export class CronQueue {
 
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
 
-    const transport = new AcpTransport(this.cliPath, this.workingDir);
+    const transport = createAgentTransport("cron", { cliPath: this.cliPath, workingDir: this.workingDir });
     const sessionKey = `cron:${entry.id}`;
 
     // 30-min hard timeout

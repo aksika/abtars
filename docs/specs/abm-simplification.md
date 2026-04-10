@@ -116,10 +116,9 @@ No other memory system does emotional trajectories across sessions.
 
 ## Backlog
 
-| Item | Origin | Description |
-|---|---|---|
-| Unified agent registry | Moved from #4 task 0 | Single `createAgentTransport(role)` factory for all agent roles (professor/dreamy/browsie/coding). Universal agent config: persona, rules, model, tools, trust. Bridge-injected context, transport-agnostic. Benefits all agents, not just sleep. |
-| `HARDWARE_SLEEP_AFTER_DREAMY` rename | From #4 | Rename `MAC_SLEEP_AFTER_DREAMY` to platform-agnostic. Platform detection for sleep command (pmset/systemctl suspend). |
+Moved to main backlog (`docs/TODO/BACKLOG.md`):
+- #105 Unified agent registry (High)
+- #106 Bidirectional ABM-L (Low)
 
 ---
 
@@ -195,7 +194,7 @@ No other memory system does emotional trajectories across sessions.
 | # | Item | Decision | Date | Notes |
 |---|---|---|---|---|
 | 1 | Recall pipeline | ✅ Implemented — 4 stages (Sf+Ss+Se+S6), porter kept, trigrams added | 2026-04-09 | `1-abm-simplification-plan.md` |
-| 2 | ABM-L render layer + timelines | ⏳ Reopened — render on read, narrative compression, timeline-based dedup | 2026-04-09 | `2-abm-simplification-render-layer.md` |
+| 2 | ABM-L render layer + timelines | ✅ Implemented — column dropped, render on read, timelines, dedup | 2026-04-10 | `2-abm-simplification-render-layer.md` |
 | 3 | CIA-AAA | 🅿️ Parked — not broken, not blocking | 2026-04-09 | |
 | 4 | Sleep phases | ✅ Implemented — bug fixes + phase refactor + SLEEP_QUALITY tiering + HARDWARE_SLEEP rename | 2026-04-09 | `4-abm-simplification-sleep.md` |
 | 5 | IPC layer | 🅿️ Parked — solves real problem | 2026-04-09 | |
