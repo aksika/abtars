@@ -75,6 +75,6 @@ Bridge loads in this order: `.env` → `.env.skills` (overrides) → transport p
 ## Key rules
 
 - **Never edit deployed files directly** — edit source in repo, then deploy
-- **Exception:** `~/.agentbridge/.env` and `~/.agentbridge/.env.local` are edited directly (they contain secrets)
+- **Exception:** `~/.agentbridge/.env` and `~/.agentbridge/.env.skills` are edited directly (they contain secrets)
 - **Exception:** `~/.agentbridge/memory/core/user_profile.md` and `agent_notes.md` are edited by the agent/Dreamy at runtime
 - All agent output goes inside `~/.agentbridge/` — never write outside

@@ -508,7 +508,7 @@ Replace the 4 flat `.env` transport profiles with a single `transport.json` per 
 - Per-agent model + context window in one place
 - No more `AGENT_MODEL` vs `AGENT_MAIN_MODEL` vs `API_MODEL` inconsistency
 - Switch profile: change `"active"` field or `AGENT_TRANSPORT_PROFILE` env
-- API keys stay in `.env` / `.env.local` (secrets not in JSON)
+- API keys stay in `.env` / `.env.skills` (secrets not in JSON)
 
 **Risks:**
 - JSON syntax error = bridge won't start. Mitigation: validate on load, fall back to last known good, `JSON.parse` with try/catch + clear error message.

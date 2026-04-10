@@ -154,7 +154,7 @@ Enables: log filtering, pattern detection, metrics.
 
 ### Deploy.sh .env preservation
 - `deploy.sh` overwrote `AGENT_TRANSPORT_PROFILE=gemini` from `.env`
-- Fix: use `.env.local` for user overrides (never overwritten by deploy)
+- Fix: use `.env.skills` for user overrides (never overwritten by deploy)
 
 ## E2E Tests
 
@@ -209,4 +209,4 @@ File: `src/tests/retry.test.ts`
 7. `withRetry` + `RetryPolicy` + tests (replace ad-hoc retries)
 8. `FATAL_PATTERNS` + `isFatal`
 9. `RestartCause` typed enum
-10. Deploy.sh .env preservation (`.env.local`)
+10. Deploy.sh .env preservation (`.env.skills`)
