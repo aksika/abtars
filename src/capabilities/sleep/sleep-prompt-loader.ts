@@ -56,7 +56,8 @@ export interface SleepStep {
  * Returns ordered steps with variable-substituted prompts.
  */
 export function loadSleepSteps(snapshot: StateSnapshot): SleepStep[] {
-  const sleepDir = join(agentBridgeHome(), "prompts", "sleep");
+  const v2Dir = join(agentBridgeHome(), "prompts", "sleep-v2");
+  const sleepDir = existsSync(v2Dir) ? v2Dir : join(agentBridgeHome(), "prompts", "sleep");
   if (!existsSync(sleepDir)) {
     throw new Error(`Sleep step directory not found at ${sleepDir}`);
   }
@@ -65,11 +66,12 @@ export function loadSleepSteps(snapshot: StateSnapshot): SleepStep[] {
   const files = readdirSync(sleepDir).filter(f => f.endsWith(".md")).sort();
   return files.map(filename => {
     const raw = readFileSync(join(sleepDir, filename), "utf-8");
+    const name = filename.replace(/^\d+-/, "").replace(/\.md$/, "");
     return {
-      name: filename.replace(/^\d+-/, "").replace(/\.md$/, ""),
+      name,
       filename,
       prompt: substituteVars(raw, vars),
-      skippable: !filename.startsWith("00-") && !filename.startsWith("14-"),
+      skippable: !name.includes("gc-noise") && !name.includes("daily-summary") && !name.includes("extract-from-daily") && !name.includes("retrospective") && !name.includes("retro-extract"),
     };
   });
 }

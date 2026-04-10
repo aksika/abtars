@@ -310,6 +310,74 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
   return results;
 }
 
+
+// ── Candidate list builder (for conditional prompts) ────────────────────────
+
+type CandidateLists = {
+  untaggedMemories: string;
+  promotionCandidates: string;
+  mergeCandidates: string;
+  translationIssues: string;
+  emotionContextGaps: string;
+  recallFeedback: string;
+};
+
+function buildCandidateLists(db: import("better-sqlite3").Database, _memoryDir: string): CandidateLists {
+  const lists: CandidateLists = { untaggedMemories: "", promotionCandidates: "", mergeCandidates: "", translationIssues: "", emotionContextGaps: "", recallFeedback: "" };
+
+  try {
+    // Untagged memories (for 07-topic-assignment)
+    const untagged = db.prepare(
+      "SELECT id, substr(content_en,1,100) as preview FROM extracted_memories WHERE (topic IS NULL OR topic = 'general') AND content_en IS NOT NULL LIMIT 20",
+    ).all() as Array<{ id: number; preview: string }>;
+    if (untagged.length > 0) lists.untaggedMemories = untagged.map(r => `#${r.id}: ${r.preview}`).join("\n");
+
+    // Promotion candidates (for 08-core-promotion)
+    const promote = db.prepare(
+      "SELECT id, substr(content_en,1,100) as preview, recall_count, confidence FROM extracted_memories WHERE tier = 'general' AND recall_count >= 2 AND confidence >= 3 AND valid_to IS NULL ORDER BY recall_count DESC LIMIT 15",
+    ).all() as Array<{ id: number; preview: string; recall_count: number; confidence: number }>;
+    if (promote.length > 0) lists.promotionCandidates = promote.map(r => `#${r.id} (recall:${r.recall_count}, conf:${r.confidence}): ${r.preview}`).join("\n");
+
+    // Merge candidates (for 09-merge) — same topic, high signature similarity
+    try {
+      const { hammingSimilarity } = require("../../memory/signature-generator.js") as typeof import("../../memory/signature-generator.js");
+      const sigs = db.prepare(
+        "SELECT id, topic, signature, substr(content_en,1,80) as preview FROM extracted_memories WHERE signature IS NOT NULL AND valid_to IS NULL ORDER BY topic",
+      ).all() as Array<{ id: number; topic: string; signature: Buffer; preview: string }>;
+      const pairs: string[] = [];
+      for (let i = 0; i < sigs.length && pairs.length < 10; i++) {
+        for (let j = i + 1; j < sigs.length && pairs.length < 10; j++) {
+          if (sigs[i]!.topic !== sigs[j]!.topic) continue;
+          const sim = hammingSimilarity(new Uint8Array(sigs[i]!.signature), new Uint8Array(sigs[j]!.signature));
+          if (sim > 0.8) pairs.push(`#${sigs[i]!.id} ↔ #${sigs[j]!.id} (${(sim * 100).toFixed(0)}%): "${sigs[i]!.preview}" vs "${sigs[j]!.preview}"`);
+        }
+      }
+      if (pairs.length > 0) lists.mergeCandidates = pairs.join("\n");
+    } catch { /* signature module not available */ }
+
+    // Translation issues (for 10-translation)
+    const translation = db.prepare(
+      "SELECT id, substr(content_en,1,80) as en, substr(content_original,1,80) as orig FROM extracted_memories WHERE content_original IS NOT NULL AND content_en IS NOT NULL AND length(content_en) > 0 AND (length(content_en) < length(content_original) * 0.3 OR length(content_en) > length(content_original) * 3) LIMIT 10",
+    ).all() as Array<{ id: number; en: string; orig: string }>;
+    if (translation.length > 0) lists.translationIssues = translation.map(r => `#${r.id}: EN="${r.en}" ORIG="${r.orig}"`).join("\n");
+
+    // Emotion context gaps (for 14-emotion-context)
+    const gaps = db.prepare(
+      "SELECT id, substr(content_en,1,100) as preview, emotion_tags FROM extracted_memories WHERE emotion_tags IS NOT NULL AND emotion_tags != '' AND emotion_context IS NULL LIMIT 15",
+    ).all() as Array<{ id: number; preview: string; emotion_tags: string }>;
+    if (gaps.length > 0) lists.emotionContextGaps = gaps.map(r => `#${r.id} [${r.emotion_tags}]: ${r.preview}`).join("\n");
+
+    // Recall feedback (for 06-feedback)
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const recalls = db.prepare(
+      "SELECT id, substr(content_en,1,80) as preview, recall_count, last_recalled_at FROM extracted_memories WHERE last_recalled_at > ? ORDER BY last_recalled_at DESC LIMIT 15",
+    ).all(today.getTime()) as Array<{ id: number; preview: string; recall_count: number; last_recalled_at: number }>;
+    if (recalls.length > 0) lists.recallFeedback = recalls.map(r => `#${r.id} (recalled ${r.recall_count}x): ${r.preview}`).join("\n");
+  } catch (err) { logWarn(TAG, `[CANDIDATES] Failed: ${err instanceof Error ? err.message : String(err)}`); }
+
+  return lists;
+}
+
 function formatWiredResults(r: WiredResults): string {
   const parts: string[] = [];
   if (r.purged > 0) parts.push(`${r.purged} garbage purged`);
@@ -770,8 +838,21 @@ async function main(): Promise<number> {
     const wiredResults = await runWiredPreTasks(db, memoryConfig.memoryDir, memory);
     logInfo(TAG, `[SLEEP] Wired: ${formatWiredResults(wiredResults)}`);
 
+    // Build candidate lists for conditional prompts
+    const candidates = buildCandidateLists(db, memoryConfig.memoryDir);
+    logInfo(TAG, `[SLEEP] Candidates: topics=${candidates.untaggedMemories ? "yes" : "none"}, promote=${candidates.promotionCandidates ? "yes" : "none"}, merge=${candidates.mergeCandidates ? "yes" : "none"}, translate=${candidates.translationIssues ? "yes" : "none"}, emotion-ctx=${candidates.emotionContextGaps ? "yes" : "none"}, feedback=${candidates.recallFeedback ? "yes" : "none"}`);
+
     // Load step files + build vars
     const vars = buildSleepVars(snapshot);
+    vars.WIRED_RESULTS = formatWiredResults(wiredResults);
+
+    // Inject candidate lists as template variables
+    vars.UNTAGGED_MEMORIES = candidates.untaggedMemories || "No untagged memories found.";
+    vars.PROMOTION_CANDIDATES = candidates.promotionCandidates || "No promotion candidates found.";
+    vars.MERGE_CANDIDATES = candidates.mergeCandidates || "No merge candidates found.";
+    vars.TRANSLATION_ISSUES = candidates.translationIssues || "No translation issues found.";
+    vars.EMOTION_CONTEXT_GAPS = candidates.emotionContextGaps || "No emotion context gaps found.";
+    vars.RECALL_FEEDBACK = candidates.recallFeedback || "No recalls happened today.";
     vars.WIRED_RESULTS = formatWiredResults(wiredResults);
     vars.RESUME_CONTEXT = isResume
       ? `This is a RESUMED sleep cycle. Steps already completed: ${Object.entries(existingState!.steps).filter(([, s]) => s.status === "ok" || s.status === "skipped").map(([k]) => k).join(", ")}. Only pending/failed steps will run.`
@@ -820,26 +901,23 @@ async function main(): Promise<number> {
       return 0;
     }
 
-    // Skip logic
+    // Skip logic — candidate-driven (empty = skip)
     const skipSet = new Set<string>();
-    try {
-      const recallCount = (db.prepare(
-        "SELECT COUNT(*) as cnt FROM messages WHERE content LIKE '%agentbridge-recall%' AND timestamp > ?",
-      ).get(snapshot.lastSleepTimestamp ?? 0) as { cnt: number }).cnt;
-      if (recallCount === 0) skipSet.add("feedback");
-    } catch { /* */ }
+    if (!candidates.recallFeedback) skipSet.add("feedback");
+    if (!candidates.untaggedMemories) skipSet.add("topic-assignment");
+    if (!candidates.promotionCandidates) skipSet.add("core-promotion");
+    if (!candidates.mergeCandidates) skipSet.add("merge");
+    if (!candidates.translationIssues) skipSet.add("translation-check");
+    if (!candidates.translationIssues) skipSet.add("translation");
+    if (!candidates.emotionContextGaps) skipSet.add("emotion-context");
+    if (!candidates.emotionContextGaps) skipSet.add("emotion-context-backfill");
+    // Legacy skip names (old prompt files)
     if (snapshot.topicFiles.length === 0) skipSet.add("topic-reorg");
     if (snapshot.dbStats.extractedMemoryCount < 10) { skipSet.add("merge"); skipSet.add("darwinism"); }
     try { if (!existsSync(join(memoryConfig.memoryDir, "..", "received"))) skipSet.add("media-cleanup"); } catch { /* */ }
-    // Skip noise if no short messages
     try {
       const shortCount = (db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE role='user' AND length(content) < 20").get() as { cnt: number }).cnt;
       if (shortCount === 0) skipSet.add("gc-noise");
-    } catch { /* */ }
-    // Skip translation check if no bilingual memories
-    try {
-      const bilingualCount = (db.prepare("SELECT COUNT(*) as cnt FROM extracted_memories WHERE content_en != content_original AND content_original IS NOT NULL").get() as { cnt: number }).cnt;
-      if (bilingualCount === 0) skipSet.add("translation-check");
     } catch { /* */ }
 
     // Initialize state file

@@ -137,19 +137,19 @@ describe("loadSleepSteps", () => {
     expect(steps[1]!.prompt).toContain("2026-03-15");
   });
 
-  it("marks identity and report as non-skippable", () => {
+  it("marks essential steps as non-skippable", () => {
     const sleepDir = join(tmpDir, ".agentbridge", "prompts", "sleep");
     const { mkdirSync } = require("node:fs");
     mkdirSync(sleepDir, { recursive: true });
-    writeFileSync(join(sleepDir, "00-identity.md"), "identity");
-    writeFileSync(join(sleepDir, "04-gc.md"), "gc");
-    writeFileSync(join(sleepDir, "14-report.md"), "report");
+    writeFileSync(join(sleepDir, "01-gc-noise.md"), "gc");
+    writeFileSync(join(sleepDir, "04-retrospective.md"), "retro");
+    writeFileSync(join(sleepDir, "07-topic-assignment.md"), "topics");
 
     const steps = loadSleepSteps(makeSnapshot());
 
-    expect(steps.find(s => s.name === "identity")!.skippable).toBe(false);
-    expect(steps.find(s => s.name === "gc")!.skippable).toBe(true);
-    expect(steps.find(s => s.name === "report")!.skippable).toBe(false);
+    expect(steps.find(s => s.name === "gc-noise")!.skippable).toBe(false);
+    expect(steps.find(s => s.name === "retrospective")!.skippable).toBe(false);
+    expect(steps.find(s => s.name === "topic-assignment")!.skippable).toBe(true);
   });
 
   it("throws when sleep directory not found", () => {

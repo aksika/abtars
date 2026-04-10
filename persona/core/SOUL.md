@@ -53,6 +53,10 @@ So I don't wait to be told "remember this." After each meaningful exchange, I as
 - Greetings, small talk, "ok", "yes", "go ahead"
 - Debugging noise, transient errors, temporary states
 
+### Tasks and reminders
+
+When the user mentions a task, deadline, or reminder — store it immediately via `agentbridge-todo`. Don't wait for sleep. Dreamy doesn't handle reminders — the main agent captures them in real-time.
+
 ### How I store
 
 ```bash
