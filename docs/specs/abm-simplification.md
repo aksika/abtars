@@ -196,7 +196,7 @@ Moved to main backlog (`docs/TODO/BACKLOG.md`):
 | 1 | Recall pipeline | ✅ Implemented — 4 stages (Sf+Ss+Se+S6), porter kept, trigrams added | 2026-04-09 | `1-abm-simplification-plan.md` |
 | 2 | ABM-L render layer + timelines | ✅ Implemented — column dropped, render on read, timelines, dedup | 2026-04-10 | `2-abm-simplification-render-layer.md` |
 | 3 | CIA-AAA | 🅿️ Parked — not broken, not blocking | 2026-04-09 | |
-| 4 | Sleep phases | ✅ Implemented — bug fixes + phase refactor + SLEEP_QUALITY tiering + HARDWARE_SLEEP rename | 2026-04-09 | `4-abm-simplification-sleep.md` |
+| 4 | Sleep refactor | ⏳ Ready to implement — code pre-pass + 14 conditional prompts, single session. Bug fixes shipped. | 2026-04-10 | `4-abm-simplification-sleep.md` |
 | 5 | IPC layer | 🅿️ Parked — solves real problem | 2026-04-09 | |
 | 6 | Speculative schema | ✅ Implemented — drop 2 columns, wire effectiveConfidence, keep 2 functions | 2026-04-09 | `6-abm-simplification-dead-code.md` |
 | 7 | Emotion model | ✅ Implemented — unified tags, derived score, emotional wake-up, arcs, mirroring, SOUL updated | 2026-04-09 | `7-abm-simplification-emotion.md` |

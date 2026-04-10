@@ -103,7 +103,7 @@ type SleepStatus = "ongoing" | "completed" | "suspended" | "failed";
 type SleepState = { status: SleepStatus; pid: number; startedAt: number; llmCalls: number; wiredResults?: WiredResults; steps: Record<string, StepResult> };
 
 const SLEEP_TIMEOUT_MS = (parseInt(process.env["SLEEP_TIMEOUT_MIN"] ?? "", 10) || 55) * 60 * 1000; // default 55 minutes
-const SLEEP_MAX_LLM_CALLS = parseInt(process.env["SLEEP_MAX_LLM_CALLS"] ?? "", 10) || 12;
+const SLEEP_MAX_LLM_CALLS = parseInt(process.env["SLEEP_MAX_LLM_CALLS"] ?? "", 10) || 15;
 
 /** Get the primary chat ID from DB, falling back to ALLOWED_USER_IDS env var. */
 function getPrimaryChatId(db: import("better-sqlite3").Database): number {
