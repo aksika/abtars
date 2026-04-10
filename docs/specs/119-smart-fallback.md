@@ -122,7 +122,7 @@ User prompt
 
 | # | Task | Effort | File |
 |---|---|---|---|
-| 1 | Progressive fill: add `consecutiveErrors` to Bucket, scale fill, reset on success | 15min | `leaky-bucket.ts` |
+| 1 | Progressive fill: add `consecutiveErrors` to Bucket, scale fill, reset on success. Add `recordSuccess(key)` to reset counter — call after successful `agentLoop()`. | 15min | `leaky-bucket.ts` + `direct-api-transport.ts` |
 | 2 | 402 as temporary: change `classifyError(402)` to `rate_limit` | 1min | `leaky-bucket.ts` |
 | 3 | Structured failure summary: collect per-candidate errors, throw descriptive | 10min | `direct-api-transport.ts` |
 | 4 | Retry-After header: if present in 429 response, use as exact cooldown | 15min | `leaky-bucket.ts` + `direct-api-transport.ts` |
