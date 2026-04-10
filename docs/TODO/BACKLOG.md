@@ -446,3 +446,77 @@ Follow an entity across topic boundaries. Currently timelines are per-topic. But
 3. Log clearly which model was unavailable and what it fell back to
 
 **Affected models:** `AGENT_SLEEP_MODEL`, `AGENT_BROWSE_MODEL`, `AGENT_CODING_MODEL`
+
+## 118. Transport Profiles → transport.json
+
+**Status:** Not started
+**Priority:** Medium
+
+Replace the 4 flat `.env` transport profiles with a single `transport.json` per deployment. Structured, per-agent config, no more inconsistent key names.
+
+```json5
+// ~/.agentbridge/transport.json
+{
+  "active": "kiro",
+  "profiles": {
+    "kiro": {
+      "transport": "acp",
+      "cli": "kiro-cli",
+      "agents": {
+        "professor": { "model": "minimax-m2.5", "contextWindow": 1000000 },
+        "dreamy":    { "model": "minimax-m2.5", "contextWindow": 128000 },
+        "browsie":   { "model": "minimax-m2.5", "contextWindow": 128000 },
+        "coding":    { "model": "qwen3-coder-next", "contextWindow": 128000 }
+      }
+    },
+    "gemini": {
+      "transport": "acp",
+      "cli": "gemini",
+      "agents": {
+        "professor": { "model": "gemini-2.5-flash", "contextWindow": 1000000 },
+        "dreamy":    { "model": "gemini-2.5-flash", "contextWindow": 1000000 },
+        "browsie":   { "model": "gemini-2.5-flash", "contextWindow": 1000000 },
+        "coding":    { "model": "gemini-2.5-flash", "contextWindow": 1000000 }
+      }
+    },
+    "openrouter": {
+      "transport": "api",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "agents": {
+        "professor": { "model": "qwen/qwen3.6-plus:free", "contextWindow": 1000000 },
+        "dreamy":    { "model": "minimax/minimax-m2.5:free", "contextWindow": 196608 },
+        "browsie":   { "model": "minimax/minimax-m2.5:free", "contextWindow": 196608 },
+        "coding":    { "model": "qwen/qwen3-coder:free", "contextWindow": 131072 }
+      }
+    },
+    "ollama": {
+      "transport": "api",
+      "endpoint": "http://localhost:11434/v1",
+      "agents": {
+        "professor": { "model": "kimi-k2.5:cloud", "contextWindow": 262144 },
+        "dreamy":    { "model": "minimax-m2.5:cloud", "contextWindow": 128000 },
+        "browsie":   { "model": "minimax-m2.5:cloud", "contextWindow": 131072 },
+        "coding":    { "model": "qwen3.5:cloud", "contextWindow": 131072 }
+      }
+    }
+  }
+}
+```
+
+**Benefits:**
+- One file, all profiles, structured
+- Per-agent model + context window in one place
+- No more `AGENT_MODEL` vs `AGENT_MAIN_MODEL` vs `API_MODEL` inconsistency
+- Switch profile: change `"active"` field or `AGENT_TRANSPORT_PROFILE` env
+- API keys stay in `.env` / `.env.local` (secrets not in JSON)
+
+**Risks:**
+- JSON syntax error = bridge won't start. Mitigation: validate on load, fall back to last known good, `JSON.parse` with try/catch + clear error message.
+
+**Implementation:**
+- New `loadTransportConfig()` reads `transport.json`, falls back to env vars if file missing
+- Agent registry reads from transport config instead of env vars
+- Deploy copies `transport.json` from repo (merge-based like `.env`)
+- Old `.env` transport profiles kept as fallback during migration
+
+**Effort:** ~3hr
