@@ -121,7 +121,7 @@ describe("loadSleepSteps", () => {
   });
 
   it("loads and orders step files alphabetically", () => {
-    const sleepDir = join(tmpDir, ".agentbridge", "prompts", "sleep");
+    const sleepDir = join(tmpDir, ".agentbridge", "prompts", "sleep-v2");
     const { mkdirSync } = require("node:fs");
     mkdirSync(sleepDir, { recursive: true });
     writeFileSync(join(sleepDir, "01-retro.md"), "Do retro for ${WAKEUP_DATE}");
@@ -138,7 +138,7 @@ describe("loadSleepSteps", () => {
   });
 
   it("marks essential steps as non-skippable", () => {
-    const sleepDir = join(tmpDir, ".agentbridge", "prompts", "sleep");
+    const sleepDir = join(tmpDir, ".agentbridge", "prompts", "sleep-v2");
     const { mkdirSync } = require("node:fs");
     mkdirSync(sleepDir, { recursive: true });
     writeFileSync(join(sleepDir, "01-gc-noise.md"), "gc");

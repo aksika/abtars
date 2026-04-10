@@ -56,10 +56,9 @@ export interface SleepStep {
  * Returns ordered steps with variable-substituted prompts.
  */
 export function loadSleepSteps(snapshot: StateSnapshot): SleepStep[] {
-  const v2Dir = join(agentBridgeHome(), "prompts", "sleep-v2");
-  const sleepDir = existsSync(v2Dir) ? v2Dir : join(agentBridgeHome(), "prompts", "sleep");
+  const sleepDir = join(agentBridgeHome(), "prompts", "sleep-v2");
   if (!existsSync(sleepDir)) {
-    throw new Error(`Sleep step directory not found at ${sleepDir}`);
+    throw new Error(`Sleep step directory not found at ${sleepDir}. Deploy sleep-v2 prompts.`);
   }
 
   const vars = buildSleepVars(snapshot);
