@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { MemoryConfig } from "./memory-config.js";
-import type { MemoryManager } from "./memory-manager.js";
+import type { IMemorySystem } from "./imemory-system.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { localISO } from "./local-time.js";
@@ -64,13 +64,11 @@ export class SleepStateGatherer {
   private db: Database.Database;
   private cronContentsFn: (() => string | null) | null;
   constructor(
-    memory: MemoryManager,
+    memory: IMemorySystem,
     private config: MemoryConfig,
     cronContentsFn?: () => string | null,
   ) {
-    const db = memory.getDatabase();
-    if (!db) throw new Error("Database not initialized");
-    this.db = db;
+    this.db = memory.getSleepData().getDb();
     this.cronContentsFn = cronContentsFn ?? null;
   }
 

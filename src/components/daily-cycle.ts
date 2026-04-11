@@ -4,7 +4,7 @@
  * After BED_TIME, counts quiet ticks (no new messages). After 6 quiet ticks
  * (~30min at 5min heartbeat), triggers sleep. Any new message resets the counter.
  */
-import type { MemoryManager } from "../memory/memory-manager.js";
+import type { IMemorySystem } from "../memory/imemory-system.js";
 import { logInfo } from "./logger.js";
 import { safeReadJson } from "./safe-json.js";
 import { hasSleepAuditToday } from "../capabilities/sleep/sleep-trigger.js";
@@ -14,7 +14,7 @@ export interface DailyCycleDeps {
   sleepMinute: number;
   bridgeLockPath: string;
   sleepAuditDir: string;
-  memory: MemoryManager | null;
+  memory: IMemorySystem | null;
   busyChats: Set<string>;
   isSleepActive: () => boolean;
 }
@@ -57,8 +57,8 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   // Check for new messages since last tick
   let currentMsgTs = 0;
   try {
-    const row = deps.memory?.getDb()?.prepare("SELECT MAX(timestamp) as latest FROM messages WHERE content NOT LIKE '%[SYSTEM%'").get() as { latest: number | null } | undefined;
-    currentMsgTs = row?.latest ?? 0;
+    const row = deps.memory?.getLastMessageTimestamp(true);
+    currentMsgTs = row ?? 0;
   } catch { return false; }
 
   if (currentMsgTs > lastSeenMsgTs) {

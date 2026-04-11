@@ -24,7 +24,7 @@ describe("SleepStateGatherer", () => {
   });
 
   function makeGatherer(): SleepStateGatherer {
-    const mockMemory = { getDatabase: () => db } as any;
+    const mockMemory = { getSleepData: () => ({ getDb: () => db }) } as any;
     return new SleepStateGatherer(mockMemory, makeMemoryTestConfig(tmpDir));
   }
 

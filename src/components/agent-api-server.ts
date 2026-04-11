@@ -6,7 +6,7 @@ import { createHmac, randomBytes } from "crypto";
 import { agentBridgeHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./transport/kiro-transport.js";
-import { MemoryManager } from "../memory/memory-manager.js";
+import type { IMemorySystem } from "../memory/imemory-system.js";
 import { scanPrompt } from "./prompt-scanner.js";
 import { logInfo, logWarn } from "./logger.js";
 import { localDate } from "./env-utils.js";
@@ -30,7 +30,7 @@ interface AgentApiDeps {
   config: AgentApiConfig;
   cliPath: string;
   workingDir: string;
-  memory: MemoryManager | null;
+  memory: IMemorySystem | null;
 }
 
 function normalizeIp(raw: string): string {
@@ -57,7 +57,7 @@ export class AgentApiServer {
   private server;
   private config: AgentApiConfig;
   private workingDir: string;
-  private memory: MemoryManager | null;
+  private memory: IMemorySystem | null;
   private trafficLog: TrafficEntry[] = [];
   private agentRules: string;
   private rulesInjected = false;

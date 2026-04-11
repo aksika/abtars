@@ -18,7 +18,7 @@ import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } 
 import type { TelegramUpdate } from "../../types/index.js";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
-import type { MemoryManager } from "../../memory/memory-manager.js";
+import type { IMemorySystem } from "../../memory/imemory-system.js";
 
 const TAG = "telegram";
 
@@ -32,7 +32,7 @@ export interface TelegramAdapterDeps {
   pipeline: PipelineDeps;
   conversationBuffer: ConversationBuffer;
   transport: IKiroTransport;
-  memory: MemoryManager | null;
+  memory: IMemorySystem | null;
 }
 
 export class TelegramAdapter implements PlatformAdapter {

@@ -17,7 +17,7 @@ import { handleInboundMessage, type PipelineDeps } from "../../components/messag
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { DiscordInboundMessage } from "../../types/index.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
-import type { MemoryManager } from "../../memory/memory-manager.js";
+import type { IMemorySystem } from "../../memory/imemory-system.js";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 
 const TAG = "discord";
@@ -36,7 +36,7 @@ export interface DiscordAdapterConfig {
 export interface DiscordAdapterDeps {
   pipeline: PipelineDeps;
   transport: IKiroTransport;
-  memory: MemoryManager | null;
+  memory: IMemorySystem | null;
   conversationBuffer: ConversationBuffer;
 }
 

@@ -8,7 +8,7 @@
 
 import type { HeartbeatTask } from "../types/memory.js";
 import type { Config } from "../types/config.js";
-import type { MemoryManager } from "../memory/memory-manager.js";
+import type { IMemorySystem } from "../memory/imemory-system.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { CommandContext } from "../components/command-handlers.js";
 
@@ -27,7 +27,7 @@ export type CapabilityServiceFactory = () => Promise<CapabilityService>;
 /** Read-only API given to each capability during registration. */
 export interface CapabilityApi {
   readonly config: Config;
-  readonly memory: MemoryManager | null;
+  readonly memory: IMemorySystem | null;
   readonly transport: IKiroTransport;
   registerCommand(name: string, handler: CapabilityCommandHandler): void;
   registerHeartbeatTask(task: HeartbeatTask): void;
@@ -57,7 +57,7 @@ export function createCapabilityRegistry(): CapabilityRegistry {
 export function createCapabilityApi(
   registry: CapabilityRegistry,
   config: Config,
-  memory: MemoryManager | null,
+  memory: IMemorySystem | null,
   transport: IKiroTransport,
 ): CapabilityApi {
   return {
@@ -74,7 +74,7 @@ export function createCapabilityApi(
 export async function discoverCapabilities(
   registry: CapabilityRegistry,
   config: Config,
-  memory: MemoryManager | null,
+  memory: IMemorySystem | null,
   transport: IKiroTransport,
   capabilitiesDir: string,
 ): Promise<string[]> {
