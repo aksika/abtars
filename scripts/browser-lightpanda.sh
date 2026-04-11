@@ -15,6 +15,8 @@ case "${1:-start}" in
   pull)
     echo "📦 Pulling $IMAGE..."
     docker pull "$IMAGE"
+    # Remove old container so next start uses new image
+    docker rm "$CONTAINER" 2>/dev/null || true
     ;;
   start)
     if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
@@ -40,7 +42,7 @@ case "${1:-start}" in
     echo "✅ $CONTAINER started on port $PORT"
     ;;
   stop)
-    docker stop "$CONTAINER" 2>/dev/null && docker rm "$CONTAINER" 2>/dev/null
+    docker stop "$CONTAINER" 2>/dev/null
     echo "🛑 $CONTAINER stopped"
     ;;
   status)

@@ -164,7 +164,7 @@ Download community skills from ClawHub (clawhub.ai) into `~/.agentbridge/skills/
 ## 81. Dual Browser Engine — Lightpanda + Patchright
 
 **Priority:** HIGH
-**Status:** Partial (2026-04-05, `refactor/architecture-v2` branch)
+**Status:** ✅ Done (2026-04-11)
 
 `BrowserManager` supports `patchright` and `lightpanda` engines. `BROWSER_ENGINE` env var + `--engine` CLI flag on both `agentbridge-browse` and `agentbridge-browser`. Lazy container management via `scripts/browser-lightpanda.sh`. `agentbridge-browser` defaults to lightpanda (fast scraping), `agentbridge-browse` defaults to patchright (stealth). `deploy.sh --full` pulls Lightpanda nightly.
 

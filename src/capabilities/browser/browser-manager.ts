@@ -62,9 +62,12 @@ export class BrowserManager {
   private readonly _sessions = new Map<string, BrowserSession>();
   private _idleTimer: ReturnType<typeof setInterval> | null = null;
   private readonly _config: BrowserConfig;
+  private _lastActivityAt = 0;
+  private readonly _containerIdleStopMs: number;
 
   constructor(config?: BrowserConfig) {
     this._config = config ?? parseBrowserConfig();
+    this._containerIdleStopMs = parseInt(process.env["BROWSER_IDLE_STOP_MIN"] ?? "10", 10) * 60_000;
     this._startIdleCheck();
   }
 
@@ -176,6 +179,7 @@ export class BrowserManager {
     };
 
     this._sessions.set(sessionId, session);
+    this._lastActivityAt = now;
     return session;
   }
 
@@ -277,6 +281,27 @@ export class BrowserManager {
       console.warn(`${LOG_PREFIX} Closing idle session "${id}".`);
       await this.closeSession(id);
     }
+
+    // Stop container if no sessions and idle long enough
+    if (this._sessions.size === 0 && this._browser && this._lastActivityAt > 0 && now - this._lastActivityAt > this._containerIdleStopMs) {
+      console.log(`${LOG_PREFIX} No sessions for ${Math.round((now - this._lastActivityAt) / 60_000)}min — stopping container.`);
+      await this.shutdown();
+      this._stopContainer();
+    }
+  }
+
+  private _stopContainer(): void {
+    try {
+      const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+      const { join, dirname } = require("node:path") as typeof import("node:path");
+      const { fileURLToPath } = require("node:url") as typeof import("node:url");
+      const scriptDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts");
+      if (this._config.engine === "lightpanda") {
+        execFileSync(join(scriptDir, "browser-lightpanda.sh"), ["stop"], { stdio: "pipe", timeout: 10_000 });
+      } else {
+        execFileSync("docker", ["stop", "agentbridge-browser"], { stdio: "pipe", timeout: 10_000 });
+      }
+    } catch { /* container may not be running */ }
   }
 
   // -------------------------------------------------------------------------
