@@ -387,12 +387,12 @@ Adjacent-key typos (QWERTZ: z↔y, s↔a, doubled/missed chars) could be handled
 - Add to TOOLS.md so agent knows it exists
 - Dreamy can suggest new rules during sleep retro
 
-### Phase 5: Dreamy auto-learns
-- Sleep retro step analyzes recent errors + how they were resolved
-- If a recurring error was manually fixed the same way 2+ times → Dreamy proposes auto-fix rule
-- Prompt: "I noticed [error] was fixed by [action] twice. Add as auto-fix rule?"
-- User approves via TG → Dreamy runs `agentbridge-autofix add`
-- Rejection → Dreamy notes it and won't propose again for that pattern
+### Phase 5: Dreamy passive proposals
+- Sleep retro step notes recurring errors + how they were resolved
+- If same error fixed the same way 2+ times → Dreamy mentions it in the retro report
+- "Recurring: [error] was fixed by [action] twice — consider adding as auto-fix rule"
+- User reads retro, manually runs `agentbridge-autofix add` if they agree
+- Dreamy never creates rules itself
 
 **Files:** `self-healer.ts`, `agent-registry.ts`, `persona/config/auto-fix.json`, `src/cli/agentbridge-autofix.ts`, `deploy.sh`, `TOOLS.md`, sleep retro prompt
 
