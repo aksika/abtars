@@ -6,7 +6,7 @@
   "workspaces": ["packages/*"],
   "main": "dist/src/main.js",
   "scripts": {
-    "build": "tsc && cp -r src/public dist/ && git log -1 --format='{\"hash\":\"%h\",\"date\":\"%ci\"}' > dist/build-info.json",
+    "build": "tsc && cp -r src/public dist/ && cp packages/memory/package.json dist/packages/memory/package.json && git log -1 --format='{\"hash\":\"%h\",\"date\":\"%ci\"}' > dist/build-info.json",
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/src/main.js",
     "typecheck": "tsc --noEmit",
