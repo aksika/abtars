@@ -369,7 +369,8 @@ Adjacent-key typos (QWERTZ: z↔y, s↔a, doubled/missed chars) could be handled
 - `persona/config/auto-fix.json` — single source of truth, no hardcoded list
 - Self-healer loads JSON at startup. Missing/empty → all errors go to notify tier
 - Deploy copies to `~/.agentbridge/config/` (KEPT if newer)
-- Schema: `[{ pattern, instruction, cooldownMin }]`
+- Schema: `[{ pattern, instruction, cooldownMin, enabled }]`
+- Per-rule `enabled: boolean` — disable without deleting (default: true)
 
 ### Phase 3: Auto-fix via coding subagent (isolated transport)
 - Self-healer matches auto-fix pattern → spawns `createSubagentTransport("coding")`
@@ -377,11 +378,13 @@ Adjacent-key typos (QWERTZ: z↔y, s↔a, doubled/missed chars) could be handled
 - Captures response, logs to `~/.agentbridge/logs/autofix-<date>.log`
 - TG notification: "🔧 Auto-fix ran: [pattern] → [result summary]"
 - Destroys transport after completion. 5min timeout (kill if stuck)
+- If subagent transport fails to initialize → skip fix, fall back to notify tier
 
 ### Phase 4: Agent-editable + validation
 - `agentbridge-autofix` CLI: list/add/remove rules
 - Validation: pattern max 200 chars, instruction max 500 chars, cooldownMin >= 5, no dupes
 - Add to TOOLS.md so agent knows it exists
+- `agentbridge-autofix test --pattern "FTS index"` — dry-run: shows matching log lines without running the fix
 - Dreamy can suggest new rules during sleep retro
 
 ### Phase 5: Dreamy passive proposals
