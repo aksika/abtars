@@ -559,3 +559,28 @@ Set `OLLAMA_NUM_PARALLEL=2` on Ollama server. Allows 2 concurrent requests on sa
 - Document in transport profile example
 
 **Files:** `bridge-app.ts` (write lastPromptAt), `bridge-lock-transport.ts` (read helper), `cron-queue.ts` (idle check), `message-pipeline.ts` (write after prompt)
+
+## 122. Unified Subagent Transport Factory
+
+**Priority:** HIGH
+**Status:** Not started
+
+**Problem:** 4 subagents (sleep, browse, coding, cron) each have their own transport creation logic — 70+ lines of duplicated code reading bridge.lock, creating DirectApiTransport or AcpTransport, wiring fallbacks. If the logic changes, it must change in 4 places.
+
+**Solution:** Single `createSubagentTransport(role)` factory in `agent-registry.ts`.
+
+**Key design decisions:**
+1. Always check `readBridgeLockTransport()` first, regardless of config. If main agent fell back from ACP to Direct API at runtime, subagents follow. Config is the starting point, bridge.lock is the truth.
+2. Read `maxContext` / `maxOutput` / `maxTurns` from env once in the factory — all callers use the same vars.
+3. Always log transport init (no verbose flag) — it's a one-time init per session.
+4. Return type is `IKiroTransport` — callers don't need to know the concrete type.
+
+**Role model table:**
+| Role | Model source | Fallback |
+|---|---|---|
+| sleep | `AGENT_SLEEP_MODEL` | main model |
+| browse | `AGENT_BROWSE_MODEL` | main model |
+| coding | `AGENT_CODING_MODEL` | main model |
+| cron | main model directly | none |
+
+**Files:** `agent-registry.ts` (new function), `agentbridge-sleep.ts`, `cron-queue.ts`, `agent-api-server.ts`, `coding-mode.ts` (all simplified to one-liner)
