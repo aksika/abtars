@@ -225,19 +225,14 @@ User asks "what's the best free model right now?" → agent runs the skill, retu
 ## 91. ABM — AgentBridge Memory System
 
 **Priority:** HIGH
-**Status:** In progress
+**Status:** Phase 0-1 ✅, Phase 2 ~95%, Phase 3 partial
 **Roadmap:** [abm-roadmap.md](../specs/abm-roadmap.md)
 **Specs:** [memory-v2-tiered.plan.md](../specs/memory-v2-tiered.plan.md), [memory-decoupling.plan.md](../specs/memory-decoupling.plan.md), [mempalace-study.md](../specs/mempalace-study.md)
 
-### Phase 0: Decouple → #123
-Tracked separately. Extract `@agentbridge/memory` standalone package.
+### Phase 0: Decouple → #123 ✅
 
-### Phase 1: ABM v1 — Tiered Memory
-- Topic column on extracted_memories (34% retrieval boost per MemPalace benchmarks)
-- Tier column (`core` vs `general`) — Dreamy promotes best to core during sleep, recall searches core first
-- Temporal validity (`valid_from`/`valid_to`) — invalidate stale facts instead of deleting
-- Core files restructure (core_facts.md + agent_notes.md split)
-- Lower storage threshold — store more aggressively, Dreamy curates later
+### Phase 1: ABM v1 — Tiered Memory ✅
+All implemented: topic column + index, tier (core/general) with auto-promote on |emotion| >= 4, Dreamy promotion candidates in sleep, temporal validity (valid_from/valid_to), recall filters expired, core files split (user_profile.md + agent_notes.md), --topic/--tier on CLI.
 
 ### Phase 2: ABM v2 — MemPalace Enhancements
 - ✅ Emotion tagger (2.1), importance flags (2.2), emotional arcs (2.3), compressor (2.4), dynamic wake-up (2.6), cross-topic timelines (2.7)
