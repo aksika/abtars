@@ -45,6 +45,41 @@
 |---|---|
 | `recall-engine.ts:73` | `RecallDeps = { db: Database.Database; index: MemoryIndex; ... }` |
 
+**11 bridge files import `MemoryManager` concrete class instead of `IMemorySystem`:**
+| File | Import kind |
+|---|---|
+| `capability.ts` | type |
+| `compaction.ts` | type |
+| `daily-cycle.ts` | type |
+| `heartbeat-tasks.ts` | type |
+| `memory-search-controller.ts` | type |
+| `message-pipeline.ts` | type |
+| `discord-adapter.ts` | type |
+| `telegram-adapter.ts` | type |
+| `agent-api-server.ts` | concrete → should be type |
+
+Keep concrete import in `bridge-app.ts` (composition root) and `agentbridge-sleep.ts` (sleep subprocess).
+
+**3 memory modules not exported from `index.ts`:**
+| Module | Used by | Export |
+|---|---|---|
+| `media-sanitizer.ts` → `sanitizeForSummary` | `sleep-daily-summary.ts` | Missing |
+| `ollama-embed.ts` → `loadEmbedConfig`, `batchEmbed` | `agentbridge-embed.ts` CLI | Missing |
+| `session-memory.ts` → `buildMemoryContext` | `compaction.ts` | Missing |
+
+Bridge code imports these directly, bypassing the public API.
+
+**7 CLIs import memory internals — must move with the package:**
+| CLI | Memory imports |
+|---|---|
+| `agentbridge-recall` | backend-factory, memory-config |
+| `agentbridge-store` | memory-config |
+| `agentbridge-edit` | memory-config |
+| `agentbridge-embed` | ollama-embed |
+| `agentbridge-expand` | (minimal) |
+| `agentbridge-retro-extract` | backend-factory, memory-config |
+| `agentbridge-backfill-v2` | mem-paths, emotion-tagger, importance-flagger, memory-compressor, signature-generator |
+
 ---
 
 ## Implementation steps
