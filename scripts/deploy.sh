@@ -277,6 +277,20 @@ if grep -q "^EMBEDDING_ENABLED=true" "$AB_HOME/.env" 2>/dev/null; then
     else
       echo "   ✅ Se pipeline ready (ollama + nomic-embed-text)"
     fi
+    # Ensure OLLAMA_NUM_PARALLEL=2 for concurrent requests (prevents collision between main agent + subagents)
+    if [ "$(curl -sf http://localhost:11434/api/tags &>/dev/null && echo ok)" = "ok" ]; then
+      PARALLEL=$(printenv OLLAMA_NUM_PARALLEL 2>/dev/null || echo "")
+      if [ -z "$PARALLEL" ] || [ "$PARALLEL" -lt 2 ] 2>/dev/null; then
+        echo "   ⚠️  OLLAMA_NUM_PARALLEL not set or <2 — set it for concurrent request support:"
+        if [ "$(uname)" = "Darwin" ]; then
+          echo "      launchctl setenv OLLAMA_NUM_PARALLEL 2 && pkill ollama"
+          echo "      Then add to ollama plist: PlistBuddy -c 'Add :EnvironmentVariables:OLLAMA_NUM_PARALLEL string 2' ~/Library/LaunchAgents/homebrew.mxcl.ollama.plist"
+        else
+          echo "      echo 'Environment=\"OLLAMA_NUM_PARALLEL=2\"' | sudo tee -a /etc/systemd/system/ollama.service.d/override.conf"
+          echo "      sudo systemctl daemon-reload && sudo systemctl restart ollama"
+        fi
+      fi
+    fi
   else
     echo "   ⚠️  ollama not installed — Se pipeline disabled"
   fi
