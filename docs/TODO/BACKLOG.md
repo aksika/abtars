@@ -447,7 +447,7 @@ Follow an entity across topic boundaries. Currently timelines are per-topic. But
 
 **Affected models:** `AGENT_SLEEP_MODEL`, `AGENT_BROWSE_MODEL`, `AGENT_CODING_MODEL`
 
-## 118. Transport Profiles → transport.json
+## 119. Transport Profiles → transport.json
 
 **Status:** Not started
 **Priority:** Medium
@@ -520,3 +520,14 @@ Replace the 4 flat `.env` transport profiles with a single `transport.json` per 
 - Old `.env` transport profiles kept as fallback during migration
 
 **Effort:** ~3hr
+
+## 120. Replace .processed.json with file rename in retro-extract
+
+**Priority:** MEDIUM
+**Status:** Not started
+
+**Problem:** `retro-extract` tracks processed retrospective files via a separate `.processed.json` in the retro directory. This is an extra state file to manage.
+
+**Solution:** Rename processed retro files to `<name>.done` (or `.old`) after extraction. The extract step globs for `retro_*.md` — renamed files won't match. No JSON tracking needed, filesystem is the state.
+
+**Files:** `src/cli/agentbridge-retro-extract.ts`
