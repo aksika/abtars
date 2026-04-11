@@ -1,12 +1,13 @@
 {
   "name": "@agentbridge/memory",
   "version": "0.1.0",
-  "description": "Standalone AI agent memory system — SQLite, FTS5, embeddings, recall, sleep maintenance",
+  "description": "Standalone AI agent memory system \u2014 SQLite, FTS5, embeddings, recall, sleep maintenance",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./*": "./dist/*.js"
   },
   "scripts": {
     "build": "tsc",
