@@ -58,8 +58,18 @@ If 429 response includes `Retry-After` or `x-ratelimit-reset`, use as exact cool
 
 ## What we're NOT doing
 
-- No cooldown probing (adds background timer complexity)
 - No fallback transition notifications (nice UX but not critical)
+
+## Borrowed from 9Router
+
+9Router uses per-model locks with expiry timestamps instead of percentage-based buckets:
+- `modelLock_<model>` = ISO timestamp when lock expires
+- Check: `is lock expired? → try it` (simpler than bucket percentage + drain rate)
+- Exponential backoff: 1s → 2s → 4s → ... → max 2min (with `backoffLevel` counter)
+- On success: clear that model's lock + lazy-clean expired locks
+- Account rotation: multiple accounts per provider, skip locked ones
+
+**Consider for future:** Replace leaky bucket with timestamp-based locks. Simpler mental model, no drain rate tuning. But current bucket system works — this is a "nice to have" refactor, not blocking.
 
 ---
 

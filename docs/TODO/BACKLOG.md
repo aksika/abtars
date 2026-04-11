@@ -532,24 +532,30 @@ Replace the 4 flat `.env` transport profiles with a single `transport.json` per 
 
 **Files:** `src/cli/agentbridge-retro-extract.ts`
 
-## 121. Ollama Request Collision — Priority Queue + Endpoint Isolation
+## 121. Request Collision — Idle Gate for Smart Crons + Ollama Parallel
 
 **Priority:** HIGH
 **Status:** Not started
 
-**Problem:** Ollama processes one request at a time. When cron/sleep/browse hits the same endpoint while the main agent is prompting a user message, one blocks the other. User experienced 2+ minute hang because a cron tweet script was running on the same Ollama instance.
+**Problem:** Ollama processes one request at a time. Cron agent tasks (tweet, AI news) hit the same endpoint while user is chatting → 2+ minute hangs. User had to /stop to unblock.
 
-**Solution: Combine endpoint isolation + priority queue**
+### Solution
 
-1. **Separate endpoints for subagents** — subagents use a different Ollama port (e.g. 11435) or a different `OLLAMA_NUM_PARALLEL` slot. Main agent keeps 11434 exclusively for user-facing prompts.
+**Part 1: Idle gate for smart crons (code change)**
 
-2. **Priority yielding** — before a subagent sends a request, check `bridge.lock` or a shared flag for `promptActive`. If main agent is mid-prompt, subagent backs off and retries after a short delay. User-facing traffic always wins.
+Cron agent tasks only launch when user is idle for 60s+.
 
-3. **Cron awareness** — cron jobs that call external scripts (like tweet) which also hit Ollama should be scheduled during idle windows, or the cron executor should check prompt activity before launching.
+- Bridge writes `lastPromptAt` timestamp to `bridge.lock` after each user prompt completes
+- `cron-queue.ts` checks before launching agent-type tasks: `Date.now() - lastPromptAt > 60_000`
+- If not idle → defer to next heartbeat tick (5 min later), job stays in queue
+- Script-type crons (backup.sh) bypass the check — they don't hit LLM
+- `lastPromptAt` missing or unreadable → treat as idle, run
 
-**Design questions:**
-- Does Ollama support `OLLAMA_NUM_PARALLEL` for concurrent requests on same instance?
-- Should subagents use a completely separate Ollama process or just a different model slot?
-- How does the priority flag propagate to child processes (sleep is a separate pid)?
+**Part 2: OLLAMA_NUM_PARALLEL (config only, zero code)**
 
-**Files:** `direct-api-transport.ts`, `cron-queue.ts`, `agentbridge-sleep.ts`, `bridge-lock-transport.ts`
+Set `OLLAMA_NUM_PARALLEL=2` on Ollama server. Allows 2 concurrent requests on same instance. Covers edge cases where sleep/browse overlaps with user chat despite idle gate.
+
+- Mac: `launchctl setenv OLLAMA_NUM_PARALLEL 2` or add to Ollama plist
+- Document in transport profile example
+
+**Files:** `bridge-app.ts` (write lastPromptAt), `bridge-lock-transport.ts` (read helper), `cron-queue.ts` (idle check), `message-pipeline.ts` (write after prompt)
