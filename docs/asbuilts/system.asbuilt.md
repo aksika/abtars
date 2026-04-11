@@ -27,7 +27,7 @@ For the memory subsystem, see [memory.asbuilt.md](memory.asbuilt.md).
 | Subsystem | Description |
 |-----------|-------------|
 | **Platform Abstraction** | Telegram + Discord adapters behind a shared `PlatformAdapter` interface and unified message pipeline. |
-| **Memory** | Standalone `@agentbridge/memory` package (ABM v2). 39 self-contained files, `IMemorySystem` interface, zero bridge dependencies. SQLite + FTS5 + vector embeddings + binary signatures (Hamming search). ABM-L compression, emotion tagging, importance flags, three-tier aging. See [memory.asbuilt.md](memory.asbuilt.md). |
+| **Memory** | Standalone `abmind` package (`packages/memory/`). 38 source + 29 test files, `IMemorySystem` interface, zero bridge dependencies. SQLite + FTS5 + vector embeddings + binary signatures (Hamming search). ABM-L compression, emotion tagging, importance flags, three-tier aging. See [memory.asbuilt.md](memory.asbuilt.md). |
 | **Sleep (Dreamy)** | Optional addon — memory works without it. Triggered by BED_TIME + quiet ticks (no restart). 24 sleep steps: retrospective, GC, extraction, consolidation, topic assignment, core promotion, temporal review, emotion/flags backfill, ABM-L compression, contradiction check, emotional arcs, memory aging, entity review, skill review. After success: optional Mac hardware sleep (`pmset sleepnow`). See [memory.asbuilt.md](memory.asbuilt.md). |
 | **Tasks** | Time-based scheduling for reminders and agent tasks. SQLite storage, sequential queue, priority levels, retry. User-facing: `/tasks`. CLI: `agentbridge-task`. |
 | **Todo** | File-based todo list (`todo.md`). Agent-managed via `agentbridge-todo` CLI. |
@@ -829,7 +829,7 @@ If the model returns `ValidationException` or error code `-32603` (context too l
 | File | Purpose |
 |------|---------|
 | `src/components/compaction.ts` | Compaction prompt + summary extraction |
-| `src/memory/session-memory.ts` | Memory context block builder |
+| `packages/memory/src/session-memory.ts` | Memory context block builder |
 | `src/components/message-pipeline.ts` | Graduated thresholds, auto-compact trigger, circuit breaker |
 | `src/components/command-handlers.ts` | `/compact` command handler |
 | `src/components/ssrf-guard.ts` | SSRF protection — private IP blocking + DNS rebinding check |

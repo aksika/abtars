@@ -11,7 +11,7 @@
 
 ## Overview
 
-Standalone memory package (`@agentbridge/memory`, workspace at `packages/memory/`). 38 source + 29 test files, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation. Unified CLI: `abmind` with subcommands (recall, store, edit, expand, embed, retro-extract, backfill, status, wake-up). npm package registered as `abmind`.
+Standalone memory package (`abmind`, workspace at `packages/memory/`). 38 source + 29 test files, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation. Unified CLI: `abmind` with subcommands (recall, store, edit, expand, embed, retro-extract, backfill, status, wake-up). npm package registered as `abmind`.
 
 SQLite-backed persistence with FTS5 (porter on content_en) + trigram FTS5 (content_en + content_original, diacritics-stripped), ollama vector embeddings with int8 quantization (1536→384 bytes after 14d) in separate `memory_embeddings` table, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L rendered on the fly from content_en (no stored content_compressed), emotion tagging (25 types, source of truth — score derived from tags), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security. Memory timelines group related memories into narrative arcs. Cross-topic timelines follow entities across topic boundaries.
 
@@ -30,12 +30,12 @@ Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sle
 | Sleep data | `SleepDataAccess` — DB queries for candidates, watermarks, arcs, messages |
 | Heartbeat | `IHeartbeat` interface — bridge injects its implementation |
 | CLI | `abmind` — unified CLI with subcommands (src/cli/abmind.ts) |
-| npm | `abmind` (registered), `@agentbridge/memory` (workspace) |
+| npm | `abmind` registered on npmjs.com |
 | Logger | `setLogger()` injection — bridge injects its logger at startup |
 | Types | `mem-types.ts` — all memory types owned by the package |
 | Tests | 90 test files, ~900 tests |
 
-**Recall architecture**: Agent-driven via `agentbridge-recall` CLI. Session-start context injection via `buildSessionStartContext`.
+**Recall architecture**: Agent-driven via `abmind recall` CLI. Session-start context injection via `buildSessionStartContext`.
 
 ---
 
@@ -45,7 +45,7 @@ Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sle
 |----|------|--------|------------|---------|------------|
 | C0 | LLM Context Window | In-memory | Bridge (raw pass-through) | LLM | Ephemeral |
 | C1 | Consolidated Summaries | Markdown files | Sleep subagent | Consolidation search, sleep subagent | Persistent — promoted up tiers |
-| C2 | SQLite + FTS5 | `memory.db` | recordMessage(), agentbridge-store, agentbridge-edit | agentbridge-recall | messages: hot buffer (max 1000, aged >10d). extracted_memories: persistent |
+| C2 | SQLite + FTS5 | `memory.db` | recordMessage(), abmind store, abmind edit | abmind recall | messages: hot buffer (max 1000, aged >10d). extracted_memories: persistent |
 | C4 | Markdown Knowledge Files | Flat files | Agent, retrospective | Sleep subagent | Persistent |
 | C5 | Embeddings | `memory.db` (`memory_embeddings` table) | ollama nomic-embed-text (on insert + batch) | recall-engine Se sidecar | Persistent — float32 quantized to int8 after 14d. Gated by `EMBEDDING_ENABLED` |
 | C6 | Retrospectives | Markdown files | Sleep subagent | Sleep subagent, agent (via recall) | Persistent |
@@ -64,7 +64,7 @@ User Message
 | (agent   |               +----------+
 |  decides |                     ^
 |  when to |                     |
-|  search) |--- recall --------->|  (single path: agentbridge-recall, Sf + Ss + Se + S6)
+|  search) |--- recall --------->|  (single path: abmind recall, Sf + Ss + Se + S6)
 |          |                     |
 |          |               +----------+
 |          |               | C1       |  daily/weekly/quarterly summaries
@@ -248,12 +248,12 @@ Nulled automatically on content edit (re-embedded on next batch run).
 |  sleep-prompt-loader, sleeping_prompt.md template                    |
 +---------------------------------------------------------------------+
 |  Layer 5: Agent-Initiated Recall (single path)                       |
-|  agentbridge-recall ONLY (4-stage: Sf + Ss + Se + S6)                |
+|  abmind recall ONLY (4-stage: Sf + Ss + Se + S6)                |
 +---------------------------------------------------------------------+
 |  Layer 4: Storage & Mutation                                        |
-|  agentbridge-store (Instant Store),                                  |
-|  agentbridge-edit (Unified Memory Mutation)                          |
-|  Extraction: Dreamy (sleep §4 step 5) via agentbridge-store          |
+|  abmind store (Instant Store),                                  |
+|  abmind edit (Unified Memory Mutation)                          |
+|  Extraction: Dreamy (sleep §4 step 5) via abmind store          |
 +---------------------------------------------------------------------+
 |  Layer 3: Consolidation (subagent-driven)                           |
 |  working → daily → weekly → quarterly                                |
@@ -272,8 +272,8 @@ Nulled automatically on content edit (re-embedded on next batch run).
 
 ## Recall Pipeline (`recall-engine.ts`, Sf + Ss + Se + S6)
 
-Source: `src/memory/recall-engine.ts`, `src/memory/trigram-search.ts`
-CLI wrapper: `src/cli/agentbridge-recall.ts`
+Source: `packages/memory/src/recall-engine.ts`, `packages/memory/src/trigram-search.ts`
+CLI wrapper: `src/cli/abmind-recall.ts`
 Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine, takes MemoryManager)
 
 ### Design Philosophy
@@ -332,10 +332,10 @@ Model: `nomic-embed-text` via ollama (768 dimensions, CPU-only, ~20-50ms/query, 
 
 | Event | What happens |
 |-------|-------------|
-| `agentbridge-store` (instant) | `embedNewMemory()` — fire-and-forget after INSERT |
-| `agentbridge-edit` (content change) | Embedding nulled → re-embedded on next batch |
+| `abmind store` (instant) | `embedNewMemory()` — fire-and-forget after INSERT |
+| `abmind edit` (content change) | Embedding nulled → re-embedded on next batch |
 | Dreamy extraction (sleep) | `embedBatch()` — embeds all new memories after INSERT |
-| `agentbridge-embed` CLI | One-time batch embed of all memories with NULL embedding |
+| `abmind embed` CLI | One-time batch embed of all memories with NULL embedding |
 | Recall (Se sidecar) | `embedText(query)` fired async at S1, cosine similarity after S3 |
 
 Storage: separate `memory_embeddings` table (memory_id PK, embedding BLOB, quantized INTEGER). float32 (768 × 4 = 3KB) quantized to int8 (384 bytes) after `MEMORY_EMBEDDING_QUANTIZE_DAYS` (default 14d) via `ageMemoryTiers()`. Threshold: 0.5 cosine similarity. int8 search via `cosineSimInt8()`.
@@ -348,9 +348,9 @@ Entities are tagged during extraction — the LLM identifies named entities per 
 
 ---
 
-## Memory Edit Tool (`agentbridge-edit`)
+## Memory Edit Tool (`abmind edit`)
 
-Source: `src/cli/agentbridge-edit.ts`
+Source: `src/cli/abmind-edit.ts`
 Method: `MemoryEditor.editMemory()` — single unified mutation path for all extracted_memory field updates.
 
 ### Lookup modes
@@ -387,7 +387,7 @@ Method: `MemoryEditor.editMemory()` — single unified mutation path for all ext
 
 ### Internal routing
 
-`adjustRelevance()`, `reclassifyMemory()`, `updateEmotionByPlatformId()` delegate to `editMemory()` internally. Sleep §6 (emotion harvest) and §7 (translation fix) use `agentbridge-edit` CLI.
+`adjustRelevance()`, `reclassifyMemory()`, `updateEmotionByPlatformId()` delegate to `editMemory()` internally. Sleep §6 (emotion harvest) and §7 (translation fix) use `abmind edit` CLI.
 
 ---
 
@@ -509,7 +509,7 @@ The CLI decides which steps to skip based on the state snapshot:
 
 | Step | Skip condition |
 |------|---------------|
-| §2 Feedback | No `agentbridge-recall` invocations in today's messages |
+| §2 Feedback | No `abmind recall` invocations in today's messages |
 | §4+ DB Maintenance | FTS healthy AND no NULL embeddings |
 | §6 Topic Reorg | No topic files exist |
 | §8 Merge | <10 extracted memories |
@@ -581,7 +581,7 @@ Dreamy scans all messages in the DB and cleans up noise while preserving emotion
 
 **Step 4a — Daily summary (code-driven):** Reads messages from DB, batches by token budget (40% of `AGENT_SLEEP_CTX_WINDOW`), accumulates summary across batches. Strips media payloads (base64, binary). Three-level escalation: normal → aggressive → deterministic fallback. Writes `daily/daily_YYYYMMDD.md`.
 
-**Step 4b — Extract from daily (code-driven):** Reads daily summary file, sends to model with extraction prompt. Model calls `agentbridge-store` for each memory. Clean input (no SQL tool calls needed).
+**Step 4b — Extract from daily (code-driven):** Reads daily summary file, sends to model with extraction prompt. Model calls `abmind store` for each memory. Clean input (no SQL tool calls needed).
 
 **Step 5 — GC noise:** Marks small talk/noise messages as garbage (flushed after 12h).
 
@@ -589,7 +589,7 @@ Dreamy scans all messages in the DB and cleans up noise while preserving emotion
 
 **Proactive storing (SOUL):** The main agent stores memories during conversation — facts, decisions, preferences, events. Dreamy is the safety net for anything missed. "If in doubt, store it" — deduplication happens during sleep.
 
-**Step 6 — Emotion harvest (verbal only):** Update nearest memory's `emotion_score` via `agentbridge-edit`. Mark emotional message as garbage.
+**Step 6 — Emotion harvest (verbal only):** Update nearest memory's `emotion_score` via `abmind edit`. Mark emotional message as garbage.
 
 **Step 7 — Flush old messages:** Keep max 500 messages, age out >7 days, garbage flushed after 12h. Gives Dreamy multiple nights to extract from the same messages.
 
@@ -627,7 +627,7 @@ After successful sleep, the bridge injects "You just woke up.. how did you sleep
 | `src/components/sleep-state-gatherer.ts` | Collects system state for identity prompt |
 | `src/components/sleep-daily-summary.ts` | Code-driven batched summarization (04a) |
 | `src/components/sleep-extract-daily.ts` | Code-driven extraction from daily file (04b) |
-| `src/memory/media-sanitizer.ts` | Strips base64/binary/media paths from messages |
+| `packages/memory/src/media-sanitizer.ts` | Strips base64/binary/media paths from messages |
 | `~/.agentbridge/memory/garbage.json` | GC tracking |
 | `~/.agentbridge/memory/sleep/` | Audit logs (`.md`) + state files (`.lock`) |
 | `~/.agentbridge/memory/daily/` | Daily summary files (`daily_YYYY-MM-DD.md`) |
@@ -647,8 +647,8 @@ recordMessage() ──► messages table (raw content, emojis preserved)
     │                    └──► chat_backup (DEBUG_MODE only)
     │
     ▼
-[During conversation: searchable via agentbridge-recall stages 3-5]
-[Agent proactively stores memories via agentbridge-store → extracted_memories (SOUL: "if in doubt, store it")]
+[During conversation: searchable via abmind recall stages 3-5]
+[Agent proactively stores memories via abmind store → extracted_memories (SOUL: "if in doubt, store it")]
 [instant-store skill removed — storing instructions now in SOUL Continuity section]
     │
     ▼
@@ -676,7 +676,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 
 ## Component Inventory
 
-All memory components live in `src/memory/` (moved from `src/components/` during refactor).
+All memory components live in `packages/memory/src/` (moved from `src/components/` during refactor).
 
 | Component | File | Description |
 |-----------|------|-------------|
@@ -702,17 +702,17 @@ All memory components live in `src/memory/` (moved from `src/components/` during
 | PromptScanner | `prompt-scanner.ts` (in `src/components/`) | 22-pattern prompt injection detector. Used by store, edit, A2A. |
 | SleepTrigger | `sleep-trigger.ts` (in `src/capabilities/sleep/`) | `hasSleepAuditToday()` — guard against re-run. |
 | SleepStateGatherer | `sleep-state-gatherer.ts` (in `src/capabilities/sleep/`) | Gathers DB stats, FTS5 health, disk usage for sleep prompt. Takes MemoryManager. |
-| agentbridge-recall | `cli/agentbridge-recall.ts` | CLI wrapper for recall-engine. Uses `createMemoryBackend()` (IPC or SQLite). |
-| agentbridge-store | `cli/agentbridge-store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete. Uses `createMemoryBackend()` (IPC or SQLite). |
-| agentbridge-edit | `cli/agentbridge-edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run. Uses `createMemoryBackend()` (IPC or SQLite). |
+| abmind recall | `cli/abmind recall.ts` | CLI wrapper for recall-engine. Uses `createMemoryBackend()` (IPC or SQLite). |
+| abmind store | `cli/abmind store.ts` | Instant memory storage. Boost/demote/reclassify/merge/delete. Uses `createMemoryBackend()` (IPC or SQLite). |
+| abmind edit | `cli/abmind edit.ts` | Unified memory mutation. Edit by `--memory-id` or `--message-id`. Classification guards, dry-run. Uses `createMemoryBackend()` (IPC or SQLite). |
 | agentbridge-sleep | `cli/agentbridge-sleep.ts` | Sleep cycle orchestrator. Multi-turn conversation with Dreamy. |
-| agentbridge-embed | `cli/agentbridge-embed.ts` | Batch embed all memories with NULL embedding via ollama. |
+| abmind embed | `cli/abmind embed.ts` | Batch embed all memories with NULL embedding via ollama. |
 | agentbridge-skill | `cli/agentbridge-skill.ts` | Auto-skill management. create/edit/patch/delete/list in `~/.agentbridge/skills/auto/`. Security scan on writes. |
 | agentbridge-backfill-v2 | `cli/agentbridge-backfill-v2.ts` | One-time migration: fills emotion_tags, importance_flags, content_compressed (ABM-L), signature on all existing memories. No LLM, pure regex. |
 
 ### Store-Time Pipeline
 
-Every `agentbridge-store` call runs these enrichments (~1-5ms total, no LLM):
+Every `abmind store` call runs these enrichments (~1-5ms total, no LLM):
 
 | Module | Output column | What |
 |---|---|---|
@@ -881,7 +881,7 @@ Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `HARDW
 | Unit tests | ~65 files | ~750 | Individual components: FTS5 indexing, emotion utils, MMR, config parsing, formatters, security gate, session manager, ABM v2 batch A-E, etc. |
 | Property-based tests | 8 files | ~40 | Invariant verification with randomized inputs: browser IPC, domain allowlist, content extractor, web scraper, browser tool. |
 | Integration tests | 2 files | ~17 | Multi-component flows with real SQLite: memory lifecycle (record→search→restore→context), recall pipeline S1-S7+Se+Sa+Ss. |
-| CLI tests | 6 files | ~35 | Arg parsing + validation for agentbridge-store, recall, cron, todo, browse, expand. |
+| CLI tests | 6 files | ~35 | Arg parsing + validation for abmind store, recall, cron, todo, browse, expand. |
 
 ### Recall Pipeline Integration (`recall-integration.test.ts`)
 
