@@ -53,4 +53,5 @@ agentbridge-expand --ids 451,452,453
 | `agentbridge-cron` | Schedule reminders/tasks | `cron` |
 | `agentbridge-browse` | Delegate browser tasks | `browse-delegate` |
 | `agentbridge-tweet` | X/Twitter feeds | `fxtwitter` |
+| `agentbridge-autofix` | Manage self-healer auto-fix rules | `healthcheck` |
 | `agentbridge-rss` | RSS/Atom feed fetcher | — |
