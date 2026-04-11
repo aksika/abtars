@@ -357,28 +357,44 @@ Heartbeat task checks `df` output. Warn at 90%, block new writes at 95%. Current
 
 Adjacent-key typos (QWERTZ: z↔y, s↔a, doubled/missed chars) could be handled by a keyboard-layout-aware correction layer before trigram search. E.g. "hogz" → "hogy", "eyg" → "egy". However: (1) every language has its own layout, (2) the substring fallback already catches most cases for longer words, (3) the agent translates to English before recall (SOUL fix) which bypasses Hungarian typos entirely, (4) Ss signatures catch semantic meaning regardless of spelling. Not worth the complexity unless short-word recall failures become a pattern.
 
-## 111. Self-healer investigation fills context window
+## 111. Self-healer — Auto-fix + Notify Tiers
 
 **Priority:** HIGH
-**Status:** Not started
+**Status:** Partly done (Phase 1 shipped: two-tier notify/auto-fix, pre-restart filter, occurrence count)
 
-**Evidence:** `docs/logs/2026-04-09-ctx-overflow-investigation.log`
+### Phase 1: Two-tier self-healer ✅ DONE
+- Auto-fix tier: whitelisted patterns → inject bounded fix command (30min cooldown)
+- Notify tier: everything else → TG notification with count (60min cooldown)
+- Pre-restart filter: ignores errors before BRIDGE START marker
+- No more context window flooding
 
-Self-healer filed a `[SYSTEM BUG REPORT]` for a `[object Object]` error from the previous process. The agent took it seriously — ran `tail -50` on logs, `grep`, `find` — each tool call dumping log content into the context window. Went from 10% to 100% context, triggered overflow reset, user got "send your message again."
+### Phase 2: Auto-fix JSON (externalized whitelist)
+- `persona/config/auto-fix.json` — single source of truth, no hardcoded list
+- Self-healer loads JSON at startup. Missing/empty → all errors go to notify tier
+- Deploy copies to `~/.agentbridge/config/` (KEPT if newer)
+- Schema: `[{ pattern, instruction, cooldownMin }]`
 
-**Problems:**
-1. Self-healer shouldn't investigate errors from before the current process started (pre-restart errors are stale)
-2. Agent investigation of log files is unbounded — no limit on how much log content enters the context
-3. `[SYSTEM BUG REPORT]` bypasses the user's conversation — the agent prioritizes self-diagnosis over user messages
-4. Context overflow during investigation loses the user's queued message ("holnap")
+### Phase 3: Auto-fix via coding subagent (isolated transport)
+- Self-healer matches auto-fix pattern → spawns `createSubagentTransport("coding")`
+- Sends instruction as one-shot prompt to isolated transport (main agent context untouched)
+- Captures response, logs to `~/.agentbridge/logs/autofix-<date>.log`
+- TG notification: "🔧 Auto-fix ran: [pattern] → [result summary]"
+- Destroys transport after completion. 5min timeout (kill if stuck)
 
-**Possible fixes:**
-- Self-healer: only scan logs after `BRIDGE START` marker (ignore pre-restart errors)
-- Non-critical errors: report to user with Investigate / Ignore choice instead of auto-investigating. Agent says "I noticed an error: [summary]. Want me to look into it?" User decides.
-- Cap tool output size for log-reading commands (truncate at N chars)
-- Don't auto-investigate bug reports — just log them and notify the user, let them decide
-- Queue bug reports as LOW priority, process only when idle
-- Context pressure guard: at ctx >70%, agent should stop investigation and warn user ("I'm running low on context, should I reset and continue or stop here?"). Options: (a) auto-reset at threshold, (b) ask user, (c) refuse new tool calls above threshold. Leaning toward (b) — user stays in control.
+### Phase 4: Agent-editable + validation
+- `agentbridge-autofix` CLI: list/add/remove rules
+- Validation: pattern max 200 chars, instruction max 500 chars, cooldownMin >= 5, no dupes
+- Add to TOOLS.md so agent knows it exists
+- Dreamy can suggest new rules during sleep retro
+
+### Phase 5: Dreamy auto-learns
+- Sleep retro step analyzes recent errors + how they were resolved
+- If a recurring error was manually fixed the same way 2+ times → Dreamy proposes auto-fix rule
+- Prompt: "I noticed [error] was fixed by [action] twice. Add as auto-fix rule?"
+- User approves via TG → Dreamy runs `agentbridge-autofix add`
+- Rejection → Dreamy notes it and won't propose again for that pattern
+
+**Files:** `self-healer.ts`, `agent-registry.ts`, `persona/config/auto-fix.json`, `src/cli/agentbridge-autofix.ts`, `deploy.sh`, `TOOLS.md`, sleep retro prompt
 
 ## 112. Unified Agent Registry
 
