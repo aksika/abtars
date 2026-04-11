@@ -20,6 +20,7 @@ import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./cron/cron-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
+import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 
 const TAG = "pipeline";
 
@@ -339,7 +340,7 @@ export async function handleInboundMessage(
 
     const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${intermediateDelivered ? " (streamed)" : ""}${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
-
+    updateBridgeLockField("lastPromptAt", Date.now());
     // --- Context window management (graduated thresholds) ---
     {
       const pct = transport.contextPercent;

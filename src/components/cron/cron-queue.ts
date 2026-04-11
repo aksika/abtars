@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { agentBridgeHome } from "../../paths.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
 import { createAgentTransport } from "../agent-registry.js";
-import { readBridgeLockTransport } from "../transport/bridge-lock-transport.js";
+import { readBridgeLockTransport, readLastPromptAt } from "../transport/bridge-lock-transport.js";
 import { DirectApiTransport } from "../transport/direct-api-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
 import type { CronEntry } from "../../cli/agentbridge-task.js";
@@ -248,6 +248,13 @@ export class CronQueue {
   }
 
   private runAgent(entry: CronEntry, onComplete?: TaskCompleteCallback): void {
+    // Idle gate: defer agent tasks if user was active in last 90s
+    const idleMs = Date.now() - readLastPromptAt();
+    if (idleMs < 90_000) {
+      logInfo(TAG, `⏸ Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
+      return;
+    }
+
     // Read task file if specified, otherwise use inline message
     let prompt = entry.message;
     let dodPaths: string[] = [];
