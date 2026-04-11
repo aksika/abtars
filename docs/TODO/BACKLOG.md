@@ -254,6 +254,7 @@ Tracked separately. Unified CLI (#124), MCP server (#125), OpenClaw plugin (#126
 ## 92. Review Dead Code — migration versions in memory-db.ts
 
 **Priority:** LOW
+**Status:** ✅ Done (2026-04-11) — collapsed 13 migrations into single fresh-install schema
 
 Review whether old migration versions in `memory-db.ts` still need to be kept. Clean up any dead migration code that's no longer needed.
 
@@ -269,7 +270,7 @@ Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") b
 ## 95. ABM Simplification
 
 **Priority:** HIGH
-**Status:** 7/7 done
+**Status:** ✅ Done (2026-04-11)
 **Spec:** [abm-simplification.md](../specs/abm-simplification.md)
 
 Full-system review and simplification of the memory system. 7 items:
