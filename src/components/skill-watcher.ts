@@ -5,7 +5,8 @@
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import { appendFileSync } from "node:fs";
-import { logInfo } from "./logger.js";
+import { logInfo, logWarn } from "./logger.js";
+import { scanForInjection } from "abmind/injection-scanner.js";
 
 const TAG = "skill-reloader";
 
@@ -38,7 +39,17 @@ export class SkillWatcher {
         if (prev !== undefined && mtime <= prev) continue; // unchanged
 
         const { name, description } = this.parseSkillHeader(filepath);
-        if (name) changed.push({ filename: key, name, description, path: filepath });
+        if (name) {
+          // Scan for prompt injection before accepting
+          const content = readFileSync(filepath, "utf-8");
+          const scan = scanForInjection(content);
+          if (!scan.safe) {
+            const top = scan.flags[0]!;
+            logWarn(TAG, `BLOCKED skill "${key}" — injection detected: ${top.category} (score=${scan.score})`);
+            continue;
+          }
+          changed.push({ filename: key, name, description, path: filepath });
+        }
       } catch { /* skip unreadable files */ }
     }
 
