@@ -357,7 +357,7 @@ Adjacent-key typos (QWERTZ: z↔y, s↔a, doubled/missed chars) could be handled
 ## 111. Self-healer — Auto-fix + Notify Tiers
 
 **Priority:** HIGH
-**Status:** Partly done (Phase 1 shipped: two-tier notify/auto-fix, pre-restart filter, occurrence count)
+**Status:** ✅ Done (Phases 1–5 shipped)
 
 ### Phase 1: Two-tier self-healer ✅ DONE
 - Auto-fix tier: whitelisted patterns → inject bounded fix command (30min cooldown)
