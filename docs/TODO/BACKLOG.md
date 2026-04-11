@@ -574,6 +574,7 @@ Set `OLLAMA_NUM_PARALLEL=2` on Ollama server. Allows 2 concurrent requests on sa
 2. Read `maxContext` / `maxOutput` / `maxTurns` from env once in the factory — all callers use the same vars.
 3. Always log transport init (no verbose flag) — it's a one-time init per session.
 4. Return type is `IKiroTransport` — callers don't need to know the concrete type.
+5. Wire per-agent context windows: `AGENT_SLEEP_CTX_WINDOW` for sleep, `AGENT_BROWSE_CTX_WINDOW` for browse, `AGENT_CODING_CTX_WINDOW` for coding, `AGENT_MAIN_CTX_WINDOW` for cron. Falls back to `API_MAX_CONTEXT` if not set. Closes the "wire ctx window env vars into code" gap.
 
 **Role model table:**
 | Role | Model source | Fallback |
