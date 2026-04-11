@@ -451,7 +451,7 @@ Follow an entity across topic boundaries. Currently timelines are per-topic. But
 ## 118. Model Health Check + Subagent Fallback
 
 **Priority:** HIGH
-**Status:** Not started
+**Status:** ✅ Done (2026-04-11)
 
 **Problem:** If a subagent model (sleep, browse, coding) is misconfigured or unavailable (404, 429), the subagent burns through all retries and fails completely. We hit this with `nemotron-3:cloud` (wrong name → 404 × 18 attempts) and `qwen3-coder-next` (not available → "all models exhausted").
 
@@ -550,7 +550,7 @@ Replace the 4 flat `.env` transport profiles with a single `transport.json` per 
 ## 121. Request Collision — Idle Gate for Smart Crons + Ollama Parallel
 
 **Priority:** HIGH
-**Status:** Not started
+**Status:** ✅ Done (2026-04-11)
 
 **Problem:** Ollama processes one request at a time. Cron agent tasks (tweet, AI news) hit the same endpoint while user is chatting → 2+ minute hangs. User had to /stop to unblock.
 
@@ -578,7 +578,7 @@ Set `OLLAMA_NUM_PARALLEL=2` on Ollama server. Allows 2 concurrent requests on sa
 ## 122. Unified Subagent Transport Factory
 
 **Priority:** HIGH
-**Status:** Not started
+**Status:** ✅ Done (2026-04-11)
 
 **Problem:** 4 subagents (sleep, browse, coding, cron) each have their own transport creation logic — 70+ lines of duplicated code reading bridge.lock, creating DirectApiTransport or AcpTransport, wiring fallbacks. If the logic changes, it must change in 4 places.
 
@@ -604,8 +604,8 @@ Set `OLLAMA_NUM_PARALLEL=2` on Ollama server. Allows 2 concurrent requests on sa
 ## 123. Memory Decoupling — Extract @agentbridge/memory
 
 **Priority:** HIGH
-**Status:** Not started
-**Spec:** [memory-decoupling.plan.md](../specs/memory-decoupling.plan.md)
+**Status:** ✅ Done (2026-04-11)
+**Spec:** [memory-decoupling.plan.md](../specs/memory-decoupling.plan.md), [123-memory-decoupling.md](../specs/123-memory-decoupling.md)
 **Prerequisite for:** #124, #125, #126
 
 Extract the memory system into a standalone `@agentbridge/memory` package. The bridge imports it as a dependency. Zero bridge imports in memory code.
