@@ -1,4 +1,4 @@
-import { localMonth } from "../utils/local-time.js";
+import { localMonth } from "./local-time.js";
 /**
  * memory-compressor.ts — ABM-L compression v2.
  * Converts English memory text + metadata into compact ABM-L format.

@@ -3,7 +3,7 @@ import type { MemoryConfig } from "./memory-config.js";
 import type { MemoryManager } from "./memory-manager.js";
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { localISO } from "../utils/local-time.js";
+import { localISO } from "./local-time.js";
 import { logInfo, logWarn, logError } from "./mem-logger.js";
 
 const TAG = "sleep-state-gatherer";

@@ -6,7 +6,7 @@
 
 import { buildArc, type EmotionArc } from "./emotion-arc.js";
 import { compress } from "./memory-compressor.js";
-import { localMonth } from "../utils/local-time.js";
+import { localMonth } from "./local-time.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 

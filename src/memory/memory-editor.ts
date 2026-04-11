@@ -1,4 +1,4 @@
-import { localDate } from "../utils/local-time.js";
+import { localDate } from "./local-time.js";
 import type Database from "better-sqlite3";
 import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "./mem-types.js";
 import { clampEmotionScore, scoreFromTags } from "./emotion-utils.js";

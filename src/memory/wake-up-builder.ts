@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { agentBridgeHome } from "./mem-paths.js";
 import { pickLevel, renderWakeUp, compressDailySummary } from "./wake-up-renderer.js";
 import { compress } from "./memory-compressor.js";
-import { localMonth } from "../utils/local-time.js";
+import { localMonth } from "./local-time.js";
 import { renderTimelines, type TimelineMemory } from "./timeline-builder.js";
 
 const ABM_L_HINT = "Memory format: [TYPE+FLAGS|topic|emotion|confidence|date] content. Types: F=fact D=decision P=preference E=event L=lesson. Flags: T=technical C=correction V=pivot O=origin M=milestone. @name=entity. >over=chose over. →=leads to. |=list separator.";

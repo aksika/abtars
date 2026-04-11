@@ -1,5 +1,5 @@
 import type { MemoryManager } from "./memory-manager.js";
-import { localTime, localDateTime } from "../utils/local-time.js";
+import { localTime, localDateTime } from "./local-time.js";
 
 export const RECENT_MSG_LIMIT = 8;
 export const RECENT_MSG_CAP = 2500;

@@ -118,6 +118,14 @@ if [ ! -f "$AB_HOME/.env.skills" ]; then
 fi
 chmod 600 "$AB_HOME/.env.skills" 2>/dev/null
 
+# auto-fix.json (self-healer rules — KEPT if newer)
+mkdir -p "$AB_HOME/config"
+if [ -f "$PROJECT_DIR/persona/config/auto-fix.json" ]; then
+  if [ ! -f "$AB_HOME/config/auto-fix.json" ] || [ "$PROJECT_DIR/persona/config/auto-fix.json" -nt "$AB_HOME/config/auto-fix.json" ]; then
+    cp "$PROJECT_DIR/persona/config/auto-fix.json" "$AB_HOME/config/auto-fix.json"
+  fi
+fi
+
 # 2. Build (unless --quick)
 if [ "$QUICK" = false ]; then
   echo "🔨 Building..."

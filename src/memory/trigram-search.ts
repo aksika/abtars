@@ -7,7 +7,7 @@
  */
 
 import type Database from "better-sqlite3";
-import { localISO } from "../utils/local-time.js";
+import { localISO } from "./local-time.js";
 import type { RecallHit } from "./recall-engine.js";
 
 export type SfOptions = {

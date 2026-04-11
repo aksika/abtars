@@ -1,13 +1,15 @@
 import { localISO } from "../utils/local-time.js";
 /**
  * Self-healer heartbeat task — scans bridge log for ERROR lines.
- * Auto-fix tier: injects bounded fix command to agent (whitelisted patterns).
+ * Auto-fix tier: spawns coding subagent with bounded instruction (from auto-fix.json).
  * Notify tier: sends TG notification to user with occurrence count.
  */
 
-import { readFileSync } from "node:fs";
-import { logInfo } from "./logger.js";
+import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { logInfo, logWarn } from "./logger.js";
 import { getLogFile } from "./logger.js";
+import { agentBridgeHome } from "../paths.js";
 import type { HeartbeatTask } from "../types/memory.js";
 import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
 
@@ -17,21 +19,36 @@ const BLACKLIST = [
   "[self-healer]", "[watchdog]", "[db-integrity]",
   "ECONNRESET", "ETIMEDOUT", "socket hang up",
   "auto-approved", "permission",
-  "BUG REPORT",
+  "BUG REPORT", "AUTO-FIX",
 ];
 
-/** Auto-fix tier: pattern → bounded instruction for the agent. */
-const AUTO_FIX: Array<{ pattern: string; instruction: string }> = [
-  { pattern: "FTS index", instruction: "Run: agentbridge-edit --rebuild-fts and report the result." },
-  { pattern: "database disk image is malformed", instruction: "Run: agentbridge-edit --rebuild-fts and report the result." },
-];
+interface AutoFixRule {
+  pattern: string;
+  instruction: string;
+  cooldownMin: number;
+  enabled: boolean;
+}
+
+function loadAutoFixRules(): AutoFixRule[] {
+  try {
+    const p = join(agentBridgeHome(), "config", "auto-fix.json");
+    const rules = JSON.parse(readFileSync(p, "utf-8")) as AutoFixRule[];
+    return rules.filter(r => r.enabled && r.pattern && r.instruction);
+  } catch { return []; }
+}
 
 const NOTIFY_COOLDOWN_MS = 60 * 60 * 1000; // 60min
-const AUTOFIX_COOLDOWN_MS = 30 * 60 * 1000; // 30min
 
 interface ErrorState {
   lastNotifiedAt: number;
   count: number;
+}
+
+function logAutoFix(message: string): void {
+  const dir = join(agentBridgeHome(), "logs");
+  try { mkdirSync(dir, { recursive: true }); } catch { /* */ }
+  const date = new Date().toISOString().slice(0, 10);
+  appendFileSync(join(dir, `autofix-${date}.log`), `${localISO()} ${message}\n`);
 }
 
 export function createSelfHealerTask(
@@ -39,9 +56,10 @@ export function createSelfHealerTask(
   allowedUserIds: Set<number>,
 ): HeartbeatTask & { enabled: boolean } {
   let lastTs = localISO();
-  let bridgeStartTs = ""; // filter pre-restart errors
+  let bridgeStartTs = "";
   const errorStates = new Map<string, ErrorState>();
   let enabled = process.env["SELFHEAL_ENABLED"] === "true";
+  let autoFixRunning = false;
 
   const task: HeartbeatTask & { enabled: boolean } = {
     name: "self-healer",
@@ -54,6 +72,7 @@ export function createSelfHealerTask(
         const content = readFileSync(logFile, "utf-8");
         const lines = content.split("\n");
         const now = Date.now();
+        const rules = loadAutoFixRules();
 
         // Find latest BRIDGE START marker — ignore errors before it
         if (!bridgeStartTs) {
@@ -82,28 +101,48 @@ export function createSelfHealerTask(
           if (!match) continue;
           const errorKey = `${match[1]}:${match[2]!.slice(0, 80)}`;
 
-          // Update count
           const state = errorStates.get(errorKey) ?? { lastNotifiedAt: 0, count: 0 };
           state.count++;
           errorStates.set(errorKey, state);
 
-          // Check auto-fix tier
-          const fix = AUTO_FIX.find(f => line.includes(f.pattern));
-          if (fix) {
-            if (now - state.lastNotifiedAt < AUTOFIX_COOLDOWN_MS) continue;
+          // Check auto-fix rules
+          const rule = rules.find(r => line.includes(r.pattern));
+          if (rule && !autoFixRunning) {
+            const cooldownMs = rule.cooldownMin * 60 * 1000;
+            if (now - state.lastNotifiedAt < cooldownMs) continue;
             state.lastNotifiedAt = now;
-            adapter.injectMessage({
-              platform: "telegram", channelId: String(chatId),
-              sessionKey: `telegram:${chatId}`, senderId: "system",
-              senderName: "Self-Healing Agent",
-              text: `[SYSTEM AUTO-FIX] ${fix.instruction}`,
-              timestamp: now, isGroup: false, isVoice: false,
-            });
-            logInfo("self-healer", `Auto-fix injected: ${errorKey.slice(0, 60)}`);
+
+            // Spawn coding subagent in background
+            autoFixRunning = true;
+            logInfo("self-healer", `Auto-fix: spawning coding subagent for "${rule.pattern}"`);
+            logAutoFix(`START: ${rule.pattern} → ${rule.instruction}`);
+
+            (async () => {
+              const timeout = setTimeout(() => { autoFixRunning = false; }, 5 * 60 * 1000);
+              try {
+                const { createSubagentTransport } = await import("./agent-registry.js");
+                const { transport } = await createSubagentTransport("coding");
+                const result = await transport.sendPrompt("autofix", rule.instruction);
+                const summary = (result || "(no output)").slice(0, 200);
+                transport.destroy();
+                logAutoFix(`DONE: ${rule.pattern} → ${summary}`);
+                adapter.sendNotification(String(chatId), `🔧 Auto-fix: ${rule.pattern}\n${summary}`);
+                logInfo("self-healer", `Auto-fix done: ${rule.pattern}`);
+              } catch (err) {
+                // Transport failed — fall back to notify
+                const msg = err instanceof Error ? err.message : String(err);
+                logWarn("self-healer", `Auto-fix transport failed, notifying user: ${msg}`);
+                logAutoFix(`FAILED: ${rule.pattern} → ${msg}`);
+                adapter.sendNotification(String(chatId), `⚠️ Auto-fix failed for "${rule.pattern}": ${msg.slice(0, 100)}`);
+              } finally {
+                clearTimeout(timeout);
+                autoFixRunning = false;
+              }
+            })();
             continue;
           }
 
-          // Notify tier — send TG notification with count
+          // Notify tier
           if (now - state.lastNotifiedAt < NOTIFY_COOLDOWN_MS) continue;
           state.lastNotifiedAt = now;
           const summary = match[2]!.slice(0, 120);
