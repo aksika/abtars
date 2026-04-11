@@ -58,6 +58,7 @@ If 429 response includes `Retry-After` or `x-ratelimit-reset`, use as exact cool
 
 ## What we're NOT doing
 
+<<<<<<< Updated upstream
 - No fallback transition notifications (nice UX but not critical)
 
 ## Borrowed from 9Router
@@ -70,6 +71,67 @@ If 429 response includes `Retry-After` or `x-ratelimit-reset`, use as exact cool
 - Account rotation: multiple accounts per provider, skip locked ones
 
 **Consider for future:** Replace leaky bucket with timestamp-based locks. Simpler mental model, no drain rate tuning. But current bucket system works — this is a "nice to have" refactor, not blocking.
+=======
+- No cooldown probing (adds background timer complexity)
+- No fallback transition notifications (nice UX but not critical)
+
+These are valid ideas from OpenClaw but overkill for now.
+
+---
+
+## Future: Transport Supplier concept
+
+**Status:** Design phase — implement after tasks 1-4 are validated.
+
+Replace the generic `API` transport profile with named suppliers:
+
+```env
+# Instead of:
+AGENT_TRANSPORT_PROFILE=api
+API_ENDPOINT=http://localhost:11434/v1
+API_MODEL=deepseek-r1
+
+# Use:
+AGENT_TRANSPORT_SUPPLIERS=openrouter,together,ollama
+OPENROUTER_ENDPOINT=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODELS=deepseek/deepseek-chat,moonshotai/kimi-k2,google/gemini-flash
+TOGETHER_ENDPOINT=https://api.together.xyz/v1
+TOGETHER_API_KEY=...
+TOGETHER_MODELS=deepseek-ai/DeepSeek-V3,Qwen/Qwen2.5-72B
+OLLAMA_ENDPOINT=https://your-ollama-cloud.example/v1
+OLLAMA_API_KEY=...
+OLLAMA_MODELS=deepseek-r1,qwen2.5
+```
+
+**Fallback chain:**
+```
+User prompt
+  → try openrouter/deepseek-chat
+  → 429 → try openrouter/kimi-k2
+  → 429 → try openrouter/gemini-flash
+  → all openrouter exhausted → SWITCH SUPPLIER
+  → try together/DeepSeek-V3
+  → 429 → try together/Qwen2.5-72B
+  → all together exhausted → SWITCH SUPPLIER
+  → try ollama/deepseek-r1
+  → success
+```
+
+**Each supplier has:**
+- Own endpoint + API key
+- Own model list (ordered by preference)
+- Own bucket state (per-model within supplier)
+- Supplier-level health (if all models in a supplier are bucketed → skip supplier)
+
+**Implementation approach:**
+- `TransportSupplier` type: `{ name, endpoint, apiKey, models[], buckets }`
+- `DirectApiTransport` takes `suppliers[]` instead of flat `fallbacks[]`
+- Candidate iteration: outer loop = suppliers, inner loop = models within supplier
+- Existing leaky bucket works per-model within each supplier
+
+**Effort:** ~2hr (refactor DirectApiTransport config + candidate iteration)
+>>>>>>> Stashed changes
 
 ---
 
@@ -135,6 +197,10 @@ User prompt
 | 1 | Progressive fill: add `consecutiveErrors` to Bucket, scale fill, reset on success. Add `recordSuccess(key)` to reset counter — call after successful `agentLoop()`. | 15min | `leaky-bucket.ts` + `direct-api-transport.ts` |
 | 2 | 402 as temporary: change `classifyError(402)` to `rate_limit` | 1min | `leaky-bucket.ts` |
 | 3 | Structured failure summary: collect per-candidate errors, throw descriptive | 10min | `direct-api-transport.ts` |
+<<<<<<< Updated upstream
 | 4 | Retry-After header: if present in 429 response, use as exact cooldown | 15min | `leaky-bucket.ts` + `direct-api-transport.ts` |
+=======
+| 4 | Retry-After header: if 429 response includes `Retry-After` or `x-ratelimit-reset`, use as exact cooldown timestamp on bucket. If absent, fall back to progressive fill. Most free tiers won't send it — but when they do, it's exact. | 15min | `leaky-bucket.ts` + `direct-api-transport.ts` |
+>>>>>>> Stashed changes
 
 **Total: ~40min**
