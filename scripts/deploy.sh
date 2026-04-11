@@ -128,8 +128,12 @@ fi
 
 # 2. Build (unless --quick)
 if [ "$QUICK" = false ]; then
-  echo "🔨 Building..."
   cd "$PROJECT_DIR"
+  echo "📥 Pulling latest..."
+  git pull --ff-only 2>/dev/null || echo "   ⚠️  git pull failed — building from local"
+  echo "📦 Installing dependencies..."
+  npm install --no-audit --no-fund 2>&1 | tail -1
+  echo "🔨 Building..."
   npm run build
 fi
 
