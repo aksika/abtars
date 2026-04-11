@@ -11,7 +11,7 @@ ${TRANSLATION_ISSUES}
 
 For each memory, read the original content and provide a corrected English translation:
 ```
-agentbridge-edit --memory-id N --translated "corrected English" --caller dreamy
+abmind edit --memory-id N --translated "corrected English" --caller dreamy
 ```
 
 Respond with the count of fixes applied.

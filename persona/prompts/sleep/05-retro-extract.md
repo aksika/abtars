@@ -10,7 +10,7 @@ ${RETRO_CONTENT}
 ## Task
 
 1. Identify lessons, mistakes, and insights from the retrospective.
-2. For each candidate, run `agentbridge-recall` with the key phrase to check for duplicates.
-3. If no duplicate exists, store via `agentbridge-store`.
+2. For each candidate, run `abmind recall` with the key phrase to check for duplicates.
+3. If no duplicate exists, store via `abmind store`.
 4. If a mistake repeats a previously stored mistake, store it with escalated emotion score (`-2` from previous).
 5. Respond with the count of memories stored.

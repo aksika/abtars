@@ -33,5 +33,5 @@ Assign `--classification <0-3>` when storing memories. Default: 1.
 ## Reclassify
 
 ```bash
-agentbridge-edit --memory-id <N> --classification <level>
+abmind edit --memory-id <N> --classification <level>
 ```

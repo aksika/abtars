@@ -6,10 +6,10 @@ user-invocable: false
 
 # Memory Search
 
-Full documentation for `agentbridge-recall`. See TOOLS.md for quick reference.
+Full documentation for `abmind recall`. See TOOLS.md for quick reference.
 
 ```bash
-agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"] [--time-start <ms>] [--time-end <ms>] [--max-classification 0-2] [--stages S1,S3] [--entity "Name"]
+abmind recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"] [--time-start <ms>] [--time-end <ms>] [--max-classification 0-2] [--stages S1,S3] [--entity "Name"]
 ```
 
 ## Parameter rules
@@ -33,7 +33,7 @@ agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó
 
 ## Expand source messages
 ```bash
-agentbridge-expand --ids 451,452,453
+abmind expand --ids 451,452,453
 ```
 Use when results have `source_ids` and you need original context or "when did I say that?"
 

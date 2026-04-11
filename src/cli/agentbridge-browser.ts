@@ -3,7 +3,7 @@
  * agentbridge-browser — standalone CLI for agent-initiated browser control.
  *
  * Gives the LLM agent direct control over a headless Chromium browser.
- * Follows the same pattern as agentbridge-recall and agentbridge-store.
+ * Follows the same pattern as abmind recall and abmind store.
  *
  * Usage:
  *   agentbridge-browser --action navigate --url "https://example.com" --session-id default

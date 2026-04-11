@@ -5,9 +5,9 @@ Run any tool with `--help` for full usage.
 ## Essential
 
 ```
-agentbridge-recall --translated "kw1,kw2" --chat-id <CHAT_ID>
-agentbridge-store --translated "English" --original "original" --memory-type fact --emotion-score 0 --chat-id <CHAT_ID>
-agentbridge-edit --memory-id <N> [--credibility N] [--classification N] [--caller kp]
+abmind recall --translated "kw1,kw2" --chat-id <CHAT_ID>
+abmind store --translated "English" --original "original" --memory-type fact --emotion-score 0 --chat-id <CHAT_ID>
+abmind edit --memory-id <N> [--credibility N] [--classification N] [--caller kp]
 ```
 
 **CRITICAL:** `--translated` = English version. `--original` = user's ACTUAL words in whatever language they used. If user spoke English, `--original` is English. NEVER fabricate a translation.

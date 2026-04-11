@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * agentbridge-embed — one-time batch embedding of all extracted_memories.
- * Usage: agentbridge-embed
+ * abmind-embed — one-time batch embedding of all extracted_memories.
+ * Usage: abmind-embed
  */
 
 import Database from "better-sqlite3";

@@ -8,4 +8,4 @@ When a session starts (first message after restart, `/new`, or `/reset`), you re
 - Keep it natural — like a colleague picking up where you left off
 
 ## Follow-up
-If the session context isn't enough to answer a question, use `agentbridge-recall` via bash to search deeper. Never claim tools are unavailable — you have bash access.
+If the session context isn't enough to answer a question, use `abmind recall` via bash to search deeper. Never claim tools are unavailable — you have bash access.

@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * agentbridge-retro-extract — Extract durable facts from retrospective files.
+ * abmind-retro-extract — Extract durable facts from retrospective files.
  *
  * Parses retro markdown, extracts bullets from "What did I learn?" (facts)
  * and "How can I improve?" (decisions), stores via instantStore().
  *
  * Usage:
- *   agentbridge-retro-extract [--dry-run] [--verbose]
+ *   abmind-retro-extract [--dry-run] [--verbose]
  */
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
@@ -140,8 +140,8 @@ async function main(): Promise<void> {
 }
 
 const isDirectRun =
-  process.argv[1]?.endsWith("agentbridge-retro-extract.js") ||
-  process.argv[1]?.endsWith("agentbridge-retro-extract.ts");
+  process.argv[1]?.endsWith("abmind-retro-extract.js") ||
+  process.argv[1]?.endsWith("abmind-retro-extract.ts");
 
 if (isDirectRun) {
   main().catch((err) => {

@@ -736,7 +736,7 @@ async function main(): Promise<number> {
         ? `${lines.length} messages since last sleep:\n\n${lines.join("\n")}`
         : "No messages since last sleep.";
       logInfo(TAG, `[SLEEP] Pre-queried ${lines.length} messages for retro (${msgs.length} total, ${garbageIds.size} garbage filtered)`);
-    } catch { vars.RETRO_MESSAGES = "Error loading messages — use agentbridge-recall to search."; }
+    } catch { vars.RETRO_MESSAGES = "Error loading messages — use abmind recall to search."; }
 
     const steps = loadSleepSteps(snapshot);
     for (const step of steps) {

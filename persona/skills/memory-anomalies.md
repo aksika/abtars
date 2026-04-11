@@ -16,7 +16,7 @@ Reference for Dreamy's daily audit and KP's review of flagged items.
 | Decisions at classification=0 | memory_type='decision' AND classification=0 | classification=1 |
 | KP decisions at trust<2 | memory_type='decision' AND trust<2 | trust=2 |
 | Stale credibility=6 (>7 days) | credibility=6 AND age>7d AND trust≥2 | credibility=3 |
-| NULL embeddings | embedding IS NULL | run agentbridge-embed |
+| NULL embeddings | embedding IS NULL | run abmind embed |
 
 ## Flag-for-review rules (needs human judgment)
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { parseArgs } from "./agentbridge-expand.js";
+import { parseArgs } from "./abmind-expand.js";
 
-describe("agentbridge-expand parseArgs", () => {
+describe("abmind expand parseArgs", () => {
   it("parses comma-separated IDs", () => {
     const result = parseArgs(["node", "expand", "--ids", "10,20,30"]);
     expect(result.ids).toEqual([10, 20, 30]);

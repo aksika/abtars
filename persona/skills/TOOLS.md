@@ -12,10 +12,10 @@ Run any tool with `--help` for full usage. See linked skill for behavioral rules
 ## Essential (90% of usage)
 
 ```
-agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"]
-agentbridge-store --translated "English" --original "eredeti" --memory-type <type> --emotion-score 0 --chat-id 7773842843 [--tags "term1,term2"] [--topic <topic>]
-agentbridge-edit --memory-id <N> [--credibility N] [--classification N] [--translated "..."] [--relevance-score +N] [--caller kp]
-agentbridge-expand --ids 451,452,453
+abmind recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"]
+abmind store --translated "English" --original "eredeti" --memory-type <type> --emotion-score 0 --chat-id 7773842843 [--tags "term1,term2"] [--topic <topic>]
+abmind edit --memory-id <N> [--credibility N] [--classification N] [--translated "..."] [--relevance-score +N] [--caller kp]
+abmind expand --ids 451,452,453
 agentbridge-skill --action create|edit|patch|delete|list --name "skill-name" --content "# Skill content..."
 ```
 
@@ -34,10 +34,10 @@ agentbridge-skill --action create|edit|patch|delete|list --name "skill-name" --c
 
 | Tool | Purpose | Skill |
 |------|---------|-------|
-| `agentbridge-recall` | Search memories | `memory-search` |
-| `agentbridge-edit` | Modify existing memories | `instant-store` |
-| `agentbridge-store` | Create new memories | `instant-store` |
-| `agentbridge-expand` | Expand source message IDs | — |
+| `abmind recall` | Search memories | `memory-search` |
+| `abmind edit` | Modify existing memories | `instant-store` |
+| `abmind store` | Create new memories | `instant-store` |
+| `abmind expand` | Expand source message IDs | — |
 | `agentbridge-todo` | Manage todo list | `todo` |
 | `agentbridge-cron` | Schedule reminders/tasks | `cron` |
 | `agentbridge-browse` | Delegate browser tasks | `browse-delegate` |

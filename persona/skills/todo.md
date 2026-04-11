@@ -26,5 +26,5 @@ Item numbers are 1-based, in the order they appear in the file.
 ## When NOT to use
 
 - For time-specific reminders with a specific date/time (use agentbridge-cron instead)
-- For facts/preferences (use agentbridge-store instead)
+- For facts/preferences (use abmind store instead)
 - For routine conversational messages

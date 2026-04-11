@@ -83,7 +83,7 @@ const memoryStoreTool: ToolDefinition = {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
       }
     }
-    let cmd = `agentbridge-store --translated ${JSON.stringify(args["translated"] ?? "")} --type ${args["type"] ?? "fact"}`;
+    let cmd = `abmind store --translated ${JSON.stringify(args["translated"] ?? "")} --type ${args["type"] ?? "fact"}`;
     if (args["original"]) cmd += ` --original ${JSON.stringify(args["original"])}`;
     if (args["emotion"]) cmd += ` --emotion-score ${args["emotion"]}`;
     if (args["confidence"]) cmd += ` --confidence ${args["confidence"]}`;
@@ -116,7 +116,7 @@ const memoryRecallTool: ToolDefinition = {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
       }
     }
-    let cmd = `agentbridge-recall ${JSON.stringify(args["query"] ?? "")}`;
+    let cmd = `abmind recall ${JSON.stringify(args["query"] ?? "")}`;
     if (args["limit"]) cmd += ` --limit ${args["limit"]}`;
     return runBash(cmd, CLI_TIMEOUT_MS);
   },
@@ -157,7 +157,7 @@ const memoryEditTool: ToolDefinition = {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
       }
     }
-    let cmd = `agentbridge-edit --memory-id ${args["memory_id"] ?? "0"}`;
+    let cmd = `abmind edit --memory-id ${args["memory_id"] ?? "0"}`;
     if (args["translated"]) cmd += ` --translated ${JSON.stringify(args["translated"])}`;
     if (args["original"]) cmd += ` --original ${JSON.stringify(args["original"])}`;
     if (args["type"]) cmd += ` --type ${args["type"]}`;

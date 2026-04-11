@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * agentbridge-store — standalone CLI for agent-initiated memory storage.
+ * abmind-store — standalone CLI for agent-initiated memory storage.
  *
  * Persists a memory immediately via MemoryManager.instantStore().
  * The agent decides when to invoke this based on conversation context.
  *
  * Usage:
- *   agentbridge-store \
+ *   abmind-store \
  *     --translated "User prefers dark mode" \
  *     --original "A user dark mode-ot preferálja" \
  *     --memory-type preference \
@@ -60,7 +60,7 @@ export function parseArgs(argv: string[]): RawArgs {
 
   if (args.includes('--help')) {
     console.log(`Usage:
-  agentbridge-store --translated <text> --original <text> --memory-type <type> --emotion-score <n> --chat-id <id>
+  abmind-store --translated <text> --original <text> --memory-type <type> --emotion-score <n> --chat-id <id>
 
 Options:
   --translated <text>     English content (alias: --content-en)
@@ -261,8 +261,8 @@ async function main() {
 }
 
 // Only run when executed as a script, not when imported for testing
-const isDirectRun = process.argv[1]?.endsWith("agentbridge-store.ts") ||
-  process.argv[1]?.endsWith("agentbridge-store.js");
+const isDirectRun = process.argv[1]?.endsWith("abmind-store.ts") ||
+  process.argv[1]?.endsWith("abmind-store.js");
 if (isDirectRun) {
   main();
 }

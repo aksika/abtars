@@ -10,8 +10,8 @@ ${MERGE_CANDIDATES}
 ## Rules
 
 - Max 5 merges per run.
-- If both express the same fact: `agentbridge-store --merge --merge-ids A,B`
-- If one contradicts the other: invalidate the older one via `agentbridge-edit --memory-id <older> --valid-to <today>`
+- If both express the same fact: `abmind store --merge --merge-ids A,B`
+- If one contradicts the other: invalidate the older one via `abmind edit --memory-id <older> --valid-to <today>`
 - If they are related but distinct, skip.
 
 ## Task

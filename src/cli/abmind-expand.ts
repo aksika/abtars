@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * agentbridge-expand — look up original messages by ID.
+ * abmind-expand — look up original messages by ID.
  *
  * Given comma-separated message IDs (from source_message_ids on extracted memories),
  * returns the original messages from the messages table.
  *
  * Usage:
- *   agentbridge-expand --ids 451,452,453
+ *   abmind-expand --ids 451,452,453
  */
 
 import { localISO } from "../utils/local-time.js";
@@ -23,7 +23,7 @@ export function parseArgs(argv = process.argv): { ids: number[] } {
 
   if (args.includes('--help')) {
     console.log(`Usage:
-  agentbridge-expand --ids <id1,id2,...>
+  abmind-expand --ids <id1,id2,...>
 
 Options:
   --ids <ids>    Comma-separated message IDs to expand`);
@@ -39,14 +39,14 @@ Options:
   }
 
   if (!ids.length) {
-    console.error("Usage: agentbridge-expand --ids <id1,id2,...>");
+    console.error("Usage: abmind-expand --ids <id1,id2,...>");
     process.exit(1);
   }
   return { ids };
 }
 
 // Only run as CLI entry point (not when imported for tests)
-const isMain = process.argv[1]?.endsWith("agentbridge-expand.js") || process.argv[1]?.endsWith("agentbridge-expand.ts");
+const isMain = process.argv[1]?.endsWith("abmind-expand.js") || process.argv[1]?.endsWith("abmind-expand.ts");
 if (isMain) {
   if (!existsSync(DB_PATH)) {
     console.error(`Memory database not found: ${DB_PATH}`);

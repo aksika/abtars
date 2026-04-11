@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const MOCK_SOUL = "You are a test agent. Be helpful.\n\n---\n\nTools: agentbridge-recall, agentbridge-store";
+const MOCK_SOUL = "You are a test agent. Be helpful.\n\n---\n\nTools: abmind recall, abmind store";
 vi.mock("../components/soul-loader.js", () => ({ loadSoulBundle: () => MOCK_SOUL }));
 
 import { handleInboundMessage, startSession, resetAndPrepare, type PipelineDeps } from "../components/message-pipeline.js";
@@ -110,7 +110,7 @@ describe("Smoke: bridge lifecycle", () => {
 
     expect(transport.prompts.length).toBe(1);
     expect(transport.prompts[0]).toContain("You are a test agent");
-    expect(transport.prompts[0]).toContain("agentbridge-recall");
+    expect(transport.prompts[0]).toContain("abmind recall");
     expect(transport.prompts[0]!.length).toBeGreaterThan(50);
     memory.close();
   });

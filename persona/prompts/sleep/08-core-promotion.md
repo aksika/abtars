@@ -17,7 +17,7 @@ ${PROMOTION_CANDIDATES}
 
 For each worthy candidate:
 ```
-agentbridge-edit --memory-id N --tier core
+abmind edit --memory-id N --tier core
 ```
 
 Respond with the list of promotions made.

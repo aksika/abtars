@@ -15,7 +15,7 @@ ${UNTAGGED_MEMORIES}
 
 For each memory, read its content and assign the most fitting topic:
 ```
-agentbridge-edit --memory-id N --topic <topic>
+abmind edit --memory-id N --topic <topic>
 ```
 
 If a memory spans multiple topics, pick the primary one.

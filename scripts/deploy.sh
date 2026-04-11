@@ -152,7 +152,12 @@ cp "$PROJECT_DIR/docs/asbuilts/memory.asbuilt.md" "$AB_HOME/knowledgebase/"
 # Generate CLI wrapper scripts in ~/.agentbridge/bin/
 echo "🔧 Generating CLI wrappers..."
 mkdir -p "$AB_HOME/bin"
+# abmind unified CLI
+printf '#!/usr/bin/env bash\nexec node "%s" "$@"\n' "$AB_HOME/dist/src/cli/abmind.js" > "$AB_HOME/bin/abmind"
+chmod +x "$AB_HOME/bin/abmind"
+# Other CLIs
 for js in "$AB_HOME/dist/src/cli/agentbridge-"*.js; do
+  [ -f "$js" ] || continue
   name=$(basename "$js" .js)
   printf '#!/usr/bin/env bash\nexec node "%s" "$@"\n' "$js" > "$AB_HOME/bin/$name"
   chmod +x "$AB_HOME/bin/$name"
@@ -274,11 +279,11 @@ fi
 
 # Deploy agentbridge-embed CLI + check ollama (only if EMBEDDING_ENABLED=true in .env)
 if grep -q "^EMBEDDING_ENABLED=true" "$AB_HOME/.env" 2>/dev/null; then
-  EMBED_SCRIPT="$AB_HOME/agentbridge-embed"
+  EMBED_SCRIPT="$AB_HOME/abmind-embed"
   echo '#!/usr/bin/env bash' > "$EMBED_SCRIPT"
-  echo "EMBEDDING_ENABLED=true exec node \"$AB_HOME/dist/src/cli/agentbridge-embed.js\" \"\$@\"" >> "$EMBED_SCRIPT"
+  echo "EMBEDDING_ENABLED=true exec node \"$AB_HOME/dist/src/cli/abmind.js\" embed \"\$@\"" >> "$EMBED_SCRIPT"
   chmod +x "$EMBED_SCRIPT"
-  ln -sf "$EMBED_SCRIPT" "$HOME/.local/bin/agentbridge-embed"
+  ln -sf "$EMBED_SCRIPT" "$HOME/.local/bin/abmind-embed"
 
   # Check ollama is running and model is pulled
   if command -v ollama &>/dev/null; then

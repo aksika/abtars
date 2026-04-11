@@ -1,6 +1,6 @@
 /**
  * Sleep extract-from-daily — reads the daily summary file and
- * asks the model to extract memories via agentbridge-store.
+ * asks the model to extract memories via abmind store.
  */
 
 import { readFileSync } from "node:fs";
@@ -15,9 +15,9 @@ const EXTRACTION_PROMPT = `Here is today's conversation summary:
 {DAILY_CONTENT}
 ---
 
-For EVERY meaningful point, store a memory using agentbridge-store:
+For EVERY meaningful point, store a memory using abmind store:
 
-agentbridge-store --translated "English" --original "original if known" --memory-type <fact|decision|preference|event> --emotion-score <-5 to +5> --chat-id {CHAT_ID}
+abmind store --translated "English" --original "original if known" --memory-type <fact|decision|preference|event> --emotion-score <-5 to +5> --chat-id {CHAT_ID}
 
 Store:
 - Facts about the user, their setup, people, life

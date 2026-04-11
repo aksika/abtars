@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * agentbridge-edit — CLI for modifying existing extracted memories.
+ * abmind-edit — CLI for modifying existing extracted memories.
  *
  * Lookup by memory ID:
- *   agentbridge-edit --memory-id 42 --translated "corrected" --caller dreamy
+ *   abmind-edit --memory-id 42 --translated "corrected" --caller dreamy
  *
  * Lookup by platform message ID:
- *   agentbridge-edit --message-id 12345 --chat-id 7773842843 --emotion-score 3
+ *   abmind-edit --message-id 12345 --chat-id 7773842843 --emotion-score 3
  *
  * Dry run:
- *   agentbridge-edit --memory-id 42 --translated "test" --dry-run
+ *   abmind-edit --memory-id 42 --translated "test" --dry-run
  *
  * Output: { "ok": true, "memoriesUpdated": 1, "ids": [42], "fieldsUpdated": ["content_en"] }
  */
@@ -50,9 +50,9 @@ export function parseEditArgs(argv: string[]): RawEditArgs {
 
   if (args.includes('--help')) {
     console.log(`Usage:
-  agentbridge-edit --memory-id <id> --translated "corrected" --caller <name>
-  agentbridge-edit --message-id <id> --chat-id <id> --emotion-score <n>
-  agentbridge-edit --memory-id <id> --translated "test" --dry-run
+  abmind-edit --memory-id <id> --translated "corrected" --caller <name>
+  abmind-edit --message-id <id> --chat-id <id> --emotion-score <n>
+  abmind-edit --memory-id <id> --translated "test" --dry-run
 
 Options:
   --memory-id <id>        Lookup by memory ID
@@ -193,8 +193,8 @@ async function main() {
   }
 }
 
-const isDirectRun = process.argv[1]?.endsWith("agentbridge-edit.ts") ||
-  process.argv[1]?.endsWith("agentbridge-edit.js");
+const isDirectRun = process.argv[1]?.endsWith("abmind-edit.ts") ||
+  process.argv[1]?.endsWith("abmind-edit.js");
 if (isDirectRun) {
   main();
 }

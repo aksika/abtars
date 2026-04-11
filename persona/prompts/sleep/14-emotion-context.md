@@ -12,6 +12,6 @@ ${EMOTION_CONTEXT_GAPS}
 For each memory:
 1. Read the content and emotion tags.
 2. Infer WHY the emotion applies in 3–5 words (e.g., "frustrated by repeated bug", "proud of shipping fast").
-3. Apply: `agentbridge-edit --memory-id N --emotion-context "reason"`
+3. Apply: `abmind edit --memory-id N --emotion-context "reason"`
 
 Respond with the count of contexts added.

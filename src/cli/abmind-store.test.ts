@@ -4,7 +4,7 @@ import fc from "fast-check";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validateArgs, parseArgs, type RawArgs } from "./agentbridge-store.js";
+import { validateArgs, parseArgs, type RawArgs } from "./abmind-store.js";
 import { MemoryManager } from "@agentbridge/memory/memory-manager.js";
 import { makeMemoryTestConfig } from "../tests/helpers.js";
 import { initializeDatabase } from "@agentbridge/memory/memory-db.js";
@@ -36,7 +36,7 @@ const requiredKeys: (keyof RawArgs)[] = [
   "chatId",
 ];
 
-describe("agentbridge-store — Property 8: CLI Argument Validation", () => {
+describe("abmind store — Property 8: CLI Argument Validation", () => {
   let tmpDir: string;
   let manager: MemoryManager;
 
@@ -119,7 +119,7 @@ describe("agentbridge-store — Property 8: CLI Argument Validation", () => {
   });
 });
 
-describe("agentbridge-store --delete-ids", () => {
+describe("abmind store --delete-ids", () => {
   let tmpDir: string;
   let manager: MemoryManager;
 
@@ -195,7 +195,7 @@ describe("agentbridge-store --delete-ids", () => {
   });
 });
 
-describe("agentbridge-store — parseArgs aliases", () => {
+describe("abmind store — parseArgs aliases", () => {
   it("--translated maps to contentEn", () => {
     const raw = parseArgs(["node", "store", "--translated", "hello"]);
     expect(raw.contentEn).toBe("hello");
@@ -212,7 +212,7 @@ describe("agentbridge-store — parseArgs aliases", () => {
   });
 });
 
-describe("agentbridge-store — validateArgs", () => {
+describe("abmind store — validateArgs", () => {
   const valid: RawArgs = {
     contentEn: "test memory",
     contentOriginal: "teszt memória",
@@ -245,7 +245,7 @@ describe("agentbridge-store — validateArgs", () => {
   });
 });
 
-describe("agentbridge-store — instantStore", () => {
+describe("abmind store — instantStore", () => {
   let tmpDir: string;
   let manager: MemoryManager;
 
@@ -283,7 +283,7 @@ describe("agentbridge-store — instantStore", () => {
   });
 });
 
-describe("agentbridge-store — boost/demote", () => {
+describe("abmind store — boost/demote", () => {
   let tmpDir: string;
   let manager: MemoryManager;
 
@@ -317,7 +317,7 @@ describe("agentbridge-store — boost/demote", () => {
   });
 });
 
-describe("agentbridge-store — merge", () => {
+describe("abmind store — merge", () => {
   let tmpDir: string;
   let manager: MemoryManager;
 

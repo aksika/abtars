@@ -41,14 +41,10 @@
     "vitest": "^2.1.0"
   },
   "bin": {
-    "agentbridge-recall": "dist/src/cli/agentbridge-recall.js",
-    "agentbridge-restart": "dist/src/cli/agentbridge-restart.js",
-    "agentbridge-store": "dist/src/cli/agentbridge-store.js",
-    "agentbridge-edit": "dist/src/cli/agentbridge-edit.js",
-    "agentbridge-sleep": "dist/src/cli/agentbridge-sleep.js",
-    "agentbridge-retro-extract": "dist/src/cli/agentbridge-retro-extract.js",
+    "abmind": "dist/src/cli/abmind.js",
     "agentbridge-browser": "dist/src/cli/agentbridge-browser.js",
     "agentbridge-tweet": "dist/src/cli/agentbridge-tweet.js",
-    "agentbridge-embed": "dist/src/cli/agentbridge-embed.js"
+    "agentbridge-sleep": "dist/src/cli/agentbridge-sleep.js",
+    "agentbridge-restart": "dist/src/cli/agentbridge-restart.js"
   }
 }

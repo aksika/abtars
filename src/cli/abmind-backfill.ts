@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * agentbridge-backfill-v2 — One-time migration: fill ABM v2 columns on existing memories.
+ * abmind-backfill — One-time migration: fill ABM v2 columns on existing memories.
  * Runs emotion tagger + importance flagger + compressor + signature generator on all
  * memories that have NULL content_compressed. No LLM needed — pure regex/string ops.
  *
- * Usage: node dist/cli/agentbridge-backfill-v2.js [--dry-run]
+ * Usage: node dist/cli/abmind-backfill.js [--dry-run]
  */
 
 import { localMonth } from "../utils/local-time.js";

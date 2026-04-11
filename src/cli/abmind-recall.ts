@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * agentbridge-recall — CLI wrapper for the recall engine.
+ * abmind-recall — CLI wrapper for the recall engine.
  *
  * Usage:
- *   agentbridge-recall --translated "kw1,kw2" --chat-id 7773842843
- *   agentbridge-recall --translated "puppy" --original "kiskutya" --chat-id 7773842843
- *   agentbridge-recall --translated "puppy" --chat-id 123 --stages Sf,Ss
+ *   abmind-recall --translated "kw1,kw2" --chat-id 7773842843
+ *   abmind-recall --translated "puppy" --original "kiskutya" --chat-id 7773842843
+ *   abmind-recall --translated "puppy" --chat-id 123 --stages Sf,Ss
  *
  * Legacy: --keywords is accepted as alias for --translated.
  */
@@ -19,10 +19,10 @@ function parseArgs() {
 
   if (args.includes('--help')) {
     console.log(`Usage:
-  agentbridge-recall --translated "kw1,kw2" --chat-id <id>
-  agentbridge-recall --translated "kw" --original "kw" --chat-id <id>
-  agentbridge-recall --translated "kw" --chat-id <id> --stages Sf,Ss
-  agentbridge-recall --entity "Name" --chat-id <id>
+  abmind-recall --translated "kw1,kw2" --chat-id <id>
+  abmind-recall --translated "kw" --original "kw" --chat-id <id>
+  abmind-recall --translated "kw" --chat-id <id> --stages Sf,Ss
+  abmind-recall --entity "Name" --chat-id <id>
 
 Options:
   --translated <kw>       Comma-separated keywords (alias: --keywords)
@@ -73,7 +73,7 @@ Options:
   }
 
   if ((!translated.length && !entity) || !chatId) {
-    console.error('Usage: agentbridge-recall --translated "kw1,kw2" --chat-id <id> [--original <kw>] [--entity "Name"] [--stages S1,S3]');
+    console.error('Usage: abmind-recall --translated "kw1,kw2" --chat-id <id> [--original <kw>] [--entity "Name"] [--stages S1,S3]');
     process.exit(1);
   }
   const fullMode = process.argv.includes("--full");
@@ -115,7 +115,7 @@ try {
   const expandable = result.results.filter(r => r.source_ids);
   if (expandable.length) {
     const allIds = expandable.map(r => r.source_ids).join(",");
-    console.error(`\nHint: ${expandable.length} result(s) have source message IDs. Expand with:\n  agentbridge-expand --ids ${allIds}`);
+    console.error(`\nHint: ${expandable.length} result(s) have source message IDs. Expand with:\n  abmind-expand --ids ${allIds}`);
   }
 } finally {
   backend.close();
