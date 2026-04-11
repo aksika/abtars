@@ -138,9 +138,9 @@ if grep -q "^EMBEDDING_ENABLED=true" "$AB/.env" 2>/dev/null; then
     NULL_EMBEDS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM extracted_memories WHERE embedding IS NULL;" 2>/dev/null || echo 0)
     if [ "$NULL_EMBEDS" -gt 0 ]; then
       if $FIX; then
-        EMBEDDING_ENABLED=true node "$(dirname "$0")/../dist/cli/agentbridge-embed.js" 2>/dev/null && fix "batch-embedded $NULL_EMBEDS memories"
+        EMBEDDING_ENABLED=true node "$(dirname "$0")/../dist/src/cli/abmind.js" embed" 2>/dev/null && fix "batch-embedded $NULL_EMBEDS memories"
       else
-        warn "$NULL_EMBEDS extracted memories missing embeddings — run: agentbridge-embed"
+        warn "$NULL_EMBEDS extracted memories missing embeddings — run: abmind embed"
       fi
     fi
   fi

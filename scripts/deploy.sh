@@ -277,7 +277,7 @@ else
   echo "   ⚠️  mcporter not built — skipping (run: cd ~/workspace/mcporter && npm run build)"
 fi
 
-# Deploy agentbridge-embed CLI + check ollama (only if EMBEDDING_ENABLED=true in .env)
+# Deploy abmind embed CLI + check ollama (only if EMBEDDING_ENABLED=true in .env)
 if grep -q "^EMBEDDING_ENABLED=true" "$AB_HOME/.env" 2>/dev/null; then
   EMBED_SCRIPT="$AB_HOME/abmind-embed"
   echo '#!/usr/bin/env bash' > "$EMBED_SCRIPT"

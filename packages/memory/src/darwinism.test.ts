@@ -285,7 +285,7 @@ describe("Memory Darwinism", () => {
     });
   });
 
-  describe("agentbridge-store parseArgs", () => {
+  describe("abmind-store parseArgs", () => {
     it("parses --confidence flag", () => {
       const args = parseArgs(["node", "store", "--content-en", "test", "--confidence", "4"]);
       expect(args.confidence).toBe("4");
