@@ -1,7 +1,7 @@
 # ABM Simplification — Master Plan
 
 **Date:** 2026-04-08
-**Status:** 6 of 7 items done. #4 partial (orchestrator rewrite pending). #3 and #5 parked.
+**Status:** 7 of 7 items done. #3 and #5 parked.
 
 ---
 
@@ -130,7 +130,7 @@ Moved to main backlog (`docs/TODO/BACKLOG.md`):
 | 2 | #6 Dead schema | ✅ Done | ~1hr | Free cleanup |
 | 3 | #4 bug fixes (0b, 0c, 0d) | 🔜 Ship now | ~1hr | Retro watermark, garbage filter, telemetry |
 | 4 | #7 Emotion | 🔜 Next | ~2.5hr | Wire existing infrastructure, human-like quality |
-| 5 | #4 Sleep phases | ⏳ Planned | ~14hr | High impact, incremental rollout |
+| 5 | #4 Sleep phases | ✅ Done | ~8hr | Code pre-pass, 14 conditional prompts, candidate-driven skip, SLEEP_QUALITY tiering, dream report |
 | — | #2 ABM-L render + timelines | ⏳ Planned | ~7hr | Render on read, narrative compression, timeline dedup. After #7. |
 | — | #3 CIA-AAA | 🅿️ Parked | — | Not broken, not blocking |
 | — | #5 IPC layer | 🅿️ Parked | — | Solves real problem, not broken |
@@ -196,7 +196,7 @@ Moved to main backlog (`docs/TODO/BACKLOG.md`):
 | 1 | Recall pipeline | ✅ Implemented — 4 stages (Sf+Ss+Se+S6), porter kept, trigrams added | 2026-04-09 | `1-abm-simplification-plan.md` |
 | 2 | ABM-L render layer + timelines | ✅ Implemented — column dropped, render on read, timelines, dedup | 2026-04-10 | `2-abm-simplification-render-layer.md` |
 | 3 | CIA-AAA | 🅿️ Parked — not broken, not blocking | 2026-04-09 | |
-| 4 | Sleep refactor | ⏳ Ready to implement — code pre-pass + 14 conditional prompts, single session. Bug fixes shipped. | 2026-04-10 | `4-abm-simplification-sleep.md` |
+| 4 | Sleep refactor | ✅ Implemented — code pre-pass, 14 conditional prompts, candidate-driven skip, SLEEP_QUALITY tiering, dream report. 9 LLM calls, 5 skipped, 40s total. | 2026-04-10 | `4-abm-simplification-sleep.md` |
 | 5 | IPC layer | 🅿️ Parked — solves real problem | 2026-04-09 | |
 | 6 | Speculative schema | ✅ Implemented — drop 2 columns, wire effectiveConfidence, keep 2 functions | 2026-04-09 | `6-abm-simplification-dead-code.md` |
 | 7 | Emotion model | ✅ Implemented — unified tags, derived score, emotional wake-up, arcs, mirroring, SOUL updated | 2026-04-09 | `7-abm-simplification-emotion.md` |

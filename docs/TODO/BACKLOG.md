@@ -269,14 +269,14 @@ Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") b
 ## 95. ABM Simplification
 
 **Priority:** HIGH
-**Status:** 6/7 done
+**Status:** 7/7 done
 **Spec:** [abm-simplification.md](../specs/abm-simplification.md)
 
 Full-system review and simplification of the memory system. 7 items:
 - ✅ #1 Recall pipeline: 10→4 stages, trigram FTS5, MMR reranking
 - ✅ #2 ABM-L render layer + timelines: column dropped, render on read, 4 compression levels
 - 🅿️ #3 CIA-AAA: parked
-- ⏳ #4 Sleep refactor: bug fixes + prompts + skip logic shipped, orchestrator rewrite pending (~3hr)
+- ✅ #4 Sleep refactor: code pre-pass, 14 conditional prompts, candidate-driven skip, SLEEP_QUALITY tiering, dream report. All 9 tasks done.
 - 🅿️ #5 IPC: parked
 - ✅ #6 Dead schema: 2 columns dropped, effectiveConfidence wired
 - ✅ #7 Emotion: tags as source of truth, arcs, mirroring, emotional wake-up
