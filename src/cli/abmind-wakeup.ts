@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /** abmind wake-up — Print current wake-up context. */
 
-import { loadMemoryConfig } from "@agentbridge/memory/memory-config.js";
-import { MemoryManager } from "@agentbridge/memory/memory-manager.js";
+import { loadMemoryConfig } from "abmind/memory-config.js";
+import { MemoryManager } from "abmind/memory-manager.js";
 
 const ctxWindow = parseInt(process.argv.find((_, i, a) => a[i - 1] === "--ctx-window") ?? "128000", 10);
 

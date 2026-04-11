@@ -225,7 +225,7 @@ User asks "what's the best free model right now?" → agent runs the skill, retu
 ## 91. ABM — AgentBridge Memory System
 
 **Priority:** HIGH
-**Status:** Phase 0-1 ✅, Phase 2 ~95%, Phase 3 partial
+**Status:** Phase 0-2 ✅, Phase 3 partial (#124 ✅, #125/#126 remaining)
 **Roadmap:** [abm-roadmap.md](../specs/abm-roadmap.md)
 **Specs:** [memory-v2-tiered.plan.md](../specs/memory-v2-tiered.plan.md), [memory-decoupling.plan.md](../specs/memory-decoupling.plan.md), [mempalace-study.md](../specs/mempalace-study.md)
 
@@ -238,7 +238,7 @@ All implemented: topic column + index, tier (core/general) with auto-promote on 
 - ✅ Emotion tagger (2.1), importance flags (2.2), emotional arcs (2.3), compressor (2.4), dynamic wake-up (2.6), cross-topic timelines (2.7)
 - ✅ Brain patterns: effectiveConfidence, isFlashbulb, detectInterference — all wired
 - ✅ D5 Embedding tiering — separate table + int8 quantize
-- ⏳ 2.5 Contradiction checker — code exists, wire into sleep core promotion (5 min)
+- ✅ 2.5 Contradiction checker — wired into sleep core promotion (2026-04-11)
 - 🗑️ D3 ABM-L aware merge — **obsolete**, signature-based merge candidates already solve this
 - 🅿️ ABM-L Compression Level 2 (entity header + topic grouping) — parked, 2% context usage on 1M models
 - 🅿️ #96 ABM-L Rules v2 (entity whitelist, negation) — parked, filler bug fixed, rest is nice-to-have

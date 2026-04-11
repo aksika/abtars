@@ -23,7 +23,7 @@
  *   { "stored": false, "error": "content-en is required" }
  */
 
-import { loadMemoryConfig } from "@agentbridge/memory/memory-config.js";
+import { loadMemoryConfig } from "abmind/memory-config.js";
 import type { InstantStoreParams } from "../types/index.js";
 import { appendFileSync } from "node:fs";
 import { agentBridgeHome } from "../paths.js";
@@ -165,7 +165,7 @@ async function main() {
   const raw = parseArgs(process.argv);
 
   const config = loadMemoryConfig();
-  const { createMemoryBackend } = await import("@agentbridge/memory/backend-factory.js");
+  const { createMemoryBackend } = await import("abmind/backend-factory.js");
   const backend = await createMemoryBackend(config);
 
   try {

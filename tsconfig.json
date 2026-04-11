@@ -21,8 +21,8 @@
         "noUnusedLocals": true,
         "noUnusedParameters": true,
         "paths": {
-            "@agentbridge/memory": ["./packages/memory/src/index.ts"],
-            "@agentbridge/memory/*": ["./packages/memory/src/*"]
+            "abmind": ["./packages/memory/src/index.ts"],
+            "abmind/*": ["./packages/memory/src/*"]
         }
     },
     "include": [

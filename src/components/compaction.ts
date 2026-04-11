@@ -3,9 +3,9 @@
  */
 
 import { logInfo } from "./logger.js";
-import { buildMemoryContext } from "@agentbridge/memory/session-memory.js";
+import { buildMemoryContext } from "abmind/session-memory.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
-import type { MemoryManager } from "@agentbridge/memory/memory-manager.js";
+import type { MemoryManager } from "abmind/memory-manager.js";
 
 const TAG = "compaction";
 

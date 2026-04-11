@@ -139,9 +139,9 @@ cp "$PROJECT_DIR/package.json" "$AB_HOME/package.json"
 rsync -a --delete "$PROJECT_DIR/dist/" "$AB_HOME/dist/"
 rsync -a --delete "$PROJECT_DIR/node_modules/" "$AB_HOME/node_modules/"
 
-# Wire @agentbridge/memory in deployed node_modules (workspace symlink doesn't survive deploy)
-rm -rf "$AB_HOME/node_modules/@agentbridge/memory"
-ln -s "$AB_HOME/dist/packages/memory" "$AB_HOME/node_modules/@agentbridge/memory"
+# Wire abmind in deployed node_modules (workspace symlink doesn't survive deploy)
+rm -rf "$AB_HOME/node_modules/abmind"
+ln -s "$AB_HOME/dist/packages/memory" "$AB_HOME/node_modules/abmind"
 
 # 2c. Copy asbuilts to knowledgebase (agent-readable, no source code paths)
 echo "📚 Copying knowledgebase..."

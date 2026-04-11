@@ -8,7 +8,7 @@ import { logInfo, logWarn, logError } from "./logger.js";
 import { runCompaction } from "./compaction.js";
 import { compactingSessions, setIdleCompactReset } from "./message-pipeline.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
-import type { MemoryManager } from "@agentbridge/memory/memory-manager.js";
+import type { MemoryManager } from "abmind/memory-manager.js";
 import type { HeartbeatTask } from "../types/memory.js";
 import { isDailyCycleDue, getQuietTickCount, type DailyCycleDeps } from "./daily-cycle.js";
 export interface IdleCompactDeps {

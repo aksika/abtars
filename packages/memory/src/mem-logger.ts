@@ -1,5 +1,5 @@
 /**
- * Standalone logger for @agentbridge/memory.
+ * Standalone logger for abmind.
  * Re-exports bridge logger when running inside the bridge,
  * falls back to minimal console logger when standalone.
  */

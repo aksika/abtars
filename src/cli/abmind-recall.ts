@@ -82,8 +82,8 @@ Options:
 
 const params = parseArgs();
 
-const config = (await import("@agentbridge/memory/memory-config.js")).loadMemoryConfig();
-const { createMemoryBackend } = await import("@agentbridge/memory/backend-factory.js");
+const config = (await import("abmind/memory-config.js")).loadMemoryConfig();
+const { createMemoryBackend } = await import("abmind/backend-factory.js");
 const backend = await createMemoryBackend(config);
 
 try {

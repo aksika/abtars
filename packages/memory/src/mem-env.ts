@@ -1,4 +1,4 @@
-/** Standalone env/date utils for @agentbridge/memory. */
+/** Standalone env/date utils for abmind. */
 
 export function parseBoolEnv(key: string, fallback: boolean): boolean {
   const raw = process.env[key];

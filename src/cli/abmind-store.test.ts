@@ -5,9 +5,9 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateArgs, parseArgs, type RawArgs } from "./abmind-store.js";
-import { MemoryManager } from "@agentbridge/memory/memory-manager.js";
+import { MemoryManager } from "abmind/memory-manager.js";
 import { makeMemoryTestConfig } from "../tests/helpers.js";
-import { initializeDatabase } from "@agentbridge/memory/memory-db.js";
+import { initializeDatabase } from "abmind/memory-db.js";
 
 /** A complete set of valid raw CLI args. */
 const validRawArgs: fc.Arbitrary<RawArgs> = fc.record({

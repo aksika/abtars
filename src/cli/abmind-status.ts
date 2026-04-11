@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /** abmind status — Show memory system stats. */
 
-import { loadMemoryConfig } from "@agentbridge/memory/memory-config.js";
-import { MemoryManager } from "@agentbridge/memory/memory-manager.js";
+import { loadMemoryConfig } from "abmind/memory-config.js";
+import { MemoryManager } from "abmind/memory-manager.js";
 
 const config = loadMemoryConfig();
 const memory = new MemoryManager(config);

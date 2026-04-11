@@ -1,5 +1,5 @@
 /**
- * @agentbridge/memory — standalone memory system.
+ * abmind — standalone memory system.
  *
  * Public API: IMemorySystem interface + MemoryManager implementation.
  * All consumers should import from this index.

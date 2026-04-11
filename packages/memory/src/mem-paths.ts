@@ -1,4 +1,4 @@
-/** Standalone paths for @agentbridge/memory. */
+/** Standalone paths for abmind. */
 
 import { resolve } from "node:path";
 import { homedir } from "node:os";

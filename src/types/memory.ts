@@ -1,5 +1,5 @@
 /**
- * Memory types — re-exported from @agentbridge/memory.
+ * Memory types — re-exported from abmind.
  * Bridge code imports from here for backward compatibility.
  */
 export type {
@@ -25,4 +25,4 @@ export type {
   RecallAnalysis,
   PipelineResult,
   MemorySearchParams,
-} from "@agentbridge/memory/mem-types.js";
+} from "abmind/mem-types.js";

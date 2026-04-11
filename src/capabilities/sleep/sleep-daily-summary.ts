@@ -5,7 +5,7 @@
 
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeForSummary } from "@agentbridge/memory/media-sanitizer.js";
+import { sanitizeForSummary } from "abmind/media-sanitizer.js";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import type Database from "better-sqlite3";
 

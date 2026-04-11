@@ -11,23 +11,26 @@
 
 ## Overview
 
-Standalone memory package (`@agentbridge/memory`, ABM v2). 38 source + 29 test files in `src/memory/`, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation.
+Standalone memory package (`@agentbridge/memory`, workspace at `packages/memory/`). 38 source + 29 test files, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation. Unified CLI: `abmind` with subcommands (recall, store, edit, expand, embed, retro-extract, backfill, status, wake-up). npm package registered as `abmind`.
 
 SQLite-backed persistence with FTS5 (porter on content_en) + trigram FTS5 (content_en + content_original, diacritics-stripped), ollama vector embeddings with int8 quantization (1536→384 bytes after 14d) in separate `memory_embeddings` table, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L rendered on the fly from content_en (no stored content_compressed), emotion tagging (25 types, source of truth — score derived from tags), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security. Memory timelines group related memories into narrative arcs. Cross-topic timelines follow entities across topic boundaries.
 
 Two-tier aging: Original NULLed after 90d (source of truth kept longer), content_en preserved forever (trigram search depends on it). Int8 embeddings + signatures persist forever. Pressure-based acceleration as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (|emotion| ≥ 4 + pivot/correction) never aged.
 
-Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods. Triggered by `BED_TIME` + quiet ticks (between BED_TIME and WAKE_TIME only). 14 sleep prompts with code pre-pass. Candidate-driven skip logic — prompts only fire when pre-pass finds work. SLEEP_QUALITY tiering: budget (3-5 calls), normal (6-11), ultimate (8-15).
+Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods + `SleepDataAccess` (DB queries for candidates, watermarks, emotion arcs, message cleanup). Triggered by `BED_TIME` + quiet ticks (between BED_TIME and WAKE_TIME only, BED_QUIET_TICKS default 2 = 10 min). No catch-up on bridge start — tick system is the only trigger. 14 sleep prompts with code pre-pass. Candidate-driven skip logic — prompts only fire when pre-pass finds work. Contradiction checker runs on promotion candidates vs existing core. SLEEP_QUALITY tiering: budget (3-5 calls), normal (6-11), ultimate (8-15). After Dreamy finishes, Professor announces hw sleep timing; same quiet ticks for hardware sleep.
 
 ### Package boundary
 
 | Aspect | Detail |
 |---|---|
-| Files | 38 source + 29 test files in `src/memory/` |
+| Files | 38 source + 29 test files in `packages/memory/src/` |
 | External imports | Zero — fully self-contained |
-| Entry point | `src/memory/index.ts` |
-| Interface | `IMemorySystem` (lifecycle, messages, search, emotion, stats, maintenance) |
+| Entry point | `packages/memory/src/index.ts` |
+| Interface | `IMemorySystem` (lifecycle, messages, search, emotion, stats, dashboard/recall, sleep data, maintenance) |
+| Sleep data | `SleepDataAccess` — DB queries for candidates, watermarks, arcs, messages |
 | Heartbeat | `IHeartbeat` interface — bridge injects its implementation |
+| CLI | `abmind` — unified CLI with subcommands (src/cli/abmind.ts) |
+| npm | `abmind` (registered), `@agentbridge/memory` (workspace) |
 | Logger | `setLogger()` injection — bridge injects its logger at startup |
 | Types | `mem-types.ts` — all memory types owned by the package |
 | Tests | 90 test files, ~900 tests |

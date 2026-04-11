@@ -14,7 +14,7 @@
  * Output: { "ok": true, "memoriesUpdated": 1, "ids": [42], "fieldsUpdated": ["content_en"] }
  */
 
-import { loadMemoryConfig } from "@agentbridge/memory/memory-config.js";
+import { loadMemoryConfig } from "abmind/memory-config.js";
 import type { EditMemoryParams } from "../types/index.js";
 import { appendFileSync } from "node:fs";
 import { agentBridgeHome } from "../paths.js";
@@ -179,7 +179,7 @@ async function main() {
   }
 
   const config = loadMemoryConfig();
-  const { createMemoryBackend } = await import("@agentbridge/memory/backend-factory.js");
+  const { createMemoryBackend } = await import("abmind/backend-factory.js");
   const backend = await createMemoryBackend(config);
   try {
     const result = await backend.editMemory(params);

@@ -11,8 +11,8 @@
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { createMemoryBackend } from "@agentbridge/memory/backend-factory.js";
-import { loadMemoryConfig } from "@agentbridge/memory/memory-config.js";
+import { createMemoryBackend } from "abmind/backend-factory.js";
+import { loadMemoryConfig } from "abmind/memory-config.js";
 import { agentBridgeHome } from "../paths.js";
 import type { InstantStoreParams } from "../types/index.js";
 

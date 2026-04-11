@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 export default defineConfig({
   resolve: {
     alias: {
-      "@agentbridge/memory": resolve(__dirname, "packages/memory/src"),
+      "abmind": resolve(__dirname, "packages/memory/src"),
     },
   },
 });
