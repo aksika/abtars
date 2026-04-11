@@ -242,6 +242,14 @@ export class MemoryManager {
     }
   }
 
+  // ── Sleep data access ───────────────────────────────────────────────────
+
+  getSleepData(): import("./sleep-data-access.js").SleepDataAccess {
+    if (!this.db) throw new Error("Database not initialized");
+    const { SleepDataAccess } = require("./sleep-data-access.js") as typeof import("./sleep-data-access.js");
+    return new SleepDataAccess(this.db);
+  }
+
   // ── Dashboard / recall ──────────────────────────────────────────────────
 
   getDistinctChatIds(): number[] {

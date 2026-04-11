@@ -41,6 +41,8 @@ export { agentBridgeHome } from "./mem-paths.js";
 // Sleep state (for sleep CLI)
 export { SleepStateGatherer } from "./sleep-state-gatherer.js";
 export type { StateSnapshot } from "./sleep-state-gatherer.js";
+export { SleepDataAccess } from "./sleep-data-access.js";
+export type { SleepCandidateLists, EmotionalProfileEntry } from "./sleep-data-access.js";
 
 // Recall engine (for search controller)
 export { recallSearch } from "./recall-engine.js";

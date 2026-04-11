@@ -105,17 +105,7 @@ type SleepState = { status: SleepStatus; pid: number; startedAt: number; llmCall
 const SLEEP_TIMEOUT_MS = (parseInt(process.env["SLEEP_TIMEOUT_MIN"] ?? "", 10) || 55) * 60 * 1000; // default 55 minutes
 const SLEEP_MAX_LLM_CALLS = parseInt(process.env["SLEEP_MAX_LLM_CALLS"] ?? "", 10) || 15;
 
-/** Get the primary chat ID from DB, falling back to ALLOWED_USER_IDS env var. */
-function getPrimaryChatId(db: import("better-sqlite3").Database): number {
-  try {
-    const row = db.prepare("SELECT DISTINCT chat_id FROM messages LIMIT 1").get() as { chat_id: number } | undefined;
-    if (row?.chat_id) return row.chat_id;
-  } catch { /* */ }
-  const envIds = process.env["ALLOWED_USER_IDS"] ?? "";
-  const first = parseInt(envIds.split(",")[0]?.trim() ?? "", 10);
-  if (Number.isFinite(first) && first > 0) return first;
-  throw new Error("No chat_id found in DB and ALLOWED_USER_IDS not set");
-}
+// getPrimaryChatId moved to SleepDataAccess in memory package
 
 function readStateFile(path: string): SleepState | null {
   try {
@@ -135,7 +125,7 @@ function writeStateFile(path: string, state: SleepState): void {
 
 // ── Wired pre-tasks ─────────────────────────────────────────────────────────
 
-async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir: string, memory: MemoryManager): Promise<WiredResults> {
+async function runWiredPreTasks(sleepData: import("../../memory/sleep-data-access.js").SleepDataAccess, memoryDir: string, memory: MemoryManager): Promise<WiredResults> {
   const results: WiredResults = { purged: 0, deduped: 0, embedded: 0, anomaliesFixed: 0, walOk: false, ftsOk: false, logsDeleted: 0 };
 
   // 1. Purge expired garbage
@@ -147,8 +137,8 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
       const expired = Object.entries(garbage).filter(([, ts]) => new Date(ts).getTime() < cutoff);
       if (expired.length > 0) {
         const ids = expired.map(([id]) => parseInt(id, 10)).filter(n => Number.isFinite(n));
-        if (ids.length > 0 && db) {
-          db.prepare(`DELETE FROM messages WHERE id IN (${ids.join(",")})`).run();
+        if (ids.length > 0) {
+          sleepData.deleteMessagesByIds(ids);
         }
         for (const [id] of expired) delete garbage[id];
         writeFileSync(garbagePath, JSON.stringify(garbage));
@@ -241,60 +231,20 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
 
   // 10. Build emotion arcs per topic
   try {
-    const { buildArc } = await import("../../memory/emotion-arc.js");
-    const topics = db.prepare(
-      `SELECT DISTINCT topic FROM extracted_memories WHERE topic IS NOT NULL AND emotion_tags IS NOT NULL AND emotion_tags != ''`,
-    ).all() as Array<{ topic: string }>;
-    let arcsWritten = 0;
-    for (const { topic } of topics) {
-      const memories = db.prepare(
-        `SELECT emotion_tags, created_at FROM extracted_memories WHERE topic = ? AND emotion_tags IS NOT NULL AND emotion_tags != '' ORDER BY created_at ASC`,
-      ).all(topic) as Array<{ emotion_tags: string; created_at: number }>;
-      if (memories.length < 2) continue;
-      const arc = buildArc(memories);
-      // Write arc symbol to the most recent core memory for this topic
-      const target = db.prepare(
-        `SELECT id FROM extracted_memories WHERE topic = ? AND tier = 'core' AND valid_to IS NULL ORDER BY created_at DESC LIMIT 1`,
-      ).get(topic) as { id: number } | undefined;
-      if (target) {
-        db.prepare("UPDATE extracted_memories SET emotion_arc = ? WHERE id = ?").run(arc.symbol, target.id);
-        arcsWritten++;
-      }
-    }
+    const arcsWritten = sleepData.buildEmotionArcs();
     if (arcsWritten > 0) logInfo(TAG, `[WIRED] ${arcsWritten} emotion arcs updated`);
   } catch (err) { logWarn(TAG, `[WIRED] emotion arcs failed: ${err instanceof Error ? err.message : String(err)}`); }
 
   // 11. Emotional profile — analyze patterns, write to user_profile.md
   try {
-    const rows = db.prepare(
-      `SELECT topic, emotion_tags, emotion_context, created_at FROM extracted_memories
-       WHERE emotion_tags IS NOT NULL AND emotion_tags != '' ORDER BY created_at DESC LIMIT 200`,
-    ).all() as Array<{ topic: string; emotion_tags: string; emotion_context: string | null; created_at: number }>;
-
-    if (rows.length >= 10) {
-      const topicEmotions = new Map<string, { positive: number; negative: number; tags: Map<string, number>; contexts: string[] }>();
-      const positiveTags = new Set(["joy", "pride", "excitement", "relief", "gratitude", "love", "hope", "humor"]);
-
-      for (const r of rows) {
-        let entry = topicEmotions.get(r.topic);
-        if (!entry) { entry = { positive: 0, negative: 0, tags: new Map<string, number>(), contexts: [] as string[] }; topicEmotions.set(r.topic, entry); }
-        for (const tag of r.emotion_tags.split(",").map(t => t.trim()).filter(Boolean)) {
-          entry.tags.set(tag, (entry.tags.get(tag) ?? 0) + 1);
-          if (positiveTags.has(tag)) entry.positive++; else entry.negative++;
-        }
-        if (r.emotion_context) entry.contexts.push(r.emotion_context);
-        topicEmotions.set(r.topic, entry);
-      }
-
+    const profileEntries = sleepData.getEmotionalProfileData();
+    if (profileEntries.length > 0) {
       const lines: string[] = ["## Emotional Patterns (auto-generated)", ""];
-      for (const [topic, data] of [...topicEmotions.entries()].sort((a, b) => (b[1].positive + b[1].negative) - (a[1].positive + a[1].negative)).slice(0, 5)) {
-        const topTags = [...data.tags.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([t, c]) => `${t}(${c})`);
-        const ratio = data.positive + data.negative > 0 ? Math.round(data.positive / (data.positive + data.negative) * 100) : 50;
-        const topContexts = [...new Set(data.contexts)].slice(0, 3);
-        lines.push(`- **${topic}**: ${ratio}% positive. Top: ${topTags.join(", ")}${topContexts.length > 0 ? `. Triggers: ${topContexts.join(", ")}` : ""}`);
+      for (const entry of profileEntries) {
+        const topTags = entry.topTags.map(t => `${t.tag}(${t.count})`);
+        const ratio = entry.positive + entry.negative > 0 ? Math.round(entry.positive / (entry.positive + entry.negative) * 100) : 50;
+        lines.push(`- **${entry.topic}**: ${ratio}% positive. Top: ${topTags.join(", ")}${entry.topContexts.length > 0 ? `. Triggers: ${entry.topContexts.join(", ")}` : ""}`);
       }
-
-      // Append/replace in user_profile.md
       const profilePath = join(memoryDir, "core", "user_profile.md");
       if (existsSync(profilePath)) {
         let content = readFileSync(profilePath, "utf-8");
@@ -303,80 +253,16 @@ async function runWiredPreTasks(db: import("better-sqlite3").Database, memoryDir
         if (idx >= 0) content = content.slice(0, idx).trimEnd();
         writeFileSync(profilePath, content + "\n\n" + lines.join("\n") + "\n", "utf-8");
       }
-      logInfo(TAG, `[WIRED] Emotional profile updated (${topicEmotions.size} topics analyzed)`);
+      logInfo(TAG, `[WIRED] Emotional profile updated (${profileEntries.length} topics analyzed)`);
     }
   } catch (err) { logWarn(TAG, `[WIRED] emotional profile failed: ${err instanceof Error ? err.message : String(err)}`); }
 
   return results;
 }
 
+// ── Candidate lists (moved to SleepDataAccess in memory package) ────────────
 
-// ── Candidate list builder (for conditional prompts) ────────────────────────
-
-type CandidateLists = {
-  untaggedMemories: string;
-  promotionCandidates: string;
-  mergeCandidates: string;
-  translationIssues: string;
-  emotionContextGaps: string;
-  recallFeedback: string;
-};
-
-function buildCandidateLists(db: import("better-sqlite3").Database, _memoryDir: string): CandidateLists {
-  const lists: CandidateLists = { untaggedMemories: "", promotionCandidates: "", mergeCandidates: "", translationIssues: "", emotionContextGaps: "", recallFeedback: "" };
-
-  try {
-    // Untagged memories (for 07-topic-assignment)
-    const untagged = db.prepare(
-      "SELECT id, substr(content_en,1,100) as preview FROM extracted_memories WHERE (topic IS NULL OR topic = 'general') AND content_en IS NOT NULL LIMIT 20",
-    ).all() as Array<{ id: number; preview: string }>;
-    if (untagged.length > 0) lists.untaggedMemories = untagged.map(r => `#${r.id}: ${r.preview}`).join("\n");
-
-    // Promotion candidates (for 08-core-promotion)
-    const promote = db.prepare(
-      "SELECT id, substr(content_en,1,100) as preview, recall_count, confidence FROM extracted_memories WHERE tier = 'general' AND recall_count >= 2 AND confidence >= 3 AND valid_to IS NULL ORDER BY recall_count DESC LIMIT 15",
-    ).all() as Array<{ id: number; preview: string; recall_count: number; confidence: number }>;
-    if (promote.length > 0) lists.promotionCandidates = promote.map(r => `#${r.id} (recall:${r.recall_count}, conf:${r.confidence}): ${r.preview}`).join("\n");
-
-    // Merge candidates (for 09-merge) — same topic, high signature similarity
-    try {
-      const { hammingSimilarity } = require("../../memory/signature-generator.js") as typeof import("../../memory/signature-generator.js");
-      const sigs = db.prepare(
-        "SELECT id, topic, signature, substr(content_en,1,80) as preview FROM extracted_memories WHERE signature IS NOT NULL AND valid_to IS NULL ORDER BY topic",
-      ).all() as Array<{ id: number; topic: string; signature: Buffer; preview: string }>;
-      const pairs: string[] = [];
-      for (let i = 0; i < sigs.length && pairs.length < 10; i++) {
-        for (let j = i + 1; j < sigs.length && pairs.length < 10; j++) {
-          if (sigs[i]!.topic !== sigs[j]!.topic) continue;
-          const sim = hammingSimilarity(new Uint8Array(sigs[i]!.signature), new Uint8Array(sigs[j]!.signature));
-          if (sim > 0.8) pairs.push(`#${sigs[i]!.id} ↔ #${sigs[j]!.id} (${(sim * 100).toFixed(0)}%): "${sigs[i]!.preview}" vs "${sigs[j]!.preview}"`);
-        }
-      }
-      if (pairs.length > 0) lists.mergeCandidates = pairs.join("\n");
-    } catch { /* signature module not available */ }
-
-    // Translation issues (for 10-translation)
-    const translation = db.prepare(
-      "SELECT id, substr(content_en,1,80) as en, substr(content_original,1,80) as orig FROM extracted_memories WHERE content_original IS NOT NULL AND content_en IS NOT NULL AND length(content_en) > 0 AND (length(content_en) < length(content_original) * 0.3 OR length(content_en) > length(content_original) * 3) LIMIT 10",
-    ).all() as Array<{ id: number; en: string; orig: string }>;
-    if (translation.length > 0) lists.translationIssues = translation.map(r => `#${r.id}: EN="${r.en}" ORIG="${r.orig}"`).join("\n");
-
-    // Emotion context gaps (for 14-emotion-context)
-    const gaps = db.prepare(
-      "SELECT id, substr(content_en,1,100) as preview, emotion_tags FROM extracted_memories WHERE emotion_tags IS NOT NULL AND emotion_tags != '' AND emotion_context IS NULL LIMIT 15",
-    ).all() as Array<{ id: number; preview: string; emotion_tags: string }>;
-    if (gaps.length > 0) lists.emotionContextGaps = gaps.map(r => `#${r.id} [${r.emotion_tags}]: ${r.preview}`).join("\n");
-
-    // Recall feedback (for 06-feedback)
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const recalls = db.prepare(
-      "SELECT id, substr(content_en,1,80) as preview, recall_count, last_recalled_at FROM extracted_memories WHERE last_recalled_at > ? ORDER BY last_recalled_at DESC LIMIT 15",
-    ).all(today.getTime()) as Array<{ id: number; preview: string; recall_count: number; last_recalled_at: number }>;
-    if (recalls.length > 0) lists.recallFeedback = recalls.map(r => `#${r.id} (recalled ${r.recall_count}x): ${r.preview}`).join("\n");
-  } catch (err) { logWarn(TAG, `[CANDIDATES] Failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  return lists;
-}
+// Candidate lists moved to SleepDataAccess in memory package
 
 function formatWiredResults(r: WiredResults): string {
   const parts: string[] = [];
@@ -664,7 +550,7 @@ function failedEssentials(state: SleepState): string[] {
 async function runCatchUp(
   locks: PreviousLock[],
   transport: import("../../components/transport/kiro-transport.js").IKiroTransport,
-  db: import("better-sqlite3").Database,
+  sleepData: import("../../memory/sleep-data-access.js").SleepDataAccess,
   memoryConfig: { memoryDir: string },
   steps: SleepStep[],
   flags: RawArgs,
@@ -691,10 +577,10 @@ async function runCatchUp(
       const start = Date.now();
       try {
         const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
-        const chatId = getPrimaryChatId(db);
+        const chatId = sleepData.getPrimaryChatId();
         const dayStart = dateStrToMs(lock.dateStr);
         const dayEnd = dayStart + 86400000;
-        const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "catch-up-04a", flags.verbose, budget).then(r => r ?? ""), {
+        const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(transport, p, "catch-up-04a", flags.verbose, budget).then(r => r ?? ""), {
           ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs: 0,
           dateRange: { startTs: dayStart, endTs: dayEnd },
         });
@@ -721,7 +607,7 @@ async function runCatchUp(
       } else {
         const start = Date.now();
         try {
-          const chatId = getPrimaryChatId(db);
+          const chatId = sleepData.getPrimaryChatId();
           const result = await extractFromDaily(dailyPath, chatId, (p) => sendWithRetry(transport, p, "catch-up-04b", flags.verbose, budget).then(r => r ?? ""));
           lock.state.steps["04b-extract-from-daily"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
           logInfo(TAG, `[CATCH-UP] ✓ 04b-extract-from-daily for ${lock.dateStr} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
@@ -782,8 +668,7 @@ async function main(): Promise<number> {
   }
 
   try {
-    const db = memory.getDatabase();
-    if (!db) { process.stderr.write("Fatal: Database not available\n"); process.exit(1); }
+    const sleepData = memory.getSleepData();
 
     // State file path
     const dateStr = localDate().replace(/-/g, "");
@@ -807,11 +692,11 @@ async function main(): Promise<number> {
 
     // Wired pre-tasks (always run — fast, idempotent)
     logInfo(TAG, `[SLEEP] Running wired pre-tasks${isResume ? " (resume)" : ""}...`);
-    const wiredResults = await runWiredPreTasks(db, memoryConfig.memoryDir, memory);
+    const wiredResults = await runWiredPreTasks(sleepData, memoryConfig.memoryDir, memory);
     logInfo(TAG, `[SLEEP] Wired: ${formatWiredResults(wiredResults)}`);
 
     // Build candidate lists for conditional prompts
-    const candidates = buildCandidateLists(db, memoryConfig.memoryDir);
+    const candidates = sleepData.buildSleepCandidates();
     logInfo(TAG, `[SLEEP] Candidates: topics=${candidates.untaggedMemories ? "yes" : "none"}, promote=${candidates.promotionCandidates ? "yes" : "none"}, merge=${candidates.mergeCandidates ? "yes" : "none"}, translate=${candidates.translationIssues ? "yes" : "none"}, emotion-ctx=${candidates.emotionContextGaps ? "yes" : "none"}, feedback=${candidates.recallFeedback ? "yes" : "none"}`);
 
     // Load step files + build vars
@@ -841,9 +726,7 @@ async function main(): Promise<number> {
         for (const e of entries) { if (e?.messageId) garbageIds.add(e.messageId); }
       } catch { /* no garbage file */ }
 
-      const msgs = db.prepare(
-        `SELECT id, role, content, emotion_score FROM messages WHERE timestamp > ? ORDER BY timestamp`,
-      ).all(lastSleepTs) as Array<{ id: number; role: string; content: string; emotion_score: number | null }>;
+      const msgs = sleepData.getMessagesAfter(lastSleepTs);
 
       const lines = msgs
         .filter(m => !garbageIds.has(m.id) && !m.content.startsWith("[SYSTEM"))
@@ -911,7 +794,7 @@ async function main(): Promise<number> {
     if (snapshot.dbStats.extractedMemoryCount < 10) { skipSet.add("merge"); skipSet.add("darwinism"); }
     try { if (!existsSync(join(memoryConfig.memoryDir, "..", "received"))) skipSet.add("media-cleanup"); } catch { /* */ }
     try {
-      const shortCount = (db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE role='user' AND length(content) < 20").get() as { cnt: number }).cnt;
+      const shortCount = sleepData.getShortMessageCount();
       if (shortCount === 0) skipSet.add("gc-noise");
     } catch { /* */ }
 
@@ -947,7 +830,7 @@ async function main(): Promise<number> {
       const previousLocks = scanPreviousLocks(sleepDir, dateStr);
       if (previousLocks.length > 0) {
         logInfo(TAG, `[CATCH-UP] Found ${previousLocks.length} previous lock(s)`);
-        await runCatchUp(previousLocks, transport, db, memoryConfig, steps, flags, budget);
+        await runCatchUp(previousLocks, transport, sleepData, memoryConfig, steps, flags, budget);
       }
 
       emitProgress("starting");
@@ -996,16 +879,15 @@ async function main(): Promise<number> {
         if (step.name === "04a-daily-summary") {
           try {
             const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
-            const chatId = getPrimaryChatId(db);
-            const watermarkRow = db.prepare("SELECT last_processed_timestamp FROM extraction_watermarks WHERE chat_id = ?").get(chatId) as { last_processed_timestamp: number } | undefined;
+            const chatId = sleepData.getPrimaryChatId();
+            const watermarkTs = sleepData.getExtractionWatermark(chatId);
 
             // Determine target date from first unprocessed message
-            const watermarkTs = watermarkRow?.last_processed_timestamp ?? 0;
-            const firstMsgRow = db.prepare("SELECT MIN(timestamp) as ts FROM messages WHERE chat_id = ? AND timestamp > ?").get(chatId, watermarkTs) as { ts: number | null } | undefined;
-            const firstMsgDate = firstMsgRow?.ts ? new Date(firstMsgRow.ts) : new Date();
+            const firstMsgTs = sleepData.getFirstMessageAfter(chatId, watermarkTs);
+            const firstMsgDate = firstMsgTs ? new Date(firstMsgTs) : new Date();
             const targetDate = `${firstMsgDate.getFullYear()}-${String(firstMsgDate.getMonth() + 1).padStart(2, "0")}-${String(firstMsgDate.getDate()).padStart(2, "0")}`;
 
-            const summary = await buildDailySummary(db, (p) => sendWithRetry(transport, p, "04a-daily-summary", flags.verbose, budget).then(r => r ?? ""), {
+            const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(transport, p, "04a-daily-summary", flags.verbose, budget).then(r => r ?? ""), {
               ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs,
             });
             if (summary) {
@@ -1033,7 +915,7 @@ async function main(): Promise<number> {
             continue;
           }
           try {
-            const chatId = getPrimaryChatId(db);
+            const chatId = sleepData.getPrimaryChatId();
             const result = await extractFromDaily(dailySummaryPath, chatId, (p) => sendWithRetry(transport, p, "04b-extract", flags.verbose, budget).then(r => r ?? ""));
             state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
             writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), result, "utf-8");
@@ -1088,16 +970,8 @@ async function main(): Promise<number> {
     // Advance extraction watermark — only when all steps succeeded
     if (dreamySucceeded) {
       try {
-        const chatIds = db.prepare("SELECT DISTINCT chat_id FROM messages").all() as { chat_id: number }[];
-        const now = Date.now();
-        for (const { chat_id } of chatIds) {
-          db.prepare(
-            `INSERT INTO extraction_watermarks (chat_id, last_processed_timestamp)
-             VALUES (?, ?)
-             ON CONFLICT(chat_id) DO UPDATE SET last_processed_timestamp = excluded.last_processed_timestamp`,
-          ).run(chat_id, now);
-        }
-        logInfo(TAG, `[SLEEP] Extraction watermark advanced for ${chatIds.length} chat(s)`);
+        const count = sleepData.advanceExtractionWatermarks();
+        logInfo(TAG, `[SLEEP] Extraction watermark advanced for ${count} chat(s)`);
       } catch { /* non-fatal */ }
     } else {
       logWarn(TAG, "[SLEEP] Watermark NOT advanced — essential steps failed, messages preserved for catch-up");
@@ -1126,7 +1000,7 @@ async function main(): Promise<number> {
     // Wired post-task: flush old messages (keep max 500, age out >7 days, garbage 12h)
     if (dreamySucceeded) {
       try {
-        // Flush garbage-marked messages >12h
+        // Flush garbage-marked messages
         const garbagePath = join(memoryConfig.memoryDir, "garbage.json");
         if (existsSync(garbagePath)) {
           const raw = JSON.parse(readFileSync(garbagePath, "utf-8"));
@@ -1134,23 +1008,16 @@ async function main(): Promise<number> {
           if (garbage.length > 0) {
             const ids = garbage.map(g => g.msg_id).filter((id): id is number => typeof id === "number");
             if (ids.length > 0) {
-              db.prepare(`DELETE FROM messages WHERE id IN (${ids.join(",")})`).run();
+              sleepData.deleteMessagesByIds(ids);
               logInfo(TAG, `[SLEEP] Flushed ${ids.length} garbage messages`);
             }
             writeFileSync(garbagePath, "[]");
           }
         }
-        // Age out >7 days
-        const ageCutoff = Date.now() - 7 * 24 * 3600000;
-        const flushedAge = db.prepare("DELETE FROM messages WHERE timestamp < ?").run(ageCutoff);
-        if (flushedAge.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushedAge.changes} messages >7d`);
-        // Cap at 500
-        const total = (db.prepare("SELECT COUNT(*) as c FROM messages").get() as { c: number }).c;
-        if (total > 500) {
-          const excess = total - 500;
-          const flushedCount = db.prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY timestamp ASC LIMIT ?)").run(excess);
-          if (flushedCount.changes > 0) logInfo(TAG, `[SLEEP] Flushed ${flushedCount.changes} messages (cap 500)`);
-        }
+        // Age out + cap
+        const { agedOut, capped } = sleepData.flushOldMessages({ maxAgeDays: 7, maxCount: 500 });
+        if (agedOut > 0) logInfo(TAG, `[SLEEP] Flushed ${agedOut} messages >7d`);
+        if (capped > 0) logInfo(TAG, `[SLEEP] Flushed ${capped} messages (cap 500)`);
       } catch (err) { logWarn(TAG, `[WIRED] flush failed: ${err instanceof Error ? err.message : String(err)}`); }
     }
 

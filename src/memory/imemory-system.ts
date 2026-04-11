@@ -43,6 +43,9 @@ export interface IMemorySystem {
   setHeartbeat(hb: IHeartbeat): void;
   stopHeartbeat(): void;
 
+  // Sleep data access (for sleep addon)
+  getSleepData(): import("./sleep-data-access.js").SleepDataAccess;
+
   // Dashboard / recall
   getDistinctChatIds(): number[];
   getAllExtractedMemories(): unknown[];
