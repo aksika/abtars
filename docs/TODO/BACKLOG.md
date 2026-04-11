@@ -374,3 +374,33 @@ This means external tools (Claude Code, Cursor) get memory access without the br
 **Depends on:** #123, #125
 
 Implement `@openclaw/memory-host-sdk` contract. Any OpenClaw agent gets persistent memory by adding the plugin. Bridge not required.
+
+## 127. Prompt Injection Scanner
+
+**Priority:** MEDIUM
+**Status:** Not started
+
+Scan incoming content (skills, user messages, tool outputs) for prompt injection attempts before they reach the agent's context window.
+
+**Surfaces to scan:**
+- ClawHub community skills on install/update (#79)
+- User messages (defense-in-depth — agent already has SOUL.md rules)
+- Tool outputs (browse results, file content)
+- Memory store content (#9 covers this specifically)
+
+**Tools to evaluate:**
+
+| Tool | Language | Approach | Notes |
+|---|---|---|---|
+| [Prompt-Shield](https://github.com/prompt-shield) | Python | 22 concurrent detectors, DeBERTa ML classifier, self-learning vector vault, ensemble scoring | Local-only, no cloud API. Catches paraphrased attacks + obfuscated jailbreaks |
+| [Vigil (vigil-llm)](https://github.com/deadbits/vigil-llm) | Python | Pre-LLM prompt evaluation, monitors for injections + jailbreaks | Open source, lightweight |
+| [LLM Guard](https://github.com/protectai/llm-guard) | Python | Full firewall — PromptInjection scanner, risk scores, sanitization | By Protect AI, comprehensive but heavier |
+
+**Integration options:**
+1. **Python sidecar** — spawn scanner as subprocess, pipe content, get risk score. Similar to ollama embed pattern.
+2. **Node.js port** — port detection patterns to TypeScript. More work but no Python dependency.
+3. **MCP tool** — scanner as MCP server, agent can self-check. Requires MCP infra.
+
+**Decision needed:** Which tool, which integration pattern. Evaluate on: accuracy, speed, resource usage, Python dependency acceptable?
+
+**Effort:** ~4-8hr depending on approach
