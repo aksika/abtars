@@ -624,7 +624,7 @@ Extract the memory system into a standalone `@agentbridge/memory` package. The b
 ## 124. Universal Memory CLI — `abmind`
 
 **Priority:** MEDIUM
-**Status:** Not started
+**Status:** ✅ Done (2026-04-11)
 **Depends on:** #123
 **npm:** `abmind` registered (0.0.1 placeholder)
 
