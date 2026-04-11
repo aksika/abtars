@@ -272,3 +272,90 @@ Extract the memory system into a standalone `@agentbridge/memory` package. The b
 
 Unified `abmind` CLI with subcommands: `store`, `recall`, `edit`, `search`, `status`, `embed`, `wake-up`. Works standalone without the bridge running. Replaces individual CLIs (`agentbridge-recall`, `agentbridge-store`, `agentbridge-edit`, `agentbridge-expand`, `agentbridge-embed`). Old CLIs deleted, all callers updated (sleep prompts, TOOLS.md, SOUL.md, deploy).
 
+
+## 79. ClawHub Skill Sync
+
+**Priority:** HIGH
+**Status:** ✅ Done (2026-04-12)
+
+Download community skills from ClawHub (clawhub.ai) into `~/.agentbridge/skills/clawhub/`. SkillWatcher already hot-reloads — just need a download CLI.
+
+**Action items:**
+- [ ] Research ClawHub API (endpoints, auth, skill format)
+- [ ] Create `src/cli/agentbridge-clawhub.ts` with install/list/update/remove
+- [ ] Add `/clawhub` command handler for agent-initiated installs
+- [ ] Optional: heartbeat task for daily auto-update
+
+**Effort:** Low-medium. **Risk:** Low.
+
+## 81. Dual Browser Engine — Lightpanda + Patchright
+
+**Priority:** HIGH
+**Status:** ✅ Done (2026-04-11)
+
+`BrowserManager` supports `patchright` and `lightpanda` engines. `BROWSER_ENGINE` env var + `--engine` CLI flag on both `agentbridge-browse` and `agentbridge-browser`. Lazy container management via `scripts/browser-lightpanda.sh`. `agentbridge-browser` defaults to lightpanda (fast scraping), `agentbridge-browse` defaults to patchright (stealth). `deploy.sh --full` pulls Lightpanda nightly.
+
+### Remaining
+- Container auto-stop: detect when no browse tasks have run for N minutes, stop idle containers. Both engines independently.
+
+### Problem
+Current browser uses Patchright (stealth Chromium) in Docker for all tasks. Heavy resource usage (~500MB RAM) for simple scraping that doesn't need stealth.
+
+### Design
+Two browser engines behind the same `agentbridge-browse` CLI:
+
+| Engine | Use case | Technology | Container |
+|--------|----------|------------|-----------|
+| Lightpanda (default) | News, research, scraping, simple sites | Zig-based headless, CDP | `lightpanda/browser:nightly` |
+| Patchright (fallback) | X.com, authenticated sites, bot-protected | Stealth Chromium fork | Existing Docker setup |
+
+**Fallback strategy:** Agent tries Lightpanda first. If site breaks or bot detection triggered (empty content, "verify you're human" page), retry with `--engine patchright`.
+
+**CLI:** `agentbridge-browse --task "..." --chat-id 123 [--engine lightpanda|patchright]`
+Default engine: lightpanda. Skill instructs fallback pattern.
+
+**Architecture:**
+- Both engines expose CDP WebSocket endpoints
+- `browser-manager.ts` connects to the selected engine's CDP endpoint
+- `pending_browse.json` format unchanged — engine is transparent to browse-checker
+- SSRF guard applies to both engines
+
+**Action items:**
+- [ ] Add Lightpanda Docker container management (start/stop alongside Patchright)
+- [ ] Add `--engine` flag to `agentbridge-browse` CLI
+- [ ] Update `browser-manager.ts` to connect via CDP endpoint (not launch Chromium directly)
+- [ ] Update browse skill to instruct fallback pattern
+- [ ] Test with common browse tasks (news sites, X.com)
+
+**Effort:** Medium. **Risk:** Low (additive — Patchright stays as-is, Lightpanda is new option).
+
+## 127. Prompt Injection Scanner
+
+**Priority:** MEDIUM
+**Status:** ✅ Done (2026-04-12)
+**Status:** Not started
+
+Scan incoming content (skills, user messages, tool outputs) for prompt injection attempts before they reach the agent's context window.
+
+**Surfaces to scan:**
+- ClawHub community skills on install/update (#79)
+- User messages (defense-in-depth — agent already has SOUL.md rules)
+- Tool outputs (browse results, file content)
+- Memory store content (#9 covers this specifically)
+
+**Tools to evaluate:**
+
+| Tool | Language | Approach | Notes |
+|---|---|---|---|
+| [Prompt-Shield](https://github.com/prompt-shield) | Python | 22 concurrent detectors, DeBERTa ML classifier, self-learning vector vault, ensemble scoring | Local-only, no cloud API. Catches paraphrased attacks + obfuscated jailbreaks |
+| [Vigil (vigil-llm)](https://github.com/deadbits/vigil-llm) | Python | Pre-LLM prompt evaluation, monitors for injections + jailbreaks | Open source, lightweight |
+| [LLM Guard](https://github.com/protectai/llm-guard) | Python | Full firewall — PromptInjection scanner, risk scores, sanitization | By Protect AI, comprehensive but heavier |
+
+**Integration options:**
+1. **Python sidecar** — spawn scanner as subprocess, pipe content, get risk score. Similar to ollama embed pattern.
+2. **Node.js port** — port detection patterns to TypeScript. More work but no Python dependency.
+3. **MCP tool** — scanner as MCP server, agent can self-check. Requires MCP infra.
+
+**Decision needed:** Which tool, which integration pattern. Evaluate on: accuracy, speed, resource usage, Python dependency acceptable?
+
+**Effort:** ~4-8hr depending on approach
