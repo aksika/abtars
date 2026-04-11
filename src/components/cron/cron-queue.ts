@@ -13,9 +13,7 @@ import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import { agentBridgeHome } from "../../paths.js";
 import { logInfo, logWarn, logDebug } from "../logger.js";
-import { createAgentTransport } from "../agent-registry.js";
-import { readBridgeLockTransport, readLastPromptAt } from "../transport/bridge-lock-transport.js";
-import { DirectApiTransport } from "../transport/direct-api-transport.js";
+import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
 import type { CronEntry } from "../../cli/agentbridge-task.js";
 import { localDate } from "../env-utils.js";
@@ -125,14 +123,10 @@ export class CronQueue {
   private queue: QueuedJob[] = [];
   private _current: RunningJob | null = null;
   private timeout: ReturnType<typeof setTimeout> | null = null;
-  private readonly cliPath: string;
-  private readonly workingDir: string;
   private readonly onFailInject?: FailInjectCallback;
   private readonly failCounts = new Map<string, { date: string; count: number }>();
 
-  constructor(cliPath: string, workingDir: string, onFailInject?: FailInjectCallback) {
-    this.cliPath = cliPath;
-    this.workingDir = workingDir;
+  constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback) {
     this.onFailInject = onFailInject;
   }
 
@@ -247,7 +241,7 @@ export class CronQueue {
     }
   }
 
-  private runAgent(entry: CronEntry, onComplete?: TaskCompleteCallback): void {
+  private async runAgent(entry: CronEntry, onComplete?: TaskCompleteCallback): Promise<void> {
     // Idle gate: defer agent tasks if user was active in last 90s
     const idleMs = Date.now() - readLastPromptAt();
     if (idleMs < 90_000) {
@@ -270,19 +264,8 @@ export class CronQueue {
 
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
 
-    let transport: import("../transport/kiro-transport.js").IKiroTransport;
-    const mainTransport = readBridgeLockTransport();
-    if (mainTransport?.type === "api") {
-      transport = new DirectApiTransport({
-        endpoint: mainTransport.endpoint!, apiKey: process.env["API_KEY"],
-        model: mainTransport.model,
-        maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
-        maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
-        maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
-      });
-    } else {
-      transport = createAgentTransport("cron", { cliPath: this.cliPath, workingDir: this.workingDir });
-    }
+    const { createSubagentTransport } = await import("../agent-registry.js");
+    const { transport } = await createSubagentTransport("cron");
     const sessionKey = `cron:${entry.id}`;
 
     // 30-min hard timeout

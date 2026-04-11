@@ -418,7 +418,7 @@ export async function startBridge(): Promise<void> {
   const pendingSessionStart = new Set<string>();
   const seenSessions = new Set<string>();
   const fullModeChats = new Set<string>();
-  const codingModeManager = new CodingMode(config.transport.agentCliPath, config.transport.workingDir, config.models.codingModel);
+  const codingModeManager = new CodingMode();
   const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
   const registry = bridge.registry;
 

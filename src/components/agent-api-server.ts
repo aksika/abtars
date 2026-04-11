@@ -6,8 +6,6 @@ import { createHmac, randomBytes } from "crypto";
 import { agentBridgeHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./transport/kiro-transport.js";
-import { createAgentTransport } from "./agent-registry.js";
-import { readBridgeLockTransport } from "./transport/bridge-lock-transport.js";
 import { MemoryManager } from "../memory/memory-manager.js";
 import { scanPrompt } from "./prompt-scanner.js";
 import { logInfo, logWarn } from "./logger.js";
@@ -58,7 +56,6 @@ function readBody(req: IncomingMessage): Promise<string> {
 export class AgentApiServer {
   private server;
   private config: AgentApiConfig;
-  private cliPath: string;
   private workingDir: string;
   private memory: MemoryManager | null;
   private trafficLog: TrafficEntry[] = [];
@@ -74,7 +71,6 @@ export class AgentApiServer {
 
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
-    this.cliPath = deps.cliPath;
     this.workingDir = deps.workingDir;
     this.memory = deps.memory;
     this.server = createServer((req, res) => this.handle(req, res));
@@ -114,26 +110,9 @@ export class AgentApiServer {
       this.resetIdleTimer();
       return this.agentTransport;
     }
-    const mainTransport = readBridgeLockTransport();
-    if (mainTransport?.type === "api") {
-      logInfo(TAG, "Spawning Direct API transport for A2A (browse)");
-      const { DirectApiTransport } = await import("./transport/direct-api-transport.js");
-      const browseModel = process.env["AGENT_BROWSE_MODEL"] || mainTransport.model;
-      this.agentTransport = new DirectApiTransport({
-        endpoint: mainTransport.endpoint!, apiKey: process.env["API_KEY"],
-        model: browseModel,
-        maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
-        maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
-        maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
-        fallbacks: browseModel !== mainTransport.model
-          ? [{ endpoint: mainTransport.endpoint!, apiKey: process.env["API_KEY"], model: mainTransport.model }]
-          : undefined,
-      });
-    } else {
-      logInfo(TAG, "Spawning dedicated kiro-cli for A2A");
-      this.agentTransport = createAgentTransport("browsie", { cliPath: this.cliPath, workingDir: this.workingDir });
-    }
-    await this.agentTransport.initialize();
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    const { transport } = await createSubagentTransport("browse");
+    this.agentTransport = transport;
     this.resetIdleTimer();
     return this.agentTransport;
   }
