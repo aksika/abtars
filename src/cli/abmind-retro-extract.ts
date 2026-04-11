@@ -9,7 +9,7 @@
  *   abmind-retro-extract [--dry-run] [--verbose]
  */
 
-import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, renameSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createMemoryBackend } from "abmind/backend-factory.js";
 import { loadMemoryConfig } from "abmind/memory-config.js";
@@ -65,18 +65,6 @@ export function parseRetro(content: string): ExtractedItem[] {
   return items;
 }
 
-function loadProcessed(retroDir: string): Set<string> {
-  const p = join(retroDir, ".processed.json");
-  if (!existsSync(p)) return new Set();
-  try {
-    return new Set(JSON.parse(readFileSync(p, "utf-8")));
-  } catch { return new Set(); }
-}
-
-function saveProcessed(retroDir: string, processed: Set<string>): void {
-  writeFileSync(join(retroDir, ".processed.json"), JSON.stringify([...processed]), "utf-8");
-}
-
 async function main(): Promise<void> {
   const flags = parseArgs(process.argv);
   const retroDir = join(agentBridgeHome(), "memory", "retrospectives");
@@ -87,10 +75,8 @@ async function main(): Promise<void> {
   }
 
   const files = readdirSync(retroDir).filter(f => f.startsWith("retro_") && f.endsWith(".md")).sort();
-  const processed = loadProcessed(retroDir);
-  const unprocessed = files.filter(f => !processed.has(f));
 
-  if (unprocessed.length === 0) {
+  if (files.length === 0) {
     if (flags.verbose) console.log(`[${TAG}] No unprocessed retro files`);
     return;
   }
@@ -100,7 +86,7 @@ async function main(): Promise<void> {
 
     let totalStored = 0;
 
-    for (const file of unprocessed) {
+    for (const file of files) {
       const content = readFileSync(join(retroDir, file), "utf-8");
       const items = parseRetro(content);
 
@@ -127,12 +113,13 @@ async function main(): Promise<void> {
         if (flags.verbose) console.log(`[${TAG}]   ${result.stored ? "✓" : "✗"} ${item.memoryType}: ${item.content.slice(0, 80)}`);
       }
 
-      if (!flags.dryRun) processed.add(file);
+      if (!flags.dryRun) {
+        renameSync(join(retroDir, file), join(retroDir, file.replace(".md", ".done")));
+      }
     }
 
     if (!flags.dryRun) {
-      saveProcessed(retroDir, processed);
-      console.log(`[${TAG}] Stored ${totalStored} items from ${unprocessed.length} retro file(s)`);
+      console.log(`[${TAG}] Stored ${totalStored} items from ${files.length} retro file(s)`);
     }
   } finally {
     await backend.close();

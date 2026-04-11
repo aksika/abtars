@@ -535,7 +535,7 @@ Replace the 4 flat `.env` transport profiles with a single `transport.json` per 
 ## 120. Replace .processed.json with file rename in retro-extract
 
 **Priority:** MEDIUM
-**Status:** Not started
+**Status:** ✅ Done (2026-04-11)
 
 **Problem:** `retro-extract` tracks processed retrospective files via a separate `.processed.json` in the retro directory. This is an extra state file to manage.
 
