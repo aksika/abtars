@@ -304,11 +304,7 @@ export class Bridge {
 
     const authGate = new AuthGate(dashConfig.webAuthToken);
     const memorySearchController = this.memory
-      ? new MemorySearchController({
-          memory: this.memory,
-          memoryDir: this.memoryConfig.memoryDir,
-          ctxStartPath: join(this.memoryConfig.memoryDir, "context-window-start.json"),
-        })
+      ? new MemorySearchController({ memory: this.memory })
       : null;
 
     this.dashboardServer = new DashboardServer({

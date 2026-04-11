@@ -25,7 +25,11 @@ export interface IMemorySystem {
   updateEmotionByPlatformId(chatId: number | string, platformMessageId: number, score: number): boolean;
 
   // Read-only
-  getStats(chatId?: number): { totalMessages: number; totalMemories: number; embeddingCount: number; nullEmbeddingCount: number } | null;
+  getStats(chatId?: number): {
+    totalMessages: number; extractedMemories: number; extractedByType: Record<string, number>;
+    consolidationFiles: { daily: number; weekly: number; quarterly: number };
+    ingestedDocuments: number; preservedKeywords: number; heartbeatRunning: boolean; dbSizeBytes: number;
+  } | null;
   readCoreKnowledge(): string;
   getLatestCompaction(chatId: number): { timestamp: number; summary: string } | null;
   getCronInfo(): { heartbeatRunning: boolean; intervalMs: number; tasks: string[]; taskStatuses: ReadonlyMap<string, string>; lastSleepAudit: string | null };
@@ -38,6 +42,14 @@ export interface IMemorySystem {
   // Heartbeat
   setHeartbeat(hb: IHeartbeat): void;
   stopHeartbeat(): void;
+
+  // Dashboard / recall
+  getDistinctChatIds(): number[];
+  getAllExtractedMemories(): unknown[];
+  getAllEntities(): unknown[];
+  getAllEntityLinks(): unknown[];
+  recallSearch(params: import("./recall-engine.js").RecallParams): Promise<import("./recall-engine.js").RecallResult>;
+  bumpRecallCount(ids: number[]): void;
 
   // Maintenance (called by sleep addon or any maintenance tool)
   buildWakeUp(ctxWindowSize: number): string;

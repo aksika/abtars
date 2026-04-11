@@ -242,6 +242,34 @@ export class MemoryManager {
     }
   }
 
+  // ── Dashboard / recall ──────────────────────────────────────────────────
+
+  getDistinctChatIds(): number[] {
+    return this.store?.getDistinctChatIds() ?? [];
+  }
+
+  getAllExtractedMemories(): unknown[] {
+    return this.store?.getAllExtractedMemories() ?? [];
+  }
+
+  getAllEntities(): unknown[] {
+    return this.store?.getAllEntities() ?? [];
+  }
+
+  getAllEntityLinks(): unknown[] {
+    return this.store?.getAllEntityLinks() ?? [];
+  }
+
+  async recallSearch(params: import("./recall-engine.js").RecallParams): Promise<import("./recall-engine.js").RecallResult> {
+    if (!this.db || !this.memoryIndex) throw new Error("Memory not initialized");
+    const { recallSearch } = await import("./recall-engine.js");
+    return recallSearch({ db: this.db, index: this.memoryIndex, memoryDir: this.config.memoryDir }, params);
+  }
+
+  bumpRecallCount(ids: number[]): void {
+    this.memoryIndex?.bumpRecallCount(ids);
+  }
+
   // ── Maintenance methods (for sleep addon / external tools) ──────────────
 
   buildWakeUp(ctxWindowSize: number): string {

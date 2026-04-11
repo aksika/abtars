@@ -74,7 +74,6 @@ export type RecallDeps = {
   db: Database.Database;
   index: MemoryIndex;
   memoryDir: string;
-  ctxStartPath: string;
 };
 
 // ── Constants ───────────────────────────────────────────────────────────────

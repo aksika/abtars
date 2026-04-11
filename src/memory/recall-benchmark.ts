@@ -138,7 +138,6 @@ function buildDeps(dbPath: string): RecallDeps {
     db,
     index,
     memoryDir: join(home, "memory"),
-    ctxStartPath: join(home, "memory", "context-window-start.json"),
   };
 }
 

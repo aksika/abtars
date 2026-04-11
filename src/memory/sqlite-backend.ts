@@ -3,7 +3,6 @@
  * Wraps MemoryManager and its sub-services.
  */
 
-import { join } from "node:path";
 import type { InstantStoreParams, InstantStoreResult, EditMemoryParams, EditMemoryResult, ForgetResult } from "./mem-types.js";
 import type { RecallParams, RecallResult } from "./recall-engine.js";
 import type { MergeResult, MemoryBackend } from "./memory-backend.js";
@@ -58,7 +57,7 @@ export class SqliteBackend implements MemoryBackend {
     const index = this.memory.getMemoryIndex();
     if (!index) throw new Error("Memory index not initialized");
     return recallSearch(
-      { db, index, memoryDir: this.config.memoryDir, ctxStartPath: join(this.config.memoryDir, "context-window-start.json") },
+      { db, index, memoryDir: this.config.memoryDir },
       params,
     );
   }
