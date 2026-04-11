@@ -49,4 +49,19 @@ echo "  Current: $kiro_version"
 echo "  (update via: kiro-cli update, or download from kiro.dev)"
 echo ""
 
+# --- ollama ---
+echo "🦙 ollama..."
+if command -v ollama &>/dev/null; then
+  ollama_version=$(ollama --version 2>/dev/null || echo "?")
+  echo "  Current: $ollama_version"
+  if command -v brew &>/dev/null; then
+    brew upgrade ollama 2>&1 | tail -2
+  else
+    echo "  (update via: curl -fsSL https://ollama.com/install.sh | sh)"
+  fi
+else
+  echo "  not installed"
+fi
+echo ""
+
 echo "✅ Done"
