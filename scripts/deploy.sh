@@ -213,7 +213,9 @@ for f in "$PROJECT_DIR/persona/prompts/sleep/"*.md; do
 done
 
 # Skills: always from repo → core subdir
-mkdir -p "$AB_HOME/skills/core" "$AB_HOME/skills/auto" "$AB_HOME/agents"
+mkdir -p "$AB_HOME/skills/core" "$AB_HOME/skills/auto" "$AB_HOME/skills/clawhub" "$AB_HOME/agents"
+# Clean stale loose .md files from skills/ root (old deploy artifacts)
+find "$AB_HOME/skills" -maxdepth 1 -name "*.md" -delete 2>/dev/null
 for f in "$PROJECT_DIR/persona/skills/"*.md; do
   [ -f "$f" ] && safe_cp "$f" "$AB_HOME/skills/core/$(basename "$f")"
 done

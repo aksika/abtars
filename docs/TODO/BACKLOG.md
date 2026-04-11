@@ -149,7 +149,7 @@ Sandbox (Docker): kiro-cli, agent tools, browser
 ## 79. ClawHub Skill Sync
 
 **Priority:** HIGH
-**Status:** Not started
+**Status:** ✅ Done (2026-04-12)
 
 Download community skills from ClawHub (clawhub.ai) into `~/.agentbridge/skills/clawhub/`. SkillWatcher already hot-reloads — just need a download CLI.
 
