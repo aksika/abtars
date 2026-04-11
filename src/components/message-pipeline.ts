@@ -468,9 +468,8 @@ function buildSessionStartPrompt(
   }
 
   try {
-    const { buildWakeUp } = require("../memory/wake-up-builder.js") as typeof import("../memory/wake-up-builder.js");
     const ctxWindow = parseInt(process.env["CONTEXT_WINDOW_SIZE"] ?? "", 10) || 128000;
-    const wakeUp = buildWakeUp(memory.getDatabase(), ctxWindow);
+    const wakeUp = memory.buildWakeUp(ctxWindow);
     if (wakeUp) {
       contextParts.push(wakeUp);
       logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars, budget=${Math.floor(ctxWindow * 0.01)} tokens)`);

@@ -40,6 +40,7 @@ export interface IMemorySystem {
   stopHeartbeat(): void;
 
   // Maintenance (called by sleep addon or any maintenance tool)
+  buildWakeUp(ctxWindowSize: number): string;
   runWalCheckpoint(): boolean;
   rebuildFtsIndexes(): { rebuilt: string[] };
   cleanupOldMessages(opts: { maxCount: number; maxAgeDays: number; garbageHours: number }): { deleted: number };

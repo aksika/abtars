@@ -244,6 +244,11 @@ export class MemoryManager {
 
   // ── Maintenance methods (for sleep addon / external tools) ──────────────
 
+  buildWakeUp(ctxWindowSize: number): string {
+    const { buildWakeUp } = require("./wake-up-builder.js") as typeof import("./wake-up-builder.js");
+    return buildWakeUp(this.db, ctxWindowSize);
+  }
+
   runWalCheckpoint(): boolean {
     if (!this.db) return false;
     try { this.db.pragma("wal_checkpoint(TRUNCATE)"); return true; } catch { return false; }
