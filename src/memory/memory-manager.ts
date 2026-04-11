@@ -51,10 +51,11 @@ export class MemoryManager {
     return this.llmCall;
   }
 
+  /** @internal Package-internal only. External consumers use IMemorySystem methods. */
   getMemoryIndex(): MemoryIndex | null { return this.memoryIndex; }
-  /** @deprecated Use sub-service methods (store, editor, maintenance) instead of raw DB access. */
+  /** @internal Package-internal only. External consumers use IMemorySystem/SleepDataAccess. */
   getDatabase(): Database.Database | null { return this.db; }
-  /** @deprecated Use sub-service methods (store, editor, maintenance) instead of raw DB access. */
+  /** @internal Package-internal only. External consumers use IMemorySystem/SleepDataAccess. */
   getDb(): Database.Database | null { return this.db; }
   getConfig(): MemoryConfig { return this.config; }
 
