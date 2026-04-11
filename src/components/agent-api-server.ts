@@ -7,7 +7,7 @@ import { agentBridgeHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./transport/kiro-transport.js";
 import type { IMemorySystem } from "abmind/imemory-system.js";
-import { scanPrompt } from "./prompt-scanner.js";
+import { scanForInjection } from "abmind/injection-scanner.js";
 import { logInfo, logWarn } from "./logger.js";
 import { localDate } from "./env-utils.js";
 import { localIso } from "./logger.js";
@@ -280,12 +280,13 @@ export class AgentApiServer {
     }
 
     // Scan for prompt injection before touching kiro-cli
-    const hit = scanPrompt(prompt);
-    if (hit) {
-      const refusal = `I can't process this request as phrased — it triggered a security filter (${hit.patternId}). Please rephrase your request without instructions that could be interpreted as prompt injection or system access commands.`;
-      logWarn(TAG, `BLOCKED ${ip}: ${hit.patternId} — "${hit.matched}"`);
-      this.log("BLOCKED", `${hit.patternId}: ${hit.matched}`);
-      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt, response: `blocked: ${hit.patternId}`, durationMs: Date.now() - start, status: 200 });
+    const scan = scanForInjection(prompt);
+    if (!scan.safe) {
+      const top = scan.flags[0]!;
+      const refusal = `I can't process this request as phrased — it triggered a security filter (${top.category}). Please rephrase your request without instructions that could be interpreted as prompt injection or system access commands.`;
+      logWarn(TAG, `BLOCKED ${ip}: ${top.category} — "${top.pattern}"`);
+      this.log("BLOCKED", `${top.category}: ${top.pattern}`);
+      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt, response: `blocked: ${top.category}`, durationMs: Date.now() - start, status: 200 });
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ response: refusal, sessionKey: this.config.sessionKey }));
       return;
     }

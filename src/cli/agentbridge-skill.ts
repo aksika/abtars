@@ -75,10 +75,11 @@ async function main(): Promise<void> {
   if (!args.content) { out({ ok: false, error: "missing --content" }); process.exit(1); }
 
   // Security scan
-  const { scanPrompt } = await import("../components/prompt-scanner.js");
-  const hit = scanPrompt(args.content);
-  if (hit) {
-    out({ ok: false, error: `security scan blocked: ${hit.patternId}`, matched: hit.matched });
+  const { scanForInjection } = await import("abmind/injection-scanner.js");
+  const scan = scanForInjection(args.content);
+  if (!scan.safe) {
+    const top = scan.flags[0]!;
+    out({ ok: false, error: `security scan blocked: ${top.category}`, matched: top.pattern, score: scan.score });
     process.exit(1);
   }
 

@@ -166,14 +166,18 @@ async function main() {
 
   // Prompt injection scan on content edits
   if (params.contentEn || params.contentOriginal) {
-    const { scanPrompt } = await import("../components/prompt-scanner.js");
-    const hit = scanPrompt(params.contentEn ?? "")
-      ?? (params.contentOriginal ? scanPrompt(params.contentOriginal) : null);
-    if (hit) {
-      const logLine = `${new Date().toLocaleString("sv-SE")} EDIT-BLOCKED patternId=${hit.patternId} matched="${hit.matched}" caller=${params.caller ?? "unknown"}\n`;
+    const { scanForInjection } = await import("abmind/injection-scanner.js");
+    const scan = scanForInjection(params.contentEn ?? "");
+    if (scan.safe && params.contentOriginal) {
+      const scan2 = scanForInjection(params.contentOriginal);
+      if (!scan2.safe) Object.assign(scan, scan2);
+    }
+    if (!scan.safe) {
+      const top = scan.flags[0]!;
+      const logLine = `${new Date().toLocaleString("sv-SE")} EDIT-BLOCKED category=${top.category} matched="${top.pattern}" caller=${params.caller ?? "unknown"}\n`;
       const logPath = join(agentBridgeHome(), "logs", "prompt_injection.log");
       try { appendFileSync(logPath, logLine); } catch { /* best-effort */ }
-      console.log(JSON.stringify({ ok: false, error: `Prompt injection detected (${hit.patternId}): "${hit.matched}"`, blocked: true }));
+      console.log(JSON.stringify({ ok: false, error: `Prompt injection detected (${top.category}): "${top.pattern}"`, blocked: true }));
       process.exit(1);
     }
   }

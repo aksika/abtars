@@ -80,6 +80,10 @@ export { buildWakeUp } from "./wake-up-builder.js";
 // ABM v2 — brain patterns
 export { isFlashbulb, isAgingProtected, effectiveConfidence, detectInterference } from "./brain-patterns.js";
 
+// Security — prompt injection detection
+export { scanForInjection } from "./injection-scanner.js";
+export type { ScanResult, InjectionFlag } from "./injection-scanner.js";
+
 // ABM v2 — config
 export { loadMemoryEnv } from "./mem-config-env.js";
 export type { SearchMode, MemoryEnvConfig } from "./mem-config-env.js";
