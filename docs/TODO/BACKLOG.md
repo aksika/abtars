@@ -585,3 +585,46 @@ Set `OLLAMA_NUM_PARALLEL=2` on Ollama server. Allows 2 concurrent requests on sa
 | cron | main model directly | none |
 
 **Files:** `agent-registry.ts` (new function), `agentbridge-sleep.ts`, `cron-queue.ts`, `agent-api-server.ts`, `coding-mode.ts` (all simplified to one-liner)
+
+## 123. Memory Decoupling — Extract @agentbridge/memory
+
+**Priority:** HIGH
+**Status:** Not started
+**Spec:** [memory-decoupling.plan.md](../specs/memory-decoupling.plan.md)
+**Prerequisite for:** #124, #125, #126
+
+Extract the memory system into a standalone `@agentbridge/memory` package. The bridge imports it as a dependency. Zero bridge imports in memory code.
+
+**Sub-phases (from spec):**
+- 0.1: Internalize bridge utilities (logger, env-utils, paths) into memory package
+- 0.2: Eliminate DB leaks — replace `getDatabase()` with proper interface methods
+- 0.3: Define `IMemorySystem` interface
+- 0.4: Remove HeartbeatSystem coupling — `IHeartbeat` interface
+- 0.6: Decouple sleep from memory — maintenance methods on interface
+- Package extraction: monorepo workspace, `@agentbridge/memory` builds independently
+
+**Done already:** Phase 0.5 (types in `mem-types.ts`, `index.ts` entry point, 27 files in `src/memory/`)
+
+## 124. Universal Memory CLI
+
+**Priority:** MEDIUM
+**Status:** Not started
+**Depends on:** #123
+
+Unified `agentbridge-memory` CLI with subcommands: `store`, `recall`, `edit`, `search`, `status`, `embed`, `wake-up`. Works standalone without the bridge running. Replaces individual CLIs (`agentbridge-recall`, `agentbridge-store`, `agentbridge-edit`, `agentbridge-expand`, `agentbridge-embed`).
+
+## 125. Memory MCP Server
+
+**Priority:** MEDIUM
+**Status:** Not started
+**Depends on:** #123
+
+Expose memory operations as MCP tools for any MCP-compatible AI tool (Claude Code, Cursor, Kiro CLI, OpenClaw). Tools: `memory_recall`, `memory_store`, `memory_edit`, `memory_status`, `memory_wake_up`. Modeled on MemPalace's 19-tool MCP server, adapted to our architecture.
+
+## 126. OpenClaw Memory Plugin
+
+**Priority:** LOW
+**Status:** Not started
+**Depends on:** #123, #125
+
+Implement `@openclaw/memory-host-sdk` contract. Any OpenClaw agent gets persistent memory by adding the plugin. Bridge not required.
