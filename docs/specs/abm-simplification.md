@@ -1,7 +1,7 @@
 # ABM Simplification — Master Plan
 
 **Date:** 2026-04-08
-**Status:** 5 of 7 items done. #2 planned, #3 and #5 parked.
+**Status:** 6 of 7 items done. #4 partial (orchestrator rewrite pending). #3 and #5 parked.
 
 ---
 

@@ -240,10 +240,13 @@ Tracked separately. Extract `@agentbridge/memory` standalone package.
 - Lower storage threshold — store more aggressively, Dreamy curates later
 
 ### Phase 2: ABM v2 — MemPalace Enhancements
-- AAAK emotion scoring (40+ codes, keyword detection, arcs) + compression
-- Contradiction detection on core promotion
-- Dynamic wake-up from core tier (replaces static core-knowledge)
-- Cross-topic linking (tunnels)
+- ✅ Emotion tagger (2.1), importance flags (2.2), emotional arcs (2.3), compressor (2.4), dynamic wake-up (2.6), cross-topic timelines (2.7)
+- ✅ Brain patterns: effectiveConfidence, isFlashbulb, detectInterference — all wired
+- ✅ D5 Embedding tiering — separate table + int8 quantize
+- ⏳ 2.5 Contradiction checker — code exists, wire into sleep core promotion (5 min)
+- 🗑️ D3 ABM-L aware merge — **obsolete**, signature-based merge candidates already solve this
+- 🅿️ ABM-L Compression Level 2 (entity header + topic grouping) — parked, 2% context usage on 1M models
+- 🅿️ #96 ABM-L Rules v2 (entity whitelist, negation) — parked, filler bug fixed, rest is nice-to-have
 
 ### Phase 3: Universal Access → #124, #125, #126
 Tracked separately. Unified CLI (#124), MCP server (#125), OpenClaw plugin (#126).
@@ -265,46 +268,27 @@ Inspired by Redis LangCache concept (O'Reilly "Managing Memory for AI Agents") b
 
 ## 96. ABM-L compressor quality fixes
 
-**Status:** ✅ Done (2026-04-10)
-**Completed by:** ABM Simplification #2 — filler bug fixed (stopped stripping meaningful verbs)
-
-**Priority:** HIGH
-**Status:** Not started
-
-1. Primary flag from memory_type (D not F for decisions, L not CM for lessons)
-2. Entity whitelist only (no @daily, @telegram, @high)
-3. Preserve negations + pronouns in filler stripping
-4. Topic inference from content when topic=general
-5. No truncation limit — wake-up builder handles length
-6. Pipe-separate list items, arrow cause→effect, abbreviations
-7. Re-run backfill after fixes
+**Status:** 🅿️ Parked (2026-04-11)
+**Priority:** LOW
+**Done:** Filler bug fixed (ABM Simplification #2). Remaining items (entity whitelist, negation preservation, pipe-separate, abbreviations) are nice-to-have — not blocking.
 
 ## 103. ABM-L Compression Level 2 — wake-up rendering
 
-**Status:** ✅ Done (2026-04-10)
-**Completed by:** ABM Simplification #2 — ABM-L rendered on the fly, multi-resolution (signal/ultra/compact/full), timelines
-
-**Priority:** HIGH
-**Status:** Not started
-
-Entity header + topic grouping + elide defaults in wake-up rendering. Daily summary compression to ABM-L. Compressed SOUL for <32K models. Adaptive full/compact/ultra based on context budget.
+**Status:** 🅿️ Parked (2026-04-11)
+**Priority:** LOW
+**Done:** Multi-resolution rendering shipped (signal/ultra/compact/full). Remaining: entity header + topic grouping saves ~20% more tokens but we're at 2% context on 1M models. Only matters for tiny models.
 
 ## 104. ABM-L storage optimization
 
-**Status:** ✅ Done (2026-04-10)
-**Completed by:** ABM Simplification #2 — content_compressed column dropped, ABM-L rendered on read from content_en
-
-**Priority:** MEDIUM
-**Status:** Not started
-
-D2: Strip prefix from stored ABM-L, reconstruct from columns at render time. D3: ABM-L aware merge (duplicate detection on compressed content). FTS5 on content_compressed only (replace English FTS5).
+**Status:** Partially done / partially obsolete (2026-04-11)
+**Done:** content_compressed column dropped, ABM-L rendered on read.
+**Obsolete:** D3 ABM-L aware merge — signature-based merge candidates in `buildSleepCandidates()` already handle dedup detection.
+**Remaining:** FTS5 on ABM-L only (replace English FTS5) — parked, current hybrid works.
 
 ## 105. Embedding tiering — separate table + int8 quantization
 
-**Priority:** MEDIUM
-**Status:** Not started
-
-Move embeddings to memory_embeddings table. Quantize float32→int8 after 14 days (384 bytes vs 1536). int8 kept forever. Main table stays lean.
+**Status:** ✅ Done (2026-04-11)
+**Completed by:** memory_embeddings table created, int8 quantization wired in ageMemoryTiers()
 
 ## 106. ABM v2 wiring — connect planned features
 
