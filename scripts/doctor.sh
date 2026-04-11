@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# doctor.sh — health check and repair for ~/.agentbridge
+# doctor.sh -- health check and repair for ~/.agentbridge
 #
 # Usage:
-#   doctor.sh              # diagnose only — prints warnings, changes nothing
+#   doctor.sh              # diagnose only -- prints warnings, changes nothing
 #   doctor.sh --fix        # safe fixes (chmod, mkdir, stale locks, stale sleep locks)
 #   doctor.sh --fix-full   # all safe fixes + FTS rebuild, WAL checkpoint, git push check
 set -uo pipefail
@@ -22,7 +22,7 @@ esac
 warn() { echo "[doctor] WARN: $1"; WARNS=$((WARNS + 1)); }
 fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 
-# 1. Directory permissions (sensitive dirs should be 700) — fix-full only
+# 1. Directory permissions (sensitive dirs should be 700) -- fix-full only
 for d in "$AB/titok" "$AB/titok/cookies" "$AB/memory"; do
   if [ -d "$d" ] && [ "$(stat -c %a "$d" 2>/dev/null)" != "700" ]; then
     if $FIX_FULL; then
@@ -52,7 +52,7 @@ for lockfile in "$AB/memory/sleep"/sleep_*.lock; do
       if $FIX; then
         rm -f "$lockfile"; fix "removed stale sleep lock $lockfile (${lockage}min old, no audit)"
       else
-        warn "stale sleep lock: $lockfile (${lockage}min old, no audit) — sleep may have hung"
+        warn "stale sleep lock: $lockfile (${lockage}min old, no audit) -- sleep may have hung"
       fi
     fi
   fi
@@ -62,10 +62,10 @@ done
 COOKIE="$AB/titok/cookies/x-cookies.json"
 if [ -f "$COOKIE" ]; then
   if ! python3 -c "import json; json.load(open('$COOKIE'))" 2>/dev/null; then
-    warn "$COOKIE is not valid JSON — cookie auth will fail"
+    warn "$COOKIE is not valid JSON -- cookie auth will fail"
   fi
 else
-  warn "no X cookies found — tweet replies/discovery won't work"
+  warn "no X cookies found -- tweet replies/discovery won't work"
 fi
 
 # 5. Required dirs exist
@@ -81,7 +81,7 @@ done
 
 # 6. Follows file exists
 if [ ! -f "$AB/twitterX/base.follows.json" ]; then
-  warn "base.follows.json missing — tweet feed won't run"
+  warn "base.follows.json missing -- tweet feed won't run"
 fi
 
 # 7. Recent backup check
@@ -89,10 +89,10 @@ BACKUP_DIR="$HOME/.backup-agentbridge"
 if [ -d "$BACKUP_DIR" ]; then
   LATEST=$(find "$BACKUP_DIR" -name "agentbridge-*.zip" -mtime -2 2>/dev/null | head -1)
   if [ -z "$LATEST" ]; then
-    warn "no backup in last 2 days — check daily-backup.sh cron"
+    warn "no backup in last 2 days -- check daily-backup.sh cron"
   fi
 else
-  warn "backup dir $BACKUP_DIR missing — backups never ran"
+  warn "backup dir $BACKUP_DIR missing -- backups never ran"
 fi
 
 # 8. Memory DB health
@@ -105,12 +105,12 @@ if [ -f "$DB" ]; then
   DB_SIZE=$(stat -c %s "$DB" 2>/dev/null || echo 0)
   if [ "$DB_SIZE" -gt 419430400 ]; then
     DB_MB=$((DB_SIZE / 1048576))
-    warn "memory.db is ${DB_MB}MB — approaching 500MB disk budget"
+    warn "memory.db is ${DB_MB}MB -- approaching 500MB disk budget"
   fi
 
   LATEST_SLEEP=$(find "$AB/memory/sleep" -name "sleep_*.md" -mtime -3 2>/dev/null | head -1)
   if [ -z "$LATEST_SLEEP" ]; then
-    warn "no sleep audit in last 3 days — GC/consolidation not running"
+    warn "no sleep audit in last 3 days -- GC/consolidation not running"
   fi
 else
   warn "memory.db not found"
@@ -140,20 +140,20 @@ if grep -q "^EMBEDDING_ENABLED=true" "$AB/.env" 2>/dev/null; then
       if $FIX; then
         EMBEDDING_ENABLED=true node "$(dirname "$0")/../dist/src/cli/abmind.js" embed" 2>/dev/null && fix "batch-embedded $NULL_EMBEDS memories"
       else
-        warn "$NULL_EMBEDS extracted memories missing embeddings — run: abmind embed"
+        warn "$NULL_EMBEDS extracted memories missing embeddings -- run: abmind embed"
       fi
     fi
   fi
 fi
 
-# 10. Heartbeat liveness (startup check — was previous session's heartbeat healthy?)
+# 10. Heartbeat liveness (startup check -- was previous session's heartbeat healthy?)
 LOCK_FILE="$AB/bridge.lock"
 if [ -f "$LOCK_FILE" ]; then
   HB_TS=$(python3 -c "import json; print(json.load(open('$LOCK_FILE')).get('lastHeartbeat',0))" 2>/dev/null || echo 0)
   if [ "$HB_TS" -gt 0 ]; then
     HB_AGE=$(( ($(date +%s) - HB_TS / 1000) / 60 ))
     if [ "$HB_AGE" -gt 15 ]; then
-      warn "heartbeat was stale before restart (last tick ${HB_AGE}min ago) — heartbeat may have stopped"
+      warn "heartbeat was stale before restart (last tick ${HB_AGE}min ago) -- heartbeat may have stopped"
     fi
   fi
 fi
@@ -163,7 +163,7 @@ for f in "$AB/core/user_profile.md" "$AB/core/agent_notes.md" "$AB/core/core_fac
   if [ -f "$f" ]; then
     LINES=$(grep -c '[^[:space:]]' "$f")
     if [ "$LINES" -gt 15 ]; then
-      warn "$(basename "$f") has $LINES non-empty lines (limit: 10) — Dreamy may have overgrown it"
+      warn "$(basename "$f") has $LINES non-empty lines (limit: 10) -- Dreamy may have overgrown it"
     fi
   fi
 done
@@ -172,13 +172,13 @@ done
 if [ -f "$DB" ]; then
   SCHEMA_VER=$(sqlite3 "$DB" "SELECT version FROM schema_version LIMIT 1" 2>/dev/null || echo 0)
   if [ "$SCHEMA_VER" -lt 8 ]; then
-    warn "memory.db schema version is $SCHEMA_VER (expected ≥8) — ABM v2 migration pending"
+    warn "memory.db schema version is $SCHEMA_VER (expected ≥8) -- ABM v2 migration pending"
   fi
 fi
 
 # 13. .env.memory exists
 if [ ! -f "$AB/.env.memory" ]; then
-  warn ".env.memory missing — ABM config defaults will be used"
+  warn ".env.memory missing -- ABM config defaults will be used"
 fi
 
 # 14. Orphaned kiro-cli processes
@@ -194,7 +194,7 @@ if [ "$KIRO_PROCS" -gt 1 ]; then
       fi
     done
   else
-    warn "$KIRO_PROCS kiro-cli acp processes running — likely orphans from previous bridge"
+    warn "$KIRO_PROCS kiro-cli acp processes running -- likely orphans from previous bridge"
   fi
 fi
 
@@ -210,7 +210,7 @@ if [ "$SLEEP_PROCS" -gt 1 ]; then
       fi
     done
   else
-    warn "$SLEEP_PROCS agentbridge-sleep processes running — likely orphans"
+    warn "$SLEEP_PROCS agentbridge-sleep processes running -- likely orphans"
   fi
 fi
 
@@ -225,9 +225,9 @@ if $FIX_FULL; then
   cd "$AB"
   if [ -d .git ]; then
     if ! git remote get-url origin &>/dev/null; then
-      warn "git remote 'origin' missing — backup push will fail"
+      warn "git remote 'origin' missing -- backup push will fail"
     elif ! timeout 5 git push --dry-run &>/dev/null; then
-      warn "git push would fail — check upstream/auth"
+      warn "git push would fail -- check upstream/auth"
     fi
   fi
 fi
