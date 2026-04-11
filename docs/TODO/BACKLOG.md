@@ -361,11 +361,11 @@ Replace the 4 flat `.env` transport profiles with a single `transport.json` per 
 
 Expose memory operations as MCP tools for any MCP-compatible AI tool (Claude Code, Cursor, Kiro CLI, OpenClaw). Tools: `memory_recall`, `memory_store`, `memory_edit`, `memory_status`, `memory_wake_up`. Modeled on MemPalace's 19-tool MCP server, adapted to our architecture.
 
-**Architecture:** MCP server wraps `IMemorySystem` from `@agentbridge/memory`. Two modes:
-- **Standalone:** `npx @agentbridge/memory mcp` — spawns its own MemoryManager, opens SQLite directly
+**Architecture:** MCP server wraps `IMemorySystem` from `abmind`. Two modes:
+- **Standalone:** `npx abmind mcp` — spawns its own MemoryManager, opens SQLite directly
 - **Bridge-attached:** connects to running bridge via IPC (existing backend factory) — shares the live DB
 
-This means external tools (Claude Code, Cursor) get memory access without the bridge running, while the bridge's own agents can also use MCP if preferred over direct import.
+**Security:** All MCP tool handlers must call `scanForInjection()` before writing (store/edit). The CLI already does this — MCP must match. See #127.
 
 ## 126. OpenClaw Memory Plugin
 
