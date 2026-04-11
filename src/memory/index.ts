@@ -52,6 +52,13 @@ export { emojiToScore, emojiToTag, scoreFromTags, effectiveEmotion, tagFromScore
 
 // Session context
 export { buildSessionStartContext } from "./session-context.js";
+export { buildMemoryContext } from "./session-memory.js";
+
+// Media
+export { sanitizeForSummary } from "./media-sanitizer.js";
+
+// Embedding
+export { loadEmbedConfig, batchEmbed, embedText } from "./ollama-embed.js";
 
 // ABM v2 — store-time enrichment
 export { detectEmotions } from "./emotion-tagger.js";
