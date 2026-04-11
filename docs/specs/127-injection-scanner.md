@@ -212,6 +212,8 @@ reverse shell
 mkfifo /tmp
 curl -O http
 wget http.*backdoor
+python -c "import
+python3 -c "import
 ```
 
 ## Implementation
