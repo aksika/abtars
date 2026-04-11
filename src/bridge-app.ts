@@ -375,6 +375,8 @@ export async function startBridge(): Promise<void> {
   logInfo("main", "──────────── BRIDGE START ────────────");
   logInfo("main", `🚀 Bridge starting (platforms=${enabledList}, log=${config.logLevel})`);
 
+  // Truncate launchd.log on startup — bridge logger takes over, previous crash output already captured
+  try { writeFileSync(join(agentBridgeHome(), "logs", "launchd.log"), "", "utf-8"); } catch { /* */ }
   // === CRITICAL PATH: Memory → Transport → Telegram (fastest path to accepting messages) ===
 
   await bridge.initMemory();
