@@ -19,7 +19,7 @@ export interface DailyCycleDeps {
   isSleepActive: () => boolean;
 }
 
-const QUIET_TICKS_REQUIRED = parseInt(process.env["BED_QUIET_TICKS"] ?? "6", 10); // default 6 × 5min = 30min
+const QUIET_TICKS_REQUIRED = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10); // default 2 × 5min = 10min
 
 let quietTickCount = 0;
 let lastSeenMsgTs = 0;
@@ -27,6 +27,11 @@ let lastSeenMsgTs = 0;
 /** Reset the quiet tick counter (call when user sends a message). */
 export function resetBedtimeCounter(): void {
   quietTickCount = 0;
+}
+
+/** Get current quiet tick count (for hw sleep check). */
+export function getQuietTickCount(): number {
+  return quietTickCount;
 }
 
 /** Returns true if conditions are met for the daily restart + sleep cycle. */

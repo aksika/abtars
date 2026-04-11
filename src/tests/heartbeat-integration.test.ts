@@ -60,7 +60,7 @@ describe("Integration: age-check task", () => {
     vi.useRealTimers();
   });
 
-  it("spawns Dreamy when past BED_TIME and 6 quiet ticks", async () => {
+  it("spawns Dreamy when past BED_TIME and 2 quiet ticks", async () => {
     const now = new Date(2026, 3, 5, 10, 0); // 10:00
     vi.useFakeTimers({ now });
     writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
@@ -68,9 +68,9 @@ describe("Integration: age-check task", () => {
     resetBedtimeCounter();
     let sleepStarted = false;
     const task = createAgeCheckTask({ ...makeDeps(), startSleep: () => { sleepStarted = true; } });
-    for (let i = 0; i < 5; i++) await task.execute();
+    for (let i = 0; i < 1; i++) await task.execute();
     expect(sleepStarted).toBe(false);
-    await task.execute(); // 6th tick
+    await task.execute(); // 2nd tick
     expect(sleepStarted).toBe(true);
     vi.useRealTimers();
   });

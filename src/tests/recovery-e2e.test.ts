@@ -43,8 +43,8 @@ describe("Recovery E2E: standby resume + daily cycle", () => {
 
     resetBedtimeCounter();
     const deps = makeDeps();
-    // Need 6 quiet ticks before it triggers
-    for (let i = 0; i < 5; i++) expect(isDailyCycleDue(deps)).toBe(false);
+    // Need 2 quiet ticks before it triggers
+    expect(isDailyCycleDue(deps)).toBe(false);
     expect(isDailyCycleDue(deps)).toBe(true);
   });
 
@@ -62,7 +62,7 @@ describe("Recovery E2E: standby resume + daily cycle", () => {
     expect(isDailyCycleDue(makeDeps({ isSleepActive: () => true }))).toBe(false);
   });
 
-  it("full overnight: Power Nap wakes → 0 restarts before SLEEP_TIME, triggers after 6 quiet ticks", () => {
+  it("full overnight: Power Nap wakes → 0 restarts before SLEEP_TIME, triggers after 2 quiet ticks", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "rec-"));
     const bridgeLockPath = join(tmpDir, "bridge.lock");
     const bridgeStartedAt = new Date(2026, 3, 4, 20, 0).getTime(); // Started 8pm yesterday
@@ -75,13 +75,11 @@ describe("Recovery E2E: standby resume + daily cycle", () => {
     vi.setSystemTime(new Date(2026, 3, 5, 4, 0));
     expect(isDailyCycleDue(deps)).toBe(false);
 
-    // After BED_TIME: accumulate 6 quiet ticks (5min each)
-    for (let tick = 0; tick < 5; tick++) {
-      vi.setSystemTime(new Date(2026, 3, 5, 6, tick * 5));
-      expect(isDailyCycleDue(deps)).toBe(false);
-    }
-    // 6th tick triggers
-    vi.setSystemTime(new Date(2026, 3, 5, 6, 25));
+    // After BED_TIME: accumulate 2 quiet ticks (5min each)
+    vi.setSystemTime(new Date(2026, 3, 5, 6, 0));
+    expect(isDailyCycleDue(deps)).toBe(false);
+    // 2nd tick triggers
+    vi.setSystemTime(new Date(2026, 3, 5, 6, 5));
     expect(isDailyCycleDue(deps)).toBe(true);
   });
 });

@@ -73,28 +73,21 @@ describe("isDailyCycleDue — quiet tick counter", () => {
   });
 
   it("returns false before BED_TIME", () => {
-    // sleepHour=2, current time is before 2am in test context
-    // We can't easily fake time here without vi.useFakeTimers, so test the counter logic
-    // by using a sleepHour in the past
-    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 }); // midnight = always past
-    // First 5 ticks: false
-    for (let i = 0; i < 5; i++) {
-      expect(isDailyCycleDue(deps)).toBe(false);
-    }
-    // 6th tick: true
+    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
+    // First tick: false (need 2 quiet ticks)
+    expect(isDailyCycleDue(deps)).toBe(false);
+    // 2nd tick: true
     expect(isDailyCycleDue(deps)).toBe(true);
   });
 
   it("resets counter when resetBedtimeCounter is called", () => {
     const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
-    // Accumulate 4 ticks
-    for (let i = 0; i < 4; i++) isDailyCycleDue(deps);
+    // Accumulate 1 tick
+    isDailyCycleDue(deps);
     // Reset
     resetBedtimeCounter();
-    // Need 6 more ticks now
-    for (let i = 0; i < 5; i++) {
-      expect(isDailyCycleDue(deps)).toBe(false);
-    }
+    // Need 2 more ticks now
+    expect(isDailyCycleDue(deps)).toBe(false);
     expect(isDailyCycleDue(deps)).toBe(true);
   });
 

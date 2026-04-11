@@ -10,7 +10,7 @@ import { compactingSessions, setIdleCompactReset } from "./message-pipeline.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "../memory/memory-manager.js";
 import type { HeartbeatTask } from "../types/memory.js";
-import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";
+import { isDailyCycleDue, getQuietTickCount, type DailyCycleDeps } from "./daily-cycle.js";
 export interface IdleCompactDeps {
   transport: IKiroTransport;
   memory: MemoryManager | null;
@@ -65,13 +65,17 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
   };
 }
 
-export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string; startSleep?: () => void };
+export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string; startSleep?: () => void; checkHwSleep?: (quietTicks: number, requiredTicks: number) => void };
 
-/** Daily cycle — restart bridge after SLEEP_TIME if started before it. */
+/** Daily cycle — spawn Dreamy after BED_TIME + quiet ticks, then hw sleep after more quiet ticks. */
 export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
+  const requiredTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
   return {
     name: "age-check",
     execute: async () => {
+      // Check hw sleep (post-Dreamy quiet ticks)
+      if (deps.checkHwSleep) deps.checkHwSleep(getQuietTickCount(), requiredTicks);
+
       if (!isDailyCycleDue(deps)) return;
 
       logInfo("age-check", `😴 BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — spawning Dreamy`);

@@ -1,5 +1,6 @@
 /**
- * Sleep capability — spawn nightly sleep cycle with retry logic.
+ * Sleep capability — spawn nightly sleep cycle via tick system.
+ * One path: BED_TIME + quiet ticks → Dreamy → quiet ticks → hardware sleep.
  * Parses PROGRESS:<pct>:<label> from stdout for visibility.
  */
 
@@ -16,9 +17,7 @@ export interface SleepOpts {
   memoryEnabled: boolean;
   memoryDir?: string;
   onComplete: () => void;
-  /** Returns latest user message timestamp. Used to check if user messaged during sleep. */
   getLastMsgTs?: () => number;
-  /** Send a system message to the agent (for sleep announcement). */
   sendSystemMessage?: (prompt: string) => Promise<void>;
 }
 
@@ -30,7 +29,10 @@ export interface SleepProgress {
 export interface SleepHandle {
   readonly child: import("node:child_process").ChildProcess | null;
   readonly progress: SleepProgress | null;
+  readonly awaitingHwSleep: boolean;
   spawn(): void;
+  /** Called by tick system to check if hardware sleep should fire. */
+  checkHwSleep(quietTicks: number, requiredTicks: number): void;
 }
 
 const MAX_RETRIES = 3;
@@ -40,21 +42,37 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
   let child: import("node:child_process").ChildProcess | null = null;
   let attempts = 0;
   let progress: SleepProgress | null = null;
-  let msgTsAtSpawn = 0;
+  let _awaitingHwSleep = false;
+  let hwSleepAnnouncedAt = 0;
+
+  function buildDreamReport(): string {
+    let dreamReport = "Dreamy finished nightly maintenance.";
+    try {
+      const sleepDir = join(opts.memoryDir ?? "", "sleep");
+      const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+      const lockPath = join(sleepDir, `sleep_${dateStr}.lock`);
+      if (existsSync(lockPath)) {
+        const lockData = JSON.parse(readFileSync(lockPath, "utf-8")) as { steps: Record<string, { status: string }>; llmCalls?: number };
+        const ok = Object.entries(lockData.steps).filter(([, s]) => s.status === "ok").map(([k]) => k);
+        const skipped = Object.entries(lockData.steps).filter(([, s]) => s.status === "skipped").map(([k]) => k);
+        const failed = Object.entries(lockData.steps).filter(([, s]) => s.status === "failed" || s.status === "timeout").map(([k]) => k);
+        dreamReport = `Dreamy finished nightly maintenance (${lockData.llmCalls ?? "?"} LLM calls). Completed: ${ok.join(", ") || "none"}.`;
+        if (skipped.length > 0) dreamReport += ` Skipped: ${skipped.join(", ")}.`;
+        if (failed.length > 0) dreamReport += ` ⚠️ FAILED: ${failed.join(", ")}. Please review.`;
+      }
+    } catch { /* lock file not readable */ }
+    return dreamReport;
+  }
 
   function spawnSleep(): void {
-    msgTsAtSpawn = opts.getLastMsgTs?.() ?? 0;
     const hour = new Date().getHours();
     const WAKE_HOUR = parseInt(process.env["WAKE_TIME"]?.split(":")[0] ?? "7", 10);
-    // Only sleep between BED_TIME and WAKE_TIME
     if (opts.sleepHour <= WAKE_HOUR) {
-      // BED_TIME is after midnight (e.g. 2:00) — sleep window is sleepHour..WAKE_HOUR
       if (hour < opts.sleepHour || hour >= WAKE_HOUR) {
         logDebug("sleep", `😴 Outside sleep window (${opts.sleepHour}:00-${WAKE_HOUR}:00) — skip`);
         return;
       }
     } else {
-      // BED_TIME is before midnight (e.g. 23:00) — sleep window is sleepHour..midnight + midnight..WAKE_HOUR
       if (hour < opts.sleepHour && hour >= WAKE_HOUR) {
         logDebug("sleep", `😴 Outside sleep window (${opts.sleepHour}:00-${WAKE_HOUR}:00) — skip`);
         return;
@@ -72,7 +90,6 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       const proc = spawn(process.execPath, [sleepScript], { stdio: ["ignore", "pipe", "ignore"] });
       child = proc;
 
-      // Parse PROGRESS lines from stdout
       let buf = "";
       proc.stdout!.on("data", (chunk: Buffer) => {
         buf += chunk.toString();
@@ -81,9 +98,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
           const match = line.match(/^PROGRESS:(\d+):(.+)$/);
-          if (match) {
-            progress = { percent: parseInt(match[1]!, 10), step: match[2]! };
-          }
+          if (match) progress = { percent: parseInt(match[1]!, 10), step: match[2]! };
         }
       });
 
@@ -93,48 +108,24 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         if (code === 0) {
           logInfo("sleep", `😴 Sleep finished successfully (attempt ${attempts})`);
           if (opts.memoryEnabled) opts.onComplete();
-          // Put hardware to sleep after successful sleep cycle — only if user stayed quiet
-          if (process.env["HARDWARE_SLEEP_AFTER_DREAMY"] === "true" || process.env["MAC_SLEEP_AFTER_DREAMY"] === "true") {
-            const currentMsgTs = opts.getLastMsgTs?.() ?? 0;
-            if (currentMsgTs > msgTsAtSpawn) {
-              logInfo("sleep", "💤 Hardware sleep skipped — user messaged during sleep cycle");
-            } else {
-              logInfo("sleep", "💤 Announcing sleep — will sleep after 1 tick if user stays quiet");
-              const announceMsgTs = opts.getLastMsgTs?.() ?? 0;
-              if (opts.sendSystemMessage) {
-                // Build dream report from lock file
-                let dreamReport = "Dreamy finished nightly maintenance.";
-                try {
-                  const sleepDir = join(opts.memoryDir ?? "", "sleep");
-                  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-                  const lockPath = join(sleepDir, `sleep_${dateStr}.lock`);
-                  if (existsSync(lockPath)) {
-                    const lockData = JSON.parse(readFileSync(lockPath, "utf-8")) as { steps: Record<string, { status: string }>; llmCalls?: number };
-                    const ok = Object.entries(lockData.steps).filter(([, s]) => s.status === "ok").map(([k]) => k);
-                    const skipped = Object.entries(lockData.steps).filter(([, s]) => s.status === "skipped").map(([k]) => k);
-                    const failed = Object.entries(lockData.steps).filter(([, s]) => s.status === "failed" || s.status === "timeout").map(([k]) => k);
-                    dreamReport = `Dreamy finished nightly maintenance (${lockData.llmCalls ?? "?"} LLM calls). Completed: ${ok.join(", ") || "none"}.`;
-                    if (skipped.length > 0) dreamReport += ` Skipped: ${skipped.join(", ")}.`;
-                    if (failed.length > 0) dreamReport += ` ⚠️ FAILED: ${failed.join(", ")}. Please review.`;
-                  }
-                } catch { /* lock file not readable */ }
-                const hwSleep = (process.env["HARDWARE_SLEEP_AFTER_DREAMY"] === "true" || process.env["MAC_SLEEP_AFTER_DREAMY"] === "true");
-                const sleepNote = hwSleep ? " The system is going to sleep in ~5 minutes. If the user needs anything, now is the time." : "";
-                opts.sendSystemMessage(`${dreamReport}${sleepNote} Send the user a brief, friendly dream report — highlight what was done and flag any issues.`).catch(() => {});
-              }
-              // Wait one heartbeat tick (5 min), then check if user interrupted
-              setTimeout(() => {
-                const postAnnounceMsgTs = opts.getLastMsgTs?.() ?? 0;
-                if (postAnnounceMsgTs > announceMsgTs) {
-                  logInfo("sleep", "💤 Hardware sleep cancelled — user messaged after announcement");
-                  return;
-                }
-                const sleepCmd = process.platform === "darwin" ? "pmset sleepnow" : "systemctl suspend";
-                logInfo("sleep", `💤 Putting hardware to sleep (${sleepCmd})...`);
-                try { execSync(sleepCmd, { timeout: 5000 }); }
-                catch (err) { logWarn("sleep", `💤 Hardware sleep failed: ${err instanceof Error ? err.message : String(err)}`); }
-              }, 5 * 60 * 1000);
-            }
+
+          // Send dream report + announce hw sleep timing
+          const hwEnabled = process.env["HARDWARE_SLEEP_AFTER_DREAMY"] === "true";
+          const quietTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
+          const hbInterval = parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "300", 10);
+          const hwSleepMin = Math.round(quietTicks * hbInterval / 60);
+
+          const dreamReport = buildDreamReport();
+          const sleepNote = hwEnabled ? ` Hardware sleep in ~${hwSleepMin} minutes if no activity.` : "";
+
+          if (opts.sendSystemMessage) {
+            opts.sendSystemMessage(`${dreamReport}${sleepNote} Send the user a brief, friendly dream report — highlight what was done and flag any issues.`).catch(() => {});
+          }
+
+          if (hwEnabled) {
+            _awaitingHwSleep = true;
+            hwSleepAnnouncedAt = Date.now();
+            logInfo("sleep", `💤 Awaiting hardware sleep — ${quietTicks} quiet ticks (${hwSleepMin} min) required`);
           }
         } else if (attempts < MAX_RETRIES) {
           logWarn("sleep", `😴 Sleep failed (code=${code}, attempt ${attempts}/${MAX_RETRIES}) — retry in 5min`);
@@ -150,9 +141,31 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
   }
 
+  function checkHwSleep(quietTicks: number, requiredTicks: number): void {
+    if (!_awaitingHwSleep) return;
+
+    // User messaged after announcement — cancel
+    const currentMsgTs = opts.getLastMsgTs?.() ?? 0;
+    if (currentMsgTs > hwSleepAnnouncedAt) {
+      logInfo("sleep", "💤 Hardware sleep cancelled — user messaged after announcement");
+      _awaitingHwSleep = false;
+      return;
+    }
+
+    if (quietTicks < requiredTicks) return;
+
+    _awaitingHwSleep = false;
+    const sleepCmd = process.platform === "darwin" ? "pmset sleepnow" : "systemctl suspend";
+    logInfo("sleep", `💤 Putting hardware to sleep (${sleepCmd})...`);
+    try { execSync(sleepCmd, { timeout: 5000 }); }
+    catch (err) { logWarn("sleep", `💤 Hardware sleep failed: ${err instanceof Error ? err.message : String(err)}`); }
+  }
+
   return {
     get child() { return child; },
     get progress() { return progress; },
+    get awaitingHwSleep() { return _awaitingHwSleep; },
     spawn: spawnSleep,
+    checkHwSleep,
   };
 }

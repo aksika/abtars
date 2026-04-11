@@ -711,6 +711,7 @@ export async function startBridge(): Promise<void> {
     memory, bridgeLockPath, sleepAuditDir, sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, busyChats, isSleepActive,
     doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
     startSleep: () => { sleepHandle?.spawn(); },
+    checkHwSleep: (qt, rt) => { sleepHandle?.checkHwSleep(qt, rt); },
   }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
@@ -827,16 +828,6 @@ export async function startBridge(): Promise<void> {
     sendSystemMessage,
   });
   bridge.sleepHandle = sleepHandle;
-  // Only auto-spawn on startup if sleep hasn't run today (catch-up after wake)
-  const { hasSleepAuditToday } = await import("./capabilities/sleep/sleep-trigger.js");
-  if (!hasSleepAuditToday(sleepAuditDir)) {
-    const nowH = new Date().getHours() * 60 + new Date().getMinutes();
-    const bedM = SLEEP_HOUR * 60 + SLEEP_MINUTE;
-    if (nowH > bedM) {
-      logInfo("main", `😴 Sleep missed today — spawning catch-up Dreamy (model: ${process.env["AGENT_SLEEP_MODEL"] ?? "auto"})`);
-      sleepHandle.spawn();
-    }
-  }
 
   // --- Web Dashboard wiring (conditional) ---
   await bridge.initDashboard(platforms, heartbeat, nlmConfig);
