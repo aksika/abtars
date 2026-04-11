@@ -225,7 +225,7 @@ User asks "what's the best free model right now?" → agent runs the skill, retu
 ## 91. ABM — AgentBridge Memory System
 
 **Priority:** HIGH
-**Status:** Phase 0-2 ✅, Phase 3 partial (#124 ✅, #125/#126 remaining)
+**Status:** ✅ Done (2026-04-11) — Phase 0-2 complete, Phase 3 tracked as #125/#126
 **Roadmap:** [abm-roadmap.md](../specs/abm-roadmap.md)
 **Specs:** [memory-v2-tiered.plan.md](../specs/memory-v2-tiered.plan.md), [memory-decoupling.plan.md](../specs/memory-decoupling.plan.md), [mempalace-study.md](../specs/mempalace-study.md)
 
