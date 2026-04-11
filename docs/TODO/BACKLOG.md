@@ -621,13 +621,14 @@ Extract the memory system into a standalone `@agentbridge/memory` package. The b
 
 **Done already:** Phase 0.5 (types in `mem-types.ts`, `index.ts` entry point, 27 files in `src/memory/`)
 
-## 124. Universal Memory CLI
+## 124. Universal Memory CLI — `abmind`
 
 **Priority:** MEDIUM
 **Status:** Not started
 **Depends on:** #123
+**npm:** `abmind` registered (0.0.1 placeholder)
 
-Unified `agentbridge-memory` CLI with subcommands: `store`, `recall`, `edit`, `search`, `status`, `embed`, `wake-up`. Works standalone without the bridge running. Replaces individual CLIs (`agentbridge-recall`, `agentbridge-store`, `agentbridge-edit`, `agentbridge-expand`, `agentbridge-embed`).
+Unified `abmind` CLI with subcommands: `store`, `recall`, `edit`, `search`, `status`, `embed`, `wake-up`. Works standalone without the bridge running. Replaces individual CLIs (`agentbridge-recall`, `agentbridge-store`, `agentbridge-edit`, `agentbridge-expand`, `agentbridge-embed`). Old CLIs deleted, all callers updated (sleep prompts, TOOLS.md, SOUL.md, deploy).
 
 ## 125. Memory MCP Server
 

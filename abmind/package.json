@@ -1,0 +1,7 @@
+{
+     "name": "abmind",
+     "version": "0.0.1",
+     "description": "AI agent memory system — SQLite, FTS5, embeddings, recall, emotional arcs",
+     "license": "MIT",
+     "keywords": ["ai", "agent", "memory", "llm", "sqlite"]
+}

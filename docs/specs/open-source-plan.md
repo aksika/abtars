@@ -56,7 +56,7 @@ Bridge depends on the public package via npm. Memory developed in public repo, p
   "version": "0.1.0",
   "license": "MIT",
   "files": ["dist", "README.md", "LICENSE"],
-  "bin": { "abm": "./dist/cli/abm.js" },
+  "bin": { "abmind": "./dist/cli/abmind.js" },
   "engines": { "node": ">=22" },
   "publishConfig": { "access": "public" }
 }
@@ -85,10 +85,10 @@ Package name and CLI command are independent:
 ```json
 {
   "name": "@agentbridge/memory",
-  "bin": { "abm": "./dist/cli/abm.js" }
+  "bin": { "abmind": "./dist/cli/abm.js" }
 }
 ```
-- `npm install -g @agentbridge/memory` → user types `abm recall "pizza"`
+- `npm install -g @agentbridge/memory` → user types `abmind recall "pizza"`
 - `npx @agentbridge/memory recall "pizza"` also works
 
 ## Documentation Strategy
@@ -120,7 +120,7 @@ Tagline: "The most complete AI agent memory system. SQLite-based, zero cloud dep
 
 ## Order of Operations
 
-1. Implement `abm` CLI (#124) — first thing users interact with
+1. Implement `abmind` CLI (#124) — first thing users interact with
 2. Pick license (MIT)
 3. Create public repo `agentbridge-memory`
 4. Copy `packages/memory/` as the root
