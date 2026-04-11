@@ -8,7 +8,7 @@ import Database from "better-sqlite3";
 import { join } from "node:path";
 import { agentBridgeHome } from "../paths.js";
 import { existsSync } from "node:fs";
-import { loadEmbedConfig, batchEmbed } from "../memory/ollama-embed.js";
+import { loadEmbedConfig, batchEmbed } from "@agentbridge/memory/ollama-embed.js";
 
 const DB_PATH = join(agentBridgeHome(), "memory", "memory.db");
 

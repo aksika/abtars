@@ -211,7 +211,7 @@ describe("store integration — v2 columns populated", () => {
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
     const { MemoryManager } = await import("./memory-manager.js");
-    const { makeMemoryTestConfig } = await import("../tests/helpers.js");
+    const { makeMemoryTestConfig } = await import("../../../src/tests/helpers.js");
 
     const tmpDir = mkdtempSync(join(tmpdir(), "abm-v2-store-"));
     const mm = new MemoryManager(makeMemoryTestConfig(tmpDir));

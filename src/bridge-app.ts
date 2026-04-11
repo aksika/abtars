@@ -13,7 +13,7 @@ import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
 import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
-import { loadMemoryConfig, MemoryManager, setLogger as setMemoryLogger } from "./memory/index.js";
+import { loadMemoryConfig, MemoryManager, setLogger as setMemoryLogger } from "@agentbridge/memory/index.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
 import type { IKiroTransport } from "./components/transport/kiro-transport.js";
 import { parsePlatformFlags } from "./components/cli-flags.js";
@@ -74,7 +74,7 @@ async function sendBackOnline(
 }
 
 import type { Config } from "./types/index.js";
-import type { MemoryConfig } from "./memory/index.js";
+import type { MemoryConfig } from "@agentbridge/memory/index.js";
 import type { PipelineDeps } from "./components/message-pipeline.js";
 import { createCapabilityRegistry, createCapabilityApi } from "./capabilities/capability.js";
 import type { CapabilityRegistry, CapabilityRegisterFn } from "./capabilities/capability.js";
@@ -120,7 +120,7 @@ export class Bridge {
     setMemoryLogger({ logInfo, logWarn, logError });
 
     // Load ABM .env.memory config
-    const { loadMemoryEnv } = await import("./memory/mem-config-env.js");
+    const { loadMemoryEnv } = await import("@agentbridge/memory/mem-config-env.js");
     const memEnv = loadMemoryEnv();
     logInfo("main", `🧠 ABM config: search=${memEnv.searchMode}, maxDB=${memEnv.maxDbSizeMb}MB, aging=${memEnv.agingEnabled}`);
 
@@ -138,8 +138,8 @@ export class Bridge {
     });
     logInfo("main", "🧠 Memory LLM callback registered");
 
-    const { MemoryIpcServer } = await import("./memory/memory-ipc-server.js");
-    const { SqliteBackend } = await import("./memory/sqlite-backend.js");
+    const { MemoryIpcServer } = await import("@agentbridge/memory/memory-ipc-server.js");
+    const { SqliteBackend } = await import("@agentbridge/memory/sqlite-backend.js");
     const ipcBackend = new SqliteBackend(this.memoryConfig);
     await ipcBackend.initialize();
     const memoryIpc = new MemoryIpcServer(ipcBackend);
@@ -243,7 +243,7 @@ export class Bridge {
     // Wire in-process memory for direct API transport
     if (config.transport.agentTransport === "api" && this.memory) {
       const { setMemoryBackend } = await import("./components/transport/tool-registry.js");
-      const { SqliteBackend } = await import("./memory/sqlite-backend.js");
+      const { SqliteBackend } = await import("@agentbridge/memory/sqlite-backend.js");
       const backend = new SqliteBackend(this.memoryConfig);
       await backend.initialize();
       setMemoryBackend(backend);

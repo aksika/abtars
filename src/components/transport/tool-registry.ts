@@ -4,7 +4,7 @@
  */
 
 import { execFile } from "node:child_process";
-import type { MemoryBackend } from "../../memory/memory-backend.js";
+import type { MemoryBackend } from "@agentbridge/memory/memory-backend.js";
 import type { InstantStoreParams } from "../../types/index.js";
 
 export type ToolDefinition = {

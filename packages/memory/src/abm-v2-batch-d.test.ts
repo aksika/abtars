@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
-import { makeMemoryTestConfig } from "../tests/helpers.js";
+import { makeMemoryTestConfig } from "../../../src/tests/helpers.js";
 import { buildWakeUp } from "./wake-up-builder.js";
 
 describe("wake-up-builder", () => {

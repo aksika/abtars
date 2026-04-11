@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
-import { makeMemoryTestConfig } from "../tests/helpers.js";
+import { makeMemoryTestConfig } from "../../../src/tests/helpers.js";
 import { buildSessionStartContext, RECENT_MSG_CAP } from "./session-context.js";
 
 function insertMessage(manager: MemoryManager, role: string, content: string, timestamp: number): void {

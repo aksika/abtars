@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initializeDatabase } from "../../memory/memory-db.js";
+import { initializeDatabase } from "@agentbridge/memory/memory-db.js";
 import type Database from "better-sqlite3";
 
 // Import the functions we need to test — they're not exported yet, so we test via the module

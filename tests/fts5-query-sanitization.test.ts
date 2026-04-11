@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import fc from "fast-check";
 import Database from "better-sqlite3";
-import { MemoryIndex } from "../src/memory/memory-index.js";
+import { MemoryIndex } from "@agentbridge/memory/memory-index.js";
 
 /**
  * Bug Condition Exploration Test — FTS5 Query Sanitization

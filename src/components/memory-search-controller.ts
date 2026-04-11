@@ -5,10 +5,10 @@
  * Returns per-stage breakdown for dashboard investigation.
  */
 
-import type { IMemorySystem } from "../memory/imemory-system.js";
+import type { IMemorySystem } from "@agentbridge/memory/imemory-system.js";
 import { logWarn } from "./logger.js";
 import type { MemorySearchResponse, WebSearchResult } from "./dashboard/dashboard-config.js";
-import type { RecallHit } from "../memory/recall-engine.js";
+import type { RecallHit } from "@agentbridge/memory/recall-engine.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 

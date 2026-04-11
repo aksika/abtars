@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { initializeDatabase } from "./memory-db.js";
 import { MemoryIndex } from "./memory-index.js";
 import type Database from "better-sqlite3";
-import type { MessageRecord } from "../types/index.js";
+import type { MessageRecord } from "./mem-types.js";
 
 function makeRecord(overrides: Partial<MessageRecord> = {}): MessageRecord {
   return {

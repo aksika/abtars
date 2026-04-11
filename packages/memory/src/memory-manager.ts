@@ -116,7 +116,7 @@ export class MemoryManager {
   }
 
   /** Load recent messages. Delegates to store. */
-  loadRecentMessages(chatId: number, sessionId: string, count: number): import("../types/index.js").MessageRecord[] {
+  loadRecentMessages(chatId: number, sessionId: string, count: number): import("./mem-types.js").MessageRecord[] {
     if (!this.config.memoryEnabled || !this.store) return [];
     return this.store.loadRecentMessages(chatId, sessionId, count);
   }

@@ -10,11 +10,11 @@
 import { localMonth } from "../utils/local-time.js";
 import Database from "better-sqlite3";
 import { join } from "node:path";
-import { agentBridgeHome } from "../memory/mem-paths.js";
-import { detectEmotions } from "../memory/emotion-tagger.js";
-import { detectFlags } from "../memory/importance-flagger.js";
-import { compress } from "../memory/memory-compressor.js";
-import { generateSignature } from "../memory/signature-generator.js";
+import { agentBridgeHome } from "@agentbridge/memory/mem-paths.js";
+import { detectEmotions } from "@agentbridge/memory/emotion-tagger.js";
+import { detectFlags } from "@agentbridge/memory/importance-flagger.js";
+import { compress } from "@agentbridge/memory/memory-compressor.js";
+import { generateSignature } from "@agentbridge/memory/signature-generator.js";
 
 const dryRun = process.argv.includes("--dry-run");
 const dbPath = join(agentBridgeHome(), "memory", "memory.db");

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
 import type { IMemorySystem } from "./imemory-system.js";
-import { makeMemoryTestConfig } from "../tests/helpers.js";
+import { makeMemoryTestConfig } from "../../../src/tests/helpers.js";
 
 describe("IMemorySystem — interface conformance", () => {
   let tmpDir: string;

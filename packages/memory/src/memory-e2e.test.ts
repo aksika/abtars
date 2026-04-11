@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
 import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
-import { makeMemoryTestConfig } from "../tests/helpers.js";
-import type { MessageRecord } from "../types/index.js";
+import { makeMemoryTestConfig } from "../../../src/tests/helpers.js";
+import type { MessageRecord } from "./mem-types.js";
 
 function makeRecord(overrides: Partial<MessageRecord> = {}): MessageRecord {
   return {

@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
   "type": "module",
-  "main": "dist/main.js",
+  "workspaces": ["packages/*"],
+  "main": "dist/src/main.js",
   "scripts": {
     "build": "tsc && cp -r src/public dist/ && git log -1 --format='{\"hash\":\"%h\",\"date\":\"%ci\"}' > dist/build-info.json",
     "dev": "node --import tsx src/main.ts",
-    "start": "node dist/main.js",
+    "start": "node dist/src/main.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest --run",
     "test:watch": "vitest"
@@ -40,14 +41,14 @@
     "vitest": "^2.1.0"
   },
   "bin": {
-    "agentbridge-recall": "dist/cli/agentbridge-recall.js",
-    "agentbridge-restart": "dist/cli/agentbridge-restart.js",
-    "agentbridge-store": "dist/cli/agentbridge-store.js",
-    "agentbridge-edit": "dist/cli/agentbridge-edit.js",
-    "agentbridge-sleep": "dist/cli/agentbridge-sleep.js",
-    "agentbridge-retro-extract": "dist/cli/agentbridge-retro-extract.js",
-    "agentbridge-browser": "dist/cli/agentbridge-browser.js",
-    "agentbridge-tweet": "dist/cli/agentbridge-tweet.js",
-    "agentbridge-embed": "dist/cli/agentbridge-embed.js"
+    "agentbridge-recall": "dist/src/cli/agentbridge-recall.js",
+    "agentbridge-restart": "dist/src/cli/agentbridge-restart.js",
+    "agentbridge-store": "dist/src/cli/agentbridge-store.js",
+    "agentbridge-edit": "dist/src/cli/agentbridge-edit.js",
+    "agentbridge-sleep": "dist/src/cli/agentbridge-sleep.js",
+    "agentbridge-retro-extract": "dist/src/cli/agentbridge-retro-extract.js",
+    "agentbridge-browser": "dist/src/cli/agentbridge-browser.js",
+    "agentbridge-tweet": "dist/src/cli/agentbridge-tweet.js",
+    "agentbridge-embed": "dist/src/cli/agentbridge-embed.js"
   }
 }

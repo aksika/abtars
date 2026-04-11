@@ -5,8 +5,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
-import { makeMemoryTestConfig } from "../tests/helpers.js";
-import type { InstantStoreParams } from "../types/index.js";
+import { makeMemoryTestConfig } from "../../../src/tests/helpers.js";
+import type { InstantStoreParams } from "./mem-types.js";
 import { initializeDatabase } from "./memory-db.js";
 
 const validMemoryType = fc.oneof(

@@ -13,7 +13,7 @@ vi.mock("../components/soul-loader.js", () => ({ loadSoulBundle: () => MOCK_SOUL
 import { handleInboundMessage, startSession, resetAndPrepare, type PipelineDeps } from "../components/message-pipeline.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "../components/kiro-transport.js";
-import { MemoryManager } from "../memory/memory-manager.js";
+import { MemoryManager } from "@agentbridge/memory/memory-manager.js";
 import { ConversationBuffer } from "../components/conversation-buffer.js";
 
 import { makeMemoryTestConfig } from "./helpers.js";

@@ -7,14 +7,14 @@
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction } from "./compaction.js";
-import { buildSessionStartContext } from "../memory/session-context.js";
+import { buildSessionStartContext } from "@agentbridge/memory/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { tryReaction } from "./reaction-handler.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason, readAndClearRestartReason } from "./restart-reason.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
-import type { MemoryManager } from "../memory/memory-manager.js";
+import type { MemoryManager } from "@agentbridge/memory/memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";

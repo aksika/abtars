@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
-import { makeMemoryTestConfig } from "../tests/helpers.js";
+import { makeMemoryTestConfig } from "../../../src/tests/helpers.js";
 import type { MessageRecord } from "./mem-types.js";
 
 describe("ABM v1 — topic, tier, temporal validity", () => {

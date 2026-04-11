@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
 import { MemoryIndex } from "./memory-index.js";
-import { makeMemoryTestConfig } from "../tests/helpers.js";
+import { makeMemoryTestConfig } from "../../../src/tests/helpers.js";
 import { initializeDatabase } from "./memory-db.js";
-import { parseArgs } from "../cli/agentbridge-store.js";
+import { parseArgs } from "../../../src/cli/agentbridge-store.js";
 
 /** Insert an extracted memory directly and return its id. */
 function insertMemory(

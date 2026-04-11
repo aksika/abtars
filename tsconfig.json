@@ -7,7 +7,7 @@
             "ES2023"
         ],
         "outDir": "dist",
-        "rootDir": "src",
+        "rootDir": ".",
         "strict": true,
         "esModuleInterop": true,
         "skipLibCheck": true,
@@ -19,10 +19,15 @@
         "isolatedModules": true,
         "noUncheckedIndexedAccess": true,
         "noUnusedLocals": true,
-        "noUnusedParameters": true
+        "noUnusedParameters": true,
+        "paths": {
+            "@agentbridge/memory": ["./packages/memory/src/index.ts"],
+            "@agentbridge/memory/*": ["./packages/memory/src/*"]
+        }
     },
     "include": [
-        "src/**/*.ts"
+        "src/**/*.ts",
+        "packages/memory/src/**/*.ts"
     ],
     "exclude": [
         "node_modules",

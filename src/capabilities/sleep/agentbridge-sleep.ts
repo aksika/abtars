@@ -22,14 +22,14 @@
 import { localISO } from "../../utils/local-time.js";
 import { join, basename } from "node:path";
 import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync, statSync, rmSync } from "node:fs";
-import { MemoryManager } from "../../memory/memory-manager.js";
-import { loadMemoryConfig } from "../../memory/memory-config.js";
-import { SleepStateGatherer } from "../../memory/sleep-state-gatherer.js";
+import { MemoryManager } from "@agentbridge/memory/memory-manager.js";
+import { loadMemoryConfig } from "@agentbridge/memory/memory-config.js";
+import { SleepStateGatherer } from "@agentbridge/memory/sleep-state-gatherer.js";
 import { loadSleepSteps, buildSleepVars, substituteVars } from "./sleep-prompt-loader.js";
 import { buildDailySummary, writeDailyFile } from "./sleep-daily-summary.js";
 import { extractFromDaily } from "./sleep-extract-daily.js";
 import { logInfo, logWarn, logError, setLogLevel } from "../../components/logger.js";
-import type { StateSnapshot } from "../../memory/sleep-state-gatherer.js";
+import type { StateSnapshot } from "@agentbridge/memory/sleep-state-gatherer.js";
 import { localDate } from "../../components/env-utils.js";
 import type { SleepStep } from "./sleep-prompt-loader.js";
 
@@ -125,7 +125,7 @@ function writeStateFile(path: string, state: SleepState): void {
 
 // ── Wired pre-tasks ─────────────────────────────────────────────────────────
 
-async function runWiredPreTasks(sleepData: import("../../memory/sleep-data-access.js").SleepDataAccess, memoryDir: string, memory: MemoryManager): Promise<WiredResults> {
+async function runWiredPreTasks(sleepData: import("@agentbridge/memory/sleep-data-access.js").SleepDataAccess, memoryDir: string, memory: MemoryManager): Promise<WiredResults> {
   const results: WiredResults = { purged: 0, deduped: 0, embedded: 0, anomaliesFixed: 0, walOk: false, ftsOk: false, logsDeleted: 0 };
 
   // 1. Purge expired garbage
@@ -166,7 +166,7 @@ async function runWiredPreTasks(sleepData: import("../../memory/sleep-data-acces
   // 5. Batch embed NULL embeddings
   try {
     if (process.env["EMBEDDING_ENABLED"] === "true") {
-      const { loadEmbedConfig, embedText: embedFn } = await import("../../memory/ollama-embed.js");
+      const { loadEmbedConfig, embedText: embedFn } = await import("@agentbridge/memory/ollama-embed.js");
       const cfg = loadEmbedConfig();
       if (cfg.enabled) {
         const { embedded } = await memory.backfillEmbeddings((text) => embedFn(cfg, text));
@@ -550,7 +550,7 @@ function failedEssentials(state: SleepState): string[] {
 async function runCatchUp(
   locks: PreviousLock[],
   transport: import("../../components/transport/kiro-transport.js").IKiroTransport,
-  sleepData: import("../../memory/sleep-data-access.js").SleepDataAccess,
+  sleepData: import("@agentbridge/memory/sleep-data-access.js").SleepDataAccess,
   memoryConfig: { memoryDir: string },
   steps: SleepStep[],
   flags: RawArgs,

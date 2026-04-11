@@ -1,0 +1,21 @@
+{
+  "name": "@agentbridge/memory",
+  "version": "0.1.0",
+  "description": "Standalone AI agent memory system — SQLite, FTS5, embeddings, recall, sleep maintenance",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "*"
+  },
+  "peerDependencies": {
+    "better-sqlite3": ">=11.0.0"
+  }
+}

@@ -6,7 +6,7 @@ import { createHmac, randomBytes } from "crypto";
 import { agentBridgeHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import { IKiroTransport } from "./transport/kiro-transport.js";
-import type { IMemorySystem } from "../memory/imemory-system.js";
+import type { IMemorySystem } from "@agentbridge/memory/imemory-system.js";
 import { scanPrompt } from "./prompt-scanner.js";
 import { logInfo, logWarn } from "./logger.js";
 import { localDate } from "./env-utils.js";

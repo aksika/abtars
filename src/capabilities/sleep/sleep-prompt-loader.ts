@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "../../paths.js";
-import type { StateSnapshot } from "../../memory/sleep-state-gatherer.js";
+import type { StateSnapshot } from "@agentbridge/memory/sleep-state-gatherer.js";
 import { logDebug } from "../../components/logger.js";
 import { localDate } from "../../components/env-utils.js";
 

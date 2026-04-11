@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { MemoryManager } from "./memory-manager.js";
 import { initializeDatabase } from "./memory-db.js";
-import { makeMemoryTestConfig } from "../tests/helpers.js";
+import { makeMemoryTestConfig } from "../../../src/tests/helpers.js";
 
 function insertMemory(
   db: ReturnType<typeof initializeDatabase>,

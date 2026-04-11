@@ -10,7 +10,7 @@ import { SecurityGate } from "../../components/security-gate.js";
 import { ResponseFormatter } from "../../components/response-formatter.js";
 import { formatReactionSignal } from "../../components/reaction-signal.js";
 import { routeReaction } from "../../components/reaction-router.js";
-import { emojiToScore } from "../../memory/emotion-utils.js";
+import { emojiToScore } from "@agentbridge/memory/emotion-utils.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
 import { writeRestartReason } from "../../components/restart-reason.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
@@ -18,7 +18,7 @@ import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } 
 import type { TelegramUpdate } from "../../types/index.js";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
-import type { IMemorySystem } from "../../memory/imemory-system.js";
+import type { IMemorySystem } from "@agentbridge/memory/imemory-system.js";
 
 const TAG = "telegram";
 

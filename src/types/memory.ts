@@ -25,4 +25,4 @@ export type {
   RecallAnalysis,
   PipelineResult,
   MemorySearchParams,
-} from "../memory/mem-types.js";
+} from "@agentbridge/memory/mem-types.js";

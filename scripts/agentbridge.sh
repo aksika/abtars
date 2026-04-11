@@ -32,7 +32,7 @@ if [[ " ${ARGS[*]} " == *" stop "* ]]; then
     kill "$pid" 2>/dev/null && echo "   Bridge stopped (pid $pid)." || echo "   Bridge not running."
     rm -f "$PIDFILE"
   else
-    pkill -f "node.*dist/main.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
+    pkill -f "node.*dist/src/main.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
   fi
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux kill-session -t "$SESSION"
@@ -65,7 +65,7 @@ echo "   Node:     $(node --version)"
 echo ""
 
 # --- kill any orphaned bridge process ---
-if pkill -f "node.*dist/main.js" 2>/dev/null; then
+if pkill -f "node.*dist/src/main.js" 2>/dev/null; then
   echo "   Killed orphaned bridge process."
   sleep 1
 fi
@@ -84,7 +84,7 @@ cd "$PROJECT_DIR"
 cleanup() { rm -f "$PIDFILE"; }
 trap cleanup EXIT
 
-node dist/main.js "${ARGS[@]}" &
+node dist/src/main.js "${ARGS[@]}" &
 BRIDGE_PID=$!
 echo "$BRIDGE_PID" > "$PIDFILE"
 echo "   Bridge started (pid $BRIDGE_PID)"

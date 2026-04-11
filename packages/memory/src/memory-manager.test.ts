@@ -6,10 +6,10 @@ import { join } from "node:path";
 import { MemoryManager } from "./memory-manager.js";
 import { MEMORY_CONFIG_DEFAULTS } from "./memory-config.js";
 import type { MemoryConfig } from "./memory-config.js";
-import type { MessageRecord } from "../types/index.js";
+import type { MessageRecord } from "./mem-types.js";
 import { MemoryIndex } from "./memory-index.js";
 import { initializeDatabase } from "./memory-db.js";
-import { makeMemoryTestConfig } from "../tests/helpers.js";
+import { makeMemoryTestConfig } from "../../../src/tests/helpers.js";
 
 describe("MemoryManager — enforceDiskBudget", () => {
   let tmpDir: string;
