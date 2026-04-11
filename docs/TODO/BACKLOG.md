@@ -372,7 +372,7 @@ Adjacent-key typos (QWERTZ: z↔y, s↔a, doubled/missed chars) could be handled
 - Schema: `[{ pattern, instruction, cooldownMin, enabled }]`
 - Per-rule `enabled: boolean` — disable without deleting (default: true)
 
-### Phase 3: Auto-fix via coding subagent (isolated transport)
+### Phase 3: Auto-fix via coding subagent (isolated transport) — depends on #122
 - Self-healer matches auto-fix pattern → spawns `createSubagentTransport("coding")`
 - Sends instruction as one-shot prompt to isolated transport (main agent context untouched)
 - Captures response, logs to `~/.agentbridge/logs/autofix-<date>.log`
