@@ -531,3 +531,25 @@ Replace the 4 flat `.env` transport profiles with a single `transport.json` per 
 **Solution:** Rename processed retro files to `<name>.done` (or `.old`) after extraction. The extract step globs for `retro_*.md` — renamed files won't match. No JSON tracking needed, filesystem is the state.
 
 **Files:** `src/cli/agentbridge-retro-extract.ts`
+
+## 121. Ollama Request Collision — Priority Queue + Endpoint Isolation
+
+**Priority:** HIGH
+**Status:** Not started
+
+**Problem:** Ollama processes one request at a time. When cron/sleep/browse hits the same endpoint while the main agent is prompting a user message, one blocks the other. User experienced 2+ minute hang because a cron tweet script was running on the same Ollama instance.
+
+**Solution: Combine endpoint isolation + priority queue**
+
+1. **Separate endpoints for subagents** — subagents use a different Ollama port (e.g. 11435) or a different `OLLAMA_NUM_PARALLEL` slot. Main agent keeps 11434 exclusively for user-facing prompts.
+
+2. **Priority yielding** — before a subagent sends a request, check `bridge.lock` or a shared flag for `promptActive`. If main agent is mid-prompt, subagent backs off and retries after a short delay. User-facing traffic always wins.
+
+3. **Cron awareness** — cron jobs that call external scripts (like tweet) which also hit Ollama should be scheduled during idle windows, or the cron executor should check prompt activity before launching.
+
+**Design questions:**
+- Does Ollama support `OLLAMA_NUM_PARALLEL` for concurrent requests on same instance?
+- Should subagents use a completely separate Ollama process or just a different model slot?
+- How does the priority flag propagate to child processes (sleep is a separate pid)?
+
+**Files:** `direct-api-transport.ts`, `cron-queue.ts`, `agentbridge-sleep.ts`, `bridge-lock-transport.ts`
