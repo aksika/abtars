@@ -697,7 +697,7 @@ async function main(): Promise<number> {
 
     // Build candidate lists for conditional prompts
     const candidates = sleepData.buildSleepCandidates();
-    logInfo(TAG, `[SLEEP] Candidates: topics=${candidates.untaggedMemories ? "yes" : "none"}, promote=${candidates.promotionCandidates ? "yes" : "none"}, merge=${candidates.mergeCandidates ? "yes" : "none"}, translate=${candidates.translationIssues ? "yes" : "none"}, emotion-ctx=${candidates.emotionContextGaps ? "yes" : "none"}, feedback=${candidates.recallFeedback ? "yes" : "none"}`);
+    logInfo(TAG, `[SLEEP] Candidates: topics=${candidates.untaggedMemories ? "yes" : "none"}, promote=${candidates.promotionCandidates ? "yes" : "none"}, contradict=${candidates.contradictions ? "yes" : "none"}, merge=${candidates.mergeCandidates ? "yes" : "none"}, translate=${candidates.translationIssues ? "yes" : "none"}, emotion-ctx=${candidates.emotionContextGaps ? "yes" : "none"}, feedback=${candidates.recallFeedback ? "yes" : "none"}`);
 
     // Load step files + build vars
     const vars = buildSleepVars(snapshot);
@@ -706,6 +706,7 @@ async function main(): Promise<number> {
     // Inject candidate lists as template variables
     vars.UNTAGGED_MEMORIES = candidates.untaggedMemories || "No untagged memories found.";
     vars.PROMOTION_CANDIDATES = candidates.promotionCandidates || "No promotion candidates found.";
+    vars.CONTRADICTION_WARNINGS = candidates.contradictions || "";
     vars.MERGE_CANDIDATES = candidates.mergeCandidates || "No merge candidates found.";
     vars.TRANSLATION_ISSUES = candidates.translationIssues || "No translation issues found.";
     vars.EMOTION_CONTEXT_GAPS = candidates.emotionContextGaps || "No emotion context gaps found.";

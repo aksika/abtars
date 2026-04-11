@@ -13,6 +13,7 @@ const TAG = "sleep-data";
 export type SleepCandidateLists = {
   untaggedMemories: string;
   promotionCandidates: string;
+  contradictions: string;
   mergeCandidates: string;
   translationIssues: string;
   emotionContextGaps: string;
@@ -145,7 +146,7 @@ export class SleepDataAccess {
   }
 
   buildSleepCandidates(): SleepCandidateLists {
-    const lists: SleepCandidateLists = { untaggedMemories: "", promotionCandidates: "", mergeCandidates: "", translationIssues: "", emotionContextGaps: "", recallFeedback: "" };
+    const lists: SleepCandidateLists = { untaggedMemories: "", promotionCandidates: "", contradictions: "", mergeCandidates: "", translationIssues: "", emotionContextGaps: "", recallFeedback: "" };
     try {
       const untagged = this.db.prepare(
         "SELECT id, substr(content_en,1,100) as preview FROM extracted_memories WHERE (topic IS NULL OR topic = 'general') AND content_en IS NOT NULL LIMIT 20",
@@ -153,9 +154,28 @@ export class SleepDataAccess {
       if (untagged.length > 0) lists.untaggedMemories = untagged.map(r => `#${r.id}: ${r.preview}`).join("\n");
 
       const promote = this.db.prepare(
-        "SELECT id, substr(content_en,1,100) as preview, recall_count, confidence FROM extracted_memories WHERE tier = 'general' AND recall_count >= 2 AND confidence >= 3 AND valid_to IS NULL ORDER BY recall_count DESC LIMIT 15",
-      ).all() as Array<{ id: number; preview: string; recall_count: number; confidence: number }>;
-      if (promote.length > 0) lists.promotionCandidates = promote.map(r => `#${r.id} (recall:${r.recall_count}, conf:${r.confidence}): ${r.preview}`).join("\n");
+        "SELECT id, topic, substr(content_en,1,300) as preview, recall_count, confidence FROM extracted_memories WHERE tier = 'general' AND recall_count >= 2 AND confidence >= 3 AND valid_to IS NULL ORDER BY recall_count DESC LIMIT 15",
+      ).all() as Array<{ id: number; topic: string; preview: string; recall_count: number; confidence: number }>;
+      if (promote.length > 0) lists.promotionCandidates = promote.map(r => `#${r.id} [${r.topic}] (recall:${r.recall_count}, conf:${r.confidence}): ${r.preview}`).join("\n");
+
+      // Contradiction check on promotion candidates
+      if (promote.length > 0) {
+        try {
+          const { checkContradiction } = require("./contradiction-checker.js") as typeof import("./contradiction-checker.js");
+          const core = this.db.prepare(
+            "SELECT id, content_en, topic FROM extracted_memories WHERE tier = 'core' AND valid_to IS NULL AND content_en IS NOT NULL",
+          ).all() as Array<{ id: number; content_en: string; topic: string }>;
+          const hits: string[] = [];
+          for (const c of promote) {
+            const hit = checkContradiction(c.preview, c.topic, core);
+            if (hit) hits.push(`#${c.id} contradicts #${hit.existingId}: ${hit.reason}`);
+          }
+          if (hits.length > 0) {
+            lists.contradictions = hits.join("\n");
+            logWarn(TAG, `${hits.length} contradiction(s) flagged in promotion candidates`);
+          }
+        } catch { /* contradiction checker not available */ }
+      }
 
       try {
         const { hammingSimilarity } = require("./signature-generator.js") as typeof import("./signature-generator.js");
