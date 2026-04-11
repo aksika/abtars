@@ -6,6 +6,8 @@
 
 import type Database from "better-sqlite3";
 import { buildArc } from "./emotion-arc.js";
+import { checkContradiction } from "./contradiction-checker.js";
+import { hammingSimilarity } from "./signature-generator.js";
 import { logWarn } from "./mem-logger.js";
 
 const TAG = "sleep-data";
@@ -161,7 +163,7 @@ export class SleepDataAccess {
       // Contradiction check on promotion candidates
       if (promote.length > 0) {
         try {
-          const { checkContradiction } = require("./contradiction-checker.js") as typeof import("./contradiction-checker.js");
+          
           const core = this.db.prepare(
             "SELECT id, content_en, topic FROM extracted_memories WHERE tier = 'core' AND valid_to IS NULL AND content_en IS NOT NULL",
           ).all() as Array<{ id: number; content_en: string; topic: string }>;
@@ -178,7 +180,7 @@ export class SleepDataAccess {
       }
 
       try {
-        const { hammingSimilarity } = require("./signature-generator.js") as typeof import("./signature-generator.js");
+        
         const sigs = this.db.prepare(
           "SELECT id, topic, signature, substr(content_en,1,80) as preview FROM extracted_memories WHERE signature IS NOT NULL AND valid_to IS NULL ORDER BY topic",
         ).all() as Array<{ id: number; topic: string; signature: Buffer; preview: string }>;

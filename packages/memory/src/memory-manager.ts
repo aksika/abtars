@@ -12,6 +12,10 @@ import type { IHeartbeat } from "./imemory-system.js";
 import { getLatestConsolidationFile } from "./consolidation-search.js";
 import type { SearchResult, SearchOptions } from "./mem-types.js";
 import { logError, logInfo, logWarn } from "./mem-logger.js";
+import { SleepDataAccess } from "./sleep-data-access.js";
+import { buildWakeUp } from "./wake-up-builder.js";
+import { isFlashbulb } from "./brain-patterns.js";
+import { quantizeToInt8 } from "./embedding-quantize.js";
 
 const TAG = "memory-manager";
 
@@ -247,7 +251,7 @@ export class MemoryManager {
 
   getSleepData(): import("./sleep-data-access.js").SleepDataAccess {
     if (!this.db) throw new Error("Database not initialized");
-    const { SleepDataAccess } = require("./sleep-data-access.js") as typeof import("./sleep-data-access.js");
+    
     return new SleepDataAccess(this.db);
   }
 
@@ -282,7 +286,7 @@ export class MemoryManager {
   // ── Maintenance methods (for sleep addon / external tools) ──────────────
 
   buildWakeUp(ctxWindowSize: number): string {
-    const { buildWakeUp } = require("./wake-up-builder.js") as typeof import("./wake-up-builder.js");
+    
     return buildWakeUp(this.db, ctxWindowSize);
   }
 
@@ -354,7 +358,7 @@ export class MemoryManager {
   /** Age memory tiers: NULL English after englishTtlDays, NULL original after originalTtlDays. */
   ageMemoryTiers(opts: { englishTtlDays: number; originalTtlDays: number; embeddingQuantizeDays?: number }): { englishNulled: number; originalNulled: number; embeddingsQuantized: number } {
     if (!this.db) return { englishNulled: 0, originalNulled: 0, embeddingsQuantized: 0 };
-    const { isFlashbulb } = require("./brain-patterns.js") as typeof import("./brain-patterns.js");
+    
 
     // content_en preserved forever — trigram search depends on it
     const englishNulled = 0;
@@ -376,7 +380,7 @@ export class MemoryManager {
     if (opts.embeddingQuantizeDays != null) {
       const quantizeCutoff = Date.now() - opts.embeddingQuantizeDays * 86400000;
       try {
-        const { quantizeToInt8 } = require("./embedding-quantize.js") as typeof import("./embedding-quantize.js");
+        
         const rows = this.db.prepare(
           "SELECT memory_id, embedding FROM memory_embeddings WHERE quantized = 0 AND memory_id IN (SELECT id FROM extracted_memories WHERE created_at < ?)",
         ).all(quantizeCutoff) as Array<{ memory_id: number; embedding: Buffer }>;
