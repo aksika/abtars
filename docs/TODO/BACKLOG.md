@@ -225,13 +225,12 @@ User asks "what's the best free model right now?" → agent runs the skill, retu
 ## 91. ABM — AgentBridge Memory System
 
 **Priority:** HIGH
-**Status:** Not started
+**Status:** In progress
 **Roadmap:** [abm-roadmap.md](../specs/abm-roadmap.md)
 **Specs:** [memory-v2-tiered.plan.md](../specs/memory-v2-tiered.plan.md), [memory-decoupling.plan.md](../specs/memory-decoupling.plan.md), [mempalace-study.md](../specs/mempalace-study.md)
 
-### Phase 0: Decouple (refactor)
-- Extract `@agentbridge/memory` standalone package from bridge
-- IMemorySystem interface, eliminate DB leaks, directory reorg
+### Phase 0: Decouple → #123
+Tracked separately. Extract `@agentbridge/memory` standalone package.
 
 ### Phase 1: ABM v1 — Tiered Memory
 - Topic column on extracted_memories (34% retrieval boost per MemPalace benchmarks)
@@ -246,10 +245,8 @@ User asks "what's the best free model right now?" → agent runs the skill, retu
 - Dynamic wake-up from core tier (replaces static core-knowledge)
 - Cross-topic linking (tunnels)
 
-### Phase 3: Universal Access
-- Unified `agentbridge-memory` CLI (standalone, no bridge needed)
-- MCP server — expose memory as MCP tools for any AI tool
-- OpenClaw plugin via `@openclaw/memory-host-sdk`
+### Phase 3: Universal Access → #124, #125, #126
+Tracked separately. Unified CLI (#124), MCP server (#125), OpenClaw plugin (#126).
 
 ## 92. Review Dead Code — migration versions in memory-db.ts
 
@@ -636,6 +633,12 @@ Unified `agentbridge-memory` CLI with subcommands: `store`, `recall`, `edit`, `s
 **Depends on:** #123
 
 Expose memory operations as MCP tools for any MCP-compatible AI tool (Claude Code, Cursor, Kiro CLI, OpenClaw). Tools: `memory_recall`, `memory_store`, `memory_edit`, `memory_status`, `memory_wake_up`. Modeled on MemPalace's 19-tool MCP server, adapted to our architecture.
+
+**Architecture:** MCP server wraps `IMemorySystem` from `@agentbridge/memory`. Two modes:
+- **Standalone:** `npx @agentbridge/memory mcp` — spawns its own MemoryManager, opens SQLite directly
+- **Bridge-attached:** connects to running bridge via IPC (existing backend factory) — shares the live DB
+
+This means external tools (Claude Code, Cursor) get memory access without the bridge running, while the bridge's own agents can also use MCP if preferred over direct import.
 
 ## 126. OpenClaw Memory Plugin
 
