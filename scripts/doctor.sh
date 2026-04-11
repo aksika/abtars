@@ -50,9 +50,9 @@ for lockfile in "$AB/memory/sleep"/sleep_*.lock; do
     base=$(basename "$lockfile" .lock)
     if ! ls "$AB/memory/sleep/${base}"_*.md &>/dev/null; then
       if $FIX; then
-        rm -f "$lockfile"; fix "removed stale sleep lock $lockfile (${lockage}min old, no audit)"
+        rm -f "$lockfile"; fix "removed stale sleep lock $lockfile ${lockage}min old, no audit"
       else
-        warn "stale sleep lock: $lockfile (${lockage}min old, no audit) -- sleep may have hung"
+        warn "stale sleep lock: $lockfile ${lockage}min old, no audit -- sleep may have hung"
       fi
     fi
   fi
@@ -138,7 +138,7 @@ if grep -q "^EMBEDDING_ENABLED=true" "$AB/.env" 2>/dev/null; then
     NULL_EMBEDS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM extracted_memories WHERE embedding IS NULL;" 2>/dev/null || echo 0)
     if [ "$NULL_EMBEDS" -gt 0 ]; then
       if $FIX; then
-        EMBEDDING_ENABLED=true node "$(dirname "$0")/../dist/src/cli/abmind.js" embed" 2>/dev/null && fix "batch-embedded $NULL_EMBEDS memories"
+        EMBEDDING_ENABLED=true node "$(dirname "$0")/../dist/src/cli/abmind.js" embed 2>/dev/null && fix "batch-embedded $NULL_EMBEDS memories"
       else
         warn "$NULL_EMBEDS extracted memories missing embeddings -- run: abmind embed"
       fi
@@ -149,11 +149,11 @@ fi
 # 10. Heartbeat liveness (startup check -- was previous session's heartbeat healthy?)
 LOCK_FILE="$AB/bridge.lock"
 if [ -f "$LOCK_FILE" ]; then
-  HB_TS=$(python3 -c "import json; print(json.load(open('$LOCK_FILE')).get('lastHeartbeat',0))" 2>/dev/null || echo 0)
+  HB_TS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("lastHeartbeat",0))' "$LOCK_FILE" 2>/dev/null || echo 0)
   if [ "$HB_TS" -gt 0 ]; then
     HB_AGE=$(( ($(date +%s) - HB_TS / 1000) / 60 ))
     if [ "$HB_AGE" -gt 15 ]; then
-      warn "heartbeat was stale before restart (last tick ${HB_AGE}min ago) -- heartbeat may have stopped"
+      warn "heartbeat was stale before restart last tick ${HB_AGE}min ago -- heartbeat may have stopped"
     fi
   fi
 fi
@@ -163,7 +163,7 @@ for f in "$AB/core/user_profile.md" "$AB/core/agent_notes.md" "$AB/core/core_fac
   if [ -f "$f" ]; then
     LINES=$(grep -c '[^[:space:]]' "$f")
     if [ "$LINES" -gt 15 ]; then
-      warn "$(basename "$f") has $LINES non-empty lines (limit: 10) -- Dreamy may have overgrown it"
+      FNAME=$(basename "$f"); warn "$FNAME has $LINES non-empty lines limit: 10 -- Dreamy may have overgrown it"
     fi
   fi
 done
@@ -172,7 +172,7 @@ done
 if [ -f "$DB" ]; then
   SCHEMA_VER=$(sqlite3 "$DB" "SELECT version FROM schema_version LIMIT 1" 2>/dev/null || echo 0)
   if [ "$SCHEMA_VER" -lt 8 ]; then
-    warn "memory.db schema version is $SCHEMA_VER (expected ≥8) -- ABM v2 migration pending"
+    warn "memory.db schema version is $SCHEMA_VER expected >=8 -- ABM v2 migration pending"
   fi
 fi
 
@@ -190,7 +190,7 @@ if [ "$KIRO_PROCS" -gt 1 ]; then
     NEWEST=$(echo "$PIDS" | tail -1)
     for pid in $PIDS; do
       if [ "$pid" != "$NEWEST" ]; then
-        kill "$pid" 2>/dev/null && fix "killed orphaned kiro-cli acp (pid $pid)"
+        kill "$pid" 2>/dev/null && fix "killed orphaned kiro-cli acp pid $pid"
       fi
     done
   else
@@ -206,7 +206,7 @@ if [ "$SLEEP_PROCS" -gt 1 ]; then
     NEWEST=$(echo "$PIDS" | tail -1)
     for pid in $PIDS; do
       if [ "$pid" != "$NEWEST" ]; then
-        kill "$pid" 2>/dev/null && fix "killed orphaned agentbridge-sleep (pid $pid)"
+        kill "$pid" 2>/dev/null && fix "killed orphaned agentbridge-sleep pid $pid"
       fi
     done
   else
@@ -216,9 +216,9 @@ fi
 
 # 13. Full fixes (--fix-full only)
 if $FIX_FULL && [ -f "$DB" ]; then
-  sqlite3 "$DB" "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt messages_fts index"
-  sqlite3 "$DB" "INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('rebuild');" 2>/dev/null && fix "rebuilt extracted_memories_fts index"
-  sqlite3 "$DB" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null && fix "WAL checkpoint (truncate)"
+  sqlite3 "$DB" 'INSERT INTO messages_fts(messages_fts) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt messages_fts index"
+  sqlite3 "$DB" 'INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt extracted_memories_fts index"
+  sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);' 2>/dev/null && fix "WAL checkpoint truncate"
 fi
 
 if $FIX_FULL; then
@@ -239,6 +239,6 @@ else
   if [ "$WARNS" -eq 0 ]; then
     echo "[doctor] All clear."
   else
-    echo "[doctor] $WARNS warning(s). Run with --fix or --fix-full to repair."
+    echo "[doctor] $WARNS warnings. Run with --fix or --fix-full to repair."
   fi
 fi
