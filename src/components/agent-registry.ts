@@ -4,7 +4,6 @@
  */
 
 import { AcpTransport } from "./transport/acp-transport.js";
-import { readBridgeLockTransport } from "./transport/bridge-lock-transport.js";
 import { logInfo } from "./logger.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
@@ -68,18 +67,11 @@ export function createAgentTransport(
 
 export type SubagentRole = "sleep" | "browse" | "coding" | "cron";
 
-const SUBAGENT_MODEL_ENV: Record<SubagentRole, string> = {
-  sleep: "AGENT_SLEEP_MODEL",
-  browse: "AGENT_BROWSE_MODEL",
-  coding: "AGENT_CODING_MODEL",
-  cron: "AGENT_MAIN_MODEL",
-};
-
-const SUBAGENT_CTX_ENV: Record<SubagentRole, string> = {
-  sleep: "AGENT_SLEEP_CTX_WINDOW",
-  browse: "AGENT_BROWSE_CTX_WINDOW",
-  coding: "AGENT_CODING_CTX_WINDOW",
-  cron: "AGENT_MAIN_CTX_WINDOW",
+const SUBAGENT_TO_AGENT: Record<SubagentRole, string> = {
+  sleep: "dreamy",
+  browse: "browsie",
+  coding: "coding",
+  cron: "professor",
 };
 
 const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
@@ -89,42 +81,51 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
   cron: "cron",
 };
 
-/** Unified transport factory for all subagents. Reads bridge.lock for runtime truth. */
+/** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 export async function createSubagentTransport(role: SubagentRole): Promise<{ transport: IKiroTransport; model: string }> {
-  const mainTransport = readBridgeLockTransport();
-  const { loadAndValidateConfig } = await import("./config.js");
-  const config = await loadAndValidateConfig();
+  const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
+  const tc = loadTransport();
+  const agentName = SUBAGENT_TO_AGENT[role];
+  const resolved = tc ? resolveAgent(agentName, tc) : null;
 
-  const modelEnv = SUBAGENT_MODEL_ENV[role];
-  const model = process.env[modelEnv] || config.models.mainModel || "auto";
-  const defaultCtx = parseInt(process.env["API_DEFAULT_CONTEXT"] ?? "128000", 10);
-  const maxContext = parseInt(process.env[SUBAGENT_CTX_ENV[role]] ?? "", 10) || defaultCtx;
-  const maxOutput = parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10);
-  const maxTurns = parseInt(process.env["API_MAX_TURNS"] ?? "50", 10);
+  // Fallback: use professor's config. If that also fails, use .env defaults.
+  const profResolved = resolved ?? (tc ? resolveAgent("professor", tc) : null);
+  const agent = profResolved ?? (() => {
+    const fb = getEnvFallback();
+    return { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
+  })();
 
-  // bridge.lock is runtime truth — if main agent is on Direct API, subagent follows
-  if (mainTransport?.type === "api") {
+  if (agent.provider.transport === "api") {
     const { DirectApiTransport } = await import("./transport/direct-api-transport.js");
-    const endpoint = mainTransport.endpoint ?? process.env["API_ENDPOINT"] ?? "http://localhost:11434/v1";
-    const apiKey = process.env["API_KEY"];
-    const fallbacks = mainTransport.model !== model
-      ? [{ endpoint, apiKey, model: mainTransport.model, maxContext: defaultCtx }]
+    const apiKey = agent.provider.apiKeyEnv ? process.env[agent.provider.apiKeyEnv] : process.env["API_KEY"];
+
+    // Subagent fallback: always professor's model+provider
+    const profAgent = tc ? resolveAgent("professor", tc) : null;
+    const fallbacks = profAgent && profAgent.model !== agent.model
+      ? [{ endpoint: profAgent.provider.endpoint ?? agent.provider.endpoint!, apiKey: profAgent.provider.apiKeyEnv ? process.env[profAgent.provider.apiKeyEnv] : apiKey, model: profAgent.model, maxContext: profAgent.contextWindow }]
       : undefined;
 
-    const transport = new DirectApiTransport({ endpoint, apiKey, model, maxContext, maxOutput, maxTurns, fallbacks });
+    const transport = new DirectApiTransport({
+      endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1",
+      apiKey, model: agent.model,
+      maxContext: agent.contextWindow, maxOutput: agent.maxOutput,
+      maxTurns: tc?.maxTurns ?? 50, fallbacks,
+    });
     await transport.initialize();
-    logInfo("subagent", `${role} transport: DirectAPI (model=${model}${fallbacks ? `, fallback=${mainTransport.model}` : ""})`);
-    return { transport, model };
+    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${agent.model}${fallbacks ? `, fallback=${profAgent!.model}` : ""})`);
+    return { transport, model: agent.model };
   }
 
   // ACP path
+  const { loadAndValidateConfig } = await import("./config.js");
+  const config = await loadAndValidateConfig();
   const transport = createAgentTransport(SUBAGENT_ACP_ROLE[role], {
-    cliPath: config.transport.agentCliPath,
+    cliPath: agent.provider.cli ?? config.transport.agentCliPath,
     workingDir: config.transport.workingDir,
-    agentCli: config.transport.agentCli,
-    model: model !== "auto" ? model : undefined,
+    agentCli: agent.provider.cli ?? config.transport.agentCli,
+    model: agent.model,
   });
   await transport.initialize();
-  logInfo("subagent", `${role} transport: ACP (model=${model})`);
-  return { transport, model };
+  logInfo("subagent", `${role} transport: ACP ${agent.providerName} (model=${agent.model})`);
+  return { transport, model: agent.model };
 }

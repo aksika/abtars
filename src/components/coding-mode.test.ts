@@ -11,6 +11,23 @@ vi.mock("./transport/acp-transport.js", () => ({
   })),
 }));
 
+// Mock createSubagentTransport to return a mock transport
+vi.mock("./agent-registry.js", async (importOriginal) => {
+  const orig = await importOriginal() as Record<string, unknown>;
+  return {
+    ...orig,
+    createSubagentTransport: vi.fn(async () => ({
+      transport: {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        sendPrompt: vi.fn().mockResolvedValue("ok"),
+        destroy: vi.fn(),
+        resetSession: vi.fn().mockResolvedValue(undefined),
+      },
+      model: "test-model",
+    })),
+  };
+});
+
 describe("CodingMode", () => {
   let cm: CodingMode;
 
