@@ -265,13 +265,12 @@ export async function handleInboundMessage(
     }
 
     // --- [REACT:emoji] — extract reaction, deliver remaining text if any ---
-    const reactMatch = userResponse.trim().match(/^\[REACT:(.+?)\]\s*([\s\S]*)/);
+    const reactMatch = userResponse.trim().match(/\[REACT:(.+?)\]/);
     if (reactMatch) {
       const emoji = reactMatch[1]!;
-      const remaining = reactMatch[2]?.trim() ?? "";
+      userResponse = userResponse.replace(reactMatch[0], "").trim();
       await tryReaction(adapter, channelId, msg.messageId, emoji, msg.threadId);
-      if (!remaining) return;
-      userResponse = remaining;
+      if (!userResponse) return;
     }
 
     // --- Deliver response ---
