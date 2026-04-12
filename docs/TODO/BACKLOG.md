@@ -319,3 +319,35 @@ Expose memory operations as MCP tools for any MCP-compatible AI tool (Claude Cod
 
 Implement `@openclaw/memory-host-sdk` contract. Any OpenClaw agent gets persistent memory by adding the plugin. Bridge not required.
 
+
+## 128. Transport/Model Consistency — Single Source of Truth
+
+**Priority:** CRITICAL
+**Status:** Step 0 done (2026-04-12)
+
+Transport and model config is scattered across 4 places (env vars, transport profiles, bridge.lock, per-agent env vars). Subagents can get confused about which transport/model to use.
+
+### Step 0: bridge.lock records transport ✅
+Bridge writes `{ transport: { type, model, endpoint } }` to bridge.lock at startup. Subagents read it via `readBridgeLockTransport()`. Fixed cron trying ACP when main bridge was on Direct API (ollama).
+
+### Step 1: Smart fallback updates bridge.lock
+When the main transport falls back (ACP → API, or model A → model B), update bridge.lock transport field immediately. Subagents spawned after fallback follow the new transport.
+
+**Files:** `direct-api-transport.ts` or `transport-manager.ts` — wherever fallback logic lives.
+**Effort:** 15 min
+
+### Step 2: Validate bridge.lock on subagent spawn
+Before spawning, check bridge.lock PID is alive (`kill(pid, 0)`). If stale (bridge crashed), fall back to env/config instead of trusting lock.
+
+**Files:** `agent-registry.ts` — `createSubagentTransport()`
+**Effort:** 10 min
+
+### Step 3: transport.json (→ #118)
+Consolidate all transport config into one structured file. Replaces env vars, profiles, and bridge.lock transport section. Per-agent model + context window in one place. This is the proper long-term fix.
+
+**Depends on:** #118
+**Effort:** ~3hr (tracked separately)
+
+### Not fixing (edge cases)
+- Two bridges on same machine — not a real scenario (separate home dirs)
+- Model mismatch between lock and env — already handled by role-specific env reads in `createSubagentTransport`
