@@ -225,7 +225,7 @@ Agent writes memories directly in ABM-L format (`--abml "[D|coding|convict|5] @c
 
 ## 119. Transport Profiles → transport.json
 
-**Status:** Not started
+**Status:** Merged into #128
 **Priority:** Medium
 
 Replace the 4 flat `.env` transport profiles with a single `transport.json` per deployment. Structured, per-agent config, no more inconsistent key names.
@@ -320,34 +320,75 @@ Expose memory operations as MCP tools for any MCP-compatible AI tool (Claude Cod
 Implement `@openclaw/memory-host-sdk` contract. Any OpenClaw agent gets persistent memory by adding the plugin. Bridge not required.
 
 
-## 128. Transport/Model Consistency — Single Source of Truth
+## 128. Transport/Model Consistency — transport.json
 
 **Priority:** CRITICAL
 **Status:** Step 0 done (2026-04-12)
+**Merges:** #118 (transport.json)
 
-Transport and model config is scattered across 4 places (env vars, transport profiles, bridge.lock, per-agent env vars). Subagents can get confused about which transport/model to use.
+Transport and model config is scattered across 4 places (env vars, transport profiles, bridge.lock, per-agent env vars). Subagents can get confused about which transport/model to use. Single solution: `transport.json`.
 
 ### Step 0: bridge.lock records transport ✅
-Bridge writes `{ transport: { type, model, endpoint } }` to bridge.lock at startup. Subagents read it via `readBridgeLockTransport()`. Fixed cron trying ACP when main bridge was on Direct API (ollama).
+Temporary fix — bridge writes `{ transport: { type, model, endpoint } }` to bridge.lock at startup. Replaced by transport.json.
 
-### Step 1: Smart fallback updates bridge.lock
-When the main transport falls back (ACP → API, or model A → model B), update bridge.lock transport field immediately. Subagents spawned after fallback follow the new transport.
+### Step 1: Create transport.json
+Single structured config file at `~/.agentbridge/transport.json`. Replaces:
+- 4 flat `.env` transport profiles (`persona/core/transports/*.env`)
+- `AGENT_TRANSPORT_PROFILE` env var
+- `AGENT_MAIN_MODEL`, `AGENT_SLEEP_MODEL`, etc. env vars
+- `AGENT_*_CTX_WINDOW` env vars
+- `API_ENDPOINT`, `API_KEY`, `API_MAX_CONTEXT`, `API_MAX_OUTPUT`, `API_MAX_TURNS` env vars
+- Transport section of bridge.lock
 
-**Files:** `direct-api-transport.ts` or `transport-manager.ts` — wherever fallback logic lives.
-**Effort:** 15 min
+```json5
+{
+  "active": "ollama",
+  "profiles": {
+    "kiro": {
+      "transport": "acp",
+      "cli": "kiro-cli",
+      "agents": {
+        "professor": { "model": "claude-sonnet-4.6", "contextWindow": 1000000 },
+        "dreamy":    { "model": "claude-sonnet-4.6", "contextWindow": 128000 },
+        "browsie":   { "model": "claude-sonnet-4.6", "contextWindow": 128000 },
+        "coding":    { "model": "claude-sonnet-4.6", "contextWindow": 128000 }
+      }
+    },
+    "ollama": {
+      "transport": "api",
+      "endpoint": "http://localhost:11434/v1",
+      "agents": {
+        "professor": { "model": "kimi-k2.5:cloud", "contextWindow": 262144 },
+        "dreamy":    { "model": "minimax-m2.5:cloud", "contextWindow": 128000 },
+        "browsie":   { "model": "minimax-m2.5:cloud", "contextWindow": 131072 },
+        "coding":    { "model": "qwen3.5:cloud", "contextWindow": 131072 }
+      }
+    }
+  }
+}
+```
 
-### Step 2: Validate bridge.lock on subagent spawn
-Before spawning, check bridge.lock PID is alive (`kill(pid, 0)`). If stale (bridge crashed), fall back to env/config instead of trusting lock.
+### Step 2: loadTransportConfig()
+New function reads `transport.json`, returns typed config. Falls back to env vars if file missing (migration path).
 
-**Files:** `agent-registry.ts` — `createSubagentTransport()`
-**Effort:** 10 min
+### Step 3: Wire into bridge + subagents
+- `bridge-app.ts`: reads active profile, creates main transport
+- `createSubagentTransport()`: reads role's model + contextWindow from active profile
+- bridge.lock: still written (PID, heartbeat, lastPromptAt) but transport section removed — transport.json is the source of truth
+- Smart fallback: updates `active` field in transport.json (or a `runtime.activeProfile` override)
 
-### Step 3: transport.json (→ #118)
-Consolidate all transport config into one structured file. Replaces env vars, profiles, and bridge.lock transport section. Per-agent model + context window in one place. This is the proper long-term fix.
+### Step 4: Deploy + migration
+- `deploy.sh`: generates `transport.json` from existing `.env` transport profiles on first deploy
+- Existing `.env` transport vars still work as fallback (migration period)
+- Delete old profile `.env` files after migration confirmed
 
-**Depends on:** #118
-**Effort:** ~3hr (tracked separately)
+### Step 5: Delete old transport env vars
+- Remove `AGENT_TRANSPORT_PROFILE`, `AGENT_*_MODEL`, `AGENT_*_CTX_WINDOW`, `API_ENDPOINT` etc. from `.env.example`
+- Remove profile loading from `config.ts`
+- Delete `persona/core/transports/*.env`
 
-### Not fixing (edge cases)
-- Two bridges on same machine — not a real scenario (separate home dirs)
-- Model mismatch between lock and env — already handled by role-specific env reads in `createSubagentTransport`
+### Risks
+- JSON syntax error = bridge won't start. Mitigation: validate on load with try/catch + clear error message pointing to the file.
+- API keys stay in `.env` / `.env.local` — never in transport.json (secrets not in JSON).
+
+**Effort:** ~4hr total
