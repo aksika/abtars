@@ -605,7 +605,7 @@ export async function startBridge(): Promise<void> {
 
   // bridge.lock — track bridge lifecycle
   const bridgeLockPath = join(agentBridgeHome(), "bridge.lock");
-  try { writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf-8"); } catch { /* */ }
+  try { writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now(), transport: { type: config.transport.agentTransport, model: config.models.mainModel, endpoint: config.transport.agentTransport === "api" ? process.env["API_ENDPOINT"] : undefined } }), "utf-8"); } catch { /* */ }
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
 
