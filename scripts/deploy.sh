@@ -207,16 +207,6 @@ for f in "$CORE_SRC/"*.md; do
   [ -f "$f" ] && safe_cp "$f" "$AB_HOME/core/$(basename "$f")"
 done
 
-# Transport profiles (skip existing — may contain secrets)
-mkdir -p "$AB_HOME/transports"
-if [ -d "$CORE_SRC/transports" ]; then
-  for f in "$CORE_SRC/transports/"*.env; do
-    dest="$AB_HOME/transports/$(basename "$f")"
-    [ -f "$f" ] && [ ! -f "$dest" ] && cp "$f" "$dest"
-  done
-  echo "  ✓ Transport profiles deployed (existing preserved)"
-fi
-
 # Prompts: always from repo
 mkdir -p "$AB_HOME/prompts"
 for f in "$PROJECT_DIR/persona/prompts/"*.md; do
