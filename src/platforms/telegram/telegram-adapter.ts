@@ -173,38 +173,95 @@ export class TelegramAdapter implements PlatformAdapter {
     if (update.callback_query) {
       await this.api.answerCallbackQuery(update.callback_query.id);
       const data = update.callback_query.data ?? "";
-      if (data.startsWith("model:")) {
+      const chatId = update.callback_query.message?.chat?.id;
+      if (!chatId) return;
+
+      if (data.startsWith("mslot:")) {
+        // Step 1 → Step 2: user picked an agent slot, show providers
+        const slot = data.slice(6);
+        const { loadTransport, getAvailableProviders } = await import("../../components/transport-config.js");
+        const tc = loadTransport();
+        if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
+        const providers = getAvailableProviders(tc);
+        if (providers.length === 0) { await this.api.sendMessage(chatId, "❌ No available providers"); return; }
+        const buttons = providers.map(p => [{ text: p.name, callback_data: `mprov:${slot}:${p.name}` }]);
+        await this.api.sendMessage(chatId, "🔌 Pick provider:", { reply_markup: { inline_keyboard: buttons } });
+      } else if (data.startsWith("mprov:")) {
+        // Step 2 → Step 3: user picked provider, show models
+        const [, slot, providerName] = data.split(":");
+        const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
+        const models = getModelsForProvider(providerName!);
+        if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No models for ${providerName}`); return; }
+        const buttons = models.map(m => [{
+          text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`,
+          callback_data: `mset:${slot}:${providerName}:${m.id}`,
+        }]);
+        await this.api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
+      } else if (data.startsWith("mset:")) {
+        // Step 3: user picked model — liveness check + write + switch
+        const parts = data.split(":");
+        const slot = parts[1]!;
+        const providerName = parts[2]!;
+        const model = parts.slice(3).join(":"); // model may contain colons
+        const { loadTransport, writeTransportConfig } = await import("../../components/transport-config.js");
+        const tc = loadTransport();
+        if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
+
+        // Liveness check
+        const provider = tc.providers[providerName];
+        if (provider?.transport === "api") {
+          try {
+            const endpoint = provider.endpoint ?? "";
+            const apiKey = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : process.env["API_KEY"];
+            const headers: Record<string, string> = {};
+            if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+            const res = await fetch(`${endpoint}/models`, { headers, signal: AbortSignal.timeout(5000) });
+            if (!res.ok) { await this.api.sendMessage(chatId, `⚠️ ${providerName} unreachable (${res.status}). Try another?`); return; }
+          } catch { await this.api.sendMessage(chatId, `⚠️ ${providerName} unreachable. Try another?`); return; }
+        }
+
+        // Determine agent key
+        const agentKey = slot.startsWith("professor_fb") ? "professor" : slot;
+        const fbIndex = slot === "professor_fb1" ? 0 : slot === "professor_fb2" ? 1 : -1;
+
+        if (fbIndex >= 0) {
+          // Fallback change
+          if (!tc.agents["professor"]) tc.agents["professor"] = { model: "", provider: "" };
+          if (!tc.agents["professor"]!.fallbacks) tc.agents["professor"]!.fallbacks = [];
+          tc.agents["professor"]!.fallbacks[fbIndex] = { model, provider: providerName };
+          writeTransportConfig(tc);
+          await this.api.sendMessage(chatId, `✅ Fallback ${fbIndex + 1} → ${model} (${providerName})`);
+        } else {
+          // Main or subagent change
+          const oldProvider = tc.agents[agentKey]?.provider;
+          tc.agents[agentKey] = { ...tc.agents[agentKey]!, model, provider: providerName };
+          writeTransportConfig(tc);
+
+          const providerChanged = oldProvider !== providerName;
+          const isProfessor = agentKey === "professor";
+
+          if (isProfessor && !providerChanged && "setModel" in this.deps.transport) {
+            await (this.deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
+            await this.api.sendMessage(chatId, `✅ Switched to ${model}`);
+          } else if (isProfessor && providerChanged) {
+            await this.api.sendMessage(chatId, `🔌 Switching to ${model} (${providerName})... restarting.`);
+            process.exit(0);
+          } else {
+            // Subagent — no reset needed
+            await this.api.sendMessage(chatId, `✅ ${agentKey} → ${model} (${providerName}). Takes effect on next spawn.`);
+          }
+        }
+      } else if (data.startsWith("model:")) {
+        // Legacy callback — direct model switch
         const newModel = data.slice(6);
         const transport = this.deps.transport;
         if ("setModel" in transport && typeof (transport as { setModel: unknown }).setModel === "function") {
-          const chatId = update.callback_query.message?.chat?.id;
           try {
             await (transport as { setModel: (m: string) => Promise<void> | void }).setModel(newModel);
             if (chatId) await this.api.sendMessage(chatId, `🤖 Model switched → ${newModel}`);
           } catch (err) {
             if (chatId) await this.api.sendMessage(chatId, `❌ Model switch failed: ${err instanceof Error ? err.message : String(err)}`);
           }
-        }
-      } else if (data.startsWith("transport:")) {
-        const profile = data.slice(10);
-        const chatId = update.callback_query.message?.chat?.id;
-        if (chatId) await this.api.sendMessage(chatId, `🔌 Switching to ${profile}... restarting.`);
-        // Write profile to .env and restart
-        const { agentBridgeHome } = await import("../../paths.js");
-        const { writeFileSync, readFileSync } = await import("node:fs");
-        const { join } = await import("node:path");
-        const envPath = join(agentBridgeHome(), ".env");
-        try {
-          let env = readFileSync(envPath, "utf-8");
-          if (env.match(/^AGENT_TRANSPORT_PROFILE=.*/m)) {
-            env = env.replace(/^AGENT_TRANSPORT_PROFILE=.*/m, `AGENT_TRANSPORT_PROFILE=${profile}`);
-          } else {
-            env += `\nAGENT_TRANSPORT_PROFILE=${profile}\n`;
-          }
-          writeFileSync(envPath, env);
-          process.exit(0); // LaunchAgent restarts with new profile
-        } catch (err) {
-          if (chatId) await this.api.sendMessage(chatId, `❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
       return;

@@ -175,3 +175,56 @@ export function validateAtStartup(): void {
     }
   }
 }
+
+// ── Write ───────────────────────────────────────────────────────────────────
+
+export function writeTransportConfig(tc: TransportConfig): void {
+  const p = join(configDir(), process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
+  const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+  writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
+  cachedTransport = tc;
+  logInfo(TAG, "transport.json updated");
+}
+
+// ── Provider availability ───────────────────────────────────────────────────
+
+export function getAvailableProviders(tc: TransportConfig): Array<{ name: string; config: ProviderConfig }> {
+  const results: Array<{ name: string; config: ProviderConfig }> = [];
+  for (const [name, config] of Object.entries(tc.providers)) {
+    if (config.transport === "api") {
+      // API: needs apiKey resolved or no key needed (ollama)
+      if (config.apiKeyEnv) {
+        if (!process.env[config.apiKeyEnv]) continue;
+      }
+      results.push({ name, config });
+    } else {
+      // ACP/tmux: needs CLI in PATH
+      try {
+        const { execSync } = require("node:child_process") as typeof import("node:child_process");
+        execSync(`which ${config.cli ?? "kiro-cli"}`, { stdio: "pipe", timeout: 2000 });
+        results.push({ name, config });
+      } catch { /* CLI not found */ }
+    }
+  }
+  return results;
+}
+
+// ── Model helpers ───────────────────────────────────────────────────────────
+
+export function getModelsForProvider(providerName: string, models?: ModelCatalog): Array<{ id: string; entry: ModelEntry }> {
+  const mc = models ?? loadModels();
+  return Object.entries(mc)
+    .filter(([, entry]) => entry.transports.includes(providerName))
+    .map(([id, entry]) => ({ id, entry }))
+    .sort((a, b) => a.entry.rank - b.entry.rank || a.entry.cost.input - b.entry.cost.input);
+}
+
+export function formatRank(rank: number): string {
+  const stars = Math.max(1, Math.min(5, 6 - rank));
+  return "★".repeat(stars) + "☆".repeat(5 - stars);
+}
+
+export function formatCost(cost: ModelCost): string {
+  if (cost.input === 0 && cost.output === 0) return "free";
+  return `$${cost.input}/M in`;
+}

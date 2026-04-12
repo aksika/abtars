@@ -8,7 +8,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logInfo, logError } from "./logger.js";
-import { getBucketLevel } from "./transport/leaky-bucket.js";
+
 import { readEntries as cronReadEntries } from "./cron/cron-db.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import { agentBridgeHome } from "../paths.js";
@@ -333,71 +333,79 @@ async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolea
 }
 
 
-async function handleModels(_text: string, ctx: CommandContext): Promise<boolean> {
-  const transport = ctx.transport;
-  const isApi = ctx.config.agentTransport === "api";
+async function handleModels(text: string, ctx: CommandContext): Promise<boolean> {
+  const { loadTransport, resolveAgent, getModelsForProvider, writeTransportConfig } = await import("./transport-config.js");
+  const tc = loadTransport();
+  const prof = tc ? resolveAgent("professor", tc) : null;
+  const currentModel = "currentModel" in ctx.transport
+    ? (ctx.transport as unknown as { currentModel: string }).currentModel
+    : prof?.model ?? "unknown";
 
-  const currentModel = "currentModel" in transport
-    ? (transport as unknown as { currentModel: string }).currentModel
-    : process.env["AGENT_MAIN_MODEL"] ?? "unknown";
+  const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
-  // Fetch models from active endpoint only
-  let models: string[] = [];
-  if (isApi) {
-    const endpoint = process.env["API_ENDPOINT"] ?? "";
-    const apiKey = process.env["API_KEY"];
-    try {
-      const headers: Record<string, string> = {};
-      if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-      const res = await fetch(`${endpoint}/models`, { headers, signal: AbortSignal.timeout(5000) });
-      if (res.ok) {
-        const data = await res.json() as { data?: Array<{ id: string; created?: number; context_length?: number }> };
-        const allModels = data.data ?? [];
-        if (endpoint.includes("openrouter")) {
-          const cutoff = (Date.now() / 1000) - (60 * 86400);
-          models = allModels
-            .filter(m => m.id.includes(":free") && (m.created ?? 0) > cutoff)
-            .sort((a, b) => (b.context_length ?? 0) - (a.context_length ?? 0))
-            .slice(0, 10)
-            .map(m => m.id);
-        } else {
-          models = allModels.map(m => m.id).sort();
-        }
-      }
-    } catch { /* */ }
-  }
-
-  // Fallback: AGENT_AVAILABLE_MODELS env
-  if (models.length === 0) {
-    const configured = process.env["AGENT_AVAILABLE_MODELS"];
-    if (configured) models = configured.split(",").map(m => m.trim()).filter(Boolean);
-  }
-
-  // Also include fallback models from current transport
-  for (let i = 1; i <= 5; i++) {
-    const m = process.env[`API_FALLBACK_${i}_MODEL`];
-    if (m && !models.includes(m)) models.push(m);
-  }
-
-  // Ensure current model is in list
-  if (!models.includes(currentModel)) models.unshift(currentModel);
-
-  if (models.length > 0) {
-    const COLS = 1;
-    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
-    for (let i = 0; i < models.length; i += COLS) {
-      const row = models.slice(i, i + COLS).map(m => ({
-        text: m === currentModel ? `✓ ${m}` : m,
-        callback_data: `model:${m}`,
-      }));
-      buttons.push(row);
+  // /models status — all agents
+  if (arg === "status") {
+    const agents = ["professor", "dreamy", "browsie", "coding"] as const;
+    const names: Record<string, string> = { professor: "Professor", dreamy: "Dreamy", browsie: "Browsie", coding: "Cody" };
+    const lines = ["📋 Agent models:"];
+    for (const a of agents) {
+      const r = tc ? resolveAgent(a, tc) : null;
+      lines.push(`  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`);
     }
-    await ctx.reply(`📋 Models (${models.length}) — tap to switch:`, {
-      reply_markup: { inline_keyboard: buttons },
-    });
-  } else {
-    await ctx.reply(`🤖 Model: ${currentModel}\n\nSet AGENT_AVAILABLE_MODELS in .env to enable model switching.`);
+    lines.push("  Cron: inherits Professor");
+    await ctx.reply(lines.join("\n"));
+    return true;
   }
+
+  // /models quick <model> — instant switch
+  if (arg.startsWith("quick ") || arg.startsWith("switch ")) {
+    const newModel = arg.split(" ").slice(1).join(" ").trim();
+    if (!newModel) { await ctx.reply("Usage: /models quick <model>"); return true; }
+    if (!tc || !prof) { await ctx.reply("❌ transport.json not loaded"); return true; }
+
+    // Check if model is available on current provider
+    const models = getModelsForProvider(prof.providerName);
+    const match = models.find(m => m.id === newModel);
+    if (!match) {
+      await ctx.reply(`❌ ${newModel} not available on ${prof.providerName}. Use /models change to switch provider.`);
+      return true;
+    }
+
+    // Write + switch
+    tc.agents["professor"]!.model = newModel;
+    writeTransportConfig(tc);
+    if ("setModel" in ctx.transport) {
+      await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
+    }
+    await ctx.reply(`✅ Switched to ${newModel}`);
+    return true;
+  }
+
+  // /models change — 3-step picker
+  if (arg === "change") {
+    const AGENT_LABELS: Array<{ key: string; label: string }> = [
+      { key: "professor", label: "Professor (main)" },
+      { key: "professor_fb1", label: "Professor fallback 1" },
+      { key: "professor_fb2", label: "Professor fallback 2" },
+      { key: "dreamy", label: "Dreamy (sleep)" },
+      { key: "browsie", label: "Browsie (browse)" },
+      { key: "coding", label: "Cody (coding)" },
+    ];
+    const buttons = AGENT_LABELS.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
+    await ctx.reply("🤖 Which agent to change?", { reply_markup: { inline_keyboard: buttons } });
+    return true;
+  }
+
+  // /models (no arg) — show current
+  const lines = [`🤖 Model: ${currentModel}`];
+  if (prof) {
+    lines.push(`🔌 Provider: ${prof.providerName} (${prof.provider.transport})`);
+    if (prof.fallbacks.length > 0) {
+      lines.push(`🛡️ Fallbacks: ${prof.fallbacks.map(f => `${f.model} (${f.provider})`).join(", ")}`);
+    }
+  }
+  lines.push("\nUse /models change to switch.");
+  await ctx.reply(lines.join("\n"));
   return true;
 }
 
@@ -532,9 +540,10 @@ async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean
 }
 
 async function handleTransport(text: string, ctx: CommandContext): Promise<boolean> {
+  // /transport is now an alias for /models
   const arg = text.replace(/^\/transport\s*/i, "").trim().toLowerCase();
 
-  // /transport restore — force switch back to primary
+  // /transport restore — keep this for fallback recovery
   if (arg === "primary" || arg === "restore") {
     const t = ctx.transport;
     if ("forceRestorePrimary" in t && typeof (t as { forceRestorePrimary: unknown }).forceRestorePrimary === "function") {
@@ -550,120 +559,8 @@ async function handleTransport(text: string, ctx: CommandContext): Promise<boole
     return true;
   }
 
-  // /transport change — list available profiles as inline keyboard
-  if (arg === "change" || arg === "switch") {
-    const transportsDir = join(agentBridgeHome(), "transports");
-    let profiles: string[] = [];
-    try {
-      profiles = readdirSync(transportsDir).filter(f => f.endsWith(".env")).map(f => f.replace(".env", "")).sort();
-    } catch { /* dir doesn't exist */ }
-
-    if (profiles.length === 0) {
-      await ctx.reply("🔌 No transport profiles found in ~/.agentbridge/transports/");
-      return true;
-    }
-
-    const currentProfile = process.env["AGENT_TRANSPORT_PROFILE"] || "default";
-    const buttons = profiles.map(p => [{
-      text: p === currentProfile ? `✓ ${p}` : p,
-      callback_data: `transport:${p}`,
-    }]);
-    await ctx.reply("🔌 Select transport profile:", { reply_markup: { inline_keyboard: buttons } });
-    return true;
-  }
-
-  const profile = process.env["AGENT_TRANSPORT_PROFILE"] || "default";
-  const transport = process.env["AGENT_TRANSPORT"] || "acp";
-  const cli = process.env["AGENT_CLI"] || "unknown";
-  const configModel = process.env["AGENT_MAIN_MODEL"] || process.env["AGENT_MAIN_MODEL"] || "unknown";
-  const activeModel = ("currentModel" in ctx.transport) ? (ctx.transport as unknown as { currentModel: string }).currentModel : configModel;
-  const endpoint = process.env["API_ENDPOINT"] || "";
-  const providerLabel = (ep: string): string => {
-    try { return ep.includes("openrouter") ? "openrouter" : ep.includes("11434") ? "ollama" : ep.includes("20128") ? "9router" : new URL(ep).hostname; }
-    catch { return "unknown"; }
-  };
-  const lines: string[] = [`🔌 Transport: ${transport} (${profile})`];
-
-  if (transport === "api" && endpoint) {
-    const modelDisplay = activeModel !== configModel ? `${activeModel} (fallback)` : activeModel;
-    lines.push(`  Model: ${modelDisplay}`);
-
-    // Connection + provider-specific info
-    try {
-      if (endpoint.includes("openrouter")) {
-        const key = process.env["API_KEY"] || "";
-        const res = await fetch("https://openrouter.ai/api/v1/auth/key", {
-          headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(3000),
-        });
-        if (res.ok) {
-          const d = (await res.json() as { data: Record<string, unknown> }).data;
-          lines.push(`  Status: ✓ Connected`);
-          lines.push(`  Tier: ${d.is_free_tier ? "free" : "paid"}`);
-          lines.push(`  Credits: $${d.limit_remaining} remaining / $${d.usage} used`);
-          const rl = d.rate_limit as { requests: number } | undefined;
-          lines.push(`  Rate: ${rl?.requests === -1 ? "unlimited" : `${rl?.requests ?? "?"} req/interval`}`);
-        } else { lines.push(`  Status: ❌ Auth failed (${res.status})`); }
-      } else if (endpoint.includes("11434")) {
-        // Ollama
-        const res = await fetch(endpoint.replace("/v1", "/api/ps"), { signal: AbortSignal.timeout(3000) });
-        if (res.ok) {
-          const d = await res.json() as { models?: Array<{ name: string; size: number }> };
-          lines.push(`  Status: ✓ Connected`);
-          const running = d.models ?? [];
-          if (running.length > 0) {
-            for (const m of running) lines.push(`  Running: ${m.name} (${(m.size / 1e9).toFixed(1)}GB)`);
-          } else { lines.push(`  Running: none`); }
-          const tags = await fetch(endpoint.replace("/v1", "/api/tags"), { signal: AbortSignal.timeout(3000) });
-          if (tags.ok) {
-            const t = await tags.json() as { models?: unknown[] };
-            lines.push(`  Available: ${t.models?.length ?? 0} models`);
-          }
-        } else { lines.push(`  Status: ❌ Unreachable`); }
-      } else {
-        // Generic API (9Router etc)
-        const res = await fetch(`${endpoint}/models`, { signal: AbortSignal.timeout(3000) });
-        lines.push(res.ok ? `  Status: ✓ Connected` : `  Status: ❌ Unreachable (${res.status})`);
-        if (res.ok) {
-          const d = await res.json() as { data?: unknown[] };
-          lines.push(`  Models: ${d.data?.length ?? "?"} available`);
-        }
-      }
-    } catch { lines.push(`  Status: ❌ Unreachable`); }
-  } else {
-    // ACP transport
-    lines.push(`  CLI: ${cli}`, `  Model: ${configModel}`);
-    lines.push(`  Context: ${ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a"}`);
-    lines.push(`  Status: ${ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected"}`);
-  }
-
-  // Bucket health (API transport)
-  if (transport === "api") {
-    const candidates = [
-      { endpoint, model: configModel },
-      ...Array.from({ length: 5 }, (_, i) => ({
-        endpoint: process.env[`API_FALLBACK_${i + 1}_ENDPOINT`] ?? "",
-        model: process.env[`API_FALLBACK_${i + 1}_MODEL`] ?? "",
-      })).filter(c => c.endpoint && c.model),
-    ];
-    if (candidates.length > 1) {
-      lines.push("  Models:");
-      for (const c of candidates) {
-        const lvl = getBucketLevel(`${c.endpoint}|${c.model}`);
-        const bar = lvl > 70 ? "🔴" : lvl > 30 ? "🟡" : "🟢";
-        lines.push(`    ${bar} ${c.model} [${providerLabel(c.endpoint)}] (${lvl}%)`);
-      }
-    }
-  }
-
-  // Fallback status
-  const t = ctx.transport;
-  if ("isOnFallback" in t) {
-    const onFb = (t as unknown as { isOnFallback: boolean }).isOnFallback;
-    lines.push(onFb ? "  ⚠️ Currently on FALLBACK transport" : "  ✓ On primary transport");
-    if (onFb) lines.push("  Use /transport restore to switch back.");
-  }
-  await ctx.reply(lines.join("\n"));
-  return true;
+  // Everything else → /models
+  return handleModels(text.replace(/^\/transport/i, "/models"), ctx);
 }
 
 function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string> {
@@ -689,53 +586,46 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   } catch { /* */ }
 
   // Fire async checks in parallel
-  const [modelRaw, mcpRaw] = await Promise.all([
-    process.env["AGENT_MAIN_MODEL"]
-      ? Promise.resolve("")
-      : execAsync("kiro-cli", ["settings", "list", "--format", "json"], 3000),
+  const [, mcpRaw] = await Promise.all([
+    Promise.resolve(""),
     execAsync("mcporter", ["list", "--json"], 15_000),
   ]);
 
-  let model = process.env["AGENT_MAIN_MODEL"] || "";
+  let model = "unknown";
   if ("currentModel" in ctx.transport) {
     model = (ctx.transport as unknown as { currentModel: string }).currentModel;
-  } else if (!model) {
-    try { model = JSON.parse(modelRaw)["chat.defaultModel"] || "unknown"; } catch { model = "unknown"; }
+  } else {
+    const { loadTransport, resolveAgent } = await import("./transport-config.js");
+    const tc = loadTransport();
+    const prof = tc ? resolveAgent("professor", tc) : null;
+    model = prof?.model ?? "unknown";
   }
 
   const transportStatus = ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected";
-  const mode = ctx.config.agentTransport.toUpperCase();
   const uptime = formatUptime(Date.now() - ctx.startedAt);
   const ctxPct = ctx.transport.contextPercent >= 0
     ? `${ctx.transport.contextPercent}%`
     : "n/a";
   const cronInfo = ctx.memory?.getCronInfo();
 
-  // Transport details
-  const endpoint = process.env["API_ENDPOINT"];
-  const provider = mode === "API" && endpoint
-    ? (process.env["AGENT_TRANSPORT_PROFILE"] || endpoint.replace(/^https?:\/\//, "").split(/[/:]/)[0]!)
-    : (process.env["AGENT_CLI"] || "kiro");
+  // Transport details from transport.json
+  const { loadTransport: lt, resolveAgent: ra } = await import("./transport-config.js");
+  const tc = lt();
+  const prof = tc ? ra("professor", tc) : null;
+  const provider = prof?.providerName ?? "unknown";
+  const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
   const transportLine = `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`;
 
-  // Fallback model(s)
-  const fallbackModels: string[] = [];
-  for (let i = 1; i <= 5; i++) {
-    const fm = process.env[`API_FALLBACK_${i}_MODEL`];
-    if (fm) fallbackModels.push(fm);
-  }
-
-  // Fallback transport
-  const fallbackTransport = process.env["TRANSPORT_FALLBACK"];
+  // Fallbacks from transport.json
+  const fallbackModels = prof?.fallbacks.map(f => `${f.model} (${f.provider})`) ?? [];
 
   const lines = [
     `AgentBridge v${version}${buildInfo}`,
     `🤖 Model: ${model}`,
-    ...(fallbackModels.length > 0 ? [`   Fallback model: ${fallbackModels.join(", ")}`] : []),
+    ...(fallbackModels.length > 0 ? [`   Fallbacks: ${fallbackModels.join(", ")}`] : []),
     `📊 Context window: ${ctxPct}`,
     `⏱️ Uptime: ${uptime}`,
     transportLine,
-    ...(fallbackTransport ? [`   Fallback transport: ${fallbackTransport}`] : []),
   ];
   if (cronInfo) {
     const mins = Math.round(cronInfo.intervalMs / 60000);
