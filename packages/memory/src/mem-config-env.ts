@@ -29,7 +29,7 @@ const DEFAULTS: MemoryEnvConfig = {
 
 /** Load .env.memory from ~/.agentbridge/.env.memory. Falls back to defaults. */
 export function loadMemoryEnv(): MemoryEnvConfig {
-  const envPath = join(agentBridgeHome(), ".env.memory");
+  const envPath = join(agentBridgeHome(), "config", ".env.memory");
   if (existsSync(envPath)) {
     const lines = readFileSync(envPath, "utf-8").split("\n");
     for (const line of lines) {

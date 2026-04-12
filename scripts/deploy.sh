@@ -103,23 +103,37 @@ merge_env() {
 merge_env "$PROJECT_DIR/.env.example" "$AB_HOME/.env"
 
 # .env.memory (ABM config — create from example if missing)
-if [ ! -f "$AB_HOME/.env.memory" ]; then
-  cp "$PROJECT_DIR/.env.memory.example" "$AB_HOME/.env.memory"
-  chmod 600 "$AB_HOME/.env.memory"
+if [ ! -f "$AB_HOME/config/.env.memory" ]; then
+  cp "$PROJECT_DIR/.env.memory.example" "$AB_HOME/config/.env.memory"
+  chmod 600 "$AB_HOME/config/.env.memory"
   echo "   ℹ️  Created .env.memory from example"
 fi
-chmod 600 "$AB_HOME/.env.memory" 2>/dev/null
+chmod 600 "$AB_HOME/config/.env.memory" 2>/dev/null
 
 # .env.skills (skill/integration config — create from example if missing)
-if [ ! -f "$AB_HOME/.env.skills" ]; then
-  cp "$PROJECT_DIR/.env.skills.example" "$AB_HOME/.env.skills"
-  chmod 600 "$AB_HOME/.env.skills"
+if [ ! -f "$AB_HOME/config/.env.skills" ]; then
+  cp "$PROJECT_DIR/.env.skills.example" "$AB_HOME/config/.env.skills"
+  chmod 600 "$AB_HOME/config/.env.skills"
   echo "   ℹ️  Created .env.skills from example — edit with your integration keys"
 fi
-chmod 600 "$AB_HOME/.env.skills" 2>/dev/null
+chmod 600 "$AB_HOME/config/.env.skills" 2>/dev/null
+
+# transport.json + models.json (create from examples if missing)
+if [ ! -f "$AB_HOME/config/transport.json" ]; then
+  cp "$PROJECT_DIR/config/transport.json.example" "$AB_HOME/config/transport.json"
+  echo "   ℹ️  Created transport.json from example — edit with your providers"
+fi
+if [ ! -f "$AB_HOME/config/models.json" ]; then
+  cp "$PROJECT_DIR/config/models.json.example" "$AB_HOME/config/models.json"
+  echo "   ℹ️  Created models.json from example"
+fi
+chmod 700 "$AB_HOME/config"
 
 # auto-fix.json (self-healer rules — KEPT if newer)
 mkdir -p "$AB_HOME/config"
+# Migrate old config files to config/ (one-time)
+[ -f "$AB_HOME/.env.memory" ] && [ ! -f "$AB_HOME/config/.env.memory" ] && mv "$AB_HOME/.env.memory" "$AB_HOME/config/.env.memory" && echo "   ↗ Migrated .env.memory → config/"
+[ -f "$AB_HOME/.env.skills" ] && [ ! -f "$AB_HOME/config/.env.skills" ] && mv "$AB_HOME/.env.skills" "$AB_HOME/config/.env.skills" && echo "   ↗ Migrated .env.skills → config/"
 if [ -f "$PROJECT_DIR/persona/config/auto-fix.json" ]; then
   if [ ! -f "$AB_HOME/config/auto-fix.json" ] || [ "$PROJECT_DIR/persona/config/auto-fix.json" -nt "$AB_HOME/config/auto-fix.json" ]; then
     cp "$PROJECT_DIR/persona/config/auto-fix.json" "$AB_HOME/config/auto-fix.json"

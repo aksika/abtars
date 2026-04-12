@@ -89,7 +89,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   loadDotenv({ path: envPath });
 
   // Load .env.skills (skill/integration config — HA, Groq, embedding, NLM — never touched by deploy)
-  const skillsEnvPath = resolve(agentBridgeHome(), ".env.skills");
+  const skillsEnvPath = resolve(agentBridgeHome(), "config", ".env.skills");
   loadDotenv({ path: skillsEnvPath, override: true });
 
   // Load transport profile (e.g. transports/kiro.env) — overrides AGENT_* vars
