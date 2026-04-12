@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { config as loadDotenv } from "dotenv";
 import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/index.js";
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
-import { logInfo } from "./logger.js";
+import { logWarn } from "./logger.js";
 import type { LogLevel } from "./logger.js";
 export { agentBridgeHome } from "../paths.js";
 import { agentBridgeHome } from "../paths.js";
@@ -92,12 +92,13 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const skillsEnvPath = resolve(agentBridgeHome(), "config", ".env.skills");
   loadDotenv({ path: skillsEnvPath, override: true });
 
-  // Load transport profile (e.g. transports/kiro.env) — overrides AGENT_* vars
-  const transportProfile = process.env["AGENT_TRANSPORT_PROFILE"];
-  if (transportProfile) {
-    const profilePath = resolve(agentBridgeHome(), "transports", `${transportProfile}.env`);
-    loadDotenv({ path: profilePath, override: true });
-    logInfo("config", `Loaded transport profile: ${transportProfile}`);
+  // Load transport.json + models.json (replaces transport profile .env files)
+  const { loadTransport, validateAtStartup } = await import("./transport-config.js");
+  const tc = loadTransport();
+  if (tc) {
+    validateAtStartup();
+  } else {
+    logWarn("config", "transport.json not loaded — using .env defaults");
   }
 
   // --- TELEGRAM_BOT_TOKEN (required) ---

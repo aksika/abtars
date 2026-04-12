@@ -150,7 +150,7 @@ export class Bridge {
   async initTransport(): Promise<void> {
     const config = this.config;
 
-    // Pre-flight: tmux session
+    // Pre-flight: tmux session (resolved below, but need config early for tmux script)
     if (config.transport.agentTransport === "tmux") {
       logInfo("main", `♻️  Starting tmux session '${config.transport.tmuxSession}'...`);
       try {
@@ -161,42 +161,56 @@ export class Bridge {
     }
 
     let transport: IKiroTransport;
-    if (config.transport.agentTransport === "tmux") {
-      logInfo("main", `🖥️  tmux transport (session: ${config.transport.tmuxSession})`);
+
+    // Resolve professor config from transport.json (falls back to .env)
+    const { resolveAgent, getEnvFallback, loadTransport } = await import("./components/transport-config.js");
+    const tc = loadTransport();
+    const prof = tc ? resolveAgent("professor", tc) : null;
+    const resolved = prof ?? (() => {
+      const fb = getEnvFallback();
+      logWarn("main", `⚠️ Using .env fallback: ${fb.model} via ${fb.providerName}`);
+      return { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
+    })();
+
+    if (resolved.provider.transport === "tmux") {
+      const defaults = tc?.transportDefaults?.tmux;
+      logInfo("main", `🖥️  tmux transport (${resolved.providerName})`);
       transport = new TmuxClient(
-        config.transport.tmuxSession,
-        config.transport.tmuxCaptureDelaySec,
-        config.transport.tmuxMaxWaitSec,
+        defaults?.session ?? config.transport.tmuxSession,
+        defaults?.captureDelaySec ?? config.transport.tmuxCaptureDelaySec,
+        defaults?.maxWaitSec ?? config.transport.tmuxMaxWaitSec,
       );
-    } else if (config.transport.agentTransport === "api") {
+    } else if (resolved.provider.transport === "api") {
       const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
-      const fallbacks: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }> = [];
-      for (let i = 1; i <= 5; i++) {
-        const ep = process.env[`API_FALLBACK_${i}_ENDPOINT`];
-        const m = process.env[`API_FALLBACK_${i}_MODEL`];
-        if (ep && m) fallbacks.push({
-          endpoint: ep, apiKey: process.env[`API_FALLBACK_${i}_KEY`], model: m,
-          maxContext: parseInt(process.env[`API_FALLBACK_${i}_MAX_CONTEXT`] ?? "0", 10) || undefined,
-        });
-      }
+      const apiKey = resolved.provider.apiKeyEnv ? process.env[resolved.provider.apiKeyEnv] : process.env["API_KEY"];
+      const fallbacks = resolved.fallbacks.map(fb => {
+        const fbResolved = tc ? resolveAgent("_fallback", { ...tc, agents: { ...tc.agents, _fallback: { model: fb.model, provider: fb.provider } } }) : null;
+        return {
+          endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint!,
+          apiKey: fbResolved?.provider.apiKeyEnv ? process.env[fbResolved.provider.apiKeyEnv] : apiKey,
+          model: fb.model,
+          maxContext: fbResolved?.contextWindow,
+        };
+      });
       transport = new DirectApiTransport({
-        endpoint: process.env["API_ENDPOINT"] ?? "http://localhost:20128/v1",
-        apiKey: process.env["API_KEY"],
-        model: process.env["AGENT_MAIN_MODEL"] ?? config.models.mainModel ?? "gpt-4o",
-        maxContext: parseInt(process.env["API_MAX_CONTEXT"] ?? "131072", 10),
-        maxOutput: parseInt(process.env["API_MAX_OUTPUT"] ?? "8192", 10),
-        maxTurns: parseInt(process.env["API_MAX_TURNS"] ?? "50", 10),
+        endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
+        apiKey,
+        model: resolved.model,
+        maxContext: resolved.contextWindow,
+        maxOutput: resolved.maxOutput,
+        maxTurns: tc?.maxTurns ?? 50,
         fallbacks: fallbacks.length > 0 ? fallbacks : undefined,
       });
-      // Fallback notification wired after bridge creation (see below)
+      logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model})`);
     } else {
+      // ACP
       try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
-      logInfo("main", `🔌 ACP transport (${config.transport.agentCli})`);
+      logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
       transport = createAgentTransport("professor", {
-        cliPath: config.transport.agentCliPath,
+        cliPath: resolved.provider.cli ?? config.transport.agentCliPath,
         workingDir: config.transport.workingDir,
-        agentCli: config.transport.agentCli,
-        model: config.models.mainModel || undefined,
+        agentCli: resolved.provider.cli ?? config.transport.agentCli,
+        model: resolved.model,
       });
     }
 
@@ -209,39 +223,32 @@ export class Bridge {
       if (soul) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(soul);
     }
 
-    // Wrap with TransportManager if fallback configured
-    const fallbackType = process.env["TRANSPORT_FALLBACK"];
-    if (fallbackType && fallbackType !== config.transport.agentTransport) {
+    // Wrap with TransportManager if professor has fallbacks
+    if (resolved.fallbacks.length > 0 && resolved.provider.transport !== "api") {
+      // Non-API transports use TransportManager for fallback (API handles it internally via DirectApiTransport fallbacks)
       const { TransportManager } = await import("./components/transport/transport-manager.js");
+      const fb = resolved.fallbacks[0]!;
       transport = new TransportManager(transport, {
         createFallback: async () => {
-          if (fallbackType === "acp") {
-            logInfo("main", "🔄 Initializing ACP fallback transport...");
-            return createAgentTransport("professor", {
-              cliPath: config.transport.agentCliPath,
-              workingDir: config.transport.workingDir,
-              model: config.models.mainModel || undefined,
-            });
-          } else if (fallbackType === "api") {
+          const fbAgent = tc ? resolveAgent("_fb", { ...tc, agents: { ...tc.agents, _fb: { model: fb.model, provider: fb.provider } } }) : null;
+          if (fbAgent?.provider.transport === "api") {
             const { DirectApiTransport } = await import("./components/transport/direct-api-transport.js");
             return new DirectApiTransport({
-              endpoint: process.env["FALLBACK_API_ENDPOINT"] ?? "http://localhost:20128/v1",
-              apiKey: process.env["FALLBACK_API_KEY"],
-              model: process.env["FALLBACK_API_MODEL"] ?? "gpt-4o",
-              maxContext: 131072, maxOutput: 8192, maxTurns: 50,
+              endpoint: fbAgent.provider.endpoint!, apiKey: fbAgent.provider.apiKeyEnv ? process.env[fbAgent.provider.apiKeyEnv] : undefined,
+              model: fb.model, maxContext: fbAgent.contextWindow, maxOutput: fbAgent.maxOutput, maxTurns: tc?.maxTurns ?? 50,
             });
           }
-          throw new Error(`Unknown fallback transport: ${fallbackType}`);
+          return createAgentTransport("professor", { cliPath: fbAgent?.provider.cli ?? "kiro-cli", workingDir: config.transport.workingDir, model: fb.model });
         },
       });
-      logInfo("main", `🛡️ Transport fallback configured: ${fallbackType}`);
+      logInfo("main", `🛡️ Transport fallback: ${fb.model} via ${fb.provider}`);
     }
 
     this.transport = transport;
     logInfo("main", "✅ Transport ready");
 
     // Wire in-process memory for direct API transport
-    if (config.transport.agentTransport === "api" && this.memory) {
+    if (resolved.provider.transport === "api" && this.memory) {
       const { setMemoryBackend } = await import("./components/transport/tool-registry.js");
       const { SqliteBackend } = await import("abmind/sqlite-backend.js");
       const backend = new SqliteBackend(this.memoryConfig);
