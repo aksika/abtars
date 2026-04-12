@@ -1,185 +1,209 @@
 # #128 Transport/Model Consistency — transport.json + models.json
 
 **Date:** 2026-04-12
-**Status:** Step 0 done, planning
+**Status:** Planned
 **Priority:** CRITICAL
 **Merges:** #119
 
 ## Problem
 
-Transport and model config scattered across 4 places:
-- `.env` transport vars (`AGENT_TRANSPORT`, `API_ENDPOINT`, etc.)
-- Transport profile `.env` files (`persona/core/transports/*.env`)
-- Per-agent env vars (`AGENT_SLEEP_MODEL`, `AGENT_CODING_CTX_WINDOW`, etc.)
-- `bridge.lock` transport section (runtime truth, added in step 0)
-
-Subagents get confused. Config is duplicated. Model properties (context window) are repeated per profile.
+Transport and model config scattered across env vars, profile .env files, per-agent env vars, and bridge.lock. Subagents get confused. Config is duplicated. Model properties repeated per profile.
 
 ## Solution
 
-Two structured JSON files:
+Two structured JSON files in `~/.agentbridge/config/`.
 
-### models.json — Model catalog (define once, use everywhere)
+### models.json — Model catalog (hot-reloaded)
 
 ```json5
-// ~/.agentbridge/models.json
 {
-  "kimi-k2.5:cloud":      { "contextWindow": 262144, "maxOutput": 16384, "alias": "Kimi" },
-  "minimax-m2.5:cloud":   { "contextWindow": 128000, "maxOutput": 8192,  "alias": "MiniMax" },
-  "qwen3.5:cloud":        { "contextWindow": 131072, "maxOutput": 8192,  "alias": "Qwen" },
-  "claude-sonnet-4.6":    { "contextWindow": 1000000, "maxOutput": 16384, "alias": "Sonnet" },
-  "gemini-2.5-flash":     { "contextWindow": 1000000, "maxOutput": 65536, "alias": "Flash" }
+  "claude-opus-5":        { "contextWindow": 1000000, "maxOutput": 32768, "rank": 1, "cost": { "input": 15.0, "output": 75.0 },  "transports": ["kiro-paid"] },
+  "claude-sonnet-4.6":    { "contextWindow": 1000000, "maxOutput": 16384, "rank": 2, "cost": { "input": 3.0,  "output": 15.0 },  "transports": ["kiro-free", "kiro-paid"] },
+  "gemini-2.5-pro":       { "contextWindow": 1000000, "maxOutput": 65536, "rank": 2, "cost": { "input": 1.25, "output": 10.0 },  "transports": ["gemini-paid"] },
+  "gemini-2.5-flash":     { "contextWindow": 1000000, "maxOutput": 65536, "rank": 3, "cost": { "input": 0.15, "output": 0.60 },  "transports": ["gemini-free", "gemini-paid"] },
+  "kimi-k2.5:cloud":      { "contextWindow": 262144,  "maxOutput": 16384, "rank": 2, "cost": { "input": 0.0,  "output": 0.0 },   "transports": ["ollama", "openrouter"] },
+  "minimax-m2.5:cloud":   { "contextWindow": 128000,  "maxOutput": 8192,  "rank": 3, "cost": { "input": 0.0,  "output": 0.0 },   "transports": ["ollama", "openrouter"] },
+  "qwen3.5:cloud":        { "contextWindow": 131072,  "maxOutput": 8192,  "rank": 3, "cost": { "input": 0.0,  "output": 0.0 },   "transports": ["ollama", "openrouter"] }
 }
 ```
 
-- Context window, max output are model properties — defined once
-- `alias` for display/logging
-- Model scout skill (#90) can append new models here
-- `AGENT_AVAILABLE_MODELS` becomes the keys of this file
+- Hot-reloaded on each use (agent can add models via model scout at runtime)
+- `transports[]` informational — validated at startup, warning log if mismatch
+- Cost per 1M tokens. Rank 1=frontier, 5=basic.
 
-### transport.json — Routing (how to reach models, which agent uses what)
+### transport.json — Routing (read at startup)
 
 ```json5
-// ~/.agentbridge/transport.json
 {
-  "active": "ollama",
-  "maxTurns": 50,
-  "profiles": {
-    "kiro": {
-      "transport": "acp",
-      "cli": "kiro-cli",
-      "agents": {
-        "professor": "claude-sonnet-4.6",
-        "dreamy":    "claude-sonnet-4.6",
-        "browsie":   "claude-sonnet-4.6",
-        "coding":    "claude-sonnet-4.6"
-      }
-    },
-    "gemini": {
-      "transport": "acp",
-      "cli": "gemini",
-      "agents": {
-        "professor": "gemini-2.5-flash",
-        "dreamy":    "gemini-2.5-flash",
-        "browsie":   "gemini-2.5-flash",
-        "coding":    "gemini-2.5-flash"
-      }
-    },
-    "ollama": {
-      "transport": "api",
-      "endpoint": "http://localhost:11434/v1",
-      "agents": {
-        "professor": "kimi-k2.5:cloud",
-        "dreamy":    "minimax-m2.5:cloud",
-        "browsie":   "minimax-m2.5:cloud",
-        "coding":    "qwen3.5:cloud"
-      }
-    },
-    "openrouter": {
-      "transport": "api",
-      "endpoint": "https://openrouter.ai/api/v1",
-      "apiKeyEnv": "OPENROUTER_API_KEY",
-      "agents": {
-        "professor": "kimi-k2.5:cloud",
-        "dreamy":    "minimax-m2.5:cloud",
-        "browsie":   "minimax-m2.5:cloud",
-        "coding":    "qwen3.5:cloud"
-      }
-    }
-  }
+  "agents": {
+    "professor": { "model": "claude-sonnet-4.6",  "provider": "kiro-free", "fallbacks": [{ "model": "kimi-k2.5:cloud", "provider": "ollama" }] },
+    "dreamy":    { "model": "minimax-m2.5:cloud", "provider": "ollama" },
+    "browsie":   { "model": "minimax-m2.5:cloud", "provider": "ollama" },
+    "coding":    { "model": "qwen3.5:cloud",      "provider": "ollama" }
+  },
+  "providers": {
+    "kiro-free":   { "transport": "acp", "cli": "kiro-cli" },
+    "kiro-paid":   { "transport": "acp", "cli": "kiro-cli" },
+    "gemini-free": { "transport": "acp", "cli": "gemini" },
+    "gemini-paid": { "transport": "acp", "cli": "gemini" },
+    "ollama":      { "transport": "api", "endpoint": "http://localhost:11434/v1" },
+    "openrouter":  { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" }
+  },
+  "transportDefaults": {
+    "tmux": { "session": "kiro-bridge", "captureDelaySec": 3, "maxWaitSec": 300 },
+    "acp":  { "permissionTimeoutMs": 60000 }
+  },
+  "maxTurns": 50
 }
 ```
 
-- `active` selects the profile
-- Agent assignment is a string referencing models.json
-- `apiKeyEnv` points to env var name (secrets stay in `.env`)
-- `maxTurns` is global (not model-specific)
-- `cron` role not listed — inherits professor's model
+- Each agent declares its own model + provider
+- `fallbacks` only on professor — format: `{ "model": "...", "provider": "..." }` object. Leaky bucket reads from this.
+- Subagents have no fallbacks — they always fall back to professor's configured model+provider
+- `cron` not listed — inherits professor
+- `apiKeyEnv` = env var name, resolved at runtime from .env
 
-### Resolution flow
+### .env — Secrets + emergency fallback
+
+Stays at `~/.agentbridge/.env` (not moved to config/).
+
+```env
+# Config paths (relative to ~/.agentbridge/)
+TRANSPORT_CONFIG=config/transport.json
+MODELS_CONFIG=config/models.json
+
+# Emergency fallback (used when JSON parse fails)
+DEFAULT_PROVIDER=openrouter
+DEFAULT_TRANSPORT=api
+DEFAULT_MODEL=minimax-m2.5:cloud
+
+# Secrets (never in JSON)
+API_KEY=
+OPENROUTER_API_KEY=sk-or-...
+GROQ_API_KEY=gsk_...
+TELEGRAM_BOT_TOKEN=...
+ALLOWED_USER_IDS=...
+WEB_AUTH_TOKEN=...
+```
+
+### Directory structure
 
 ```
-Agent "dreamy" needs a transport:
-  1. Read transport.json → active profile = "ollama"
-  2. Profile says: transport=api, endpoint=localhost:11434, dreamy="minimax-m2.5:cloud"
-  3. Read models.json → minimax-m2.5:cloud has contextWindow=128000, maxOutput=8192
-  4. Create DirectApiTransport(endpoint, model, contextWindow, maxOutput)
+~/.agentbridge/
+  .env                    ← stays here (secrets + fallback)
+  .env.local              ← stays here
+  .env.memory             ← moves to config/
+  .env.skills             ← moves to config/
+  config/                 chmod 700
+    .env.memory
+    .env.skills
+    transport.json
+    models.json
+    auto-fix.json
+  core/
+  skills/core/ auto/ clawhub/
+  agents/
+  prompts/sleep/
+  memory/
+  logs/
+  bin/
+  dist/
+  node_modules/
 ```
 
-### bridge.lock (runtime only)
+## Resolution flow
 
-Still written at startup for PID/heartbeat/lastPromptAt. Transport section removed — transport.json is the source of truth. If smart fallback switches profile at runtime, it updates `transport.json` `active` field (or a `runtimeOverride` field cleared on restart).
+```
+createSubagentTransport("dreamy"):
+  1. transport.json → agents.dreamy = { model: "minimax-m2.5:cloud", provider: "ollama" }
+  2. transport.json → providers.ollama = { transport: "api", endpoint: "http://localhost:11434/v1" }
+  3. models.json["minimax-m2.5:cloud"] = { contextWindow: 128000, maxOutput: 8192 }
+  4. → DirectApiTransport(endpoint, model, contextWindow, maxOutput)
+
+createSubagentTransport("professor"):
+  1. transport.json → agents.professor = { model: "claude-sonnet-4.6", provider: "kiro-free" }
+  2. transport.json → providers.kiro-free = { transport: "acp", cli: "kiro-cli" }
+  3. models.json["claude-sonnet-4.6"] = { contextWindow: 1000000, maxOutput: 16384 }
+  4. → AcpTransport(cli, model, contextWindow)
+
+Cron task:
+  → Check TransportManager.currentModel (in-memory runtime state)
+  → If set (professor fell back): use that model+provider
+  → If not set: use professor's configured model+provider from transport.json
+
+CONTEXT_WINDOW_SIZE:
+  → Resolved from professor's model contextWindow in models.json
+```
+
+## Fallback
+
+```
+Professor model fails (429/timeout):
+  1. TransportManager reads professor.fallbacks from transport.json
+  2. Tries { "model": "kimi-k2.5:cloud", "provider": "ollama" } → resolve provider, create transport
+  3. Sets TransportManager.currentModel in-memory
+  4. Cron tasks spawned after this use the runtime model (in-memory, same process)
+
+Subagent model fails:
+  → Falls back to professor's CONFIGURED model+provider (from transport.json)
+  → No model shopping, no provider switching
+
+JSON broken (parse error):
+  1. Log "⚠️ Config error in transport.json: <error>"
+  2. Use .env: DEFAULT_PROVIDER + DEFAULT_TRANSPORT + DEFAULT_MODEL
+  3. Send TG: "⚠️ Back online. Config error, using default: minimax-m2.5:cloud via openrouter"
+  4. Doctor.sh --fix can repair (rewrite from example)
+  5. Self-healer whitelist: "transport.json parse error" → auto-fix rule
+```
+
+## bridge.lock (unchanged from today)
+
+```json
+{ "pid": 12345, "startedAt": 1775921677402, "lastHeartbeat": 1775940861683, "lastPromptAt": 1775952594192 }
+```
+
+No transport section. Step 0's temporary transport field removed in cleanup. Runtime fallback state is in-memory on TransportManager (same process as cron). Sleep has its own model+provider from transport.json — doesn't need professor's runtime state.
+
+## Validation
+
+- JSON parse failure → fall back to .env defaults, bridge starts, TG warning
+- Model in transport.json missing from models.json → warning log, use model name as-is (graceful)
+- Model's `transports` doesn't include assigned provider → warning log at startup
+- No crash on config errors — doctor.sh / self-healer can fix
 
 ## Implementation
 
-### Step 0: bridge.lock records transport ✅
-Temporary fix — keeps things working until transport.json ships.
-
-### Step 1: Create models.json + transport.json schemas (30 min)
-- TypeScript types for both files
-- `loadModels()` reads `~/.agentbridge/models.json`
-- `loadTransport()` reads `~/.agentbridge/transport.json`
-- Both validate with clear error messages on parse failure
-- Both fall back to env vars if file missing (migration)
-
-### Step 2: Wire into bridge startup (45 min)
-- `config.ts`: `loadTransport()` replaces profile `.env` loading
-- `bridge-app.ts`: reads active profile, creates main transport
-- Remove `AGENT_TRANSPORT_PROFILE` env var handling
-- Remove transport profile `.env` loading from config.ts
-
-### Step 3: Wire into subagents (30 min)
-- `createSubagentTransport()`: reads role's model from active profile + context window from models.json
-- Remove `AGENT_*_MODEL`, `AGENT_*_CTX_WINDOW` env var reads
-- Remove `readBridgeLockTransport()` — transport.json is the source
-- bridge.lock transport section removed
-
-### Step 4: Deploy + migration (30 min)
-- `deploy.sh`: generates `models.json` + `transport.json` from existing `.env` profiles on first deploy
-- If files already exist, don't overwrite (user may have edited)
-- Ship example files: `models.json.example`, `transport.json.example`
-
-### Step 5: Cleanup (15 min)
-- Delete `persona/core/transports/*.env`
-- Remove transport env vars from `.env.example`
-- Remove profile loading from `config.ts`
-- Remove `bridge-lock-transport.ts` transport reading (keep PID/heartbeat reads)
-- Update TOOLS.md, deploy docs
-
-## What stays in .env
-- `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS` — platform config
-- `API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY` — secrets
-- `EMBEDDING_ENABLED`, `MEMORY_*` — memory config
-- `BED_TIME`, `WAKE_TIME`, `SLEEP_QUALITY` — sleep config
-- `WEB_AUTH_TOKEN`, `WEB_PORT` — dashboard config
-
-## What moves to transport.json
-- `AGENT_TRANSPORT_PROFILE` → `active`
-- `AGENT_TRANSPORT` → `profiles.*.transport`
-- `AGENT_CLI` → `profiles.*.cli`
-- `API_ENDPOINT` → `profiles.*.endpoint`
-- `AGENT_MAIN_MODEL` → `profiles.*.agents.professor`
-- `AGENT_SLEEP_MODEL` → `profiles.*.agents.dreamy`
-- `AGENT_BROWSE_MODEL` → `profiles.*.agents.browsie`
-- `AGENT_CODING_MODEL` → `profiles.*.agents.coding`
-- `API_MAX_TURNS` → `maxTurns`
-
-## What moves to models.json
-- `AGENT_MAIN_CTX_WINDOW` → `models.*.contextWindow`
-- `AGENT_SLEEP_CTX_WINDOW` → `models.*.contextWindow`
-- `AGENT_BROWSE_CTX_WINDOW` → `models.*.contextWindow`
-- `AGENT_CODING_CTX_WINDOW` → `models.*.contextWindow`
-- `API_MAX_OUTPUT` → `models.*.maxOutput`
-- `API_MAX_CONTEXT` → `models.*.contextWindow`
-- `AGENT_AVAILABLE_MODELS` → keys of models.json
-
-## Effort
-
 | Step | What | Time |
 |---|---|---|
-| 1 | Schemas + loaders | 30 min |
-| 2 | Wire bridge startup | 45 min |
-| 3 | Wire subagents | 30 min |
-| 4 | Deploy + migration | 30 min |
-| 5 | Cleanup | 15 min |
-| **Total** | | **~2.5 hr** |
+| 1 | TypeScript types + `loadModels()` + `loadTransport()` with validation + .env fallback | 30 min |
+| 3 | Wire bridge startup — replace profile .env loading with JSON loading | 45 min |
+| 4 | Wire `createSubagentTransport()` — read from JSON, resolve model from models.json, cron reads TransportManager.currentModel | 30 min |
+| 5 | Wire professor fallbacks — TransportManager reads `fallbacks` from transport.json, sets currentModel in-memory on fallback | 20 min |
+| 6 | models.json hot-reload — re-read on each use | 10 min |
+| 7 | Deploy — generate JSON from existing profiles, migrate config dir, ship examples | 30 min |
+| 8 | Doctor.sh — validate JSON, --fix rewrites from example. Self-healer whitelist entry. | 15 min |
+| 9 | Cleanup — delete old profiles, env vars, bridge-lock transport field, update docs | 15 min |
+| **Total** | | **~3.5 hr** |
+
+## What gets deleted
+
+- `persona/core/transports/*.env` (4 profile files)
+- `AGENT_TRANSPORT_PROFILE`, `AGENT_TRANSPORT`, `AGENT_CLI`
+- `AGENT_*_MODEL`, `AGENT_*_CTX_WINDOW`
+- `API_ENDPOINT`, `API_MAX_CONTEXT`, `API_MAX_OUTPUT`, `API_MAX_TURNS`
+- `FALLBACK_API_ENDPOINT`, `AGENT_AVAILABLE_MODELS`
+- `CONTEXT_WINDOW_SIZE`, `BROWSING_AGENT`
+- `AGENT_FALLBACK_MODEL_*` env vars
+- `readBridgeLockTransport()` function
+- `transport` field from bridge.lock write (step 0 temporary fix)
+- Profile .env loading from config.ts
+
+## What stays in .env
+
+- `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS` — platform
+- `API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY` — secrets
+- `EMBEDDING_ENABLED`, `MEMORY_*` — memory (in config/.env.memory)
+- `BED_TIME`, `WAKE_TIME`, `SLEEP_QUALITY` — sleep
+- `WEB_AUTH_TOKEN`, `WEB_PORT` — dashboard
+- `DEFAULT_PROVIDER`, `DEFAULT_TRANSPORT`, `DEFAULT_MODEL` — emergency fallback
+- `TRANSPORT_CONFIG`, `MODELS_CONFIG` — paths to JSON files

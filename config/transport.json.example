@@ -1,0 +1,21 @@
+{
+  "agents": {
+    "professor": { "model": "claude-sonnet-4.6",  "provider": "kiro-free", "fallbacks": [{ "model": "kimi-k2.5:cloud", "provider": "ollama" }] },
+    "dreamy":    { "model": "minimax-m2.5:cloud", "provider": "ollama" },
+    "browsie":   { "model": "minimax-m2.5:cloud", "provider": "ollama" },
+    "coding":    { "model": "qwen3.5:cloud",      "provider": "ollama" }
+  },
+  "providers": {
+    "kiro-free":   { "transport": "acp", "cli": "kiro-cli" },
+    "kiro-paid":   { "transport": "acp", "cli": "kiro-cli" },
+    "gemini-free": { "transport": "acp", "cli": "gemini" },
+    "gemini-paid": { "transport": "acp", "cli": "gemini" },
+    "ollama":      { "transport": "api", "endpoint": "http://localhost:11434/v1" },
+    "openrouter":  { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" }
+  },
+  "transportDefaults": {
+    "tmux": { "session": "kiro-bridge", "captureDelaySec": 3, "maxWaitSec": 300 },
+    "acp":  { "permissionTimeoutMs": 60000 }
+  },
+  "maxTurns": 50
+}
