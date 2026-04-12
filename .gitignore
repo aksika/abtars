@@ -32,3 +32,5 @@ docs/.obsidian/
 titok/
 persona/tasks/
 .test-*
+backlog.db-wal
+backlog.db-shm
