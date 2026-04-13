@@ -47,6 +47,8 @@ kicks every tick
 
 Both run on the same event loop. Neither can detect a fully blocked event loop from within. The countdown doesn't give hardware-watchdog semantics — it just looks like it does. Wall-clock detects the same failures (heartbeat stopped ticking) without the batching vulnerability.
 
+`classifyResume()` runs whenever elapsed exceeds threshold — in practice every dark wake cycle (~16-20min) during sleep, and once on morning wake.
+
 See #130 for future external watchdog process (separate concern).
 
 ## Implementation
@@ -71,6 +73,7 @@ With:
 ```typescript
 const WD_THRESHOLD_MS = hbIntervalMs * 3;       // 15min
 const WD_CHECK_INTERVAL = 60_000;
+const WD_UNKNOWN_SUPPRESS_MS = 60 * 60_000;     // 1hr
 let lastKickAt = Date.now();
 const kickWatchdog = (): void => { lastKickAt = Date.now(); };
 // ...
@@ -78,7 +81,10 @@ setInterval(() => {
   const elapsed = Date.now() - lastKickAt;
   if (elapsed <= WD_THRESHOLD_MS) return;
   const kind = classifyResume();
-  if (kind === "dark") { lastKickAt = Date.now(); return; }
+  if (kind === "dark" || (kind === "unknown" && elapsed < WD_UNKNOWN_SUPPRESS_MS)) {
+    lastKickAt = Date.now();
+    return;
+  }
   logWarn("watchdog", `No heartbeat kick for ${Math.round(elapsed / 60000)}min (${kind}) — forcing restart`);
   writeRestartReason("watchdog: no heartbeat kick");
   process.exit(1);
@@ -92,6 +98,7 @@ setInterval(() => {
 ## Edge cases
 
 - Dark wake + stuck heartbeat → suppressed. Dark wakes are brief — next full wake catches it.
+- `classifyResume()` returns "unknown" → elapsed heuristic: `< 60min` = suppress (almost certainly dark wake, they come every 16-20min), `≥ 60min` = kill (genuinely stuck).
 - NTP clock jump forward → could trigger false positive. Acceptable — restart is safe, rare.
 - `classifyResume()` hangs → 3s timeout in execSync. Worst case: 3s delay before kill.
 - DST changes → `Date.now()` is UTC, unaffected.
