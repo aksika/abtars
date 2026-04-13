@@ -263,7 +263,7 @@ chmod +x "$AB_HOME/browser-patchright.sh"
 cp "$PROJECT_DIR/scripts/browser-lightpanda.sh" "$AB_HOME/browser-lightpanda.sh"
 chmod +x "$AB_HOME/browser-lightpanda.sh"
 mkdir -p "$AB_HOME/scripts"
-for script in daily-backup.sh doctor.sh upgrade-deps.sh; do
+for script in daily-backup.sh doctor.sh upgrade-deps.sh scout-openrouter.py scout-ollama.py scout-add-model.py; do
   cp "$PROJECT_DIR/scripts/$script" "$AB_HOME/scripts/$script"
   chmod +x "$AB_HOME/scripts/$script"
 done
