@@ -95,7 +95,20 @@ Plugin API passes userId (not chatId) through all hooks and tool calls. userId s
 
 ## OC compatibility (later)
 
-Thin wrapper (~50 lines) that maps AB slot interfaces to OC's `register(api)`:
+## Multi-host adapter pattern
+
+abmind core is host-agnostic (`IMemoryCore`). Thin adapters map to each host's plugin API:
+
+```
+abmind (core library — IMemoryCore)
+├── @abmind/ab-slot          → implements IMemorySlot for AB skeleton
+├── @abmind/openclaw-plugin  → maps to OC register(api) — registerTool, registerContextEngine
+└── @abmind/opencode-plugin  → maps to OpenCode plugin API — hooks, transforms, tools
+```
+
+One brain, multiple bodies. Each adapter is ~50-100 lines. The core never imports host-specific code.
+
+Example OC adapter:
 ```typescript
 // abmind-openclaw-plugin/index.ts
 export default {
