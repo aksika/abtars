@@ -58,20 +58,49 @@ Extends IMemoryCore with bridge-specific methods:
 - `src/memory/imemory-system.ts` — re-exports `IMemoryCore` from abmind + adds bridge methods
 - Sleep orchestrator (`src/capabilities/sleep/`) — imports `SleepDataAccess` from abmind
 
+## Build & packaging
+
+- `"type": "module"` — ESM only, no CJS fallback
+- `"prepare": "tsc"` — auto-builds on `npm install` from git dep
+- Exports map in package.json with `.js` extensions everywhere
+- `"files": ["dist/"]` — only compiled JS published (when npm publish happens later)
+
 ## Dependency strategy (no npm publish)
 
-**Local dev:** `npm link` between repos — changes in abmind are instant in bridge.
-```bash
-cd ~/workspace/abmind && npm link
-cd ~/workspace/agentbridge && npm link abmind
+**Local dev:** `file:../abmind` in bridge's package.json — survives `npm install`, no global symlink fragility.
+```json
+"abmind": "file:../abmind"
 ```
 
-**Deploy/CI:** Git dependency in bridge's package.json:
+**Deploy/CI:** Git dependency pinned to semver tag:
 ```json
-"abmind": "github:aksika/abmind#main"
+"abmind": "github:aksika/abmind#v0.1.0"
 ```
+
+**Version pinning:** Semver tags from day one. Never `#main`. Update deliberately via tag bump.
+
+**deploy.sh:** `--quick` skips `npm install`. Git dep updates require full deploy (or explicit `npm install` in deploy dir). Document this.
 
 **Later:** Publish to npm when stable and ready for external users.
+
+## CLI bridge imports (resolved)
+
+CLI files import 4 things from bridge — all have equivalents in memory package:
+- `agentBridgeHome` → already in `mem-paths.ts`
+- `localISO`, `localMonth` → already in `local-time.ts`
+- `EditMemoryParams`, `InstantStoreParams` → move types into abmind
+
+No bridge utilities need duplicating. CLI becomes self-contained.
+
+## MemoryManager split
+
+`MemoryManager` currently lives in `packages/memory/` and implements `IMemorySystem`. After extraction:
+- **In abmind:** `MemoryBackend` (core DB operations), `IMemoryCore` interface, all pure memory logic
+- **In bridge:** `MemoryManager` wraps abmind's backend + adds bridge-specific methods (heartbeat, emotion by platform ID, cron info). Implements `IMemorySystem extends IMemoryCore`.
+
+## IMemoryCore boundary
+
+`buildWakeUp(ctxWindow)` and `readCoreKnowledge()` stay in `IMemoryCore` — they're useful for any host that needs to inject memory context into prompts (OC, OpenCode, Claude Code all do this). They're not bridge-specific, they're "give me context to put in the prompt."
 
 ## Implementation
 
@@ -99,6 +128,11 @@ import { MemoryManager } from "abmind/memory-manager.js";  // → node_modules/a
 ```
 
 Import paths stay the same. Only the resolution changes.
+
+## Nice-to-haves (not blocking)
+
+- CI in new repo — run 29 test files on push, catch breaks before bridge pulls
+- `.github/workflows/test.yml` — simple: checkout, npm install, npm test
 
 ## Git history
 
