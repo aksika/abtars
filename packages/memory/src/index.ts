@@ -6,7 +6,7 @@
  */
 
 // Interface
-export type { IMemorySystem, IHeartbeat } from "./imemory-system.js";
+export type { IMemoryCore, IMemorySystem, IHeartbeat } from "./imemory-system.js";
 
 // Implementation
 export { MemoryManager } from "./memory-manager.js";
