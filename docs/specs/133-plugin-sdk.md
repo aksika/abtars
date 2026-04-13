@@ -111,6 +111,20 @@ abmind (core library — IMemoryCore)
 
 One brain, multiple bodies. Each adapter is ~50-100 lines. The core never imports host-specific code.
 
+### Integration levels (deepest → shallowest)
+
+| Adapter | Integration | Features | Overhead |
+|---|---|---|---|
+| `@abmind/ab-slot` | Direct in-process import | Full: sleep, emotion, contradiction, wake-up context, context injection, lifecycle hooks | Zero — native function calls |
+| `@abmind/openclaw-plugin` | `register(api)` + hooks | Most: tools, context engine, lifecycle hooks, CLI. No emotion/sleep unless host supports it | Small — adapter mapping |
+| `@abmind/opencode-plugin` | Hooks + transforms | Good: tools, dreamer integration, transforms. Different lifecycle model | Small — adapter mapping |
+| `@abmind/claude-plugin` | Skills + hooks + MCP | Medium: tools via MCP, skills for agent guidance. Constrained by CC's plugin API | Medium — MCP serialization for tools |
+| `@abmind/mcp-server` | MCP protocol (JSON-RPC) | Basic: recall/store/edit/search as MCP tools. No lifecycle hooks, no context injection, no sleep | High — full JSON-RPC serialization |
+| `@abmind/cli` | stdin/stdout | Minimal: manual/scripted recall/store/edit. No runtime integration | Highest — process spawn per call |
+
+Deeper = more features (sleep, emotion, context injection, contradiction checking).
+Shallower = more portable but just basic recall/store — loses the "brain" features.
+
 ### Host plugin systems studied (2026-04-13)
 
 | Host | Plugin contract | Memory approach |
