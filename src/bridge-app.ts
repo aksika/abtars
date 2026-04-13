@@ -79,14 +79,17 @@ import type { PipelineDeps } from "./components/message-pipeline.js";
 import { createCapabilityRegistry, createCapabilityApi } from "./capabilities/capability.js";
 import type { CapabilityRegistry, CapabilityRegisterFn } from "./capabilities/capability.js";
 
+import { SubagentRuntime } from "./components/subagent-runtime.js";
+
 /**
- * Bridge — owns the lifecycle of all subsystems.
- * Created by startBridge(), exposes subsystems for the future plugin system.
+ * Bridge — the skeleton. Owns all subsystem lifecycles.
+ * Implements the slot-based architecture: memory, transport, runtime, tasks, skills, platforms.
  */
 export class Bridge {
   readonly config: Config;
   readonly memoryConfig: MemoryConfig;
   readonly startedAt = Date.now();
+  readonly runtime = new SubagentRuntime();
 
   transport!: IKiroTransport;
   memory: MemoryManager | null = null;
@@ -356,6 +359,7 @@ export class Bridge {
     await step("heartbeat", () => this.heartbeat.stop());
     await step("browser-ipc", () => this.browserIpc?.shutdown());
     await step("browser", () => this.browserManager?.shutdown(), 5000);
+    await step("runtime", () => this.runtime.shutdown());
     await step("memory", () => this.memory?.close());
     await step("transport", () => this.transport.destroy());
     if (this.mcpDaemonStarted) {
