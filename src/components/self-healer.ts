@@ -120,11 +120,11 @@ export function createSelfHealerTask(
             (async () => {
               const timeout = setTimeout(() => { autoFixRunning = false; }, 5 * 60 * 1000);
               try {
-                const { createSubagentTransport } = await import("./agent-registry.js");
-                const { transport } = await createSubagentTransport("coding");
-                const result = await transport.sendPrompt("autofix", rule.instruction);
+                const { SubagentRuntime } = await import("./subagent-runtime.js");
+                const runtime = new SubagentRuntime();
+                const result = await runtime.complete("coding", rule.instruction);
+                await runtime.shutdown();
                 const summary = (result || "(no output)").slice(0, 200);
-                transport.destroy();
                 logAutoFix(`DONE: ${rule.pattern} → ${summary}`);
                 adapter.sendNotification(String(chatId), `🔧 Auto-fix: ${rule.pattern}\n${summary}`);
                 logInfo("self-healer", `Auto-fix done: ${rule.pattern}`);
