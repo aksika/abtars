@@ -203,7 +203,13 @@ Single heartbeat loop controls everything: task scheduling, standby detection, w
 
 **Dark wake guard:** `isDailyCycleDue` requires `lastHeartbeat` to exist in the lock file. No successful tick = system not ready (dark wake, network down). Replaces the old 5-minute uptime heuristic.
 
-**Heartbeat watchdog timer:** Standalone `setInterval` (60s) in `bridge-app.ts`, independent of the heartbeat system. Countdown+kick pattern — counter starts at 15min, heartbeat kicks reset it, counter ≤ -60s → `process.exit(1)`. No file I/O.
+**Heartbeat watchdog timer:** Standalone `setInterval` (60s) in `bridge-app.ts`, independent of the heartbeat system. Wall-clock comparison — `Date.now() - lastKickAt`. Heartbeat kicks reset `lastKickAt`. Elapsed > 15min → `classifyResume()`:
+- `"dark"` → suppress (reset lastKickAt, Mac is in Power Nap)
+- `"full"` → `process.exit(1)` (morning wake or genuine failure)
+- `"unknown"` + elapsed < 1hr → suppress (likely dark wake)
+- `"unknown"` + elapsed ≥ 1hr → `process.exit(1)` (genuinely stuck)
+
+No file I/O. Immune to `setInterval` batching after sleep resume (fixed #10).
 
 **DB integrity:** Runs every 72 ticks (~6 hours). Checks SQLite integrity + FTS5 health. Auto-rebuilds corrupt FTS indexes on detection. Sleep pre-tasks also rebuild nightly.
 
@@ -253,11 +259,19 @@ Wraps primary + fallback transport. Recovery L3: after 3 consecutive failures, c
 429s and transient errors retried with 3s exponential backoff (3 attempts). Status check inside retry loop.
 
 ### `/models` Command
-Fetches available models from `/v1/models` (API) or `AGENT_AVAILABLE_MODELS` env (ACP). Displays as Telegram inline keyboard (1 column). Tap to hot-swap: instant for API, session reset for ACP.
+- `/models` — shows current model, provider, transport type, fallbacks (from transport.json)
+- `/models change` — 3-step Telegram inline keyboard: agent slot (Professor/Dreamy/Browsie/Cody + Professor fallbacks) → provider (pre-filtered by availability: API needs key, ACP needs CLI in PATH) → model (filtered by provider from models.json, shows ★ rank + cost)
+- `/models status` — all agents with model + provider
+- `/models quick <model>` — instant switch if model available on current provider
+- `/model` — alias for `/models`
+
+All changes persist to transport.json. Professor provider change = `process.exit(0)` (restart). Same-provider model change = `setModel()` hot-switch. Subagent changes take effect on next spawn.
+
+Liveness check runs after model selection: API providers probed via `/models` endpoint, ACP providers checked via `which` CLI.
 
 ### `/transport` Command
-- `/transport` — shows current transport status, provider info, fallback state
-- `/transport change` — lists `~/.agentbridge/transports/*.env` profiles as Telegram inline keyboard. Tap to switch: writes `AGENT_TRANSPORT_PROFILE` to `.env` → bridge restarts
+- `/transport` — alias for `/models`
+- `/transport change` — alias for `/models change`
 - `/transport restore` — forces switch back to primary when on fallback (`TransportManager.forceRestorePrimary()`)
 
 Command dispatcher matches exact commands by first word as fallback (after prefix commands), so `/transport change` routes correctly.
