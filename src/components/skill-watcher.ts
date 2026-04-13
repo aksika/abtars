@@ -8,6 +8,8 @@ import { appendFileSync } from "node:fs";
 import { logInfo, logWarn } from "./logger.js";
 import { scanForInjection } from "abmind/injection-scanner.js";
 
+import type { ISkillSlot } from "./skeleton.js";
+
 const TAG = "skill-reloader";
 
 export interface NewSkill {
@@ -17,7 +19,7 @@ export interface NewSkill {
   path: string;
 }
 
-export class SkillWatcher {
+export class SkillWatcher implements ISkillSlot {
   private mtimes = new Map<string, number>();
   private firstTick = true;
 

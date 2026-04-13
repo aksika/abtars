@@ -21,12 +21,10 @@ export interface ITaskSlot {
 
 /** Skill loader slot — markdown files or MCP server. */
 export interface ISkillSlot {
-  /** Load all skills from source. Returns map of skill name → content. */
-  loadSkills(): Map<string, string>;
-  /** Start watching for changes (hot-reload). */
-  watch(): void;
-  /** Stop watching. */
-  stop(): void;
+  /** Scan for new/changed skills since last check. */
+  checkForChanges(): Array<{ filename: string; name: string; description: string; path: string }>;
+  /** Append skill to tools manifest. */
+  appendToTools(skill: { name: string; description: string }): void;
 }
 
 /** Platform adapter slot — Telegram, Discord, etc. */

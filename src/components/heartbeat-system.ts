@@ -17,9 +17,11 @@ export type HeartbeatConfig = {
 const TAG = "heartbeat";
 const MIN_GUARD_MS = 3 * 60 * 1000; // 3 min minimum delay before first tick
 
+import type { ITaskSlot } from "./skeleton.js";
+
 export type TaskStatus = "✓" | "✗" | "—" | "?";
 
-export class HeartbeatSystem {
+export class HeartbeatSystem implements ITaskSlot {
   private timer: ReturnType<typeof setInterval> | null = null;
   private initTimeout: ReturnType<typeof setTimeout> | null = null;
   private tasks: HeartbeatTask[] = [];
