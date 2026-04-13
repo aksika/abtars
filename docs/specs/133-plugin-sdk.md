@@ -103,10 +103,34 @@ abmind core is host-agnostic (`IMemoryCore`). Thin adapters map to each host's p
 abmind (core library — IMemoryCore)
 ├── @abmind/ab-slot          → implements IMemorySlot for AB skeleton
 ├── @abmind/openclaw-plugin  → maps to OC register(api) — registerTool, registerContextEngine
-└── @abmind/opencode-plugin  → maps to OpenCode plugin API — hooks, transforms, tools
+├── @abmind/opencode-plugin  → maps to OpenCode plugin API — hooks, transforms, tools
+├── @abmind/claude-plugin    → maps to Claude Code plugin API — skills, hooks, MCP servers
+├── @abmind/mcp-server       → MCP server exposing recall/store/edit as MCP tools (universal)
+├── @abmind/cli              → standalone CLI (abmind recall/store/edit/status)
 ```
 
 One brain, multiple bodies. Each adapter is ~50-100 lines. The core never imports host-specific code.
+
+### Host plugin systems studied (2026-04-13)
+
+| Host | Plugin contract | Memory approach |
+|---|---|---|
+| OpenClaw | `register(api)` — registerTool, registerContextEngine, hooks | memory-core + memory-lancedb plugins |
+| OpenCode | Plugin hooks, transforms, tools, hidden agents | Magic Context: dreamer, historian, compartments |
+| Claude Code | `BuiltinPluginDefinition` — skills, hooks, mcpServers | memdir: markdown files, 4 types (user/feedback/project/reference), team memory |
+| Any MCP client | MCP protocol — tools, resources, prompts | MCP server exposes tools |
+| CLI | stdin/stdout | Direct CLI invocation |
+
+### Claude Code memory taxonomy (reference for #135)
+
+Claude Code separates memories into 4 types:
+- **user** — role, preferences, expertise (always private)
+- **feedback** — corrections + confirmations on approach (private or team)
+- **project** — ongoing work, goals, deadlines (bias toward team)
+- **reference** — pointers to external systems (usually team)
+
+Plus: private vs team scope, CLAUDE.md (project conventions), CLAUDE.local.md (personal).
+Relevant for #135 (user vs project memory separation).
 
 Example OC adapter:
 ```typescript
