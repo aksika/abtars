@@ -170,7 +170,36 @@ agentbridge-browser --action extract_text --max-chars 5000
 
 ## After scouting
 
-1. Add discovered models to `~/.agentbridge/config/models.json` (hot-reloaded)
-2. Set `transports` correctly — model must list every provider that can serve it
-3. Test with `/models quick <model>` or `/models change`
-4. Update rank if leaderboard data available
+1. **Backup** — before any write, copy current models.json to `.old`:
+   ```bash
+   cp ~/.agentbridge/config/models.json ~/.agentbridge/config/models.json.old
+   ```
+2. **Add** discovered models to `~/.agentbridge/config/models.json` (hot-reloaded)
+3. **Set `transports` correctly** — model must list every provider that can serve it
+4. **Verify** — validate JSON and check the new entry round-trips:
+   ```bash
+   python3 -c "
+   import json,os
+   path = os.path.expanduser('~/.agentbridge/config/models.json')
+   models = json.load(open(path))
+   errors = []
+   for mid, m in models.items():
+       for f in ['contextWindow','maxOutput','rank','cost','transports']:
+           if f not in m: errors.append(f'{mid}: missing {f}')
+       if 'cost' in m:
+           for cf in ['input','output']:
+               if cf not in m['cost']: errors.append(f'{mid}: missing cost.{cf}')
+       if not m.get('transports'): errors.append(f'{mid}: empty transports (won\'t appear in /models change)')
+   if errors:
+       print('❌ Validation failed:')
+       for e in errors: print(f'  {e}')
+       print('Restore with: cp ~/.agentbridge/config/models.json.old ~/.agentbridge/config/models.json')
+   else:
+       print(f'✅ {len(models)} models, all valid')
+   "
+   ```
+5. **Test** with `/models quick <model>` or `/models change`
+6. **If validation fails** — restore from backup:
+   ```bash
+   cp ~/.agentbridge/config/models.json.old ~/.agentbridge/config/models.json
+   ```
