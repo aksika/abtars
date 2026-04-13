@@ -80,6 +80,8 @@ Respond with JSON only:
 ```
 abmind parses this reliably. No tool loop needed.
 
+**JSON parser must be defensive:** Models wrap JSON in markdown fences, add trailing commentary, produce invalid syntax. Parser needs: strip fences, find first `{`/`[`, try-parse, fallback to regex extraction. Budget 1 hour, not 30 min.
+
 **Effort:** ~2-3 hours of prompt engineering to rewrite 14 sleep step prompts.
 
 ### 2. Multi-turn steps
@@ -88,21 +90,45 @@ abmind parses this reliably. No tool loop needed.
 
 **Mitigation:** Redesign the 2-3 multi-turn steps to be single-turn. Provide all context upfront so the LLM can decide in one pass. Most steps are already single-turn.
 
+**Risk:** Collapsing multi-turn to single-turn may reduce decision quality on complex steps (darwinism, core-promotion, merge). Test single-turn versions against real data before committing. Identify which steps are currently multi-turn first.
+
 **Effort:** ~1 hour to collapse multi-turn steps.
+
+### 3. Persona-specific prompts
+
+**Problem:** The 14 prompt files contain Dreamy's personality, Hungarian references, agent-specific context. Moving to abmind makes them generic. Other hosts need different prompts.
+
+**Mitigation:** abmind ships prompt *templates* with `{variables}` for personality injection. Hosts provide personality context via variables. Default templates are neutral. AgentBridge overrides with Dreamy's personality at runtime.
+
+### 4. LLM callback precedent
+
+`buildDailySummary` needs a completion callback. Today it's one function. If contradiction detection or semantic dedup later need LLM access, the callback surface grows.
+
+**Design rule:** LLM callbacks in abmind are exceptional, not the pattern. Document each one. If the count exceeds 3, reconsider Option C.
+
+### 5. Plan B: Option C
+
+If structured JSON prompts degrade sleep quality (gap #2), fall back to Option C:
+```typescript
+runSleep({ agent: (prompt, tools) => Promise<AgentResult> })
+```
+Preserves current tool-call behavior — no prompt rewrite needed. Tradeoff: callback complexity (host must implement tool loop). Keep as documented fallback.
 
 ## Implementation
 
 | Step | What | Time |
 |---|---|---|
-| 1 | Redesign sleep prompts: structured JSON output, single-turn | 3 hr |
-| 2 | Create `parseSleepResponse()` — JSON parser with validation | 30 min |
-| 3 | Move prompt loader + daily summary + extract to abmind repo | 30 min |
-| 4 | Move sleep prompt markdown files to abmind repo | 15 min |
-| 5 | Create `buildDreamReport()` in abmind | 30 min |
-| 6 | Refactor bridge orchestrator to use abmind pipeline | 1 hr |
-| 7 | Add `abmind sleep-state/sleep-prompt/sleep-apply/sleep-report` CLI commands | 30 min |
-| 8 | Test: bridge sleep cycle works with new pipeline | 30 min |
-| **Total** | | **~6.5 hr** |
+| 1 | Identify which of 14 steps are multi-turn, test single-turn against real data | 1 hr |
+| 2 | Redesign sleep prompts: structured JSON output, single-turn, personality variables | 3 hr |
+| 3 | Create `parseSleepResponse()` — defensive JSON parser (strip fences, fallback) | 1 hr |
+| 4 | Move prompt loader + daily summary + extract to abmind repo | 30 min |
+| 5 | Move sleep prompt templates to abmind repo | 15 min |
+| 6 | Create `buildDreamReport()` in abmind | 30 min |
+| 7 | Refactor bridge orchestrator to use abmind pipeline (retry/progress/lock/audit) | 1.5 hr |
+| 8 | Add `abmind sleep-state/sleep-prompt/sleep-apply/sleep-report` CLI commands | 45 min |
+| 9 | `sleep-apply --dry-run` mode for debugging | 15 min |
+| 10 | Test: bridge sleep cycle works with new pipeline | 30 min |
+| **Total** | | **~9 hr** |
 
 ## CLI commands for standalone use (#137)
 
