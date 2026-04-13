@@ -209,18 +209,23 @@ const todoTool: ToolDefinition = {
   },
 };
 
+let _enqueueCron: ((id: string, manual?: boolean) => string | null) | null = null;
+
+/** Inject enqueueCron from bridge for task_manage --run. */
+export function setEnqueueCron(fn: (id: string, manual?: boolean) => string | null): void { _enqueueCron = fn; }
+
 const taskTool: ToolDefinition = {
   name: "task_manage",
-  description: "Manage scheduled/recurring tasks (cron). Add, list, remove, pause, resume, or trigger tasks.",
+  description: "Manage scheduled/recurring tasks (cron). Add, list, remove, pause, resume, or run tasks. Use action=run to execute a task immediately via the cron queue (isolated subagent).",
   parameters: {
     type: "object",
     properties: {
-      action: { type: "string", enum: ["add", "list", "remove", "pause", "resume", "trigger"], description: "Action" },
+      action: { type: "string", enum: ["add", "list", "remove", "pause", "resume", "run"], description: "Action" },
       message: { type: "string", description: "Task message/command (for add)" },
       schedule: { type: "string", description: "Cron schedule expression (for add)" },
       type: { type: "string", enum: ["reminder", "script", "agent"], description: "Task type (for add)" },
       chat_id: { type: "string", description: "Chat ID (for add)" },
-      id: { type: "string", description: "Task ID (for remove/pause/resume/trigger)" },
+      id: { type: "string", description: "Task ID (for remove/pause/resume/run)" },
     },
     required: ["action"],
   },
@@ -230,7 +235,11 @@ const taskTool: ToolDefinition = {
     if (action === "remove") return runBash(`agentbridge-task remove ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
     if (action === "pause") return runBash(`agentbridge-task pause ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
     if (action === "resume") return runBash(`agentbridge-task resume ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "trigger") return runBash(`agentbridge-task trigger ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    if (action === "run") {
+      if (!_enqueueCron) return Promise.resolve(JSON.stringify({ error: "enqueueCron not available" }));
+      const err = _enqueueCron(args["id"] ?? "", true);
+      return Promise.resolve(JSON.stringify(err ? { error: err } : { ok: true, message: `Task ${args["id"]} enqueued for immediate execution` }));
+    }
     let cmd = `agentbridge-task add --message ${JSON.stringify(args["message"] ?? "")}`;
     if (args["schedule"]) cmd += ` --schedule ${JSON.stringify(args["schedule"])}`;
     if (args["type"]) cmd += ` --type ${args["type"]}`;

@@ -90,8 +90,8 @@ describe("command-handlers", () => {
     const ctx = makeCtx({ enqueueCron });
     const handled = await handleCommand("/cron trigger abc123", ctx);
     expect(handled).toBe(true);
-    expect(enqueueCron).toHaveBeenCalledWith("abc123");
-    expect(ctx.reply).toHaveBeenCalledWith("✓ Triggered abc123");
+    expect(enqueueCron).toHaveBeenCalledWith("abc123", true);
+    expect(ctx.reply).toHaveBeenCalledWith("⏳ Running: abc123");
   });
 
   it("/cron trigger shows error on failure", async () => {

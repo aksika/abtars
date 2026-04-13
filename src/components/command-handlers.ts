@@ -311,9 +311,9 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
 
 async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<boolean> {
   const id = text.replace(/^\/(tasks|cron) trigger /, "").trim();
-  if (!id) { await ctx.reply("Usage: /trigger <cron-id>"); return true; }
-  const err = ctx.enqueueCron?.(id);
-  await ctx.reply(err ?? `✓ Triggered ${id}`);
+  if (!id) { await ctx.reply("Usage: /tasks trigger <cron-id>"); return true; }
+  const err = ctx.enqueueCron?.(id, true);
+  await ctx.reply(err ?? `⏳ Running: ${id}`);
   return true;
 }
 

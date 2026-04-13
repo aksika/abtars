@@ -445,6 +445,23 @@ export async function startBridge(): Promise<void> {
     });
   });
 
+  // Wire task_manage --run to use the cron queue
+  const { setEnqueueCron } = await import("./components/transport/tool-registry.js");
+  const cronCallback: import("./components/cron/cron-queue.js").TaskCompleteCallback = (chatId, message, result) => {
+    if (platforms.telegram && bridge.telegramAdapter) {
+      bridge.telegramAdapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
+        logWarn("main", `Cron task TG report failed: ${err}`);
+      });
+    }
+  };
+  setEnqueueCron((id, manual) => {
+    try {
+      const entry = cronReadEntry(id);
+      if (!entry) return `❌ Entry ${id} not found`;
+      return cronQueue.enqueue(entry, cronCallback, manual);
+    } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
+  });
+
   // Build pipeline deps (needed before platform start)
   const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
     transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
@@ -458,12 +475,11 @@ export async function startBridge(): Promise<void> {
     busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
     messageQueue: new Map(),
     cronCurrentJob: () => cronQueue.currentJob,
-    enqueueCron: (entryId: string): string | null => {
+    enqueueCron: (entryId: string, manual?: boolean): string | null => {
       try {
         const entry = cronReadEntry(entryId);
         if (!entry) return `❌ Entry ${entryId} not found`;
-        cronQueue.enqueue(entry, cronCallback);
-        return null;
+        return cronQueue.enqueue(entry, cronCallback, manual);
       } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
     },
     requestShutdown: () => process.exit(0),
@@ -641,14 +657,6 @@ export async function startBridge(): Promise<void> {
       // No restart, no isDailyCycleDue. Age-check task handles bedtime. Watchdog handles stale process.
     },
   });
-
-  const cronCallback = (chatId: number, message: string, result: string): void => {
-    if (platforms.telegram && bridge.telegramAdapter) {
-      bridge.telegramAdapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
-        logWarn("main", `Cron task TG report failed: ${err}`);
-      });
-    }
-  };
 
   heartbeat.registerTask({
     name: "tasks",

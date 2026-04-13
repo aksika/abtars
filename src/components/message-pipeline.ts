@@ -90,7 +90,7 @@ export interface SessionState {
 /** Pipeline dependencies — composed from focused interfaces. */
 export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps, SessionState {
   cronCurrentJob?: () => RunningJob | null;
-  enqueueCron?: (entryId: string) => string | null;
+  enqueueCron?: (entryId: string, manual?: boolean) => string | null;
   requestShutdown?: () => void;
   sleepProgress?: () => { percent: number; step: string } | null;
   loadedCapabilities?: string[];

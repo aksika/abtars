@@ -12,7 +12,7 @@ import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "no
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import { agentBridgeHome } from "../../paths.js";
-import { logInfo, logWarn, logDebug } from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
 import type { CronEntry } from "../../cli/agentbridge-task.js";
@@ -109,6 +109,7 @@ export type FailInjectCallback = (entryId: string, command: string, result: stri
 interface QueuedJob {
   entry: CronEntry;
   onComplete?: TaskCompleteCallback;
+  manual?: boolean;
 }
 
 export interface RunningJob {
@@ -136,15 +137,13 @@ export class CronQueue {
   /** Number of jobs waiting. */
   get pending(): number { return this.queue.length; }
 
-  /** Enqueue a task. Skips if entry ID is already queued or running. */
-  enqueue(entry: CronEntry, onComplete?: TaskCompleteCallback): void {
+  /** Enqueue a task. Returns null on success, error string on failure. */
+  enqueue(entry: CronEntry, onComplete?: TaskCompleteCallback, manual?: boolean): string | null {
     if (this._current?.entryId === entry.id) {
-      logDebug(TAG, `Skip "${entry.id}" — already running`);
-      return;
+      return `⏳ Already running: "${entry.message.slice(0, 60)}"`;
     }
     if (this.queue.some(j => j.entry.id === entry.id)) {
-      logDebug(TAG, `Skip "${entry.id}" — already queued`);
-      return;
+      return `⏳ Already queued: "${entry.message.slice(0, 60)}"`;
     }
 
     // Priority-sorted insert
@@ -155,10 +154,11 @@ export class CronQueue {
       if (rank < qRank) break;
       i++;
     }
-    this.queue.splice(i, 0, { entry, onComplete });
-    logInfo(TAG, `Enqueued "${entry.id}" (${entry.executor ?? "agent"}, ${entry.priority ?? "medium"}) — ${this.queue.length} pending`);
+    this.queue.splice(i, 0, { entry, onComplete, manual });
+    logInfo(TAG, `Enqueued "${entry.id}" (${entry.executor ?? "agent"}, ${entry.priority ?? "medium"}${manual ? ", manual" : ""}) — ${this.queue.length} pending`);
 
     if (!this._current) this.processNext();
+    return null;
   }
 
   private processNext(): void {
@@ -169,7 +169,7 @@ export class CronQueue {
     if (entry.executor === "script") {
       this.runScript(entry, job.onComplete);
     } else {
-      this.runAgent(entry, job.onComplete);
+      this.runAgent(entry, job.onComplete, job.manual);
     }
   }
 
@@ -241,12 +241,14 @@ export class CronQueue {
     }
   }
 
-  private async runAgent(entry: CronEntry, onComplete?: TaskCompleteCallback): Promise<void> {
-    // Idle gate: defer agent tasks if user was active in last 90s
-    const idleMs = Date.now() - readLastPromptAt();
-    if (idleMs < 90_000) {
-      logInfo(TAG, `⏸ Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
-      return;
+  private async runAgent(entry: CronEntry, onComplete?: TaskCompleteCallback, manual?: boolean): Promise<void> {
+    // Idle gate: defer agent tasks if user was active in last 90s (skip for manual triggers)
+    if (!manual) {
+      const idleMs = Date.now() - readLastPromptAt();
+      if (idleMs < 90_000) {
+        logInfo(TAG, `⏸ Deferring agent task "${entry.id}" — user active ${Math.round(idleMs / 1000)}s ago`);
+        return;
+      }
     }
 
     // Read task file if specified, otherwise use inline message

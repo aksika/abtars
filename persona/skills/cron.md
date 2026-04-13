@@ -37,6 +37,14 @@ Bridge heartbeat checks every 5 min. When due:
 - `task` + `executor: agent` → spawns kiro-cli subagent, reports via Telegram
 - `task` + `executor: script` → runs `bash -c`, reports exit code + output
 
+## Running tasks manually
+
+When the user asks to run a scheduled task (e.g. "run the finance report", "trigger the AI daily"):
+1. Use `task_manage` with `action: "run"` and the task `id`
+2. **Never execute the task content inline** — always delegate via `task_manage --run`
+3. The task runs in an isolated subagent with the full task file prompt
+4. Result is sent to the user's chat when complete
+
 ## When to use
 - Specific time: `--at` + `--type reminder` or `--type task`
 - Recurring: `--schedule` + appropriate executor
