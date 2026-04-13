@@ -263,9 +263,10 @@ chmod +x "$AB_HOME/browser-patchright.sh"
 cp "$PROJECT_DIR/scripts/browser-lightpanda.sh" "$AB_HOME/browser-lightpanda.sh"
 chmod +x "$AB_HOME/browser-lightpanda.sh"
 mkdir -p "$AB_HOME/scripts"
-for script in daily-backup.sh doctor.sh upgrade-deps.sh scout-openrouter.py scout-ollama.py scout-add-model.py; do
-  cp "$PROJECT_DIR/scripts/$script" "$AB_HOME/scripts/$script"
-  chmod +x "$AB_HOME/scripts/$script"
+for script in "$PROJECT_DIR"/scripts/*; do
+  [ -f "$script" ] || continue
+  cp "$script" "$AB_HOME/scripts/$(basename "$script")"
+  chmod +x "$AB_HOME/scripts/$(basename "$script")"
 done
 
 # Deploy stock watchlist (only if not already present — user manages this file)
