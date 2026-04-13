@@ -98,6 +98,18 @@ Rule of thumb: parameter count × 0.6 = GB in Q4 quantization.
 - Up to 12B: fits comfortably (~7GB)
 - 12-20B: tight, may swap
 - 20B+: cloud only
+- Cloud models (`*:cloud`) route through Ollama but run remotely — no local memory impact
+- After pulling a new model, set `num_ctx` in a Modelfile — Ollama defaults to 4096 context
+- Never run `ollama serve` manually — it's managed by the LaunchAgent
+
+### Ollama management commands
+```bash
+ollama list                    # list installed models
+ollama show <model>            # show model details (architecture, params, context, quantization)
+ollama ps                      # show currently loaded models and memory usage
+ollama pull <model>            # download/update a model
+ollama rm <model>              # remove a model
+```
 
 ## Scoring criteria
 - **Intelligence Index** (from leaderboard, higher = better) → determines rank

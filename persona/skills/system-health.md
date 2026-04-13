@@ -8,7 +8,7 @@ user-invocable: true
 
 Run a comprehensive health check and report only **real issues** — not known/accepted deviations.
 
-## Step 1 — Read known deviations
+## Step 0 — Read known deviations
 
 ```
 read docs/system-notes.md
@@ -16,33 +16,82 @@ read docs/system-notes.md
 
 Parse this file first. Any item described here is **expected** and must NOT be reported as an issue. Mention them briefly as "known & accepted" if relevant.
 
-## Step 2 — Gateway health
+## Step 1 — Doctor
 
-Use the **gateway** tool:
+```bash
+~/.agentbridge/scripts/doctor.sh
 ```
-gateway action=restart  (only if needed)
+
+## Step 2 — Heartbeat
+
+```bash
+cat ~/.agentbridge/memory/.heartbeat  # epoch ms — if >10 min old, stalled
 ```
 
-Or check via `session_status` for version/uptime info.
+## Step 3 — Cron / Tasks
 
-## Step 3 — Check system resources
+```bash
+# Use /tasks command or:
+cat ~/.agentbridge/memory/cron-state.json
+```
 
-Via `exec` (all allowlisted):
+## Step 4 — Sleep cycle
+
+```bash
+ls -lt ~/.agentbridge/memory/sleep/ | head -5   # last audit — if >2 days, broken
+ls -la ~/.agentbridge/memory/sleep/*.lock 2>/dev/null  # stale locks
+```
+
+## Step 5 — Memory DB
+
+```bash
+sqlite3 ~/.agentbridge/memory/memory.db "SELECT 'messages', COUNT(*) FROM messages UNION ALL SELECT 'extracted', COUNT(*) FROM extracted_memories;"
+sqlite3 ~/.agentbridge/memory/memory.db "SELECT datetime(timestamp/1000, 'unixepoch', 'localtime'), substr(content,1,60) FROM messages ORDER BY timestamp DESC LIMIT 3;"
+```
+
+## Step 6 — Consolidation
+
+```bash
+ls -lt ~/.agentbridge/memory/daily/ 2>/dev/null | head -3    # if >3 days, broken
+ls -lt ~/.agentbridge/memory/weekly/ 2>/dev/null | head -3
+```
+
+## Step 7 — Bridge logs
+
+```bash
+grep -i "error\|fail\|crash\|WARN" ~/.agentbridge/logs/bridge.log 2>/dev/null | tail -20
+```
+
+## Step 8 — Backup
+
+```bash
+ls -lt ~/.backup-agentbridge/ 2>/dev/null | head -5  # should be <2 days old
+```
+
+## Step 9 — Processes
+
+```bash
+ps aux | grep -E "agentbridge|kiro-cli|ollama" | grep -v grep
+```
+
+## Step 10 — System resources
+
 ```bash
 top -l 1 -n 0 | head -10
 df -h /
 uptime
 ```
 
-## Step 4 — Check processes
+## Step 11 — Model availability
 
 ```bash
-ps aux | head -20
+# Check configured models from transport.json
+python3 ~/.agentbridge/scripts/scout-ollama.py
 ```
 
 ## Reporting
 
-Produce a concise report with these sections:
+Produce a concise report:
 
 1. **Status**: one-line overall (✅ healthy / ⚠️ degraded / 🔴 down)
 2. **Services**: gateway, channels (Telegram/Discord) — up/down each
@@ -51,3 +100,5 @@ Produce a concise report with these sections:
 5. **Resources**: disk, memory, uptime — only flag if concerning (disk >85%, etc.)
 
 Keep it short. If everything is fine, say so in 3-4 lines.
+
+If issues found, suggest `doctor.sh --fix` or `doctor.sh --fix-full`.
