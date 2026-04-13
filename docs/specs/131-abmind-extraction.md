@@ -82,7 +82,7 @@ cd ~/workspace/agentbridge && npm link abmind
 | 3 | Set up package.json, tsconfig, vitest, build script | 20 min |
 | 4 | Verify all 29 test files pass in new repo | 15 min |
 | 5 | Update bridge: git dep, remove `packages/memory/`, update imports | 30 min |
-| 6 | Remove deploy symlink hack, verify bridge 939 tests pass | 15 min |
+| 6 | Remove deploy symlink hack + update deploy.sh, verify bridge 939 tests pass | 15 min |
 | 7 | Write `.kiro/steering/abmind.md` for standalone use | 15 min |
 | **Total** | | **~2.5 hr** |
 
@@ -99,6 +99,10 @@ import { MemoryManager } from "abmind/memory-manager.js";  // → node_modules/a
 ```
 
 Import paths stay the same. Only the resolution changes.
+
+## Git history
+
+Start fresh in the new repo. History stays in agentbridge if needed.
 
 ## Risk
 
