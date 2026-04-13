@@ -1,18 +1,16 @@
 # Model Scout
 
-Find the best models for each provider and add them to `models.json`.
+Find the best free cloud models and propose the top 3 candidates.
 
 ## When to use
 User asks about model recommendations, best deals, or you need to evaluate if a better model is available.
 
 ## Config files
 
-- **models.json** — `~/.agentbridge/config/models.json` (hot-reloaded, you can add models at runtime)
-- **transport.json** — `~/.agentbridge/config/transport.json` (read at startup, lists providers)
+- **models.json** — `~/.agentbridge/config/models.json` (hot-reloaded)
+- **transport.json** — `~/.agentbridge/config/transport.json` (lists providers)
 
 ## models.json schema
-
-Every model entry must have all fields. Missing `transports` = model won't appear in `/models change` picker.
 
 ```json
 {
@@ -21,7 +19,9 @@ Every model entry must have all fields. Missing `transports` = model won't appea
     "maxOutput": 16384,
     "rank": 2,
     "cost": { "input": 0.0, "output": 0.0 },
-    "transports": ["ollama", "openrouter"]
+    "transports": ["ollama", "openrouter"],
+    "description": "High IQ free model, top Intelligence Index score",
+    "addedAt": "2026-04-13"
   }
 }
 ```
@@ -29,58 +29,87 @@ Every model entry must have all fields. Missing `transports` = model won't appea
 - **rank**: 1 = frontier, 2 = strong, 3 = good, 4 = basic, 5 = minimal
 - **cost**: per million tokens in USD. `0.0` = free
 - **transports**: provider names from transport.json that can serve this model
+- **description**: why this model was added (scout writes this)
+- **addedAt**: date when scouted (auto-set by script)
 
-## Scripts
+## Scouting workflow
 
-All scout scripts are in `scripts/`. No inline python — avoids prompt injection scanner triggers.
+### 1. Scan available free models
 
-### OpenRouter scouting
 ```bash
-# List free models, compare against catalog
-python3 scripts/scout-openrouter.py
-```
-Shows all free-tier models sorted by context window, marks which are already in models.json.
+# OpenRouter free tier
+python3 ~/.agentbridge/scripts/scout-openrouter.py
 
-### Ollama scouting
-```bash
-# List installed + running models, compare against catalog
-python3 scripts/scout-ollama.py
-```
-Shows installed models with size, running status, and catalog status.
-
-### Add a model
-```bash
-# Backup → add → validate → restore if broken
-python3 scripts/scout-add-model.py <model-id> [contextWindow] [maxOutput] [rank] [input_cost] [output_cost] [transports...]
-
-# Examples:
-python3 scripts/scout-add-model.py 'kimi-k2.5:cloud' 262144 16384 2 0.0 0.0 ollama openrouter
-python3 scripts/scout-add-model.py 'qwen/qwen3-coder:free' 131072 8192 3 0.0 0.0 openrouter
-```
-Automatically backs up to `.old`, validates all entries after write, restores if validation fails.
-
-## Research
-
-### Browse for new Ollama models
-```bash
-# Tool-calling models (required for agent use)
-agentbridge-browser --action navigate --url "https://ollama.com/search?c=tools"
-agentbridge-browser --action extract_text --max-chars 5000
-
-# Cloud models (no RAM cost)
-agentbridge-browser --action navigate --url "https://ollama.com/search?q=cloud"
-agentbridge-browser --action extract_text --max-chars 5000
+# Ollama cloud models (no local, cloud only)
+python3 ~/.agentbridge/scripts/scout-ollama.py
 ```
 
-### Check quality leaderboards
+### 2. Research quality
+
+Browse leaderboards to get Intelligence Index scores:
 ```bash
 agentbridge-browser --action navigate --url "https://artificialanalysis.ai/leaderboards/models"
 agentbridge-browser --action extract_text --max-chars 5000
 ```
 
-### Liveness test before adding
+Search for new cloud models on Ollama:
 ```bash
-# Ollama
+agentbridge-browser --action navigate --url "https://ollama.com/search?q=cloud"
+agentbridge-browser --action extract_text --max-chars 5000
+```
+
+### 3. Propose top 3
+
+After scanning and researching, propose exactly 3 candidates ranked by:
+
+1. **Intelligence Index** (higher = better) → determines rank
+2. **Context window** (bigger = fewer compactions)
+3. **Tool calling** (required — model must support function calling)
+4. **Throughput** (tokens/sec, matters for interactive use)
+
+Format:
+```
+🏆 Top 3 free cloud models:
+
+1. model-name (provider) — Intelligence: XX, Context: XXK
+   Why: [one sentence reason]
+
+2. model-name (provider) — Intelligence: XX, Context: XXK
+   Why: [one sentence reason]
+
+3. model-name (provider) — Intelligence: XX, Context: XXK
+   Why: [one sentence reason]
+```
+
+### 4. Add approved models
+
+After user approves, add with description explaining why:
+
+```bash
+python3 ~/.agentbridge/scripts/scout-add-model.py \
+  "model-id" contextWindow maxOutput rank input_cost output_cost \
+  "Why this model: Intelligence XX, free, large context" \
+  ollama openrouter
+```
+
+The script automatically:
+- Backs up models.json to `.old`
+- Sets `addedAt` to today's date
+- Validates all entries after write
+- Restores from backup if validation fails
+
+### 5. Test
+
+```
+/models quick <model>
+```
+
+## Liveness test
+
+Before proposing, verify the model actually responds:
+
+```bash
+# Ollama cloud
 curl -s http://localhost:11434/v1/chat/completions -d '{
   "model": "model-name",
   "messages": [{"role":"user","content":"Say hi"}],
@@ -92,34 +121,3 @@ curl -s https://openrouter.ai/api/v1/chat/completions \
   -H "Authorization: Bearer $OPENROUTER_API_KEY" \
   -d '{"model":"model-id","messages":[{"role":"user","content":"Say hi"}],"max_tokens":5}'
 ```
-
-### Local model sizing (Mac Mini M4, 16GB RAM)
-Rule of thumb: parameter count × 0.6 = GB in Q4 quantization.
-- Up to 12B: fits comfortably (~7GB)
-- 12-20B: tight, may swap
-- 20B+: cloud only
-- Cloud models (`*:cloud`) route through Ollama but run remotely — no local memory impact
-- After pulling a new model, set `num_ctx` in a Modelfile — Ollama defaults to 4096 context
-- Never run `ollama serve` manually — it's managed by the LaunchAgent
-
-### Ollama management commands
-```bash
-ollama list                    # list installed models
-ollama show <model>            # show model details (architecture, params, context, quantization)
-ollama ps                      # show currently loaded models and memory usage
-ollama pull <model>            # download/update a model
-ollama rm <model>              # remove a model
-```
-
-## Scoring criteria
-- **Intelligence Index** (from leaderboard, higher = better) → determines rank
-- **Context window** (bigger = fewer compactions)
-- **Tool calling** (required — model must support function calling)
-- **Throughput** (tokens/sec, matters for interactive use)
-- **Cost** (free preferred, low cost acceptable)
-- **RAM fit** (local models only)
-
-## After scouting
-
-1. Run `python3 scripts/scout-add-model.py` for each new model (handles backup + validation)
-2. Test with `/models quick <model>` or `/models change`

@@ -20,6 +20,8 @@ export type ModelEntry = {
   rank: number;
   cost: ModelCost;
   transports: string[];
+  description?: string;
+  addedAt?: string;
 };
 
 export type ModelCatalog = Record<string, ModelEntry>;

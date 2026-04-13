@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Add a model to models.json with backup and validation."""
+"""Add a model to models.json with backup, validation, description, and timestamp."""
 import json, os, shutil, sys
+from datetime import datetime
 
 config_dir = os.path.expanduser("~/.agentbridge/config")
 models_path = os.path.join(config_dir, "models.json")
 
 if len(sys.argv) < 2:
-    print("Usage: scout-add-model.py <model-id> [contextWindow] [maxOutput] [rank] [input_cost] [output_cost] [transports...]")
-    print("Example: scout-add-model.py 'qwen/qwen3-coder:free' 131072 8192 3 0.0 0.0 openrouter ollama")
+    print("Usage: scout-add-model.py <model-id> [contextWindow] [maxOutput] [rank] [input_cost] [output_cost] [description] [transports...]")
+    print('Example: scout-add-model.py "kimi-k2.5:cloud" 262144 16384 2 0.0 0.0 "High IQ free model, top Intelligence Index" ollama openrouter')
     sys.exit(1)
 
 model_id = sys.argv[1]
@@ -16,21 +17,26 @@ max_out = int(sys.argv[3]) if len(sys.argv) > 3 else 8192
 rank = int(sys.argv[4]) if len(sys.argv) > 4 else 3
 cost_in = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
 cost_out = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
-transports = sys.argv[7:] if len(sys.argv) > 7 else ["ollama"]
+description = sys.argv[7] if len(sys.argv) > 7 else ""
+transports = sys.argv[8:] if len(sys.argv) > 8 else ["ollama"]
 
 # Backup
 shutil.copy2(models_path, models_path + ".old")
-print(f"📦 Backed up to models.json.old")
+print("📦 Backed up to models.json.old")
 
 # Add
 models = json.load(open(models_path))
-models[model_id] = {
+entry = {
     "contextWindow": ctx,
     "maxOutput": max_out,
     "rank": rank,
     "cost": {"input": cost_in, "output": cost_out},
     "transports": transports,
+    "addedAt": datetime.now().strftime("%Y-%m-%d"),
 }
+if description:
+    entry["description"] = description
+models[model_id] = entry
 json.dump(models, open(models_path, "w"), indent=2)
 
 # Validate
