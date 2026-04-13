@@ -616,10 +616,10 @@ export async function startBridge(): Promise<void> {
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
 
-  // Watchdog: countdown+kick pattern (variables declared here, timer started after heartbeat)
-  const WD_COUNTDOWN_MS = hbIntervalMs * 3;
-  let wdCountdown = WD_COUNTDOWN_MS;
-  const kickWatchdog = (): void => { wdCountdown = WD_COUNTDOWN_MS; };
+  // Watchdog: wall-clock comparison (immune to setInterval batching after sleep)
+  const WD_THRESHOLD_MS = hbIntervalMs * 3;
+  let lastKickAt = Date.now();
+  const kickWatchdog = (): void => { lastKickAt = Date.now(); };
 
   const heartbeat = new HeartbeatSystem({
     enabled: true,
@@ -631,7 +631,6 @@ export async function startBridge(): Promise<void> {
       const resumeKind = classifyResume();
       if (resumeKind === "dark") {
         logDebug("main", `⏸️ Darkwake resume (${Math.round(gapMs / 60000)}min) — skipping tick`);
-        kickWatchdog(); // keep watchdog alive during dark wakes
         return;
       }
       logInfo("main", `⏸️ Standby resume (${Math.round(gapMs / 60000)}min, ${resumeKind}) — continuing`);
@@ -726,17 +725,21 @@ export async function startBridge(): Promise<void> {
     heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });
   }
 
-  // --- Heartbeat watchdog timer: countdown+kick ---
+  // --- Heartbeat watchdog timer: wall-clock comparison ---
   const WD_CHECK_INTERVAL = 60_000;
-  const WD_GRACE_MS = -60_000;
+  const WD_UNKNOWN_SUPPRESS_MS = 60 * 60_000; // 1hr
 
   setInterval(() => {
-    wdCountdown -= WD_CHECK_INTERVAL;
-    if (wdCountdown <= WD_GRACE_MS) {
-      logWarn("watchdog", `No heartbeat kick for ${Math.round((WD_COUNTDOWN_MS - wdCountdown) / 60000)}min — forcing restart`);
-      writeRestartReason("watchdog: no heartbeat kick");
-      process.exit(1);
+    const elapsed = Date.now() - lastKickAt;
+    if (elapsed <= WD_THRESHOLD_MS) return;
+    const kind = classifyResume();
+    if (kind === "dark" || (kind === "unknown" && elapsed < WD_UNKNOWN_SUPPRESS_MS)) {
+      lastKickAt = Date.now();
+      return;
     }
+    logWarn("watchdog", `No heartbeat kick for ${Math.round(elapsed / 60000)}min (${kind}) — forcing restart`);
+    writeRestartReason("watchdog: no heartbeat kick");
+    process.exit(1);
   }, WD_CHECK_INTERVAL);
 
   // --- Restart flag check ---
