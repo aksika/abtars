@@ -127,12 +127,10 @@ Memory leaks solved by daily restart. No RSS tracking needed — process never l
 
 ### Phase 1 — Active bugs (implement now)
 
-**Gap 1: Dark wake restart loop**
-- Watchdog fires during dark wake, sees stale lastHeartbeat, kills bridge
-- Fix: replace timestamp-checking watchdog with countdown+kick pattern. Watchdog counts down from 15 min. Heartbeat kicks (resets) every tick. During dark wake, heartbeat fires first (standby detection → classifyResume → "dark" → skip tick but still kicks). Watchdog gets kicked before it reaches zero. After full hardware sleep (hours), counter is deeply negative → no kick comes → exit(1) → correct morning restart.
-- Grace period: kill at ≤ -60s (not ≤ 0) to give heartbeat one interval to kick after resume.
-- Files: `bridge-app.ts` (watchdog timer), `heartbeat-system.ts` (kick call)
-- Removes: bridge.lock lastHeartbeat reads from watchdog, gap detection hack
+**Gap 1: Dark wake restart loop** → **#10** ([010-watchdog-darkwake-fix.md](010-watchdog-darkwake-fix.md))
+- Countdown+kick pattern was implemented but is vulnerable to setInterval batching on resume
+- Fix: wall-clock watchdog (`Date.now() - lastKickAt`) + `classifyResume()` gate at kill threshold
+- See #10 spec for full implementation
 
 **Gap 2: Overlapping standby handlers**
 - Standby resume calls `isDailyCycleDue()` + `process.exit(0)`, duplicating age-check task
