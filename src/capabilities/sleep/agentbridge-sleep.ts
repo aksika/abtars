@@ -92,7 +92,7 @@ export interface AuditLogEntry {
  * The subagent is granted AgentBridge tools access through the transport's
  * session mechanism — the Kiro CLI agent has full tool access.
  */
-/** Create a reusable ACP transport for the sleep session. */
+/** Create a SubagentRuntime for sleep — cached, uses transport.json config. */
 
 // ── State file types ────────────────────────────────────────────────────────
 
@@ -278,14 +278,17 @@ function formatWiredResults(r: WiredResults): string {
 
 // ── Transport ───────────────────────────────────────────────────────────────
 
-async function createSleepTransport(_verbose: boolean): Promise<{ transport: import("../../components/transport/kiro-transport.js").IKiroTransport; model: string }> {
-  const { createSubagentTransport } = await import("../../components/agent-registry.js");
-  return createSubagentTransport("sleep");
+import { SubagentRuntime } from "../../components/subagent-runtime.js";
+
+let sleepRuntime: SubagentRuntime | null = null;
+
+function getSleepRuntime(): SubagentRuntime {
+  if (!sleepRuntime) sleepRuntime = new SubagentRuntime();
+  return sleepRuntime;
 }
 
 const MAX_RETRIES = 3;
 
-/** Send a prompt with retry logic. Returns response or null on exhaustion. */
 /** Budget tracker — shared across all sendWithRetry calls in a sleep cycle. */
 class LlmBudget {
   private state: SleepState;
@@ -312,7 +315,7 @@ class LlmBudget {
 }
 
 async function sendWithRetry(
-  transport: import("../../components/transport/kiro-transport.js").IKiroTransport,
+  _transport: import("../../components/transport/kiro-transport.js").IKiroTransport | null,
   prompt: string,
   stepName: string,
   _verbose: boolean,
@@ -324,8 +327,7 @@ async function sendWithRetry(
       return null;
     }
     try {
-      const response = await transport.sendPrompt("system:sleep", prompt);
-      return response;
+      return await getSleepRuntime().complete("dreamy", prompt, { session: "reuse" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `Step ${stepName} attempt ${attempt}/${MAX_RETRIES} failed: ${msg}`);
@@ -549,7 +551,6 @@ function failedEssentials(state: SleepState): string[] {
 
 async function runCatchUp(
   locks: PreviousLock[],
-  transport: import("../../components/transport/kiro-transport.js").IKiroTransport,
   sleepData: import("abmind/sleep-data-access.js").SleepDataAccess,
   memoryConfig: { memoryDir: string },
   steps: SleepStep[],
@@ -580,7 +581,7 @@ async function runCatchUp(
         const chatId = sleepData.getPrimaryChatId();
         const dayStart = dateStrToMs(lock.dateStr);
         const dayEnd = dayStart + 86400000;
-        const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(transport, p, "catch-up-04a", flags.verbose, budget).then(r => r ?? ""), {
+        const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(null, p, "catch-up-04a", flags.verbose, budget).then(r => r ?? ""), {
           ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs: 0,
           dateRange: { startTs: dayStart, endTs: dayEnd },
         });
@@ -608,7 +609,7 @@ async function runCatchUp(
         const start = Date.now();
         try {
           const chatId = sleepData.getPrimaryChatId();
-          const result = await extractFromDaily(dailyPath, chatId, (p) => sendWithRetry(transport, p, "catch-up-04b", flags.verbose, budget).then(r => r ?? ""));
+          const result = await extractFromDaily(dailyPath, chatId, (p) => sendWithRetry(null, p, "catch-up-04b", flags.verbose, budget).then(r => r ?? ""));
           lock.state.steps["04b-extract-from-daily"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
           logInfo(TAG, `[CATCH-UP] ✓ 04b-extract-from-daily for ${lock.dateStr} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
         } catch (err) {
@@ -625,7 +626,7 @@ async function runCatchUp(
       const step = steps.find(s => s.name === stepName);
       if (!step) { logWarn(TAG, `[CATCH-UP] Step file not found: ${stepName}`); continue; }
       const start = Date.now();
-      const response = await sendWithRetry(transport, step.prompt, `catch-up-${stepName}`, flags.verbose, budget);
+      const response = await sendWithRetry(null, step.prompt, `catch-up-${stepName}`, flags.verbose, budget);
       if (response) {
         lock.state.steps[stepName] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
         logInfo(TAG, `[CATCH-UP] ✓ ${stepName} (${((Date.now() - start) / 1000).toFixed(1)}s)`);
@@ -818,7 +819,10 @@ async function main(): Promise<number> {
       process.exit(1);
     }, SLEEP_TIMEOUT_MS);
 
-    const { transport, model: modelUsed } = await createSleepTransport(flags.verbose);
+    // Resolve model name for logging (from transport.json)
+    const { resolveAgent, loadTransport } = await import("../../components/transport-config.js");
+    const tc = loadTransport();
+    const modelUsed = tc ? (resolveAgent("dreamy", tc)?.model ?? "unknown") : "unknown";
     let dreamySucceeded = true;
     let dailySummaryPath: string | null = null;
 
@@ -831,7 +835,7 @@ async function main(): Promise<number> {
       const previousLocks = scanPreviousLocks(sleepDir, dateStr);
       if (previousLocks.length > 0) {
         logInfo(TAG, `[CATCH-UP] Found ${previousLocks.length} previous lock(s)`);
-        await runCatchUp(previousLocks, transport, sleepData, memoryConfig, steps, flags, budget);
+        await runCatchUp(previousLocks, sleepData, memoryConfig, steps, flags, budget);
       }
 
       emitProgress("starting");
@@ -888,7 +892,7 @@ async function main(): Promise<number> {
             const firstMsgDate = firstMsgTs ? new Date(firstMsgTs) : new Date();
             const targetDate = `${firstMsgDate.getFullYear()}-${String(firstMsgDate.getMonth() + 1).padStart(2, "0")}-${String(firstMsgDate.getDate()).padStart(2, "0")}`;
 
-            const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(transport, p, "04a-daily-summary", flags.verbose, budget).then(r => r ?? ""), {
+            const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(null, p, "04a-daily-summary", flags.verbose, budget).then(r => r ?? ""), {
               ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs,
             });
             if (summary) {
@@ -917,7 +921,7 @@ async function main(): Promise<number> {
           }
           try {
             const chatId = sleepData.getPrimaryChatId();
-            const result = await extractFromDaily(dailySummaryPath, chatId, (p) => sendWithRetry(transport, p, "04b-extract", flags.verbose, budget).then(r => r ?? ""));
+            const result = await extractFromDaily(dailySummaryPath, chatId, (p) => sendWithRetry(null, p, "04b-extract", flags.verbose, budget).then(r => r ?? ""));
             state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
             writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), result, "utf-8");
             logInfo(TAG, `[SLEEP] ✓ ${step.name} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
@@ -931,9 +935,9 @@ async function main(): Promise<number> {
         }
 
         // Standard prompt-driven step
-        const ctxBefore = transport.contextPercent;
-        const response = await sendWithRetry(transport, step.prompt, step.name, flags.verbose, budget);
-        const ctxAfter = transport.contextPercent;
+        const ctxBefore = -1;
+        const response = await sendWithRetry(null, step.prompt, step.name, flags.verbose, budget);
+        const ctxAfter = -1;
         const duration = Date.now() - start;
 
         if (response) {
@@ -959,7 +963,7 @@ async function main(): Promise<number> {
       }
     } finally {
       clearTimeout(timeoutHandle);
-      try { transport.destroy(); } catch { /* */ }
+      try { getSleepRuntime().shutdown(); } catch { /* */ }
     }
 
     // Set final status
