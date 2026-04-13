@@ -10,7 +10,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn, logError } from "../logger.js";
-import { writeRestartReason } from "../restart-reason.js";
+import { writeRestartReason } from "../transport/bridge-lock-transport.js";
 
 /**
  * ACP transport using @agentclientprotocol/sdk.

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readEntry as cronReadEntry } from "./components/cron/cron-db.js";
 import { execFileSync, execSync } from "node:child_process";
@@ -7,7 +7,7 @@ import { agentBridgeHome } from "./paths.js";
 
 import { TmuxClient } from "./components/transport/tmux-client.js";
 import { createAgentTransport } from "./components/agent-registry.js";
-import { writeRestartReason } from "./components/restart-reason.js";
+import { writeRestartReason, readAndClearRestartRequested } from "./components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "./components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
 import type { SttConfig } from "./components/stt.js";
@@ -612,7 +612,11 @@ export async function startBridge(): Promise<void> {
 
   // bridge.lock — track bridge lifecycle
   const bridgeLockPath = join(agentBridgeHome(), "bridge.lock");
-  try { writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), "utf-8"); } catch { /* */ }
+  try {
+    let version = "?";
+    try { version = JSON.parse(readFileSync(join(import.meta.dirname, "build-info.json"), "utf-8")).hash; } catch { /* */ }
+    writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now(), version, sleepStatus: "awake" }), "utf-8");
+  } catch { /* */ }
 
   const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
 
@@ -746,11 +750,9 @@ export async function startBridge(): Promise<void> {
   heartbeat.registerTask({
     name: "restart-check",
     execute: async () => {
-      const flag = join(agentBridgeHome(), ".restart-requested");
-      if (existsSync(flag)) {
-        const reason = readFileSync(flag, "utf-8").trim();
-        logInfo("restart-check", `Restart requested: ${reason}`);
-        unlinkSync(flag);
+      const req = readAndClearRestartRequested();
+      if (req) {
+        logInfo("restart-check", `Restart requested: ${req}`);
         process.exit(0);
       }
     },

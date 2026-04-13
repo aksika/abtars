@@ -1,11 +1,7 @@
 #!/usr/bin/env node
 // agentbridge-restart — request bridge restart. Exits the bridge process; launchd auto-restarts.
-import { localISO } from "../utils/local-time.js";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { agentBridgeHome } from "../paths.js";
+import { writeRestartRequested } from "../components/transport/bridge-lock-transport.js";
 
 const reason = process.argv.slice(2).join(" ") || "no reason given";
-const flagFile = join(agentBridgeHome(), ".restart-requested");
-writeFileSync(flagFile, `${localISO()} ${reason}\n`);
+writeRestartRequested(reason);
 console.log(`Restart requested: ${reason}`);

@@ -5,6 +5,7 @@
  */
 
 import { spawn, execSync } from "node:child_process";
+import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
 import { join, dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -107,6 +108,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         progress = null;
         if (code === 0) {
           logInfo("sleep", `😴 Sleep finished successfully (attempt ${attempts})`);
+          writeSleepStatus("awake");
           if (opts.memoryEnabled) opts.onComplete();
 
           // Send dream report + announce hw sleep timing
@@ -132,9 +134,11 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           setTimeout(spawnSleep, RETRY_MS);
         } else {
           logWarn("sleep", `😴 Sleep failed (code=${code}) — exhausted ${MAX_RETRIES} attempts`);
+          writeSleepStatus("awake");
         }
       });
       logInfo("sleep", `😴 Sleep spawned (pid=${proc.pid}, attempt ${attempts}, model=${process.env["AGENT_SLEEP_MODEL"] ?? "auto"})`);
+      writeSleepStatus("sleeping");
     } catch (err) {
       logWarn("sleep", `😴 Sleep spawn failed: ${err instanceof Error ? err.message : String(err)}`);
       if (attempts < MAX_RETRIES) setTimeout(spawnSleep, RETRY_MS);
@@ -157,6 +161,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     _awaitingHwSleep = false;
     const sleepCmd = process.platform === "darwin" ? "pmset sleepnow" : "systemctl suspend";
     logInfo("sleep", `💤 Putting hardware to sleep (${sleepCmd})...`);
+    writeSleepStatus("hw_sleep");
     try { execSync(sleepCmd, { timeout: 5000 }); }
     catch (err) { logWarn("sleep", `💤 Hardware sleep failed: ${err instanceof Error ? err.message : String(err)}`); }
   }

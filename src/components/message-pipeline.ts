@@ -12,7 +12,7 @@ import { loadSoulBundle } from "./soul-loader.js";
 import { tryReaction } from "./reaction-handler.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
-import { writeRestartReason, readAndClearRestartReason } from "./restart-reason.js";
+import { writeRestartReason, readAndClearRestartReason } from "./transport/bridge-lock-transport.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind/memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";

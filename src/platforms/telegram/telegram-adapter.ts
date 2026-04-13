@@ -12,7 +12,7 @@ import { formatReactionSignal } from "../../components/reaction-signal.js";
 import { routeReaction } from "../../components/reaction-router.js";
 import { emojiToScore } from "abmind/emotion-utils.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
-import { writeRestartReason } from "../../components/restart-reason.js";
+import { writeRestartReason } from "../../components/transport/bridge-lock-transport.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { TelegramUpdate } from "../../types/index.js";
