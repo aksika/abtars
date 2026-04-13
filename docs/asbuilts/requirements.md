@@ -20,3 +20,11 @@ Post-skeleton refactor (#131/#132/#133). These are the non-negotiable properties
 | 12 | **Testable** | Every slot has an interface → mockable. 900+ tests across both repos. Skeleton makes testing easier — mock the runtime, test the component. |
 | 13 | **Robust with recovery** | Watchdog (wall-clock, dark wake safe). LaunchAgent restart. Transport fallback (leaky bucket + rollback). DB WAL checkpoint. doctor.sh diagnostics. |
 | 14 | **Basic self-healing** | Self-healer task. Transport auto-restore after fallback. Heartbeat health check restores primary. FTS index rebuild. Message dedup. Memory defaults fix. |
+| 15 | **Persistent personality** | SOUL.md, agent notes, core knowledge, skills. Consistent identity across sessions. Wake-up context rebuilds who the agent is after every restart. |
+| 16 | **Cost-effective model access** | Use existing subscriptions (AWS Builder ID, Google, OpenRouter free tier) instead of per-token billing. Bridge turns subscription CLIs into an autonomous agent. |
+| 17 | **Coding mode** | Dedicated coding agent (Cody) with project context, separate session. /coding to switch, /default to return. A working mode, not just chat. |
+| 18 | **Scheduled tasks** | Cron system with heartbeat-driven execution. Reminders, stock checks, daily routines. Agent can schedule its own tasks at runtime via tool calls. |
+| 19 | **Browser capability** | Headless browsing via Browsie subagent. Navigate, extract, screenshot. Docker container with auto-stop after idle. Web research without leaving the conversation. |
+| 20 | **Knowledge base integration** | NotebookLM (NLM) as Layer 6 recall. Topic files. ClawHub community skills. External knowledge sources plugged into the memory hierarchy. |
+| 21 | **Skill system** | Markdown-based skills in persona/skills/. Hot-reloaded via skill-watcher. Injection scanner on install. Agent learns new capabilities without restart. ClawHub for community distribution. |
+| 22 | **Heartbeat subsystem** | 5-minute tick drives everything: task scheduling, standby detection, watchdog kick, session lifecycle. Registered tasks execute per tick. Bridge.lock updated every tick as health signal. Single loop, no competing timers. |
