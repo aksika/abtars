@@ -25,13 +25,13 @@ import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, write
 import { MemoryManager } from "abmind/memory-manager.js";
 import { loadMemoryConfig } from "abmind/memory-config.js";
 import { SleepStateGatherer } from "abmind/sleep-state-gatherer.js";
-import { loadSleepSteps, buildSleepVars, substituteVars } from "./sleep-prompt-loader.js";
-import { buildDailySummary, writeDailyFile } from "./sleep-daily-summary.js";
-import { extractFromDaily } from "./sleep-extract-daily.js";
+import { loadSleepSteps, buildSleepVars, substituteVars } from "abmind/sleep-pipeline.js";
+import { buildDailySummary, writeDailyFile } from "abmind/sleep-pipeline.js";
+import { extractFromDaily } from "abmind/sleep-pipeline.js";
 import { logInfo, logWarn, logError, setLogLevel } from "../../components/logger.js";
 import type { StateSnapshot } from "abmind/sleep-state-gatherer.js";
 import { localDate } from "../../components/env-utils.js";
-import type { SleepStep } from "./sleep-prompt-loader.js";
+import type { SleepStep } from "abmind/sleep-pipeline.js";
 
 const TAG = "agentbridge-sleep";
 
