@@ -85,15 +85,16 @@ Plugin API passes userId (not chatId) through all hooks and tool calls. userId s
 | gitagent (2.7k★) | Portability standard, framework-agnostic | Interesting but different goal |
 | axar (157★) | Minimal TS framework, decorators | No plugin system |
 
-## Sequencing
+## Sequencing (staged)
 
-1. #131 — Extract abmind, define IMemoryCore (public API)
-2. #132 — Decouple sleep into ISleepSlot
-3. #133 — Formalize remaining slots, config-driven loading
-4. Wrap abmind as first standalone plugin
-5. OC compatibility wrapper (thin, maps slots → register(api))
+| Stage | What | Backlog | Priority |
+|---|---|---|---|
+| 1 | Extract abmind core + publish npm. ab-slot + cli (already exist). IMemoryCore refactor. | #131 | MEDIUM |
+| 2 | Decouple sleep into ISleepSlot. Formalize ISkillSlot, ITaskSlot. Config-driven loading. userId threading. | #132, #133 | HIGH |
+| 3 | MCP server adapter — any MCP client gets abmind | #125 | MEDIUM |
+| 4 | Ecosystem adapters: OpenClaw, OpenCode, Claude Code | #136 | LOW |
 
-## OC compatibility (later)
+Each stage ships independently. Stage 1 changes nothing for the running system. Stage 2 is internal refactoring. Stage 3+ is reach.
 
 ## Multi-host adapter pattern
 
