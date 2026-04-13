@@ -1,164 +1,126 @@
 # #133 AB Plugin SDK — Skeleton Architecture
 
-**Date:** 2026-04-13
+**Date:** 2026-04-14
 **Status:** Planned
 **Priority:** HIGH
+**Depends on:** #131 (done)
 
-## Vision
+## Goal
 
-AgentBridge becomes a skeleton with typed plugin slots. Everything plugs in:
+AgentBridge gets a skeleton with a subagent runtime. Any component can request LLM completions without managing transports. Slot interfaces formalized. bridge-app.ts wiring simplified.
 
+## Three parts
+
+### Part 1: SubagentRuntime (core deliverable)
+
+```typescript
+interface SubagentRuntime {
+  complete(agent: string, prompt: string): Promise<string>;
+  // agent = "professor" | "dreamy" | "browsie" | "coding"
+  // Reads model+provider from transport.json
+  // Creates/reuses transport, handles session, retries
+}
 ```
-AgentBridge Skeleton
-├── Transport  (already pluggable: ACP, tmux, DirectAPI)
-├── Memory     (abmind — or swap for another)
-├── Sleep      (maintenance cycle)
-├── Skills     (knowledge system)
-├── Tasks      (cron/heartbeat)
-└── Platforms  (Telegram, Discord — already pluggable)
-```
 
-## Design: Slot-based, not generic SDK
+Replaces:
+- `createSubagentTransport()` scattered calls
+- Manual transport creation in sleep, browse, coding
+- 1000-line sleep orchestrator's transport management
 
-Two patterns exist in the ecosystem:
-- **Heavy SDK** (OpenClaw, Mastra): general-purpose `register(api)`, lifecycle hooks, arbitrary extensions
-- **Slot-based**: fixed slots with typed interfaces, swap implementations
+Implementation: wrap `createSubagentTransport()` with cache + session manager. One transport per agent, reused across calls, lazy-created on first use.
 
-AB uses slot-based. Reasons:
-- AB has 6 slots, not unlimited extension points
-- No need for third-party plugins — need swappable implementations
-- Generic `register(api)` adds indirection without value when slots are known
-- The slot interfaces ARE the SDK
-
-## Slot interfaces
+### Part 2: Slot interfaces
 
 ```typescript
 interface ABSkeleton {
-  memory:    IMemorySlot;      // abmind
-  sleep:     ISleepSlot;       // sleep orchestrator
-  skills:    ISkillSlot;       // skill loader
-  tasks:     ITaskSlot;        // cron/heartbeat
-  transport: ITransportSlot;   // IKiroTransport (exists)
-  platforms: IPlatformSlot[];  // adapters (exist)
+  memory:    IMemorySystem;       // exists
+  transport: IKiroTransport;      // exists (professor's main transport)
+  platforms: PlatformAdapter[];   // exists
+  runtime:   SubagentRuntime;     // NEW
+  skills:    ISkillSlot;          // formalize skill-watcher
+  tasks:     ITaskSlot;           // formalize heartbeat
+}
+
+interface ISkillSlot {
+  loadSkills(): Skill[];
+  watchForChanges(): void;
+  stop(): void;
+}
+
+interface ITaskSlot {
+  registerTask(task: { name: string; execute: () => Promise<void> }): void;
+  tick(): Promise<void>;
+  stop(): void;
+  getTaskNames(): string[];
+  getTaskStatuses(): ReadonlyMap<string, string>;
 }
 ```
 
-Each slot has a specific contract. Not a generic API — each plugin type knows exactly what it provides.
+ISkillSlot and ITaskSlot extracted from existing skill-watcher.ts and heartbeat-system.ts.
 
-### Already formalized
-- `IKiroTransport` — transport slot
-- `IMemorySystem` — memory slot (needs IMemoryCore refactor for public API)
-- Platform adapters — telegram/discord
+### Part 3: Config-driven wiring
 
-### Needs formalization
-- `ISleepSlot` — `runSleep(complete: LLMCallback): SleepReport`, `isActive(): boolean`
-- `ISkillSlot` — `loadSkills(): Skill[]`, `watchForChanges(): void`
-- `ITaskSlot` — `registerTask(task)`, `tick()`, `getStatus()`
-
-## Config-driven loading
-
-```json
-{
-  "plugins": {
-    "memory": "abmind",
-    "sleep": "abmind-sleep",
-    "skills": "default",
-    "tasks": "default",
-    "transport": "from transport.json"
-  }
-}
-```
-
-## Design constraint: multi-user
-
-Plugin API passes userId (not chatId) through all hooks and tool calls. userId spans platforms (TG, DC). userId→chatId mapping is a platform concern. See #67.
-
-## Ecosystem research (2026-04-13)
-
-| Project | Pattern | Relevance |
-|---|---|---|
-| OpenClaw | Heavy SDK: register(api), hooks, tools, commands, context engines | Reference for OC compat wrapper |
-| lossless-claw | OC plugin: registerContextEngine, registerTool, lifecycle hooks | Reference implementation |
-| Magic Context | OpenCode plugin: overnight dreamer, cross-session memory, compaction | Closest to abmind — study |
-| Mastra (23k★) | Full framework, built-in memory with stores | Too heavy, everything built-in |
-| eigent (13.6k★) | Desktop agent, skills = markdown + scripts | Similar skill pattern |
-| gitagent (2.7k★) | Portability standard, framework-agnostic | Interesting but different goal |
-| axar (157★) | Minimal TS framework, decorators | No plugin system |
-
-## Sequencing (staged)
-
-| Stage | What | Backlog | Priority |
-|---|---|---|---|
-| 1 | Extract abmind core + publish npm. ab-slot + cli (already exist). IMemoryCore refactor. | #131 | MEDIUM |
-| 2 | Decouple sleep into ISleepSlot. Formalize ISkillSlot, ITaskSlot. Config-driven loading. userId threading. | #132, #133 | HIGH |
-| 3 | MCP server adapter — any MCP client gets abmind | #125 | MEDIUM |
-| 4 | Ecosystem adapters: OpenClaw, OpenCode, Claude Code | #136 | LOW |
-
-Each stage ships independently. Stage 1 changes nothing for the running system. Stage 2 is internal refactoring. Stage 3+ is reach.
-
-## Multi-host adapter pattern
-
-abmind core is host-agnostic (`IMemoryCore`). Thin adapters map to each host's plugin API:
-
-```
-abmind (core library — IMemoryCore)
-├── @abmind/ab-slot          → implements IMemorySlot for AB skeleton
-├── @abmind/openclaw-plugin  → maps to OC register(api) — registerTool, registerContextEngine
-├── @abmind/opencode-plugin  → maps to OpenCode plugin API — hooks, transforms, tools
-├── @abmind/claude-plugin    → maps to Claude Code plugin API — skills, hooks, MCP servers
-├── @abmind/mcp-server       → MCP server exposing recall/store/edit as MCP tools (universal)
-├── @abmind/cli              → standalone CLI (abmind recall/store/edit/status)
-```
-
-One brain, multiple bodies. Each adapter is ~50-100 lines. The core never imports host-specific code.
-
-### Integration levels (deepest → shallowest)
-
-| Adapter | Integration | Features | Overhead |
-|---|---|---|---|
-| `@abmind/ab-slot` | Direct in-process import | Full: sleep, emotion, contradiction, wake-up context, context injection, lifecycle hooks | Zero — native function calls |
-| `@abmind/openclaw-plugin` | `register(api)` + hooks | Most: tools, context engine, lifecycle hooks, CLI. No emotion/sleep unless host supports it | Small — adapter mapping |
-| `@abmind/opencode-plugin` | Hooks + transforms | Good: tools, dreamer integration, transforms. Different lifecycle model | Small — adapter mapping |
-| `@abmind/claude-plugin` | Skills + hooks + MCP | Medium: tools via MCP, skills for agent guidance. Constrained by CC's plugin API | Medium — MCP serialization for tools |
-| `@abmind/mcp-server` | MCP protocol (JSON-RPC) | Basic: recall/store/edit/search as MCP tools. No lifecycle hooks, no context injection, no sleep | High — full JSON-RPC serialization |
-| `@abmind/cli` | stdin/stdout | Minimal: manual/scripted recall/store/edit. No runtime integration | Highest — process spawn per call |
-
-Deeper = more features (sleep, emotion, context injection, contradiction checking).
-Shallower = more portable but just basic recall/store — loses the "brain" features.
-
-### Host plugin systems studied (2026-04-13)
-
-| Host | Plugin contract | Memory approach |
-|---|---|---|
-| OpenClaw | `register(api)` — registerTool, registerContextEngine, hooks | memory-core + memory-lancedb plugins |
-| OpenCode | Plugin hooks, transforms, tools, hidden agents | Magic Context: dreamer, historian, compartments |
-| Claude Code | `BuiltinPluginDefinition` — skills, hooks, mcpServers | memdir: markdown files, 4 types (user/feedback/project/reference), team memory |
-| Any MCP client | MCP protocol — tools, resources, prompts | MCP server exposes tools |
-| CLI | stdin/stdout | Direct CLI invocation |
-
-### Claude Code memory taxonomy (reference for #135)
-
-Claude Code separates memories into 4 types:
-- **user** — role, preferences, expertise (always private)
-- **feedback** — corrections + confirmations on approach (private or team)
-- **project** — ongoing work, goals, deadlines (bias toward team)
-- **reference** — pointers to external systems (usually team)
-
-Plus: private vs team scope, CLAUDE.md (project conventions), CLAUDE.local.md (personal).
-Relevant for #135 (user vs project memory separation).
-
-Example OC adapter:
 ```typescript
-// abmind-openclaw-plugin/index.ts
-export default {
-  id: "abmind",
-  kind: "memory",
-  register(api: OpenClawPluginApi) {
-    const mem = createAbmind(api.pluginConfig);
-    api.registerTool((ctx) => createRecallTool(mem, ctx.sessionKey));
-    api.registerTool((ctx) => createStoreTool(mem, ctx.sessionKey));
-    api.registerCommand(createAbmindCommand(mem));
-    api.on("session_end", () => mem.flush());
-  }
-};
+const skeleton = await createSkeleton({
+  memory: createAbmindMemory(memoryConfig),
+  transport: await initTransport(transportConfig),
+  platforms: [telegramAdapter, discordAdapter],
+  runtime: new SubagentRuntime(transportConfig),
+  skills: new SkillWatcher(skillsDir),
+  tasks: heartbeat,
+});
 ```
+
+bridge-app.ts becomes: create skeleton → start platforms → start heartbeat. Glue code shrinks from 700+ lines to ~100.
+
+## What this enables
+
+Sleep:
+```typescript
+const resp = await skeleton.runtime.complete("dreamy", prompt);
+```
+
+Browse:
+```typescript
+const result = await skeleton.runtime.complete("browsie", browsePrompt);
+```
+
+Any future component:
+```typescript
+await skeleton.runtime.complete(agentName, prompt);
+```
+
+After #132 + #133, sleep orchestrator collapses from ~1000 lines to ~30.
+
+## What exists today vs what changes
+
+| Component | Today | After #133 |
+|---|---|---|
+| Subagent creation | Manual per component | `runtime.complete(agent, prompt)` |
+| Slot interfaces | Informal (IKiroTransport, IMemorySystem) | Formal ABSkeleton |
+| bridge-app.ts | 700+ lines of manual wiring | ~100 lines via createSkeleton() |
+| Sleep transport | Creates own ACP session | `runtime.complete("dreamy", ...)` |
+| Browse transport | Creates own transport | `runtime.complete("browsie", ...)` |
+| Coding transport | Creates own transport | `runtime.complete("coding", ...)` |
+
+## Design constraint: userId
+
+`runtime.complete()` is agent-to-agent — no userId needed. `skeleton.memory` methods need userId for #67. Skeleton passes userId through context when platform adapter receives a message. Not implemented in #133, but interface accommodates it.
+
+## Risk
+
+Refactoring bridge-app.ts (step 6) is the biggest risk — most complex file, 700+ lines of wiring. Needs incremental refactoring, not a rewrite. Extract one component at a time, test after each.
+
+## Implementation
+
+| Step | What | Time |
+|---|---|---|
+| 1 | `SubagentRuntime` class — wraps transport creation, caches per agent | 1.5 hr |
+| 2 | Extract `ISkillSlot` from skill-watcher | 30 min |
+| 3 | Extract `ITaskSlot` from heartbeat-system | 30 min |
+| 4 | Define `ABSkeleton` interface | 15 min |
+| 5 | `createSkeleton()` factory — config-driven wiring | 1 hr |
+| 6 | Refactor bridge-app.ts to use skeleton | 1.5 hr |
+| 7 | Refactor sleep/browse/coding to use `runtime.complete()` | 1 hr |
+| 8 | Verify all 568 bridge tests pass | 30 min |
+| **Total** | | **~7 hr** |
