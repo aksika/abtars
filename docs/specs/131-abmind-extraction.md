@@ -102,6 +102,18 @@ No bridge utilities need duplicating. CLI becomes self-contained.
 
 `buildWakeUp(ctxWindow)` and `readCoreKnowledge()` stay in `IMemoryCore` — they're useful for any host that needs to inject memory context into prompts (OC, OpenCode, Claude Code all do this). They're not bridge-specific, they're "give me context to put in the prompt."
 
+## Repo
+
+https://github.com/aksika/abmind — MIT license, README with basic usage.
+
+## Bridge cleanup (step 5 details)
+
+After extraction, remove monorepo scaffolding from bridge:
+- `package.json`: remove `"workspaces": ["packages/*"]`, remove `abmind` bin entry, remove `cp packages/memory/package.json` from build script, add `"abmind": "file:../abmind"` to dependencies
+- `tsconfig.json`: remove `paths` mapping for `abmind/*`, remove `packages/memory/src/**/*.ts` from include, simplify `rootDir` back to `"src"`
+- Delete `packages/memory/` directory entirely
+- The `abmind` CLI binary comes from the dependency's bin (installed to `node_modules/.bin/abmind`)
+
 ## Implementation
 
 | Step | What | Time |
