@@ -266,21 +266,19 @@ export class CronQueue {
 
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
 
-    const { createSubagentTransport } = await import("../agent-registry.js");
-    const { transport } = await createSubagentTransport("cron");
-    const sessionKey = `cron:${entry.id}`;
+    const { SubagentRuntime } = await import("../subagent-runtime.js");
+    const runtime = new SubagentRuntime();
 
     // 30-min hard timeout
     this.timeout = setTimeout(() => {
-      logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min) — destroying transport`);
-      transport.destroy();
+      logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min) — shutting down runtime`);
+      runtime.shutdown();
     }, AGENT_TIMEOUT_MS);
 
-    // Use a fake PID — AcpTransport manages the process internally
+    // Use a fake PID — SubagentRuntime manages the process internally
     this.setCurrent(entry, 0, "agent");
 
-    transport.initialize()
-      .then(() => transport.sendPrompt(sessionKey, prompt))
+    runtime.complete("cron", prompt)
       .then((response) => {
         const summary = (response || "(no output)").slice(0, 500);
         let exitCode = 0;
@@ -315,7 +313,7 @@ export class CronQueue {
         onComplete?.(entry.chatId, entry.message, errMsg);
       })
       .finally(() => {
-        transport.destroy();
+        runtime.shutdown();
         this.clearCurrent();
         this.processNext();
       });
