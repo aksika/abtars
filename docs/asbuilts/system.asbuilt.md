@@ -269,10 +269,10 @@ All changes persist to transport.json. Professor provider change = `process.exit
 
 Liveness check runs after model selection: API providers probed via `/models` endpoint, ACP providers checked via `which` CLI.
 
-### `/transport` Command
-- `/transport` — alias for `/models`
-- `/transport change` — alias for `/models change`
-- `/transport restore` — forces switch back to primary when on fallback (`TransportManager.forceRestorePrimary()`)
+Callback flow in telegram-adapter.ts: `mslot:` → `mprov:` → `mset:` prefixes on `callback_data`.
+
+### `/transport` Command — Removed
+Replaced entirely by `/models`. `/models restore` handles fallback recovery.
 
 Command dispatcher matches exact commands by first word as fallback (after prefix commands), so `/transport change` routes correctly.
 

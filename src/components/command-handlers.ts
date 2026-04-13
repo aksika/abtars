@@ -75,7 +75,6 @@ const exactCommands: Record<string, CommandHandler> = {
   "/cron": handleTasksList,
   "/memory": handleMemory,
   "/heartbeat": handleHeartbeat,
-  "/transport": handleTransport,
   "/models": handleModels,
   "/model": handleModels,
   "/a2a-reset": handleA2aReset,
@@ -343,6 +342,22 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
+  // /models restore — force switch back to primary after fallback
+  if (arg === "primary" || arg === "restore") {
+    const t = ctx.transport;
+    if ("forceRestorePrimary" in t && typeof (t as { forceRestorePrimary: unknown }).forceRestorePrimary === "function") {
+      if ((t as unknown as { isOnFallback: boolean }).isOnFallback) {
+        (t as unknown as { forceRestorePrimary: () => void }).forceRestorePrimary();
+        await ctx.reply("🔌 Restored to primary transport.");
+      } else {
+        await ctx.reply("🔌 Already on primary transport.");
+      }
+    } else {
+      await ctx.reply("🔌 No fallback configured.");
+    }
+    return true;
+  }
+
   // /models status — all agents
   if (arg === "status") {
     const agents = ["professor", "dreamy", "browsie", "coding"] as const;
@@ -497,7 +512,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/models change — Switch model/provider (any agent)",
     "/models status — All agents with model + provider",
     "/models quick <model> — Instant switch on same provider",
-    "/transport restore — Restore primary transport after fallback",
+    "/models restore — Restore primary after fallback",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",
@@ -539,30 +554,6 @@ async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean
   }
   await ctx.reply(total > 0 ? `📚 Skills (${total}):\n\n${sections.join("\n\n")}` : "📚 No skills found.");
   return true;
-}
-
-async function handleTransport(text: string, ctx: CommandContext): Promise<boolean> {
-  // /transport is now an alias for /models
-  const arg = text.replace(/^\/transport\s*/i, "").trim().toLowerCase();
-
-  // /transport restore — keep this for fallback recovery
-  if (arg === "primary" || arg === "restore") {
-    const t = ctx.transport;
-    if ("forceRestorePrimary" in t && typeof (t as { forceRestorePrimary: unknown }).forceRestorePrimary === "function") {
-      if ((t as unknown as { isOnFallback: boolean }).isOnFallback) {
-        (t as unknown as { forceRestorePrimary: () => void }).forceRestorePrimary();
-        await ctx.reply("🔌 Restored to primary transport.");
-      } else {
-        await ctx.reply("🔌 Already on primary transport.");
-      }
-    } else {
-      await ctx.reply("🔌 No fallback configured.");
-    }
-    return true;
-  }
-
-  // Everything else → /models
-  return handleModels(text.replace(/^\/transport/i, "/models"), ctx);
 }
 
 function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string> {
