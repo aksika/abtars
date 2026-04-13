@@ -157,9 +157,7 @@ cp "$PROJECT_DIR/package.json" "$AB_HOME/package.json"
 rsync -a --delete "$PROJECT_DIR/dist/" "$AB_HOME/dist/"
 rsync -a --delete "$PROJECT_DIR/node_modules/" "$AB_HOME/node_modules/"
 
-# Wire abmind in deployed node_modules (workspace symlink doesn't survive deploy)
-rm -rf "$AB_HOME/node_modules/abmind"
-ln -s "$AB_HOME/dist/packages/memory" "$AB_HOME/node_modules/abmind"
+# abmind is now a file: dependency — npm install handles it, no manual symlink needed
 
 # 2c. Copy asbuilts to knowledgebase (agent-readable, no source code paths)
 echo "📚 Copying knowledgebase..."
@@ -171,10 +169,10 @@ cp "$PROJECT_DIR/docs/asbuilts/memory.asbuilt.md" "$AB_HOME/knowledgebase/"
 echo "🔧 Generating CLI wrappers..."
 mkdir -p "$AB_HOME/bin"
 # abmind unified CLI
-printf '#!/usr/bin/env bash\nexec node "%s" "$@"\n' "$AB_HOME/dist/src/cli/abmind.js" > "$AB_HOME/bin/abmind"
+printf '#!/usr/bin/env bash\nexec node "%s" "$@"\n' "$AB_HOME/node_modules/.bin/abmind" > "$AB_HOME/bin/abmind"
 chmod +x "$AB_HOME/bin/abmind"
 # Other CLIs
-for js in "$AB_HOME/dist/src/cli/agentbridge-"*.js; do
+for js in "$AB_HOME/dist/cli/agentbridge-"*.js; do
   [ -f "$js" ] || continue
   name=$(basename "$js" .js)
   printf '#!/usr/bin/env bash\nexec node "%s" "$@"\n' "$js" > "$AB_HOME/bin/$name"
@@ -292,7 +290,7 @@ fi
 if grep -q "^EMBEDDING_ENABLED=true" "$AB_HOME/.env" 2>/dev/null; then
   EMBED_SCRIPT="$AB_HOME/abmind-embed"
   echo '#!/usr/bin/env bash' > "$EMBED_SCRIPT"
-  echo "EMBEDDING_ENABLED=true exec node \"$AB_HOME/dist/src/cli/abmind.js\" embed \"\$@\"" >> "$EMBED_SCRIPT"
+  echo "EMBEDDING_ENABLED=true exec node \"$AB_HOME/node_modules/.bin/abmind\" embed \"\$@\"" >> "$EMBED_SCRIPT"
   chmod +x "$EMBED_SCRIPT"
   ln -sf "$EMBED_SCRIPT" "$HOME/.local/bin/abmind-embed"
 

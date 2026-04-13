@@ -7,7 +7,7 @@
             "ES2023"
         ],
         "outDir": "dist",
-        "rootDir": ".",
+        "rootDir": "src",
         "strict": true,
         "esModuleInterop": true,
         "skipLibCheck": true,
@@ -19,15 +19,10 @@
         "isolatedModules": true,
         "noUncheckedIndexedAccess": true,
         "noUnusedLocals": true,
-        "noUnusedParameters": true,
-        "paths": {
-            "abmind": ["./packages/memory/src/index.ts"],
-            "abmind/*": ["./packages/memory/src/*"]
-        }
+        "noUnusedParameters": true
     },
     "include": [
-        "src/**/*.ts",
-        "packages/memory/src/**/*.ts"
+        "src/**/*.ts"
     ],
     "exclude": [
         "node_modules",
