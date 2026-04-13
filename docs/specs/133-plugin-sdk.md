@@ -48,6 +48,8 @@ SubagentRuntime injects context per agent automatically:
 
 The caller sends the *task prompt*. The runtime prepends the agent's context. This is what makes "sleep collapses to 30 lines" true — the context assembly moves into the runtime, not the caller.
 
+**Rule:** Runtime owns ALL persona/context injection. Sleep prompt templates in abmind (#132) are personality-neutral — just `{candidates}`, `{stats}`, `{date}`. No Dreamy personality in templates. This avoids double injection.
+
 ### Session lifecycle
 
 | Agent | Session strategy | Why |
@@ -167,6 +169,13 @@ for (const step of sleepSteps) {
 ### Ship order
 
 Phase 1 alone delivers value. Phases 2-3 are incremental improvements. No need to ship all three together.
+
+**Ship #133 Phase 1 BEFORE #132.** Sleep orchestrator uses runtime from the start.
+
+### Nice-to-haves (not blocking)
+
+- **Logging:** Log every `complete()` call — agent, prompt length, response length, duration, model. Free observability.
+- **Request queuing:** If browse + coding call simultaneously, they compete for Ollama. Runtime could serialize per provider.
 
 ## Ecosystem research reference
 

@@ -5,6 +5,30 @@
 **Priority:** MEDIUM
 **Depends on:** #131 (done)
 
+## Execution order
+
+**Ship #133 Phase 1 (SubagentRuntime) BEFORE #132.** Then #132's orchestrator uses `runtime.complete("dreamy", ...)` from the start. Avoids double refactor.
+
+With SubagentRuntime available:
+- No structured JSON prompt rewrite needed for AB (runtime handles tool loop)
+- `buildDailySummary(complete)` callback becomes `runtime.complete("dreamy", summarizePrompt)`
+- Structured JSON mode only needed for CLI standalone (#137)
+- Estimated effort drops from ~9hr to ~5hr
+
+## Persona injection rule
+
+**Runtime owns persona, templates are pure data.** Sleep prompt templates contain only data variables (`{candidates}`, `{stats}`, `{date}`). No Dreamy personality in templates. SubagentRuntime (#133) prepends agent persona automatically. Avoids double injection.
+
+## Dual mode (tools vs JSON)
+
+```typescript
+buildSleepPrompt(step, vars, mode: "tools" | "json")
+// "tools" → prompt expects tool calls (AB via runtime, OC via subagent)
+// "json"  → prompt expects JSON response (CLI standalone)
+```
+
+`parseSleepResponse()` only needed in "json" mode. In "tools" mode, the runtime handles tool calls and abmind's `applyResults()` is called by the tool executor directly.
+
 ## Design: Option D — Move pure logic, keep orchestrator in host
 
 Don't move the orchestrator. Move the reusable sleep data pipeline. The orchestrator is inherently tied to "having an agent session" — that's a host concern, not a memory concern.
@@ -114,21 +138,20 @@ runSleep({ agent: (prompt, tools) => Promise<AgentResult> })
 ```
 Preserves current tool-call behavior — no prompt rewrite needed. Tradeoff: callback complexity (host must implement tool loop). Keep as documented fallback.
 
-## Implementation
+## Implementation (assumes #133 Phase 1 done)
 
 | Step | What | Time |
 |---|---|---|
-| 1 | Identify which of 14 steps are multi-turn, test single-turn against real data | 1 hr |
-| 2 | Redesign sleep prompts: structured JSON output, single-turn, personality variables | 3 hr |
-| 3 | Create `parseSleepResponse()` — defensive JSON parser (strip fences, fallback) | 1 hr |
-| 4 | Move prompt loader + daily summary + extract to abmind repo | 30 min |
-| 5 | Move sleep prompt templates to abmind repo | 15 min |
-| 6 | Create `buildDreamReport()` in abmind | 30 min |
-| 7 | Refactor bridge orchestrator to use abmind pipeline (retry/progress/lock/audit) | 1.5 hr |
-| 8 | Add `abmind sleep-state/sleep-prompt/sleep-apply/sleep-report` CLI commands | 45 min |
-| 9 | `sleep-apply --dry-run` mode for debugging | 15 min |
-| 10 | Test: bridge sleep cycle works with new pipeline | 30 min |
-| **Total** | | **~9 hr** |
+| 1 | Move prompt loader + templates to abmind (personality-neutral) | 30 min |
+| 2 | Move daily summary + extract to abmind | 30 min |
+| 3 | Create `buildDreamReport()` in abmind | 30 min |
+| 4 | Add JSON mode for CLI: `buildSleepPrompt(step, vars, "json")` | 1 hr |
+| 5 | Create `parseSleepResponse()` — defensive JSON parser (JSON mode only) | 1 hr |
+| 6 | Refactor bridge orchestrator to use `runtime.complete("dreamy", ...)` | 45 min |
+| 7 | Add `abmind sleep-state/sleep-prompt/sleep-apply/sleep-report` CLI commands | 45 min |
+| 8 | `sleep-apply --dry-run` mode | 15 min |
+| 9 | Test: bridge sleep cycle + CLI standalone | 30 min |
+| **Total** | | **~5.5 hr** |
 
 ## CLI commands for standalone use (#137)
 
