@@ -1289,3 +1289,69 @@ gws gmail users messages get --params '{"userId": "me", "id": "MSG_ID"}'
 - `~/.config/gws/client_secret.json` — OAuth client config (chmod 600)
 - `~/.config/gws/credentials.enc` — encrypted refresh token
 - `~/.config/gws/token_cache.json` — access token cache (auto-refreshed)
+
+---
+
+## Skeleton Architecture
+
+AgentBridge is a slot-based skeleton. Every subsystem is behind a typed interface. The brain (abmind) is a separate repo.
+
+### Slots
+
+| Slot | Interface | Implementation | Swappable for |
+|---|---|---|---|
+| Memory | `IMemorySystem` | abmind (MemoryManager) | Any IMemoryCore implementation |
+| Transport | `IKiroTransport` | ACP / tmux / DirectAPI | Any OpenAI-compatible endpoint |
+| Runtime | `SubagentRuntime` | `complete()` one-shot, `session()` multi-turn | — (this IS the abstraction) |
+| Tasks | `ITaskSlot` | HeartbeatSystem (5-min tick) | Message queue (BullMQ, SQLite jobs) |
+| Skills | `ISkillSlot` | SkillWatcher (markdown files) | MCP-backed skill server |
+| Dashboard | `IDashboardSlot` | DashboardServer (localhost web UI) | React SPA, Grafana, mobile push |
+| Platforms | `IPlatformSlot[]` | TelegramAdapter, DiscordAdapter | Slack, WhatsApp, Matrix |
+
+### SubagentRuntime (`src/components/subagent-runtime.ts`)
+
+Unified LLM access for all subagents. Replaces manual `createSubagentTransport()` calls.
+
+- `runtime.complete(agent, prompt, opts?)` — one-shot: create/reuse transport, send prompt, return response. Used by: sleep, self-healer, cron.
+- `runtime.session(agent)` — multi-turn: returns persistent session handle with `sendPrompt()` + `destroy()`. Used by: coding-mode, agent-api-server.
+- Transport cached per agent, lazy-created on first call.
+- Session strategy per agent: `fresh` (dreamy, browsie, cron) vs `reuse` (coding, professor).
+- Fallback: on failure, evicts cache, next call creates fresh transport.
+- Logging: agent, prompt length, response length, duration, model.
+- `createSubagentTransport()` is internal to the runtime — no direct callers.
+
+### ABSkeleton (`src/components/skeleton.ts`)
+
+```typescript
+interface ABSkeleton {
+  memory:    IMemorySystem;
+  transport: IKiroTransport;
+  runtime:   SubagentRuntime;
+  tasks:     ITaskSlot;
+  skills:    ISkillSlot;
+  dashboard: IDashboardSlot;
+  platforms: IPlatformSlot[];
+}
+```
+
+Bridge class IS the skeleton — it owns all slot lifecycles. No separate `createSkeleton()` factory.
+
+### abmind (brain) — separate repo
+
+`github.com/aksika/abmind` — standalone AI agent memory system.
+
+**Memory core:** IMemoryCore (public API) + IMemorySystem (bridge-internal). SQLite + FTS5, 4-layer recall, embeddings, emotion tagger, contradiction checker, injection scanner, wake-up context builder.
+
+**Sleep pipeline:** Prompt loader + 14 templates, daily summary, extract, SleepDataAccess. Pure logic — no transport, no LLM. Host drives the loop.
+
+**CLI:** `abmind recall/store/edit/expand/embed/retro-extract/backfill/status/wake-up`
+
+**Integration levels:** ab-slot (direct, zero overhead) → OC plugin → OpenCode plugin → Claude Code plugin → MCP server → CLI (most portable).
+
+**Dependency:** Bridge uses `file:../abmind` for local dev, `github:aksika/abmind#v0.2.0` for deploy.
+
+### Test counts
+
+- abmind: 32 files, 362 tests
+- agentbridge: 60 files, 564 tests
+- Total: 92 files, 926 tests

@@ -11,7 +11,7 @@
 
 ## Overview
 
-Standalone memory package (`abmind`, workspace at `packages/memory/`). 38 source + 29 test files, zero bridge dependencies. Public API via `IMemorySystem` interface — consumers program against the interface, `MemoryManager` is the concrete implementation. Unified CLI: `abmind` with subcommands (recall, store, edit, expand, embed, retro-extract, backfill, status, wake-up). npm package registered as `abmind`.
+Standalone memory package (`abmind`, separate repo (`github.com/aksika/abmind`)). 74 source + 32 test files (362 tests), zero bridge dependencies. Public API via `IMemoryCore` (external) + `IMemorySystem` (bridge) interface — consumers program against the interface, `MemoryManager` is the concrete implementation. Unified CLI: `abmind` with subcommands (recall, store, edit, expand, embed, retro-extract, backfill, status, wake-up). npm package registered as `abmind`.
 
 SQLite-backed persistence with FTS5 (porter on content_en) + trigram FTS5 (content_en + content_original, diacritics-stripped), ollama vector embeddings with int8 quantization (1536→384 bytes after 14d) in separate `memory_embeddings` table, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L rendered on the fly from content_en (no stored content_compressed), emotion tagging (25 types, source of truth — score derived from tags), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security. Memory timelines group related memories into narrative arcs. Cross-topic timelines follow entities across topic boundaries.
 
@@ -23,9 +23,9 @@ Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sle
 
 | Aspect | Detail |
 |---|---|
-| Files | 38 source + 29 test files in `packages/memory/src/` |
+| Files | 74 source + 32 test files in `github.com/aksika/abmind src/` |
 | External imports | Zero — fully self-contained |
-| Entry point | `packages/memory/src/index.ts` |
+| Entry point | `github.com/aksika/abmind src/index.ts` |
 | Interface | `IMemorySystem` (lifecycle, messages, search, emotion, stats, dashboard/recall, sleep data, maintenance) |
 | Sleep data | `SleepDataAccess` — DB queries for candidates, watermarks, arcs, messages |
 | Heartbeat | `IHeartbeat` interface — bridge injects its implementation |
@@ -272,7 +272,7 @@ Nulled automatically on content edit (re-embedded on next batch run).
 
 ## Recall Pipeline (`recall-engine.ts`, Sf + Ss + Se + S6)
 
-Source: `packages/memory/src/recall-engine.ts`, `packages/memory/src/trigram-search.ts`
+Source: `github.com/aksika/abmind src/recall-engine.ts`, `github.com/aksika/abmind src/trigram-search.ts`
 CLI wrapper: `src/cli/abmind-recall.ts`
 Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine, takes MemoryManager)
 
@@ -627,7 +627,7 @@ After successful sleep, the bridge injects "You just woke up.. how did you sleep
 | `src/components/sleep-state-gatherer.ts` | Collects system state for identity prompt |
 | `src/components/sleep-daily-summary.ts` | Code-driven batched summarization (04a) |
 | `src/components/sleep-extract-daily.ts` | Code-driven extraction from daily file (04b) |
-| `packages/memory/src/media-sanitizer.ts` | Strips base64/binary/media paths from messages |
+| `github.com/aksika/abmind src/media-sanitizer.ts` | Strips base64/binary/media paths from messages |
 | `~/.agentbridge/memory/garbage.json` | GC tracking |
 | `~/.agentbridge/memory/sleep/` | Audit logs (`.md`) + state files (`.lock`) |
 | `~/.agentbridge/memory/daily/` | Daily summary files (`daily_YYYY-MM-DD.md`) |
@@ -676,7 +676,7 @@ recordMessage() ──► messages table (raw content, emojis preserved)
 
 ## Component Inventory
 
-All memory components live in `packages/memory/src/` (moved from `src/components/` during refactor).
+All memory components live in `github.com/aksika/abmind src/` (moved from `src/components/` during refactor).
 
 | Component | File | Description |
 |-----------|------|-------------|
