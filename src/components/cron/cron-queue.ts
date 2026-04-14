@@ -13,7 +13,7 @@ import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import { agentBridgeHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
-import { readLastPromptAt } from "../transport/bridge-lock-transport.js";
+import { readLastPromptAt, readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
 import type { CronEntry } from "../../cli/agentbridge-task.js";
 import { localDate } from "../env-utils.js";
@@ -163,6 +163,13 @@ export class CronQueue {
 
   private processNext(): void {
     if (this.queue.length === 0) return;
+
+    // Skip all tasks during hardware sleep (dark wakes are too brief)
+    if (readBridgeLockField("sleepStatus") === "hw_sleep") {
+      logInfo(TAG, `⏸ Hardware sleep — deferring ${this.queue.length} task(s)`);
+      return;
+    }
+
     const job = this.queue.shift()!;
     const { entry } = job;
 
