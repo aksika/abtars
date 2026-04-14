@@ -348,7 +348,6 @@ export function buildSnapshotSummary(snapshot: StateSnapshot): string {
     `Working dirs: ${snapshot.workingDirs.length}`,
     `Messages: ${snapshot.dbStats.messageCount}`,
     `Embeddings: ${snapshot.dbStats.embeddingCount}`,
-    `Sessions: ${snapshot.dbStats.sessionCount}`,
     `Extracted memories: ${snapshot.dbStats.extractedMemoryCount}`,
     `Disk: ${(snapshot.diskUsageBytes / 1024 / 1024).toFixed(1)} MB / ${(snapshot.diskBudgetBytes / 1024 / 1024).toFixed(0)} MB`,
     `Topics: ${snapshot.topicFiles.length}`,

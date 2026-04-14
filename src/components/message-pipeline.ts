@@ -482,11 +482,10 @@ function buildSessionStartPrompt(
   }
 
   try {
-    const ctxWindow = parseInt(process.env["CONTEXT_WINDOW_SIZE"] ?? "", 10) || 128000;
-    const wakeUp = memory.buildWakeUp(ctxWindow);
+    const wakeUp = memory.buildWakeUp();
     if (wakeUp) {
       contextParts.push(wakeUp);
-      logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars, budget=${Math.floor(ctxWindow * 0.01)} tokens)`);
+      logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
     }
   } catch { /* wake-up builder not available */ }
 
