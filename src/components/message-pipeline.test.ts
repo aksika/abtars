@@ -75,6 +75,7 @@ describe("handleInboundMessage", () => {
 
   beforeEach(() => {
     transport = mockTransport();
+    process.env["ALLOWED_USER_IDS"] = "100"; // #145: test user treated as master via fallback
   });
 
   it("sends prompt to transport and delivers response via adapter", async () => {

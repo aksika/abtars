@@ -3,12 +3,16 @@
  *
  * Interrupt commands (/stop, /new, /reset, /restart) run immediately even when busy.
  * All other commands defer to the busy guard when the chat is busy.
+ * Non-master messages must start with letter, digit, emoji, or /command (#145).
  */
 
 import type { Middleware } from "./middleware.js";
 import { handleCommand } from "../command-handlers.js";
 import type { CommandContext } from "../command-handlers.js";
 import { logInfo } from "../logger.js";
+import { loadUsers } from "../user-registry.js";
+
+const SAFE_FIRST_CHAR = /^\s*(\p{L}|\p{N}|\p{So}|\/\p{L})/u;
 
 const INTERRUPT_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/restart"]);
 const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/restart", "/compact", "/coding", "/default"]);
@@ -18,6 +22,18 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
   const { transport, config, startedAt, memory, memoryConfig, nlmConfig,
     codingMode, idleSave, busyChats, fullModeChats, pendingSessionStart,
     updateCtxStart, conversationBuffer } = deps;
+
+  // #145: block unsafe prefixes for non-master (!, //, shell escapes)
+  const registry = loadUsers();
+  const platformKey = `${msg.platform}:${msg.channelId}`;
+  const user = registry.byPlatformId.get(platformKey);
+  const isMaster = !user || user.role === "master"; // unknown users = master (backward compat, #67 Phase 1 adds proper gate)
+  if (!isMaster && !SAFE_FIRST_CHAR.test(ctx.text)) {
+    logInfo("commands", `Blocked unsafe input from ${user.userId}: "${ctx.text.slice(0, 20)}"`);
+    await ctx.reply("⛔ Message blocked — unsafe prefix.");
+    ctx.handled = true;
+    return;
+  }
 
   const trimmed = ctx.text.trim();
   const cmd = trimmed.split(/\s/)[0]!.toLowerCase();
