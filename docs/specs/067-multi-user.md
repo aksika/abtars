@@ -130,7 +130,7 @@ Foundation: define users in .env, parse at startup, inject user context into ses
 # ============================================================
 # Format: userId:role:maxClass:telegramId[:discordId]
 # Roles: master (full access), user (chat only, no tools), guest (runtime, /approve)
-# maxClass: 0=world, 1=internal, 2=master-private, 3=non-disclosed
+# maxClass: max Classification level (0=World, 1=Internal, 2=Master, 3=Non-disclosed)
 USERS=master:master:3:7773842843
 ```
 
