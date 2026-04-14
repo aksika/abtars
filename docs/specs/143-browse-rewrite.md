@@ -13,13 +13,21 @@ Replace the monolithic browse architecture (raw kiro-cli spawn + Unix socket IPC
 
 ### Level 1: Lightpanda (fast, native, no spawn)
 
-Main agent runs directly via skill:
+Main agent runs via skill + wrapper script:
 ```bash
-lightpanda fetch --dump markdown --http-connect-timeout 10000 --http-timeout 15000 --block-private-networks "<url>" 2>/dev/null
+agentbridge-fetch "<url>"
 ```
 
+The wrapper (`scripts/agentbridge-fetch.sh`) handles:
+- Checks `which lightpanda` — clear error if missing ("use Level 2 browse")
+- Runs `lightpanda fetch --dump markdown --strip-mode full --http-connect-timeout 10000 --http-timeout 15000 --block-private-networks "<url>"`
+- Truncates output to 50K chars (prevents context window blowout)
+- Strips stderr (lightpanda logs)
+- Returns clean markdown to stdout
+
+Skill teaches WHEN to use it + escalation: "if output is empty or says 'enable JavaScript', escalate to Level 2 browse."
+
 - No subagent, no spawn — stays in Professor's context
-- Native markdown output (no turndown/html-to-markdown needed)
 - Built-in SSRF guard (`--block-private-networks`)
 - Use cases: docs, APIs, news, public pages, stock data, any page without JS/login
 
@@ -29,7 +37,8 @@ Browsie agent via `runtime.spawn("browsie", task)`:
 - Dockerized Chrome with real fingerprint (patchright)
 - Session persistence (cookies, auth state)
 - Use cases: login flows, anti-bot sites, multi-page navigation, form filling, screenshots
-- Result delivered via `onComplete` callback → reminder → chat
+- Result delivered via `onComplete` callback → `deliverBrowseResult()` → `appendReminder()` → cron-checker → Telegram
+- Same delivery path as current browse, just triggered by callback instead of ACP log parsing
 
 ## What Changes
 
@@ -69,14 +78,15 @@ Binary at `~/.local/bin/lightpanda`. Key flags:
 
 | Step | What | Time |
 |---|---|---|
-| 1 | `web-fetch.md` skill — teaches lightpanda fetch | 15 min |
-| 2 | Update `browse-delegate.md` — Level 2 only, reference web-fetch for simple | 10 min |
-| 3 | Rewrite `agentbridge-browse.ts` — use `runtime.spawn("browsie")` | 30 min |
-| 4 | Remove Unix socket IPC from `index.ts` | 20 min |
-| 5 | Simplify `browse-delivery.ts` — callback-based | 20 min |
-| 6 | Remove `browser-lightpanda.sh`, update deploy.sh | 10 min |
-| 7 | Update browser-manager.ts — patchright only (remove lightpanda engine) | 15 min |
-| 8 | Tests | 20 min |
+| 1 | Create `scripts/agentbridge-fetch.sh` — wrapper (flags, truncation, missing binary check) | 15 min |
+| 2 | `web-fetch.md` skill — teaches when to use fetch + escalation rules | 15 min |
+| 3 | Update `browse-delegate.md` — Level 2 only, reference web-fetch for simple | 10 min |
+| 4 | Rewrite `agentbridge-browse.ts` — use `runtime.spawn("browsie")` | 30 min |
+| 5 | Remove Unix socket IPC from `index.ts` | 20 min |
+| 6 | Simplify `browse-delivery.ts` — callback-based | 20 min |
+| 7 | Remove `browser-lightpanda.sh`, update deploy.sh | 10 min |
+| 8 | Update browser-manager.ts — patchright only (remove lightpanda engine) | 15 min |
+| 9 | Tests | 20 min |
 | **Total** | | **~2.5 hr** |
 
 ## Verification
