@@ -11,6 +11,7 @@ import type { CommandContext } from "../command-handlers.js";
 import { logInfo } from "../logger.js";
 
 const INTERRUPT_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/restart"]);
+const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/restart", "/compact", "/coding", "/default"]);
 
 export const commandMiddleware: Middleware = async (ctx, next) => {
   const { msg, deps } = ctx;
@@ -28,8 +29,8 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     busyChats.delete(msg.sessionKey);
   }
 
-  // Non-interrupt commands while busy: defer to busy guard (will be queued)
-  if (!INTERRUPT_COMMANDS.has(cmd) && cmd.startsWith("/") && busyChats.has(msg.sessionKey)) {
+  // Non-interrupt destructive commands while busy: defer to busy guard (will be queued)
+  if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && busyChats.has(msg.sessionKey)) {
     await next();
     return;
   }
