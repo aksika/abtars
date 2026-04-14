@@ -13,25 +13,38 @@ Family-scale multi-user (2-4 people) on one bridge instance. Isolated sessions, 
 
 | Role | Source | Transport | Tools | Injection scan |
 |---|---|---|---|---|
-| master | .env | any (configured) | all | skip (trusted) |
-| user | .env | Direct API only | none | ✓ |
+| master | users.json | any (configured) | all (from config) | skip (trusted) |
+| user | users.json | Direct API only | per-user (from config, e.g. web_fetch) | ✓ |
 | guest | runtime (/approve) | Direct API only | none | ✓ |
 
 ## Auth config
 
-```env
-# One line per user. Format: userId:role:maxClass
-USER_AKSIKA=aksika:master:3
-USER_ADRIKA=adrika:user:1
+`~/.agentbridge/config/users.json`:
 
-# Platform IDs
-AKSIKA_TELEGRAM=7773842843
-ADRIKA_TELEGRAM=8385860222
+```json
+{
+  "users": [
+    {
+      "userId": "aksika",
+      "role": "master",
+      "maxClass": 3,
+      "tools": ["all"],
+      "platforms": { "telegram": 7773842843 }
+    },
+    {
+      "userId": "adrika",
+      "role": "user",
+      "maxClass": 1,
+      "tools": ["web_fetch"],
+      "platforms": { "telegram": 8385860222 }
+    }
+  ]
+}
 ```
 
-Replaces `ALLOWED_USER_IDS`. Both Telegram and Discord closed by default — allowlist only.
+Fallback: if no `users.json`, treat all `ALLOWED_USER_IDS` as master with maxClass=3 and all tools. Zero migration for single-user setups.
 
-Guest: approved at runtime via `/approve <platformId>`, persisted to `~/.agentbridge/config/guests.json`. Hardcoded maxClass=0.
+Guest: approved at runtime via `/approve <platformId>`, appended to `users.json` with `role: "guest"`, `maxClass: 0`, `tools: []`.
 
 ## Classification & recall
 
@@ -118,37 +131,29 @@ interface UserEntry {
 
 ### Phase 0 — User definitions + core injection (~1hr)
 
-Foundation: define users in .env, parse at startup, inject user context into sessions.
+Foundation: define users in `~/.agentbridge/config/users.json`, parse at startup, inject user context into sessions.
 
 | Step | What | Time |
 |---|---|---|
-| 0a | Add `# Users` section to .env.example | 10 min |
-| 0b | `parseUsers()` in config.ts — scan `USER_*` env vars → UserEntry[] map | 20 min |
+| 0a | Define `UserEntry` type + `loadUsers()` — read users.json, fallback to ALLOWED_USER_IDS | 20 min |
+| 0b | Build platform ID → UserEntry lookup map | 10 min |
 | 0c | Soul-loader: inject `[USERS]` block into core bundle | 15 min |
-| 0d | `buildSessionStartPrompt` receives userId — injects "You are now talking to {name} ({role})" | 15 min |
+| 0d | `buildSessionStartPrompt` receives userId — injects "You are now talking to {userId} ({role})" | 15 min |
 
-#### .env.example addition
+#### users.json schema
 
-```env
-# ============================================================
-# Users
-# ============================================================
-# One line per user. Format: userId:role:maxClass
-# Roles: master (full access), user (chat only, no tools)
-# maxClass: 0=UNCLASSIFIED, 1=RESTRICTED, 2=CONFIDENTIAL, 3=SECRET
-USER_AKSIKA=aksika:master:3
-USER_ADRIKA=adrika:user:1
-
-# Platform IDs (link users to platforms)
-AKSIKA_TELEGRAM=7773842843
-ADRIKA_TELEGRAM=8385860222
+```typescript
+interface UserEntry {
+  userId: string;
+  role: "master" | "user" | "guest";
+  maxClass: number;       // 0-3 (NATO classification)
+  tools: string[];        // ["all"] or ["web_fetch"] or []
+  platforms: {
+    telegram?: number;
+    discord?: string;
+  };
+}
 ```
-
-#### parseUsers() logic
-
-- Scan env for `USER_*` keys → parse `userId:role:maxClass`
-- Scan env for `{USERID}_TELEGRAM`, `{USERID}_DISCORD` → map platform IDs
-- Return `Map<platformId, UserEntry>`
 
 #### Core injection
 
@@ -222,7 +227,7 @@ Schema already done (user_id column on all tables, extraction_watermarks keyed b
 
 ## Migration
 
-- `ALLOWED_USER_IDS` → `USERS` (new format, old var as fallback if USERS missing)
+- `ALLOWED_USER_IDS` → `users.json` (if no users.json, ALLOWED_USER_IDS treated as all-master fallback)
 - Existing memories: `user_id` already defaults to master's userId (done in abmind schema)
 - Existing session keys (`telegram:123`) → mapped to userId on first message
 
