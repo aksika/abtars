@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-14
 **Status:** Planned
-**Priority:** LOW
+**Priority:** MEDIUM
 **Depends on:** #133 (done)
 
 ## Goal
@@ -84,10 +84,11 @@ Loses detached survival but if bridge dies mid-browse, the task is lost anyway (
 | 2 | Add `SpawnResult` interface + `runtime.spawn(agent, prompt, opts?)` | 20 min |
 | 3 | Migrate coding-mode to `runtime.session("coding")` | 20 min |
 | 4 | Migrate agent-api-server to `runtime.session("browsie")` | 30 min |
-| 5 | Migrate browsie to `runtime.spawn("browsie")` | 30 min |
-| 6 | Verify zero `createSubagentTransport` outside runtime | 10 min |
-| 7 | Tests | 20 min |
-| **Total** | | **~2.5 hr** |
+| 5 | Verify zero `createSubagentTransport` outside runtime (except browsie — deferred to #143) | 10 min |
+| 6 | Tests | 20 min |
+| **Total** | | **~2 hr** |
+
+**Note:** Browsie migration deferred to #143 (browse rewrite). No point migrating the detached spawn to `runtime.spawn()` when #143 replaces the entire browse architecture. `runtime.spawn()` API is built here, consumed by #143.
 
 ## Verification
 
