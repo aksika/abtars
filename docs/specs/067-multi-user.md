@@ -20,8 +20,13 @@ Family-scale multi-user (2-4 people) on one bridge instance. Isolated sessions, 
 ## Auth config
 
 ```env
-# Format: userId:role:maxClass:telegramId[:discordId]
-USERS=master:master:3:7773842843,adrika:user:1:8385860222
+# One line per user. Format: userId:role:maxClass
+USER_AKSIKA=aksika:master:3
+USER_ADRIKA=adrika:user:1
+
+# Platform IDs
+AKSIKA_TELEGRAM=7773842843
+ADRIKA_TELEGRAM=8385860222
 ```
 
 Replaces `ALLOWED_USER_IDS`. Both Telegram and Discord closed by default — allowlist only.
@@ -117,10 +122,10 @@ Foundation: define users in .env, parse at startup, inject user context into ses
 
 | Step | What | Time |
 |---|---|---|
-| 0a | Add `# Users` section to .env.example with USERS format + docs | 10 min |
-| 0b | `parseUsers()` in config.ts — parse USERS env → UserEntry[] map | 20 min |
-| 0c | Add user context to soul-loader: inject `[USERS]` section into core bundle listing all users with roles (agent knows who it's talking to) | 15 min |
-| 0d | `buildSessionStartPrompt` receives userId — injects "You are now talking to {displayName} ({role})" | 15 min |
+| 0a | Add `# Users` section to .env.example | 10 min |
+| 0b | `parseUsers()` in config.ts — scan `USER_*` env vars → UserEntry[] map | 20 min |
+| 0c | Soul-loader: inject `[USERS]` block into core bundle | 15 min |
+| 0d | `buildSessionStartPrompt` receives userId — injects "You are now talking to {name} ({role})" | 15 min |
 
 #### .env.example addition
 
@@ -128,11 +133,22 @@ Foundation: define users in .env, parse at startup, inject user context into ses
 # ============================================================
 # Users
 # ============================================================
-# Format: userId:role:maxClass:telegramId[:discordId]
-# Roles: master (full access), user (chat only, no tools), guest (runtime, /approve)
-# maxClass: Classification (0=UNCLASSIFIED, 1=RESTRICTED, 2=CONFIDENTIAL, 3=SECRET)
-USERS=master:master:3:7773842843
+# One line per user. Format: userId:role:maxClass
+# Roles: master (full access), user (chat only, no tools)
+# maxClass: 0=UNCLASSIFIED, 1=RESTRICTED, 2=CONFIDENTIAL, 3=SECRET
+USER_AKSIKA=aksika:master:3
+USER_ADRIKA=adrika:user:1
+
+# Platform IDs (link users to platforms)
+AKSIKA_TELEGRAM=7773842843
+ADRIKA_TELEGRAM=8385860222
 ```
+
+#### parseUsers() logic
+
+- Scan env for `USER_*` keys → parse `userId:role:maxClass`
+- Scan env for `{USERID}_TELEGRAM`, `{USERID}_DISCORD` → map platform IDs
+- Return `Map<platformId, UserEntry>`
 
 #### Core injection
 
@@ -140,8 +156,8 @@ The soul bundle gets a `[USERS]` block so the agent knows the household:
 
 ```
 [USERS]
-- aksika (master, maxClass=3) — Telegram: 7773842843
-- adrika (user, maxClass=1) — Telegram: 8385860222
+- aksika (master, SECRET clearance)
+- adrika (user, RESTRICTED clearance)
 
 Current session: aksika (master)
 ```
