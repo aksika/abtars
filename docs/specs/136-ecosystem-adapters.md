@@ -3,11 +3,23 @@
 **Date:** 2026-04-14
 **Status:** Planned
 **Priority:** LOW
-**Depends on:** #138 (done — abmind v0.4.0)
+**Depends on:** #138 (done), #146 (done — user_id in schema), #67 Phase 0 (done — users.json)
 
 ## Goal
 
 Make abmind work with every major AI coding tool. MCP config for most hosts. Native plugin for OpenClaw.
+
+## User resolution
+
+All adapters resolve the master userId at runtime from `~/.agentbridge/users.json`:
+
+```typescript
+const users = JSON.parse(readFileSync(join(agentBridgeHome(), "users.json"), "utf-8"));
+const master = users.users.find((u: { role: string }) => u.role === "master");
+const masterUserId = master.userId;
+```
+
+Never hardcode `"aksika"`. The master is whoever `users.json` says it is.
 
 ## Adapters
 
@@ -33,9 +45,13 @@ All MCP hosts use the same config — only the file location differs:
 | OpenCode | MCP config |
 | Cursor | MCP config |
 
-## OpenClaw Plugin — `registerMemoryCapability`
+### MCP server fix (pre-req)
 
-The modern OC memory plugin API. Old individual methods are `@deprecated`.
+`src/mcp-server.ts` currently uses `userIdToChatId()` with a hash. Update:
+- If no `userId` param from client → read master from `users.json`
+- Pass `userId` to backend calls (backend scopes by user_id column)
+
+## OpenClaw Plugin — `registerMemoryCapability`
 
 ### Entry point
 
@@ -45,30 +61,30 @@ export async function register(api: OpenClawPluginApi): Promise<void> {
   const memory = new MemoryManager(config);
   await memory.initialize();
   const backend = await createMemoryBackend(config);
+  const masterUserId = loadMasterUserId(); // from users.json
 
   api.registerMemoryCapability({
     promptBuilder,
     flushPlanResolver,
-    runtime: buildRuntime(backend, memory, api),
+    runtime: buildRuntime(backend, memory, masterUserId, api),
   });
 }
 ```
 
 ### MemorySearchManager mapping
 
-| OC method | abmind mapping | Notes |
-|---|---|---|
-| `search(query, opts?)` | `backend.recall({ translated: [query], chatId: 0, limit: opts.maxResults })` | chatId 0 for now; map from OC's `agentId` when #67 ships |
-| `readFile({ relPath, from?, lines? })` | Read from abmind data dir (`~/.agentbridge/memory/`). Return `{ text: "", path }` if file doesn't exist | relPath is relative to memory data dir |
-| `status()` | `memory.getStats()` mapped to OC's `MemoryProviderStatus` shape | |
-| `sync()` | No-op — SQLite writes are immediate, no sync needed | |
-| `close()` | `memory.close()` | |
+| OC method | abmind mapping |
+|---|---|
+| `search(query, opts?)` | `backend.recall({ translated: [query], chatId: 0, limit: opts.maxResults })` — scoped by master userId |
+| `readFile({ relPath })` | Read from `~/.agentbridge/memory/`. Return `{ text: "", path }` if missing |
+| `status()` | `memory.getStats()` mapped to OC's shape |
+| `sync()` | No-op — SQLite writes are immediate |
+| `close()` | `memory.close()` |
 
 ### promptBuilder
 
 ```typescript
-const promptBuilder: MemoryPromptSectionBuilder = ({ availableTools }) => {
-  // Use OC's model context window if available, fallback to 128k
+const promptBuilder: MemoryPromptSectionBuilder = () => {
   const wakeup = memory.buildWakeUp(128000);
   return wakeup ? [wakeup] : [];
 };
@@ -83,28 +99,23 @@ const flushPlanResolver: MemoryFlushPlanResolver = () => ({
   reserveTokensFloor: 20000,
   prompt: "Summarize the conversation so far.",
   systemPrompt: "You are a conversation summarizer.",
-  relativePath: "memory/compaction", // relative to OC's workspace dir
+  relativePath: "memory/compaction",
 });
 ```
 
 ### Error handling
 
 - DB locked / missing → return empty results, log via `api.logger.error()`
-- Never throw from search/status — OC should degrade gracefully
-- Wrap all backend calls in try/catch
-
-### chatId / userId
-
-- Hardcoded `0` for now (single-user)
-- OC provides `agentId` in runtime params — can map to userId when #67 ships
-- Note in code: `// TODO(#67): map agentId → userId`
+- Never throw from search/status — degrade gracefully
 
 ## Implementation
 
 | Step | What | Time |
 |---|---|---|
-| 1 | MCP config examples in `docs/mcp-configs/` | 10 min |
-| 2 | OpenClaw plugin: `src/adapters/openclaw.ts` | 1 hr |
-| 3 | README: "Use with your editor" section | 10 min |
-| 4 | Test: kiro-cli MCP + OC plugin load | 15 min |
+| 1 | Fix MCP server — master userId from users.json, pass userId to backend | 15 min |
+| 2 | MCP config examples in `docs/mcp-configs/` | 10 min |
+| 3 | `loadMasterUserId()` helper — reads users.json, finds master | 5 min |
+| 4 | OpenClaw plugin: `src/adapters/openclaw.ts` | 45 min |
+| 5 | README: "Use with your editor" section | 10 min |
+| 6 | Test: kiro-cli MCP + OC plugin load | 15 min |
 | **Total** | | **~1.5 hr** |
