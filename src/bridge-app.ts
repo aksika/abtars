@@ -7,7 +7,7 @@ import { agentBridgeHome } from "./paths.js";
 
 import { TmuxClient } from "./components/transport/tmux-client.js";
 import { createAgentTransport } from "./components/agent-registry.js";
-import { writeRestartReason, readAndClearRestartRequested } from "./components/transport/bridge-lock-transport.js";
+import { writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus } from "./components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "./components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
 import type { SttConfig } from "./components/stt.js";
@@ -658,7 +658,13 @@ export async function startBridge(): Promise<void> {
         return;
       }
       logInfo("main", `⏸️ Standby resume (${Math.round(gapMs / 60000)}min, ${resumeKind}) — continuing`);
-      // No restart, no isDailyCycleDue. Age-check task handles bedtime. Watchdog handles stale process.
+      // Morning restart: first full wake after hardware sleep → fresh process
+      if (resumeKind === "full" && readBridgeLockField("sleepStatus") === "hw_sleep") {
+        writeSleepStatus("awake");
+        writeRestartReason("morning restart after hw_sleep");
+        logInfo("main", "🌅 Morning wake detected — restarting for fresh process");
+        process.exit(0);
+      }
     },
   });
 

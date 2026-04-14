@@ -17,11 +17,11 @@ export function classifyResume(): ResumeKind {
 
 function classifyMacOS(): ResumeKind {
   try {
-    // Apple Silicon: pmset -g systemstate doesn't show DarkWake/FullWake.
-    // Use UserIsActive assertion instead — 0 = dark wake (Power Nap), 1 = full wake.
-    const out = execSync("pmset -g assertions 2>/dev/null", { timeout: 3000, encoding: "utf-8" });
-    const match = out.match(/UserIsActive\s+(\d)/);
-    if (match) return match[1] === "1" ? "full" : "dark";
+    // Apple Silicon: ioreg Wake Type is the definitive signal.
+    // "UserActivity Assertion" = full wake, "Maintenance"/"SleepService" = dark wake.
+    const out = execSync("ioreg -n IOPMrootDomain -w0 2>/dev/null | grep 'Wake Type'", { timeout: 3000, encoding: "utf-8" });
+    if (out.includes("UserActivity")) return "full";
+    if (out.includes("Maintenance") || out.includes("SleepService")) return "dark";
   } catch { /* */ }
   return "unknown";
 }
