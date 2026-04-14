@@ -45,26 +45,48 @@ await session.sendPrompt(key, userMessage);
 await session.destroy();
 ```
 
-### Browsie — fire-and-forget
+### runtime.spawn(agent, prompt, opts?) — fire-and-forget
 
-Browsie is different: it spawns a detached process that survives bridge restarts. Two options:
+```typescript
+interface SpawnResult {
+  taskId: string;
+}
 
-**Option A (simple):** Keep detached spawn, already uses transport.json for model. Not through runtime but model resolution is correct. Accept the inconsistency.
+interface SpawnOpts {
+  onComplete?: (taskId: string, result: string) => void;
+  onError?: (taskId: string, error: Error) => void;
+  timeoutMs?: number;  // default: 600_000 (10 min)
+}
 
-**Option B (clean):** `runtime.complete("browsie", prompt)` wrapped in fire-and-forget. Loses detached survival but gains consistency. Browse tasks take 1-10 min — if bridge restarts mid-browse, task is lost either way (no resume).
+runtime.spawn(agent, prompt, opts?): Promise<SpawnResult>
+```
 
-**Recommendation:** Option B. The detached spawn is complexity for a benefit that doesn't matter in practice.
+Runs `complete()` internally but returns immediately. Result delivered via callback. Runtime tracks active spawns for shutdown cleanup.
+
+**Use cases:**
+- Browsie browse tasks (1-10 min, result → file + notification)
+- Parallel cron tasks (don't block the queue)
+- Background research ("go research X, write report to ~/reports/")
+- Any long-running task where caller doesn't need inline response
+
+### Browsie migration
+
+Current: raw `spawn("kiro-cli", ["acp"])` via wrapper script + detached child.
+New: `runtime.spawn("browsie", prompt, { onComplete: deliverResult })`.
+
+Loses detached survival but if bridge dies mid-browse, the task is lost anyway (no resume). Gains: consistency, logging, model resolution, shutdown cleanup.
 
 ## Implementation
 
 | Step | What | Time |
 |---|---|---|
 | 1 | Add `AgentSession` interface + `runtime.session(agent)` | 30 min |
-| 2 | Migrate coding-mode to `runtime.session("coding")` | 20 min |
-| 3 | Migrate agent-api-server to `runtime.session("browsie")` | 30 min |
-| 4 | Migrate browsie to `runtime.complete("browsie")` | 30 min |
-| 5 | Verify zero `createSubagentTransport` outside runtime | 10 min |
-| 6 | Tests | 20 min |
+| 2 | Add `SpawnResult` interface + `runtime.spawn(agent, prompt, opts?)` | 20 min |
+| 3 | Migrate coding-mode to `runtime.session("coding")` | 20 min |
+| 4 | Migrate agent-api-server to `runtime.session("browsie")` | 30 min |
+| 5 | Migrate browsie to `runtime.spawn("browsie")` | 30 min |
+| 6 | Verify zero `createSubagentTransport` outside runtime | 10 min |
+| 7 | Tests | 20 min |
 | **Total** | | **~2.5 hr** |
 
 ## Verification
