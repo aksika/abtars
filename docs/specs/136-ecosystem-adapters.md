@@ -9,6 +9,31 @@
 
 Make abmind work with every major AI coding tool. MCP config for most hosts. Native plugin for OpenClaw.
 
+## Pre-req fixes (part of this ticket)
+
+### 1. `ABMIND_HOME` — standalone home dir
+
+abmind gets its own home dir, decoupled from agentbridge:
+
+```
+Standalone:  ABMIND_HOME=~/.abmind              (default)
+With bridge: ABMIND_HOME=~/.agentbridge/memory   (bridge overrides via env)
+```
+
+Rename `agentBridgeHome()` → `abmindHome()` in abmind repo. Reads `ABMIND_HOME` env var, defaults to `~/.abmind`.
+
+### 2. `buildWakeUp()` — remove ctxWindowSize param
+
+Memory should not know about model context windows. `buildWakeUp()` returns full context. Caller truncates if needed.
+
+### 3. MCP server `memory_wakeup` — remove ctxWindowSize param
+
+Tool no longer accepts `ctxWindowSize`. Returns full wake-up context.
+
+### 4. MCP server userId — master from users.json
+
+If no `userId` param from client → read master from `users.json` (via `loadMasterUserId()`). Remove `userIdToChatId()` hash function.
+
 ## User resolution
 
 All adapters resolve the master userId at runtime from `~/.agentbridge/users.json`:
@@ -19,37 +44,21 @@ const master = users.users.find((u: { role: string }) => u.role === "master");
 const masterUserId = master.userId;
 ```
 
-Never hardcode `"aksika"`. The master is whoever `users.json` says it is.
+Never hardcode a userId. The master is whoever `users.json` says it is.
 
-## Adapters
+## MCP Config
 
-| Host | Type | Effort |
-|---|---|---|
-| kiro-cli | MCP config | 5 min |
-| Claude Code | MCP config | 5 min |
-| OpenCode / Cursor | MCP config | 5 min |
-| OpenClaw | Native plugin (`registerMemoryCapability`) | 1 hr |
-
-## MCP Configs
-
-All MCP hosts use the same config — only the file location differs:
+One JSON snippet, same for all hosts. Put in your host's MCP config file:
 
 ```json
 { "mcpServers": { "abmind": { "command": "abmind", "args": ["mcp"] } } }
 ```
 
-| Host | Config file |
+| Host | Where to put it |
 |---|---|
 | kiro-cli | `.kiro/settings/mcp.json` or `kiro-cli mcp add` |
 | Claude Code | `.claude/settings.json` |
-| OpenCode | MCP config |
-| Cursor | MCP config |
-
-### MCP server fix (pre-req)
-
-`src/mcp-server.ts` currently uses `userIdToChatId()` with a hash. Update:
-- If no `userId` param from client → read master from `users.json`
-- Pass `userId` to backend calls (backend scopes by user_id column)
+| OpenCode / Cursor | Host's MCP config |
 
 ## OpenClaw Plugin — `registerMemoryCapability`
 
@@ -61,7 +70,7 @@ export async function register(api: OpenClawPluginApi): Promise<void> {
   const memory = new MemoryManager(config);
   await memory.initialize();
   const backend = await createMemoryBackend(config);
-  const masterUserId = loadMasterUserId(); // from users.json
+  const masterUserId = loadMasterUserId();
 
   api.registerMemoryCapability({
     promptBuilder,
@@ -76,7 +85,7 @@ export async function register(api: OpenClawPluginApi): Promise<void> {
 | OC method | abmind mapping |
 |---|---|
 | `search(query, opts?)` | `backend.recall({ translated: [query], chatId: 0, limit: opts.maxResults })` — scoped by master userId |
-| `readFile({ relPath })` | Read from `~/.agentbridge/memory/`. Return `{ text: "", path }` if missing |
+| `readFile({ relPath })` | Read from `abmindHome()`. Return `{ text: "", path }` if missing |
 | `status()` | `memory.getStats()` mapped to OC's shape |
 | `sync()` | No-op — SQLite writes are immediate |
 | `close()` | `memory.close()` |
@@ -85,7 +94,7 @@ export async function register(api: OpenClawPluginApi): Promise<void> {
 
 ```typescript
 const promptBuilder: MemoryPromptSectionBuilder = () => {
-  const wakeup = memory.buildWakeUp(128000);
+  const wakeup = memory.buildWakeUp();
   return wakeup ? [wakeup] : [];
 };
 ```
@@ -112,10 +121,11 @@ const flushPlanResolver: MemoryFlushPlanResolver = () => ({
 
 | Step | What | Time |
 |---|---|---|
-| 1 | Fix MCP server — master userId from users.json, pass userId to backend | 15 min |
-| 2 | MCP config examples in `docs/mcp-configs/` | 10 min |
-| 3 | `loadMasterUserId()` helper — reads users.json, finds master | 5 min |
-| 4 | OpenClaw plugin: `src/adapters/openclaw.ts` | 45 min |
-| 5 | README: "Use with your editor" section | 10 min |
-| 6 | Test: kiro-cli MCP + OC plugin load | 15 min |
-| **Total** | | **~1.5 hr** |
+| 1 | `ABMIND_HOME` — rename `agentBridgeHome()` → `abmindHome()`, default `~/.abmind` | 15 min |
+| 2 | `buildWakeUp()` — remove `ctxWindowSize` param, update all callers | 10 min |
+| 3 | Fix MCP server — remove `ctxWindowSize` from wakeup tool, master userId from users.json | 15 min |
+| 4 | `loadMasterUserId()` helper — reads users.json, finds master | 5 min |
+| 5 | OpenClaw plugin: `src/adapters/openclaw.ts` | 45 min |
+| 6 | README: "Use with your editor" section + MCP config snippet | 10 min |
+| 7 | Test | 15 min |
+| **Total** | | **~2 hr** |
