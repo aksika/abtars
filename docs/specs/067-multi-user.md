@@ -111,6 +111,46 @@ interface UserEntry {
 
 ## Implementation
 
+### Phase 0 — User definitions + core injection (~1hr)
+
+Foundation: define users in .env, parse at startup, inject user context into sessions.
+
+| Step | What | Time |
+|---|---|---|
+| 0a | Add `# Users` section to .env.example with USERS format + docs | 10 min |
+| 0b | `parseUsers()` in config.ts — parse USERS env → UserEntry[] map | 20 min |
+| 0c | Add user context to soul-loader: inject `[USERS]` section into core bundle listing all users with roles (agent knows who it's talking to) | 15 min |
+| 0d | `buildSessionStartPrompt` receives userId — injects "You are now talking to {displayName} ({role})" | 15 min |
+
+#### .env.example addition
+
+```env
+# ============================================================
+# Users
+# ============================================================
+# Format: userId:role:maxClass:telegramId[:discordId]
+# Roles: master (full access), user (chat only, no tools), guest (runtime, /approve)
+# maxClass: 0=world, 1=internal, 2=master-private, 3=non-disclosed
+USERS=master:master:3:7773842843
+```
+
+#### Core injection
+
+The soul bundle gets a `[USERS]` block so the agent knows the household:
+
+```
+[USERS]
+- aksika (master, maxClass=3) — Telegram: 7773842843
+- adrika (user, maxClass=1) — Telegram: 8385860222
+
+Current session: aksika (master)
+```
+
+This lets the agent:
+- Address users by name
+- Know what it can/cannot disclose per user
+- Adjust tone (master gets full technical detail, user gets friendly chat)
+
 ### Phase 1 — Identity + routing (~5hr)
 
 | Step | What | Time |
@@ -150,7 +190,7 @@ Schema already done (user_id column on all tables, extraction_watermarks keyed b
 | 23 | Document security model (classification = privacy, not enforcement) | 15 min |
 | 24 | End-to-end test: master + user simultaneous | 30 min |
 
-**Total: ~9hr. Phase 1 alone is functional.**
+**Total: ~10hr. Phase 0 alone gives the agent user awareness.**
 
 ## Schema (already done)
 
