@@ -42,7 +42,7 @@ All adapters resolve the master userId at runtime from `~/.agentbridge/config/us
 const usersPath = join(agentBridgeHome(), "config", "users.json");
 ```
 
-Fallback: if no `users.json` exists (standalone, no bridge), default to `"default"`.
+Fallback: if no `users.json` exists (standalone, no bridge), default to `"master"`.
 
 Never hardcode a userId. The master is whoever `users.json` says it is.
 
