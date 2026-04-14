@@ -22,13 +22,13 @@ With bridge: ABMIND_HOME=~/.agentbridge/memory   (bridge overrides via env)
 
 Rename `agentBridgeHome()` → `abmindHome()` in abmind repo. Reads `ABMIND_HOME` env var, defaults to `~/.abmind`.
 
-### 2. `buildWakeUp()` — remove ctxWindowSize param
+### 2. `buildWakeUp()` — simplify param
 
-Memory should not know about model context windows. `buildWakeUp()` returns full context. Caller truncates if needed.
+Replace `buildWakeUp(ctxWindowSize: number)` with `buildWakeUp(maxChars?: number)`. Default ~5000 chars. No model context window knowledge needed.
 
-### 3. MCP server `memory_wakeup` — remove ctxWindowSize param
+### 3. MCP server `memory_wakeup` — simplify param
 
-Tool no longer accepts `ctxWindowSize`. Returns full wake-up context.
+Tool accepts `maxChars` (optional) instead of `ctxWindowSize`. Default 5000.
 
 ### 4. MCP server userId — master from users.json
 
@@ -36,13 +36,13 @@ If no `userId` param from client → read master from `users.json` (via `loadMas
 
 ## User resolution
 
-All adapters resolve the master userId at runtime from `~/.agentbridge/users.json`:
+All adapters resolve the master userId at runtime from `~/.agentbridge/config/users.json`:
 
 ```typescript
-const users = JSON.parse(readFileSync(join(agentBridgeHome(), "users.json"), "utf-8"));
-const master = users.users.find((u: { role: string }) => u.role === "master");
-const masterUserId = master.userId;
+const usersPath = join(agentBridgeHome(), "config", "users.json");
 ```
+
+Fallback: if no `users.json` exists (standalone, no bridge), default to `"default"`.
 
 Never hardcode a userId. The master is whoever `users.json` says it is.
 
@@ -84,7 +84,7 @@ export async function register(api: OpenClawPluginApi): Promise<void> {
 
 | OC method | abmind mapping |
 |---|---|
-| `search(query, opts?)` | `backend.recall({ translated: [query], chatId: 0, limit: opts.maxResults })` — scoped by master userId |
+| `search(query, opts?)` | `backend.recall({ translated: [query], chatId: 0, limit: opts.maxResults })` — filtered by `user_id = masterUserId` |
 | `readFile({ relPath })` | Read from `abmindHome()`. Return `{ text: "", path }` if missing |
 | `status()` | `memory.getStats()` mapped to OC's shape |
 | `sync()` | No-op — SQLite writes are immediate |
@@ -122,7 +122,7 @@ const flushPlanResolver: MemoryFlushPlanResolver = () => ({
 | Step | What | Time |
 |---|---|---|
 | 1 | `ABMIND_HOME` — rename `agentBridgeHome()` → `abmindHome()`, default `~/.abmind` | 15 min |
-| 2 | `buildWakeUp()` — remove `ctxWindowSize` param, update all callers | 10 min |
+| 2 | `buildWakeUp(maxChars?)` — replace `ctxWindowSize` param, default 5000, update all callers | 10 min |
 | 3 | Fix MCP server — remove `ctxWindowSize` from wakeup tool, master userId from users.json | 15 min |
 | 4 | `loadMasterUserId()` helper — reads users.json, finds master | 5 min |
 | 5 | OpenClaw plugin: `src/adapters/openclaw.ts` | 45 min |
