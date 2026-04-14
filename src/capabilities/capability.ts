@@ -10,6 +10,7 @@ import type { HeartbeatTask } from "../types/memory.js";
 import type { Config } from "../types/config.js";
 import type { IMemorySystem } from "abmind/imemory-system.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
+import type { SubagentRuntime } from "../components/subagent-runtime.js";
 import type { CommandContext } from "../components/command-handlers.js";
 
 /** Handler for a slash command registered by a capability. */
@@ -29,6 +30,7 @@ export interface CapabilityApi {
   readonly config: Config;
   readonly memory: IMemorySystem | null;
   readonly transport: IKiroTransport;
+  readonly runtime: SubagentRuntime;
   registerCommand(name: string, handler: CapabilityCommandHandler): void;
   registerHeartbeatTask(task: HeartbeatTask): void;
   registerService(name: string, factory: CapabilityServiceFactory): void;
@@ -59,11 +61,13 @@ export function createCapabilityApi(
   config: Config,
   memory: IMemorySystem | null,
   transport: IKiroTransport,
+  runtime: SubagentRuntime,
 ): CapabilityApi {
   return {
     config,
     memory,
     transport,
+    runtime,
     registerCommand(name, handler) { registry.commands.set(name, handler); },
     registerHeartbeatTask(task) { registry.heartbeatTasks.push(task); },
     registerService(name, factory) { registry.services.set(name, factory); },
@@ -76,6 +80,7 @@ export async function discoverCapabilities(
   config: Config,
   memory: IMemorySystem | null,
   transport: IKiroTransport,
+  runtime: SubagentRuntime,
   capabilitiesDir: string,
 ): Promise<string[]> {
   const { readdirSync, existsSync, readFileSync } = await import("node:fs");
@@ -102,7 +107,7 @@ export async function discoverCapabilities(
 
     try {
       const mod = await import(join(capabilitiesDir, dir, "index.js"));
-      const api = createCapabilityApi(registry, config, memory, transport);
+      const api = createCapabilityApi(registry, config, memory, transport, runtime);
       mod.register(api);
       loaded.push(manifest.name);
     } catch { /* skip broken capabilities */ }

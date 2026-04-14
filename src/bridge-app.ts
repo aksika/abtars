@@ -335,7 +335,7 @@ export class Bridge {
 
   /** Register a capability before start(). */
   registerCapability(fn: CapabilityRegisterFn): void {
-    const api = createCapabilityApi(this.capabilities, this.config, this.memory, this.transport);
+    const api = createCapabilityApi(this.capabilities, this.config, this.memory, this.transport, this.runtime);
     fn(api);
   }
 
@@ -573,7 +573,7 @@ export async function startBridge(): Promise<void> {
   // Auto-discover capabilities (browser, hotskills, etc.)
   const { discoverCapabilities } = await import("./capabilities/capability.js");
   const capDir = join(import.meta.dirname, "capabilities");
-  const loaded = await discoverCapabilities(bridge.capabilities, config, memory, transport, capDir);
+  const loaded = await discoverCapabilities(bridge.capabilities, config, memory, transport, bridge.runtime, capDir);
   if (loaded.length > 0) {
     logInfo("main", `🔌 Capabilities: ${loaded.join(", ")}`);
     pipelineDeps.loadedCapabilities = ["sleep", ...loaded];

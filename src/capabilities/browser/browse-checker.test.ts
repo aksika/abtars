@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const originalHome = process.env.HOME;
 
-describe("checkBrowseTasks", () => {
+describe("browse-delivery", () => {
   let tmpDir: string;
   let memDir: string;
   let browsePath: string;
@@ -40,97 +40,72 @@ describe("checkBrowseTasks", () => {
     catch { return []; }
   }
 
-  it("delivers result when pid is dead", async () => {
-    const { checkBrowseTasks } = await import("./browse-delivery.js");
-    const logsDir = join(tmpDir, ".agentbridge", "logs");
-    mkdirSync(logsDir, { recursive: true });
-    const logFile = join(logsDir, "browse_abc123.log");
-    writeFileSync(logFile, '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Found 3 notifications"}}}}\n', "utf-8");
-
-    writeBrowse([{
+  it("deliverBrowseResult writes report and appends reminder", async () => {
+    const { deliverBrowseResult } = await import("./browse-delivery.js");
+    const entry = {
       taskId: "abc123", task: "check X", chatId: 42,
-      pid: 999999999, // non-existent pid
-      startedAt: Date.now() - 60000, timeoutMs: 300000, logFile,
-    }]);
+      pid: 0, startedAt: Date.now(), timeoutMs: 300000, logFile: "",
+    };
 
-    checkBrowseTasks();
+    deliverBrowseResult(entry, "Found 3 notifications");
 
     const reminders = readReminders();
     expect(reminders).toHaveLength(1);
     expect(reminders[0].chatId).toBe(42);
     expect(reminders[0].message).toContain("Browse task complete");
-    expect(reminders[0].message).toContain("Report:");
 
-    // Report file should exist in subagents dir
     const subDir = join(tmpDir, ".agentbridge", "subagents");
-    expect(existsSync(subDir)).toBe(true);
     const files = require("node:fs").readdirSync(subDir) as string[];
     const report = files.find((f: string) => f.startsWith("browse_abc123"));
     expect(report).toBeDefined();
     const content = readFileSync(join(subDir, report!), "utf-8");
-    expect(content).toContain("Found 3 notifications");
+    expect(content).toBe("Found 3 notifications");
+  });
+
+  it("deliverBrowseResult handles empty result", async () => {
+    const { deliverBrowseResult } = await import("./browse-delivery.js");
+    const entry = {
+      taskId: "empty1", task: "empty task", chatId: 7,
+      pid: 0, startedAt: Date.now(), timeoutMs: 300000, logFile: "",
+    };
+
+    deliverBrowseResult(entry, "");
+
+    const subDir = join(tmpDir, ".agentbridge", "subagents");
+    const files = require("node:fs").readdirSync(subDir) as string[];
+    const report = files.find((f: string) => f.startsWith("browse_empty1"));
+    const content = readFileSync(join(subDir, report!), "utf-8");
+    expect(content).toBe("(no output captured)");
+  });
+
+  it("checkBrowseTasks removes stale entries", async () => {
+    const { checkBrowseTasks } = await import("./browse-delivery.js");
+    writeBrowse([{
+      taskId: "stale1", task: "old task", chatId: 1,
+      pid: 0, startedAt: Date.now() - 600000, timeoutMs: 300000, logFile: "",
+    }]);
+
+    checkBrowseTasks();
 
     const remaining = readBrowse();
     expect(remaining).toHaveLength(0);
   });
 
-  it("kills timed-out process and reports", async () => {
+  it("checkBrowseTasks keeps recent entries", async () => {
     const { checkBrowseTasks } = await import("./browse-delivery.js");
-    // Use a non-existent pid so kill fails silently
     writeBrowse([{
-      taskId: "timeout1", task: "slow task", chatId: 99,
-      pid: 999999998,
-      startedAt: Date.now() - 600000, timeoutMs: 300000,
-      logFile: "/nonexistent.log",
-    }]);
-
-    checkBrowseTasks();
-
-    // Since pid doesn't exist, it'll be treated as dead (kill(0) fails)
-    // and deliver result rather than timeout
-    const reminders = readReminders();
-    expect(reminders).toHaveLength(1);
-    expect(reminders[0].chatId).toBe(99);
-  });
-
-  it("leaves alive process within timeout alone", async () => {
-    const { checkBrowseTasks } = await import("./browse-delivery.js");
-    // Use our own pid — guaranteed alive
-    writeBrowse([{
-      taskId: "alive1", task: "running task", chatId: 1,
-      pid: process.pid,
-      startedAt: Date.now() - 1000, timeoutMs: 300000,
-      logFile: "/tmp/test.log",
+      taskId: "recent1", task: "running task", chatId: 1,
+      pid: 0, startedAt: Date.now() - 1000, timeoutMs: 300000, logFile: "",
     }]);
 
     checkBrowseTasks();
 
     const remaining = readBrowse();
     expect(remaining).toHaveLength(1);
-    expect(remaining[0].taskId).toBe("alive1");
-
-    const reminders = readReminders();
-    expect(reminders).toHaveLength(0);
   });
 
   it("handles missing pending_browse.json gracefully", async () => {
     const { checkBrowseTasks } = await import("./browse-delivery.js");
     expect(() => checkBrowseTasks()).not.toThrow();
-  });
-
-  it("handles missing log file gracefully", async () => {
-    const { checkBrowseTasks } = await import("./browse-delivery.js");
-    writeBrowse([{
-      taskId: "nolog", task: "no log task", chatId: 7,
-      pid: 999999997,
-      startedAt: Date.now() - 60000, timeoutMs: 300000,
-      logFile: "/nonexistent/path/browse.log",
-    }]);
-
-    checkBrowseTasks();
-
-    const reminders = readReminders();
-    expect(reminders).toHaveLength(1);
-    expect(reminders[0].message).toContain("Report:");
   });
 });

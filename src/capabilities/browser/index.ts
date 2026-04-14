@@ -1,5 +1,7 @@
 /**
- * Browser capability — browse-checker heartbeat + IPC server.
+ * Browser capability — browse-spawn IPC + browse-checker heartbeat.
+ * Level 1 (lightpanda fetch) is handled by the agent via skill — no bridge code needed.
+ * Level 2 (Browsie) uses runtime.spawn() via IPC socket.
  */
 
 import { BrowserManager } from "./browser-manager.js";
@@ -9,11 +11,10 @@ import { DomainAllowlist } from "./domain-allowlist.js";
 import { checkBrowseTasks, deliverBrowseResult } from "./browse-delivery.js";
 import { readPendingBrowse, writePendingBrowse } from "./agentbridge-browse.js";
 import type { PendingBrowseEntry } from "./agentbridge-browse.js";
-import { logInfo } from "../../components/logger.js";
+import { logInfo, logWarn } from "../../components/logger.js";
 import { agentBridgeHome } from "../../paths.js";
 import type { CapabilityApi } from "../capability.js";
 import * as net from "node:net";
-import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { unlinkSync } from "node:fs";
 
@@ -30,11 +31,11 @@ export function register(api: CapabilityApi): void {
     logInfo("browser", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
   };
 
-  // Browse spawn IPC — CLI sends requests here, bridge owns the child process
-  const browseSocketPath = join(agentBridgeHome(), "browse.sock");
-  try { unlinkSync(browseSocketPath); } catch { /* */ }
+  // Browse-spawn IPC — CLI sends task, bridge spawns via runtime
+  const spawnSocketPath = join(agentBridgeHome(), "browse-spawn.sock");
+  try { unlinkSync(spawnSocketPath); } catch { /* */ }
 
-  const browseServer = net.createServer((conn) => {
+  const spawnServer = net.createServer((conn) => {
     let buf = "";
     conn.on("data", (chunk) => {
       buf += chunk.toString();
@@ -44,27 +45,37 @@ export function register(api: CapabilityApi): void {
       buf = buf.slice(nl + 1);
 
       try {
-        const req = JSON.parse(line);
-        const { wrapperFile, logFile, taskId, task, chatId, threadId, timeoutMs, engine } = req;
+        const { taskId, task, prompt, chatId, threadId, timeoutMs } = JSON.parse(line);
 
-        const child = spawn("node", [wrapperFile, logFile, req.promptFile], {
-          stdio: "ignore",
-          env: { ...process.env, ...(engine ? { BROWSER_ENGINE: engine } : {}) },
-        });
-
-        const entry: PendingBrowseEntry = { taskId, task, chatId, threadId, pid: child.pid!, startedAt: Date.now(), timeoutMs, logFile };
+        const entry: PendingBrowseEntry = {
+          taskId, task, chatId, threadId,
+          pid: process.pid, // bridge pid — runtime manages the actual transport
+          startedAt: Date.now(), timeoutMs,
+          logFile: "", // no log file — result comes from callback
+        };
         const entries = readPendingBrowse();
         entries.push(entry);
         writePendingBrowse(entries);
 
-        // Instant delivery on exit
-        child.on("exit", () => {
-          deliverBrowseResult(entry);
-          const remaining = readPendingBrowse().filter(e => e.taskId !== taskId);
-          writePendingBrowse(remaining);
+        // Fire-and-forget via runtime
+        api.runtime.spawn("browsie", prompt, {
+          timeoutMs,
+          onComplete: (_id: string, result: string) => {
+            deliverBrowseResult(entry, result);
+            const remaining = readPendingBrowse().filter(e => e.taskId !== taskId);
+            writePendingBrowse(remaining);
+          },
+          onError: (_id: string, err: Error) => {
+            logWarn("browser", `Browsie spawn failed for ${taskId}: ${err.message}`);
+            deliverBrowseResult(entry, `Browse task failed: ${err.message}`);
+            const remaining = readPendingBrowse().filter(e => e.taskId !== taskId);
+            writePendingBrowse(remaining);
+          },
+        }).then(({ taskId: spawnId }) => {
+          conn.write(JSON.stringify({ ok: true, taskId, spawnId, status: "spawned" }) + "\n");
+        }).catch((err) => {
+          conn.write(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }) + "\n");
         });
-
-        conn.write(JSON.stringify({ ok: true, taskId, status: "spawned", pid: child.pid }) + "\n");
       } catch (err) {
         conn.write(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }) + "\n");
       }
@@ -72,8 +83,8 @@ export function register(api: CapabilityApi): void {
     conn.on("error", () => {});
   });
 
-  browseServer.listen(browseSocketPath, () => {
-    logInfo("browser", `🔌 Browse IPC listening on ${browseSocketPath}`);
+  spawnServer.listen(spawnSocketPath, () => {
+    logInfo("browser", `🔌 Browse spawn IPC listening on ${spawnSocketPath}`);
   });
 
   api.registerHeartbeatTask({

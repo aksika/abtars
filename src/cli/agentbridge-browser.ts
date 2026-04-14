@@ -187,7 +187,7 @@ async function main() {
 
   // Fallback: ephemeral browser (no session persistence).
   if (validation.raw.engine) process.env["BROWSER_ENGINE"] = validation.raw.engine;
-  else if (!process.env["BROWSER_ENGINE"]) process.env["BROWSER_ENGINE"] = "lightpanda";
+  else if (!process.env["BROWSER_ENGINE"]) process.env["BROWSER_ENGINE"] = "patchright";
   const browserManager = new BrowserManager();
   const allowlist = DomainAllowlist.fromEnv();
   const tool = new BrowserTool(browserManager, allowlist);

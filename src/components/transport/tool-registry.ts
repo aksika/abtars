@@ -177,7 +177,7 @@ const webBrowseTool: ToolDefinition = {
     properties: {
       task: { type: "string", description: "What to do on the web" },
       chat_id: { type: "string", description: "Chat ID for result delivery" },
-      engine: { type: "string", enum: ["lightpanda", "patchright"], description: "Browser engine (default: patchright)" },
+      engine: { type: "string", enum: ["patchright"], description: "Browser engine (default: patchright)" },
     },
     required: ["task", "chat_id"],
   },

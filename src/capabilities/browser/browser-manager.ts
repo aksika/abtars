@@ -15,14 +15,13 @@ const DEFAULTS = {
   WEB_SCRAPE_USER_AGENT: "Mozilla/5.0 (compatible; AgentBridge/1.0)",
 } as const;
 
-export type BrowserEngine = "patchright" | "lightpanda";
+export type BrowserEngine = "patchright";
 
 export interface BrowserConfig {
   sessionTimeoutMs: number;
   maxSessions: number;
   userAgent: string;
   engine: BrowserEngine;
-  lightpandaEndpoint: string;
 }
 
 /**
@@ -44,10 +43,9 @@ export function parseBrowserConfig(): BrowserConfig {
     DEFAULTS.WEB_SCRAPE_USER_AGENT,
   );
 
-  const engine = (process.env["BROWSER_ENGINE"] ?? "patchright") as BrowserEngine;
-  const lightpandaEndpoint = process.env["LIGHTPANDA_CDP_ENDPOINT"] ?? "ws://127.0.0.1:9222";
+  const engine = "patchright" as BrowserEngine;
 
-  return { sessionTimeoutMs, maxSessions, userAgent, engine, lightpandaEndpoint };
+  return { sessionTimeoutMs, maxSessions, userAgent, engine };
 }
 
 // ---------------------------------------------------------------------------
@@ -95,10 +93,7 @@ export class BrowserManager {
     // Avoid duplicate launches if multiple callers race.
     if (this._launching) return this._launching;
 
-    this._launching = (this._config.engine === "lightpanda"
-      ? this._connectLightpanda()
-      : this._launchPatchright()
-    ).then((browser) => {
+    this._launching = this._launchPatchright().then((browser) => {
       this._browser = browser;
       this._launching = null;
       browser.on("disconnected", () => {
@@ -123,20 +118,6 @@ export class BrowserManager {
       channel: process.env["BROWSER_CHANNEL"] || undefined,
       args,
     });
-  }
-
-  private async _connectLightpanda(): Promise<Browser> {
-    // Lazy start: ensure container is running
-    try {
-      const { execFileSync } = await import("node:child_process");
-      const { join, dirname } = await import("node:path");
-      const { fileURLToPath } = await import("node:url");
-      const scriptDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts");
-      execFileSync(join(scriptDir, "browser-lightpanda.sh"), ["start"], { stdio: "pipe", timeout: 30_000 });
-    } catch { /* script missing or docker not available — try connecting anyway */ }
-
-    console.log(`${LOG_PREFIX} Connecting to Lightpanda at ${this._config.lightpandaEndpoint}`);
-    return chromium.connectOverCDP(this._config.lightpandaEndpoint);
   }
 
   // -------------------------------------------------------------------------
@@ -293,14 +274,7 @@ export class BrowserManager {
   private _stopContainer(): void {
     try {
       const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
-      const { join, dirname } = require("node:path") as typeof import("node:path");
-      const { fileURLToPath } = require("node:url") as typeof import("node:url");
-      const scriptDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "scripts");
-      if (this._config.engine === "lightpanda") {
-        execFileSync(join(scriptDir, "browser-lightpanda.sh"), ["stop"], { stdio: "pipe", timeout: 10_000 });
-      } else {
-        execFileSync("docker", ["stop", "agentbridge-browser"], { stdio: "pipe", timeout: 10_000 });
-      }
+      execFileSync("docker", ["stop", "agentbridge-browser"], { stdio: "pipe", timeout: 10_000 });
     } catch { /* container may not be running */ }
   }
 

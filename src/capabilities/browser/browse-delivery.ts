@@ -1,9 +1,9 @@
 /**
- * Browse task delivery — result extraction and notification for completed browse tasks.
- * Safety net for timeout kills and orphaned processes (normal completion via exit callback in index.ts).
+ * Browse task delivery — write report + notify user via reminder.
+ * Called from runtime.spawn() onComplete/onError callbacks.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "../../paths.js";
 import { logInfo, logWarn } from "../../components/logger.js";
@@ -14,58 +14,23 @@ import type { PendingBrowseEntry } from "./agentbridge-browse.js";
 
 const TAG = "browse-delivery";
 
-function isProcessAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; }
-  catch { return false; }
-}
-
-function extractAgentText(logFile: string): string {
-  try {
-    if (!existsSync(logFile)) return "";
-    const content = readFileSync(logFile, "utf-8");
-    const chunks: string[] = [];
-    for (const line of content.split("\n")) {
-      try {
-        const msg = JSON.parse(line);
-        if (msg.method === "session/update" && msg.params?.update?.sessionUpdate === "agent_message_chunk") {
-          const text = msg.params.update.content?.text;
-          if (text) chunks.push(text);
-        }
-      } catch { /* skip non-JSON */ }
-    }
-    return chunks.join("");
-  } catch { return ""; }
-}
-
 const subagentsDir = (): string => join(agentBridgeHome(), "subagents");
 
-function ensureReportFile(taskId: string): string {
+/** Deliver result for a browse task. Called by runtime.spawn() callback. */
+export function deliverBrowseResult(entry: PendingBrowseEntry, result: string): void {
   const dir = subagentsDir();
   mkdirSync(dir, { recursive: true });
-  try {
-    const existing = readdirSync(dir).find(f => f.startsWith(`browse_${taskId}`));
-    if (existing) return join(dir, existing);
-  } catch { /* */ }
-  const logFile = join(agentBridgeHome(), "logs", `browse_${taskId}.log`);
-  const text = extractAgentText(logFile);
   const date = localDate();
-  const reportPath = join(dir, `browse_${taskId}_${date}.md`);
-  writeFileSync(reportPath, text || "(no output captured)", "utf-8");
-  return reportPath;
-}
+  const reportPath = join(dir, `browse_${entry.taskId}_${date}.md`);
+  writeFileSync(reportPath, result || "(no output captured)", "utf-8");
 
-/** Deliver result for a single browse task. */
-export function deliverBrowseResult(entry: PendingBrowseEntry, timedOut = false): void {
-  const reportPath = ensureReportFile(entry.taskId);
   const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
-  const msg = timedOut
-    ? `🌐 Browse task timed out (${Math.round(entry.timeoutMs / 1000)}s): ${taskLabel}\nPartial report: ${reportPath}`
-    : `🌐 Browse task complete: ${taskLabel}\nReport: ${reportPath}`;
+  const msg = `🌐 Browse task complete: ${taskLabel}\nReport: ${reportPath}`;
   appendReminder({ chatId: entry.chatId, message: msg, createdAt: Date.now(), threadId: entry.threadId });
-  (timedOut ? logWarn : logInfo)(TAG, `🌐 Browse "${taskLabel}" ${timedOut ? "timed out" : "finished"} — ${reportPath}`);
+  logInfo(TAG, `🌐 Browse "${taskLabel}" finished — ${reportPath}`);
 }
 
-/** Safety net: check for completed/timed-out browse tasks. Normal completion handled by exit callback. */
+/** Safety net: check for stale pending entries (runtime handles timeouts, this catches orphans). */
 export function checkBrowseTasks(): void {
   const entries = readPendingBrowse();
   if (entries.length === 0) return;
@@ -74,18 +39,15 @@ export function checkBrowseTasks(): void {
   const remaining: PendingBrowseEntry[] = [];
 
   for (const entry of entries) {
-    const alive = isProcessAlive(entry.pid);
     const elapsed = now - entry.startedAt;
-
-    if (!alive) {
-      deliverBrowseResult(entry);
-    } else if (elapsed > entry.timeoutMs) {
-      try { process.kill(entry.pid, "SIGKILL"); } catch { /* */ }
-      deliverBrowseResult(entry, true);
+    if (elapsed > entry.timeoutMs + 60_000) {
+      // Stale entry — runtime should have cleaned up, remove orphan
+      const taskLabel = entry.task.length > 200 ? entry.task.slice(0, 200) + "…" : entry.task;
+      logWarn(TAG, `Removing stale browse entry: ${taskLabel} (${Math.round(elapsed / 1000)}s old)`);
     } else {
       remaining.push(entry);
     }
   }
 
-  writePendingBrowse(remaining);
+  if (remaining.length !== entries.length) writePendingBrowse(remaining);
 }
