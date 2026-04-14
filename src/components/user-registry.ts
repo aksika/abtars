@@ -23,8 +23,14 @@ export interface UserRegistry {
   byUserId: Map<string, UserEntry>;
 }
 
+let _override: UserRegistry | null = null;
+
+/** Override registry for testing. Pass null to clear. */
+export function setUserRegistryOverride(registry: UserRegistry | null): void { _override = registry; }
+
 /** Load users from config/users.json, fallback to ALLOWED_USER_IDS. */
 export function loadUsers(): UserRegistry {
+  if (_override) return _override;
   const configPath = join(agentBridgeHome(), "config", "users.json");
   const registry: UserRegistry = { users: [], byPlatformId: new Map(), byUserId: new Map() };
 

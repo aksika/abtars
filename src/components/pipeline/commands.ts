@@ -27,9 +27,9 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
   const registry = loadUsers();
   const platformKey = `${msg.platform}:${msg.channelId}`;
   const user = registry.byPlatformId.get(platformKey);
-  const isMaster = !user || user.role === "master"; // unknown users = master (backward compat, #67 Phase 1 adds proper gate)
+  const isMaster = user?.role === "master";
   if (!isMaster && !SAFE_FIRST_CHAR.test(ctx.text)) {
-    logInfo("commands", `Blocked unsafe input from ${user.userId}: "${ctx.text.slice(0, 20)}"`);
+    logInfo("commands", `Blocked unsafe input from ${user?.userId ?? "unknown"}: "${ctx.text.slice(0, 20)}"`);
     await ctx.reply("⛔ Message blocked — unsafe prefix.");
     ctx.handled = true;
     return;

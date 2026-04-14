@@ -1,4 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
+
+const MASTER_REGISTRY: UserRegistry = {
+  users: [{ userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
+  byPlatformId: new Map([["telegram:100", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+  byUserId: new Map([["test", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+};
 import { handleInboundMessage, type PipelineDeps } from "./message-pipeline.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
@@ -75,7 +82,11 @@ describe("handleInboundMessage", () => {
 
   beforeEach(() => {
     transport = mockTransport();
-    process.env["ALLOWED_USER_IDS"] = "100"; // #145: test user treated as master via fallback
+    setUserRegistryOverride(MASTER_REGISTRY);
+  });
+
+  afterEach(() => {
+    setUserRegistryOverride(null);
   });
 
   it("sends prompt to transport and delivers response via adapter", async () => {
