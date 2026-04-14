@@ -45,5 +45,6 @@
     "agentbridge-tweet": "dist/cli/agentbridge-tweet.js",
     "agentbridge-sleep": "dist/cli/agentbridge-sleep.js",
     "agentbridge-restart": "dist/cli/agentbridge-restart.js"
-  }
+  },
+  "license": "Apache-2.0"
 }
