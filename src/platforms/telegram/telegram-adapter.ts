@@ -12,7 +12,6 @@ import { formatReactionSignal } from "../../components/reaction-signal.js";
 import { routeReaction } from "../../components/reaction-router.js";
 import { emojiToScore } from "abmind/emotion-utils.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
-import { writeRestartReason } from "../../components/transport/bridge-lock-transport.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { TelegramUpdate } from "../../types/index.js";
@@ -429,21 +428,7 @@ export class TelegramAdapter implements PlatformAdapter {
       rawPlatformData: message,
     };
 
-    // /stop, /ctrlc, /restart bypass the pipeline queue
-    const trimText = (text ?? "").trim();
-    if (trimText === "/stop" || trimText === "/ctrlc") {
-      await this.deps.pipeline.transport.sendInterrupt();
-      this.deps.pipeline.busyChats.delete(`telegram:${chatId}`);
-      await this.api.sendMessage(chatId, "🛑 Stopped.");
-      logInfo(TAG, "Immediate cancel via /stop");
-      return;
-    }
-    if (trimText === "/restart") {
-      await this.api.sendMessage(chatId, "♻️ Restarting bridge...");
-      writeRestartReason("user-restart");
-      setTimeout(() => this.deps.pipeline.requestShutdown?.(), 500);
-      return;
-    }
+    // /stop, /ctrlc, /restart now handled in commandMiddleware (platform-agnostic)
 
     await handleInboundMessage(inbound, this, this.deps.pipeline);
   }
