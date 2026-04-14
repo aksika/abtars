@@ -44,7 +44,7 @@ Family-scale multi-user (2-4 people) on one bridge instance. Isolated sessions, 
 
 Fallback: if no `users.json`, treat all `ALLOWED_USER_IDS` as master with maxClass=3 and all tools. Zero migration for single-user setups.
 
-Guest: approved at runtime via `/approve <platformId>`, appended to `users.json` with `role: "guest"`, `maxClass: 0`, `tools: []`.
+Guest: approved at runtime via `/users approve <platformId>`, appended to `users.json` with `role: "guest"`, `maxClass: 0`, `tools: []`.
 
 ## Classification & recall
 
@@ -83,7 +83,7 @@ Constraint: user/guest only go through API. No ACP/kiro/gemini CLI sessions — 
 | `/tasks`, `/memory`, `/heartbeat` | ✓ | ⛔ |
 | `/restart`, `/healing`, `/facts` | ✓ | ⛔ |
 | `/wakeup`, `/skills` | ✓ | ⛔ |
-| `/approve`, `/revoke`, `/users` | ✓ | ⛔ |
+| `/users [approve/revoke]` | ✓ | ⛔ |
 | `//` passthrough, `!` shell | ✓ (after #145) | ⛔ |
 
 Non-master commands blocked with: "⛔ Owner-only command."
@@ -123,9 +123,9 @@ interface UserEntry {
 
 | Command | What |
 |---|---|
-| `/approve <platformId>` | Add guest |
-| `/revoke <userId>` | Remove guest |
-| `/users` | List all users with roles + maxClass |
+| `/users approve <platformId>` | Add guest |
+| `/users revoke <userId>` | Remove guest |
+| `/users` | List all users with roles + clearance |
 
 ## Implementation
 
@@ -178,12 +178,12 @@ This lets the agent:
 |---|---|---|
 | 1 | Parse `USERS` env → user registry + load guests.json | 30 min |
 | 2 | Security gate: platformId → userId + role + maxClass | 30 min |
-| 3 | Unknown sender → reject. `/approve` adds guest | 30 min |
+| 3 | Unknown sender → reject. `/users approve` adds guest | 30 min |
 | 4 | Session key `{userId}:{platform}` — update pipeline, adapters | 1 hr |
 | 5 | Transport: master=configured, user/guest=DirectAPI with tools:[] | 30 min |
 | 6 | Command whitelist for non-master (middleware check) | 30 min |
 | 7 | Injection scan for non-master messages | 15 min |
-| 8 | `/approve`, `/revoke`, `/users` commands | 30 min |
+| 8 | `/users`, `/users approve`, `/users revoke` commands + update `/help` | 30 min |
 | 9 | Delivery context (lastPlatform per user) | 15 min |
 | 10 | Tests | 30 min |
 
