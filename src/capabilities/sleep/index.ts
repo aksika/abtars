@@ -137,7 +137,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           writeSleepStatus("awake");
         }
       });
-      logInfo("sleep", `😴 Sleep spawned (pid=${proc.pid}, attempt ${attempts}, model=${process.env["AGENT_SLEEP_MODEL"] ?? "auto"})`);
+      logInfo("sleep", `😴 Sleep spawned (pid=${proc.pid}, attempt ${attempts}, model=dreamy)`);
       writeSleepStatus("sleeping");
     } catch (err) {
       logWarn("sleep", `😴 Sleep spawn failed: ${err instanceof Error ? err.message : String(err)}`);

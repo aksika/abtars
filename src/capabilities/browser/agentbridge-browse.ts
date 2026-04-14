@@ -155,7 +155,10 @@ Usage:
   // Build prompt
   const prompt = loadBrowsePrompt(task, chatId, taskId);
 
-  const browseModel = process.env.AGENT_BROWSE_MODEL || "claude-sonnet-4.5";
+  const { resolveAgent, loadTransport } = await import("../../components/transport-config.js");
+  const tc = loadTransport();
+  const browsieAgent = tc ? resolveAgent("browsie", tc) : null;
+  const browseModel = browsieAgent?.model ?? "claude-sonnet-4.6";
 
   // Spawn detached kiro-cli acp subprocess
   const promptFile = join(logsDir, `browse_${taskId}_prompt.txt`);

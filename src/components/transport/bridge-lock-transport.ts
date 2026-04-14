@@ -8,21 +8,7 @@ import { join } from "node:path";
 import { agentBridgeHome } from "../../paths.js";
 import { localISO } from "../../utils/local-time.js";
 
-export interface BridgeLockTransport {
-  type: string;
-  endpoint?: string;
-  model: string;
-}
-
 export type SleepStatus = "awake" | "sleeping" | "hw_sleep";
-
-export function readBridgeLockTransport(): BridgeLockTransport | null {
-  try {
-    const lock = JSON.parse(readFileSync(join(agentBridgeHome(), "bridge.lock"), "utf-8"));
-    if (lock.transport?.type && lock.transport?.model) return lock.transport;
-  } catch { /* no lock or invalid */ }
-  return null;
-}
 
 /** Read lastPromptAt from bridge.lock. Returns 0 if missing/unreadable. */
 export function readLastPromptAt(): number {

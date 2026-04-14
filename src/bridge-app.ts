@@ -799,14 +799,20 @@ export async function startBridge(): Promise<void> {
       if (modelHealthDone) return;
       modelHealthDone = true;
       if (config.transport.agentTransport !== "api") return; // only ping Direct API models
-      const models: Array<{ label: string; model: string }> = [
-        { label: "AGENT_MAIN_MODEL", model: config.models.mainModel },
-      ];
-      if (config.models.sleepModel !== config.models.mainModel) models.push({ label: "AGENT_SLEEP_MODEL", model: config.models.sleepModel });
-      if (config.models.browseModel !== config.models.mainModel) models.push({ label: "AGENT_BROWSE_MODEL", model: config.models.browseModel });
-      if (config.models.codingModel !== config.models.mainModel) models.push({ label: "AGENT_CODING_MODEL", model: config.models.codingModel });
-      const endpoint = process.env["API_ENDPOINT"] ?? "http://localhost:11434/v1";
-      const apiKey = process.env["API_KEY"];
+      const { loadTransport, resolveAgent } = await import("./components/transport-config.js");
+      const tc = loadTransport();
+      if (!tc) return;
+      const agents = ["professor", "dreamy", "browsie", "coding"] as const;
+      const models: Array<{ label: string; model: string }> = [];
+      for (const a of agents) {
+        const r = resolveAgent(a, tc);
+        if (r && !models.some(m => m.model === r.model)) {
+          models.push({ label: a, model: r.model });
+        }
+      }
+      const prof = resolveAgent("professor", tc);
+      const endpoint = prof?.provider.endpoint ?? "http://localhost:11434/v1";
+      const apiKey = prof?.provider.apiKeyEnv ? process.env[prof.provider.apiKeyEnv] : process.env["API_KEY"];
       const warnings: string[] = [];
       for (const { label, model } of models) {
         try {
