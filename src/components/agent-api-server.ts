@@ -5,10 +5,11 @@ import { fileURLToPath } from "url";
 import { createHmac, randomBytes } from "crypto";
 import { agentBridgeHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
-import { IKiroTransport } from "./transport/kiro-transport.js";
 import type { IMemorySystem } from "abmind/imemory-system.js";
 import { scanForInjection } from "abmind/injection-scanner.js";
 import { logInfo, logWarn } from "./logger.js";
+import type { SubagentRuntime } from "./subagent-runtime.js";
+import type { AgentSession } from "./subagent-runtime.js";
 import { localDate } from "./env-utils.js";
 import { localIso } from "./logger.js";
 
@@ -31,6 +32,7 @@ interface AgentApiDeps {
   cliPath: string;
   workingDir: string;
   memory: IMemorySystem | null;
+  runtime: SubagentRuntime;
 }
 
 function normalizeIp(raw: string): string {
@@ -63,8 +65,9 @@ export class AgentApiServer {
   private rulesInjected = false;
   private logDir: string;
   private logFile: string;
-  private agentTransport: IKiroTransport | null = null;
+  private agentSession: AgentSession | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private runtime: SubagentRuntime;
   private guestName = "GUEST";
   private authenticated = false;
   private pendingChallenge: string | null = null;
@@ -73,6 +76,7 @@ export class AgentApiServer {
     this.config = deps.config;
     this.workingDir = deps.workingDir;
     this.memory = deps.memory;
+    this.runtime = deps.runtime;
     this.server = createServer((req, res) => this.handle(req, res));
     this.logDir = join(agentBridgeHome(), "logs", "agents");
     mkdirSync(this.logDir, { recursive: true });
@@ -100,46 +104,43 @@ export class AgentApiServer {
   }
 
   async stop(): Promise<void> {
-    this.killAgentTransport();
+    await this.killAgentSession();
     return new Promise((resolve) => this.server.close(() => resolve()));
   }
 
-  /** Spawn a dedicated kiro-cli ACP process for A2A. No --agent flag (no SOUL needed). */
-  private async ensureAgentTransport(): Promise<IKiroTransport> {
-    if (this.agentTransport?.isReady) {
+  /** Get or create a dedicated agent session for A2A. */
+  private async ensureAgentSession(): Promise<AgentSession> {
+    if (this.agentSession?.isReady) {
       this.resetIdleTimer();
-      return this.agentTransport;
+      return this.agentSession;
     }
-    const { createSubagentTransport } = await import("./agent-registry.js");
-    const { transport } = await createSubagentTransport("browse");
-    this.agentTransport = transport;
+    this.agentSession = await this.runtime.session("browsie");
     this.resetIdleTimer();
-    return this.agentTransport;
+    return this.agentSession;
   }
 
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => this.killAgentTransport(), IDLE_TIMEOUT_MS);
+    this.idleTimer = setTimeout(() => this.killAgentSession(), IDLE_TIMEOUT_MS);
   }
 
-  private async killAgentTransport(): Promise<void> {
+  private async killAgentSession(): Promise<void> {
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
-    if (!this.agentTransport) return;
-    logInfo(TAG, "A2A idle timeout — saving chat, closing log, killing kiro-cli");
-    // Save conversation before destroying
+    if (!this.agentSession) return;
+    logInfo(TAG, "A2A idle timeout — saving chat, closing log, killing session");
     try {
       const today = localDate();
       const dir = join(this.workingDir, "memory", "working", today);
       mkdirSync(dir, { recursive: true });
       const dest = join(dir, "transcript_a2a.chat");
-      await this.agentTransport.sendPrompt("a2a:save", `/chat save ${dest}`);
+      await this.agentSession.sendPrompt("a2a:save", `/chat save ${dest}`);
       logInfo(TAG, `A2A chat saved to ${dest}`);
     } catch (e) {
       logWarn(TAG, `A2A chat save failed: ${e}`);
     }
     this.log("SYSTEM", "Idle timeout — session closed");
-    this.agentTransport.destroy();
-    this.agentTransport = null;
+    await this.agentSession.destroy();
+    this.agentSession = null;
     this.rulesInjected = false;
     this.guestName = "GUEST";
     this.authenticated = false;
@@ -262,7 +263,7 @@ export class AgentApiServer {
 
   private async handleClose(res: ServerResponse): Promise<void> {
     logInfo(TAG, `Session closed by [${this.guestName}]`);
-    await this.killAgentTransport();
+    await this.killAgentSession();
     this.guestName = "GUEST";
     this.authenticated = false;
     this.pendingChallenge = null;
@@ -291,9 +292,9 @@ export class AgentApiServer {
       return;
     }
 
-    let t: IKiroTransport;
+    let t: AgentSession;
     try {
-      t = await this.ensureAgentTransport();
+      t = await this.ensureAgentSession();
     } catch (err) {
       this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt, response: "503: spawn failed", durationMs: Date.now() - start, status: 503 });
       res.writeHead(503).end(JSON.stringify({ error: "failed to spawn agent kiro-cli" }));
@@ -323,7 +324,7 @@ export class AgentApiServer {
 
   private async handleReset(res: ServerResponse): Promise<void> {
     const start = Date.now();
-    this.killAgentTransport();
+    this.killAgentSession();
     this.log("SYSTEM", "Session reset");
     this.pushTraffic({ ts: start, ip: "", endpoint: "reset", prompt: "", response: "ok", durationMs: Date.now() - start, status: 200 });
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
@@ -331,13 +332,13 @@ export class AgentApiServer {
 
   private handleStatus(res: ServerResponse): void {
     const start = Date.now();
-    const ready = this.agentTransport?.isReady ?? false;
+    const ready = this.agentSession?.isReady ?? false;
     this.pushTraffic({ ts: start, ip: "", endpoint: "status", prompt: "", response: `ready=${ready}`, durationMs: Date.now() - start, status: 200 });
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
       ready,
       sessionKey: this.config.sessionKey,
       chatId: this.config.chatId,
-      hasProcess: this.agentTransport !== null,
+      hasProcess: this.agentSession !== null,
     }));
   }
 }

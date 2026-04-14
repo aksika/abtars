@@ -159,10 +159,10 @@ export async function handleInboundMessage(
     }
 
     // --- Send to transport ---
-    const activeTransport = codingMode.has(sessionKey) && codingMode.getTransport()
-      ? codingMode.getTransport()! : transport;
-
-    const responsePromise = activeTransport.sendPrompt(sessionKey, prompt);
+    const codingSession = codingMode.has(sessionKey) ? codingMode.getSession() : null;
+    const responsePromise = codingSession
+      ? codingSession.sendPrompt(sessionKey, prompt)
+      : transport.sendPrompt(sessionKey, prompt);
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {

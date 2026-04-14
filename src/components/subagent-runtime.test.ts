@@ -37,7 +37,6 @@ describe("SubagentRuntime", () => {
   it("caches transport — second call reuses", async () => {
     await runtime.complete("dreamy", "first");
     await runtime.complete("dreamy", "second");
-    // createSubagentTransport called once, sendPrompt called twice
     const { createSubagentTransport } = await import("./agent-registry.js");
     expect(createSubagentTransport).toHaveBeenCalledTimes(1);
     expect(mockSendPrompt).toHaveBeenCalledTimes(2);
@@ -53,7 +52,6 @@ describe("SubagentRuntime", () => {
   it("evicts cache on failure — next call creates fresh", async () => {
     mockSendPrompt.mockRejectedValueOnce(new Error("model down"));
     await expect(runtime.complete("dreamy", "fail")).rejects.toThrow("model down");
-    // Next call should create new transport
     mockSendPrompt.mockResolvedValueOnce("recovered");
     const result = await runtime.complete("dreamy", "retry");
     expect(result).toBe("recovered");
@@ -75,10 +73,66 @@ describe("SubagentRuntime", () => {
   });
 
   it("fresh session resets before sending", async () => {
-    // First call creates + caches
     await runtime.complete("dreamy", "first");
-    // Second call with fresh session should reset
     await runtime.complete("dreamy", "second", { session: "fresh" });
     expect(mockResetSession).toHaveBeenCalledWith("system:dreamy");
+  });
+
+  // --- session() tests ---
+
+  it("session() returns AgentSession with sendPrompt and destroy", async () => {
+    const session = await runtime.session("coding");
+    expect(typeof session.sendPrompt).toBe("function");
+    expect(typeof session.destroy).toBe("function");
+    expect(session.isReady).toBe(true);
+  });
+
+  it("session().sendPrompt delegates to transport", async () => {
+    const session = await runtime.session("coding");
+    await session.sendPrompt("key1", "hello");
+    expect(mockSendPrompt).toHaveBeenCalledWith("key1", "hello");
+  });
+
+  it("session().destroy evicts from cache", async () => {
+    const session = await runtime.session("coding");
+    await session.destroy();
+    expect(mockDestroy).toHaveBeenCalledTimes(1);
+    // Next session() should create fresh
+    await runtime.session("coding");
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledTimes(2);
+  });
+
+  // --- spawn() tests ---
+
+  it("spawn() returns taskId immediately", async () => {
+    const result = await runtime.spawn("browsie", "long task");
+    expect(result.taskId).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it("spawn() calls onComplete with result", async () => {
+    const onComplete = vi.fn();
+    await runtime.spawn("browsie", "task", { onComplete });
+    // Wait for the background promise to resolve
+    await new Promise(r => setTimeout(r, 10));
+    expect(onComplete).toHaveBeenCalledWith(expect.any(String), "response text");
+  });
+
+  it("spawn() calls onError on failure", async () => {
+    mockSendPrompt.mockRejectedValueOnce(new Error("boom"));
+    const onError = vi.fn();
+    await runtime.spawn("browsie", "fail", { onError });
+    await new Promise(r => setTimeout(r, 10));
+    expect(onError).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ message: "boom" }));
+  });
+
+  it("shutdown aborts active spawns", async () => {
+    mockSendPrompt.mockImplementation(() => new Promise(r => setTimeout(r, 5000)));
+    const onComplete = vi.fn();
+    await runtime.spawn("browsie", "slow", { onComplete });
+    await runtime.shutdown();
+    // onComplete should NOT be called (aborted)
+    await new Promise(r => setTimeout(r, 10));
+    expect(onComplete).not.toHaveBeenCalled();
   });
 });

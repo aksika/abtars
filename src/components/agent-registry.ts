@@ -82,6 +82,7 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
 };
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
+/** @internal Used only by SubagentRuntime. Do not call directly. */
 export async function createSubagentTransport(role: SubagentRole): Promise<{ transport: IKiroTransport; model: string }> {
   const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
   const tc = loadTransport();

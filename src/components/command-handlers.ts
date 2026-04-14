@@ -139,10 +139,9 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
   if (text === "/reset" && ctx.codingMode.has(ctx.sessionKey)) {
     await ctx.codingMode.stop(ctx.sessionKey);
   }
-  const activeTransport = ctx.codingMode.has(ctx.sessionKey) && ctx.codingMode.getTransport()
-    ? ctx.codingMode.getTransport()! : ctx.transport;
+  // Reset always goes to main transport — coding session is separate
   await resetAndPrepare({
-    transport: activeTransport, sessionKey: ctx.sessionKey, reason: "user-reset",
+    transport: ctx.transport, sessionKey: ctx.sessionKey, reason: "user-reset",
     pendingSessionStart: ctx.pendingSessionStart, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);

@@ -427,7 +427,7 @@ export async function startBridge(): Promise<void> {
   const pendingSessionStart = new Set<string>();
   const seenSessions = new Set<string>();
   const fullModeChats = new Set<string>();
-  const codingModeManager = new CodingMode();
+  const codingModeManager = new CodingMode(bridge.runtime);
   const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
   const registry = bridge.registry;
 
@@ -880,6 +880,7 @@ export async function startBridge(): Promise<void> {
         cliPath: config.transport.agentCliPath,
         workingDir: config.transport.workingDir,
         memory,
+        runtime: bridge.runtime,
       });
       return {
         async start() { await agentApiServer!.start(); },

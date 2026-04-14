@@ -1,78 +1,70 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { CodingMode } from "./coding-mode.js";
 
-// Mock AcpTransport
-vi.mock("./transport/acp-transport.js", () => ({
-  AcpTransport: vi.fn().mockImplementation(() => ({
-    initialize: vi.fn().mockResolvedValue(undefined),
-    sendPrompt: vi.fn().mockResolvedValue("ok"),
-    destroy: vi.fn(),
-    resetSession: vi.fn().mockResolvedValue(undefined),
+const mockSendPrompt = vi.fn().mockResolvedValue("ok");
+const mockDestroy = vi.fn().mockResolvedValue(undefined);
+
+vi.mock("./agent-registry.js", () => ({
+  createSubagentTransport: vi.fn(async () => ({
+    transport: {
+      sendPrompt: mockSendPrompt,
+      destroy: mockDestroy,
+      resetSession: vi.fn(),
+      isReady: true,
+      contextPercent: -1,
+      initialize: vi.fn(),
+    },
+    model: "test-model",
   })),
 }));
 
-// Mock createSubagentTransport to return a mock transport
-vi.mock("./agent-registry.js", async (importOriginal) => {
-  const orig = await importOriginal() as Record<string, unknown>;
-  return {
-    ...orig,
-    createSubagentTransport: vi.fn(async () => ({
-      transport: {
-        initialize: vi.fn().mockResolvedValue(undefined),
-        sendPrompt: vi.fn().mockResolvedValue("ok"),
-        destroy: vi.fn(),
-        resetSession: vi.fn().mockResolvedValue(undefined),
-      },
-      model: "test-model",
-    })),
-  };
-});
+const { SubagentRuntime } = await import("./subagent-runtime.js");
+const { CodingMode } = await import("./coding-mode.js");
 
 describe("CodingMode", () => {
-  let cm: CodingMode;
+  let cm: InstanceType<typeof CodingMode>;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    cm = new CodingMode("/usr/bin/kiro-cli", "/tmp/project", "test-model");
+    const runtime = new SubagentRuntime();
+    cm = new CodingMode(runtime);
   });
 
   it("has() returns false for unknown session", () => {
     expect(cm.has("s1")).toBe(false);
   });
 
-  it("getTransport() returns null before start", () => {
-    expect(cm.getTransport()).toBeNull();
+  it("getSession() returns null before start", () => {
+    expect(cm.getSession()).toBeNull();
   });
 
-  it("start() creates transport and adds session", async () => {
+  it("start() creates session and adds session key", async () => {
     await cm.start("s1");
     expect(cm.has("s1")).toBe(true);
-    expect(cm.getTransport()).not.toBeNull();
+    expect(cm.getSession()).not.toBeNull();
   });
 
-  it("start() reuses transport for second session", async () => {
+  it("start() reuses session for second key", async () => {
     await cm.start("s1");
-    const t1 = cm.getTransport();
+    const s1 = cm.getSession();
     await cm.start("s2");
-    expect(cm.getTransport()).toBe(t1);
+    expect(cm.getSession()).toBe(s1);
     expect(cm.has("s1")).toBe(true);
     expect(cm.has("s2")).toBe(true);
   });
 
-  it("stop() removes session, destroys transport when last session removed", async () => {
+  it("stop() removes key, destroys session when last key removed", async () => {
     await cm.start("s1");
-    const transport = cm.getTransport()!;
     await cm.stop("s1");
     expect(cm.has("s1")).toBe(false);
-    expect(cm.getTransport()).toBeNull();
-    expect(transport.destroy).toHaveBeenCalled();
+    expect(cm.getSession()).toBeNull();
+    expect(mockDestroy).toHaveBeenCalled();
   });
 
-  it("stop() keeps transport alive if other sessions remain", async () => {
+  it("stop() keeps session alive if other keys remain", async () => {
     await cm.start("s1");
     await cm.start("s2");
     await cm.stop("s1");
     expect(cm.has("s1")).toBe(false);
-    expect(cm.getTransport()).not.toBeNull();
+    expect(cm.getSession()).not.toBeNull();
   });
 });
