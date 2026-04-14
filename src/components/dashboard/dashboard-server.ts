@@ -37,7 +37,9 @@ export type DashboardServerDeps = {
 
 // ── DashboardServer ─────────────────────────────────────────────────────────
 
-export class DashboardServer {
+import type { IDashboardSlot } from "../skeleton.js";
+
+export class DashboardServer implements IDashboardSlot {
   private readonly deps: DashboardServerDeps;
   private readonly _broadcaster: StatusBroadcaster;
   private readonly wss: WebSocketServer;

@@ -23,6 +23,7 @@ import { AuthGate } from "./components/auth-gate.js";
 import { ServiceRegistry } from "./components/service-registry.js";
 import { MemorySearchController } from "./components/memory-search-controller.js";
 import { DashboardServer } from "./components/dashboard/dashboard-server.js";
+import type { IDashboardSlot, DashboardSlotOpts } from "./components/skeleton.js";
 import { renderDashboardHtml } from "./components/dashboard/dashboard-ui.js";
 import { loadNLMConfig } from "./components/nlm-command-handler.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
@@ -97,7 +98,7 @@ export class Bridge {
   registry = new ServiceRegistry();
   pipelineDeps!: PipelineDeps;
 
-  dashboardServer: DashboardServer | null = null;
+  dashboardServer: IDashboardSlot | null = null;
   agentApiServer: AgentApiServer | null = null;
   browserIpc: BrowserIpcServer | null = null;
   /** @deprecated Browser is now a capability — this field is only used by shutdown. */
@@ -317,17 +318,28 @@ export class Bridge {
       ? new MemorySearchController({ memory: this.memory })
       : null;
 
-    this.dashboardServer = new DashboardServer({
-      config: dashConfig,
-      authGate,
-      getStatus,
-      registry: this.registry,
-      memorySearchController,
-      dashboardHtml,
-    });
+    const customModule = process.env["DASHBOARD_MODULE"];
+    if (customModule) {
+      const mod = await import(customModule);
+      const Ctor = mod.Dashboard ?? mod.default;
+      if (typeof Ctor?.prototype?.start !== "function" || typeof Ctor?.prototype?.stop !== "function") {
+        throw new Error(`DASHBOARD_MODULE (${customModule}) does not implement IDashboardSlot (missing start/stop)`);
+      }
+      const opts: DashboardSlotOpts = { getStatus, port: dashConfig.webPort, host: dashConfig.webHost, authToken: dashConfig.webAuthToken };
+      this.dashboardServer = new Ctor(opts) as IDashboardSlot;
+    } else {
+      this.dashboardServer = new DashboardServer({
+        config: dashConfig,
+        authGate,
+        getStatus,
+        registry: this.registry,
+        memorySearchController,
+        dashboardHtml,
+      });
+    }
 
     await this.dashboardServer.start();
-    logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort} (token: ${dashConfig.webAuthToken})`);
+    logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort}${customModule ? ` (custom: ${customModule})` : ""}`);
   }
 
   /** Collected registrations from all capabilities. */

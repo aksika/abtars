@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { HeartbeatSystem } from "./heartbeat-system.js";
 import { SkillWatcher } from "./skill-watcher.js";
-import type { ITaskSlot, ISkillSlot } from "./skeleton.js";
+import { DashboardServer } from "./dashboard/dashboard-server.js";
+import type { ITaskSlot, ISkillSlot, IDashboardSlot } from "./skeleton.js";
 
 describe("Skeleton slot conformance", () => {
   it("HeartbeatSystem implements ITaskSlot", () => {
@@ -20,5 +21,12 @@ describe("Skeleton slot conformance", () => {
     const slot: ISkillSlot = sw;
     expect(typeof slot.checkForChanges).toBe("function");
     expect(typeof slot.appendToTools).toBe("function");
+  });
+
+  it("DashboardServer implements IDashboardSlot", () => {
+    // Type-level check — DashboardServer satisfies IDashboardSlot
+    const check: IDashboardSlot = { start: DashboardServer.prototype.start, stop: DashboardServer.prototype.stop };
+    expect(typeof check.start).toBe("function");
+    expect(typeof check.stop).toBe("function");
   });
 });

@@ -6,6 +6,7 @@
 import type { IMemorySystem } from "abmind/imemory-system.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
+import type { StatusSnapshot } from "../types/status.js";
 
 // ── Slot interfaces ─────────────────────────────────────────────────────────
 
@@ -34,6 +35,20 @@ export interface IPlatformSlot {
   stop(): Promise<void>;
 }
 
+/** Dashboard slot — web UI, Grafana exporter, mobile push, etc. */
+export interface IDashboardSlot {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+}
+
+/** Options passed to custom dashboard implementations. */
+export interface DashboardSlotOpts {
+  getStatus: () => StatusSnapshot;
+  port: number;
+  host: string;
+  authToken: string;
+}
+
 // ── Skeleton ────────────────────────────────────────────────────────────────
 
 export interface ABSkeleton {
@@ -42,5 +57,6 @@ export interface ABSkeleton {
   runtime: SubagentRuntime;
   tasks: ITaskSlot;
   skills: ISkillSlot;
+  dashboard: IDashboardSlot | null;
   platforms: IPlatformSlot[];
 }

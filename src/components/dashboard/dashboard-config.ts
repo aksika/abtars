@@ -59,87 +59,15 @@ import { homedir } from "node:os";
 import type { TrafficEntry } from "../agent-api-server.js";
 import { localIso } from "../logger.js";
 
-export type StatusSnapshot = {
-  timestamp: string;
-  uptimeMs: number;
-  platforms: PlatformStates;
-  services: Record<string, { configured: boolean; running: boolean }>;
-  transport: TransportStatus;
-  memory: MemoryStatus;
-  heartbeat: HeartbeatStatus;
-  cron: CronEntryStatus[];
-  notebooklm: { enabled: boolean } | null;
-  gwsAuth: boolean;
-  agentApi: { traffic: TrafficEntry[] } | null;
-};
+export type {
+  StatusSnapshot, CronEntryStatus, PlatformStates, TransportStatus,
+  MemoryStatus, HeartbeatStatus, WebSearchResult, MemorySearchResponse,
+} from "../../types/status.js";
 
-export type CronEntryStatus = {
-  id: string;
-  label: string;
-  schedule: string;
-  executor: "agent" | "script";
-  fireAt: number;
-  paused: boolean;
-  lastRanAt?: number;
-  lastExitCode?: number | null;
-  priority?: "high" | "medium" | "low";
-};
-
-export type PlatformStates = {
-  telegram: { configured: boolean; running: boolean };
-  discord: { configured: boolean; running: boolean };
-};
-
-export type TransportStatus = {
-  type: "tmux" | "acp" | "api";
-  ready: boolean;
-  contextPercent: number;
-};
-
-export type MemoryStatus = {
-  enabled: boolean;
-  stats: {
-    totalMessages: number;
-    extractedMemories: number;
-    extractedByType: Record<string, number>;
-    preservedKeywords: number;
-    consolidationFiles: { daily: number; weekly: number; quarterly: number };
-    ingestedDocuments: number;
-    dbSizeBytes: number;
-  } | null;
-  error?: string;
-};
-
-export type HeartbeatStatus = {
-  running: boolean;
-  intervalMs: number;
-  taskNames: string[];
-};
-
-// ── Memory Search Types ─────────────────────────────────────────────────────
-
-export type WebSearchResult = {
-  content: string;
-  date: string;
-  source: string;
-  score: number;
-  // Rich attributes (L2 extracted memories only)
-  contentOriginal?: string;
-  memoryType?: string;
-  emotionScore?: number;
-  classification?: number;
-  trust?: number;
-  integrity?: number;
-  credibility?: number;
-  recallCount?: number;
-  relevanceScore?: number;
-  preserveOriginal?: boolean;
-};
-
-export type MemorySearchResponse = {
-  results: WebSearchResult[];
-  layers: Record<string, { status: string; hits?: number; ms?: number }>;
-};
+import type {
+  StatusSnapshot, CronEntryStatus, PlatformStates,
+  TransportStatus, MemoryStatus, HeartbeatStatus,
+} from "../../types/status.js";
 
 // ── Snapshot Builder ────────────────────────────────────────────────────────
 
