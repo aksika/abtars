@@ -3,177 +3,172 @@
 **Date:** 2026-04-14
 **Status:** Planned
 **Priority:** HIGH
+**Depends on:** #145 (restrict passthrough commands)
 
 ## Goal
 
-Multiple users interact with the same bridge instance. Identity-based routing, memory separation by classification, master priority.
+Family-scale multi-user (2-4 people) on one bridge instance. Isolated sessions, classification-based memory privacy, no tools for non-master.
 
 ## Roles
 
-| Role | Source | Max classification | Tools | Priority |
+| Role | Source | Transport | Tools | Injection scan |
 |---|---|---|---|---|
-| master | .env only | 2 | all | highest |
-| user | .env only | 1 | all | normal |
-| guest | runtime (/approve) | 0 (world only) | all | lowest |
-
-Master and user roles can only be assigned via .env. Guests are approved at runtime and persisted to `~/.agentbridge/config/guests.json`.
+| master | .env | any (configured) | all | skip (trusted) |
+| user | .env | Direct API only | none | ✓ |
+| guest | runtime (/approve) | Direct API only | none | ✓ |
 
 ## Auth config
 
 ```env
-# Format: userId:role:telegramId[:discordId]
-USERS=master:master:7773842843,adrika:user:8385860222
+# Format: userId:role:maxClass:telegramId[:discordId]
+USERS=master:master:3:7773842843,adrika:user:1:8385860222
 ```
 
-Replaces `ALLOWED_USER_IDS`. Both Telegram and Discord are closed by default — allowlist only.
+Replaces `ALLOWED_USER_IDS`. Both Telegram and Discord closed by default — allowlist only.
 
-## Pairing flow (guests)
+Guest: approved at runtime via `/approve <platformId>`, persisted to `~/.agentbridge/config/guests.json`. Hardcoded maxClass=0.
 
-1. Unknown person messages bot → bot replies "👋 To get access, ask the owner to run: `/approve`"
-2. Master sends `/approve <platformId>` → person added as `guest`, persisted to `guests.json`
-3. Guest can now chat. Sees only classification=0 (world) memories.
-4. To promote: `/promote <userId> user` (runtime) or edit .env (permanent)
+## Classification & recall
 
-No pairing codes — master provides the platform ID directly. Simpler, no state to track.
-
-## Memory visibility (Unix-style)
-
-Uses existing `classification` column — no schema change for the column itself.
-
-| Classification | Label | Visible to |
+| Class | Label | Description |
 |---|---|---|
-| 0 | World | everyone (master + user + guest) |
-| 1 | Internal | master + user |
-| 2 | Master | master only |
-| 3 | Non-disclosed | nobody (encrypted at rest, future #45) |
+| 0 | World | Public knowledge, visible to everyone |
+| 1 | Internal | Family/project knowledge |
+| 2 | Master | Private to master |
+| 3 | Non-disclosed | Secret — agent uses internally, never outputs in chat |
 
-Recall filter: `WHERE classification <= {roleMaxClassification}`
+**Per-user maxClass** set in .env. Controls what the agent can recall for that user.
+
+- **Master (maxClass=3):** Agent recalls everything. Class 3 memories are used for internal reasoning but NEVER disclosed in chat responses. Enforced via SOUL.md prompt instruction.
+- **User (maxClass=0-2):** Recall query filters `WHERE classification <= maxClass`. Memories above their level never enter the context. No output filtering needed — data simply isn't there.
+- **Guest (maxClass=0):** World only. Hardcoded.
 
 Store defaults:
-- master: classification=1 (can store any level)
-- user: classification=1 (can store 0 or 1)
-- guest: classification=0 (world only)
-
-**Security note:** Classification is agent-level privacy — it controls what the agent shows in recall. It is NOT OS-level enforcement. A user with bash tool access could query the DB directly. This is acceptable for the trust model (master + trusted friends). Document this.
+- Master: classification=1 (can store any level 0-3)
+- User: classification=1 (can store up to their maxClass)
+- Guest: cannot store
 
 ## Transport
 
-One transport session per userId. Direct API is stateless — multiple sessions are free.
+- Master: uses configured transport from transport.json (ACP, Direct API, any provider)
+- User/Guest: always Direct API with `tools: []` (no tool calls). Same endpoint/model as master's Direct API provider. Separate session per user.
 
-### Priority queue
+Constraint: user/guest only go through API. No ACP/kiro/gemini CLI sessions — avoids multi-user CLI conflicts.
 
-When multiple users have pending messages:
-```
-master messages processed first
-user messages processed next
-guest messages processed last
-```
+## Commands
 
-Implementation: priority field in the busy guard queue. Sort on drain.
+| Command | Master | User/Guest |
+|---|---|---|
+| `/new`, `/reset`, `/stop` | ✓ | ✓ |
+| `/status`, `/help` | ✓ | ✓ |
+| `/models`, `/compact`, `/coding` | ✓ | ⛔ |
+| `/tasks`, `/memory`, `/heartbeat` | ✓ | ⛔ |
+| `/restart`, `/healing`, `/facts` | ✓ | ⛔ |
+| `/wakeup`, `/skills` | ✓ | ⛔ |
+| `/approve`, `/revoke`, `/users` | ✓ | ⛔ |
+| `//` passthrough, `!` shell | ✓ (after #145) | ⛔ |
+
+Non-master commands blocked with: "⛔ Owner-only command."
+
+## Memory behavior per role
+
+| | Master | User | Guest |
+|---|---|---|---|
+| Messages in DB | ✓ | ✓ | ✗ (context window only) |
+| Sleep extracts | ✓ | ✗ (ignored) | ✗ |
+| Daily summaries | ✓ | ✗ | ✗ |
+| Recall | class ≤ maxClass | class ≤ maxClass | class ≤ 0 |
+| Store | any class (0-3) | up to maxClass | ✗ |
+| Wake-up | full ABM | last-session summary | "Hi! How can I help?" |
 
 ## Session key
 
 `{userId}:{platform}` — e.g. `master:telegram`, `adrika:telegram`
 
-Replaces `telegram:{chatId}`. All downstream code uses userId.
-
 ## User registry
 
-Parsed at startup from .env + guests.json. In-memory map:
+Parsed at startup from .env + guests.json:
 
 ```typescript
 interface UserEntry {
   userId: string;
   role: "master" | "user" | "guest";
+  maxClass: number;          // 0-3
   displayName?: string;
   platforms: { telegram?: number; discord?: string };
+  lastPlatform?: string;     // delivery context
+  lastChatId?: number | string;
 }
 ```
 
-Security gate: receives platform + platformId → looks up UserEntry → returns `{ userId, role }` or null (rejected).
+## Master-only commands
 
-## Commands
+| Command | What |
+|---|---|
+| `/approve <platformId>` | Add guest |
+| `/revoke <userId>` | Remove guest |
+| `/users` | List all users with roles + maxClass |
 
-| Command | Who | What |
-|---|---|---|
-| `/approve <platformId>` | master | Add guest |
-| `/promote <userId> user` | master | Upgrade guest to user (runtime) |
-| `/revoke <userId>` | master | Remove guest |
-| `/users` | master | List all users with roles |
+## Implementation
 
-## Delivery context
-
-Track which platform each user last messaged from. Cron results, reminders, and system messages delivered to the user's last-active platform.
-
-```typescript
-// In user registry (runtime)
-lastPlatform: "telegram" | "discord";
-lastChatId: number | string;
-```
-
-## Phase 1 — Identity + routing + pairing (~5hr)
+### Phase 1 — Identity + routing (~5hr)
 
 | Step | What | Time |
 |---|---|---|
 | 1 | Parse `USERS` env → user registry + load guests.json | 30 min |
-| 2 | Security gate: platformId → userId + role lookup | 30 min |
-| 3 | Pairing: unknown sender → reject with message. `/approve` adds guest | 45 min |
-| 4 | Session key: `{userId}:{platform}` — update pipeline, adapters | 1 hr |
-| 5 | Priority queue in busy guard — master > user > guest | 30 min |
-| 6 | `/users`, `/promote`, `/revoke` commands | 30 min |
-| 7 | Delivery context tracking (lastPlatform per user) | 15 min |
-| 8 | Cron delivery: resolve userId → platform chatId | 30 min |
-| 9 | Tests | 30 min |
+| 2 | Security gate: platformId → userId + role + maxClass | 30 min |
+| 3 | Unknown sender → reject. `/approve` adds guest | 30 min |
+| 4 | Session key `{userId}:{platform}` — update pipeline, adapters | 1 hr |
+| 5 | Transport: master=configured, user/guest=DirectAPI with tools:[] | 30 min |
+| 6 | Command whitelist for non-master (middleware check) | 30 min |
+| 7 | Injection scan for non-master messages | 15 min |
+| 8 | `/approve`, `/revoke`, `/users` commands | 30 min |
+| 9 | Delivery context (lastPlatform per user) | 15 min |
+| 10 | Tests | 30 min |
 
-## Phase 2 — Memory separation (~3hr)
-
-| Step | What | Time |
-|---|---|---|
-| 10 | `user_id` column on messages table | 15 min |
-| 11 | `user_id` column on extracted_memories table | 15 min |
-| 12 | Recall: filter by `classification <= roleMax` + `user_id` scoping | 45 min |
-| 13 | Store: tag with userId + enforce classification limits per role | 30 min |
-| 14 | Wake-up: built per userId (only their memories) | 30 min |
-| 15 | Migration: existing data → `user_id = "master"` | 15 min |
-| 16 | Tests | 30 min |
-
-## Phase 3 — Per-user profiles + polish (~2hr)
+### Phase 2 — Memory separation (~3hr)
 
 | Step | What | Time |
 |---|---|---|
-| 17 | `user_profile_{userId}.md` — per-user profile in core/ | 30 min |
-| 18 | Session-start injects correct user profile | 15 min |
-| 19 | displayName in user registry → dashboard + logs | 15 min |
-| 20 | Document classification security model | 15 min |
-| 21 | Update SOUL.md — agent knows about multi-user | 15 min |
-| 22 | End-to-end test: master + guest simultaneous | 30 min |
+| 11 | `user_id` column on messages + extracted_memories | 30 min |
+| 12 | Recall: `WHERE classification <= maxClass` per user | 30 min |
+| 13 | Store: tag with userId, enforce maxClass limit | 15 min |
+| 14 | Sleep: skip non-master user_id messages in extraction | 15 min |
+| 15 | Guest: skip DB write entirely (context window only) | 15 min |
+| 16 | Wake-up: master=full ABM, user=last-session summary, guest=generic | 30 min |
+| 17 | Migration: existing data → `user_id = "master"` | 15 min |
+| 18 | Tests | 30 min |
 
-**Total: ~10hr across 3 phases. Phase 1 alone is functional.**
+### Phase 3 — Profiles + polish (~2hr)
+
+| Step | What | Time |
+|---|---|---|
+| 19 | `user_profile_{userId}.md` per user | 30 min |
+| 20 | Session-start injects correct user profile | 15 min |
+| 21 | SOUL.md: class 3 non-disclosure rule | 15 min |
+| 22 | displayName in registry → dashboard + logs | 15 min |
+| 23 | Document security model (classification = privacy, not enforcement) | 15 min |
+| 24 | End-to-end test: master + user simultaneous | 30 min |
+
+**Total: ~10hr. Phase 1 alone is functional.**
 
 ## What stays shared
 
 - Agent personality (SOUL.md, agent_notes.md)
-- Skills
-- Transport (one ollama, multiple sessions)
-- Cron system (tasks belong to a userId)
-- Dashboard
-- Tools (all roles get all tools for now)
-
-## What's per-user
-
-- Session (isolated context per userId)
-- Memory recall (filtered by classification + userId)
-- User profile (Phase 3)
-- Wake-up context
-- Delivery platform preference
+- Skills (master only uses them via tools, but they're loaded once)
+- Cron system (master's tasks)
+- Dashboard (master access only)
+- Model/endpoint config
 
 ## Migration
 
-- `ALLOWED_USER_IDS` → `USERS` (new format, old var ignored if USERS present)
-- Existing memories: `user_id = "master"` backfill
-- Existing cron entries: `chat_id` stays, delivery resolves via user registry
-- Existing session keys (`telegram:123`) → mapped to new format on first message
+- `ALLOWED_USER_IDS` → `USERS` (new format, old var as fallback if USERS missing)
+- Existing memories → `user_id = "master"` backfill
+- Existing session keys (`telegram:123`) → mapped to userId on first message
 
-## Reference
+## Security notes
 
-OpenClaw uses a "one operator per gateway" model — no multi-user within a single instance. AB takes a different approach: shared instance with classification-based privacy. OC patterns adopted: pairing flow concept (simplified to /approve), delivery context tracking, displayName in sessions.
+- Classification is agent-level privacy, not OS-level enforcement. A master with bash can query the DB directly. Acceptable for family trust model.
+- Class 3 non-disclosure relies on prompt instruction. A sufficiently clever prompt injection could bypass it. Defense: class 3 memories should also be encrypted at rest (#45) for true protection.
+- User/guest with no tools cannot execute code, browse, or modify files. Pure conversation only.
+- All user/guest messages scanned for injection (#127) before reaching the model.
