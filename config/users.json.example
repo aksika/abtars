@@ -1,0 +1,11 @@
+{
+  "users": [
+    {
+      "userId": "master",
+      "role": "master",
+      "maxClass": 3,
+      "tools": ["all"],
+      "platforms": { "telegram": 0 }
+    }
+  ]
+}

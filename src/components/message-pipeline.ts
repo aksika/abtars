@@ -9,6 +9,7 @@ import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction } from "./compaction.js";
 import { buildSessionStartContext } from "abmind/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
+import { loadUsers } from "./user-registry.js";
 import { tryReaction } from "./reaction-handler.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
@@ -432,7 +433,7 @@ export async function startSession(
   greeting: string,
   sendResponse: (text: string) => Promise<unknown>,
 ): Promise<void> {
-  const prompt = buildSessionStartPrompt(greeting, memory, chatId);
+  const prompt = buildSessionStartPrompt(greeting, memory, chatId, sessionKey);
   logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
   const response = await transport.sendPrompt(sessionKey, prompt);
   if (response?.trim() && response.trim() !== "[NO-REPLY]" && response.trim() !== "(no response)") {
@@ -440,11 +441,12 @@ export async function startSession(
   }
 }
 
-/** Single path for session-start injection: SOUL + memory wake-up + context + restart reason. */
+/** Single path for session-start injection: SOUL + memory wake-up + context + user identity + restart reason. */
 function buildSessionStartPrompt(
   prompt: string,
   memory: MemoryManager,
   chatId: number,
+  sessionKey?: string,
 ): string {
   const contextParts: string[] = [];
 
@@ -458,6 +460,19 @@ function buildSessionStartPrompt(
   if (soul) {
     contextParts.push(soul);
     logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
+  }
+
+  // Inject current user identity
+  if (sessionKey) {
+    try {
+      const registry = loadUsers();
+      const platformKey = sessionKey.includes(":") ? `telegram:${chatId}` : sessionKey;
+      const user = registry.byPlatformId.get(platformKey);
+      if (user) {
+        const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
+        contextParts.push(`[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).`);
+      }
+    } catch { /* registry not available */ }
   }
 
   const ctx = buildSessionStartContext(memory, chatId);
@@ -500,7 +515,7 @@ function preparePrompt(
 ): string {
   const isSessionStart = pending.has(sessionKey) || !seen.has(sessionKey);
   if (isSessionStart) {
-    prompt = buildSessionStartPrompt(prompt, memory, chatId);
+    prompt = buildSessionStartPrompt(prompt, memory, chatId, sessionKey);
   }
   seen.add(sessionKey);
   pending.delete(sessionKey);
