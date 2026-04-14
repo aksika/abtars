@@ -126,18 +126,18 @@ interface UserEntry {
 | 9 | Delivery context (lastPlatform per user) | 15 min |
 | 10 | Tests | 30 min |
 
-### Phase 2 — Memory separation (~3hr)
+### Phase 2 — Memory separation (~2hr)
+
+Schema already done (user_id column on all tables, extraction_watermarks keyed by user_id, migration defaults to master). Only wiring remains.
 
 | Step | What | Time |
 |---|---|---|
-| 11 | `user_id` column on messages + extracted_memories | 30 min |
-| 12 | Recall: `WHERE classification <= maxClass` per user | 30 min |
-| 13 | Store: tag with userId, enforce maxClass limit | 15 min |
-| 14 | Sleep: skip non-master user_id messages in extraction | 15 min |
-| 15 | Guest: skip DB write entirely (context window only) | 15 min |
-| 16 | Wake-up: master=full ABM, user=last-session summary, guest=generic | 30 min |
-| 17 | Migration: existing data → `user_id = "master"` | 15 min |
-| 18 | Tests | 30 min |
+| 11 | Recall: add `WHERE user_id = ? AND classification <= ?` filter | 30 min |
+| 12 | Store: tag with userId, enforce maxClass limit per role | 15 min |
+| 13 | Sleep: filter extraction to master's user_id only | 15 min |
+| 14 | Guest: skip DB write entirely (context window only) | 15 min |
+| 15 | Wake-up: master=full ABM, user=last-session summary, guest=generic | 30 min |
+| 16 | Tests | 15 min |
 
 ### Phase 3 — Profiles + polish (~2hr)
 
@@ -150,7 +150,11 @@ interface UserEntry {
 | 23 | Document security model (classification = privacy, not enforcement) | 15 min |
 | 24 | End-to-end test: master + user simultaneous | 30 min |
 
-**Total: ~10hr. Phase 1 alone is functional.**
+**Total: ~9hr. Phase 1 alone is functional.**
+
+## Schema (already done)
+
+`user_id TEXT DEFAULT 'aksika'` added to: messages, extracted_memories, ingested_documents, entities. `extraction_watermarks` keyed by user_id (per-user sleep extraction). Migration defaults existing data to master's userId. Done in abmind repo.
 
 ## What stays shared
 
@@ -163,7 +167,7 @@ interface UserEntry {
 ## Migration
 
 - `ALLOWED_USER_IDS` → `USERS` (new format, old var as fallback if USERS missing)
-- Existing memories → `user_id = "master"` backfill
+- Existing memories: `user_id` already defaults to master's userId (done in abmind schema)
 - Existing session keys (`telegram:123`) → mapped to userId on first message
 
 ## Security notes
