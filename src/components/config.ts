@@ -135,13 +135,8 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
   const agentTransport = rawTransport as AgentTransport;
 
-  // --- AGENT_MODEL ---
-  const mainModel = process.env["AGENT_MAIN_MODEL"] || CONFIG_DEFAULTS.models.mainModel;
-
-  // Sub-models default to main model if not explicitly set
-  const agentBrowseModel = process.env["AGENT_BROWSE_MODEL"] || mainModel;
-  const agentSleepModel = process.env["AGENT_SLEEP_MODEL"] || mainModel;
-  const agentCodingModel = process.env["AGENT_CODING_MODEL"] || mainModel;
+  // --- AGENT_MODEL (legacy — models now come from transport.json) ---
+  const mainModel = "from-transport-json";
 
   // --- WORKING_DIR (optional, default cwd) ---
   let workingDir = process.env["WORKING_DIR"] || CONFIG_DEFAULTS.transport.workingDir;
@@ -331,9 +326,9 @@ export async function loadAndValidateConfig(): Promise<Config> {
     },
     models: {
       mainModel,
-      browseModel: agentBrowseModel,
-      sleepModel: agentSleepModel,
-      codingModel: agentCodingModel,
+      browseModel: mainModel,
+      sleepModel: mainModel,
+      codingModel: mainModel,
     },
     logLevel,
     mcpDaemon: parseBoolEnv("MCPORTER_DAEMON", CONFIG_DEFAULTS.mcpDaemon),

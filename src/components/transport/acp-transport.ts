@@ -268,7 +268,7 @@ export class AcpTransport implements IKiroTransport {
     logInfo(this.tag, `Model switched to: ${model} (session reset)`);
   }
 
-  getModel(): string { return this.modelId ?? process.env["AGENT_MAIN_MODEL"] ?? "unknown"; }
+  getModel(): string { return this.modelId ?? "unknown"; }
 
   private handleSessionUpdate(params: SessionNotification): void {
     const update = params.update;
