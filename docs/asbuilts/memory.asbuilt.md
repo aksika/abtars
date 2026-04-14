@@ -11,13 +11,28 @@
 
 ## Overview
 
-Standalone memory package (`abmind`, separate repo (`github.com/aksika/abmind`)). 74 source + 32 test files (362 tests), zero bridge dependencies. Public API via `IMemoryCore` (external) + `IMemorySystem` (bridge) interface — consumers program against the interface, `MemoryManager` is the concrete implementation. Unified CLI: `abmind` with subcommands (recall, store, edit, expand, embed, retro-extract, backfill, status, wake-up). npm package registered as `abmind`.
+Standalone memory package (`abmind`, separate repo (`github.com/aksika/abmind`)). 74 source + 32 test files (359 tests), zero bridge dependencies. Public API via `IMemoryCore` (external) + `IMemorySystem` (bridge) interface — consumers program against the interface, `MemoryManager` is the concrete implementation. Unified CLI: `abmind` with subcommands (recall, store, edit, expand, embed, retro-extract, backfill, status, wake-up, sleep-state, sleep-apply, sleep-report, mcp). npm package registered as `abmind`.
 
-SQLite-backed persistence with FTS5 (porter on content_en) + trigram FTS5 (content_en + content_original, diacritics-stripped), ollama vector embeddings with int8 quantization (1536→384 bytes after 14d) in separate `memory_embeddings` table, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L rendered on the fly from content_en (no stored content_compressed), emotion tagging (25 types, source of truth — score derived from tags), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security. Memory timelines group related memories into narrative arcs. Cross-topic timelines follow entities across topic boundaries.
+SQLite-backed persistence with FTS5 (porter on content_en) + trigram FTS5 (content_en + content_original, diacritics-stripped), ollama vector embeddings with inline on `extracted_memories.embedding`, 256-bit binary signatures (Hamming search, no ollama needed), ABM-L rendered on the fly from content_en (no stored content_compressed), emotion tagging (25 types, source of truth — score derived from tags), importance flags (8 types), auto-promote |emotion| ≥ 4 to core tier, Memory Darwinism, CIA+AAA security. Memory timelines group related memories into narrative arcs. Cross-topic timelines follow entities across topic boundaries.
 
-Two-tier aging: Original NULLed after 90d (source of truth kept longer), content_en preserved forever (trigram search depends on it). Int8 embeddings + signatures persist forever. Pressure-based acceleration as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (|emotion| ≥ 4 + pivot/correction) never aged.
+Two-tier aging: Original NULLed after 90d (source of truth kept longer), content_en preserved forever (trigram search depends on it). Embeddings + signatures persist forever. Pressure-based acceleration as DB approaches `MEMORY_MAX_DB_SIZE_MB`. Flashbulb memories (|emotion| ≥ 4 + pivot/correction) never aged.
 
 Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sleep calls memory via `IMemorySystem` maintenance methods + `SleepDataAccess` (DB queries for candidates, watermarks, emotion arcs, message cleanup). Triggered by `BED_TIME` + quiet ticks (between BED_TIME and WAKE_TIME only, BED_QUIET_TICKS default 2 = 10 min). No catch-up on bridge start — tick system is the only trigger. 14 sleep prompts with code pre-pass. Candidate-driven skip logic — prompts only fire when pre-pass finds work. Contradiction checker runs on promotion candidates vs existing core. SLEEP_QUALITY tiering: budget (3-5 calls), normal (6-11), ultimate (8-15). After Dreamy finishes, Professor announces hw sleep timing; same quiet ticks for hardware sleep.
+
+### Schema (v14)
+
+Tables:
+- `messages` — conversation messages (chat_id, role, content, timestamp, user_id)
+- `extracted_memories` — 32 columns including embedding BLOB, emotion, tier, topic, entities TEXT, user_id
+- `extracted_memories_fts` — FTS5 porter tokenizer on content_en
+- `content_en_trigram` — FTS5 trigram on content_en + preserved_keyword
+- `content_original_trigram` — FTS5 trigram on content_original
+- `extraction_watermarks` — per-user watermark (user_id PK, last_processed_timestamp)
+- `ingested_documents` — dedup for /ingest (source_type, identifier, user_id)
+- `entities` — named entity catalog (name, type, summary, user_id)
+- `schema_version` — migration tracking
+
+All user-scoped tables have `user_id TEXT DEFAULT 'aksika'`.
 
 ### Package boundary
 
@@ -47,7 +62,7 @@ Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sle
 | C1 | Consolidated Summaries | Markdown files | Sleep subagent | Consolidation search, sleep subagent | Persistent — promoted up tiers |
 | C2 | SQLite + FTS5 | `memory.db` | recordMessage(), abmind store, abmind edit | abmind recall | messages: hot buffer (max 1000, aged >10d). extracted_memories: persistent |
 | C4 | Markdown Knowledge Files | Flat files | Agent, retrospective | Sleep subagent | Persistent |
-| C5 | Embeddings | `memory.db` (`memory_embeddings` table) | ollama nomic-embed-text (on insert + batch) | recall-engine Se sidecar | Persistent — float32 quantized to int8 after 14d. Gated by `EMBEDDING_ENABLED` |
+| C5 | Embeddings | `memory.db` (`extracted_memories.embedding` column) | ollama nomic-embed-text (on insert + batch) | recall-engine Se sidecar | Persistent — float32 quantized to int8 after 14d. Gated by `EMBEDDING_ENABLED` |
 | C6 | Retrospectives | Markdown files | Sleep subagent | Sleep subagent, agent (via recall) | Persistent |
 
 ### Data Flow
@@ -288,7 +303,7 @@ Four non-overlapping stages, each using a fundamentally different search method 
 | Sf.2 | `content_en_trigram` | Trigram FTS5 (diacritics-stripped) on content_en + preserved_keyword | Substrings, accent-insensitive matches, agent-flagged terms | Darwinism-boosted |
 | Sf.3 | `content_original_trigram` | Trigram FTS5 (diacritics-stripped) on content_original (fallback) | Untranslated Hungarian queries, typos in original language | Darwinism-boosted |
 | Ss | `extracted_memories.signature` | Binary signature Hamming distance (cap 5, threshold 0.65) | Semantic similarity without ollama | 0.0-1.0 similarity |
-| Se | `memory_embeddings` | Embedding cosine similarity (ollama) | Best semantic quality | 0.0-1.0 similarity |
+| Se | `extracted_memories.embedding` | Embedding cosine similarity (ollama) | Best semantic quality | 0.0-1.0 similarity |
 | S6 | daily/weekly/quarterly .md files | Substring match on file content | Consolidation summaries, narrative context | 0.5 (fixed) |
 
 ### Pipeline Flow
@@ -338,11 +353,11 @@ Model: `nomic-embed-text` via ollama (768 dimensions, CPU-only, ~20-50ms/query, 
 | `abmind embed` CLI | One-time batch embed of all memories with NULL embedding |
 | Recall (Se sidecar) | `embedText(query)` fired async at S1, cosine similarity after S3 |
 
-Storage: separate `memory_embeddings` table (memory_id PK, embedding BLOB, quantized INTEGER). float32 (768 × 4 = 3KB) quantized to int8 (384 bytes) after `MEMORY_EMBEDDING_QUANTIZE_DAYS` (default 14d) via `ageMemoryTiers()`. Threshold: 0.5 cosine similarity. int8 search via `cosineSimInt8()`.
+Storage: separate `extracted_memories.embedding` column (memory_id PK, embedding BLOB, quantized INTEGER). float32 (768 × 4 = 3KB) quantized to int8 (384 bytes) after `MEMORY_EMBEDDING_QUANTIZE_DAYS` (default 14d) via `ageMemoryTiers()`. Threshold: 0.5 cosine similarity. int8 search via `cosineSimInt8()`.
 
 ### Entity Linking
 
-Tables: `entities` (name, type, summary) + `memory_entities` (memory_id, entity_id junction).
+Table: `entities` (name, type, summary, user_id). Entity linking via `entities TEXT` column on `extracted_memories` (flat, no junction table).
 
 Entities are tagged during extraction — the LLM identifies named entities per memory. Recall supports `--entity "Name"` filter.
 
@@ -606,7 +621,6 @@ See `skills/memory-anomalies.md` for full anomaly definitions.
 
 - Both user AND paired assistant messages are garbage-marked/deleted together
 - 7-day grace period on noise marks (dupes/wrong-chat/STT are immediate)
-- `chat_backup` table is never touched — immutable audit trail
 - Emotion scores are harvested before deletion — no signal loss
 - Classification-aware: SECRET/CONFIDENTIAL content redacted in summaries
 
@@ -644,7 +658,6 @@ Message arrives
 recordMessage() ──► messages table (raw content, emojis preserved)
     │                    │
     │                    ├──► FTS5 trigger (emoji-stripped index)
-    │                    └──► chat_backup (DEBUG_MODE only)
     │
     ▼
 [During conversation: searchable via abmind recall stages 3-5]
@@ -772,8 +785,6 @@ Search stages: Sf (porter FTS5 + trigram with z↔y and substring fallback), Se 
 |---|---|---|---|
 | English | `content_en` | Never (preserved for trigram search) | — |
 | Original | `content_original` | 90 days | Flashbulb (\|emotion\| ≥ 4 + pivot/correction) |
-| float32 embedding | `memory_embeddings` | 14 days (quantized to int8) | — |
-| int8 embedding | `memory_embeddings` | Never | — |
 | Signature | `signature` | Never | — |
 
 Pressure-based acceleration: aging TTLs multiply by pressure factor as DB approaches `MEMORY_MAX_DB_SIZE_MB` (0-50%: 1×, 50-75%: 0.7×, 75-90%: 0.35×, 90-95%: 0.15×, 95%+: immediate).
@@ -803,7 +814,7 @@ Daily summaries compressed via `compressDailySummary()` (markdown → ABM-L bull
 
 ### Embedding Tiering
 
-Separate `memory_embeddings` table (migration v9). float32 quantized to int8 after 14 days via `embedding-quantize.ts`. int8 (384 bytes) kept forever. `cosineSimInt8()` for similarity search on quantized vectors.
+Separate `extracted_memories.embedding` column (migration v9). float32 quantized to int8 after 14 days via `embedding-quantize.ts`. int8 (384 bytes) kept forever. `cosineSimInt8()` for similarity search on quantized vectors.
 
 ### Bedtime Flow
 
@@ -830,7 +841,6 @@ Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `HARDW
 | `EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model |
 | `EMBEDDING_URL` | `http://localhost:11434` | Ollama API endpoint |
 | `EMBEDDING_SIMILARITY_THRESHOLD` | `0.5` | Cosine similarity threshold for Se sidecar |
-| `DEBUG_MODE` | `false` | Enables chat_backup writes |
 | `MEMORY_RECALL_SHORT_CIRCUIT` | `true` | Toggle short-circuit in recall cascade |
 | `MEMORY_DISK_BUDGET_MB` | `500` | Disk budget for memory directory |
 | `MEMORY_FORGET_THRESHOLD` | `0.8` | Relevance threshold for topic-based forgetting |
