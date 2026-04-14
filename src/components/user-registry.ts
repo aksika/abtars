@@ -58,19 +58,20 @@ export function loadUsers(): UserRegistry {
     }
   }
 
-  // Fallback: ALLOWED_USER_IDS → all master
+  // Fallback: ALLOWED_USER_IDS → all master with userId "master"
   if (registry.users.length === 0) {
     const raw = process.env["ALLOWED_USER_IDS"] ?? "";
-    for (const id of raw.split(",").map(s => s.trim()).filter(Boolean)) {
+    const ids = raw.split(",").map(s => s.trim()).filter(Boolean);
+    for (const id of ids) {
       const entry: UserEntry = {
-        userId: id,
+        userId: "master",
         role: "master",
         maxClass: 3,
         tools: ["all"],
         platforms: { telegram: parseInt(id, 10) || undefined },
       };
       registry.users.push(entry);
-      registry.byUserId.set(entry.userId, entry);
+      registry.byUserId.set("master", entry);
       registry.byPlatformId.set(`telegram:${id}`, entry);
     }
     if (registry.users.length > 0) {
