@@ -3,11 +3,12 @@
  * Platform-specific commands check ctx.platform internally.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { logInfo, logError } from "./logger.js";
+import { writeSleepStatus, readBridgeLockField } from "./transport/bridge-lock-transport.js";
 
 import { readEntries as cronReadEntries } from "./cron/cron-db.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
@@ -81,6 +82,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/help": handleHelp,
   "/skills": handleSkills,
   "/skill": handleSkills,
+  "/wakeup": handleWakeup,
 };
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
@@ -499,6 +501,43 @@ async function handleA2aReset(_text: string, ctx: CommandContext): Promise<boole
   return true;
 }
 
+let _wakeInhibitPid: number | null = null;
+
+/** Kill the wake inhibitor process (called before hw sleep). */
+export function killWakeInhibit(): void {
+  if (_wakeInhibitPid) {
+    try { process.kill(_wakeInhibitPid); } catch { /* already dead */ }
+    logInfo("wakeup", `Killed wake inhibitor pid=${_wakeInhibitPid}`);
+    _wakeInhibitPid = null;
+  }
+}
+
+async function handleWakeup(_text: string, ctx: CommandContext): Promise<boolean> {
+  if (readBridgeLockField("sleepStatus") !== "hw_sleep") {
+    await ctx.reply("Already awake.");
+    return true;
+  }
+  const os = platform();
+  let child: ReturnType<typeof spawn> | null = null;
+  if (os === "darwin") {
+    child = spawn("caffeinate", ["-d"], { stdio: "ignore", detached: true });
+  } else if (os === "linux") {
+    child = spawn("systemd-inhibit", ["--what=idle:sleep", "sleep", "infinity"], { stdio: "ignore", detached: true });
+  }
+  if (child?.pid) {
+    child.unref();
+    _wakeInhibitPid = child.pid;
+    writeSleepStatus("awake");
+    const bedTime = process.env["BED_TIME"] ?? "0:30";
+    await ctx.reply(`☀️ Awake! Will sleep again at ${bedTime} or when requested.`);
+    logInfo("wakeup", `Emergency wake — inhibit pid=${child.pid}`);
+  } else {
+    writeSleepStatus("awake");
+    await ctx.reply("☀️ Awake! (sleep inhibitor not available on this platform)");
+  }
+  return true;
+}
+
 async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> {
   const cmds = [
     "/new — Fresh session (keeps current mode)",
@@ -521,6 +560,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/default — Switch back to default agent",
     "/nlm — Knowledge base (list/create/sources/query)",
     "/restart — Restart CLI session",
+    "/wakeup — Wake Mac from sleep (cancel hw_sleep)",
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");

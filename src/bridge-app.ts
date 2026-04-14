@@ -853,6 +853,7 @@ export async function startBridge(): Promise<void> {
 
   // --- Sleep capability (background, with retry) ---
   const { createSleepHandle } = await import("./capabilities/sleep/index.js");
+  const { killWakeInhibit } = await import("./components/command-handlers.js");
   sleepHandle = createSleepHandle({
     sleepHour: SLEEP_HOUR,
     sleepAuditDir,
@@ -860,6 +861,7 @@ export async function startBridge(): Promise<void> {
     onComplete: () => resetAllCtxStarts(memoryConfig.memoryDir),
     getLastMsgTs: () => memory?.getLastMessageTimestamp(true) ?? 0,
     sendSystemMessage,
+    killWakeInhibit,
   });
   bridge.sleepHandle = sleepHandle;
 

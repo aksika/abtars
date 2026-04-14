@@ -20,6 +20,7 @@ export interface SleepOpts {
   onComplete: () => void;
   getLastMsgTs?: () => number;
   sendSystemMessage?: (prompt: string) => Promise<void>;
+  killWakeInhibit?: () => void;
 }
 
 export interface SleepProgress {
@@ -159,6 +160,8 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     if (quietTicks < requiredTicks) return;
 
     _awaitingHwSleep = false;
+    // Kill any wake inhibitor from /wakeup before sleeping
+    opts.killWakeInhibit?.();
     const sleepCmd = process.platform === "darwin" ? "pmset sleepnow" : "systemctl suspend";
     logInfo("sleep", `💤 Putting hardware to sleep (${sleepCmd})...`);
     writeSleepStatus("hw_sleep");

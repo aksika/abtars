@@ -84,8 +84,9 @@ Loses detached survival but if bridge dies mid-browse, the task is lost anyway (
 | 2 | Add `SpawnResult` interface + `runtime.spawn(agent, prompt, opts?)` | 20 min |
 | 3 | Migrate coding-mode to `runtime.session("coding")` | 20 min |
 | 4 | Migrate agent-api-server to `runtime.session("browsie")` | 30 min |
-| 5 | Verify zero `createSubagentTransport` outside runtime (except browsie — deferred to #143) | 10 min |
-| 6 | Tests | 20 min |
+| 5 | Make `createSubagentTransport` private to runtime (unexport from agent-registry) | 10 min |
+| 6 | Verify zero direct transport callers outside runtime (except browsie — #143) | 10 min |
+| 7 | Tests | 20 min |
 | **Total** | | **~2 hr** |
 
 **Note:** Browsie migration deferred to #143 (browse rewrite). No point migrating the detached spawn to `runtime.spawn()` when #143 replaces the entire browse architecture. `runtime.spawn()` API is built here, consumed by #143.
@@ -93,6 +94,11 @@ Loses detached survival but if bridge dies mid-browse, the task is lost anyway (
 ## Verification
 
 ```bash
-grep -rn "createSubagentTransport" src/ --include="*.ts" | grep -v node_modules | grep -v test | grep -v subagent-runtime
+# No direct callers outside runtime (browsie exempt until #143)
+grep -rn "createSubagentTransport" src/ --include="*.ts" | grep -v node_modules | grep -v test | grep -v subagent-runtime | grep -v agent-registry
+# Should return: nothing
+
+# createSubagentTransport no longer exported
+grep "export.*createSubagentTransport" src/components/agent-registry.ts
 # Should return: nothing
 ```
