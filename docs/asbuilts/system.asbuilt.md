@@ -866,7 +866,7 @@ Heartbeat task (`self-healer`) that scans `bridge.log` for ERROR lines every 5 m
 
 ### Overview
 
-A smart, autonomous browser subagent that runs as a detached process. The professor delegates browser tasks to Browsie instead of running browser commands directly, preventing long-running or hanging browser operations from blocking the bridge.
+Two-level browsing architecture. Level 1 (lightpanda) for fast public page fetches, Level 2 (Browsie + patchright/Chrome) for complex tasks requiring JS, login, or anti-bot bypass.
 
 Browsie gets a high-level goal (e.g., "check X notifications", "post on FB", "fill out a web form"), autonomously drives a headless Chromium browser inside a Docker container, and returns a summary when done. Same subagent pattern as the Sleep Agent.
 
@@ -1314,11 +1314,12 @@ Unified LLM access for all subagents. Replaces manual `createSubagentTransport()
 
 - `runtime.complete(agent, prompt, opts?)` — one-shot: create/reuse transport, send prompt, return response. Used by: sleep, self-healer, cron.
 - `runtime.session(agent)` — multi-turn: returns persistent session handle with `sendPrompt()` + `destroy()`. Used by: coding-mode, agent-api-server.
+- `runtime.spawn(agent, prompt, opts?)` — fire-and-forget: runs complete() in background, delivers result via callback. Used by: Browsie (Level 2 browse).
 - Transport cached per agent, lazy-created on first call.
 - Session strategy per agent: `fresh` (dreamy, browsie, cron) vs `reuse` (coding, professor).
 - Fallback: on failure, evicts cache, next call creates fresh transport.
 - Logging: agent, prompt length, response length, duration, model.
-- `createSubagentTransport()` is internal to the runtime — no direct callers.
+- `createSubagentTransport()` is `@internal` to the runtime — no direct callers.
 
 ### ABSkeleton (`src/components/skeleton.ts`)
 
@@ -1334,24 +1335,36 @@ interface ABSkeleton {
 }
 ```
 
-Bridge class IS the skeleton — it owns all slot lifecycles. No separate `createSkeleton()` factory.
+Bridge class IS the skeleton — it owns all slot lifecycles. No separate `createSkeleton()` factory. Dashboard swappable via `DASHBOARD_MODULE` env var (dynamic import at startup). `CapabilityApi` includes `runtime` field for capability access to SubagentRuntime.
+
+### Two-level browsing
+
+**Level 1: Lightpanda (fast, native)** — Main agent runs `agentbridge-fetch <url>`. Wrapper script calls `lightpanda fetch --dump markdown` with SSRF guard (`--block-private-networks`), truncates to 50K chars. No subagent, stays in Professor's context. For docs, APIs, news, public pages.
+
+**Level 2: Patchright + Chrome (stealthy, session-based)** — Browsie agent via `runtime.spawn("browsie", prompt)`. Dockerized Chrome with real fingerprint. For login flows, anti-bot sites, multi-page navigation. Result delivered via `onComplete` callback → `deliverBrowseResult()` → `appendReminder()` → cron → Telegram.
 
 ### abmind (brain) — separate repo
 
-`github.com/aksika/abmind` — standalone AI agent memory system.
+`github.com/aksika/abmind` v0.6.0 — standalone AI agent memory system.
 
 **Memory core:** IMemoryCore (public API) + IMemorySystem (bridge-internal). SQLite + FTS5, 4-layer recall, embeddings, emotion tagger, contradiction checker, injection scanner, wake-up context builder.
 
 **Sleep pipeline:** Prompt loader + 14 templates, daily summary, extract, SleepDataAccess. Pure logic — no transport, no LLM. Host drives the loop.
 
-**CLI:** `abmind recall/store/edit/expand/embed/retro-extract/backfill/status/wake-up`
+**CLI:** `abmind recall/store/edit/expand/embed/retro-extract/backfill/status/wake-up/sleep-state/sleep-apply/sleep-report/mcp`
 
-**Integration levels:** ab-slot (direct, zero overhead) → OC plugin → OpenCode plugin → Claude Code plugin → MCP server → CLI (most portable).
+**MCP server:** `abmind mcp` — 5 tools (memory_recall, memory_store, memory_edit, memory_status, memory_wakeup) over stdio. Master userId from `users.json`.
 
-**Dependency:** Bridge uses `file:../abmind` for local dev, `github:aksika/abmind#v0.2.0` for deploy.
+**OpenClaw adapter:** `src/adapters/openclaw.ts` — `registerMemoryCapability` (Path A). promptBuilder + flushPlanResolver + MemorySearchManager.
+
+**Data dir:** `ABMIND_HOME` env var, default `~/.abmind`. Bridge overrides to `~/.agentbridge/memory`.
+
+**Integration:** ab-slot (direct) → OC plugin (registerMemoryCapability) → MCP server → kiro-cli steering → CLI.
+
+**Dependency:** Bridge uses `file:../abmind` for local dev, `github:aksika/abmind#v0.6.0` for deploy.
 
 ### Test counts
 
-- abmind: 32 files, 362 tests
-- agentbridge: 60 files, 564 tests
-- Total: 92 files, 926 tests
+- abmind: 32 files, 359 tests
+- agentbridge: 60 files, 572 tests
+- Total: 92 files, 931 tests

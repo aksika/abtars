@@ -846,7 +846,7 @@ Config: `BED_TIME` (default 2:00), `BED_QUIET_TICKS` (default 6 = 30min), `HARDW
 | `MEMORY_FORGET_THRESHOLD` | `0.8` | Relevance threshold for topic-based forgetting |
 | `MEMORY_BACKEND` | `sqlite` | Memory backend type (only `sqlite` currently) |
 | `MEMORY_IPC` | `1` | Set to `0` to disable IPC socket (CLI tools open own DB) |
-| `AGENT_BRIDGE_HOME` | `~/.agentbridge` | Base directory for all runtime data (env override for paths) |
+| `ABMIND_HOME` | `~/.abmind` | Base directory for all runtime data (env override for paths) |
 
 ---
 
