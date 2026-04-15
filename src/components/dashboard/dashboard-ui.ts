@@ -174,31 +174,32 @@ function getPlatformsCard(agentHtml: string): string {
   <div class="platform-group">
     <h3>External Tooling</h3>
     <div class="platform-item">
-      <span class="name">Projects</span>
-      <span><span class="badge coming" title="coming soon">coming soon</span>
-      <button disabled>Start</button></span>
+      <span class="name">Gmail (gws)</span>
+      <span><span class="badge disabled" id="auth-gws">—</span></span>
     </div>
     <div class="platform-item" id="plat-nlm">
       <span class="name">LM Notebook</span>
-      <span><span class="badge disabled" id="plat-nlm-badge">—</span></span>
+      <span><span class="badge disabled" id="auth-nlm">—</span></span>
     </div>
     <div class="platform-item" id="plat-keep">
       <span class="name">Keep</span>
       <span><span class="badge disabled" id="plat-keep-badge">—</span></span>
+    </div>
+    <div class="platform-item">
+      <span class="name">Projects</span>
+      <span><span class="badge coming" title="coming soon">coming soon</span></span>
     </div>
   </div>
 
   <div class="platform-group">
     <h3>Social Media</h3>
     <div class="platform-item">
-      <span class="name">X</span>
-      <span><span class="badge coming" title="coming soon">coming soon</span>
-      <button disabled>Start</button></span>
+      <span class="name">X.com</span>
+      <span><span class="badge disabled" id="auth-x">—</span></span>
     </div>
     <div class="platform-item">
       <span class="name">Facebook</span>
-      <span><span class="badge coming" title="coming soon">coming soon</span>
-      <button disabled>Start</button></span>
+      <span><span class="badge coming" title="coming soon">coming soon</span></span>
     </div>
   </div>
 </div>`;
@@ -238,7 +239,6 @@ function getMemoryCard(): string {
   <div style="display:flex;gap:8px;flex-wrap:wrap;">
     <button class="btn-search-toggle" onclick="loadMemoryUniverse()">🌌 Universe</button>
     <button class="btn-search-toggle" onclick="toggleOverlay('search-overlay')">🔍 Search</button>
-    <button class="btn-search-toggle" onclick="toggleOverlay('log-overlay')">📋 Log</button>
   </div>
 </div>`;
 }
@@ -255,31 +255,20 @@ function getCronCard(): string {
 
 function getAuthCard(): string {
   return `
-<div class="card" id="card-auth">
-  <h2>Services</h2>
-  <div class="stat-row"><span class="stat-label">Gmail (gws)</span><span class="stat-value" id="auth-gws">—</span></div>
-  <div class="stat-row"><span class="stat-label">NotebookLM</span><span class="stat-value" id="auth-nlm">—</span></div>
-  <div class="stat-row"><span class="stat-label">X.com</span><span class="stat-value" id="auth-x">—</span></div>
+<div class="card" id="card-log">
+  <h2>📋 Log</h2>
+  <div style="display:flex;gap:6px;margin-bottom:8px;">
+    <button class="log-level-btn lvl-info active" onclick="toggleLogLevel('info')">info</button>
+    <button class="log-level-btn lvl-warn active" onclick="toggleLogLevel('warn')">warn</button>
+    <button class="log-level-btn lvl-error active" onclick="toggleLogLevel('error')">error</button>
+    <button class="log-level-btn lvl-debug" onclick="toggleLogLevel('debug')">debug</button>
+  </div>
+  <div id="log-entries" style="max-height:500px;overflow-y:auto;font-size:0.78rem;font-family:monospace;line-height:1.5;"></div>
 </div>`;
 }
 
 function getLogOverlay(): string {
-  return `
-<div id="log-overlay" class="overlay-panel" style="display:none;">
-  <div class="overlay-header">
-    <h2>📋 Log (24h)</h2>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <div class="log-level-filters">
-        <button class="log-level-btn lvl-info active" onclick="toggleLogLevel('info')">info</button>
-        <button class="log-level-btn lvl-warn active" onclick="toggleLogLevel('warn')">warn</button>
-        <button class="log-level-btn lvl-error active" onclick="toggleLogLevel('error')">error</button>
-        <button class="log-level-btn lvl-debug" onclick="toggleLogLevel('debug')">debug</button>
-      </div>
-      <button class="btn-close-overlay" onclick="toggleOverlay('log-overlay')">✕</button>
-    </div>
-  </div>
-  <div class="log-entries overlay-body" id="log-entries" style="font-size:0.82rem;"></div>
-</div>`;
+  return "";
 }
 
 function getSearchOverlay(): string {
