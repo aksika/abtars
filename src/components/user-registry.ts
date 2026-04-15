@@ -25,13 +25,26 @@ export interface UserRegistry {
 }
 
 let _override: UserRegistry | null = null;
+let _cached: UserRegistry | null = null;
 
 /** Override registry for testing. Pass null to clear. */
 export function setUserRegistryOverride(registry: UserRegistry | null): void { _override = registry; }
 
-/** Load users from config/users.json, fallback to MAIN_CHAT_ID. */
+/** Load users from config/users.json, fallback to MAIN_CHAT_ID. Cached after first call. */
 export function loadUsers(): UserRegistry {
   if (_override) return _override;
+  if (_cached) return _cached;
+  _cached = loadFromDisk();
+  return _cached;
+}
+
+/** Force reload from disk (e.g. after /users approve). */
+export function reloadUsers(): UserRegistry {
+  _cached = null;
+  return loadUsers();
+}
+
+function loadFromDisk(): UserRegistry {
   const configPath = join(agentBridgeHome(), "config", "users.json");
   const registry: UserRegistry = { users: [], byPlatformId: new Map(), byUserId: new Map() };
 

@@ -87,7 +87,7 @@
 ├── persona/                   ← agent identity (grouped)
 │   ├── core/                  ← SOUL, agent_notes, core_facts, user_profile
 │   ├── prompts/               ← system prompts + sleep/
-│   ├── skills/                ← core/, auto/, clawhub/
+│   ├── skills/                ← core/, auto/, downloaded/
 │   ├── agents/                ← CODING.md etc
 │   ├── subagents/
 │   └── tasks/

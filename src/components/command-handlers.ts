@@ -592,7 +592,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
 
 async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
   const base = join(agentBridgeHome(), "skills");
-  const groups = ["core", "auto", "downloaded"] as const;
+  const groups = ["core", "personal", "auto", "downloaded"] as const;
   const sections: string[] = [];
   let total = 0;
   for (const group of groups) {
