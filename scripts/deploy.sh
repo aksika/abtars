@@ -346,6 +346,40 @@ fi
 echo ""
 echo "✅ Deploy complete."
 echo ""
+# ── Telegram bot commands ────────────────────────────────────────────────────
+# Source .env for bot token
+set -a; source "$AB_HOME/.env" 2>/dev/null; set +a
+if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+  echo "📱 Syncing Telegram bot commands..."
+  curl -sf "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommands" \
+    -H "Content-Type: application/json" \
+    -d '{"commands":[
+      {"command":"new","description":"Fresh session (keeps current model)"},
+      {"command":"reset","description":"Reset to defaults (model, provider) + fresh session"},
+      {"command":"compact","description":"Compact context window"},
+      {"command":"status","description":"Bridge status"},
+      {"command":"stop","description":"Stop current response"},
+      {"command":"ctrlc","description":"Stop current response"},
+      {"command":"models","description":"List and switch models"},
+      {"command":"heartbeat","description":"Heartbeat diagnostics"},
+      {"command":"memory","description":"Memory stats"},
+      {"command":"skills","description":"List skills"},
+      {"command":"tasks","description":"Scheduled tasks"},
+      {"command":"facts","description":"Core knowledge"},
+      {"command":"coding","description":"Switch to coding agent"},
+      {"command":"default","description":"Switch to default agent"},
+      {"command":"nlm","description":"Knowledge base"},
+      {"command":"restart","description":"Restart CLI session"},
+      {"command":"wakeup","description":"Wake Mac from sleep"},
+      {"command":"users","description":"User management"},
+      {"command":"full","description":"Raw output, TTS off"},
+      {"command":"short","description":"Clean output, TTS on"},
+      {"command":"healing","description":"Toggle self-healer on/off"},
+      {"command":"help","description":"Show all commands"}
+    ]}' > /dev/null && echo "   ✅ Bot commands synced" || echo "   ⚠️  Bot commands sync failed"
+fi
+
+echo ""
 echo "Next steps:"
 echo "  Start bridge:  ~/.agentbridge/agentbridge.sh"
 echo "  Start bridge:  ~/.agentbridge/agentbridge.sh --all"
