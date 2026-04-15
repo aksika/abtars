@@ -44,7 +44,7 @@ Family-scale multi-user (2-4 people) on one bridge instance. Isolated sessions, 
 
 Fallback: if no `users.json`, treat all `ALLOWED_USER_IDS` as master with maxClass=3 and all tools. Zero migration for single-user setups.
 
-Guest: approved at runtime via `/users approve <platformId>`, appended to `users.json` with `role: "guest"`, `maxClass: 0`, `tools: []`.
+Guest: approved at runtime via `/users approve <platformId>`, appended to `users.json` with `role: "guest"`, `maxClass: 0`, `tools: []`. All users in one file.
 
 ## Classification & recall
 
@@ -105,7 +105,7 @@ Non-master commands blocked with: "⛔ Owner-only command."
 
 ## User registry
 
-Parsed at startup from .env + guests.json:
+Parsed at startup from users.json:
 
 ```typescript
 interface UserEntry {
@@ -176,16 +176,17 @@ This lets the agent:
 
 | Step | What | Time |
 |---|---|---|
-| 1 | Parse `USERS` env → user registry + load guests.json | 30 min |
+| 1 | Load users.json at startup → user registry (guests stored in same file) | 20 min |
 | 2 | Security gate: platformId → userId + role + maxClass | 30 min |
 | 3 | Unknown sender → reject. `/users approve` adds guest | 30 min |
 | 4 | Session key `{userId}:{platform}` — update pipeline, adapters | 1 hr |
-| 5 | Transport: master=configured, user/guest=DirectAPI with tools:[] | 30 min |
+| 5 | Transport: master=configured, user/guest=DirectAPI with tools from users.json (guest=[]) | 30 min |
 | 6 | Command whitelist for non-master (middleware check) | 30 min |
 | 7 | Injection scan for non-master messages | 15 min |
 | 8 | `/users`, `/users approve`, `/users revoke` commands + update `/help` | 30 min |
 | 9 | Delivery context (lastPlatform per user) | 15 min |
-| 10 | Tests | 30 min |
+| 10 | Update cronCallback session key: `telegram:{chatId}` → `{userId}:{platform}` | 15 min |
+| 11 | Tests | 30 min |
 
 ### Phase 2 — Memory separation (~2hr)
 
@@ -193,23 +194,23 @@ Schema already done (user_id column on all tables, extraction_watermarks keyed b
 
 | Step | What | Time |
 |---|---|---|
-| 11 | Recall: add `WHERE user_id = ? AND classification <= ?` filter | 30 min |
-| 12 | Store: tag with userId, enforce maxClass limit per role | 15 min |
-| 13 | Sleep: filter extraction to master's user_id only | 15 min |
-| 14 | Guest: skip DB write entirely (context window only) | 15 min |
-| 15 | Wake-up: master=full ABM, user=last-session summary, guest=generic | 30 min |
-| 16 | Tests | 15 min |
+| 12 | Recall: add `WHERE user_id = ? AND classification <= ?` filter | 30 min |
+| 13 | Store: tag with userId, enforce maxClass limit per role | 15 min |
+| 14 | Sleep: filter extraction to master's user_id only | 15 min |
+| 15 | Guest: skip DB write entirely (context window only) | 15 min |
+| 16 | Wake-up: master=full ABM, user=last-session summary, guest=generic | 30 min |
+| 17 | Tests | 15 min |
 
 ### Phase 3 — Profiles + polish (~2hr)
 
 | Step | What | Time |
 |---|---|---|
-| 19 | `user_profile_{userId}.md` per user | 30 min |
-| 20 | Session-start injects correct user profile | 15 min |
-| 21 | SOUL.md: class 3 non-disclosure rule | 15 min |
-| 22 | displayName in registry → dashboard + logs | 15 min |
-| 23 | Document security model (classification = privacy, not enforcement) | 15 min |
-| 24 | End-to-end test: master + user simultaneous | 30 min |
+| 18 | `user_profile_{userId}.md` per user | 30 min |
+| 19 | Session-start injects correct user profile | 15 min |
+| 20 | SOUL.md: class 3 non-disclosure rule | 15 min |
+| 21 | displayName in registry → dashboard + logs | 15 min |
+| 22 | Document security model (classification = privacy, not enforcement) | 15 min |
+| 23 | End-to-end test: master + user simultaneous | 30 min |
 
 **Total: ~10hr. Phase 0 alone gives the agent user awareness.**
 
