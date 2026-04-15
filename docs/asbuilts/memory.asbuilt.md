@@ -22,7 +22,7 @@ Sleep maintenance (Dreamy) is an optional addon — memory works without it. Sle
 ### Schema (v14)
 
 Tables:
-- `messages` — conversation messages (chat_id, role, content, timestamp, user_id)
+- `messages` — conversation messages (user_id, role, content, timestamp, chat_id for platform routing)
 - `extracted_memories` — 32 columns including embedding BLOB, emotion, tier, topic, entities TEXT, user_id
 - `extracted_memories_fts` — FTS5 porter tokenizer on content_en
 - `content_en_trigram` — FTS5 trigram on content_en + preserved_keyword
@@ -104,7 +104,7 @@ The core knowledge table. Each row is a permanent fact, decision, preference, or
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER PK | Auto-increment |
-| `chat_id` | INTEGER | Source chat |
+| `chat_id` | INTEGER | Source chat (legacy — memory scoping uses `user_id`) |
 | `content_original` | TEXT | Memory in user's original language |
 | `content_en` | TEXT | Memory translated to English |
 | `memory_type` | TEXT | `fact`, `decision`, `preference`, `event` |
@@ -371,7 +371,7 @@ Method: `MemoryEditor.editMemory()` — single unified mutation path for all ext
 ### Lookup modes
 
 - `--memory-id N` — direct extracted_memory ID
-- `--message-id N --chat-id C` — find memories linked via `source_message_ids`, edit all matches
+- `--message-id N --chat-id C` — find memories linked via `source_message_ids`, edit all matches (`--chat-id` maps to userId internally)
 
 ### Two-tier usage for KP
 
@@ -694,7 +694,7 @@ All memory components live in `github.com/aksika/abmind src/` (moved from `src/c
 | Component | File | Description |
 |-----------|------|-------------|
 | MemoryManager | `memory-manager.ts` | Top-level coordinator. Owns SQLite DB, delegates to sub-services. Search, stats, core knowledge. |
-| MessageStore | `message-store.ts` | Message recording, loading, emotion score updates. Dashboard queries (getAllExtractedMemories, getAllEntities, getDistinctChatIds). |
+| MessageStore | `message-store.ts` | Message recording, loading, emotion score updates. Dashboard queries (getAllExtractedMemories, getAllEntities, getDistinctUserIds). |
 | MemoryEditor | `memory-editor.ts` | Extracted memory mutations: editMemory(), instantStore(), merge, reclassify, cascadeDelete. |
 | MaintenanceService | `maintenance-service.ts` | Disk budget, backup pruning, auto-compact, forget operations. |
 | MemoryBackend | `memory-backend.ts` | Abstract interface for memory storage (store, edit, recall, delete, merge). |
