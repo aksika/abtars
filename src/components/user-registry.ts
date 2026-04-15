@@ -11,6 +11,7 @@ const TAG = "user-registry";
 
 export interface UserEntry {
   userId: string;
+  displayName?: string;
   role: "master" | "user" | "guest";
   maxClass: number;
   tools: string[];
@@ -42,6 +43,7 @@ export function loadUsers(): UserRegistry {
         if (!u.userId || !u.role) continue;
         const entry: UserEntry = {
           userId: u.userId,
+          displayName: u.displayName ?? u.userId,
           role: u.role,
           maxClass: typeof u.maxClass === "number" ? u.maxClass : (u.role === "master" ? 3 : 0),
           tools: Array.isArray(u.tools) ? u.tools : (u.role === "master" ? ["all"] : []),
