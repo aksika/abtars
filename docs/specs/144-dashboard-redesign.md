@@ -10,6 +10,10 @@ Clean up dashboard layout. Remove lower panel. Three overlay panels (same patter
 
 ## Changes
 
+### 0. Fix Memory Universe
+
+Memory Universe stopped showing memories after refactor. Likely broken by `chatId → userId` rename or `getDistinctChatIds → getDistinctUserIds` change. Diagnose and fix before other changes.
+
 ### 1. Auth status indicators on main dashboard
 
 Green/red dots for authenticated services:
@@ -46,6 +50,7 @@ Main dashboard becomes: status cards + auth indicators + 3 launch buttons.
 
 | Step | What | Time |
 |---|---|---|
+| 0 | Fix Memory Universe — diagnose + fix broken memory display | 15 min |
 | 1 | Add `xAuth` to StatusSnapshot + buildStatusSnapshot | 10 min |
 | 2 | Auth status indicators (Gmail, NLM, X.com) on main dashboard | 15 min |
 | 3 | Extract Memory Search into overlay panel | 20 min |
