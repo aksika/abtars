@@ -465,11 +465,16 @@ export async function startBridge(): Promise<void> {
 
   // Wire task_manage --run to use the cron queue
   const { setEnqueueCron } = await import("./components/transport/tool-registry.js");
-  const cronCallback: import("./components/cron/cron-queue.js").TaskCompleteCallback = (chatId, message, result) => {
+  const cronCallback: import("./components/cron/cron-queue.js").TaskCompleteCallback = (chatId, message, result, resultPath) => {
     if (platforms.telegram && bridge.telegramAdapter) {
       bridge.telegramAdapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
         logWarn("main", `Cron task TG report failed: ${err}`);
       });
+    }
+    // Inject [SYSTEM] so the agent knows the result exists
+    if (resultPath) {
+      const sessionKey = `telegram:${chatId}`;
+      transport.sendPrompt(sessionKey, `[SYSTEM] Task "${message}" completed. If user asks for the result, use: cat ${resultPath}`).catch(() => {});
     }
   };
   setEnqueueCron((id, manual) => {

@@ -27,11 +27,12 @@ function recordRunToFile(entryId: string, exitCode?: number): void {
   dbRecordRun(entryId, exitCode);
 }
 
-function writeResultFile(entryId: string, content: string): string | null {
+function writeResultFile(message: string, content: string): string | null {
   try {
     const dir = join(agentBridgeHome(), "workspace", "task-results");
     mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${entryId}_${localDate()}.md`);
+    const slug = message.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const file = join(dir, `${slug}-${localDate()}.md`);
     writeFileSync(file, content, "utf-8");
     return file;
   } catch { return null; }
@@ -103,7 +104,7 @@ function scheduleRetry(entry: CronEntry, isRetry: boolean): void {
   }
 }
 
-export type TaskCompleteCallback = (chatId: number, message: string, result: string) => void;
+export type TaskCompleteCallback = (chatId: number, message: string, result: string, resultPath?: string) => void;
 export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
 
 interface QueuedJob {
@@ -300,7 +301,7 @@ export class CronQueue {
         }
 
         // Write result file
-        const resultPath = writeResultFile(entry.id, response || "(no output)");
+        const resultPath = writeResultFile(entry.message, response || "(no output)");
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         recordRunToFile(entry.id, exitCode);
@@ -309,7 +310,7 @@ export class CronQueue {
           scheduleRetry(entry, !!entry._retrying);
           this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
         }
-        onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`);
+        onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`, resultPath ?? undefined);
       })
       .catch((err) => {
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
