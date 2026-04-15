@@ -110,7 +110,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- ALLOWED_USER_IDS (optional if MAIN_CHAT_ID + users.json present) ---
-  const rawUserIds = process.env["ALLOWED_USER_IDS"] ?? process.env["MAIN_CHAT_ID"] ?? "";
+  const rawUserIds = process.env["ALLOWED_USER_IDS"]?.trim() || process.env["MAIN_CHAT_ID"] || "";
   const allowedUserIds = parseUserIds(rawUserIds);
   if (allowedUserIds.size === 0) {
     throw new Error(
