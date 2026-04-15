@@ -315,8 +315,9 @@ export async function handleInboundMessage(
       }
     }
 
-    // --- Record to memory ---
-    if (memory) {
+    // --- Record to memory (skip for guests) ---
+    const isGuest = registry.byUserId.get(userId)?.role === "guest";
+    if (memory && !isGuest) {
       memory.recordMessage({
         role: "assistant", content: cleanAnswer || response,
         timestamp: Date.now(), userId, sessionId: sessionKey,
@@ -486,10 +487,17 @@ function buildSessionStartPrompt(
   }
 
   try {
-    const wakeUp = memory.buildWakeUp();
-    if (wakeUp) {
-      contextParts.push(wakeUp);
-      logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
+    const userRole = loadUsers().byUserId.get(userId)?.role ?? "master";
+    if (userRole === "guest") {
+      contextParts.push("Hi! How can I help?");
+    } else if (userRole === "user") {
+      contextParts.push("[SESSION START] Returning user. Be friendly and helpful.");
+    } else {
+      const wakeUp = memory.buildWakeUp();
+      if (wakeUp) {
+        contextParts.push(wakeUp);
+        logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
+      }
     }
   } catch { /* wake-up builder not available */ }
 
@@ -522,6 +530,9 @@ function preparePrompt(
   }
   seen.add(sessionKey);
   pending.delete(sessionKey);
-  memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId });
+  const userRole = loadUsers().byUserId.get(userId)?.role;
+  if (userRole !== "guest") {
+    memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId });
+  }
   return prompt;
 }

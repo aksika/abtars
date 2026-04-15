@@ -1,8 +1,7 @@
 {
   "claude-sonnet-4.6":    { "contextWindow": 1000000, "maxOutput": 16384, "rank": 2, "cost": { "input": 3.0,  "output": 15.0 },  "transports": ["kiro-free", "kiro-paid"] },
-  "gemini-2.5-flash":     { "contextWindow": 1000000, "maxOutput": 65536, "rank": 3, "cost": { "input": 0.15, "output": 0.60 },  "transports": ["gemini-free", "gemini-paid"] },
+  "gemini-2.5-flash":     { "contextWindow": 1000000, "maxOutput": 65536, "rank": 3, "cost": { "input": 0.15, "output": 0.60 },  "transports": ["gemini-free", "gemini-paid", "openrouter"] },
   "gemini-2.5-pro":       { "contextWindow": 1000000, "maxOutput": 65536, "rank": 2, "cost": { "input": 1.25, "output": 10.0 },  "transports": ["gemini-paid"] },
-  "grok-4.1-fast":        { "contextWindow": 131072,  "maxOutput": 16384, "rank": 3, "cost": { "input": 0.30, "output": 0.60 },  "transports": ["xai"], "description": "Budget last-resort fallback. Fast, good coding, cheap." },
   "kimi-k2.5:cloud":      { "contextWindow": 262144,  "maxOutput": 16384, "rank": 2, "cost": { "input": 0.0,  "output": 0.0 },   "transports": ["ollama", "openrouter"] },
   "minimax-m2.5:cloud":   { "contextWindow": 128000,  "maxOutput": 8192,  "rank": 3, "cost": { "input": 0.0,  "output": 0.0 },   "transports": ["ollama", "openrouter"] },
   "qwen3.5:cloud":        { "contextWindow": 131072,  "maxOutput": 8192,  "rank": 3, "cost": { "input": 0.0,  "output": 0.0 },   "transports": ["ollama", "openrouter"] }

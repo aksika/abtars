@@ -1,6 +1,6 @@
 {
   "agents": {
-    "professor": { "model": "claude-sonnet-4.6",  "provider": "kiro-free", "fallbacks": [{ "model": "kimi-k2.5:cloud", "provider": "ollama" }] },
+    "professor": { "model": "claude-sonnet-4.6",  "provider": "kiro-free", "fallbacks": [{ "model": "kimi-k2.5:cloud", "provider": "ollama" }, { "model": "gemini-2.5-flash", "provider": "openrouter" }] },
     "dreamy":    { "model": "minimax-m2.5:cloud", "provider": "ollama" },
     "browsie":   { "model": "minimax-m2.5:cloud", "provider": "ollama" },
     "coding":    { "model": "qwen3.5:cloud",      "provider": "ollama" }
