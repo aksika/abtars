@@ -354,9 +354,9 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
   const { loadTransport, resolveAgent, getModelsForProvider, writeTransportConfig } = await import("./transport-config.js");
   const tc = loadTransport();
   const prof = tc ? resolveAgent("professor", tc) : null;
-  const currentModel = "currentModel" in ctx.transport
+  const currentModel = ("currentModel" in ctx.transport
     ? (ctx.transport as unknown as { currentModel: string }).currentModel
-    : prof?.model ?? "unknown";
+    : undefined) ?? prof?.model ?? "unknown";
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 

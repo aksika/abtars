@@ -200,12 +200,8 @@ export function getAvailableProviders(tc: TransportConfig): Array<{ name: string
       }
       results.push({ name, config });
     } else {
-      // ACP/tmux: needs CLI in PATH
-      try {
-        const { execSync } = require("node:child_process") as typeof import("node:child_process");
-        execSync(`which ${config.cli ?? "kiro-cli"}`, { stdio: "pipe", timeout: 2000 });
-        results.push({ name, config });
-      } catch { /* CLI not found */ }
+      // ACP/tmux: always available (bridge manages the connection)
+      results.push({ name, config });
     }
   }
   return results;
