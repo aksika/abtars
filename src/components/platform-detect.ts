@@ -17,11 +17,11 @@ export function classifyResume(): ResumeKind {
 
 function classifyMacOS(): ResumeKind {
   try {
-    // Apple Silicon: ioreg Wake Type is the definitive signal.
-    // "UserActivity Assertion" = full wake, "Maintenance"/"SleepService" = dark wake.
-    const out = execSync("ioreg -n IOPMrootDomain -w0 2>/dev/null | grep 'Wake Type'", { timeout: 3000, encoding: "utf-8" });
-    if (out.includes("UserActivity")) return "full";
-    if (out.includes("Maintenance") || out.includes("SleepService")) return "dark";
+    // pmset -g log is the definitive record. ioreg Wake Type is transient and unreliable.
+    // Last line matching "DarkWake" or "Wake" (without "Dark") determines the state.
+    const out = execSync("pmset -g log 2>/dev/null | grep -E '(DarkWake|Wake )' | tail -1", { timeout: 3000, encoding: "utf-8" });
+    if (out.includes("DarkWake")) return "dark";
+    if (out.includes("Wake")) return "full";
   } catch { /* */ }
   return "unknown";
 }
