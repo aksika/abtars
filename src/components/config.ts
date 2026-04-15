@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { config as loadDotenv } from "dotenv";
 import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/index.js";
+import { loadUsers } from "./user-registry.js";
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
 import { logWarn } from "./logger.js";
 import type { LogLevel } from "./logger.js";
@@ -43,18 +44,6 @@ function parseSnowflakeList(raw: string, envVarName: string): Set<string> {
  * Parse a comma-separated string of user IDs into a Set of numbers.
  * Trims whitespace, ignores empty segments and non-numeric values.
  */
-function parseUserIds(raw: string): Set<number> {
-  const ids = new Set<number>();
-  for (const segment of raw.split(",")) {
-    const trimmed = segment.trim();
-    if (trimmed === "") continue;
-    const n = Number(trimmed);
-    if (Number.isFinite(n) && Number.isInteger(n)) {
-      ids.add(n);
-    }
-  }
-  return ids;
-}
 
 /**
  * Check whether the kiro-cli path is executable.
@@ -109,12 +98,17 @@ export async function loadAndValidateConfig(): Promise<Config> {
     );
   }
 
-  // --- ALLOWED_USER_IDS (optional if MAIN_CHAT_ID + users.json present) ---
-  const rawUserIds = process.env["ALLOWED_USER_IDS"]?.trim() || process.env["MAIN_CHAT_ID"] || "";
-  const allowedUserIds = parseUserIds(rawUserIds);
+  // --- User IDs (from users.json, fallback to MAIN_CHAT_ID) ---
+  const registry = loadUsers();
+  const telegramIds = registry.users
+    .filter(u => u.platforms.telegram)
+    .map(u => u.platforms.telegram!);
+  const mainChatId = process.env["MAIN_CHAT_ID"]?.trim();
+  if (mainChatId) telegramIds.push(parseInt(mainChatId, 10));
+  const allowedUserIds = new Set(telegramIds.filter(id => id > 0));
   if (allowedUserIds.size === 0) {
     throw new Error(
-      "MAIN_CHAT_ID or ALLOWED_USER_IDS is required — provide at least one numeric Telegram chat ID",
+      "No users configured — create config/users.json or set MAIN_CHAT_ID",
     );
   }
 
@@ -228,12 +222,12 @@ export async function loadAndValidateConfig(): Promise<Config> {
       );
     }
     discordAppId = rawAppId;
-    // --- DISCORD_ALLOWED_USER_IDS (required when Discord enabled) ---
-    const rawDiscordUserIds = process.env["DISCORD_ALLOWED_USER_IDS"] ?? "";
-    discordAllowedUserIds = parseSnowflakeList(rawDiscordUserIds, "DISCORD_ALLOWED_USER_IDS");
+    // Discord user IDs from users.json
+    const discordUsers = registry.users.filter(u => u.platforms.discord);
+    discordAllowedUserIds = new Set(discordUsers.map(u => u.platforms.discord!));
     if (discordAllowedUserIds.size === 0) {
       throw new Error(
-        "DISCORD_ALLOWED_USER_IDS is required and must contain at least one valid Discord snowflake ID when DISCORD_BOT_TOKEN is set",
+        "No Discord users in users.json — add at least one user with platforms.discord",
       );
     }
 
@@ -289,10 +283,10 @@ export async function loadAndValidateConfig(): Promise<Config> {
     CONFIG_DEFAULTS.discord.a2aRateLimitMs,
   );
 
-  const mainChatId = process.env["MAIN_CHAT_ID"] ?? String([...allowedUserIds][0] ?? "");
+  const resolvedMainChatId = mainChatId ?? String([...allowedUserIds][0] ?? "");
 
   return {
-    mainChatId,
+    mainChatId: resolvedMainChatId,
     telegram: {
       botToken: token,
       allowedUserIds,

@@ -1,6 +1,6 @@
 /**
  * User registry — loads users from config/users.json.
- * Falls back to ALLOWED_USER_IDS (all treated as master, maxClass=3, all tools).
+ * Falls back to MAIN_CHAT_ID.
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -29,7 +29,7 @@ let _override: UserRegistry | null = null;
 /** Override registry for testing. Pass null to clear. */
 export function setUserRegistryOverride(registry: UserRegistry | null): void { _override = registry; }
 
-/** Load users from config/users.json, fallback to ALLOWED_USER_IDS. */
+/** Load users from config/users.json, fallback to MAIN_CHAT_ID. */
 export function loadUsers(): UserRegistry {
   if (_override) return _override;
   const configPath = join(agentBridgeHome(), "config", "users.json");
@@ -60,24 +60,21 @@ export function loadUsers(): UserRegistry {
     }
   }
 
-  // Fallback: ALLOWED_USER_IDS → all master with userId "master"
+  // Fallback: MAIN_CHAT_ID → single master
   if (registry.users.length === 0) {
-    const raw = process.env["ALLOWED_USER_IDS"] ?? "";
-    const ids = raw.split(",").map(s => s.trim()).filter(Boolean);
-    for (const id of ids) {
+    const mainChatId = process.env["MAIN_CHAT_ID"]?.trim();
+    if (mainChatId) {
       const entry: UserEntry = {
         userId: "master",
         role: "master",
         maxClass: 3,
         tools: ["all"],
-        platforms: { telegram: parseInt(id, 10) || undefined },
+        platforms: { telegram: parseInt(mainChatId, 10) || undefined },
       };
       registry.users.push(entry);
       registry.byUserId.set("master", entry);
-      registry.byPlatformId.set(`telegram:${id}`, entry);
-    }
-    if (registry.users.length > 0) {
-      logInfo(TAG, `Fallback: ${registry.users.length} users from ALLOWED_USER_IDS (all master)`);
+      registry.byPlatformId.set(`telegram:${mainChatId}`, entry);
+      logInfo(TAG, `Fallback: single master from MAIN_CHAT_ID`);
     }
   }
 

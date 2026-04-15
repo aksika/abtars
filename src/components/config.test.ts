@@ -17,7 +17,7 @@ vi.mock("dotenv", () => ({
 /** Set up a valid env baseline; individual tests override specific vars. */
 function setValidEnv() {
   process.env["TELEGRAM_BOT_TOKEN"] = "123456:ABC-DEF_ghi";
-  process.env["ALLOWED_USER_IDS"] = "111,222";
+  process.env["MAIN_CHAT_ID"] = "111";
   process.env["AGENT_CLI_PATH"] = "kiro-cli";
   process.env["WORKING_DIR"] = process.cwd();
   delete process.env["TRUST_MODE"];
@@ -34,7 +34,6 @@ function setValidEnv() {
   delete process.env["TTS_ENABLED"];
   delete process.env["TTS_VOICE"];
   delete process.env["DISCORD_BOT_TOKEN"];
-  delete process.env["DISCORD_ALLOWED_USER_IDS"];
   delete process.env["DISCORD_ALLOWED_CHANNEL_IDS"];
   delete process.env["DISCORD_A2A_CHANNEL_ID"];
   delete process.env["DISCORD_A2A_PEER_BOT_ID"];
@@ -52,7 +51,8 @@ describe("loadAndValidateConfig", () => {
   it("returns a valid Config with all required fields", async () => {
     const config = await loadAndValidateConfig();
     expect(config.telegram.botToken).toBe("123456:ABC-DEF_ghi");
-    expect(config.telegram.allowedUserIds).toEqual(new Set([111, 222]));
+    expect(config.telegram.allowedUserIds.size).toBeGreaterThanOrEqual(1);
+    expect(config.telegram.allowedUserIds.has(111)).toBe(true);
     expect(config.transport.agentCliPath).toBe("kiro-cli");
     expect(config.transport.workingDir).toBe(process.cwd());
     expect(config.transport.trustMode).toBe(false);
@@ -78,23 +78,20 @@ describe("loadAndValidateConfig", () => {
     expect(config.telegram.botToken).toBe("9876:xYz_123-abc");
   });
 
-  // --- ALLOWED_USER_IDS ---
+  // --- Users ---
 
-  it("throws when ALLOWED_USER_IDS is missing", async () => {
-    delete process.env["ALLOWED_USER_IDS"];
-    await expect(loadAndValidateConfig()).rejects.toThrow("ALLOWED_USER_IDS");
+  it("throws when no users configured", async () => {
+    delete process.env["MAIN_CHAT_ID"];
+    const { setUserRegistryOverride } = await import("./user-registry.js");
+    setUserRegistryOverride({ users: [], byPlatformId: new Map(), byUserId: new Map() });
+    try {
+      await expect(loadAndValidateConfig()).rejects.toThrow("No users configured");
+    } finally {
+      setUserRegistryOverride(null);
+    }
   });
 
-  it("throws when ALLOWED_USER_IDS has no valid numeric IDs", async () => {
-    process.env["ALLOWED_USER_IDS"] = "abc, , xyz";
-    await expect(loadAndValidateConfig()).rejects.toThrow("ALLOWED_USER_IDS");
-  });
 
-  it("trims whitespace and ignores empty segments in user IDs", async () => {
-    process.env["ALLOWED_USER_IDS"] = " 42 , , 99 ";
-    const config = await loadAndValidateConfig();
-    expect(config.telegram.allowedUserIds).toEqual(new Set([42, 99]));
-  });
 
   // --- KIRO_CLI_PATH ---
 

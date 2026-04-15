@@ -77,7 +77,7 @@ Edit `~/.agentbridge/.env`:
 
 ```env
 TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
-ALLOWED_USER_IDS=987654321
+MAIN_CHAT_ID=987654321
 KIRO_TRANSPORT=tmux
 WORKING_DIR=/path/to/your/project
 TRUST_MODE=true
@@ -233,7 +233,7 @@ KIRO_CLI_PATH=kiro-cli
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | yes | — | Bot token from @BotFather |
-| `ALLOWED_USER_IDS` | yes | — | Comma-separated Telegram user IDs |
+| `MAIN_CHAT_ID` | yes | — | Master Telegram chat ID (fallback if no users.json) |
 | `KIRO_TRANSPORT` | no | `tmux` | Transport: `tmux` or `acp` |
 | `KIRO_CLI_PATH` | no | `kiro-cli` | Path to kiro-cli binary |
 | `WORKING_DIR` | no | `.` | Directory where Kiro operates |

@@ -146,52 +146,39 @@
 
 | Step | What | Effort |
 |---|---|---|
-| 1 | Move loose scripts → `bin/`, update PATH references in deploy.sh | 15 min |
-| 2 | Move stale .env files → `config/`, delete `.env.old`, `memory.env` | 10 min |
+| 1 | Move loose scripts → `bin/`, update deploy.sh | 15 min |
+| 2 | Delete stale .env files from root, ensure config/ is the only source | 10 min |
 | 3 | Move `professor.json` → `config/` | 5 min |
 | 4 | Create `persona/` — move core, prompts, skills, agents, subagents, tasks | 15 min |
 | 5 | Create `data/` — move memory, finance, twitterX, topics, reports, notebooklm, received | 15 min |
 | 6 | Create `runtime/` — move dist, node_modules, package.json, overflow, browser-socket, docker | 10 min |
-| 7 | Update all path references in bridge source (`AB_HOME + "/core"` → `AB_HOME + "/persona/core"` etc) | 1 hr |
+| 7 | Update all path references in bridge source | 1 hr |
 | 8 | Update deploy.sh — new target paths | 30 min |
 | 9 | Update doctor.sh — new check paths | 15 min |
 | 10 | Update daily-backup.sh — new zip paths | 10 min |
-| 11 | Update .gitignore — runtime/ excluded, persona/ + data/ included | 10 min |
-| 12 | Migration in doctor.sh: detect old layout → move to new | 30 min |
-| 13 | Update asbuilts | 15 min |
-| 14 | Test: deploy + doctor + backup on new layout | 20 min |
-| **Total** | | **~3.5 hr** |
+| 11 | Update .gitignore — runtime/ excluded | 10 min |
+| 12 | Update asbuilts | 15 min |
+| 13 | Test: deploy + doctor + backup | 20 min |
+| **Total** | | **~3 hr** |
 
 ## Migration strategy
 
-`doctor.sh --fix` detects old layout (checks for `core/` at root) and migrates:
+One-shot. Deploy.sh creates the new structure. No backward compatibility, no fallback, no detection of old layout.
 
-```bash
-# One-time migration
-if [ -d "$AB/core" ] && [ ! -d "$AB/persona" ]; then
-  mkdir -p "$AB/persona" "$AB/data" "$AB/runtime"
-  mv "$AB/core" "$AB/prompts" "$AB/skills" "$AB/agents" "$AB/subagents" "$AB/tasks" "$AB/persona/"
-  mv "$AB/memory" "$AB/finance" "$AB/twitterX" "$AB/topics" "$AB/reports" "$AB/notebooklm" "$AB/received" "$AB/data/"
-  mv "$AB/dist" "$AB/node_modules" "$AB/package.json" "$AB/overflow" "$AB/browser-socket" "$AB/docker" "$AB/logo" "$AB/runtime/"
-  # scripts
-  mv "$AB/agentbridge.sh" "$AB/browser-"*.sh "$AB/agentbridge-embed" "$AB/mcporter" "$AB/bin/" 2>/dev/null
-  # stale env
-  rm -f "$AB/.env.old" "$AB/memory.env"
-  [ -f "$AB/.env" ] && mv "$AB/.env" "$AB/config/.env"
-  [ -f "$AB/.env.memory" ] && mv "$AB/.env.memory" "$AB/config/.env.memory"
-  [ -f "$AB/.env.skills" ] && mv "$AB/.env.skills" "$AB/config/.env.skills"
-  [ -f "$AB/professor.json" ] && mv "$AB/professor.json" "$AB/config/professor.json"
-fi
-```
+1. Stop the bridge
+2. `rm -rf ~/.agentbridge`
+3. `./scripts/deploy.sh`
+4. Restore secrets: copy `secret/` from backup
+5. Start the bridge
+
+All path references in source code point to the new structure. Old layout is dead.
 
 ## Risks
 
 | Risk | Mitigation |
 |---|---|
-| Bridge running during migration | doctor.sh checks bridge.lock — warn if bridge is running, skip migration |
-| Hardcoded paths in persona .md files | grep + fix — most use relative refs |
-| Mac agent has different layout | Same doctor.sh migration runs on both |
-| Git backup repo paths change | .gitignore update + one `git add -A` after migration |
+| Hardcoded paths in persona .md files | grep + fix |
+| Mac + WSL both need fresh deploy | Deploy both after merge |
 
 ## Notes
 
