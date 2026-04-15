@@ -262,11 +262,10 @@ Cron results, system notifications, and task reports always go to the master's m
 
 ```env
 # Master's primary Telegram chatId — cron results, system notifications, task reports
-# Defaults to first ALLOWED_USER_IDS if not set
 MAIN_CHAT_ID=7773842843
 ```
 
-Replaces the `[...allowedUserIds][0]` hack. Falls back to first ALLOWED_USER_IDS for backward compat. Never delivers cron results to non-master users.
+Replaces `ALLOWED_USER_IDS` for delivery routing. Auth is handled by users.json. Never delivers cron results to non-master users.
 
 ## Migration
 
