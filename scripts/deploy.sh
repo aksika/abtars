@@ -125,7 +125,7 @@ if [ ! -f "$AB_HOME/config/transport.json" ]; then
   echo "   ℹ️  Created transport.json from example — edit with your providers"
 fi
 # transport.default.json — baseline for /reset. Always from repo on full deploy.
-cp "$PROJECT_DIR/config/transport.json.example" "$AB_HOME/config/transport.default.json"
+cp "$PROJECT_DIR/config/transport.default.json" "$AB_HOME/config/transport.default.json"
 if [ ! -f "$AB_HOME/config/models.json" ]; then
   cp "$PROJECT_DIR/config/models.json.example" "$AB_HOME/config/models.json"
   echo "   ℹ️  Created models.json from example"
