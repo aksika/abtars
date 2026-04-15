@@ -172,6 +172,8 @@ mkdir -p "$AB_HOME/bin"
 # abmind unified CLI
 printf '#!/usr/bin/env bash\nexec node "%s" "$@"\n' "$AB_HOME/node_modules/.bin/abmind" > "$AB_HOME/bin/abmind"
 chmod +x "$AB_HOME/bin/abmind"
+mkdir -p "$HOME/.local/bin"
+ln -sf "$AB_HOME/bin/abmind" "$HOME/.local/bin/abmind"
 # Other CLIs
 for js in "$AB_HOME/dist/cli/agentbridge-"*.js; do
   [ -f "$js" ] || continue
