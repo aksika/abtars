@@ -105,6 +105,7 @@ export class AgentApiServer {
 
   async stop(): Promise<void> {
     await this.killAgentSession();
+    this.server.closeAllConnections();
     return new Promise((resolve) => this.server.close(() => resolve()));
   }
 

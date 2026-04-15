@@ -100,6 +100,7 @@ export class DashboardServer implements IDashboardSlot {
 
       this.wss.close(() => {
         if (this.server) {
+          this.server.closeAllConnections();
           this.server.close(() => resolve());
         } else {
           resolve();
