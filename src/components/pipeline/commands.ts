@@ -35,6 +35,18 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     return;
   }
 
+  // Injection scan for non-master users
+  if (!isMaster && ctx.text.length > 10) {
+    const { scanForInjection } = await import("abmind/injection-scanner.js");
+    const scan = scanForInjection(ctx.text);
+    if (!scan.safe) {
+      logInfo("commands", `Injection blocked from ${user?.userId ?? "unknown"}: ${scan.flags.map(f => f.category).join(", ")}`);
+      await ctx.reply("⛔ Message blocked — suspicious content detected.");
+      ctx.handled = true;
+      return;
+    }
+  }
+
   const trimmed = ctx.text.trim();
   const cmd = trimmed.split(/\s/)[0]!.toLowerCase();
 

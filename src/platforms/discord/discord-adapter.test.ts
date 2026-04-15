@@ -17,6 +17,14 @@ vi.mock("./discord-api.js", () => ({
   })),
 }));
 
+vi.mock("../../components/user-registry.js", () => ({
+  loadUsers: () => ({
+    users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { discord: "42" } }],
+    byPlatformId: new Map([["discord:42", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { discord: "42" } }]]),
+    byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { discord: "42" } }]]),
+  }),
+}));
+
 vi.mock("./discord-poller.js", () => ({
   DiscordPoller: vi.fn().mockImplementation((_api: unknown, _appId: string, handler: Function) => {
     (DiscordPollerMock as any)._handler = handler;

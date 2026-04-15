@@ -81,6 +81,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/model": handleModels,
   "/a2a-reset": handleA2aReset,
   "/help": handleHelp,
+  "/users": handleUsers,
   "/skills": handleSkills,
   "/skill": handleSkills,
   "/wakeup": handleWakeup,
@@ -105,7 +106,22 @@ export function registerCommand(name: string, handler: CommandHandler): void {
 }
 
 /** Returns true if command was handled. */
+/** Commands allowed for non-master users. Everything else is master-only. */
+const NON_MASTER_COMMANDS = new Set(["/new", "/reset", "/stop", "/ctrlc", "/status", "/help"]);
+
 export async function handleCommand(text: string, ctx: CommandContext): Promise<boolean> {
+  // Role-based command gating
+  const isMaster = !ctx.userId || ctx.userId === "master" ||
+    (await import("./user-registry.js")).loadUsers().byUserId.get(ctx.userId)?.role === "master";
+
+  if (!isMaster) {
+    const cmd = text.split(/\s/)[0]!;
+    if (cmd.startsWith("/") && !NON_MASTER_COMMANDS.has(cmd)) {
+      await ctx.reply("⛔ Owner-only command.");
+      return true;
+    }
+  }
+
   const exact = exactCommands[text];
   if (exact) return exact(text, ctx);
 
@@ -713,4 +729,61 @@ function formatUptime(ms: number): string {
   const h = Math.floor(ms / 3600000);
   const m = Math.floor((ms % 3600000) / 60000);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+// ── /users command ──────────────────────────────────────────────────────────
+
+async function handleUsers(text: string, ctx: CommandContext): Promise<boolean> {
+  const { loadUsers } = await import("./user-registry.js");
+  const parts = text.trim().split(/\s+/);
+  const sub = parts[1];
+
+  if (sub === "approve" && parts[2]) {
+    const platformId = parts[2];
+    const { writeFileSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { agentBridgeHome } = await import("../paths.js");
+    const configPath = join(agentBridgeHome(), "config", "users.json");
+    try {
+      const raw = JSON.parse(readFileSync(configPath, "utf-8"));
+      const users = Array.isArray(raw.users) ? raw.users : [];
+      if (users.some((u: { platforms?: { telegram?: number } }) => String(u.platforms?.telegram) === platformId)) {
+        await ctx.reply(`User with platform ID ${platformId} already exists.`);
+        return true;
+      }
+      const guestId = `guest-${platformId}`;
+      users.push({ userId: guestId, role: "guest", maxClass: 0, tools: [], platforms: { telegram: parseInt(platformId, 10) || 0 } });
+      writeFileSync(configPath, JSON.stringify({ users }, null, 2), "utf-8");
+      await ctx.reply(`✅ Approved guest: ${guestId} (platform ID: ${platformId})`);
+    } catch (err) {
+      await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  if (sub === "revoke" && parts[2]) {
+    const targetUserId = parts[2];
+    const { writeFileSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { agentBridgeHome } = await import("../paths.js");
+    const configPath = join(agentBridgeHome(), "config", "users.json");
+    try {
+      const raw = JSON.parse(readFileSync(configPath, "utf-8"));
+      const users = (Array.isArray(raw.users) ? raw.users : []).filter((u: { userId: string }) => u.userId !== targetUserId);
+      writeFileSync(configPath, JSON.stringify({ users }, null, 2), "utf-8");
+      await ctx.reply(`✅ Revoked: ${targetUserId}`);
+    } catch (err) {
+      await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  // List users
+  const registry = loadUsers();
+  const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
+  const lines = registry.users.map(u =>
+    `• ${u.userId} (${u.role}, ${CLASS_NAMES[u.maxClass] ?? `class ${u.maxClass}`}) — tools: ${u.tools.join(", ") || "none"}`
+  );
+  await ctx.reply(`👥 Users (${registry.users.length}):\n${lines.join("\n")}\n\n/users approve <platformId>\n/users revoke <userId>`);
+  return true;
 }

@@ -7,6 +7,7 @@
 import { DiscordApi } from "./discord-api.js";
 import { DiscordPoller } from "./discord-poller.js";
 import { SecurityGate } from "../../components/security-gate.js";
+import { loadUsers } from "../../components/user-registry.js";
 import { ResponseFormatter } from "../../components/response-formatter.js";
 import { A2ARouter } from "../../components/a2a-router.js";
 import { interceptLargeMessage } from "../../components/message-interceptor.js";
@@ -59,7 +60,7 @@ export class DiscordAdapter implements PlatformAdapter {
 
   constructor(config: DiscordAdapterConfig, deps: DiscordAdapterDeps) {
     this.api = new DiscordApi(config.botToken);
-    this.securityGate = new SecurityGate(config.allowedUserIds, config.allowedChannelIds);
+    this.securityGate = new SecurityGate(loadUsers(), config.allowedChannelIds);
     this.config = config;
     this.deps = deps;
   }
@@ -89,7 +90,7 @@ export class DiscordAdapter implements PlatformAdapter {
 
   authorize(msg: InboundMessage): boolean {
     // Discord security uses string IDs + channel check
-    return this.securityGate.authorize(msg.senderId, msg.channelId);
+    return this.securityGate.authorizeById(msg.senderId, msg.channelId);
   }
 
   async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<number | undefined> {
@@ -116,7 +117,7 @@ export class DiscordAdapter implements PlatformAdapter {
 
     const effectiveChannelId = message.parentChannelId ?? message.channelId;
 
-    if (!this.securityGate.authorize(message.authorId, effectiveChannelId)) {
+    if (!this.securityGate.authorizeById(message.authorId, effectiveChannelId)) {
       logDebug(TAG, `Unauthorized user=${message.authorId} channel=${effectiveChannelId}`);
       return;
     }
@@ -186,7 +187,7 @@ export class DiscordAdapter implements PlatformAdapter {
     const emoji = reaction.emoji.name ?? "";
     if (!emoji) return;
 
-    const isAuthorized = this.securityGate.authorize(user.id, channelId);
+    const isAuthorized = this.securityGate.authorizeById(user.id, channelId);
     const senderName = user.username || `id:${user.id}`;
     logInfo(TAG, `Reaction ${emoji} from ${senderName} on msg ${reaction.message.id}`);
 

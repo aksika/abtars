@@ -20,6 +20,14 @@ vi.mock("./telegram-api.js", () => ({
   })),
 }));
 
+vi.mock("../../components/user-registry.js", () => ({
+  loadUsers: () => ({
+    users: [{ userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 42 } }],
+    byPlatformId: new Map([["telegram:42", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 42 } }]]),
+    byUserId: new Map([["master", { userId: "master", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 42 } }]]),
+  }),
+}));
+
 vi.mock("./telegram-poller.js", () => ({
   TelegramPoller: vi.fn().mockImplementation((_api: unknown, _timeout: number, handler: Function) => {
     (TelegramPollerMock as any)._handler = handler;
