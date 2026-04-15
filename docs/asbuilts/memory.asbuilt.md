@@ -291,6 +291,14 @@ Source: `github.com/aksika/abmind src/recall-engine.ts`, `github.com/aksika/abmi
 CLI wrapper: `src/cli/abmind-recall.ts`
 Dashboard: `src/components/memory-search-controller.ts` (delegates to recall-engine, takes MemoryManager)
 
+### Multi-user privacy filter
+
+All recall stages (FTS5, trigram, vector, consolidation) apply:
+```sql
+WHERE classification <= :maxClass AND (classification <= 1 OR user_id = :userId)
+```
+Class 0-1 memories are shared pool. Class 2+ private to owner. Applied in `trigram-search.ts`, `ollama-embed.ts`, `memory-index.ts`.
+
 ### Design Philosophy
 
 Four non-overlapping stages, each using a fundamentally different search method on a distinct data source. No redundancy. Priority ordering with MMR reranking for diversity.

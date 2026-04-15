@@ -1368,3 +1368,81 @@ Bridge class IS the skeleton — it owns all slot lifecycles. No separate `creat
 - abmind: 32 files, 359 tests
 - agentbridge: 60 files, 572 tests
 - Total: 92 files, 931 tests
+
+
+---
+
+## Multi-User System
+
+Family-scale multi-user (2-4 people) on one bridge instance. Isolated sessions, classification-based memory privacy.
+
+### Roles
+
+| Role | Transport | Tools | Memory | Injection scan |
+|---|---|---|---|---|
+| master | any (configured) | all | full (read/write all classes) | skip (trusted) |
+| user | Direct API only | per-user from config | shared pool (class 0-1), no class 2+ | ✓ |
+| guest | Direct API only | none | context window only, no DB writes | ✓ |
+
+### Auth
+
+`~/.agentbridge/config/users.json` — single file for all users including runtime-approved guests. `deploy.sh` never overwrites if exists. Fallback: `ALLOWED_USER_IDS` → all master.
+
+```typescript
+interface UserEntry {
+  userId: string;
+  displayName?: string;
+  role: "master" | "user" | "guest";
+  maxClass: number;       // 0=UNCLASSIFIED, 1=RESTRICTED, 2=CONFIDENTIAL, 3=SECRET
+  tools: string[];        // ["all"] or ["web_fetch"] or []
+  platforms: { telegram?: number; discord?: string };
+}
+```
+
+### Session key
+
+`{userId}:{platform}` — e.g. `aksika:telegram`, `adrika:discord`. Resolved from user registry at adapter level.
+
+### SecurityGate
+
+Takes `UserRegistry`, returns `AuthResult` with `UserEntry`. `authorizeById()` for legacy compat. Unknown senders silently rejected.
+
+### Classification & recall
+
+```sql
+WHERE classification <= :maxClass AND (classification <= 1 OR user_id = :userId)
+```
+
+- Class 0-1: shared pool — visible to anyone with sufficient clearance
+- Class 2+: private to the storing user
+- Master (maxClass=3): sees everything, class 3 for internal reasoning only
+- Confidentiality signals ("between us", "keep this private") → class 2 during sleep extraction
+
+### No-attribution rule
+
+Agent uses shared knowledge naturally but NEVER attributes it to another user. Enforced via SOUL.md prompt instruction.
+
+### Commands
+
+Non-master users blocked from owner-only commands (⛔). Allowed: `/new`, `/reset`, `/stop`, `/status`, `/help`. Master-only: `/users approve|revoke`, `/models`, `/compact`, `/coding`, `/tasks`, `/memory`, etc.
+
+### Wake-up per role
+
+- Master: full ABM wake-up (core memories, timelines, emotional highlights)
+- User: friendly session start
+- Guest: "Hi! How can I help?"
+
+### Per-user profiles
+
+`persona/core/user_profile_{userId}.md` — loaded at session start. Falls back to `user_profile.md`.
+
+### Guest lifecycle
+
+- Approved via `/users approve <platformId>` → appended to users.json
+- Context window only — no DB writes
+- Context fills → session resets (like /new)
+- Revoked via `/users revoke <userId>`
+
+### Cron delivery
+
+Always to master's main channel (`MAIN_CHAT_ID`). Never to non-master users.
