@@ -122,7 +122,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           const sleepNote = hwEnabled ? ` Hardware sleep in ~${hwSleepMin} minutes if no activity.` : "";
 
           if (opts.sendSystemMessage) {
-            opts.sendSystemMessage(`${dreamReport}${sleepNote} Send the user a brief, friendly dream report — highlight what was done and flag any issues.`).catch(() => {});
+            opts.sendSystemMessage(`${dreamReport}${sleepNote} Send the user a brief, friendly dream report — highlight what was done and flag any issues. Do not use any tools. Respond with text only.`).catch(() => {});
           }
 
           if (hwEnabled) {
