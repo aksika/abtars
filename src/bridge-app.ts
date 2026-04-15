@@ -752,6 +752,7 @@ export async function startBridge(): Promise<void> {
     doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
     startSleep: () => { sleepHandle?.spawn(); },
     checkHwSleep: (qt, rt) => { sleepHandle?.checkHwSleep(qt, rt); },
+    cronBusy: () => cronQueue.currentJob !== null || cronQueue.pending > 0,
   }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
