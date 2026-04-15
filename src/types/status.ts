@@ -13,6 +13,7 @@ export type StatusSnapshot = {
   cron: CronEntryStatus[];
   notebooklm: { enabled: boolean } | null;
   gwsAuth: boolean;
+  xAuth: boolean;
   agentApi: { traffic: TrafficEntry[] } | null;
 };
 

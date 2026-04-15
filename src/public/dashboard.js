@@ -210,6 +210,14 @@ function formatBytes(bytes) {
       }
     }
 
+    // Auth indicators
+    var authGws = document.getElementById('auth-gws');
+    if (authGws) authGws.innerHTML = '<span class="auth-dot ' + (snap.gwsAuth ? 'ok' : 'no') + '"></span>' + (snap.gwsAuth ? 'Authenticated' : 'Not configured');
+    var authNlm = document.getElementById('auth-nlm');
+    if (authNlm) authNlm.innerHTML = '<span class="auth-dot ' + (snap.notebooklm && snap.notebooklm.enabled ? 'ok' : 'no') + '"></span>' + (snap.notebooklm && snap.notebooklm.enabled ? 'Active' : 'Disabled');
+    var authX = document.getElementById('auth-x');
+    if (authX) authX.innerHTML = '<span class="auth-dot ' + (snap.xAuth ? 'ok' : 'no') + '"></span>' + (snap.xAuth ? 'Authenticated' : 'No cookies');
+
     // Cron entries
     if (snap.cron) {
       updateCronPanel(snap.cron);
@@ -575,6 +583,11 @@ function formatBytes(bytes) {
   connect();
 
   // ── Memory Universe Loader ──────────────────────────────────────────
+  window.toggleOverlay = function(id) {
+    var el = document.getElementById(id);
+    if (el) el.style.display = el.style.display === 'none' ? 'flex' : 'none';
+  };
+
   window.loadMemoryUniverse = function() {
     if (document.getElementById('memory-universe-overlay')) return;
     var s = document.createElement('script');

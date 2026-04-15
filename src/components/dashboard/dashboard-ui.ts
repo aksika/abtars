@@ -70,19 +70,16 @@ ${getHeaderHtml(logoBase64)}
 <div id="connection-banner" class="connection-banner" style="display:none;">
   Connection lost. Reconnecting<span id="reconnect-dots">...</span>
 </div>
-<div class="dashboard-layout">
-<div class="main-area">
 <main class="grid">
   ${getBridgeHealthCard()}
   ${getPlatformsCard(agentHtml)}
   ${getMemoryCard()}
   ${getCronCard()}
+  ${getAuthCard()}
 </main>
-${getSearchPanel()}
+${getSearchOverlay()}
+${getLogOverlay()}
 ${getA2APanel()}
-</div>
-${getLogPanel()}
-</div>
 <script>
 ${loadJs()}
 </script>
@@ -238,9 +235,10 @@ function getMemoryCard(): string {
     </div>
   </div>
   <hr style="border-color:#0f3460;margin:12px 0;">
-  <div style="display:flex;gap:8px;">
-    <button class="btn-search-toggle" onclick="toggleSearchPanel()">🔍 Search Memory</button>
-    <button class="btn-search-toggle" onclick="loadMemoryUniverse()">🌌 Memory Universe</button>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button class="btn-search-toggle" onclick="loadMemoryUniverse()">🌌 Universe</button>
+    <button class="btn-search-toggle" onclick="toggleOverlay('search-overlay')">🔍 Search</button>
+    <button class="btn-search-toggle" onclick="toggleOverlay('log-overlay')">📋 Log</button>
   </div>
 </div>`;
 }
@@ -255,29 +253,46 @@ function getCronCard(): string {
 </div>`;
 }
 
-function getLogPanel(): string {
+function getAuthCard(): string {
   return `
-<div class="log-panel">
-  <div class="log-panel-header">
-    <h2>📋 Log (24h)</h2>
-    <div class="log-level-filters">
-      <button class="log-level-btn lvl-info active" onclick="toggleLogLevel('info')">info</button>
-      <button class="log-level-btn lvl-warn active" onclick="toggleLogLevel('warn')">warn</button>
-      <button class="log-level-btn lvl-error active" onclick="toggleLogLevel('error')">error</button>
-      <button class="log-level-btn lvl-debug" onclick="toggleLogLevel('debug')">debug</button>
-    </div>
-  </div>
-  <div class="log-entries" id="log-entries"></div>
+<div class="card" id="card-auth">
+  <h2>Services</h2>
+  <div class="stat-row"><span class="stat-label">Gmail (gws)</span><span class="stat-value" id="auth-gws">—</span></div>
+  <div class="stat-row"><span class="stat-label">NotebookLM</span><span class="stat-value" id="auth-nlm">—</span></div>
+  <div class="stat-row"><span class="stat-label">X.com</span><span class="stat-value" id="auth-x">—</span></div>
 </div>`;
 }
 
-function getSearchPanel(): string {
+function getLogOverlay(): string {
   return `
-<div id="search-panel" class="search-panel" style="display:none;">
-  <div class="search-panel-header">
+<div id="log-overlay" class="overlay-panel" style="display:none;">
+  <div class="overlay-header">
+    <h2>📋 Log (24h)</h2>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <div class="log-level-filters">
+        <button class="log-level-btn lvl-info active" onclick="toggleLogLevel('info')">info</button>
+        <button class="log-level-btn lvl-warn active" onclick="toggleLogLevel('warn')">warn</button>
+        <button class="log-level-btn lvl-error active" onclick="toggleLogLevel('error')">error</button>
+        <button class="log-level-btn lvl-debug" onclick="toggleLogLevel('debug')">debug</button>
+      </div>
+      <button class="btn-close-overlay" onclick="toggleOverlay('log-overlay')">✕</button>
+    </div>
+  </div>
+  <div class="log-entries overlay-body" id="log-entries" style="font-size:0.82rem;"></div>
+</div>`;
+}
+
+function getSearchOverlay(): string {
+  return `
+<div id="search-overlay" class="overlay-panel" style="display:none;">
+  <div class="overlay-header">
+    <h2>🔍 Memory Search</h2>
+    <button class="btn-close-overlay" onclick="toggleOverlay('search-overlay')">✕</button>
+  </div>
+  <div class="overlay-body">
     <div class="search-panel-row">
       <div class="search-box" style="margin:0;">
-        <input type="text" id="mem-chatid-input" placeholder="0 = all chats" style="width:100px;text-align:center;flex:none;">
+        <input type="text" id="mem-userid-input" placeholder="all users" style="width:100px;text-align:center;flex:none;">
         <button onclick="listChatIds()">LIST</button>
       </div>
       <div class="layer-toggles" id="layer-toggles" style="margin:0;">
@@ -299,8 +314,8 @@ function getSearchPanel(): string {
       <button class="btn-search" onclick="searchMemory()">Search</button>
     </div>
     <div id="keyword-filters" class="keyword-filters"></div>
+    <div class="search-results" id="mem-search-results"></div>
   </div>
-  <div class="search-results" id="mem-search-results"></div>
 </div>`;
 }
 
