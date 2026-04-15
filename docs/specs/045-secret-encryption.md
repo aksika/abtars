@@ -11,33 +11,40 @@ Encrypt classification=3 (SECRET) memory content at rest using machine-bound AES
 
 ## Design Decisions
 
-1. **Machine-bound key** — derive encryption key from `/etc/machine-id` on first run, persist to `~/.abmind/secret/abmind.key`. Copy to `~/.agentbridge/secret/abmind.key` for centralized backup.
+1. **Random key** — 32 random bytes generated once on first run, stored at `~/.abmind/secret/abmind.key`. Copied to `~/.agentbridge/secret/abmind.key` for backup recovery.
 2. **Encrypt-only lifecycle** — SECRET rows are never decrypted back to plaintext in the DB. No reclassify-from-3 path. If the agent needs a lower-classification version, it reads via `--user-override` and creates a new sanitized memory at a lower classification.
 3. **`--user-override` for read** — the only decrypt path. Agent must have explicit user permission to read SECRET content.
 4. **FTS5 exclusion** — encrypted rows are removed from FTS5 index. Already excluded from recall by the classification hard cap (≤ 2), so no functional loss.
 
-## Key Derivation
+## Key Generation
 
 ```
-machine_id = read("/etc/machine-id").trim()          // e.g. "e150b7283f594e85a2046bbb169a2355"
-key        = PBKDF2(machine_id, salt="abmind-v1", iterations=100000, keylen=32, digest=sha256)
+key = crypto.randomBytes(32)
+→ write as 64-char hex string to ~/.abmind/secret/abmind.key (chmod 600)
+→ copy to ~/.agentbridge/secret/abmind.key (backup convenience, not a security measure)
 ```
+
+No PBKDF2, no machine-id. The key is 32 random bytes stored as 64 hex chars (same format as existing `db.key`). Machine-binding comes from the key file living on that machine. Anyone with file access to `abmind.key` already has the key — deriving from machine-id adds nothing.
+
+Two keys, two purposes:
+- **`db.key`** — whole-DB encryption for git backup (`openssl aes-256-cbc`, bash)
+- **`abmind.key`** — per-row SECRET content encryption (`AES-256-GCM`, Node.js crypto)
 
 ### Key file locations
 
 - **Primary:** `~/.abmind/secret/abmind.key` (dir chmod 700, file chmod 600)
-- **Backup copy:** `~/.agentbridge/secret/abmind.key` (managed by agentbridge daily backup)
+- **Backup copy:** `~/.agentbridge/secret/abmind.key` (recovery convenience — covered by daily backup)
 
 ### First run
 
 1. If `~/.abmind/secret/abmind.key` exists → use it
-2. Else: read `/etc/machine-id`, derive key via PBKDF2, write to `~/.abmind/secret/abmind.key`
-3. If `~/.agentbridge/secret/` exists → copy key there (backup convenience)
+2. Else: `crypto.randomBytes(32)` → write to `~/.abmind/secret/abmind.key`
+3. If `~/.agentbridge/secret/` exists → copy key there
 
 ### Fallback
 
 - `ABMIND_KEY_FILE` env var overrides the path
-- If no machine-id and no key file → refuse to store classification=3, log warning
+- If no key file and can't create one → refuse to store classification=3, log warning
 
 ### Key rotation
 
@@ -51,6 +58,11 @@ abmind rekey --old-key <path-to-old-keyfile>
   → report: "Re-encrypted N memories with new key"
 ```
 
+### Limitations
+
+- Key file is plaintext on disk. macOS Keychain (`security add-generic-password`) would be more secure — future enhancement.
+- Backup copy in `~/.agentbridge/secret/` is for recovery, not security. Same-machine access to DB likely means access to the key file too.
+
 ## Encryption Scheme
 
 - **Algorithm:** AES-256-GCM (authenticated — detects tampering)
@@ -59,7 +71,7 @@ abmind rekey --old-key <path-to-old-keyfile>
 - **Marker:** `encrypted INTEGER DEFAULT 0` column on `extracted_memories`. 1 = content is encrypted. No prefix parsing, no ambiguity.
 - **Encrypted columns:** `content_en`, `content_original`
 - **Not encrypted:** metadata (id, memory_type, emotion tags, importance flags, timestamps, classification) — needed for queries and sleep maintenance
-- **Key caching:** `deriveKey()` called once per process, result cached in module scope. PBKDF2 100K iterations (~100ms) only on first call.
+- **Key caching:** Key read from file once per process, cached in module scope.
 
 ## Flows
 
@@ -67,12 +79,11 @@ abmind rekey --old-key <path-to-old-keyfile>
 
 ```
 abmind store --translated "sk-proj-abc123..." --memory-type fact --classification 3
-  → deriveKey() (cached)
+  → loadKey() (cached)
   → encrypt(content_en) → encrypted blob in content_en column
   → encrypt(content_original) → encrypted blob in content_original column
-  → SET encrypted = 1
+  → INSERT with encrypted blobs + encrypted = 1 (metadata unencrypted)
   → DELETE from FTS5 index for this row
-  → INSERT as normal (metadata unencrypted)
 ```
 
 ### Recall (normal)
@@ -89,7 +100,7 @@ abmind recall --translated "api key"
 ```
 abmind recall --translated "api key" --user-override
   → recall by metadata (id, memory_type, timestamps) — not FTS5
-  → deriveKey() (cached)
+  → loadKey() (cached)
   → decrypt(content_en), decrypt(content_original)
   → return plaintext to caller
 ```
@@ -104,13 +115,13 @@ abmind list-secrets
   → user picks ID, then: abmind recall --memory-id 42 --user-override
 ```
 
-Solves discoverability: user can find SECRET memories by metadata without needing FTS5 search on encrypted content.
+Solves discoverability: user can find SECRET memories by metadata without needing FTS5 search on encrypted content. For a small number of SECRET memories (typical — tokens, credentials) this is sufficient. No content-based search is possible on encrypted rows.
 
 ### Reclassify TO 3
 
 ```
 abmind edit --memory-id 42 --classification 3
-  → deriveKey() (cached)
+  → loadKey() (cached)
   → encrypt existing plaintext content_en, content_original
   → SET encrypted = 1
   → UPDATE row with encrypted blobs
@@ -137,37 +148,24 @@ Sleep (Dreamy) skips classification=3 rows. Already enforced by the classificati
 
 ## Prerequisite: agentbridge `titok/` → `secret/` migration
 
-Separate task. Rename `~/.agentbridge/titok/` to `~/.agentbridge/secret/`, chmod 700. Update all references:
-
-| File | Change |
-|---|---|
-| `scripts/daily-backup.sh` | `titok/db.key` → `secret/db.key` |
-| `scripts/doctor.sh` | `titok` → `secret` |
-| `scripts/deploy.sh` | `titok/` → `secret/` |
-| `scripts/browser-patchright.sh` | `titok/cookies` → `secret/cookies` |
-| `src/cli/agentbridge-tweet.ts` | `titok/cookies/` → `secret/cookies/` |
-| `.gitignore` | `titok/` → `secret/` |
-| docs (4 files) | update references |
-
-Runtime migration in `doctor.sh`: if `titok/` exists and `secret/` doesn't, `mv titok secret && chmod 700 secret`.
+✅ **Done.** Deployed on both WSL and Mac.
 
 ## Implementation
 
 | Step | What | File | Effort |
 |---|---|---|---|
-| 1 | Key init: read/generate key, write to `~/.abmind/secret/`, copy to `~/.agentbridge/secret/` | `src/crypto.ts` | 20 min |
-| 2 | `deriveKey()` — PBKDF2 from key file, cache in memory | `src/crypto.ts` | 15 min |
-| 3 | `encrypt(plaintext)` / `decrypt(blob)` — AES-256-GCM | `src/crypto.ts` | 20 min |
-| 4 | Migration: add `encrypted INTEGER DEFAULT 0` column | `src/db/` | 5 min |
-| 5 | Hook store: encrypt on classification=3 INSERT | `src/memory-manager.ts` | 15 min |
-| 6 | Hook edit: encrypt on reclassify to 3 | `src/memory-manager.ts` | 10 min |
-| 7 | FTS5 exclusion for encrypted rows | `src/db/` | 10 min |
+| 1 | Key init: generate or read key, write to `~/.abmind/secret/`, copy to `~/.agentbridge/secret/` | `src/crypto.ts` | 15 min |
+| 2 | `encrypt(plaintext)` / `decrypt(blob)` — AES-256-GCM | `src/crypto.ts` | 20 min |
+| 3 | Migration: add `encrypted INTEGER DEFAULT 0` column | `src/db/` | 5 min |
+| 4 | Hook store: encrypt on classification=3 INSERT | `src/memory-manager.ts` | 15 min |
+| 5 | Hook edit: encrypt on reclassify to 3 | `src/memory-manager.ts` | 10 min |
+| 6 | FTS5 exclusion for encrypted rows | `src/db/` | 10 min |
 | 7 | `--user-override` decrypt in recall | `src/recall-engine.ts` | 15 min |
 | 8 | `abmind list-secrets` CLI command | `src/cli/` | 15 min |
 | 9 | `abmind encrypt-secrets` migration CLI | `src/cli/` | 15 min |
 | 10 | `abmind rekey --old-key` CLI command | `src/cli/` | 15 min |
 | 11 | Tests | `tests/crypto.test.ts` | 30 min |
-| **Total** | | | **~3 hr** |
+| **Total** | | | **~2.5 hr** |
 
 ## What This Does NOT Cover
 
@@ -185,6 +183,5 @@ None. Node.js `crypto` module only.
 | Risk | Mitigation |
 |---|---|
 | Key file lost | Backed up in both `~/.abmind/secret/` and `~/.agentbridge/secret/` (daily backup covers agentbridge) |
-| Machine-id changes (OS reinstall) | Key file persists independently. Only matters on first-ever generation. |
 | WSL reset | Key file in `~/.abmind/secret/` lost if home is wiped. Restore from `~/.agentbridge/secret/` backup. `abmind rekey` if both lost. |
-| No machine-id (macOS, container) | `ABMIND_KEY_FILE` env var, or manually create `~/.abmind/secret/abmind.key` |
+| Key file is plaintext on disk | Acceptable for local single-user. macOS Keychain integration is a future enhancement. |

@@ -383,6 +383,12 @@ export class Bridge {
 }
 
 export async function startBridge(): Promise<void> {
+  // Ensure ~/.agentbridge/bin is in PATH for child processes (kiro-cli, gemini-cli)
+  const binDir = join(agentBridgeHome(), "bin");
+  if (!process.env["PATH"]?.includes(binDir)) {
+    process.env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`;
+  }
+
   const platforms = parsePlatformFlags();
   const config = await loadAndValidateConfig();
   if (platforms.transport) config.transport.agentTransport = platforms.transport;
