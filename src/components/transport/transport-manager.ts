@@ -85,7 +85,9 @@ export class TransportManager implements IKiroTransport {
   /** Proxy currentModel from active transport if available. */
   get currentModel(): string | undefined {
     const t = this.active;
-    return "currentModel" in t ? (t as unknown as { currentModel: string }).currentModel : undefined;
+    if ("currentModel" in t) return (t as unknown as { currentModel: string }).currentModel;
+    if ("getModel" in t) return (t as unknown as { getModel: () => string }).getModel();
+    return undefined;
   }
 
   /** Proxy setModel to active transport if available. */
