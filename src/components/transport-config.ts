@@ -3,7 +3,7 @@
  * Falls back to .env defaults if JSON is broken.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "../paths.js";
 import { logInfo, logWarn, logError } from "./logger.js";
@@ -182,7 +182,6 @@ export function validateAtStartup(): void {
 
 export function writeTransportConfig(tc: TransportConfig): void {
   const p = join(configDir(), process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
-  const { writeFileSync } = require("node:fs") as typeof import("node:fs");
   writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
   cachedTransport = tc;
   logInfo(TAG, "transport.json updated");
