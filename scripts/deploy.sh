@@ -156,7 +156,7 @@ fi
 echo "📦 Copying runtime..."
 cp "$PROJECT_DIR/package.json" "$AB_HOME/package.json"
 rsync -a --delete "$PROJECT_DIR/dist/" "$AB_HOME/dist/"
-rsync -a --delete "$PROJECT_DIR/node_modules/" "$AB_HOME/node_modules/"
+rsync -aL --delete "$PROJECT_DIR/node_modules/" "$AB_HOME/node_modules/"
 
 # abmind is now a file: dependency — npm install handles it, no manual symlink needed
 
