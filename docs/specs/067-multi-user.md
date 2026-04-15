@@ -3,7 +3,7 @@
 **Date:** 2026-04-14
 **Status:** Planned
 **Priority:** HIGH
-**Depends on:** #145 (restrict passthrough commands)
+**Depends on:** #145 (done — restrict passthrough commands)
 
 ## Goal
 
@@ -26,6 +26,7 @@ Family-scale multi-user (2-4 people) on one bridge instance. Isolated sessions, 
   "users": [
     {
       "userId": "aksika",
+      "displayName": "aksika",
       "role": "master",
       "maxClass": 3,
       "tools": ["all"],
@@ -33,6 +34,7 @@ Family-scale multi-user (2-4 people) on one bridge instance. Isolated sessions, 
     },
     {
       "userId": "adrika",
+      "displayName": "Adrika",
       "role": "user",
       "maxClass": 1,
       "tools": ["web_fetch"],
@@ -51,27 +53,51 @@ Guest: approved at runtime via `/users approve <platformId>`, appended to `users
 | Class | Label | Description |
 |---|---|---|
 | 0 | World | Public knowledge, visible to everyone |
-| 1 | Internal | Family/project knowledge |
-| 2 | Master | Private to master |
+| 1 | Internal | Family/project knowledge — shared, no attribution |
+| 2 | Confidential | Private to the storing user |
 | 3 | Non-disclosed | Secret — agent uses internally, never outputs in chat |
 
-**Per-user maxClass** set in .env. Controls what the agent can recall for that user.
+**Per-user maxClass** set in users.json. Controls what the agent can recall for that user.
 
-- **Master (maxClass=3):** Agent recalls everything. Class 3 memories are used for internal reasoning but NEVER disclosed in chat responses. Enforced via SOUL.md prompt instruction.
-- **User (maxClass=0-2):** Recall query filters `WHERE classification <= maxClass`. Memories above their level never enter the context. No output filtering needed — data simply isn't there.
-- **Guest (maxClass=0):** World only. Hardcoded.
+### Recall logic
 
-Store defaults:
-- Master: classification=1 (can store any level 0-3)
-- User: classification=1 (can store up to their maxClass)
-- Guest: cannot store
+Class 0-1 memories are shared knowledge — visible to anyone with sufficient clearance, regardless of who stored them. Class 2+ memories are private to the owner.
+
+```sql
+WHERE classification <= :maxClass AND (classification <= 1 OR user_id = :userId)
+```
+
+- **Master (maxClass=3):** Sees everything. Class 3 used for internal reasoning, never disclosed.
+- **User (maxClass=1):** Sees all class 0-1 memories (shared pool). Cannot see class 2+ from any user.
+- **Guest (maxClass=0):** World only.
+
+### No-attribution rule (SOUL.md)
+
+When talking to non-master users, the agent uses shared knowledge naturally but NEVER attributes it:
+- ✓ "React uses JSX for templating" (uses knowledge)
+- ✗ "Aksika mentioned that React uses JSX" (attributes to another user)
+- ✓ "Pink would look great!" (uses preference knowledge)
+- ✗ "You told me last time you like pink" (references past conversation directly is OK — it's the user's own)
+
+### Confidentiality signals
+
+During sleep extraction, if the user explicitly requests confidentiality ("between us", "don't tell anyone", "keep this private"), the memory is stored at class 2 (CONFIDENTIAL) instead of the default class 1. Detected by the LLM during extraction — no regex, natural language understanding.
+
+### Store defaults
+
+- Master: default class 1, can store any level 0-3. Confidentiality signals → class 2.
+- User: default class 1, can store up to their maxClass. 
+- Guest: cannot store.
 
 ## Transport
 
-- Master: uses configured transport from transport.json (ACP, Direct API, any provider)
-- User/Guest: always Direct API with `tools: []` (no tool calls). Same endpoint/model as master's Direct API provider. Separate session per user.
+- Master: uses configured transport from transport.json (ACP or Direct API)
+- User: always Direct API with tools from users.json (e.g. `["web_fetch"]`). Separate session per user.
+- Guest: always Direct API with `tools: []` (no tool calls).
 
-Constraint: user/guest only go through API. No ACP/kiro/gemini CLI sessions — avoids multi-user CLI conflicts.
+**Concurrent sessions:** DirectApiTransport is stateless — each sendPrompt() sends a full message array. Two users calling simultaneously make two HTTP requests. With OLLAMA_NUM_PARALLEL=2, they run concurrently. No per-user transport instance needed.
+
+Constraint: user/guest always go through Direct API. No ACP for non-master — avoids CLI session conflicts. Master can also be on Direct API (both master and users share the same API endpoint). Requires at least one API provider in transport.json when users.json has non-master users (validated at startup).
 
 ## Commands
 
@@ -93,11 +119,24 @@ Non-master commands blocked with: "⛔ Owner-only command."
 | | Master | User | Guest |
 |---|---|---|---|
 | Messages in DB | ✓ | ✓ | ✗ (context window only) |
-| Sleep extracts | ✓ | ✗ (ignored) | ✗ |
+| Sleep extraction | full (darwinism, promotion, merge, timelines) | lightweight (facts + preferences only) | ✗ |
 | Daily summaries | ✓ | ✗ | ✗ |
-| Recall | class ≤ maxClass | class ≤ maxClass | class ≤ 0 |
-| Store | any class (0-3) | up to maxClass | ✗ |
+| Recall | class ≤ 3 (shared + private + non-disclosed) | class ≤ maxClass (shared pool, no attribution) | class ≤ 0 |
+| Store | any class (0-3) | class 0-1 | ✗ |
 | Wake-up | full ABM | last-session summary | "Hi! How can I help?" |
+| Guest session lifecycle | n/a | n/a | context fills → session resets (like /new). No compaction. |
+
+### User extraction (lightweight)
+
+Sleep scans user conversations and extracts:
+- Facts: "we have a black Tesla", "my birthday is March 5"
+- Preferences: "I love pink nails", "I prefer dark mode"
+- Relationships: "my best friend is Anna"
+
+Skips: opinions on technical topics, work discussions, emotional processing.
+Tagged with `user_id` so the agent knows WHO said it.
+Classification: class 1 (family knowledge) — master and other users benefit.
+No promotion to core, no merge, no darwinism — just store and recall.
 
 ## Session key
 
@@ -105,19 +144,7 @@ Non-master commands blocked with: "⛔ Owner-only command."
 
 ## User registry
 
-Parsed at startup from users.json:
-
-```typescript
-interface UserEntry {
-  userId: string;
-  role: "master" | "user" | "guest";
-  maxClass: number;          // 0-3
-  displayName?: string;
-  platforms: { telegram?: number; discord?: string };
-  lastPlatform?: string;     // delivery context
-  lastChatId?: number | string;
-}
-```
+Parsed at startup from users.json. See schema in Phase 0. Runtime fields added: `lastPlatform` (delivery context — which platform user last messaged from), `lastChatId` (for cron/reminder delivery).
 
 ## Master-only commands
 
@@ -129,7 +156,7 @@ interface UserEntry {
 
 ## Implementation
 
-### Phase 0 — User definitions + core injection (~1hr)
+### Phase 0 — User definitions + core injection ✅ DONE
 
 Foundation: define users in `~/.agentbridge/config/users.json`, parse at startup, inject user context into sessions.
 
@@ -148,6 +175,7 @@ interface UserEntry {
   role: "master" | "user" | "guest";
   maxClass: number;       // 0-3 (NATO classification)
   tools: string[];        // ["all"] or ["web_fetch"] or []
+  displayName?: string;   // human-readable name for dashboard + logs
   platforms: {
     telegram?: number;
     discord?: string;
@@ -188,31 +216,33 @@ This lets the agent:
 | 10 | Update cronCallback session key: `telegram:{chatId}` → `{userId}:{platform}` | 15 min |
 | 11 | Tests | 30 min |
 
-### Phase 2 — Memory separation (~2hr)
+### Phase 2 — Memory separation (~3hr)
 
 Schema already done (user_id column on all tables, extraction_watermarks keyed by user_id, migration defaults to master). Only wiring remains.
 
 | Step | What | Time |
 |---|---|---|
-| 12 | Recall: add `WHERE user_id = ? AND classification <= ?` filter | 30 min |
+| 12 | Recall: `WHERE classification <= :maxClass AND (classification <= 1 OR user_id = :userId)` | 30 min |
 | 13 | Store: tag with userId, enforce maxClass limit per role | 15 min |
-| 14 | Sleep: filter extraction to master's user_id only | 15 min |
-| 15 | Guest: skip DB write entirely (context window only) | 15 min |
-| 16 | Wake-up: master=full ABM, user=last-session summary, guest=generic | 30 min |
-| 17 | Tests | 15 min |
+| 14 | Sleep master extraction: full processing, confidentiality signal detection → class 2 | 30 min |
+| 15 | Sleep user extraction: lightweight facts + preferences pass, class 1, tagged with userId | 30 min |
+| 16 | Guest: skip DB write entirely (context window only, reset on full) | 10 min |
+| 17 | Wake-up: master=full ABM, user=last-session summary, guest="Hi! How can I help?" | 30 min |
+| 18 | SOUL.md: no-attribution rule + confidentiality signal instruction | 15 min |
+| 19 | Tests | 15 min |
 
 ### Phase 3 — Profiles + polish (~2hr)
 
 | Step | What | Time |
 |---|---|---|
-| 18 | `user_profile_{userId}.md` per user | 30 min |
-| 19 | Session-start injects correct user profile | 15 min |
-| 20 | SOUL.md: class 3 non-disclosure rule | 15 min |
-| 21 | displayName in registry → dashboard + logs | 15 min |
-| 22 | Document security model (classification = privacy, not enforcement) | 15 min |
-| 23 | End-to-end test: master + user simultaneous | 30 min |
+| 20 | `user_profile_{userId}.md` per user | 30 min |
+| 21 | Session-start injects correct user profile | 15 min |
+| 22 | SOUL.md: class 3 non-disclosure rule | 15 min |
+| 23 | displayName in registry → dashboard + logs | 15 min |
+| 24 | Document security model (classification = privacy, not enforcement) | 15 min |
+| 25 | End-to-end test: master + user simultaneous | 30 min |
 
-**Total: ~10hr. Phase 0 alone gives the agent user awareness.**
+**Total: ~11hr. Phase 0 done. Phase 1 is the next milestone.**
 
 ## Schema (already done)
 
@@ -222,15 +252,30 @@ Schema already done (user_id column on all tables, extraction_watermarks keyed b
 
 - Agent personality (SOUL.md, agent_notes.md)
 - Skills (master only uses them via tools, but they're loaded once)
-- Cron system (master's tasks)
+- Cron system (master's tasks, always delivered to master's main channel)
 - Dashboard (master access only)
 - Model/endpoint config
+
+## Main channel
+
+Cron results, system notifications, and task reports always go to the master's main channel. Defined in .env:
+
+```env
+# Master's primary delivery channel (default: telegram)
+MAIN_CHANNEL=telegram
+```
+
+Resolves to master's telegram chatId from users.json. Never delivers cron results to non-master users.
 
 ## Migration
 
 - `ALLOWED_USER_IDS` → `users.json` (if no users.json, ALLOWED_USER_IDS treated as all-master fallback)
 - Existing memories: `user_id` already defaults to master's userId (done in abmind schema)
 - Existing session keys (`telegram:123`) → mapped to userId on first message
+
+## Deploy
+
+`deploy.sh` never overwrites `config/users.json` if it exists (same pattern as .env). Guests approved at runtime persist across deploys.
 
 ## Security notes
 

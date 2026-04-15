@@ -417,7 +417,7 @@ export async function startBridge(): Promise<void> {
     (transport as unknown as { onFallback: (model: string, ctxPct: number) => void }).onFallback = (model, ctxPct) => {
       const msg = `⚡ Fallback: ${model}${ctxPct >= 0 ? ` (ctx: ~${ctxPct}%)` : ""}`;
       logInfo("main", msg);
-      const chatId = [...config.telegram.allowedUserIds][0];
+      const chatId = config.mainChatId;
       if (chatId && bridge.telegramAdapter) {
         bridge.telegramAdapter.sendNotification(String(chatId), msg);
       }
@@ -616,7 +616,7 @@ export async function startBridge(): Promise<void> {
   // --- Startup notification (async, non-blocking) ---
   if (memoryConfig.memoryEnabled) {
     const tgSend = bridge.telegramAdapter ? async (msg: string): Promise<void> => {
-      const chatId = [...config.telegram.allowedUserIds][0];
+      const chatId = config.mainChatId;
       if (chatId) await bridge.telegramAdapter!.sendMessage(String(chatId), msg);
     } : undefined;
     const dcSend = bridge.discordAdapter ? async (msg: string): Promise<void> => {
@@ -629,7 +629,7 @@ export async function startBridge(): Promise<void> {
 
     // Start session: inject SOUL + context + greeting, push response to Telegram
     if (bridge.telegramAdapter && memory) {
-      const chatId = [...config.telegram.allowedUserIds][0];
+      const chatId = config.mainChatId;
       if (chatId) {
         const sessionKey = `telegram:${chatId}`;
         seenSessions.add(sessionKey);
@@ -739,7 +739,7 @@ export async function startBridge(): Promise<void> {
 
   // --- System message sender (generic, any component can use) ---
   const { initSystemMessage, sendSystemMessage } = await import("./components/system-message.js");
-  const primaryChatId = String([...config.telegram.allowedUserIds][0] ?? "");
+  const primaryChatId = String(config.mainChatId ?? "");
   initSystemMessage(async (prompt: string) => {
     try {
       const response = await transport.sendPrompt(primaryChatId, `[SYSTEM] ${prompt}`);

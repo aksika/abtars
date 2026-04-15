@@ -50,6 +50,7 @@ export type ModelConfig = {
 
 /** Bridge configuration loaded from .env and validated at startup. */
 export type Config = {
+  mainChatId: string;
   telegram: TelegramConfig;
   discord: DiscordConfig;
   transport: TransportConfig;

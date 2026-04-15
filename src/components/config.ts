@@ -289,7 +289,10 @@ export async function loadAndValidateConfig(): Promise<Config> {
     CONFIG_DEFAULTS.discord.a2aRateLimitMs,
   );
 
+  const mainChatId = process.env["MAIN_CHAT_ID"] ?? String([...allowedUserIds][0] ?? "");
+
   return {
+    mainChatId,
     telegram: {
       botToken: token,
       allowedUserIds,
