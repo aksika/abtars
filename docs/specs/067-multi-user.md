@@ -256,16 +256,17 @@ Schema already done (user_id column on all tables, extraction_watermarks keyed b
 - Dashboard (master access only)
 - Model/endpoint config
 
-## Main channel
+## Main channel ✅ DONE
 
 Cron results, system notifications, and task reports always go to the master's main channel. Defined in .env:
 
 ```env
-# Master's primary delivery channel (default: telegram)
-MAIN_CHANNEL=telegram
+# Master's primary Telegram chatId — cron results, system notifications, task reports
+# Defaults to first ALLOWED_USER_IDS if not set
+MAIN_CHAT_ID=7773842843
 ```
 
-Resolves to master's telegram chatId from users.json. Never delivers cron results to non-master users.
+Replaces the `[...allowedUserIds][0]` hack. Falls back to first ALLOWED_USER_IDS for backward compat. Never delivers cron results to non-master users.
 
 ## Migration
 
