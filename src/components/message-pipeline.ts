@@ -70,7 +70,7 @@ export interface MemoryDeps {
   conversationBuffer: ConversationBuffer;
   idleSave: IdleSave;
   nlmConfig: { enabled: boolean; [k: string]: unknown };
-  updateCtxStart: (memoryDir: string, chatId: number) => void;
+  updateCtxStart: (memoryDir: string, userId: string) => void;
 }
 
 /** Voice processing deps. */
@@ -126,6 +126,11 @@ export async function handleInboundMessage(
   const chatId = ctx.chatId;
   const text = ctx.text;
 
+  // Resolve userId for memory scoping
+  const registry = loadUsers();
+  const platformKey = sessionKey.includes(":") ? sessionKey.split(":")[0] + ":" + String(chatId) : sessionKey;
+  const userId = registry.byPlatformId.get(platformKey)?.userId ?? "master";
+
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   try {
     busyChats.add(sessionKey);
@@ -152,7 +157,7 @@ export async function handleInboundMessage(
     const isSessionStart = pendingSessionStart.has(sessionKey);
 
     if (memory) {
-      prompt = preparePrompt(prompt, memory, chatId, sessionKey, text, pendingSessionStart, seenSessions, msg.messageId);
+      prompt = preparePrompt(prompt, memory, userId, sessionKey, text, pendingSessionStart, seenSessions, msg.messageId);
     }
 
     if (!isSessionStart) {
@@ -314,7 +319,7 @@ export async function handleInboundMessage(
     if (memory) {
       memory.recordMessage({
         role: "assistant", content: cleanAnswer || response,
-        timestamp: Date.now(), chatId, sessionId: sessionKey,
+        timestamp: Date.now(), userId, sessionId: sessionKey,
         platformMessageId: lastSentMsgId,
       });
     }
@@ -357,7 +362,7 @@ export async function handleInboundMessage(
             // Safety-net transcript
             if (memory) {
               memory.maintenance.checkAutoCompact({
-                chatId, sessionId: sessionKey, contextPercent: pct,
+                userId, sessionId: sessionKey, contextPercent: pct,
                 sendCompactCommand: async () => "",
               }).catch(() => {});
             }
@@ -368,7 +373,7 @@ export async function handleInboundMessage(
             compactFailures.delete(sessionKey);
 
             await adapter.sendMessage(channelId, "📦 Compaction complete.", { threadId: msg.threadId });
-            if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, chatId);
+            if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, userId);
           } catch (err) {
             const count = (compactFailures.get(sessionKey) ?? 0) + 1;
             compactFailures.set(sessionKey, count);
@@ -428,12 +433,12 @@ export async function handleInboundMessage(
 export async function startSession(
   transport: IKiroTransport,
   memory: MemoryManager,
-  chatId: number,
+  userId: string,
   sessionKey: string,
   greeting: string,
   sendResponse: (text: string) => Promise<unknown>,
 ): Promise<void> {
-  const prompt = buildSessionStartPrompt(greeting, memory, chatId, sessionKey);
+  const prompt = buildSessionStartPrompt(greeting, memory, userId, sessionKey);
   logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
   const response = await transport.sendPrompt(sessionKey, prompt);
   if (response?.trim() && response.trim() !== "[NO-REPLY]" && response.trim() !== "(no response)") {
@@ -445,7 +450,7 @@ export async function startSession(
 function buildSessionStartPrompt(
   prompt: string,
   memory: MemoryManager,
-  chatId: number,
+  userId: string,
   sessionKey?: string,
 ): string {
   const contextParts: string[] = [];
@@ -466,8 +471,7 @@ function buildSessionStartPrompt(
   if (sessionKey) {
     try {
       const registry = loadUsers();
-      const platformKey = sessionKey.includes(":") ? `telegram:${chatId}` : sessionKey;
-      const user = registry.byPlatformId.get(platformKey);
+      const user = registry.byUserId.get(userId);
       if (user) {
         const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
         contextParts.push(`[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).`);
@@ -475,7 +479,7 @@ function buildSessionStartPrompt(
     } catch { /* registry not available */ }
   }
 
-  const ctx = buildSessionStartContext(memory, chatId);
+  const ctx = buildSessionStartContext(memory, userId);
   if (ctx) {
     contextParts.push(ctx);
     logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
@@ -505,7 +509,7 @@ function buildSessionStartPrompt(
 function preparePrompt(
   prompt: string,
   memory: MemoryManager,
-  chatId: number,
+  userId: string,
   sessionKey: string,
   text: string,
   pending: Set<string>,
@@ -514,10 +518,10 @@ function preparePrompt(
 ): string {
   const isSessionStart = pending.has(sessionKey) || !seen.has(sessionKey);
   if (isSessionStart) {
-    prompt = buildSessionStartPrompt(prompt, memory, chatId, sessionKey);
+    prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey);
   }
   seen.add(sessionKey);
   pending.delete(sessionKey);
-  memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), chatId, sessionId: sessionKey, platformMessageId });
+  memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId });
   return prompt;
 }

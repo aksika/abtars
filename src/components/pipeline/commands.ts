@@ -52,7 +52,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
   }
 
   const cmdCtx: CommandContext = {
-    sessionKey: msg.sessionKey, chatId: ctx.chatId, platform: msg.platform, reply: ctx.reply,
+    sessionKey: msg.sessionKey, chatId: ctx.chatId, userId: ctx.userId ?? "master", platform: msg.platform, reply: ctx.reply,
     transport, config, startedAt,
     memory, memoryConfig, nlmConfig,
     codingMode, idleSave,

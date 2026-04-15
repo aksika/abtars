@@ -31,21 +31,16 @@ function params(obj: Record<string, string>): URLSearchParams {
 describe("MemorySearchController.handle — validation", () => {
   it("returns 400 when keywords are missing", async () => {
     const ctrl = new MemorySearchController(makeDeps());
-    const result = await ctrl.handle(params({ chatId: "1" }));
+    const result = await ctrl.handle(params({ userId: "1" }));
     expect(result.status).toBe(400);
   });
 
   it("returns 400 when keywords are empty string", async () => {
     const ctrl = new MemorySearchController(makeDeps());
-    const result = await ctrl.handle(params({ keywords: "", chatId: "1" }));
+    const result = await ctrl.handle(params({ keywords: "", userId: "1" }));
     expect(result.status).toBe(400);
   });
 
-  it("returns 400 when chatId is not a number", async () => {
-    const ctrl = new MemorySearchController(makeDeps());
-    const result = await ctrl.handle(params({ keywords: "test", chatId: "abc" }));
-    expect(result.status).toBe(400);
-  });
 
   it("returns 200 when chatId is omitted", async () => {
     const ctrl = new MemorySearchController(makeDeps());
@@ -61,14 +56,14 @@ describe("MemorySearchController.handle — stage selection", () => {
     const deps = makeDeps();
     const ctrl = new MemorySearchController(deps);
     (deps.memory.recallSearch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ results: [], stages: { Sf: { hits: [], ms: 1 } }, shortCircuitAfter: null, extractedIds: [] });
-    await ctrl.handle(params({ keywords: "hello", chatId: "1" }));
+    await ctrl.handle(params({ keywords: "hello", userId: "1" }));
     expect(deps.memory.recallSearch).toHaveBeenCalledWith(expect.objectContaining({ translated: ["hello"] }));
   });
 
   it("passes original param to recallSearch", async () => {
     const deps = makeDeps();
     const ctrl = new MemorySearchController(deps);
-    await ctrl.handle(params({ keywords: "hello", chatId: "1", original: "szia" }));
+    await ctrl.handle(params({ keywords: "hello", userId: "1", original: "szia" }));
     expect(deps.memory.recallSearch).toHaveBeenCalledWith(expect.objectContaining({ original: "szia" }));
   });
 
@@ -76,14 +71,14 @@ describe("MemorySearchController.handle — stage selection", () => {
     const deps = makeDeps();
     const ctrl = new MemorySearchController(deps);
     (deps.memory.recallSearch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ results: [], stages: { Sf: { hits: [], ms: 1 } }, shortCircuitAfter: null, extractedIds: [] });
-    await ctrl.handle(params({ keywords: "hello", chatId: "1", stages: "Sf" }));
+    await ctrl.handle(params({ keywords: "hello", userId: "1", stages: "Sf" }));
     expect(deps.memory.recallSearch).toHaveBeenCalledWith(expect.objectContaining({ stages: ["Sf"] }));
   });
 
   it("returns per-stage hit counts and timing", async () => {
     const deps = makeDeps({ recallResult: { results: [], stages: { Sf: { hits: [], ms: 2 } }, shortCircuitAfter: null, extractedIds: [] } as any });
     const ctrl = new MemorySearchController(deps);
-    const result = await ctrl.handle(params({ keywords: "hello", chatId: "1" }));
+    const result = await ctrl.handle(params({ keywords: "hello", userId: "1" }));
     const body = result.body as MemorySearchResponse;
     expect(body.layers["Sf"]).toBeDefined();
     expect(body.layers["Sf"]!.hits).toBe(0);
@@ -103,7 +98,7 @@ describe("MemorySearchController.handle — results", () => {
       shortCircuitAfter: null, extractedIds: [1],
     });
     const ctrl = new MemorySearchController(deps);
-    const result = await ctrl.handle(params({ keywords: "puppy", chatId: "1" }));
+    const result = await ctrl.handle(params({ keywords: "puppy", userId: "1" }));
     const body = result.body as MemorySearchResponse;
     expect(body.results.length).toBe(1);
     expect(body.results[0]!.content).toBe("puppy info");
@@ -116,7 +111,7 @@ describe("MemorySearchController.handle — error handling", () => {
     const deps = makeDeps();
     (deps.memory.recallSearch as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("DB corrupt"));
     const ctrl = new MemorySearchController(deps);
-    const result = await ctrl.handle(params({ keywords: "test", chatId: "1" }));
+    const result = await ctrl.handle(params({ keywords: "test", userId: "1" }));
     expect(result.status).toBe(500);
   });
 });

@@ -8,6 +8,7 @@
 
 import type { PlatformAdapter, InboundMessage } from "../../types/platform.js";
 import type { PipelineDeps } from "../message-pipeline.js";
+import { loadUsers } from "../user-registry.js";
 import type { Reply } from "../command-handlers.js";
 
 /** Mutable context flowing through the middleware pipeline. */
@@ -19,6 +20,8 @@ export interface MessageContext {
   text: string;
   /** Chat ID parsed from channelId. */
   readonly chatId: number;
+  /** User ID resolved from user registry. */
+  readonly userId: string;
   /** Reply helper bound to the message's channel/thread. */
   readonly reply: Reply;
   /** Set to true by any middleware that fully handled the message. */
@@ -56,12 +59,17 @@ export function createMessageContext(
   deps: PipelineDeps,
 ): MessageContext {
   const reply: Reply = (text, opts) => adapter.sendMessage(msg.channelId, text, { threadId: msg.threadId, ...opts });
+  const chatId = parseInt(msg.channelId, 10) || 0;
+  const registry = loadUsers();
+  const platformKey = `${msg.platform}:${chatId}`;
+  const userId = registry.byPlatformId.get(platformKey)?.userId ?? "master";
   return {
     msg,
     adapter,
     deps,
     text: msg.text,
-    chatId: parseInt(msg.channelId, 10) || 0,
+    chatId,
+    userId,
     reply,
     handled: false,
   };

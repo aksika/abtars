@@ -25,6 +25,7 @@ export type Reply = (text: string, opts?: { parseMode?: string; reply_markup?: {
 export interface CommandContext {
   sessionKey: string;
   chatId: number;
+  userId: string;
   platform: Platform;
   reply: Reply;
   // From PipelineDeps
@@ -144,7 +145,7 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
     transport: ctx.transport, sessionKey: ctx.sessionKey, reason: "user-reset",
     pendingSessionStart: ctx.pendingSessionStart, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
   });
-  if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
+  if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
   const label = text === "/reset" ? "🔄 Reset to default." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
   await ctx.reply(label);
   logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
@@ -156,7 +157,7 @@ async function handleCompact(_text: string, ctx: CommandContext): Promise<boolea
   try {
     await runCompaction(ctx.transport, ctx.sessionKey, ctx.memory ?? null, ctx.memoryConfig.memoryDir);
     ctx.pendingSessionStart.add(ctx.sessionKey);
-    if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.chatId);
+    if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
     await ctx.reply("📦 Compaction complete.");
     logInfo(TAG, `Manual compaction done`);
   } catch (err) {
@@ -458,7 +459,7 @@ async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<bool
 
 async function handleMemory(_text: string, ctx: CommandContext): Promise<boolean> {
   if (!ctx.memory) { await ctx.reply("🧠 Memory is disabled."); return true; }
-  const stats = ctx.memory.getStats(ctx.chatId);
+  const stats = ctx.memory.getStats(ctx.userId);
   if (!stats) { await ctx.reply("⚠️ Could not retrieve memory stats."); return true; }
   const dbMb = (stats.dbSizeBytes / (1024 * 1024)).toFixed(1);
   const types = Object.entries(stats.extractedByType).map(([t, n]) => `  ${t}: ${n}`).join("\n") || "  (none)";

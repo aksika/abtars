@@ -30,7 +30,7 @@ describe("SleepStateGatherer", () => {
 
   function insertMemory(contentEn: string, withEmbedding: boolean): void {
     db.prepare(
-      "INSERT INTO extracted_memories (chat_id, content_original, content_en, memory_type, source_timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+      "INSERT INTO extracted_memories (user_id, content_original, content_en, memory_type, source_timestamp, created_at) VALUES (?, ?, ?, ?, ?, ?)"
     ).run(1, contentEn, contentEn, "fact", Date.now(), Date.now());
     if (withEmbedding) {
       const vec = Buffer.from(new Float32Array(768).buffer);
@@ -78,7 +78,7 @@ describe("SleepStateGatherer", () => {
     });
 
     it("counts messages", async () => {
-      db.prepare("INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)").run(1, "s1", "user", "hello", Date.now());
+      db.prepare("INSERT INTO messages (user_id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)").run("aksika", "s1", "user", "hello", Date.now());
       const snapshot = await makeGatherer().gather();
       expect(snapshot.dbStats.messageCount).toBe(1);
     });

@@ -86,7 +86,7 @@ export type SubsystemRefs = {
     contextPercent?: number;
   };
   memory: {
-    getStats: (chatId?: number) => {
+    getStats: (userId?: string) => {
       totalMessages: number;
       extractedMemories: number;
       extractedByType: Record<string, number>;
@@ -101,7 +101,7 @@ export type SubsystemRefs = {
     intervalMs: number;
     tasks: { name: string }[];
   } | null;
-  chatId?: number;
+  userId?: string;
   notebooklm: boolean;
   agentApi: { getTrafficLog: () => TrafficEntry[] } | null;
 };
@@ -141,7 +141,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     memory = { enabled: false, stats: null };
   } else {
     try {
-      const raw = refs.memory.getStats(refs.chatId);
+      const raw = refs.memory.getStats(undefined);
       memory = { enabled: true, stats: raw };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -35,7 +35,7 @@ describe("cron-checker", () => {
     return readEntries();
   }
 
-  function readReminders(): Array<{ chatId: number; message: string; createdAt: number }> {
+  function readReminders(): Array<{ userId: string; message: string; createdAt: number }> {
     try { return JSON.parse(readFileSync(remindersPath, "utf-8")); }
     catch { return []; }
   }
@@ -44,14 +44,14 @@ describe("cron-checker", () => {
     const { checkCron } = await import("./cron-checker.js");
     writeCron([{
       id: "abc123", fireAt: Date.now() - 1000, message: "Test reminder",
-      chatId: 42, type: "reminder", fired: false, createdAt: Date.now() - 5000,
+      chatId: 1, type: "reminder", fired: false, createdAt: Date.now() - 5000,
     }]);
 
     checkCron();
 
     const reminders = readReminders();
     expect(reminders).toHaveLength(1);
-    expect(reminders[0].chatId).toBe(42);
+    expect(reminders[0].chatId).toBe(1);
     expect(reminders[0].message).toBe("Test reminder");
 
     const entries = readCron();

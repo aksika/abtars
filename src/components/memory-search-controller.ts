@@ -30,8 +30,8 @@ export class MemorySearchController {
 
   listChats(): { status: number; body: object } {
     try {
-      const chatIds = this.deps.memory.getDistinctChatIds();
-      return { status: 200, body: { chatIds } };
+      const userIds = this.deps.memory.getDistinctUserIds();
+      return { status: 200, body: { userIds } };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `listChats failed: ${msg}`);
@@ -56,9 +56,8 @@ export class MemorySearchController {
     const keywordsRaw = params.get("keywords")?.trim() ?? "";
     if (!keywordsRaw) return { status: 400, body: { error: "keywords required" } };
 
-    const chatIdRaw = params.get("chatId")?.trim() ?? "";
-    const chatId = chatIdRaw ? Number(chatIdRaw) : undefined;
-    if (chatIdRaw && !Number.isFinite(chatId!)) return { status: 400, body: { error: "chatId must be a number" } };
+    const userIdRaw = params.get("userId")?.trim() ?? "";
+    const userId = userIdRaw || undefined;
 
     const translated = keywordsRaw.split(",").map((k) => k.trim()).filter((k) => k.length > 0);
     if (translated.length === 0) return { status: 400, body: { error: "keywords required" } };
@@ -72,7 +71,7 @@ export class MemorySearchController {
 
     try {
       const result = await this.deps.memory.recallSearch(
-        { translated, original, chatId: chatId ?? 0, limit: 10, timeStart, timeEnd, stages, entity },
+        { translated, original, userId: userId ?? "master", limit: 10, timeStart, timeEnd, stages, entity },
       );
       this.deps.memory.bumpRecallCount(result.extractedIds);
 

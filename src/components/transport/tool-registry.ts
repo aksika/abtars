@@ -69,7 +69,7 @@ const memoryStoreTool: ToolDefinition = {
     if (memoryBackend) {
       try {
         const params: InstantStoreParams = {
-          chatId: 0,
+          userId: "master",
           contentEn: args["translated"] ?? "",
           contentOriginal: args["original"] ?? args["translated"] ?? "",
           memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
@@ -108,7 +108,7 @@ const memoryRecallTool: ToolDefinition = {
       try {
         const result = await memoryBackend.recall({
           translated: [args["query"] ?? ""],
-          chatId: 0,
+          userId: "master",
           limit: parseInt(args["limit"] ?? "10", 10),
         });
         return JSON.stringify(result);

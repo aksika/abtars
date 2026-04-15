@@ -18,6 +18,7 @@ import type { TelegramUpdate } from "../../types/index.js";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 import type { IMemorySystem } from "abmind/imemory-system.js";
+import { loadUsers } from "../../components/user-registry.js";
 
 const TAG = "telegram";
 
@@ -454,7 +455,7 @@ export class TelegramAdapter implements PlatformAdapter {
 
     if (isAuthorized && this.deps.memory) {
       const score = emojiToScore(emojis[0]!);
-      const updated = this.deps.memory.updateEmotionByPlatformId(chatId, reaction.message_id, score);
+      const updated = this.deps.memory.updateEmotionByPlatformId(loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master", reaction.message_id, score);
       if (updated) logDebug(TAG, `Emotion score ${score} set on platform msg ${reaction.message_id}`);
     }
 

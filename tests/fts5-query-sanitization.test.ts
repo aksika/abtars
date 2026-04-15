@@ -34,7 +34,7 @@ describe("FTS5 Bug Condition Exploration", () => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
+        user_id TEXT NOT NULL DEFAULT 'aksika',
         session_id TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
@@ -52,11 +52,11 @@ describe("FTS5 Bug Condition Exploration", () => {
 
     // Seed sample messages
     const samples = [
-      { role: "user" as const, content: "hello world how are you", timestamp: 1000, chatId: 1, sessionId: "s1" },
-      { role: "assistant" as const, content: "I am doing well thank you", timestamp: 2000, chatId: 1, sessionId: "s1" },
-      { role: "user" as const, content: "quantum computing is fascinating", timestamp: 3000, chatId: 1, sessionId: "s1" },
-      { role: "assistant" as const, content: "the price of goods varies by quantity", timestamp: 4000, chatId: 2, sessionId: "s2" },
-      { role: "user" as const, content: "not bad for a first attempt", timestamp: 5000, chatId: 2, sessionId: "s2" },
+      { role: "user" as const, content: "hello world how are you", timestamp: 1000, userId: "aksika", sessionId: "s1" },
+      { role: "assistant" as const, content: "I am doing well thank you", timestamp: 2000, userId: "aksika", sessionId: "s1" },
+      { role: "user" as const, content: "quantum computing is fascinating", timestamp: 3000, userId: "aksika", sessionId: "s1" },
+      { role: "assistant" as const, content: "the price of goods varies by quantity", timestamp: 4000, userId: "user-2", sessionId: "s2" },
+      { role: "user" as const, content: "not bad for a first attempt", timestamp: 5000, userId: "user-2", sessionId: "s2" },
     ];
 
     for (const msg of samples) {
@@ -150,7 +150,7 @@ describe("FTS5 Preservation Tests", () => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
+        user_id TEXT NOT NULL DEFAULT 'aksika',
         session_id TEXT NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
@@ -168,13 +168,13 @@ describe("FTS5 Preservation Tests", () => {
 
     // Seed known messages for deterministic assertions
     const samples = [
-      { role: "user" as const, content: "hello world how are you", timestamp: 1000, chatId: 1, sessionId: "s1" },
-      { role: "assistant" as const, content: "I am doing well thank you", timestamp: 2000, chatId: 1, sessionId: "s1" },
-      { role: "user" as const, content: "quantum computing is fascinating", timestamp: 3000, chatId: 1, sessionId: "s1" },
-      { role: "assistant" as const, content: "the price of goods varies by quantity", timestamp: 4000, chatId: 2, sessionId: "s2" },
-      { role: "user" as const, content: "not bad for a first attempt", timestamp: 5000, chatId: 2, sessionId: "s2" },
-      { role: "user" as const, content: "hello again from the other side", timestamp: 6000, chatId: 1, sessionId: "s1" },
-      { role: "assistant" as const, content: "world peace is a noble goal", timestamp: 7000, chatId: 2, sessionId: "s2" },
+      { role: "user" as const, content: "hello world how are you", timestamp: 1000, userId: "aksika", sessionId: "s1" },
+      { role: "assistant" as const, content: "I am doing well thank you", timestamp: 2000, userId: "aksika", sessionId: "s1" },
+      { role: "user" as const, content: "quantum computing is fascinating", timestamp: 3000, userId: "aksika", sessionId: "s1" },
+      { role: "assistant" as const, content: "the price of goods varies by quantity", timestamp: 4000, userId: "user-2", sessionId: "s2" },
+      { role: "user" as const, content: "not bad for a first attempt", timestamp: 5000, userId: "user-2", sessionId: "s2" },
+      { role: "user" as const, content: "hello again from the other side", timestamp: 6000, userId: "aksika", sessionId: "s1" },
+      { role: "assistant" as const, content: "world peace is a noble goal", timestamp: 7000, userId: "user-2", sessionId: "s2" },
     ];
 
     for (const msg of samples) {
@@ -210,7 +210,7 @@ describe("FTS5 Preservation Tests", () => {
           expect(r.record).toHaveProperty("role");
           expect(r.record).toHaveProperty("content");
           expect(r.record).toHaveProperty("timestamp");
-          expect(r.record).toHaveProperty("chatId");
+          expect(r.record).toHaveProperty("userId");
           expect(r.record).toHaveProperty("sessionId");
           expect(r.score).toBeGreaterThanOrEqual(0);
         }
@@ -258,18 +258,18 @@ describe("FTS5 Preservation Tests", () => {
     }
   });
 
-  it("search('hello', { chatId: 1 }) applies chatId filter correctly", () => {
-    const results = index.search("hello", { chatId: 1 });
+  it("search with userId filter applies correctly", () => {
+    const results = index.search("hello", { userId: "aksika" });
     expect(results).toBeInstanceOf(Array);
     expect(results.length).toBeGreaterThan(0);
 
     for (const r of results) {
-      expect(r.record.chatId).toBe(1);
+      expect(r.record.userId).toBe("aksika");
     }
   });
 
-  it("search('hello', { chatId: 999 }) returns empty for non-existent chatId", () => {
-    const results = index.search("hello", { chatId: 999 });
+  it("search with non-existent userId returns empty", () => {
+    const results = index.search("hello", { userId: "nonexistent" });
     expect(results).toEqual([]);
   });
 

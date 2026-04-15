@@ -37,14 +37,15 @@ import { IdleSave } from "./components/idle-save.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "./components/cron/cron-checker.js";
 import { CronQueue } from "./components/cron/cron-queue.js";
 import { startSession } from "./components/message-pipeline.js";
+import { loadUsers } from "./components/user-registry.js";
 
 
 /** Update context-window-start timestamp for a chat. Used by recall fallback stages. */
-function updateCtxStart(memoryDir: string, chatId: number, ts = Date.now()): void {
+function updateCtxStart(memoryDir: string, userId: string, ts = Date.now()): void {
   const p = join(memoryDir, "context-window-start.json");
   let data: Record<string, number> = {};
   try { data = JSON.parse(readFileSync(p, "utf-8")); } catch { /* new file */ }
-  data[String(chatId)] = ts;
+  data[userId] = ts;
   writeFileSync(p, JSON.stringify(data), "utf-8");
 }
 
@@ -303,7 +304,7 @@ export class Bridge {
           isReady: this.transport.isReady,
           contextPercent: this.transport.contextPercent,
         },
-        memory: this.memory ? { getStats: (chatId?: number) => this.memory!.getStats(chatId) } : null,
+        memory: this.memory ? { getStats: (userId?: string) => this.memory!.getStats(userId) } : null,
         heartbeat: this.memory
           ? { running: this.memory.getStats()?.heartbeatRunning ?? false, intervalMs: heartbeat.intervalMs, tasks: heartbeat.getTaskNames().map(n => ({ name: n })) }
           : null,
@@ -425,7 +426,8 @@ export async function startBridge(): Promise<void> {
 
   // Initialize context-window-start for all known chats
   if (memoryConfig.memoryEnabled) {
-    for (const uid of config.telegram.allowedUserIds) updateCtxStart(memoryConfig.memoryDir, uid, startedAt);
+    const reg = loadUsers();
+    for (const user of reg.users) updateCtxStart(memoryConfig.memoryDir, user.userId, startedAt);
   }
 
   // Sleep state
@@ -628,7 +630,7 @@ export async function startBridge(): Promise<void> {
         seenSessions.add(sessionKey);
         busyChats.add(sessionKey);
         startSession(
-          transport, memory, chatId, sessionKey,
+          transport, memory, loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master", sessionKey,
           "You just came online. Output ONLY a personalized greeting message.",
           (text) => (bridge.telegramAdapter as import("./platforms/telegram/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
         ).then(() => {

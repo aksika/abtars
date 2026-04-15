@@ -105,7 +105,7 @@ type SleepState = { status: SleepStatus; pid: number; startedAt: number; llmCall
 const SLEEP_TIMEOUT_MS = (parseInt(process.env["SLEEP_TIMEOUT_MIN"] ?? "", 10) || 55) * 60 * 1000; // default 55 minutes
 const SLEEP_MAX_LLM_CALLS = parseInt(process.env["SLEEP_MAX_LLM_CALLS"] ?? "", 10) || 15;
 
-// getPrimaryChatId moved to SleepDataAccess in memory package
+// getPrimaryUserId moved to SleepDataAccess in memory package
 
 function readStateFile(path: string): SleepState | null {
   try {
@@ -577,11 +577,11 @@ async function runCatchUp(
       const start = Date.now();
       try {
         const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
-        const chatId = sleepData.getPrimaryChatId();
+        const userId = sleepData.getPrimaryUserId();
         const dayStart = dateStrToMs(lock.dateStr);
         const dayEnd = dayStart + 86400000;
         const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(null, p, "catch-up-04a", flags.verbose, budget).then(r => r ?? ""), {
-          ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs: 0,
+          ctxWindow, memoryDir: memoryConfig.memoryDir, userId, watermarkTs: 0,
           dateRange: { startTs: dayStart, endTs: dayEnd },
         });
         if (summary) {
@@ -607,8 +607,8 @@ async function runCatchUp(
       } else {
         const start = Date.now();
         try {
-          const chatId = sleepData.getPrimaryChatId();
-          const result = await extractFromDaily(dailyPath, chatId, (p) => sendWithRetry(null, p, "catch-up-04b", flags.verbose, budget).then(r => r ?? ""));
+          const userId = sleepData.getPrimaryUserId();
+          const result = await extractFromDaily(dailyPath, userId, (p) => sendWithRetry(null, p, "catch-up-04b", flags.verbose, budget).then(r => r ?? ""));
           lock.state.steps["04b-extract-from-daily"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
           logInfo(TAG, `[CATCH-UP] ✓ 04b-extract-from-daily for ${lock.dateStr} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
         } catch (err) {
@@ -883,16 +883,16 @@ async function main(): Promise<number> {
         if (step.name === "04a-daily-summary") {
           try {
             const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
-            const chatId = sleepData.getPrimaryChatId();
-            const watermarkTs = sleepData.getExtractionWatermark(chatId);
+            const userId = sleepData.getPrimaryUserId();
+            const watermarkTs = sleepData.getExtractionWatermark(userId);
 
             // Determine target date from first unprocessed message
-            const firstMsgTs = sleepData.getFirstMessageAfter(chatId, watermarkTs);
+            const firstMsgTs = sleepData.getFirstMessageAfter(userId, watermarkTs);
             const firstMsgDate = firstMsgTs ? new Date(firstMsgTs) : new Date();
             const targetDate = `${firstMsgDate.getFullYear()}-${String(firstMsgDate.getMonth() + 1).padStart(2, "0")}-${String(firstMsgDate.getDate()).padStart(2, "0")}`;
 
             const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(null, p, "04a-daily-summary", flags.verbose, budget).then(r => r ?? ""), {
-              ctxWindow, memoryDir: memoryConfig.memoryDir, chatId, watermarkTs,
+              ctxWindow, memoryDir: memoryConfig.memoryDir, userId, watermarkTs,
             });
             if (summary) {
               dailySummaryPath = writeDailyFile(memoryConfig.memoryDir, targetDate, summary);
@@ -919,8 +919,8 @@ async function main(): Promise<number> {
             continue;
           }
           try {
-            const chatId = sleepData.getPrimaryChatId();
-            const result = await extractFromDaily(dailySummaryPath, chatId, (p) => sendWithRetry(null, p, "04b-extract", flags.verbose, budget).then(r => r ?? ""));
+            const userId = sleepData.getPrimaryUserId();
+            const result = await extractFromDaily(dailySummaryPath, userId, (p) => sendWithRetry(null, p, "04b-extract", flags.verbose, budget).then(r => r ?? ""));
             state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
             writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), result, "utf-8");
             logInfo(TAG, `[SLEEP] ✓ ${step.name} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);

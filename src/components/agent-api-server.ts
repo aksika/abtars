@@ -301,10 +301,10 @@ export class AgentApiServer {
       return;
     }
 
-    const { sessionKey, chatId } = this.config;
+    const { sessionKey } = this.config;
 
     // Record user message
-    this.memory?.recordMessage({ role: "user", content: prompt, timestamp: Date.now(), chatId, sessionId: sessionKey });
+    this.memory?.recordMessage({ role: "user", content: prompt, timestamp: Date.now(), userId: "master", sessionId: sessionKey });
 
     const fullPrompt = this.agentRules && !this.rulesInjected
       ? `[AGENT RULES]\n${this.agentRules}\n[END AGENT RULES]\n\n${prompt}`
@@ -314,7 +314,7 @@ export class AgentApiServer {
     const response = await t.sendPrompt(sessionKey, fullPrompt);
 
     // Record assistant message
-    this.memory?.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), chatId, sessionId: sessionKey });
+    this.memory?.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), userId: "master", sessionId: sessionKey });
 
     this.log("[KP]", response);
 

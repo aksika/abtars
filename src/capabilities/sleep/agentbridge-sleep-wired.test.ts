@@ -45,7 +45,7 @@ describe("Sleep wired tasks", () => {
   describe("garbage purge", () => {
     it("deletes messages marked >7 days ago in garbage.json", () => {
       const now = Date.now();
-      db.prepare("INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (1, 's', 'user', 'old noise', ?)").run(now);
+      db.prepare("INSERT INTO messages (user_id, session_id, role, content, timestamp) VALUES ('aksika', 's', 'user', 'old noise', ?)").run(now);
       const msgId = (db.prepare("SELECT last_insert_rowid() as id").get() as { id: number }).id;
 
       const oldDate = new Date(now - 8 * 86400000).toISOString();
@@ -69,16 +69,16 @@ describe("Sleep wired tasks", () => {
 
   describe("dedup consecutive", () => {
     it("deletes second consecutive identical message from same role", () => {
-      db.prepare("INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (1, 's', 'user', 'hello', 1000)").run();
-      db.prepare("INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (1, 's', 'user', 'hello', 2000)").run();
+      db.prepare("INSERT INTO messages (user_id, session_id, role, content, timestamp) VALUES ('aksika', 's', 'user', 'hello', 1000)").run();
+      db.prepare("INSERT INTO messages (user_id, session_id, role, content, timestamp) VALUES ('aksika', 's', 'user', 'hello', 2000)").run();
 
       const dupes = db.prepare(`
         SELECT b.id FROM messages a JOIN messages b
-        ON a.chat_id = b.chat_id AND a.role = b.role
+        ON a.user_id = b.user_id AND a.role = b.role
         AND TRIM(a.content) = TRIM(b.content)
         AND b.id > a.id
         AND NOT EXISTS (
-          SELECT 1 FROM messages m WHERE m.chat_id = a.chat_id AND m.id > a.id AND m.id < b.id AND m.role = a.role
+          SELECT 1 FROM messages m WHERE m.user_id = a.user_id AND m.id > a.id AND m.id < b.id AND m.role = a.role
         )
       `).all() as Array<{ id: number }>;
 
@@ -88,16 +88,16 @@ describe("Sleep wired tasks", () => {
     });
 
     it("keeps both when different content", () => {
-      db.prepare("INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (1, 's', 'user', 'hello', 1000)").run();
-      db.prepare("INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (1, 's', 'user', 'world', 2000)").run();
+      db.prepare("INSERT INTO messages (user_id, session_id, role, content, timestamp) VALUES ('aksika', 's', 'user', 'hello', 1000)").run();
+      db.prepare("INSERT INTO messages (user_id, session_id, role, content, timestamp) VALUES ('aksika', 's', 'user', 'world', 2000)").run();
 
       const dupes = db.prepare(`
         SELECT b.id FROM messages a JOIN messages b
-        ON a.chat_id = b.chat_id AND a.role = b.role
+        ON a.user_id = b.user_id AND a.role = b.role
         AND TRIM(a.content) = TRIM(b.content)
         AND b.id > a.id
         AND NOT EXISTS (
-          SELECT 1 FROM messages m WHERE m.chat_id = a.chat_id AND m.id > a.id AND m.id < b.id AND m.role = a.role
+          SELECT 1 FROM messages m WHERE m.user_id = a.user_id AND m.id > a.id AND m.id < b.id AND m.role = a.role
         )
       `).all();
 
@@ -105,17 +105,17 @@ describe("Sleep wired tasks", () => {
     });
 
     it("dedupes across time gap (consecutive, not time-based)", () => {
-      db.prepare("INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (1, 's', 'user', 'retry msg', 1000)").run();
+      db.prepare("INSERT INTO messages (user_id, session_id, role, content, timestamp) VALUES ('aksika', 's', 'user', 'retry msg', 1000)").run();
       // 3 hours later, same message
-      db.prepare("INSERT INTO messages (chat_id, session_id, role, content, timestamp) VALUES (1, 's', 'user', 'retry msg', 10800000)").run();
+      db.prepare("INSERT INTO messages (user_id, session_id, role, content, timestamp) VALUES ('aksika', 's', 'user', 'retry msg', 10800000)").run();
 
       const dupes = db.prepare(`
         SELECT b.id FROM messages a JOIN messages b
-        ON a.chat_id = b.chat_id AND a.role = b.role
+        ON a.user_id = b.user_id AND a.role = b.role
         AND TRIM(a.content) = TRIM(b.content)
         AND b.id > a.id
         AND NOT EXISTS (
-          SELECT 1 FROM messages m WHERE m.chat_id = a.chat_id AND m.id > a.id AND m.id < b.id AND m.role = a.role
+          SELECT 1 FROM messages m WHERE m.user_id = a.user_id AND m.id > a.id AND m.id < b.id AND m.role = a.role
         )
       `).all();
 
@@ -126,7 +126,7 @@ describe("Sleep wired tasks", () => {
   describe("anomaly auto-fixes", () => {
     it("sets trust=2 on decisions with trust<2", () => {
       const now = Date.now();
-      db.prepare("INSERT INTO extracted_memories (chat_id, content_original, content_en, memory_type, source_timestamp, created_at, preserve_original, emotion_score, trust, classification) VALUES (1, 't', 't', 'decision', ?, ?, 0, 0, 0, 1)").run(now, now);
+      db.prepare("INSERT INTO extracted_memories (user_id, content_original, content_en, memory_type, source_timestamp, created_at, preserve_original, emotion_score, trust, classification) VALUES (1, 't', 't', 'decision', ?, ?, 0, 0, 0, 1)").run(now, now);
 
       const changes = db.prepare("UPDATE extracted_memories SET trust = 2 WHERE memory_type = 'decision' AND trust < 2").run().changes;
       expect(changes).toBe(1);
@@ -137,7 +137,7 @@ describe("Sleep wired tasks", () => {
 
     it("sets classification=1 on decisions with classification=0", () => {
       const now = Date.now();
-      db.prepare("INSERT INTO extracted_memories (chat_id, content_original, content_en, memory_type, source_timestamp, created_at, preserve_original, emotion_score, classification) VALUES (1, 't', 't', 'decision', ?, ?, 0, 0, 0)").run(now, now);
+      db.prepare("INSERT INTO extracted_memories (user_id, content_original, content_en, memory_type, source_timestamp, created_at, preserve_original, emotion_score, classification) VALUES (1, 't', 't', 'decision', ?, ?, 0, 0, 0)").run(now, now);
 
       const changes = db.prepare("UPDATE extracted_memories SET classification = 1 WHERE memory_type = 'decision' AND classification = 0").run().changes;
       expect(changes).toBe(1);
@@ -145,7 +145,7 @@ describe("Sleep wired tasks", () => {
 
     it("sets credibility=3 on stale credibility=6 memories >7 days old", () => {
       const old = Date.now() - 10 * 86400000;
-      db.prepare("INSERT INTO extracted_memories (chat_id, content_original, content_en, memory_type, source_timestamp, created_at, preserve_original, emotion_score, credibility) VALUES (1, 't', 't', 'fact', ?, ?, 0, 0, 6)").run(old, old);
+      db.prepare("INSERT INTO extracted_memories (user_id, content_original, content_en, memory_type, source_timestamp, created_at, preserve_original, emotion_score, credibility) VALUES (1, 't', 't', 'fact', ?, ?, 0, 0, 6)").run(old, old);
 
       const changes = db.prepare("UPDATE extracted_memories SET credibility = 3 WHERE credibility = 6 AND created_at < ?").run(Date.now() - 7 * 86400000).changes;
       expect(changes).toBe(1);
