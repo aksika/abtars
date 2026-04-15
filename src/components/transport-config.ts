@@ -191,20 +191,7 @@ export function writeTransportConfig(tc: TransportConfig): void {
 // ── Provider availability ───────────────────────────────────────────────────
 
 export function getAvailableProviders(tc: TransportConfig): Array<{ name: string; config: ProviderConfig }> {
-  const results: Array<{ name: string; config: ProviderConfig }> = [];
-  for (const [name, config] of Object.entries(tc.providers)) {
-    if (config.transport === "api") {
-      // API: needs apiKey resolved or no key needed (ollama)
-      if (config.apiKeyEnv) {
-        if (!process.env[config.apiKeyEnv]) continue;
-      }
-      results.push({ name, config });
-    } else {
-      // ACP/tmux: always available (bridge manages the connection)
-      results.push({ name, config });
-    }
-  }
-  return results;
+  return Object.entries(tc.providers).map(([name, config]) => ({ name, config }));
 }
 
 // ── Model helpers ───────────────────────────────────────────────────────────
