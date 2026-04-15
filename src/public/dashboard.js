@@ -374,9 +374,9 @@ function formatBytes(bytes) {
       return;
     }
 
-    var chatIdInput = document.getElementById('mem-chatid-input');
-    var chatIdVal = chatIdInput ? chatIdInput.value.trim() : '0';
-    var chatId = parseInt(chatIdVal, 10) || 0;
+    var userIdInput = document.getElementById('mem-userid-input');
+    var userIdVal = userIdInput ? userIdInput.value.trim() : '';
+    var userId = userIdVal;
 
     var stages = getSelectedStages();
     if (stages.length === 0) {
@@ -387,8 +387,8 @@ function formatBytes(bytes) {
     var entity = (document.getElementById('mem-entity-input') || {}).value || '';
     var url = '/api/memory/search?keywords=' + encodeURIComponent(keywords) + '&original=' + encodeURIComponent(keywords) + '&stages=' + encodeURIComponent(stages.join(',')) + '&mode=' + searchMode;
     if (entity) url += '&entity=' + encodeURIComponent(entity);
-    if (chatId > 0) {
-      url += '&chatId=' + chatId;
+    if (userId) {
+      url += '&userId=' + encodeURIComponent(userId);
     }
 
     fetch(url, {
@@ -454,14 +454,14 @@ function formatBytes(bytes) {
         return;
       }
 
-      if (!data.chatIds || data.chatIds.length === 0) {
+      if (!data.userIds || data.userIds.length === 0) {
         container.innerHTML = '<div style="color:#666;padding:6px 0;">No chats found</div>';
         return;
       }
 
       container.innerHTML = '<div style="padding:6px 0;color:#e0e0e0;">' +
         '<strong>Stored Chat IDs:</strong><br>' +
-        data.chatIds.map(function(id) {
+        data.userIds.map(function(id) {
           return '<span style="cursor:pointer;color:#64b5f6;margin-right:12px;" onclick="document.getElementById(&quot;mem-chatid-input&quot;).value=&quot;' + id + '&quot;">' + id + '</span>';
         }).join('') +
         '</div>';
