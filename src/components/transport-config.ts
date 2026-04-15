@@ -80,14 +80,22 @@ export function loadModels(): ModelCatalog {
 
 export function loadTransport(): TransportConfig | null {
   if (cachedTransport) return cachedTransport;
-  const p = join(configDir(), process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
+  const dir = configDir();
+  const p = join(dir, process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
   try {
     cachedTransport = JSON.parse(readFileSync(p, "utf-8")) as TransportConfig;
     logInfo(TAG, `Loaded transport config (${Object.keys(cachedTransport.agents).length} agents, ${Object.keys(cachedTransport.providers).length} providers)`);
     return cachedTransport;
-  } catch (err) {
-    logError(TAG, `Failed to load transport.json: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+  } catch {
+    // Fallback to transport.default.json
+    try {
+      cachedTransport = JSON.parse(readFileSync(join(dir, "transport.default.json"), "utf-8")) as TransportConfig;
+      logWarn(TAG, `transport.json missing/corrupt — loaded transport.default.json`);
+      return cachedTransport;
+    } catch (err) {
+      logError(TAG, `No transport config available: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 }
 
