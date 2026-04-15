@@ -37,18 +37,6 @@ Bridge heartbeat checks every 5 min. When due:
 - `task` + `executor: agent` → spawns kiro-cli subagent, reports via Telegram
 - `task` + `executor: script` → runs `bash -c`, reports exit code + output
 
-## Task results
-
-Completed task results are saved at `~/.agentbridge/workspace/task-results/{id}_{date}.md`. When the user asks to see a report or task result, just `cat` the file — do NOT regenerate it.
-
-```bash
-# List today's results
-ls ~/.agentbridge/workspace/task-results/*_$(date +%Y-%m-%d).md
-
-# Show a specific result
-cat ~/.agentbridge/workspace/task-results/350b6d_2026-04-15.md
-```
-
 ## Running tasks manually
 
 When the user asks to run a scheduled task (e.g. "run the finance report", "trigger the AI daily"):
