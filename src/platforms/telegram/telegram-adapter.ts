@@ -412,10 +412,11 @@ export class TelegramAdapter implements PlatformAdapter {
     }
 
     // --- Dispatch to pipeline ---
+    const resolvedUser = loadUsers().byPlatformId.get("telegram:" + message.from.id)?.userId ?? "unknown";
     const inbound: InboundMessage = {
       platform: "telegram",
       channelId: String(chatId),
-      sessionKey: `telegram:${chatId}`,
+      sessionKey: resolvedUser + ":telegram",
       senderId: String(message.from.id),
       senderName,
       text,
@@ -469,7 +470,8 @@ export class TelegramAdapter implements PlatformAdapter {
       this.deps.conversationBuffer.push(bufKey, senderName, signal);
       logDebug(TAG, `Buffered reaction signal for group ${chatId}`);
     } else {
-      const sessionKey = `telegram:${chatId}`;
+      const reactionUser = loadUsers().byPlatformId.get("telegram:" + user.id)?.userId ?? "unknown";
+      const sessionKey = reactionUser + ":telegram";
       const { busyChats, messageQueue } = this.deps.pipeline;
       if (busyChats.has(sessionKey)) {
         const queue = messageQueue.get(sessionKey) ?? [];

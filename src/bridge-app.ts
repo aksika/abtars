@@ -473,7 +473,7 @@ export async function startBridge(): Promise<void> {
     }
     // Inject [SYSTEM] so the agent knows the result exists
     if (resultPath) {
-      const sessionKey = `telegram:${chatId}`;
+      const masterUser = loadUsers().users.find(u => u.role === "master"); const sessionKey = `${masterUser?.userId ?? "master"}:telegram`;
       transport.sendPrompt(sessionKey, `[SYSTEM] Task "${message}" completed. If user asks for the result, use: cat ${resultPath}`).catch(() => {});
     }
   };
@@ -631,7 +631,7 @@ export async function startBridge(): Promise<void> {
     if (bridge.telegramAdapter && memory) {
       const chatId = config.mainChatId;
       if (chatId) {
-        const sessionKey = `telegram:${chatId}`;
+        const masterUser = loadUsers().users.find(u => u.role === "master"); const sessionKey = `${masterUser?.userId ?? "master"}:telegram`;
         seenSessions.add(sessionKey);
         busyChats.add(sessionKey);
         startSession(
@@ -711,7 +711,7 @@ export async function startBridge(): Promise<void> {
           bridge.telegramAdapter.injectMessage({
             platform: "telegram",
             channelId: String(r.chatId),
-            sessionKey: `telegram:${r.chatId}`,
+            sessionKey: (loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master") + ":telegram",
             senderId: String(r.chatId),
             senderName: "cron",
             text: `[Scheduled reminder] ${r.message}`,

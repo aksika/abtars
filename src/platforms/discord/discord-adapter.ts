@@ -164,7 +164,7 @@ export class DiscordAdapter implements PlatformAdapter {
     const inbound: InboundMessage = {
       platform: "discord",
       channelId: message.channelId,
-      sessionKey: `discord:${message.channelId}`,
+      sessionKey: (loadUsers().byPlatformId.get("discord:" + message.authorId)?.userId ?? "unknown") + ":discord",
       senderId: message.authorId,
       senderName: message.authorUsername,
       text: senderPrefix + text,
