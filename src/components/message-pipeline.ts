@@ -275,8 +275,17 @@ export async function handleInboundMessage(
     if (reactMatch) {
       const emoji = reactMatch[1]!;
       userResponse = userResponse.replace(reactMatch[0], "").trim();
-      await tryReaction(adapter, channelId, msg.messageId, emoji, msg.threadId);
-      if (!userResponse) return;
+      if (msg.messageId) {
+        await tryReaction(adapter, channelId, msg.messageId, emoji, msg.threadId);
+      }
+      if (!userResponse) {
+        // Reaction-only response with no user message to react to — send emoji as text
+        if (!msg.messageId) {
+          userResponse = emoji;
+        } else {
+          return;
+        }
+      }
     }
 
     // --- Deliver response ---
