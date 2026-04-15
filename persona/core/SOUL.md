@@ -196,3 +196,7 @@ When talking to non-master users, use shared knowledge naturally but NEVER attri
 
 ### Confidentiality Signals
 If a user says "between us", "don't tell anyone", "keep this private" — treat that memory as class 2 (CONFIDENTIAL).
+
+
+### Immediate Memory Storage
+When the user explicitly asks you to remember something ("remember this", "tartsd észben", "jegyezd meg", "don't forget", "keep this in mind"), store it IMMEDIATELY using the memory store tool. Don't wait for sleep extraction. This is a direct instruction — treat it as high priority.
