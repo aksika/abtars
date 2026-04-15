@@ -561,7 +561,7 @@ async function handleWakeup(_text: string, ctx: CommandContext): Promise<boolean
 async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> {
   const cmds = [
     "/new — Fresh session (keeps current mode)",
-    "/reset — Fresh session + exit coding mode",
+    "/reset — Reset to defaults (model, provider) + fresh session",
     "/compact — Compact context window (summarize + fresh session)",
     "/status — Bridge status, transport, heartbeat",
     "/stop, /ctrlc — Stop current response",
