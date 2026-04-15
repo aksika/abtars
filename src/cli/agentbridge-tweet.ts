@@ -19,7 +19,7 @@ import { localDate } from "../components/env-utils.js";
 
 const AB_HOME = agentBridgeHome();
 const TWITTER_DIR = join(AB_HOME, "twitterX");
-const COOKIE_PATH = join(AB_HOME, "titok", "cookies", "x-cookies.json");
+const COOKIE_PATH = join(AB_HOME, "secret", "cookies", "x-cookies.json");
 const BASE_FOLLOWS = join(TWITTER_DIR, "base.follows.json");
 const MOLTY_FOLLOWS = join(TWITTER_DIR, "molty.follows.json");
 const REPORTS_DIR = join(homedir(), "reports");
@@ -298,7 +298,7 @@ function loadCookieHeader(): { cookie: string; csrf: string } | undefined {
 
 async function twitterGql(url: string, variables: Record<string, any>): Promise<any> {
   const auth = loadCookieHeader();
-  if (!auth) throw new Error("User auth required. Refresh cookies in ~/.agentbridge/titok/cookies/x-cookies.json");
+  if (!auth) throw new Error("User auth required. Refresh cookies in ~/.agentbridge/secret/cookies/x-cookies.json");
 
   const params = new URLSearchParams({
     variables: JSON.stringify(variables),
@@ -313,7 +313,7 @@ async function twitterGql(url: string, variables: Record<string, any>): Promise<
     },
   });
   if (!res.ok) {
-    if (res.status === 403) throw new Error("403 — cookies may be expired. Refresh in ~/.agentbridge/titok/cookies/x-cookies.json");
+    if (res.status === 403) throw new Error("403 — cookies may be expired. Refresh in ~/.agentbridge/secret/cookies/x-cookies.json");
     throw new Error(`Twitter API ${res.status}: ${await res.text().catch(() => "")}`);
   }
   return res.json();

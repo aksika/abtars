@@ -57,6 +57,7 @@ logs/
 finance/rss-*.json
 .kiro/
 titok/
+secret/
 sleeping_prompt.md
 browsing_prompt.md
 professor.json

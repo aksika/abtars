@@ -62,4 +62,4 @@ gws-cli auth status
 |------|------|
 | Encrypted credentials | `~/.config/gws-cli/client_secret.json.enc` |
 | OAuth token | `~/.config/gws-cli/token.json` |
-| Original client_secret | `~/.agentbridge/titok/client_secret.json` (backup) |
+| Original client_secret | `~/.agentbridge/secret/client_secret.json` (backup) |

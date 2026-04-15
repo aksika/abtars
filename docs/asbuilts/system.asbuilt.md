@@ -976,7 +976,7 @@ Management script: `scripts/browser-patchright.sh` → deployed to `~/.agentbrid
 Docker mounts (isolated):
 ```
 ~/.agentbridge/browser-socket/ → /run/browser       (rw, IPC socket)
-~/.agentbridge/titok/cookies/  → /run/browser/cookies (ro, cookie files only)
+~/.agentbridge/secret/cookies/  → /run/browser/cookies (ro, cookie files only)
 ```
 
 The `set_cookie` action loads JSON cookie files into the browser context. Cookie files must be under `/run/browser/cookies/` (enforced by path validation in `browser-tool.ts`). Cookie file format: `{ "cookie_name": "cookie_value", ... }`.
@@ -1102,11 +1102,11 @@ Repository: `kiroprof-backup` on GitHub. Tracks text content only:
 - `finance/`, `reports/`, `twitterX/` — output data
 - `backup/memory.db.enc` — AES-256-CBC encrypted SQLite database
 
-**Encrypted DB**: `memory.db` is encrypted with `openssl aes-256-cbc -pbkdf2` using key at `~/.agentbridge/titok/db.key`, written to `backup/memory.db.enc`, and pushed to git. No smudge/clean filters — plain encrypted blob.
+**Encrypted DB**: `memory.db` is encrypted with `openssl aes-256-cbc -pbkdf2` using key at `~/.agentbridge/secret/db.key`, written to `backup/memory.db.enc`, and pushed to git. No smudge/clean filters — plain encrypted blob.
 
 **Restore:**
 ```bash
-openssl enc -d -aes-256-cbc -pbkdf2 -pass file:titok/db.key \
+openssl enc -d -aes-256-cbc -pbkdf2 -pass file:secret/db.key \
   -in backup/memory.db.enc -out memory/memory.db
 ```
 
@@ -1189,7 +1189,7 @@ doctor.sh --fix-full   # all safe fixes + FTS rebuild, WAL checkpoint, git push 
 
 | # | Check | Warns when |
 |---|-------|------------|
-| 1 | Directory permissions | Sensitive dirs (`titok/`, `cookies/`, `memory/`) not 700 |
+| 1 | Directory permissions | Sensitive dirs (`secret/`, `cookies/`, `memory/`) not 700 |
 | 2 | Stale locks | `.lock` files older than 1 hour (excludes sleep locks) |
 | 3 | Stale sleep locks | `sleep_*.lock` older than 2h with no matching audit `.md` — detects hung sleep |
 | 4 | Stale browse artifacts | `browse_*` files in `logs/` older than 3 days |

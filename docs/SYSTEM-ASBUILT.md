@@ -174,7 +174,7 @@ Bridge picks matching Edge TTS voice. Tag stripped from display.
 ## Backup
 
 - Daily 1:45 AM: zip + encrypted DB (AES-256-CBC) → git push to aksikatwo/molty-agentbridge
-- Encryption key: `~/.agentbridge/titok/db.key`
+- Encryption key: `~/.agentbridge/secret/db.key`
 - Retention: 7 days local zips
 
 ## Key Commands

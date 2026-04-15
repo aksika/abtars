@@ -40,7 +40,7 @@ run_container() {
     --restart unless-stopped \
     --user "$(id -u):$(id -g)" \
     -v "$SOCKET_DIR:/run/browser" \
-    -v "$AB_HOME/titok/cookies:/run/browser/cookies:ro" \
+    -v "$AB_HOME/secret/cookies:/run/browser/cookies:ro" \
     -e BROWSER_SOCKET_PATH=/run/browser/browser.sock \
     -e BROWSER_CHANNEL="${BROWSER_CHANNEL:-chrome}" \
     -e BROWSER_ALLOWED_DOMAINS="${BROWSER_ALLOWED_DOMAINS:-}" \

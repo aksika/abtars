@@ -22,8 +22,19 @@ esac
 warn() { echo "[doctor] WARN: $1"; WARNS=$((WARNS + 1)); }
 fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 
+# 0. Migrate titok/ → secret/ (one-time)
+if [ -d "$AB/titok" ] && [ ! -d "$AB/secret" ]; then
+  if $FIX || $FIX_FULL; then
+    mv "$AB/titok" "$AB/secret"
+    chmod 700 "$AB/secret"
+    fix "migrated titok/ → secret/"
+  else
+    warn "titok/ should be renamed to secret/ — run with --fix"
+  fi
+fi
+
 # 1. Directory permissions (sensitive dirs should be 700) -- fix-full only
-for d in "$AB/titok" "$AB/titok/cookies" "$AB/memory"; do
+for d in "$AB/secret" "$AB/secret/cookies" "$AB/memory"; do
   if [ -d "$d" ] && [ "$(stat -c %a "$d" 2>/dev/null)" != "700" ]; then
     if $FIX_FULL; then
       chmod 700 "$d"; fix "$d permissions → 700"
@@ -59,7 +70,7 @@ for lockfile in "$AB/memory/sleep"/sleep_*.lock; do
 done
 
 # 4. Cookie file exists and is valid JSON
-COOKIE="$AB/titok/cookies/x-cookies.json"
+COOKIE="$AB/secret/cookies/x-cookies.json"
 if [ -f "$COOKIE" ]; then
   if ! python3 -c "import json; json.load(open('$COOKIE'))" 2>/dev/null; then
     warn "$COOKIE is not valid JSON -- cookie auth will fail"

@@ -106,7 +106,7 @@ Output: JSON to stdout (for piping) or `--format md` for markdown.
 ## Auth
 
 - **Guest** (no login): user timelines, user details, single tweet details
-- **User** (cookies from `~/.agentbridge/titok/cookies/x-cookies.json`): search, replies, likes, advanced features
+- **User** (cookies from `~/.agentbridge/secret/cookies/x-cookies.json`): search, replies, likes, advanced features
 - Cookies converted to rettiwt-api API_KEY format at runtime
 - On 401/403: KP sends Telegram alert "X cookies expired, please refresh"
 - Cookie refresh: manual — copy fresh cookies when alerted (typically every few months)
@@ -137,7 +137,7 @@ Output: JSON to stdout (for piping) or `--format md` for markdown.
 ## Implementation Stages
 
 ### Stage 0 — Auth & Bootstrap
-- [ ] Read X cookies from `~/.agentbridge/titok/cookies/x-cookies.json` (already exists, 0600 perms)
+- [ ] Read X cookies from `~/.agentbridge/secret/cookies/x-cookies.json` (already exists, 0600 perms)
 - [ ] Convert cookies to rettiwt-api API_KEY format (base64-encoded)
 - [ ] **Base list**: user gives bootstrap prompt to an agent → produces `base.follows.json`
 - [ ] **Molty list**: `agentbridge-tweet --bootstrap-molty` → rettiwt-api pulls Molty account's following list → `molty.follows.json`

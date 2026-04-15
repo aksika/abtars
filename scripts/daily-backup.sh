@@ -15,7 +15,7 @@ zip -qr "$DEST/agentbridge-$DATE.zip" \
 
 # Encrypted DB backup for git
 mkdir -p "$AB/backup"
-DB_KEY="$AB/titok/db.key"
+DB_KEY="$AB/secret/db.key"
 if [ -f "$DB_KEY" ] && [ -f "$AB/memory/memory.db" ]; then
   openssl enc -aes-256-cbc -pbkdf2 -salt -pass "file:$DB_KEY" \
     -in "$AB/memory/memory.db" -out "$AB/backup/memory.db.enc"

@@ -30,6 +30,7 @@ Thumbs.db
 !.kiro/steering/
 docs/.obsidian/
 titok/
+secret/
 persona/tasks/
 .test-*
 backlog.db-wal
