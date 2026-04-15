@@ -232,9 +232,16 @@ export class AcpTransport implements IKiroTransport {
   }
 
   async resetSession(_sessionKey: string): Promise<void> {
-    // Kill and respawn the entire ACP process so the new first session
-    // gets --agent professor again. Just deleting the session would create
-    // session #2 which loses the agent identity.
+    // Re-read transport.json to pick up model changes from /model or /reset
+    try {
+      const { clearTransportCache, loadTransport, resolveAgent } = await import("../transport-config.js");
+      clearTransportCache();
+      const tc = loadTransport();
+      if (tc) {
+        const prof = resolveAgent("professor", tc);
+        if (prof?.model) this.modelId = prof.model;
+      }
+    } catch { /* keep current model */ }
     this.destroy();
     await this.initialize();
   }

@@ -124,6 +124,11 @@ if [ ! -f "$AB_HOME/config/transport.json" ]; then
   cp "$PROJECT_DIR/config/transport.json.example" "$AB_HOME/config/transport.json"
   echo "   ℹ️  Created transport.json from example — edit with your providers"
 fi
+# transport.default.json — baseline for /reset. Create from transport.json if missing.
+if [ ! -f "$AB_HOME/config/transport.default.json" ]; then
+  cp "$AB_HOME/config/transport.json" "$AB_HOME/config/transport.default.json"
+  echo "   ℹ️  Created transport.default.json (baseline for /reset)"
+fi
 if [ ! -f "$AB_HOME/config/models.json" ]; then
   cp "$PROJECT_DIR/config/models.json.example" "$AB_HOME/config/models.json"
   echo "   ℹ️  Created models.json from example"

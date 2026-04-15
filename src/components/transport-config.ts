@@ -187,6 +187,23 @@ export function writeTransportConfig(tc: TransportConfig): void {
   logInfo(TAG, "transport.json updated");
 }
 
+/** Copy transport.default.json → transport.json, clear cache. Returns true if successful. */
+export function resetToDefaults(): boolean {
+  const dir = configDir();
+  const defaultPath = join(dir, "transport.default.json");
+  const activePath = join(dir, process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
+  try {
+    const defaults = readFileSync(defaultPath, "utf-8");
+    writeFileSync(activePath, defaults, "utf-8");
+    cachedTransport = null;
+    logInfo(TAG, "transport.json reset to defaults");
+    return true;
+  } catch (err) {
+    logWarn(TAG, `No transport.default.json — keeping current config: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
 // ── Provider availability ───────────────────────────────────────────────────
 
 export function getAvailableProviders(tc: TransportConfig): Array<{ name: string; config: ProviderConfig }> {

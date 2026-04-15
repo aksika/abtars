@@ -156,13 +156,17 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
   if (text === "/reset" && ctx.codingMode.has(ctx.sessionKey)) {
     await ctx.codingMode.stop(ctx.sessionKey);
   }
-  // Reset always goes to main transport — coding session is separate
+  // /reset → restore default transport config; /new → keep active config
+  if (text === "/reset") {
+    const { resetToDefaults } = await import("./transport-config.js");
+    resetToDefaults();
+  }
   await resetAndPrepare({
-    transport: ctx.transport, sessionKey: ctx.sessionKey, reason: "user-reset",
+    transport: ctx.transport, sessionKey: ctx.sessionKey, reason: text === "/reset" ? "reset-to-defaults" : "new-session",
     pendingSessionStart: ctx.pendingSessionStart, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
-  const label = text === "/reset" ? "🔄 Reset to default." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
+  const label = text === "/reset" ? "🔄 Reset to defaults." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
   await ctx.reply(label);
   logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
   return true;
