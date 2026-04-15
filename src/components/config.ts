@@ -109,12 +109,12 @@ export async function loadAndValidateConfig(): Promise<Config> {
     );
   }
 
-  // --- ALLOWED_USER_IDS (required, at least one numeric ID) ---
-  const rawUserIds = process.env["ALLOWED_USER_IDS"] ?? "";
+  // --- ALLOWED_USER_IDS (optional if MAIN_CHAT_ID + users.json present) ---
+  const rawUserIds = process.env["ALLOWED_USER_IDS"] ?? process.env["MAIN_CHAT_ID"] ?? "";
   const allowedUserIds = parseUserIds(rawUserIds);
   if (allowedUserIds.size === 0) {
     throw new Error(
-      "ALLOWED_USER_IDS is missing or contains no valid numeric IDs — provide at least one comma-separated user ID",
+      "MAIN_CHAT_ID or ALLOWED_USER_IDS is required — provide at least one numeric Telegram chat ID",
     );
   }
 
