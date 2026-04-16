@@ -47,12 +47,17 @@ No userId filtering needed in compaction. Each session belongs to one user.
 
 | Step | File | Change |
 |------|------|--------|
-| 1 | `compaction.ts` | Rewrite COMPACTION_PROMPT — "summarize user conversation only" |
-| 2 | `compaction.ts` | Strict `extractSummary` — return null if no tags or < 50 chars |
+| 1 | `persona/prompts/compaction.md` | New file — compaction system prompt. "Summarize ONLY user messages and your responses. Exclude [CONTEXT] blocks, tool calls/results, system messages, SOUL, wake-up, memory injections." |
+| 2 | `compaction.ts` | Load prompt from file. Strict `extractSummary` — return null if no `<summary>` tags or < 50 chars |
 | 3 | `message-pipeline.ts` | Add `compactionSummaries: Map<string, string>` |
 | 4 | `compaction.ts` | `runCompaction` — store summary in map, reset, mark pendingSessionStart. Remove `sendPrompt(injection)` |
 | 5 | `message-pipeline.ts` | `buildSessionStartPrompt` — check map, inject `[COMPACTED CONVERSATION]` block |
-| 6 | `compaction.test.ts` | Tests for `extractSummary` (with tags, without tags, too short, analysis stripping) |
+| 6 | `heartbeat-tasks.ts` | Fix idle-compact session key: old `telegram:${chatId}` → `{userId}:{platform}` |
+| 7 | `compaction.ts` | Tool call prevention: reject tool permission requests during compaction (ACP), strip tools (Direct API) |
+| 8 | `compaction.test.ts` | Tests for `extractSummary` (with tags, without tags, too short, analysis stripping) |
+
+### Idle-compact
+The heartbeat `idle-compact` task calls the same `runCompaction` — fix applies automatically. Also fix stale session key format (line 48 of heartbeat-tasks.ts).
 
 ## Not doing
 - Auto-compact threshold (separate backlog item)
