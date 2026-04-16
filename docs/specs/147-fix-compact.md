@@ -53,7 +53,7 @@ No userId filtering needed in compaction. Each session belongs to one user.
 | 4 | `compaction.ts` | `runCompaction` — store summary in map, reset, mark pendingSessionStart. Remove `sendPrompt(injection)` |
 | 5 | `message-pipeline.ts` | `buildSessionStartPrompt` — check map, inject `[COMPACTED CONVERSATION]` block |
 | 6 | `heartbeat-tasks.ts` | Fix idle-compact session key: old `telegram:${chatId}` → `{userId}:{platform}` |
-| 7 | `compaction.ts` | Tool call prevention: reject tool permission requests during compaction (ACP), strip tools (Direct API) |
+| 7 | `compaction.ts` | Tool call prevention: pass `{ noTools: true }` option to `sendPrompt`. ACP: auto-reject any tool permission requests. Direct API: omit `tools` array from request. |
 | 8 | `compaction.test.ts` | Tests for `extractSummary` (with tags, without tags, too short, analysis stripping) |
 
 ### Idle-compact
