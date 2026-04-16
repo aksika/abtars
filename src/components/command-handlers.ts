@@ -396,7 +396,11 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     const lines = ["📋 Agent models:"];
     for (const a of agents) {
       const r = tc ? resolveAgent(a, tc) : null;
-      lines.push(`  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`);
+      let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
+      if (a === "professor" && r?.fallbacks.length) {
+        line += "\n" + r.fallbacks.map((f, i) => `    ↳ fb${i + 1}: ${f.model} (${f.provider})`).join("\n");
+      }
+      lines.push(line);
     }
     lines.push("  Cron: inherits Professor");
     await ctx.reply(lines.join("\n"));
