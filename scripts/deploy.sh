@@ -132,14 +132,14 @@ if [ ! -f "$AB_HOME/config/models.json" ]; then
 fi
 chmod 700 "$AB_HOME/config"
 
-# auto-fix.json (self-healer rules — KEPT if newer)
+# Config dir + migrations
 mkdir -p "$AB_HOME/config"
-# Migrate old config files to config/ (one-time)
 [ -f "$AB_HOME/.env.memory" ] && [ ! -f "$AB_HOME/config/.env.memory" ] && mv "$AB_HOME/.env.memory" "$AB_HOME/config/.env.memory" && echo "   ↗ Migrated .env.memory → config/"
 [ -f "$AB_HOME/.env.skills" ] && [ ! -f "$AB_HOME/config/.env.skills" ] && mv "$AB_HOME/.env.skills" "$AB_HOME/config/.env.skills" && echo "   ↗ Migrated .env.skills → config/"
-if [ -f "$PROJECT_DIR/persona/config/auto-fix.json" ]; then
-  if [ ! -f "$AB_HOME/config/auto-fix.json" ] || [ "$PROJECT_DIR/persona/config/auto-fix.json" -nt "$AB_HOME/config/auto-fix.json" ]; then
-    cp "$PROJECT_DIR/persona/config/auto-fix.json" "$AB_HOME/config/auto-fix.json"
+# auto-fix.json (self-healer rules)
+if [ -f "$PROJECT_DIR/config/auto-fix.json" ]; then
+  if [ ! -f "$AB_HOME/config/auto-fix.json" ] || [ "$PROJECT_DIR/config/auto-fix.json" -nt "$AB_HOME/config/auto-fix.json" ]; then
+    cp "$PROJECT_DIR/config/auto-fix.json" "$AB_HOME/config/auto-fix.json"
   fi
 fi
 
@@ -186,6 +186,16 @@ done
 [ -d "$PROJECT_DIR/docker" ] && rsync -a "$PROJECT_DIR/docker/" "$AB_HOME/docker/"
 [ -d "$PROJECT_DIR/logo" ] && rsync -a "$PROJECT_DIR/logo/" "$AB_HOME/logo/"
 
+# 2c. Deploy abmind (prompts, config dirs)
+ABMIND_PKG=$(node -e "console.log(require.resolve('abmind/package.json'))" 2>/dev/null || true)
+if [ -n "$ABMIND_PKG" ]; then
+  ABMIND_DIR=$(dirname "$ABMIND_PKG")
+  if [ -f "$ABMIND_DIR/scripts/deploy_abmind.sh" ]; then
+    echo "🧠 Deploying abmind..."
+    bash "$ABMIND_DIR/scripts/deploy_abmind.sh"
+  fi
+fi
+
 # 3. Deploy persona files
 echo "📝 Deploying persona..."
 
@@ -199,12 +209,8 @@ safe_cp() {
   cp "$src" "$dst"
 }
 
-# Core (personal): deploy from persona/core/ if exists, else persona/core_templates/
-CORE_SRC="$PROJECT_DIR/persona/core"
-if [ -z "$(ls "$CORE_SRC/"*.md 2>/dev/null)" ]; then
-  CORE_SRC="$PROJECT_DIR/persona/core_templates"
-  echo "   ℹ️  Using core_templates (no .md files in persona/core/)"
-fi
+# Core: deploy templates from agentbridge, then overlay personal from abproject
+CORE_SRC="$PROJECT_DIR/core/core_templates"
 mkdir -p "$AB_HOME/core"
 for f in "$CORE_SRC/"*.md; do
   [ -f "$f" ] && safe_cp "$f" "$AB_HOME/core/$(basename "$f")"
@@ -212,41 +218,49 @@ done
 
 # Prompts: always from repo
 mkdir -p "$AB_HOME/prompts"
-for f in "$PROJECT_DIR/persona/prompts/"*.md; do
+for f in "$PROJECT_DIR/core/prompts/"*.md; do
   [ -f "$f" ] && safe_cp "$f" "$AB_HOME/prompts/$(basename "$f")"
 done
 
-# Sleep step files — clean old files first
-rm -f "$AB_HOME/prompts/sleep/"*.md
-mkdir -p "$AB_HOME/prompts/sleep"
-for f in "$PROJECT_DIR/persona/prompts/sleep/"*.md; do
-  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/prompts/sleep/$(basename "$f")"
-done
+# Sleep prompts — handled by deploy_abmind.sh (abmind owns these)
 
-# Skills: always from repo → core subdir
+# Skills: generic from agentbridge
 mkdir -p "$AB_HOME/skills/core" "$AB_HOME/skills/personal" "$AB_HOME/skills/auto" "$AB_HOME/skills/downloaded" "$AB_HOME/agents"
-# Clean stale loose .md files from skills/ root (old deploy artifacts)
 find "$AB_HOME/skills" -maxdepth 1 -name "*.md" -delete 2>/dev/null
-for f in "$PROJECT_DIR/persona/skills/"*.md; do
+for f in "$PROJECT_DIR/core/skills/"*.md; do
   [ -f "$f" ] && safe_cp "$f" "$AB_HOME/skills/core/$(basename "$f")"
 done
-for f in "$PROJECT_DIR/persona/skills/personal/"*.md; do
-  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/skills/personal/$(basename "$f")"
-done
-for f in "$PROJECT_DIR/persona/agents/"*.md; do
-  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/agents/$(basename "$f")"
-done
-
-# Tasks (personal): deploy from persona/tasks/ if exists, else create empty dir
-mkdir -p "$AB_HOME/tasks"
-if [ -d "$PROJECT_DIR/persona/tasks" ] && [ -n "$(ls -A "$PROJECT_DIR/persona/tasks" 2>/dev/null)" ]; then
-  for f in "$PROJECT_DIR/persona/tasks/"*.md; do
-    [ -f "$f" ] && safe_cp "$f" "$AB_HOME/tasks/$(basename "$f")"
-  done
-fi
 
 # Agent config
-safe_cp "$PROJECT_DIR/persona/professor.json" "$AB_HOME/professor.json"
+safe_cp "$PROJECT_DIR/core/professor.json" "$AB_HOME/professor.json"
+
+# --- Personal overlay from abproject (optional) ---
+ABPROJECT_DIR="${ABPROJECT_DIR:-$(dirname "$PROJECT_DIR")/abproject}"
+if [ -d "$ABPROJECT_DIR/persona" ]; then
+  echo "📝 Overlaying personal files from abproject..."
+  # Personal core (SOUL.md, TOOLS.md, user_profile.md — overrides templates)
+  for f in "$ABPROJECT_DIR/persona/core/"*.md; do
+    [ -f "$f" ] && safe_cp "$f" "$AB_HOME/core/$(basename "$f")"
+  done
+  # Personal skills
+  for f in "$ABPROJECT_DIR/persona/skills/personal/"*.md; do
+    [ -f "$f" ] && safe_cp "$f" "$AB_HOME/skills/personal/$(basename "$f")"
+  done
+  # Personal agents
+  for f in "$ABPROJECT_DIR/persona/agents/"*.md; do
+    [ -f "$f" ] && safe_cp "$f" "$AB_HOME/agents/$(basename "$f")"
+  done
+  # Personal tasks
+  mkdir -p "$AB_HOME/tasks"
+  if [ -d "$ABPROJECT_DIR/persona/tasks" ]; then
+    for f in "$ABPROJECT_DIR/persona/tasks/"*.md; do
+      [ -f "$f" ] && safe_cp "$f" "$AB_HOME/tasks/$(basename "$f")"
+    done
+  fi
+else
+  echo "   ℹ️  No abproject found — skipping personal overlay"
+  mkdir -p "$AB_HOME/tasks"
+fi
 
 # 4. Deploy launcher script + recall CLI
 echo "🚀 Deploying launcher + recall CLI..."
