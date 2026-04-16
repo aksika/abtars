@@ -21,7 +21,7 @@
 
 import { localISO } from "../../utils/local-time.js";
 import { join, basename } from "node:path";
-import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync, statSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { MemoryManager } from "abmind/memory-manager.js";
 import { loadMemoryConfig } from "abmind/memory-config.js";
 import { SleepStateGatherer } from "abmind/sleep-state-gatherer.js";
@@ -123,65 +123,13 @@ function writeStateFile(path: string, state: SleepState): void {
   writeFileSync(path, JSON.stringify(state, null, 2));
 }
 
-// ── Wired pre-tasks ─────────────────────────────────────────────────────────
+// ── Wired pre-tasks (delegated to abmind MaintenanceService) ────────────────
 
 async function runWiredPreTasks(sleepData: import("abmind/sleep-data-access.js").SleepDataAccess, memoryDir: string, memory: MemoryManager): Promise<WiredResults> {
-  const results: WiredResults = { purged: 0, deduped: 0, embedded: 0, anomaliesFixed: 0, walOk: false, ftsOk: false, logsDeleted: 0 };
+  const r = await memory.maintenance.runPreSleepTasks(memory, sleepData);
 
-  // 1. Purge expired garbage
-  try {
-    const garbagePath = join(memoryDir, "garbage.json");
-    if (existsSync(garbagePath)) {
-      const garbage = JSON.parse(readFileSync(garbagePath, "utf-8")) as Record<string, string>;
-      const cutoff = Date.now() - 7 * 86400000;
-      const expired = Object.entries(garbage).filter(([, ts]) => new Date(ts).getTime() < cutoff);
-      if (expired.length > 0) {
-        const ids = expired.map(([id]) => parseInt(id, 10)).filter(n => Number.isFinite(n));
-        if (ids.length > 0) {
-          sleepData.deleteMessagesByIds(ids);
-        }
-        for (const [id] of expired) delete garbage[id];
-        writeFileSync(garbagePath, JSON.stringify(garbage));
-        results.purged = expired.length;
-      }
-    }
-  } catch (err) { logWarn(TAG, `[WIRED] garbage purge failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  // 2. Dedup consecutive exact messages
-  try {
-    const { removed } = memory.deduplicateMessages();
-    results.deduped = removed;
-  } catch (err) { logWarn(TAG, `[WIRED] dedup failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  // 3. WAL checkpoint
-  results.walOk = memory.runWalCheckpoint();
-
-  // 4. FTS rebuild if corrupt
-  try {
-    const { rebuilt } = memory.rebuildFtsIndexes();
-    results.ftsOk = true;
-    for (const t of rebuilt) logInfo(TAG, `[WIRED] Rebuilt corrupt FTS: ${t}`);
-  } catch (err) { logWarn(TAG, `[WIRED] FTS check failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  // 5. Batch embed NULL embeddings
-  try {
-    if (process.env["EMBEDDING_ENABLED"] === "true") {
-      const { loadEmbedConfig, embedText: embedFn } = await import("abmind/ollama-embed.js");
-      const cfg = loadEmbedConfig();
-      if (cfg.enabled) {
-        const { embedded } = await memory.backfillEmbeddings((text) => embedFn(cfg, text));
-        results.embedded = embedded;
-      }
-    }
-  } catch (err) { logWarn(TAG, `[WIRED] embed failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  // 6. Anomaly auto-fixes
-  try {
-    const { fixed } = memory.fixMemoryDefaults();
-    results.anomaliesFixed = fixed;
-  } catch (err) { logWarn(TAG, `[WIRED] anomaly fixes failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  // 7. Log rotation (delete >7d)
+  // Bridge-side: log rotation (not memory's concern)
+  let logsDeleted = 0;
   try {
     const logsDir = join(memoryDir, "..", "logs");
     if (existsSync(logsDir)) {
@@ -191,78 +139,15 @@ async function runWiredPreTasks(sleepData: import("abmind/sleep-data-access.js")
         const match = f.match(/bridge-(\d{4}-\d{2}-\d{2})\.log/);
         if (match && new Date(match[1]!).getTime() < cutoff) {
           unlinkSync(join(logsDir, f));
-          results.logsDeleted++;
+          logsDeleted++;
         }
       }
     }
-  } catch (err) { logWarn(TAG, `[WIRED] log rotation failed: ${err instanceof Error ? err.message : String(err)}`); }
+  } catch (err) { logWarn(TAG, `[WIRED] log rotation: ${err instanceof Error ? err.message : String(err)}`); }
 
-  // 8. Delete old sleep files (locks + step log dirs) older than 3 days
-  try {
-    const sleepDir = join(memoryDir, "sleep");
-    if (existsSync(sleepDir)) {
-      const cutoff = Date.now() - 3 * 86400000;
-      for (const f of readdirSync(sleepDir)) {
-        const match = f.match(/^(?:sleep_)?(\d{4})(\d{2})(\d{2})/);
-        if (!match) continue;
-        if (new Date(`${match[1]}-${match[2]}-${match[3]}`).getTime() >= cutoff) continue;
-        const fullPath = join(sleepDir, f);
-        const stat = statSync(fullPath);
-        if (stat.isDirectory()) {
-          rmSync(fullPath, { recursive: true, force: true });
-          logInfo(TAG, `[WIRED] Deleted old step logs: ${f}/`);
-        } else if (f.endsWith(".lock")) {
-          unlinkSync(fullPath);
-          logInfo(TAG, `[WIRED] Deleted old lock: ${f}`);
-        }
-      }
-    }
-  } catch (err) { logWarn(TAG, `[WIRED] sleep cleanup failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  // 9. Compute decayed confidence — write candidates for Darwinism step
-  try {
-    const candidates = await memory.computeDecayedConfidence();
-    if (candidates.length > 0) {
-      const candidatesPath = join(memoryDir, "sleep", "darwinism-candidates.json");
-      writeFileSync(candidatesPath, JSON.stringify(candidates, null, 2));
-      logInfo(TAG, `[WIRED] ${candidates.length} Darwinism prune candidates (effective confidence < 1)`);
-    }
-  } catch (err) { logWarn(TAG, `[WIRED] confidence decay failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  // 10. Build emotion arcs per topic
-  try {
-    const arcsWritten = sleepData.buildEmotionArcs();
-    if (arcsWritten > 0) logInfo(TAG, `[WIRED] ${arcsWritten} emotion arcs updated`);
-  } catch (err) { logWarn(TAG, `[WIRED] emotion arcs failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  // 11. Emotional profile — analyze patterns, write to user_profile.md
-  try {
-    const profileEntries = sleepData.getEmotionalProfileData();
-    if (profileEntries.length > 0) {
-      const lines: string[] = ["## Emotional Patterns (auto-generated)", ""];
-      for (const entry of profileEntries) {
-        const topTags = entry.topTags.map(t => `${t.tag}(${t.count})`);
-        const ratio = entry.positive + entry.negative > 0 ? Math.round(entry.positive / (entry.positive + entry.negative) * 100) : 50;
-        lines.push(`- **${entry.topic}**: ${ratio}% positive. Top: ${topTags.join(", ")}${entry.topContexts.length > 0 ? `. Triggers: ${entry.topContexts.join(", ")}` : ""}`);
-      }
-      const profilePath = join(memoryDir, "core", "user_profile.md");
-      if (existsSync(profilePath)) {
-        let content = readFileSync(profilePath, "utf-8");
-        const marker = "## Emotional Patterns (auto-generated)";
-        const idx = content.indexOf(marker);
-        if (idx >= 0) content = content.slice(0, idx).trimEnd();
-        writeFileSync(profilePath, content + "\n\n" + lines.join("\n") + "\n", "utf-8");
-      }
-      logInfo(TAG, `[WIRED] Emotional profile updated (${profileEntries.length} topics analyzed)`);
-    }
-  } catch (err) { logWarn(TAG, `[WIRED] emotional profile failed: ${err instanceof Error ? err.message : String(err)}`); }
-
-  return results;
+  return { purged: r.purged, deduped: r.deduped, embedded: r.embedded, anomaliesFixed: r.anomaliesFixed, walOk: r.walOk, ftsOk: r.ftsOk, logsDeleted };
 }
 
-// ── Candidate lists (moved to SleepDataAccess in memory package) ────────────
-
-// Candidate lists moved to SleepDataAccess in memory package
 
 function formatWiredResults(r: WiredResults): string {
   const parts: string[] = [];
