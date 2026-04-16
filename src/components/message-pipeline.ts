@@ -6,7 +6,7 @@
 
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
-import { runCompaction } from "./compaction.js";
+import { runCompaction, compactionSummaries } from "./compaction.js";
 import { buildSessionStartContext } from "abmind/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { loadUsers } from "./user-registry.js";
@@ -377,8 +377,7 @@ export async function handleInboundMessage(
               }).catch(() => {});
             }
 
-            await runCompaction(transport, sessionKey, memory ?? null, memoryConfig.memoryDir);
-            pendingSessionStart.add(sessionKey);
+            await runCompaction(transport, sessionKey, pendingSessionStart);
             ctxWarned.delete(sessionKey);
             compactFailures.delete(sessionKey);
 
@@ -522,6 +521,14 @@ function buildSessionStartPrompt(
       }
     }
   } catch { /* wake-up builder not available */ }
+
+  // Inject compaction summary if available
+  const compSummary = compactionSummaries.get(sessionKey ?? "");
+  if (compSummary && sessionKey) {
+    contextParts.push(`[COMPACTED CONVERSATION]\n${compSummary}\n[/COMPACTED CONVERSATION]`);
+    compactionSummaries.delete(sessionKey);
+    logInfo(TAG, `Injected compaction summary (${compSummary.length} chars)`);
+  }
 
   // Wrap all context, put user instruction after
   const contextBlock = contextParts.length > 0

@@ -44,14 +44,17 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
 
       const chatId = [...deps.allowedUserIds][0];
       if (!chatId) return false;
-      const sessionKey = `telegram:${chatId}`;
+      // Resolve userId session key from registry
+      const { loadUsers } = await import("./user-registry.js");
+      const registry = loadUsers();
+      const user = registry.byPlatformId.get("telegram:" + chatId);
+      const sessionKey = (user?.userId ?? "master") + ":telegram";
 
       logInfo("idle-compact", `☕ ctx at ${pct}%, idle ${Math.round((Date.now() - lastMsgTs) / 60000)}min — compacting`);
       deps.busyChats.add(sessionKey);
       compactingSessions.add(sessionKey);
       try {
-        await runCompaction(deps.transport, sessionKey, deps.memory, deps.memoryDir);
-        deps.pendingSessionStart.add(sessionKey);
+        await runCompaction(deps.transport, sessionKey, deps.pendingSessionStart);
         compactedThisIdle = true;
         logInfo("idle-compact", "☕ Floating compaction complete");
       } catch (err) {

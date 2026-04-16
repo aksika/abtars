@@ -184,8 +184,7 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
 async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.reply("📦 Compacting...");
   try {
-    await runCompaction(ctx.transport, ctx.sessionKey, ctx.memory ?? null, ctx.memoryConfig.memoryDir);
-    ctx.pendingSessionStart.add(ctx.sessionKey);
+    await runCompaction(ctx.transport, ctx.sessionKey, ctx.pendingSessionStart);
     if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
     await ctx.reply("📦 Compaction complete.");
     logInfo(TAG, `Manual compaction done`);
