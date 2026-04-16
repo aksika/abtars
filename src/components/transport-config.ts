@@ -201,10 +201,12 @@ export function resetToDefaults(): boolean {
   const defaultPath = join(dir, "transport.default.json");
   const activePath = join(dir, process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
   try {
+    // Backup current before overwriting
+    try { writeFileSync(activePath.replace(".json", ".old.json"), readFileSync(activePath, "utf-8"), "utf-8"); } catch { /* no current to backup */ }
     const defaults = readFileSync(defaultPath, "utf-8");
     writeFileSync(activePath, defaults, "utf-8");
     cachedTransport = null;
-    logInfo(TAG, "transport.json reset to defaults");
+    logInfo(TAG, "transport.json reset to defaults (old saved as .old.json)");
     return true;
   } catch (err) {
     logWarn(TAG, `No transport.default.json — keeping current config: ${err instanceof Error ? err.message : String(err)}`);

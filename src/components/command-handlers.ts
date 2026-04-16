@@ -153,20 +153,29 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
 
 async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
-  if (text === "/reset" && ctx.codingMode.has(ctx.sessionKey)) {
+  const isReset = text.startsWith("/reset");
+  const isResetDefault = text.trim().toLowerCase() === "/reset default";
+
+  if (isReset && ctx.codingMode.has(ctx.sessionKey)) {
     await ctx.codingMode.stop(ctx.sessionKey);
   }
-  // /reset → restore default transport config; /new → keep active config
-  if (text === "/reset") {
+
+  if (isResetDefault) {
     const { resetToDefaults } = await import("./transport-config.js");
     resetToDefaults();
+  } else if (isReset) {
+    // Re-read transport.json (picks up /model changes)
+    const { clearTransportCache } = await import("./transport-config.js");
+    clearTransportCache();
   }
+
   await resetAndPrepare({
-    transport: ctx.transport, sessionKey: ctx.sessionKey, reason: text === "/reset" ? "reset-to-defaults" : "new-session",
+    transport: ctx.transport, sessionKey: ctx.sessionKey,
+    reason: isResetDefault ? "reset-to-defaults" : isReset ? "reset-transport" : "new-session",
     pendingSessionStart: ctx.pendingSessionStart, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
-  const label = text === "/reset" ? "🔄 Reset to defaults." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
+  const label = isResetDefault ? "🔄 Reset to defaults." : isReset ? "🔄 Transport reloaded." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
   await ctx.reply(label);
   logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
   return true;
@@ -561,7 +570,8 @@ async function handleWakeup(_text: string, ctx: CommandContext): Promise<boolean
 async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> {
   const cmds = [
     "/new — Fresh session (keeps current mode)",
-    "/reset — Reset to defaults (model, provider) + fresh session",
+    "/reset — Reload transport + fresh session",
+    "/reset default — Restore transport.default.json + fresh session",
     "/compact — Compact context window (summarize + fresh session)",
     "/status — Bridge status, transport, heartbeat",
     "/stop, /ctrlc — Stop current response",
