@@ -55,9 +55,17 @@ No userId filtering needed in compaction. Each session belongs to one user.
 | 6 | `heartbeat-tasks.ts` | Fix idle-compact session key: old `telegram:${chatId}` → `{userId}:{platform}` |
 | 7 | `compaction.ts` | Tool call prevention: pass `{ noTools: true }` option to `sendPrompt`. ACP: auto-reject any tool permission requests. Direct API: omit `tools` array from request. |
 | 8 | `compaction.test.ts` | Tests for `extractSummary` (with tags, without tags, too short, analysis stripping) |
+| 9 | manual | Manual test: /compact on Telegram, verify summary injected on next message, verify SOUL not duplicated, verify tools work after |
 
 ### Idle-compact
 The heartbeat `idle-compact` task calls the same `runCompaction` — fix applies automatically. Also fix stale session key format (line 48 of heartbeat-tasks.ts).
+
+### Verification
+- [ ] /compact produces summary, resets session, next message gets SOUL + summary
+- [ ] No double SOUL/wake-up injection
+- [ ] Tools work normally after compaction
+- [ ] Idle-compact triggers correctly with new session key format
+- [ ] Agent does not call tools during compaction prompt
 
 ## Not doing
 - Auto-compact threshold (separate backlog item)
