@@ -510,7 +510,7 @@ async function runCatchUp(
       const step = steps.find(s => s.name === stepName);
       if (!step) { logWarn(TAG, `[CATCH-UP] Step file not found: ${stepName}`); continue; }
       const start = Date.now();
-      const response = await sendWithRetry(null, step.prompt, `catch-up-${stepName}`, flags.verbose, budget);
+      const response = await sendWithRetry(null, step.rawPrompt, `catch-up-${stepName}`, flags.verbose, budget);
       if (response) {
         lock.state.steps[stepName] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
         logInfo(TAG, `[CATCH-UP] ✓ ${stepName} (${((Date.now() - start) / 1000).toFixed(1)}s)`);
@@ -618,16 +618,25 @@ async function main(): Promise<number> {
         .filter(m => !garbageIds.has(m.id) && !m.content.startsWith("[SYSTEM"))
         .map(m => `[${m.role}]${m.emotion_score ? ` (emotion:${m.emotion_score})` : ""} ${m.content.slice(0, 500)}`);
 
-      vars.RETRO_MESSAGES = lines.length > 0
+      vars.CLEAN_MESSAGES = lines.length > 0
         ? `${lines.length} messages since last sleep:\n\n${lines.join("\n")}`
         : "No messages since last sleep.";
       logInfo(TAG, `[SLEEP] Pre-queried ${lines.length} messages for retro (${msgs.length} total, ${garbageIds.size} garbage filtered)`);
-    } catch { vars.RETRO_MESSAGES = "Error loading messages — use abmind recall to search."; }
+    } catch { vars.CLEAN_MESSAGES = "Error loading messages — use abmind recall to search."; }
 
-    const steps = loadSleepSteps(snapshot);
-    for (const step of steps) {
-      step.prompt = substituteVars(step.prompt, vars);
-    }
+    // Set remaining missing vars
+    vars.MESSAGES_SINCE_WATERMARK = vars.CLEAN_MESSAGES; // same data, different name for gc-noise
+    vars.RETRO_PATH = join(memoryConfig.memoryDir, "daily", `daily_${localDate()}.md`);
+    try {
+      const { getLatestConsolidationFile } = await import("abmind/consolidation-search.js");
+      const latest = getLatestConsolidationFile(memoryConfig.memoryDir, "weekly");
+      vars.CONSOLIDATION_PATH = latest?.filePath ?? "No consolidation files yet.";
+    } catch { vars.CONSOLIDATION_PATH = "No consolidation files yet."; }
+
+    const steps = loadSleepSteps();
+    // Merge snapshot vars + bridge vars into one map for JIT substitution
+    const snapshotVars = buildSleepVars(snapshot);
+    for (const [k, v] of Object.entries(snapshotVars)) vars[k] = vars[k] ?? v;
 
     // Progress protocol — emit PROGRESS:<pct>:<label> on stdout
     const totalSteps = steps.length;
@@ -638,7 +647,7 @@ async function main(): Promise<number> {
     };
 
     if (flags.dryRun) {
-      for (const step of steps) process.stdout.write(`\n--- ${step.filename} ---\n${step.prompt}\n`);
+      for (const step of steps) process.stdout.write(`\n--- ${step.filename} ---\n${substituteVars(step.rawPrompt, vars)}\n`);
       return 0;
     }
 
@@ -818,15 +827,19 @@ async function main(): Promise<number> {
           continue;
         }
 
-        // Standard prompt-driven step
+        // Standard prompt-driven step — JIT substitution
+        const prompt = substituteVars(step.rawPrompt, vars);
         const ctxBefore = -1;
-        const response = await sendWithRetry(null, step.prompt, step.name, flags.verbose, budget);
+        const response = await sendWithRetry(null, prompt, step.name, flags.verbose, budget);
         const ctxAfter = -1;
         const duration = Date.now() - start;
 
         if (response) {
           state.steps[step.name] = { status: "ok", duration: Math.round(duration / 100) / 10, ctxBefore, ctxAfter };
           writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), response, "utf-8");
+          // Generic output chaining + explicit aliases
+          vars[step.name.toUpperCase().replace(/-/g, "_") + "_OUTPUT"] = response;
+          if (step.name === "retrospective") vars.RETRO_CONTENT = response;
         } else {
           state.steps[step.name] = { status: "failed", duration: Math.round(duration / 100) / 10, attempts: MAX_RETRIES, ctxBefore, ctxAfter };
           dreamySucceeded = false;
@@ -879,7 +892,7 @@ async function main(): Promise<number> {
         timestamp: localISO(),
         model: modelUsed,
         stateSnapshotSummary: buildSnapshotSummary(snapshot),
-        subagentResponse: `Wired: ${formatWiredResults(wiredResults)}\n${allResponses}`,
+        subagentResponse: `Wired: ${formatWiredResults(wiredResults)}\n${allResponses}${vars.RETRO_CONTENT ? "\n\n--- Retrospective ---\n" + vars.RETRO_CONTENT : ""}`,
         outcomes: { filesConsolidated: 0, messagesPruned: wiredResults.purged + wiredResults.deduped, embeddingsRemoved: 0, sessionsCleaned: 0, topicsMerged: 0, topicsDeleted: 0 },
       });
     } catch (err) {
