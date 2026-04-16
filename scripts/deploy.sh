@@ -162,11 +162,13 @@ rsync -aL --delete "$PROJECT_DIR/node_modules/" "$AB_HOME/node_modules/"
 
 # abmind is now a file: dependency — npm install handles it, no manual symlink needed
 
-# 2c. Copy asbuilts to knowledgebase (agent-readable, no source code paths)
+# 2c. Copy asbuilts to knowledgebase (from abproject if available)
 echo "📚 Copying knowledgebase..."
 mkdir -p "$AB_HOME/knowledgebase"
-cp "$PROJECT_DIR/docs/asbuilts/system.asbuilt.md" "$AB_HOME/knowledgebase/"
-cp "$PROJECT_DIR/docs/asbuilts/memory.asbuilt.md" "$AB_HOME/knowledgebase/"
+ABPROJECT_DIR="${ABPROJECT_DIR:-$(dirname "$PROJECT_DIR")/abproject}"
+if [ -d "$ABPROJECT_DIR/docs/asbuilts" ]; then
+  cp "$ABPROJECT_DIR/docs/asbuilts/"*.md "$AB_HOME/knowledgebase/" 2>/dev/null
+fi
 
 # Generate CLI wrapper scripts in ~/.agentbridge/bin/
 echo "🔧 Generating CLI wrappers..."
