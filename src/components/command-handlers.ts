@@ -422,7 +422,7 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
 
     // Write + switch
     tc.agents["professor"]!.model = newModel;
-    writeTransportConfig(tc);
+    writeTransportConfig(tc, `professor model → ${newModel}`);
     if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }

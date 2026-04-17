@@ -229,13 +229,13 @@ export class TelegramAdapter implements PlatformAdapter {
           if (!tc.agents["professor"]) tc.agents["professor"] = { model: "", provider: "" };
           if (!tc.agents["professor"]!.fallbacks) tc.agents["professor"]!.fallbacks = [];
           tc.agents["professor"]!.fallbacks[fbIndex] = { model, provider: providerName };
-          writeTransportConfig(tc);
+          writeTransportConfig(tc, `professor fallback ${fbIndex + 1} → ${model} (${providerName})`);
           await this.api.sendMessage(chatId, `✅ Fallback ${fbIndex + 1} → ${model} (${providerName})`);
         } else {
           // Main or subagent change
           const oldProvider = tc.agents[agentKey]?.provider;
           tc.agents[agentKey] = { ...tc.agents[agentKey]!, model, provider: providerName };
-          writeTransportConfig(tc);
+          writeTransportConfig(tc, `${agentKey} → ${model} (${providerName})`);
 
           const providerChanged = oldProvider !== providerName;
           const isProfessor = agentKey === "professor";

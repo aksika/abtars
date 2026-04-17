@@ -188,11 +188,11 @@ export function validateAtStartup(): void {
 
 // ── Write ───────────────────────────────────────────────────────────────────
 
-export function writeTransportConfig(tc: TransportConfig): void {
+export function writeTransportConfig(tc: TransportConfig, reason?: string): void {
   const p = join(configDir(), process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
   writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
   cachedTransport = tc;
-  logInfo(TAG, "transport.json updated");
+  logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
 }
 
 /** Copy transport.default.json → transport.json, clear cache. Returns true if successful. */
