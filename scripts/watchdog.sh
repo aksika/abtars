@@ -2,7 +2,7 @@
 # AgentBridge External Watchdog
 # Spawns the bridge, monitors bridge.lock heartbeat, kills+restarts on stale.
 # Usage: watchdog.sh [bridge flags, e.g. --all --web --agent]
-set -euo pipefail
+set -uo pipefail
 
 AB="${AGENT_BRIDGE_HOME:-$HOME/.agentbridge}"
 BRIDGE="$AB/agentbridge.sh"
