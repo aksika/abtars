@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo } from "./logger.js";
+import { agentBridgeHome } from "../paths.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
 const TAG = "compaction";
@@ -18,7 +19,6 @@ function loadCompactionPrompt(): string {
   } catch {
     // Fallback for deployed path
     try {
-      const { agentBridgeHome } = require("../paths.js") as { agentBridgeHome: () => string };
       return readFileSync(join(agentBridgeHome(), "persona", "prompts", "compaction.md"), "utf-8").trim();
     } catch {
       return "Summarize the conversation so far in <summary> tags. TEXT ONLY, no tool calls.";

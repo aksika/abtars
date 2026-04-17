@@ -9,7 +9,7 @@ import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction, compactionSummaries } from "./compaction.js";
 import { buildSessionStartContext } from "abmind/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
-import { loadUsers } from "./user-registry.js";
+import { loadUsers, loadUserProfile } from "./user-registry.js";
 import { tryReaction } from "./reaction-handler.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
@@ -484,19 +484,8 @@ function buildSessionStartPrompt(
       if (user) {
         const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
         contextParts.push(`[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).`);
-        // Per-user profile
-        try {
-          const { existsSync, readFileSync } = require("node:fs") as typeof import("node:fs");
-          const { join } = require("node:path") as typeof import("node:path");
-          const coreDir = join(process.cwd(), "persona", "core");
-          const userProfile = join(coreDir, `user_profile_${user.userId}.md`);
-          const defaultProfile = join(coreDir, "user_profile.md");
-          const profilePath = existsSync(userProfile) ? userProfile : defaultProfile;
-          if (existsSync(profilePath)) {
-            const profile = readFileSync(profilePath, "utf-8").trim();
-            if (profile) contextParts.push(profile);
-          }
-        } catch { /* profile not available */ }
+        const profile = loadUserProfile(user.userId);
+        if (profile) contextParts.push(profile);
       }
     } catch { /* registry not available */ }
   }

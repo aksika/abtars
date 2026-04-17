@@ -1,5 +1,6 @@
 import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
+import { execFileSync } from "node:child_process";
 import type { BrowserSession } from "../../types/browser.js";
 import { parsePositiveIntEnv, parseStringEnv } from "../../components/env-utils.js";
 
@@ -273,7 +274,6 @@ export class BrowserManager {
 
   private _stopContainer(): void {
     try {
-      const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
       execFileSync("docker", ["stop", "agentbridge-browser"], { stdio: "pipe", timeout: 10_000 });
     } catch { /* container may not be running */ }
   }

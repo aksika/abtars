@@ -1,5 +1,6 @@
 import * as os from "node:os";
 import * as path from "node:path";
+import { readFileSync } from "node:fs";
 import type { BrowserAction, BrowserToolResult, PageElement } from "../../types/browser.js";
 import type { BrowserManager } from "./browser-manager.js";
 import type { DomainAllowlist } from "./domain-allowlist.js";
@@ -353,12 +354,12 @@ export class BrowserTool {
 
     // Only allow files under /run/browser/cookies (mounted read-only)
     const COOKIES_DIR = "/run/browser/cookies";
-    const resolved = require("node:path").resolve(file) as string;
+    const resolved = path.resolve(file);
     if (!resolved.startsWith(COOKIES_DIR)) {
       return { success: false, error: `cookie file must be under ${COOKIES_DIR}` };
     }
 
-    const raw = require("node:fs").readFileSync(resolved, "utf-8") as string;
+    const raw = readFileSync(resolved, "utf-8");
     const json = JSON.parse(raw) as Record<string, string>;
 
     const session = await this._browserManager.getSession(action.sessionId);

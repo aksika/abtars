@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -55,7 +55,7 @@ describe("browse-delivery", () => {
     expect(reminders[0].message).toContain("Browse task complete");
 
     const subDir = join(tmpDir, ".agentbridge", "subagents");
-    const files = require("node:fs").readdirSync(subDir) as string[];
+    const files = readdirSync(subDir) as string[];
     const report = files.find((f: string) => f.startsWith("browse_abc123"));
     expect(report).toBeDefined();
     const content = readFileSync(join(subDir, report!), "utf-8");
@@ -72,7 +72,7 @@ describe("browse-delivery", () => {
     deliverBrowseResult(entry, "");
 
     const subDir = join(tmpDir, ".agentbridge", "subagents");
-    const files = require("node:fs").readdirSync(subDir) as string[];
+    const files = readdirSync(subDir) as string[];
     const report = files.find((f: string) => f.startsWith("browse_empty1"));
     const content = readFileSync(join(subDir, report!), "utf-8");
     expect(content).toBe("(no output captured)");
