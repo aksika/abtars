@@ -246,7 +246,7 @@ export async function handleInboundMessage(
       if (!intermediateDelivered) {
         logWarn(TAG, "Empty response from transport");
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "🤷");
-        await adapter.sendMessage(channelId, "🤷 Kiro returned an empty response. Try again or /reset.", { threadId: msg.threadId });
+        await adapter.sendMessage(channelId, "🤷 Model returned an empty response. Try again or /reset.", { threadId: msg.threadId });
       }
       return;
     }
