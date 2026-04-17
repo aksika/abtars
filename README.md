@@ -39,12 +39,10 @@ No web server, no exposed ports, no webhooks. Outbound-only traffic to Telegram'
 
 - **Node.js 22+**
 - **python3** — used by `doctor.sh` for JSON parsing and health checks
-- **tmux** installed (`apt install tmux` or `brew install tmux`)
-- **Kiro CLI** installed and in your PATH — verify: `kiro-cli --version`
 - **A Telegram Bot** — created via [@BotFather](https://t.me/BotFather)
 - **Your Telegram User ID** — get it from [@userinfobot](https://t.me/userinfobot)
 
-Optional: ollama (local LLM + embeddings), mcporter (MCP), gws (Gmail), nlm (NotebookLM).
+Optional: Kiro CLI (ACP transport), Gemini CLI (ACP transport), tmux (legacy transport), ollama (local LLM + embeddings), mcporter (MCP), gws (Gmail), nlm (NotebookLM).
 
 ## Quick Start
 
