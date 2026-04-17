@@ -8,7 +8,6 @@ import { createSelfHealerTask } from "./components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
 import { logInfo, logWarn, logError, logDebug } from "./components/logger.js";
 import { MemoryManager } from "abmind/index.js";
-import { ConversationBuffer } from "./components/conversation-buffer.js";
 import type { IKiroTransport } from "./components/transport/kiro-transport.js";
 import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard/dashboard-config.js";
 import type { SubsystemRefs } from "./components/dashboard/dashboard-config.js";
@@ -215,6 +214,7 @@ export async function startBridge(): Promise<void> {
   const { phaseTransport } = await import("./boot/phase-transport.js");
   const { phaseMemoryIpc } = await import("./boot/phase-memory-ipc.js");
   const { phasePipelineDeps, createCronCallback } = await import("./boot/phase-pipeline-deps.js");
+  const { phasePlatforms } = await import("./boot/phase-platforms.js");
   const ctx = createBootCtx();
   {
     const t = Date.now();
@@ -238,8 +238,6 @@ export async function startBridge(): Promise<void> {
   bridge.memory = ctx.memory;
   const memory = ctx.memory;
 
-  const conversationBuffer = new ConversationBuffer(50);
-
   // ── Phase 3: transport ──
   {
     const t = Date.now();
@@ -252,7 +250,6 @@ export async function startBridge(): Promise<void> {
   // Sleep state is now held on ctx.sleepHandle (populated by phase-sleep)
   let sleepHandle: import("./capabilities/sleep/index.js").SleepHandle | null = null;
   const isSleepActive = (): boolean => sleepHandle?.child !== null && sleepHandle?.child !== undefined && !sleepHandle.child.killed;
-  const platformAdapters = ctx.platformAdapters;
   const sleepAuditDir = ctx.sleepAuditDir;
 
   const busyChats = ctx.busyChats;
@@ -287,75 +284,11 @@ export async function startBridge(): Promise<void> {
 
     // Unified heartbeat — single 5-min timer for all periodic tasks
 
-  // --- Telegram service ---
-  
-
-  registry.register("telegram", {
-    configured: Boolean(config.telegram.botToken && config.telegram.allowedUserIds.size > 0),
-    async create() {
-      const { TelegramAdapter } = await import("./platforms/telegram/telegram-adapter.js");
-      bridge.telegramAdapter = new TelegramAdapter(
-        { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
-        { pipeline: pipelineDeps, conversationBuffer, transport, memory },
-      );
-      platformAdapters.set("telegram", bridge.telegramAdapter);
-      return {
-        async start() { await bridge.telegramAdapter!.start(); },
-        stop() { bridge.telegramAdapter?.stop(); platformAdapters.delete("telegram"); bridge.telegramAdapter = null; },
-      };
-    },
-  });
-
-  if (platforms.telegram) {
-    const result = await registry.start("telegram");
-    if (result.ok) {
-      logInfo("main", "📡 Telegram polling started");
-    } else {
-      logError("main", `Telegram failed to start: ${result.error}`);
-    }
-  } else {
-    logInfo("main", "📡 Telegram disabled (no --telegram flag)");
-  }
-
-  // --- Discord service ---
-  
-
-  registry.register("discord", {
-    configured: Boolean(config.discord.enabled && config.discord.botToken),
-    async create() {
-      const { DiscordAdapter } = await import("./platforms/discord/discord-adapter.js");
-      bridge.discordAdapter = new DiscordAdapter(
-        {
-          botToken: config.discord.botToken!,
-          appId: config.discord.appId!,
-          allowedUserIds: config.discord.allowedUserIds!,
-          allowedChannelIds: config.discord.allowedChannelIds!,
-          a2aEnabled: config.discord.a2aEnabled,
-          a2aChannelId: config.discord.a2aChannelId,
-          a2aPeerBotId: config.discord.a2aPeerBotId,
-          a2aRateLimitMs: config.discord.a2aRateLimitMs,
-        },
-        { pipeline: pipelineDeps, transport, memory, conversationBuffer },
-      );
-      platformAdapters.set("discord", bridge.discordAdapter);
-      return {
-        async start() { await bridge.discordAdapter!.start(); },
-        stop() { bridge.discordAdapter?.stop(); platformAdapters.delete("discord"); bridge.discordAdapter = null; },
-      };
-    },
-  });
-
-  if (platforms.discord) {
-    const result = await registry.start("discord");
-    if (result.ok) {
-      logInfo("main", "📡 Discord polling started");
-    } else if (result.error?.includes("not configured")) {
-      logWarn("main", "Discord flag set but not configured — skipping");
-    } else {
-      logError("main", `Discord failed to start: ${result.error}`);
-    }
-  } else {
-    logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
+  // ── Phase 6: platforms (Telegram + Discord) ──
+  {
+    const t = Date.now();
+    await phasePlatforms(ctx, bridge);
+    logInfo("boot", `✓ phasePlatforms (${Date.now() - t}ms)`);
   }
 
   // === DEFERRED INIT: non-critical services (after platforms are accepting messages) ===
