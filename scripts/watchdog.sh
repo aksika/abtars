@@ -60,8 +60,7 @@ read_lock() {
 }
 
 now_ms() {
-  # macOS date doesn't support %N, use perl (always available)
-  perl -MTime::HiRes=time -e 'printf "%d\n", time()*1000' 2>/dev/null || echo $(( $(date +%s) * 1000 ))
+  echo $(( $(date +%s) * 1000 ))
 }
 
 wait_for_death() {
