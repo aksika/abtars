@@ -169,10 +169,10 @@ describe("AuthGate.extractToken — Property 2: Token extraction from requests",
      * extractToken() returns that exact token.
      */
     // Use alphanumeric-ish tokens to avoid URL encoding edge cases
-    const tokenArb = fc.stringOf(
-      fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789-_".split("")),
-      { minLength: 1 },
-    );
+    const tokenArb = fc.string({
+      unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789-_".split("")),
+      minLength: 1,
+    });
 
     fc.assert(
       fc.property(tokenArb, (token) => {
@@ -190,10 +190,10 @@ describe("AuthGate.extractToken — Property 2: Token extraction from requests",
      * For any HTTP request with no Authorization header and no token query
      * parameter, extractToken() returns null.
      */
-    const pathArb = fc.stringOf(
-      fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz/".split("")),
-      { minLength: 1 },
-    ).map((p) => `/${p}`);
+    const pathArb = fc.string({
+      unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz/".split("")),
+      minLength: 1,
+    }).map((p) => `/${p}`);
 
     fc.assert(
       fc.property(pathArb, (path) => {

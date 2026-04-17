@@ -22,10 +22,11 @@ afterEach(async () => {
 // ── Generators ──────────────────────────────────────────────────────────────
 
 /** Generate a valid session ID string (alphanumeric + hyphens, 1-20 chars). */
-const sessionId = fc.stringOf(
-  fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789-"),
-  { minLength: 1, maxLength: 20 },
-);
+const sessionId = fc.string({
+  unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789-"),
+  minLength: 1,
+  maxLength: 20,
+});
 
 /** Generate a small positive integer for max sessions (1-5 for test speed). */
 const smallMaxSessions = fc.integer({ min: 1, max: 5 });
@@ -189,10 +190,11 @@ describe("Feature: playwright-web-ingestion, Property 16: Environment variable p
     fc.double({ min: 0.1, max: 99.9, noNaN: true, noDefaultInfinity: true })
       .filter((n) => !Number.isInteger(n))
       .map(String),
-    fc.stringOf(
-      fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz!@#$%"),
-      { minLength: 1, maxLength: 10 },
-    ),
+    fc.string({
+      unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz!@#$%"),
+      minLength: 1,
+      maxLength: 10,
+    }),
     fc.constant("NaN"),
     fc.constant("Infinity"),
     fc.constant("-Infinity"),
@@ -208,10 +210,11 @@ describe("Feature: playwright-web-ingestion, Property 16: Environment variable p
 
   /** Generate a user agent env value: non-empty string, empty/whitespace, or unset. */
   const userAgentEnvValue = fc.oneof(
-    fc.stringOf(
-      fc.constantFrom(..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/.-_ "),
-      { minLength: 1, maxLength: 30 },
-    )
+    fc.string({
+      unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/.-_ "),
+      minLength: 1,
+      maxLength: 30,
+    })
       .filter((s) => s.trim().length > 0)
       .map((v) => ({ kind: "valid" as const, raw: v, parsed: v })),
     fc.constantFrom("", "   ", "\t")

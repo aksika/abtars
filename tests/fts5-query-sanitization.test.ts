@@ -78,10 +78,11 @@ describe("FTS5 Bug Condition Exploration", () => {
    */
   it("property: search does not throw for queries with FTS5 special characters", () => {
     const queryArb = fc
-      .stringOf(
-        fc.constantFrom(...fts5SpecialChars, ..."abcdefghijklmnopqrstuvwxyz ".split("")),
-        { minLength: 1, maxLength: 60 },
-      )
+      .string({
+        unit: fc.constantFrom(...fts5SpecialChars, ..."abcdefghijklmnopqrstuvwxyz ".split("")),
+        minLength: 1,
+        maxLength: 60,
+      })
       .filter((s) => isBugCondition(s));
 
     fc.assert(
@@ -195,10 +196,11 @@ describe("FTS5 Preservation Tests", () => {
    * **Validates: Requirements 3.1, 3.2, 3.3, 3.4**
    */
   it("property: plain alphanumeric queries return valid results without throwing", () => {
-    const plainQueryArb = fc.stringOf(
-      fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789 ".split("")),
-      { minLength: 1, maxLength: 40 },
-    );
+    const plainQueryArb = fc.string({
+      unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789 ".split("")),
+      minLength: 1,
+      maxLength: 40,
+    });
 
     fc.assert(
       fc.property(plainQueryArb, (query) => {

@@ -19,10 +19,11 @@ import { extractTextFromHtml } from "./content-extractor.js";
 const STRIPPED_TAGS = ["script", "style", "nav", "footer", "header", "aside"] as const;
 
 /** Generate a random plain text string (no angle brackets or ampersands). */
-const safeText = fc.stringOf(
-  fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-"),
-  { minLength: 1, maxLength: 40 },
-);
+const safeText = fc.string({
+  unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?-"),
+  minLength: 1,
+  maxLength: 40,
+});
 
 /** Generate content wrapped in a stripped tag. */
 const strippedElement = fc.tuple(

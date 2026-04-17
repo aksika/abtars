@@ -6,18 +6,20 @@ import type { InboundMessage } from "../../types/platform.js";
 
 // Mock TelegramApi
 vi.mock("./telegram-api.js", () => ({
-  TelegramApi: vi.fn().mockImplementation(() => ({
-    getMe: vi.fn().mockResolvedValue({ username: "testbot" }),
-    setMyCommands: vi.fn().mockResolvedValue(undefined),
-    sendMessage: vi.fn().mockResolvedValue(1),
-    sendChatAction: vi.fn().mockResolvedValue(undefined),
-    setMessageReaction: vi.fn().mockResolvedValue(undefined),
-    getFile: vi.fn().mockResolvedValue({ file_path: "voice/file.ogg" }),
-    downloadFile: vi.fn().mockResolvedValue(Buffer.from("audio")),
-    sendVoice: vi.fn().mockResolvedValue(undefined),
-    answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
-    getUpdates: vi.fn().mockResolvedValue([]),
-  })),
+  TelegramApi: vi.fn(function () {
+    return {
+      getMe: vi.fn().mockResolvedValue({ username: "testbot" }),
+      setMyCommands: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue(1),
+      sendChatAction: vi.fn().mockResolvedValue(undefined),
+      setMessageReaction: vi.fn().mockResolvedValue(undefined),
+      getFile: vi.fn().mockResolvedValue({ file_path: "voice/file.ogg" }),
+      downloadFile: vi.fn().mockResolvedValue(Buffer.from("audio")),
+      sendVoice: vi.fn().mockResolvedValue(undefined),
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      getUpdates: vi.fn().mockResolvedValue([]),
+    };
+  }),
 }));
 
 vi.mock("../../components/user-registry.js", () => ({
@@ -29,7 +31,7 @@ vi.mock("../../components/user-registry.js", () => ({
 }));
 
 vi.mock("./telegram-poller.js", () => ({
-  TelegramPoller: vi.fn().mockImplementation((_api: unknown, _timeout: number, handler: Function) => {
+  TelegramPoller: vi.fn(function (this: unknown, _api: unknown, _timeout: number, handler: Function) {
     (TelegramPollerMock as any)._handler = handler;
     return {
       start: vi.fn(),

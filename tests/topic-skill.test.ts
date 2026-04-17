@@ -173,12 +173,13 @@ describe("Topic Skill — Property Tests", () => {
   it("Property 1: File path follows naming convention", () => {
     // Generate valid topic names (alphanumeric + spaces) and ISO dates
     const topicNameArb = fc
-      .stringOf(
-        fc.constantFrom(
+      .string({
+        unit: fc.constantFrom(
           ..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ".split(""),
         ),
-        { minLength: 1, maxLength: 40 },
-      )
+        minLength: 1,
+        maxLength: 40,
+      })
       .filter((s) => sanitizeTopicName(s) !== null);
 
     const dateArb = fc
@@ -211,12 +212,13 @@ describe("Topic Skill — Property Tests", () => {
   // Feature: topic-skill, Property 2: Discovery matches existing files case-insensitively
   it("Property 2: Discovery matches existing files case-insensitively", () => {
     const topicNameArb = fc
-      .stringOf(
-        fc.constantFrom(
+      .string({
+        unit: fc.constantFrom(
           ..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ".split(""),
         ),
-        { minLength: 1, maxLength: 30 },
-      )
+        minLength: 1,
+        maxLength: 30,
+      })
       .filter((s) => sanitizeTopicName(s) !== null);
 
     const dateArb = fc
@@ -260,12 +262,13 @@ describe("Topic Skill — Property Tests", () => {
   // Feature: topic-skill, Property 3: Filename date preserved on append
   it("Property 3: Filename date preserved on append", () => {
     const topicNameArb = fc
-      .stringOf(
-        fc.constantFrom(
+      .string({
+        unit: fc.constantFrom(
           ..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_".split(""),
         ),
-        { minLength: 1, maxLength: 30 },
-      )
+        minLength: 1,
+        maxLength: 30,
+      })
       .filter((s) => sanitizeTopicName(s) !== null);
 
     const dateArb = fc
@@ -300,7 +303,7 @@ describe("Topic Skill — Property Tests", () => {
   // Feature: topic-skill, Property 4: Sanitization produces only valid characters with casing preserved
   it("Property 4: Sanitization produces only valid characters with casing preserved", () => {
     fc.assert(
-      fc.property(fc.fullUnicodeString({ minLength: 1, maxLength: 50 }), (input) => {
+      fc.property(fc.string({ unit: "grapheme", minLength: 1, maxLength: 50 }), (input) => {
         const result = sanitizeTopicName(input);
 
         if (result === null) return; // null is acceptable for invalid inputs
@@ -323,7 +326,7 @@ describe("Topic Skill — Property Tests", () => {
   // Feature: topic-skill, Property 5: Sanitization is idempotent
   it("Property 5: Sanitization is idempotent", () => {
     fc.assert(
-      fc.property(fc.fullUnicodeString({ minLength: 0, maxLength: 50 }), (input) => {
+      fc.property(fc.string({ unit: "grapheme", minLength: 0, maxLength: 50 }), (input) => {
         const first = sanitizeTopicName(input);
 
         if (first === null) return; // skip inputs that produce null
