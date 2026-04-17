@@ -420,8 +420,9 @@ export async function startBridge(): Promise<void> {
 
   // Wire fallback notification for direct API transport
   if ("onFallback" in transport) {
-    (transport as unknown as { onFallback: (model: string, ctxPct: number) => void }).onFallback = (model, ctxPct) => {
-      const msg = `⚡ Fallback: ${model}${ctxPct >= 0 ? ` (ctx: ~${ctxPct}%)` : ""}`;
+    (transport as unknown as { onFallback: (model: string, ctxPct: number, reason?: string) => void }).onFallback = (model, ctxPct, reason) => {
+      const reasonTag = reason ? ` (${reason})` : "";
+      const msg = `⚡ Fallback${reasonTag}: ${model}${ctxPct >= 0 ? ` (ctx: ~${ctxPct}%)` : ""}`;
       logInfo("main", msg);
       const chatId = config.mainChatId;
       if (chatId && bridge.telegramAdapter) {

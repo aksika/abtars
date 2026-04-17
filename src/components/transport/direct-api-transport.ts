@@ -43,7 +43,7 @@ export class DirectApiTransport implements IKiroTransport {
 
   onIntermediateResponse?: (text: string) => void;
   /** Called when fallback model is selected — send notification before response. */
-  onFallback?: (model: string, ctxPercent: number) => void;
+  onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
 
   constructor(config: DirectApiConfig) {
     this.config = config;
@@ -118,7 +118,8 @@ export class DirectApiTransport implements IKiroTransport {
         // Notify user on fallback
         if (!isPrimary(candidate) && this.onFallback) {
           const ctxPct = candidate.maxContext > 0 ? Math.round((this._lastPromptTokens / candidate.maxContext) * 100) : -1;
-          this.onFallback(candidate.model, ctxPct);
+          const lastFail = failedAttempts[failedAttempts.length - 1];
+          this.onFallback(candidate.model, ctxPct, lastFail?.kind);
         }
 
         try {
