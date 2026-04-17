@@ -231,6 +231,11 @@ export async function startBridge(): Promise<void> {
   bridge.heartbeat = heartbeat;
   bridge.cronQueue = cronQueue;
 
-  process.on("SIGINT", () => void bridge.shutdown());
-  process.on("SIGTERM", () => void bridge.shutdown());
+  // ── Phase 13: shutdown signals ──
+  {
+    const t = Date.now();
+    const { phaseShutdown } = await import("./boot/phase-shutdown.js");
+    await phaseShutdown(ctx, bridge);
+    logInfo("boot", `✓ phaseShutdown (${Date.now() - t}ms)`);
+  }
 }
