@@ -47,16 +47,17 @@ notify() {
 }
 
 read_lock() {
-  # Returns: pid heartbeat_ms sleep_status  (or "ERR" on parse failure)
+  # Returns: pid heartbeat_ms sleep_status started_at_ms  (or "ERR" on parse failure)
   # Pure bash — no python3/jq dependency
   if [[ ! -f "$LOCK" ]]; then echo "ERR"; return; fi
   local content
   content=$(cat "$LOCK" 2>/dev/null) || { echo "ERR"; return; }
-  local pid hb sleep
+  local pid hb sleep started
   pid=$(echo "$content" | grep -o '"pid":[0-9]*' | grep -o '[0-9]*') || pid=0
   hb=$(echo "$content" | grep -o '"lastHeartbeat":[0-9]*' | grep -o '[0-9]*') || hb=0
   sleep=$(echo "$content" | grep -o '"sleepStatus":"[^"]*"' | cut -d'"' -f4) || sleep="awake"
-  echo "${pid:-0} ${hb:-0} ${sleep:-awake}"
+  started=$(echo "$content" | grep -o '"startedAt":[0-9]*' | grep -o '[0-9]*') || started=0
+  echo "${pid:-0} ${hb:-0} ${sleep:-awake} ${started:-0}"
 }
 
 now_ms() {
@@ -199,6 +200,7 @@ while true; do
   lock_pid=$(echo "$local_lock" | awk '{print $1}')
   lock_hb=$(echo "$local_lock" | awk '{print $2}')
   lock_sleep=$(echo "$local_lock" | awk '{print $3}')
+  lock_started=$(echo "$local_lock" | awk '{print $4}')
   now=$(now_ms)
 
   # Update tracked PID from bridge.lock (node process, not bash wrapper)
@@ -214,24 +216,25 @@ while true; do
     spawn_bridge "${BRIDGE_ARGS[@]}"
     continue
   fi
-  now=$(now_ms)
 
   # Skip stale check during hardware sleep
   if [[ "$lock_sleep" == "hw_sleep" ]]; then
     continue
   fi
 
-  # Startup timeout — no heartbeat within 2 min of spawn
+  # Startup phase — bridge has startedAt but no heartbeat yet
   if (( lock_hb == 0 )); then
-    elapsed=$(( $(date +%s) - SPAWNED_AT ))
-    if (( elapsed > STARTUP_TIMEOUT )); then
-      kill_bridge "startup timeout (${elapsed}s, no heartbeat)"
-      spawn_bridge "${BRIDGE_ARGS[@]}"
+    if (( lock_started > 0 )); then
+      # Bridge wrote startedAt — it's alive, waiting for first heartbeat tick
+      age_s=$(( (now - lock_started) / 1000 ))
+      if (( age_s > STARTUP_TIMEOUT )); then
+        kill_bridge "startup timeout (${age_s}s from startedAt, no heartbeat)"
+        spawn_bridge "${BRIDGE_ARGS[@]}"
+      fi
     fi
     continue
   fi
 
-  # Stale heartbeat check
   age_sec=$(( (now - lock_hb) / 1000 ))
   if (( age_sec > STALE_SEC )); then
     kill_bridge "heartbeat stale (${age_sec}s)"
