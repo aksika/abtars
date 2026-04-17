@@ -47,12 +47,12 @@ notify() {
 }
 
 read_lock() {
-  # Returns: pid heartbeat_ms  (or "ERR" on parse failure)
+  # Returns: pid heartbeat_ms sleep_status  (or "ERR" on parse failure)
   python3 -c "
 import json
 try:
     d=json.load(open('$LOCK'))
-    print(d.get('pid',0), d.get('lastHeartbeat',0))
+    print(d.get('pid',0), d.get('lastHeartbeat',0), d.get('sleepStatus','awake'))
 except:
     print('ERR')
 " 2>/dev/null
@@ -191,7 +191,13 @@ while true; do
 
   lock_pid=$(echo "$local_lock" | awk '{print $1}')
   lock_hb=$(echo "$local_lock" | awk '{print $2}')
+  lock_sleep=$(echo "$local_lock" | awk '{print $3}')
   now=$(now_ms)
+
+  # Skip stale check during hardware sleep
+  if [[ "$lock_sleep" == "hw_sleep" ]]; then
+    continue
+  fi
 
   # Startup timeout — no heartbeat within 2 min of spawn
   if (( lock_hb == 0 )); then
