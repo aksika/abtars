@@ -94,22 +94,6 @@ export class Bridge {
     this.memoryConfig = memoryConfig;
   }
 
-  /** Wire LLM callback + start memory IPC server. Call after transport is ready. */
-  async wireMemory(): Promise<void> {
-    if (!this.memory) return;
-    this.memory.setLlmCall(async (prompt: string, content: string) => {
-      return this.transport.sendPrompt("system:memory", `${prompt}\n\n${content}`);
-    });
-    logInfo("main", "🧠 Memory LLM callback registered");
-
-    const { MemoryIpcServer } = await import("abmind/memory-ipc-server.js");
-    const { SqliteBackend } = await import("abmind/sqlite-backend.js");
-    const ipcBackend = new SqliteBackend(this.memoryConfig);
-    await ipcBackend.initialize();
-    const memoryIpc = new MemoryIpcServer(ipcBackend);
-    await memoryIpc.start();
-  }
-
   /** Initialize web dashboard. */
   async initDashboard(
     platforms: { web: boolean; agent: boolean },
@@ -235,6 +219,7 @@ export async function startBridge(): Promise<void> {
   const { phaseConfig } = await import("./boot/phase-config.js");
   const { phaseMemory } = await import("./boot/phase-memory.js");
   const { phaseTransport } = await import("./boot/phase-transport.js");
+  const { phaseMemoryIpc } = await import("./boot/phase-memory-ipc.js");
   const ctx = createBootCtx();
   {
     const t = Date.now();
@@ -352,7 +337,12 @@ export async function startBridge(): Promise<void> {
   };
 
   // Wire memory LLM callback + IPC server
-  await bridge.wireMemory();
+  // ── Phase 4: memory IPC ──
+  {
+    const t = Date.now();
+    await phaseMemoryIpc(ctx);
+    logInfo("boot", `✓ phaseMemoryIpc (${Date.now() - t}ms)`);
+  }
 
     // Unified heartbeat — single 5-min timer for all periodic tasks
 
