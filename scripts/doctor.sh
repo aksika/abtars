@@ -8,7 +8,8 @@
 set -uo pipefail
 
 AB="$HOME/.agentbridge"
-DB="$AB/memory/memory.db"
+ABMIND="${ABMIND_HOME:-$HOME/.abmind}"
+DB="$ABMIND/memory/memory.db"
 FIX=false
 FIX_FULL=false
 WARNS=0
@@ -120,7 +121,7 @@ if [ -d "$AB/titok" ] && [ ! -d "$AB/secret" ]; then
 fi
 
 # 1. Directory permissions (sensitive dirs should be 700) -- fix-full only
-for d in "$AB/secret" "$AB/secret/cookies" "$AB/memory"; do
+for d in "$AB/secret" "$AB/secret/cookies" "$ABMIND/memory"; do
   if [ -d "$d" ] && [ "$(stat -c %a "$d" 2>/dev/null)" != "700" ]; then
     if $FIX_FULL; then
       chmod 700 "$d"; fix "$d permissions → 700"
@@ -143,12 +144,12 @@ while IFS= read -r f; do
 done < <(find "$AB" -name "*.lock" -not -path "*/sleep/*" -not -path "*/node_modules/*" -not -name "watchdog.lock" -mmin +60 2>/dev/null)
 
 # 3. Stale sleep lock (older than 2 hours, no matching audit .md)
-for lockfile in "$AB/memory/sleep"/sleep_*.lock; do
+for lockfile in "$ABMIND/memory/sleep"/sleep_*.lock; do
   [ -f "$lockfile" ] || continue
   lockage=$(( ($(date +%s) - $(stat -c %Y "$lockfile" 2>/dev/null || echo 0)) / 60 ))
   if [ "$lockage" -gt 120 ]; then
     base=$(basename "$lockfile" .lock)
-    if ! ls "$AB/memory/sleep/${base}"_*.md &>/dev/null; then
+    if ! ls "$ABMIND/memory/sleep/${base}"_*.md &>/dev/null; then
       if $FIX; then
         rm -f "$lockfile"; fix "removed stale sleep lock $lockfile ${lockage}min old, no audit"
       else
@@ -169,7 +170,7 @@ else
 fi
 
 # 5. Required dirs exist
-for d in "$AB/twitterX" "$AB/twitterX/output" "$AB/skills" "$AB/logs" "$AB/memory/sleep" "$AB/memory/retrospectives"; do
+for d in "$AB/twitterX" "$AB/twitterX/output" "$AB/skills" "$AB/logs" "$ABMIND/memory/sleep" "$ABMIND/memory/retrospectives"; do
   if [ ! -d "$d" ]; then
     if $FIX; then
       mkdir -p "$d"; fix "created missing dir $d"
@@ -208,7 +209,7 @@ if [ -f "$DB" ]; then
     warn "memory.db is ${DB_MB}MB -- approaching 500MB disk budget"
   fi
 
-  LATEST_SLEEP=$(find "$AB/memory/sleep" -name "sleep_*.md" -mtime -3 2>/dev/null | head -1)
+  LATEST_SLEEP=$(find "$ABMIND/memory/sleep" -name "sleep_*.md" -mtime -3 2>/dev/null | head -1)
   if [ -z "$LATEST_SLEEP" ]; then
     warn "no sleep audit in last 3 days -- GC/consolidation not running"
   fi
