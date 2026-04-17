@@ -25,26 +25,9 @@ import { BrowserManager } from "./capabilities/browser/browser-manager.js";
 import { BrowserIpcServer } from "./capabilities/browser/browser-ipc-server.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "./components/cron/cron-checker.js";
 import { CronQueue } from "./components/cron/cron-queue.js";
-import { startSession } from "./components/message-pipeline.js";
 import { loadUsers } from "./components/user-registry.js";
 import { resetAllCtxStarts } from "./boot/ctx-start.js";
 
-
-/** Send "Back online" notification to all platforms. */
-async function sendBackOnline(
-  sendTelegram?: (msg: string) => Promise<void>,
-  sendDiscord?: (msg: string) => Promise<void>,
-): Promise<void> {
-  const msg = "🔄 Back online.";
-  logInfo("main", "Startup: Back online notification sent");
-  const results = await Promise.allSettled([
-    sendTelegram?.(msg).catch(() => {}),
-    sendDiscord?.(msg).catch(() => {}),
-  ]);
-  for (const r of results) {
-    if (r.status === "rejected") logWarn("main", `Back online send failed: ${r.reason}`);
-  }
-}
 
 import type { Config } from "./types/index.js";
 import type { MemoryConfig } from "abmind/index.js";
@@ -216,6 +199,7 @@ export async function startBridge(): Promise<void> {
   const { phasePipelineDeps, createCronCallback } = await import("./boot/phase-pipeline-deps.js");
   const { phasePlatforms } = await import("./boot/phase-platforms.js");
   const { phaseCapabilities } = await import("./boot/phase-capabilities.js");
+  const { phaseStartupNotification } = await import("./boot/phase-startup-notification.js");
   const ctx = createBootCtx();
   {
     const t = Date.now();
@@ -255,7 +239,6 @@ export async function startBridge(): Promise<void> {
 
   const busyChats = ctx.busyChats;
   const pendingSessionStart = ctx.pendingSessionStart;
-  const seenSessions = ctx.seenSessions;
   const registry = bridge.registry;
 
   // STT/TTS/NLM config (already loaded in phase-config; locals for legacy refs)
@@ -308,40 +291,11 @@ export async function startBridge(): Promise<void> {
   if (sttConfig) logInfo("main", `🎤 STT enabled (${sttConfig.provider}/${sttConfig.model || "whisper-large-v3"})`);
   if (ttsConfig) logInfo("main", `🔊 TTS enabled (Edge TTS / ${ttsConfig.voice})`);
 
-  // --- Startup notification (async, non-blocking) ---
-  if (memoryConfig.memoryEnabled) {
-    const tgSend = bridge.telegramAdapter ? async (msg: string): Promise<void> => {
-      const chatId = config.mainChatId;
-      if (chatId) await bridge.telegramAdapter!.sendMessage(String(chatId), msg);
-    } : undefined;
-    const dcSend = bridge.discordAdapter ? async (msg: string): Promise<void> => {
-      const channelId = config.discord.allowedChannelIds ? [...config.discord.allowedChannelIds][0] : undefined;
-      if (channelId) await bridge.discordAdapter!.sendMessage(channelId, msg);
-    } : undefined;
-    sendBackOnline(tgSend, dcSend).catch((err) => {
-      logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
-    });
-
-    // Start session: inject SOUL + context + greeting, push response to Telegram
-    if (bridge.telegramAdapter && memory) {
-      const chatId = config.mainChatId;
-      if (chatId) {
-        const masterUser = loadUsers().users.find(u => u.role === "master"); const sessionKey = `${masterUser?.userId ?? "master"}:telegram`;
-        seenSessions.add(sessionKey);
-        busyChats.add(sessionKey);
-        startSession(
-          transport, memory, loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master", sessionKey,
-          "You just came online. Output ONLY a personalized greeting message.",
-          (text) => (bridge.telegramAdapter as import("./platforms/telegram/telegram-adapter.js").TelegramAdapter).sendMessage(String(chatId), text),
-        ).then(() => {
-          logInfo("main", "✅ Startup session ready");
-        }).catch(err => {
-          logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`);
-        }).finally(() => {
-          busyChats.delete(sessionKey);
-        });
-      }
-    }
+  // ── Phase 8: startup notification ──
+  {
+    const t = Date.now();
+    await phaseStartupNotification(ctx);
+    logInfo("boot", `✓ phaseStartupNotification (${Date.now() - t}ms)`);
   }
 
   // bridge.lock — track bridge lifecycle
