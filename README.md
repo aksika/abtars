@@ -8,289 +8,181 @@ AI subscriptions give you access to the best models at a fixed monthly cost — 
 
 - **AWS Builder ID** (free) or enterprise account → Claude Sonnet via [Kiro CLI](https://kiro.dev)
 - **Google account** (free/paid) → Gemini 2.5 Pro via [Gemini CLI](https://github.com/google-gemini/gemini-cli)
-- **9Router / OpenRouter** → 40+ models including free tiers (Qwen, DeepSeek, Kimi K2)
+- **OpenRouter** → 40+ models including free tiers (Qwen, DeepSeek, Gemma, Kimi K2)
+- **ollama** → local models, zero cost, no rate limits
 
-The bridge is the agent brain — it owns memory, personality, tools, and context management. The CLIs are just model access wrappers. Switch models by changing a config flag, not rewriting your agent.
+The bridge is the agent brain — it owns memory, personality, tools, and context management. The CLIs are just model access wrappers. Switch models by changing a config file, not rewriting your agent.
 
 ```
 You (Telegram/Discord)
   │
   ▼
 AgentBridge (agent brain)
-  ├── Memory system (SQLite, 4-layer recall, embeddings)
+  ├── Memory system (abmind — SQLite, 4-layer recall, embeddings)
   ├── Personality (SOUL.md, skills, agent notes)
   ├── Tools (browse, store, recall, edit, sleep cycle)
-  ├── Context window management (own compaction, graduated thresholds)
+  ├── Context window management (compaction, graduated thresholds)
   │
   ├── kiro-cli     → Claude Sonnet (AWS subscription)
   ├── gemini-cli   → Gemini 2.5 Pro (Google free tier)
-  └── direct API   → any OpenAI-compatible endpoint (planned)
+  └── Direct API   → ollama, OpenRouter, any OpenAI-compatible endpoint
 ```
 
-No web server, no exposed ports, no webhooks. Outbound-only traffic to Telegram's API + local communication with the model provider. Optionally, a localhost-only web dashboard can be enabled with `--web`.
+No web server, no exposed ports, no webhooks. Outbound-only traffic to Telegram's API + local communication with the model provider.
 
 ## Supported Transports
 
-- **ACP** (recommended) — communicates with kiro-cli or gemini-cli via Agent Client Protocol (JSON-RPC 2.0 over stdio). Real-time streaming, structured permission handling.
-- **tmux** (legacy) — runs kiro-cli in a tmux session, communicates via `send-keys` / `capture-pane`. Battle-tested, survives disconnects.
-- **Direct API** (planned) — talks to any OpenAI-compatible endpoint directly. No CLI dependency. Tool-calling loop built into the bridge.
+| Transport | How | Best for |
+|-----------|-----|----------|
+| **ACP** (recommended) | JSON-RPC 2.0 over stdio with kiro-cli or gemini-cli | Subscription-based models (Claude, Gemini) |
+| **Direct API** | HTTP to any OpenAI-compatible endpoint | ollama, OpenRouter, self-hosted |
+| **tmux** (legacy) | send-keys / capture-pane with kiro-cli in tmux | Fallback if ACP unavailable |
+
+Configure in `~/.agentbridge/config/transport.json`. See `config/transport.json.example`.
 
 ## Prerequisites
 
+**Required:**
 - **Node.js 22+**
-- **python3** — used by `doctor.sh` for JSON parsing and health checks
+- **python3** — used by `doctor.sh` for health checks
 - **A Telegram Bot** — created via [@BotFather](https://t.me/BotFather)
-- **Your Telegram User ID** — get it from [@userinfobot](https://t.me/userinfobot)
 
-Optional: Kiro CLI (ACP transport), Gemini CLI (ACP transport), tmux (legacy transport), ollama (local LLM + embeddings), mcporter (MCP), gws (Gmail), nlm (NotebookLM).
+**Transport (at least one):**
+- **Kiro CLI** — ACP transport for Claude models
+- **Gemini CLI** — ACP transport for Gemini models
+- **ollama** — Direct API transport for local models
+- **OpenRouter account** — Direct API transport for cloud models
+
+**Skill dependencies (optional):**
+- **ollama** + `nomic-embed-text` — memory embeddings
+- **mcporter** — MCP tool server
+- **gws** — Gmail integration
+- **nlm** — NotebookLM knowledge base
 
 ## Quick Start
 
 ### 1. Clone and install
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/aksika/agentbridge.git
 cd agentbridge
 npm install
 ```
 
-### 2. Create a Telegram bot
-
-1. Message [@BotFather](https://t.me/BotFather) on Telegram
-2. Send `/newbot` and follow the prompts
-3. Copy the bot token (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
-
-### 3. Get your Telegram user ID
-
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
-2. It replies with your numeric user ID (e.g. `987654321`)
-
-### 4. Configure
+### 2. Configure
 
 ```bash
-mkdir -p ~/.agentbridge
-cp .env.example ~/.agentbridge/.env
+npm run build
+bash scripts/deploy.sh
 ```
 
-Edit `~/.agentbridge/.env`:
+Deploy creates `~/.agentbridge/` with all config files. Edit `~/.agentbridge/.env`:
 
 ```env
-TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
-MAIN_CHAT_ID=987654321
-KIRO_TRANSPORT=tmux
-WORKING_DIR=/path/to/your/project
-TRUST_MODE=true
+TELEGRAM_BOT_TOKEN=<from @BotFather>
+MAIN_CHAT_ID=<your Telegram user ID>
 ```
 
-### 5. Build
+Configure your transport in `~/.agentbridge/config/transport.json` and models in `~/.agentbridge/config/models.json`. See the `.example` files in `config/`.
 
-```bash
-npm run build
+Configure users in `~/.agentbridge/config/users.json`:
+
+```json
+{
+  "users": [
+    {
+      "userId": "you",
+      "role": "master",
+      "maxClass": 3,
+      "tools": ["all"],
+      "platforms": { "telegram": 123456789 }
+    }
+  ]
+}
 ```
 
-### 6. Deploy and start
+### 3. Start
 
 ```bash
-chmod +x scripts/deploy.sh
+# Via watchdog (recommended — auto-restarts on crash)
+~/.agentbridge/watchdog.sh --all --web --agent &
 
-# Full deploy: build + env sync + steering + launcher + restart tmux
-./scripts/deploy.sh
-
-# Quick deploy: env + steering + launcher only (skip build, skip tmux restart)
-./scripts/deploy.sh --quick
+# Or directly
+~/.agentbridge/agentbridge.sh --all
 ```
 
-Use `--quick` after config or steering changes when you don't need a rebuild or tmux restart.
+Flags: `--telegram`, `--discord`, `--web` (dashboard), `--agent` (REST API), `--all` (everything).
 
-### 7. Start the bridge
-
-**Option A — Launcher script (from anywhere):**
+### 4. Health check
 
 ```bash
-~/.agentbridge/agentbridge.sh                # Discord (default)
-~/.agentbridge/agentbridge.sh --telegram     # Telegram only
-~/.agentbridge/agentbridge.sh --all          # Both platforms
-~/.agentbridge/agentbridge.sh --all --web    # Both platforms + web dashboard
-~/.agentbridge/agentbridge.sh stop           # Stop everything
-```
-
-The launcher handles nvm, starts the tmux/kiro-cli session if needed, and runs the bridge.
-
-**Option B — Manual (from project directory):**
-
-```bash
-cd /home/qakosal/workspace/agentbridge
-
-# 1. Build TypeScript
-npm run build
-
-# 2. Start the tmux session (if not already running)
-./scripts/tmux-session.sh
-
-# 3. Start the bridge
-npm start -- --discord      # or --telegram, --all
-```
-
-Dev mode (no build step):
-
-```bash
-npm run dev -- --telegram
+bash scripts/doctor.sh          # diagnose
+bash scripts/doctor.sh --fix    # auto-fix safe issues
 ```
 
 ## Web Dashboard
 
-An optional operations dashboard for monitoring and controlling the bridge from your browser.
-
-### Setup
-
-1. Generate an auth token:
-
-```bash
-openssl rand -hex 32
-```
-
-2. Add to your `.env`:
+Optional localhost dashboard for monitoring. Enable with `--web`.
 
 ```env
-WEB_AUTH_TOKEN=<your-generated-token>
+WEB_AUTH_TOKEN=<openssl rand -hex 32>
+WEB_PORT=3000
+WEB_HOST=127.0.0.1
 ```
 
-3. Start with `--web`:
+Open `http://localhost:3000`, enter your token.
 
-```bash
-npm run build
-npm start -- --telegram --web
-# or with --all (enables telegram + discord + web)
-npm start -- --all
-```
-
-Dev mode (no build step):
-
-```bash
-npm run dev -- --telegram --web
-```
-
-4. Open `http://localhost:3000` in your browser. Enter your token when prompted.
-
-### What it shows
-
-- Bridge health and uptime
-- Platform status (Telegram, Discord) with start/stop toggles
-- Transport mode (tmux/ACP) with live switch
-- Memory system stats and keyword search (L1–L4 layers)
-- Heartbeat status
-
-Real-time updates via WebSocket — no polling.
-
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WEB_AUTH_TOKEN` | — | Required when `--web` is enabled |
-| `WEB_PORT` | `3000` | HTTP server port |
-| `WEB_HOST` | `127.0.0.1` | Bind address (localhost only by default) |
-| `WEB_PUSH_INTERVAL_MS` | `5000` | WebSocket push interval |
-
-## Usage
+## Commands
 
 Message your bot on Telegram:
 
-- **Any text** — forwarded to Kiro as a prompt
-- **`/new`** or **`/reset`** — start a fresh Kiro session
-- **`/status`** — check transport connection status
+| Command | Description |
+|---------|-------------|
+| `/status` | Bridge health, model, uptime |
+| `/models` | Current model + fallbacks |
+| `/models change` | Switch model/provider (interactive) |
+| `/models status` | All agents with model + provider |
+| `/new`, `/reset` | Fresh session |
+| `/compact` | Compress context window |
+| `/tasks` | Cron task management |
+| `/memory` | Memory stats |
+| `/help` | All commands |
 
-## Transport Modes
+## External Watchdog
 
-### tmux (default)
+`watchdog.sh` monitors the bridge from outside — catches event loop deadlocks and silent crashes that in-process watchdogs can't detect.
 
-Kiro CLI runs inside a persistent tmux session. The bridge sends your messages via `tmux send-keys` and reads Kiro's responses via `tmux capture-pane`.
+```bash
+# Start
+~/.agentbridge/watchdog.sh --all --web --agent &
 
-Pros: works today, battle-tested, survives disconnects
-Cons: output parsing is heuristic-based, no structured permission handling
-
-```env
-KIRO_TRANSPORT=tmux
-TMUX_SESSION=kiro-bridge
-TMUX_CAPTURE_DELAY_SEC=3
-TMUX_MAX_WAIT_SEC=300
+# Graceful restart (e.g. after deploy)
+kill -USR1 $(grep -o '"pid":[0-9]*' ~/.agentbridge/watchdog.lock | grep -o '[0-9]*')
 ```
 
-### ACP (experimental)
+Features: 6-min stale heartbeat detection, SIGKILL for frozen processes, circuit breaker (3 restarts in 5 min), Telegram notification on kill/restart.
 
-Communicates with `kiro-cli acp` via JSON-RPC 2.0 over stdio. Structured protocol with typed messages.
+For persistent operation, use the provided LaunchAgent (macOS) or systemd unit (Linux).
 
-Pros: real-time streaming, structured permission requests, clean API
-Cons: ACP protocol is young — currently has deserialization issues
+## Memory System (abmind)
 
-```env
-KIRO_TRANSPORT=acp
-KIRO_CLI_PATH=kiro-cli
-```
+AgentBridge uses [abmind](https://github.com/aksika/abmind) for persistent memory:
 
-## Configuration Reference
+- **Messages** — conversation history with emotion scoring
+- **Extracted memories** — facts, preferences, relationships extracted during sleep
+- **Core knowledge** — promoted long-term memories
+- **Sleep cycle** — nightly extraction, consolidation, darwinism (memory competition)
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `TELEGRAM_BOT_TOKEN` | yes | — | Bot token from @BotFather |
-| `MAIN_CHAT_ID` | yes | — | Master Telegram chat ID (fallback if no users.json) |
-| `KIRO_TRANSPORT` | no | `tmux` | Transport: `tmux` or `acp` |
-| `KIRO_CLI_PATH` | no | `kiro-cli` | Path to kiro-cli binary |
-| `WORKING_DIR` | no | `.` | Directory where Kiro operates |
-| `TMUX_SESSION` | no | `kiro-bridge` | tmux session name (tmux transport) |
-| `TMUX_CAPTURE_DELAY_SEC` | no | `3` | Seconds before first output capture |
-| `TMUX_MAX_WAIT_SEC` | no | `300` | Max seconds to wait for Kiro response |
-| `TRUST_MODE` | no | `false` | Auto-approve Kiro actions |
-| `BROWSING_AGENT` | no | `claude-sonnet-4.6` | Model for browse subagent |
-| `PERMISSION_TIMEOUT_MS` | no | `60000` | Permission prompt timeout (acp only) |
-| `LOG_LEVEL` | no | `low` | Logging: `off`, `low`, `debug` |
-| `WEB_AUTH_TOKEN` | when `--web` | — | Bearer token for dashboard auth |
-| `WEB_PORT` | no | `3000` | Dashboard HTTP port |
-| `WEB_HOST` | no | `127.0.0.1` | Dashboard bind address |
-| `WEB_PUSH_INTERVAL_MS` | no | `5000` | WebSocket status push interval (ms) |
-
-All configuration is read from `~/.agentbridge/.env`. Logs are written to `~/.agentbridge/bridge.log`.
-
-## Security
-
-- Fail-closed: empty user whitelist = refuses to start
-- Silent rejection: unauthorized users get no response
-- Zero network surface: no webhooks, no exposed ports (web dashboard binds to localhost only)
-- No API keys in code: all secrets in `.env`
-- No MCP: uses local communication only
+abmind is a separate repo linked via `npm link` or `file:../abmind` in package.json.
 
 ## Development
 
 ```bash
 npm test              # Run tests
 npm run test:watch    # Watch mode
-npm run typecheck     # Type-check (catches errors Vitest ignores)
+npm run typecheck     # Type-check
 npm run build         # Build
-```
-
-## Project Structure
-
-```
-src/
-├── main.ts                          # Entry point — transport selection + wiring
-├── types/
-│   ├── index.ts                     # Re-exports
-│   ├── config.ts                    # Config type with transport settings
-│   ├── session.ts, acp.ts, permission.ts, telegram.ts
-└── components/
-    ├── kiro-transport.ts            # IKiroTransport interface
-    ├── tmux-client.ts               # tmux transport implementation
-    ├── acp-client.ts                # ACP JSON-RPC client
-    ├── acp-transport.ts             # ACP transport adapter
-    ├── config.ts                    # .env loading and validation
-    ├── security-gate.ts             # User ID whitelist
-    ├── telegram-api.ts              # Telegram Bot API wrapper
-    ├── telegram-poller.ts           # Long-poll loop
-    ├── response-formatter.ts        # Response chunking
-    ├── jsonrpc.ts                   # JSON-RPC utilities (acp)
-    ├── session-manager.ts           # Session mapping (acp)
-    └── permission-handler.ts        # Permission flow (acp)
-scripts/
-    └── tmux-session.sh              # Start kiro-cli in tmux
+npm run dev -- --telegram  # Dev mode (no build step)
 ```
 
 ## License
