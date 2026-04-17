@@ -7,14 +7,16 @@ import type { IKiroTransport } from "../../components/transport/kiro-transport.j
 let capturedReactionHandler: Function | null = null;
 
 vi.mock("./discord-api.js", () => ({
-  DiscordApi: vi.fn().mockImplementation(() => ({
-    connect: vi.fn().mockResolvedValue(undefined),
-    disconnect: vi.fn(),
-    sendMessage: vi.fn().mockResolvedValue(undefined),
-    onMessage: vi.fn(),
-    onReaction: vi.fn((handler: Function) => { capturedReactionHandler = handler; }),
-    botUserId: null,
-  })),
+  DiscordApi: vi.fn(function () {
+    return {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+      onMessage: vi.fn(),
+      onReaction: vi.fn((handler: Function) => { capturedReactionHandler = handler; }),
+      botUserId: null,
+    };
+  }),
 }));
 
 vi.mock("../../components/user-registry.js", () => ({
@@ -26,7 +28,7 @@ vi.mock("../../components/user-registry.js", () => ({
 }));
 
 vi.mock("./discord-poller.js", () => ({
-  DiscordPoller: vi.fn().mockImplementation((_api: unknown, _appId: string, handler: Function) => {
+  DiscordPoller: vi.fn(function (this: unknown, _api: unknown, _appId: string, handler: Function) {
     (DiscordPollerMock as any)._handler = handler;
     return {
       start: vi.fn().mockResolvedValue(undefined),

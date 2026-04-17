@@ -19,10 +19,11 @@ import { DomainAllowlist } from "./domain-allowlist.js";
 // ── Generators ──────────────────────────────────────────────────────────────
 
 /** Generate a valid domain label (1-10 lowercase alpha chars). */
-const domainLabel = fc.stringOf(
-  fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz"),
-  { minLength: 1, maxLength: 10 },
-);
+const domainLabel = fc.string({
+  unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz"),
+  minLength: 1,
+  maxLength: 10,
+});
 
 /** Generate a valid domain name like "foo.bar.com" (2-4 labels). */
 const domainName = fc
@@ -37,7 +38,8 @@ const urlFromHostname = (hostname: string) =>
   fc
     .tuple(
       fc.constantFrom("https://", "http://"),
-      fc.stringOf(fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz/"), {
+      fc.string({
+        unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz/"),
         minLength: 0,
         maxLength: 20,
       }),

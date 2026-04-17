@@ -56,10 +56,11 @@ const VALID_ACTIONS: BrowserActionType[] = [
 ];
 
 /** Generate a random session ID. */
-const sessionId = fc.stringOf(
-  fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789-"),
-  { minLength: 1, maxLength: 20 },
-);
+const sessionId = fc.string({
+  unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789-"),
+  minLength: 1,
+  maxLength: 20,
+});
 
 /** Generate a random valid BrowserAction that will succeed with mocks. */
 const validBrowserAction: fc.Arbitrary<BrowserAction> = fc.oneof(
@@ -439,10 +440,11 @@ describe("Feature: playwright-web-ingestion, Property 11: Credential masking", (
    * as substrings in log boilerplate (session IDs, selectors, action names).
    * We prefix with "PWD_" and use a minimum length to avoid false positives.
    */
-  const randomPassword = fc.stringOf(
-    fc.constantFrom(..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
-    { minLength: 4, maxLength: 40 },
-  ).map((s) => `PWD_${s}`);
+  const randomPassword = fc.string({
+    unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+    minLength: 4,
+    maxLength: 40,
+  }).map((s) => `PWD_${s}`);
 
   it("password value never appears in console.log output", async () => {
     await fc.assert(
@@ -534,15 +536,17 @@ describe("Feature: playwright-web-ingestion, Property 17: Error responses includ
   /** Generate random valid-looking URLs. */
   const randomUrl = fc.tuple(
     fc.constantFrom("https://", "http://"),
-    fc.stringOf(
-      fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789"),
-      { minLength: 1, maxLength: 15 },
-    ),
+    fc.string({
+      unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789"),
+      minLength: 1,
+      maxLength: 15,
+    }),
     fc.constantFrom(".com", ".org", ".net", ".io", ".dev"),
-    fc.stringOf(
-      fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789/-_"),
-      { minLength: 0, maxLength: 20 },
-    ),
+    fc.string({
+      unit: fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789/-_"),
+      minLength: 0,
+      maxLength: 20,
+    }),
   ).map(([scheme, host, tld, path]) => `${scheme}${host}${tld}/${path}`);
 
   it("navigation failure error message contains the URL", async () => {

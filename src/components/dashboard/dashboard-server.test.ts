@@ -339,12 +339,13 @@ describe("DashboardServer — Property 9: Unknown route returns 404", () => {
   // Arbitrary that generates URL-safe path strings excluding known routes
   const unknownPathArb = fc
     .array(
-      fc.stringOf(
-        fc.constantFrom(
+      fc.string({
+        unit: fc.constantFrom(
           ..."abcdefghijklmnopqrstuvwxyz0123456789-_.~".split(""),
         ),
-        { minLength: 1, maxLength: 12 },
-      ),
+        minLength: 1,
+        maxLength: 12,
+      }),
       { minLength: 1, maxLength: 4 },
     )
     .map((segments) => "/" + segments.join("/"))
