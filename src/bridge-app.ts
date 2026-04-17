@@ -92,150 +92,83 @@ export class Bridge {
   }
 }
 
+import { createBootCtx } from "./boot/context.js";
+import type { BootCtx } from "./boot/context.js";
+import { phaseConfig } from "./boot/phase-config.js";
+import { phaseMemory } from "./boot/phase-memory.js";
+import { phaseTransport } from "./boot/phase-transport.js";
+import { phaseMemoryIpc } from "./boot/phase-memory-ipc.js";
+import { phasePipelineDeps } from "./boot/phase-pipeline-deps.js";
+import { phasePlatforms } from "./boot/phase-platforms.js";
+import { phaseCapabilities } from "./boot/phase-capabilities.js";
+import { phaseStartupNotification } from "./boot/phase-startup-notification.js";
+import { phaseHeartbeat } from "./boot/phase-heartbeat.js";
+import { phaseSleep } from "./boot/phase-sleep.js";
+import { phaseDashboard } from "./boot/phase-dashboard.js";
+import { phaseAgentApi } from "./boot/phase-agent-api.js";
+import { phaseShutdown } from "./boot/phase-shutdown.js";
+
+/**
+ * Boot phase sequence. Each phase receives the BootCtx and populates
+ * fields used by later phases. Order must not change without updating
+ * the boot log expectations and phase-order.test.ts.
+ *
+ * Phases that need the Bridge instance (phase-platforms, phase-shutdown)
+ * receive it as a second arg via the dispatcher in startBridge().
+ */
+export const BOOT_PHASES = [
+  phaseConfig,
+  phaseMemory,
+  phaseTransport,
+  phaseMemoryIpc,
+  phasePipelineDeps,
+  phasePlatforms,
+  phaseCapabilities,
+  phaseStartupNotification,
+  phaseHeartbeat,
+  phaseSleep,
+  phaseDashboard,
+  phaseAgentApi,
+  phaseShutdown,
+] as const;
+
 export async function startBridge(): Promise<void> {
-  // ── Phase 1: config ──
-  const { createBootCtx } = await import("./boot/context.js");
-  const { phaseConfig } = await import("./boot/phase-config.js");
-  const { phaseMemory } = await import("./boot/phase-memory.js");
-  const { phaseTransport } = await import("./boot/phase-transport.js");
-  const { phaseMemoryIpc } = await import("./boot/phase-memory-ipc.js");
-  const { phasePipelineDeps } = await import("./boot/phase-pipeline-deps.js");
-  const { phasePlatforms } = await import("./boot/phase-platforms.js");
-  const { phaseCapabilities } = await import("./boot/phase-capabilities.js");
-  const { phaseStartupNotification } = await import("./boot/phase-startup-notification.js");
-  const { phaseHeartbeat } = await import("./boot/phase-heartbeat.js");
   const ctx = createBootCtx();
+
+  // Phase 1: config — must run first so Bridge can be constructed
   {
     const t = Date.now();
     await phaseConfig(ctx);
     logInfo("boot", `✓ phaseConfig (${Date.now() - t}ms)`);
   }
 
-  // Legacy procedural boot — references ctx fields instead of re-reading
-  const config = ctx.config;
-  const memoryConfig = ctx.memoryConfig;
-  const bridge = new Bridge(config, memoryConfig);
-  // === CRITICAL PATH: Memory → Transport → Telegram (fastest path to accepting messages) ===
-
-  // ── Phase 2: memory ──
-  {
-    const t = Date.now();
-    await phaseMemory(ctx);
-    logInfo("boot", `✓ phaseMemory (${Date.now() - t}ms)`);
-  }
-  bridge.memory = ctx.memory;
-
-  // ── Phase 3: transport ──
-  {
-    const t = Date.now();
-    await phaseTransport(ctx);
-    logInfo("boot", `✓ phaseTransport (${Date.now() - t}ms)`);
-  }
-  bridge.transport = ctx.transport!;
-  // isSleepActive reads ctx.sleepHandle (set later in phase-sleep / post-heartbeat)
+  const bridge = new Bridge(ctx.config, ctx.memoryConfig);
+  // Sync capabilities from ctx (readonly field — cast)
+  (bridge as unknown as { capabilities: typeof ctx.capabilities }).capabilities = ctx.capabilities;
+  // Lazy isSleepActive closure — reads ctx.sleepHandle after phase-sleep sets it
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.child !== null && ctx.sleepHandle?.child !== undefined && !ctx.sleepHandle.child.killed;
 
-  // STT/TTS config (already loaded in phase-config; locals for legacy refs)
-  const sttConfig = ctx.sttConfig;
-  const ttsConfig = ctx.ttsConfig;
-
-  // ── Phase 5: pipeline deps ──
-  {
+  // Run remaining phases 2-13
+  for (const phase of BOOT_PHASES.slice(1)) {
     const t = Date.now();
-    await phasePipelineDeps(ctx);
-    logInfo("boot", `✓ phasePipelineDeps (${Date.now() - t}ms)`);
+    // phase-platforms and phase-shutdown take bridge as second arg; all others just ctx
+    await (phase as (ctx: BootCtx, bridge?: Bridge) => Promise<void>)(ctx, bridge);
+    logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
+    // Sync ctx → bridge for phases that populate fields used by Bridge.shutdown
+    syncBridgeFromCtx(bridge, ctx);
   }
-  const cronQueue = ctx.cronQueue!;
-  const pipelineDeps = ctx.pipelineDeps!;
-  bridge.cronQueue = cronQueue;
-  bridge.pipelineDeps = pipelineDeps;
+}
 
-  // Wire memory LLM callback + IPC server
-  // ── Phase 4: memory IPC ──
-  {
-    const t = Date.now();
-    await phaseMemoryIpc(ctx);
-    logInfo("boot", `✓ phaseMemoryIpc (${Date.now() - t}ms)`);
-  }
-
-    // Unified heartbeat — single 5-min timer for all periodic tasks
-
-  // ── Phase 6: platforms (Telegram + Discord) ──
-  {
-    const t = Date.now();
-    await phasePlatforms(ctx, bridge);
-    logInfo("boot", `✓ phasePlatforms (${Date.now() - t}ms)`);
-  }
-
-  // === DEFERRED INIT: non-critical services (after platforms are accepting messages) ===
-
-  // ── Phase 7: capabilities + MCP daemon ──
-  // Sync bridge.capabilities with ctx.capabilities so command-handlers can read from either
-  // (transitional — once Bridge.shutdown reads from ctx, bridge.capabilities field is removable)
-  (bridge as unknown as { capabilities: typeof ctx.capabilities }).capabilities = ctx.capabilities;
-  {
-    const t = Date.now();
-    await phaseCapabilities(ctx);
-    logInfo("boot", `✓ phaseCapabilities (${Date.now() - t}ms)`);
-  }
+/** Copy ctx fields consumed by Bridge.shutdown() onto the bridge instance. */
+function syncBridgeFromCtx(bridge: Bridge, ctx: BootCtx): void {
+  if (ctx.memory) bridge.memory = ctx.memory;
+  if (ctx.transport) bridge.transport = ctx.transport;
+  if (ctx.heartbeat) bridge.heartbeat = ctx.heartbeat;
+  if (ctx.cronQueue) bridge.cronQueue = ctx.cronQueue;
+  if (ctx.pipelineDeps) bridge.pipelineDeps = ctx.pipelineDeps;
+  if (ctx.sleepHandle) bridge.sleepHandle = ctx.sleepHandle;
+  if (ctx.selfHealerTask) bridge.selfHealerTask = ctx.selfHealerTask;
+  if (ctx.dashboardServer) bridge.dashboardServer = ctx.dashboardServer;
+  if (ctx.agentApiServer) bridge.agentApiServer = ctx.agentApiServer;
   bridge.mcpDaemonStarted = ctx.mcpDaemonStarted;
-
-  if (sttConfig) logInfo("main", `🎤 STT enabled (${sttConfig.provider}/${sttConfig.model || "whisper-large-v3"})`);
-  if (ttsConfig) logInfo("main", `🔊 TTS enabled (Edge TTS / ${ttsConfig.voice})`);
-
-  // ── Phase 8: startup notification ──
-  {
-    const t = Date.now();
-    await phaseStartupNotification(ctx);
-    logInfo("boot", `✓ phaseStartupNotification (${Date.now() - t}ms)`);
-  }
-
-  // ── Phase 9: heartbeat + all periodic tasks ──
-  {
-    const t = Date.now();
-    await phaseHeartbeat(ctx);
-    logInfo("boot", `✓ phaseHeartbeat (${Date.now() - t}ms)`);
-  }
-  const heartbeat = ctx.heartbeat!;
-  bridge.heartbeat = heartbeat;
-  bridge.selfHealerTask = ctx.selfHealerTask;
-
-  // ── Phase 10: sleep ──
-  {
-    const t = Date.now();
-    const { phaseSleep } = await import("./boot/phase-sleep.js");
-    await phaseSleep(ctx);
-    logInfo("boot", `✓ phaseSleep (${Date.now() - t}ms)`);
-  }
-  bridge.sleepHandle = ctx.sleepHandle;
-
-  // ── Phase 11: dashboard (web) ──
-  {
-    const t = Date.now();
-    const { phaseDashboard } = await import("./boot/phase-dashboard.js");
-    await phaseDashboard(ctx);
-    logInfo("boot", `✓ phaseDashboard (${Date.now() - t}ms)`);
-  }
-  bridge.dashboardServer = ctx.dashboardServer;
-
-  // ── Phase 12: agent-api ──
-  {
-    const t = Date.now();
-    const { phaseAgentApi } = await import("./boot/phase-agent-api.js");
-    await phaseAgentApi(ctx);
-    logInfo("boot", `✓ phaseAgentApi (${Date.now() - t}ms)`);
-  }
-  bridge.agentApiServer = ctx.agentApiServer;
-
-  // Wire bridge fields for shutdown
-  bridge.heartbeat = heartbeat;
-  bridge.cronQueue = cronQueue;
-
-  // ── Phase 13: shutdown signals ──
-  {
-    const t = Date.now();
-    const { phaseShutdown } = await import("./boot/phase-shutdown.js");
-    await phaseShutdown(ctx, bridge);
-    logInfo("boot", `✓ phaseShutdown (${Date.now() - t}ms)`);
-  }
 }
