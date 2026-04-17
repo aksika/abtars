@@ -103,12 +103,12 @@ circuit_check() {
   now=$(date +%s)
   # Prune old timestamps
   local fresh=()
-  for ts in "${RESTART_TIMES[@]}"; do
+  for ts in ${RESTART_TIMES[@]+"${RESTART_TIMES[@]}"}; do
     if (( now - ts < CIRCUIT_WINDOW )); then
       fresh+=("$ts")
     fi
   done
-  RESTART_TIMES=("${fresh[@]}")
+  RESTART_TIMES=(${fresh[@]+"${fresh[@]}"})
   if (( ${#RESTART_TIMES[@]} >= CIRCUIT_MAX )); then
     return 1  # tripped
   fi
