@@ -32,6 +32,12 @@ fi
 
 mkdir -p "$AB/logs"
 
+# Verify python3 is available (used for JSON parsing)
+if ! command -v python3 &>/dev/null; then
+  echo "FATAL: python3 not found — watchdog requires it for JSON parsing" >&2
+  exit 1
+fi
+
 log() {
   local ts
   ts=$(date '+%Y-%m-%dT%H:%M:%S')
