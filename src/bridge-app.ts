@@ -1,18 +1,10 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { logInfo, logWarn, logError } from "./components/logger.js";
 import { MemoryManager } from "abmind/index.js";
 import type { IKiroTransport } from "./components/transport/kiro-transport.js";
-import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard/dashboard-config.js";
-import type { SubsystemRefs } from "./components/dashboard/dashboard-config.js";
-import { AuthGate } from "./components/auth-gate.js";
 import { ServiceRegistry } from "./components/service-registry.js";
-import { MemorySearchController } from "./components/memory-search-controller.js";
-import { DashboardServer } from "./components/dashboard/dashboard-server.js";
-import type { IDashboardSlot, DashboardSlotOpts } from "./components/skeleton.js";
-import { renderDashboardHtml } from "./components/dashboard/dashboard-ui.js";
+import type { IDashboardSlot } from "./components/skeleton.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
@@ -60,86 +52,6 @@ export class Bridge {
   constructor(config: Config, memoryConfig: MemoryConfig) {
     this.config = config;
     this.memoryConfig = memoryConfig;
-  }
-
-  /** Initialize web dashboard. */
-  async initDashboard(
-    platforms: { web: boolean; agent: boolean },
-    heartbeat: HeartbeatSystem,
-    nlmConfig: { enabled: boolean },
-  ): Promise<void> {
-    if (!platforms.web) return;
-
-    const dashConfig = loadDashboardConfig(process.env);
-    try {
-      validateDashboardConfig(dashConfig, true);
-    } catch (err) {
-      logError("main", err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-
-    let logoBase64 = "";
-    try {
-      const logoPath = join(process.cwd(), "logo", "KiroProfessor.jpg");
-      logoBase64 = readFileSync(logoPath).toString("base64");
-    } catch {
-      // Logo is optional — dashboard works without it
-    }
-
-    const agentApiOpts = platforms.agent
-      ? (() => { try { return loadAgentApiConfig(process.env as Record<string, string | undefined>); } catch { return undefined; } })()
-      : undefined;
-    const dashboardHtml = renderDashboardHtml(logoBase64, agentApiOpts ? { agentApi: { port: agentApiOpts.port, allowedIps: agentApiOpts.allowedIps } } : undefined);
-
-    const getStatus = () => {
-      const svcStates = this.registry.getStates();
-      const refs: SubsystemRefs = {
-        startedAt: this.startedAt,
-        telegramPoller: { running: svcStates.telegram?.running ?? false },
-        discordPoller: { started: svcStates.discord?.running ?? false },
-        services: svcStates,
-        transport: {
-          type: this.config.transport.agentTransport as "tmux" | "acp" | "api",
-          isReady: this.transport.isReady,
-          contextPercent: this.transport.contextPercent,
-        },
-        memory: this.memory ? { getStats: (userId?: string) => this.memory!.getStats(userId) } : null,
-        heartbeat: this.memory
-          ? { running: this.memory.getStats()?.heartbeatRunning ?? false, intervalMs: heartbeat.intervalMs, tasks: heartbeat.getTaskNames().map(n => ({ name: n })) }
-          : null,
-        notebooklm: nlmConfig.enabled,
-        agentApi: this.agentApiServer ? { getTrafficLog: () => this.agentApiServer!.getTrafficLog() } : null,
-      };
-      return buildStatusSnapshot(refs);
-    };
-
-    const authGate = new AuthGate(dashConfig.webAuthToken);
-    const memorySearchController = this.memory
-      ? new MemorySearchController({ memory: this.memory })
-      : null;
-
-    const customModule = process.env["DASHBOARD_MODULE"];
-    if (customModule) {
-      const mod = await import(customModule);
-      const Ctor = mod.Dashboard ?? mod.default;
-      if (typeof Ctor?.prototype?.start !== "function" || typeof Ctor?.prototype?.stop !== "function") {
-        throw new Error(`DASHBOARD_MODULE (${customModule}) does not implement IDashboardSlot (missing start/stop)`);
-      }
-      const opts: DashboardSlotOpts = { getStatus, port: dashConfig.webPort, host: dashConfig.webHost, authToken: dashConfig.webAuthToken };
-      this.dashboardServer = new Ctor(opts) as IDashboardSlot;
-    } else {
-      this.dashboardServer = new DashboardServer({
-        config: dashConfig,
-        authGate,
-        getStatus,
-        registry: this.registry,
-        memorySearchController,
-        dashboardHtml,
-      });
-    }
-
-    await this.dashboardServer.start();
-    logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort}${customModule ? ` (custom: ${customModule})` : ""}`);
   }
 
   /** Collected registrations from all capabilities. */
@@ -231,7 +143,6 @@ export async function startBridge(): Promise<void> {
   // STT/TTS/NLM config (already loaded in phase-config; locals for legacy refs)
   const sttConfig = ctx.sttConfig;
   const ttsConfig = ctx.ttsConfig;
-  const nlmConfig = ctx.nlmConfig;
 
   // ── Phase 5: pipeline deps ──
   {
@@ -303,8 +214,14 @@ export async function startBridge(): Promise<void> {
   }
   bridge.sleepHandle = ctx.sleepHandle;
 
-  // --- Web Dashboard wiring (conditional) ---
-  await bridge.initDashboard(platforms, heartbeat, nlmConfig);
+  // ── Phase 11: dashboard (web) ──
+  {
+    const t = Date.now();
+    const { phaseDashboard } = await import("./boot/phase-dashboard.js");
+    await phaseDashboard(ctx);
+    logInfo("boot", `✓ phaseDashboard (${Date.now() - t}ms)`);
+  }
+  bridge.dashboardServer = ctx.dashboardServer;
 
   // --- Agent API service ---
   let agentApiServer: AgentApiServer | null = null; // local ref, wired to bridge at end
