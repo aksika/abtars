@@ -152,8 +152,8 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     // User messaged after announcement — cancel
     const currentMsgTs = opts.getLastMsgTs?.() ?? 0;
     if (currentMsgTs > hwSleepAnnouncedAt) {
-      logInfo("sleep", "💤 Hardware sleep cancelled — user messaged after announcement");
-      _awaitingHwSleep = false;
+      logInfo("sleep", "💤 Hardware sleep postponed — user messaged (will retry after quiet period)");
+      hwSleepAnnouncedAt = currentMsgTs;
       return;
     }
 
