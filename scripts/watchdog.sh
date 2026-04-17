@@ -13,7 +13,16 @@ ENV_FILE="$AB/.env"
 
 POLL_SEC=60
 STALE_SEC="${WATCHDOG_STALE_SEC:-360}"
-STARTUP_TIMEOUT=400
+# Read heartbeat interval from .env (default 300s = 5min)
+HB_SEC=300
+if [[ -f "$ENV_FILE" ]]; then
+  _hb_ms=$(grep -m1 '^HEARTBEAT_INTERVAL_MS=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
+  if [[ -n "$_hb_ms" && "$_hb_ms" != "0" ]]; then
+    HB_SEC=$(( _hb_ms / 1000 ))
+  fi
+fi
+# Startup timeout = heartbeat interval + 2 poll cycles buffer
+STARTUP_TIMEOUT=$(( HB_SEC + POLL_SEC * 2 ))
 CIRCUIT_MAX=3
 CIRCUIT_WINDOW=300
 MAX_LOG_BYTES=10485760  # 10MB
