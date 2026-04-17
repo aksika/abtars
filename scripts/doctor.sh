@@ -285,9 +285,10 @@ if [ -f "$DB" ]; then
   fi
 fi
 
-# 13. .env.memory exists
-if [ ! -f "$AB/.env.memory" ]; then
-  warn ".env.memory missing -- ABM config defaults will be used"
+# 13. .env.memory exists (in abmind home)
+ABMIND="${ABMIND_HOME:-$HOME/.abmind}"
+if [ ! -f "$ABMIND/config/.env.memory" ]; then
+  warn ".env.memory missing at $ABMIND/config/ -- ABM config defaults will be used"
 fi
 
 # 14. Orphaned kiro-cli processes
