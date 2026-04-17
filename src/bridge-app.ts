@@ -1,12 +1,8 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { agentBridgeHome } from "./paths.js";
 
-import { writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus } from "./components/transport/bridge-lock-transport.js";
-import { createSelfHealerTask } from "./components/self-healer.js";
-import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
-import { logInfo, logWarn, logError, logDebug } from "./components/logger.js";
+import { logInfo, logWarn, logError } from "./components/logger.js";
 import { MemoryManager } from "abmind/index.js";
 import type { IKiroTransport } from "./components/transport/kiro-transport.js";
 import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard/dashboard-config.js";
@@ -18,14 +14,11 @@ import { DashboardServer } from "./components/dashboard/dashboard-server.js";
 import type { IDashboardSlot, DashboardSlotOpts } from "./components/skeleton.js";
 import { renderDashboardHtml } from "./components/dashboard/dashboard-ui.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
-import { classifyResume } from "./components/platform-detect.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { BrowserManager } from "./capabilities/browser/browser-manager.js";
 import { BrowserIpcServer } from "./capabilities/browser/browser-ipc-server.js";
-import { checkCron, readPendingReminders, clearPendingReminders } from "./components/cron/cron-checker.js";
 import { CronQueue } from "./components/cron/cron-queue.js";
-import { loadUsers } from "./components/user-registry.js";
 import { resetAllCtxStarts } from "./boot/ctx-start.js";
 
 
@@ -196,10 +189,11 @@ export async function startBridge(): Promise<void> {
   const { phaseMemory } = await import("./boot/phase-memory.js");
   const { phaseTransport } = await import("./boot/phase-transport.js");
   const { phaseMemoryIpc } = await import("./boot/phase-memory-ipc.js");
-  const { phasePipelineDeps, createCronCallback } = await import("./boot/phase-pipeline-deps.js");
+  const { phasePipelineDeps } = await import("./boot/phase-pipeline-deps.js");
   const { phasePlatforms } = await import("./boot/phase-platforms.js");
   const { phaseCapabilities } = await import("./boot/phase-capabilities.js");
   const { phaseStartupNotification } = await import("./boot/phase-startup-notification.js");
+  const { phaseHeartbeat } = await import("./boot/phase-heartbeat.js");
   const ctx = createBootCtx();
   {
     const t = Date.now();
@@ -230,15 +224,9 @@ export async function startBridge(): Promise<void> {
     logInfo("boot", `✓ phaseTransport (${Date.now() - t}ms)`);
   }
   bridge.transport = ctx.transport!;
-  let transport = ctx.transport!;
+  // isSleepActive reads ctx.sleepHandle (set later in phase-sleep / post-heartbeat)
+  ctx.isSleepActive = (): boolean => ctx.sleepHandle?.child !== null && ctx.sleepHandle?.child !== undefined && !ctx.sleepHandle.child.killed;
 
-  // Sleep state is now held on ctx.sleepHandle (populated by phase-sleep)
-  let sleepHandle: import("./capabilities/sleep/index.js").SleepHandle | null = null;
-  const isSleepActive = (): boolean => sleepHandle?.child !== null && sleepHandle?.child !== undefined && !sleepHandle.child.killed;
-  const sleepAuditDir = ctx.sleepAuditDir;
-
-  const busyChats = ctx.busyChats;
-  const pendingSessionStart = ctx.pendingSessionStart;
   const registry = bridge.registry;
 
   // STT/TTS/NLM config (already loaded in phase-config; locals for legacy refs)
@@ -256,7 +244,6 @@ export async function startBridge(): Promise<void> {
   const pipelineDeps = ctx.pipelineDeps!;
   bridge.cronQueue = cronQueue;
   bridge.pipelineDeps = pipelineDeps;
-  const cronCallback = createCronCallback(ctx);
 
   // Wire memory LLM callback + IPC server
   // ── Phase 4: memory IPC ──
@@ -298,240 +285,30 @@ export async function startBridge(): Promise<void> {
     logInfo("boot", `✓ phaseStartupNotification (${Date.now() - t}ms)`);
   }
 
-  // bridge.lock — track bridge lifecycle
-  const bridgeLockPath = join(agentBridgeHome(), "bridge.lock");
-  try {
-    let version = "?";
-    try { version = JSON.parse(readFileSync(join(import.meta.dirname, "build-info.json"), "utf-8")).hash; } catch { /* */ }
-    writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now(), version, sleepStatus: "awake" }), "utf-8");
-  } catch { /* */ }
-
-  const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
-
-  // Watchdog: wall-clock comparison (immune to setInterval batching after sleep)
-  const WD_THRESHOLD_MS = hbIntervalMs * 3;
-  let lastKickAt = Date.now();
-  const kickWatchdog = (): void => { lastKickAt = Date.now(); };
-
-  const heartbeat = new HeartbeatSystem({
-    enabled: true,
-    intervalMs: hbIntervalMs,
-    bridgeLockPath,
-    sleepActive: isSleepActive,
-    onTick: kickWatchdog,
-    onStandbyResume: (gapMs) => {
-      const resumeKind = classifyResume();
-      if (resumeKind === "dark") {
-        logDebug("main", `⏸️ Darkwake resume (${Math.round(gapMs / 60000)}min) — skipping tick`);
-        return;
-      }
-      logInfo("main", `⏸️ Standby resume (${Math.round(gapMs / 60000)}min, ${resumeKind}) — continuing`);
-      // Morning restart: first full wake after hardware sleep → fresh process
-      if (resumeKind === "full" && readBridgeLockField("sleepStatus") === "hw_sleep") {
-        writeSleepStatus("awake");
-        writeRestartReason("morning restart after hw_sleep");
-        logInfo("main", "🌅 Morning wake detected — restarting for fresh process");
-        process.exit(0);
-      }
-    },
-  });
-
-  heartbeat.registerTask({
-    name: "tasks",
-    execute: async () => {
-      const dueTasks = checkCron();
-      for (const entry of dueTasks) cronQueue.enqueue(entry, cronCallback);
-    },
-  });
-
-  // browse-checker is now registered by browser capability
-
-  // skill-reloader is now registered by skills capability
-
-  heartbeat.registerTask({
-    name: "reminder-injector",
-    execute: async () => {
-      const reminders = readPendingReminders();
-      if (reminders.length === 0) return;
-      clearPendingReminders();
-      for (const r of reminders) {
-        logInfo("main", `⏰ Injecting reminder for chat ${r.chatId}: "${r.message}"`);
-        if (bridge.telegramAdapter) {
-          bridge.telegramAdapter.injectMessage({
-            platform: "telegram",
-            channelId: String(r.chatId),
-            sessionKey: (loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master") + ":telegram",
-            senderId: String(r.chatId),
-            senderName: "cron",
-            text: `[Scheduled reminder] ${r.message}`,
-            timestamp: Date.now(),
-            threadId: r.threadId ? String(r.threadId) : undefined,
-            isGroup: false,
-            isVoice: false,
-          });
-        }
-      }
-    },
-  });
-
-  // --- DB integrity check (hourly) ---
-  const SLEEP_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? "2", 10);
-  const SLEEP_MINUTE = parseInt(process.env["BED_TIME"]?.split(":")[1] ?? "0", 10);
-
-  // --- Floating compaction (idle-triggered) ---
-  if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
-    heartbeat.registerTask(createIdleCompactTask({
-      transport, memory, memoryDir: memoryConfig.memoryDir,
-      allowedUserIds: config.telegram.allowedUserIds, busyChats, pendingSessionStart, isSleepActive,
-    }));
+  // ── Phase 9: heartbeat + all periodic tasks ──
+  {
+    const t = Date.now();
+    await phaseHeartbeat(ctx);
+    logInfo("boot", `✓ phaseHeartbeat (${Date.now() - t}ms)`);
   }
-
-  // --- System message sender (generic, any component can use) ---
-  const { initSystemMessage, sendSystemMessage } = await import("./components/system-message.js");
-  const primaryChatId = String(config.mainChatId ?? "");
-  initSystemMessage(async (prompt: string) => {
-    try {
-      const response = await transport.sendPrompt(primaryChatId, `[SYSTEM] ${prompt}`);
-      if (response && bridge.telegramAdapter) {
-        await bridge.telegramAdapter.sendNotification(primaryChatId, response);
-      }
-    } catch (err) {
-      logWarn("main", `System message failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  });
-
-  // --- Daily cycle: spawn Dreamy after BED_TIME + quiet ticks ---
-  heartbeat.registerTask(createAgeCheckTask({
-    memory, bridgeLockPath, sleepAuditDir, sleepHour: SLEEP_HOUR, sleepMinute: SLEEP_MINUTE, busyChats, isSleepActive,
-    doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
-    startSleep: () => { sleepHandle?.spawn(); },
-    checkHwSleep: (qt, rt) => { sleepHandle?.checkHwSleep(qt, rt); },
-    cronBusy: () => cronQueue.currentJob !== null || cronQueue.pending > 0,
-  }));
-
-  heartbeat.registerTask(createDbIntegrityTask(memory));
-
-  // --- Watchdog: detect stuck agent ---
-  if (transport.healthCheck) {
-    heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });
-  }
-
-  // --- Heartbeat watchdog timer: wall-clock comparison ---
-  const WD_CHECK_INTERVAL = 60_000;
-  const WD_UNKNOWN_SUPPRESS_MS = 60 * 60_000; // 1hr
-
-  setInterval(() => {
-    const elapsed = Date.now() - lastKickAt;
-    if (elapsed <= WD_THRESHOLD_MS) return;
-    const kind = classifyResume();
-    if (kind === "dark" || (kind === "unknown" && elapsed < WD_UNKNOWN_SUPPRESS_MS)) {
-      lastKickAt = Date.now();
-      return;
-    }
-    logWarn("watchdog", `No heartbeat kick for ${Math.round(elapsed / 60000)}min (${kind}) — forcing restart`);
-    writeRestartReason("watchdog: no heartbeat kick");
-    process.exit(1);
-  }, WD_CHECK_INTERVAL);
-
-  // --- Restart flag check ---
-  heartbeat.registerTask({
-    name: "restart-check",
-    execute: async () => {
-      const req = readAndClearRestartRequested();
-      if (req) {
-        logInfo("restart-check", `Restart requested: ${req}`);
-        process.exit(0);
-      }
-    },
-  });
-
-  // --- Self-healing agent: error scanner ---
-  let selfHealerTask: ReturnType<typeof createSelfHealerTask> | null = null;
-  if (process.env["SELFHEAL_ENABLED"] !== "false") {
-    selfHealerTask = createSelfHealerTask(() => bridge.telegramAdapter, config.telegram.allowedUserIds);
-    heartbeat.registerTask(selfHealerTask);
-  }
-  bridge.selfHealerTask = selfHealerTask;
-  pipelineDeps.selfHealerTask = selfHealerTask;
-
-  // Run once on startup, then start periodic
-  // Wire capability-registered commands
-  const { registerCommand } = await import("./components/command-handlers.js");
-  for (const [name, handler] of bridge.capabilities.commands) {
-    registerCommand(name, handler);
-  }
-
-  // Wire capability-registered heartbeat tasks
-  for (const task of bridge.capabilities.heartbeatTasks) {
-    heartbeat.registerTask(task);
-  }
-
-  // Model health check — runs once on first tick, skipped on dark wake (dark wake skips all tasks)
-  let modelHealthDone = false;
-  heartbeat.registerTask({
-    name: "model-health",
-    execute: async () => {
-      if (modelHealthDone) return;
-      modelHealthDone = true;
-      if (config.transport.agentTransport !== "api") return; // only ping Direct API models
-      const { loadTransport, resolveAgent } = await import("./components/transport-config.js");
-      const tc = loadTransport();
-      if (!tc) return;
-      const agents = ["professor", "dreamy", "browsie", "coding"] as const;
-      const models: Array<{ label: string; model: string }> = [];
-      for (const a of agents) {
-        const r = resolveAgent(a, tc);
-        if (r && !models.some(m => m.model === r.model)) {
-          models.push({ label: a, model: r.model });
-        }
-      }
-      const prof = resolveAgent("professor", tc);
-      const endpoint = prof?.provider.endpoint ?? "http://localhost:11434/v1";
-      const apiKey = prof?.provider.apiKeyEnv ? process.env[prof.provider.apiKeyEnv] : process.env["API_KEY"];
-      const warnings: string[] = [];
-      for (const { label, model } of models) {
-        try {
-          const res = await fetch(`${endpoint}/chat/completions`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-            body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (!res.ok) {
-            warnings.push(`⚠️ ${label}=${model} — ${res.status} ${res.statusText}`);
-            logWarn("model-health", `${label}=${model} failed: ${res.status}`);
-          } else {
-            logInfo("model-health", `✓ ${label}=${model}`);
-          }
-        } catch (err) {
-          warnings.push(`⚠️ ${label}=${model} — ${err instanceof Error ? err.message : String(err)}`);
-          logWarn("model-health", `${label}=${model} unreachable: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-      if (warnings.length > 0 && bridge.telegramAdapter) {
-        bridge.telegramAdapter.sendNotification(primaryChatId, `🏥 Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
-      }
-    },
-  });
-
-  const { checkBrowseTasks } = await import("./capabilities/browser/browse-delivery.js");
-  checkBrowseTasks();
-  heartbeat.start();
-  memory?.setHeartbeat(heartbeat);
-  logInfo("main", "💓 Heartbeat started (5-min interval)");
+  const heartbeat = ctx.heartbeat!;
+  bridge.heartbeat = heartbeat;
+  bridge.selfHealerTask = ctx.selfHealerTask;
 
   // --- Sleep capability (background, with retry) ---
   const { createSleepHandle } = await import("./capabilities/sleep/index.js");
   const { killWakeInhibit } = await import("./components/command-handlers.js");
-  sleepHandle = createSleepHandle({
+  const SLEEP_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? "2", 10);
+  const sleepHandle = createSleepHandle({
     sleepHour: SLEEP_HOUR,
-    sleepAuditDir,
+    sleepAuditDir: ctx.sleepAuditDir,
     memoryEnabled: memoryConfig.memoryEnabled,
     onComplete: () => resetAllCtxStarts(memoryConfig.memoryDir),
     getLastMsgTs: () => memory?.getLastMessageTimestamp(true) ?? 0,
-    sendSystemMessage,
+    sendSystemMessage: ctx.sendSystemMessage!,
     killWakeInhibit,
   });
+  ctx.sleepHandle = sleepHandle;
   bridge.sleepHandle = sleepHandle;
 
   // --- Web Dashboard wiring (conditional) ---

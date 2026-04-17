@@ -94,6 +94,8 @@ export interface BootCtx {
 
   // ── Callbacks (closures set by phases for cross-phase use) ────────────
   isSleepActive: () => boolean;
+  /** Set by phase-heartbeat; used by phase-sleep to hook the sleep handle. */
+  sendSystemMessage?: (prompt: string) => Promise<void>;
 }
 
 /**
