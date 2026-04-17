@@ -1,14 +1,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readEntry as cronReadEntry } from "./components/cron/cron-db.js";
 import { execFileSync } from "node:child_process";
 import { agentBridgeHome } from "./paths.js";
 
 import { writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus } from "./components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "./components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
-import type { SttConfig } from "./components/stt.js";
-import type { TtsConfig } from "./components/tts.js";
 import { logInfo, logWarn, logError, logDebug } from "./components/logger.js";
 import { MemoryManager } from "abmind/index.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
@@ -21,20 +18,17 @@ import { MemorySearchController } from "./components/memory-search-controller.js
 import { DashboardServer } from "./components/dashboard/dashboard-server.js";
 import type { IDashboardSlot, DashboardSlotOpts } from "./components/skeleton.js";
 import { renderDashboardHtml } from "./components/dashboard/dashboard-ui.js";
-import { loadNLMConfig } from "./components/nlm-command-handler.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
 import { classifyResume } from "./components/platform-detect.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
 import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { BrowserManager } from "./capabilities/browser/browser-manager.js";
 import { BrowserIpcServer } from "./capabilities/browser/browser-ipc-server.js";
-import { CodingMode } from "./components/coding-mode.js";
-import { IdleSave } from "./components/idle-save.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "./components/cron/cron-checker.js";
 import { CronQueue } from "./components/cron/cron-queue.js";
 import { startSession } from "./components/message-pipeline.js";
 import { loadUsers } from "./components/user-registry.js";
-import { updateCtxStart, resetAllCtxStarts } from "./boot/ctx-start.js";
+import { resetAllCtxStarts } from "./boot/ctx-start.js";
 
 
 /** Send "Back online" notification to all platforms. */
@@ -220,6 +214,7 @@ export async function startBridge(): Promise<void> {
   const { phaseMemory } = await import("./boot/phase-memory.js");
   const { phaseTransport } = await import("./boot/phase-transport.js");
   const { phaseMemoryIpc } = await import("./boot/phase-memory-ipc.js");
+  const { phasePipelineDeps, createCronCallback } = await import("./boot/phase-pipeline-deps.js");
   const ctx = createBootCtx();
   {
     const t = Date.now();
@@ -232,7 +227,6 @@ export async function startBridge(): Promise<void> {
   const config = ctx.config;
   const memoryConfig = ctx.memoryConfig;
   const bridge = new Bridge(config, memoryConfig);
-  const startedAt = bridge.startedAt;
   // === CRITICAL PATH: Memory → Transport → Telegram (fastest path to accepting messages) ===
 
   // ── Phase 2: memory ──
@@ -255,86 +249,33 @@ export async function startBridge(): Promise<void> {
   bridge.transport = ctx.transport!;
   let transport = ctx.transport!;
 
-  // Sleep state
-  // sleepChild tracked via sleepHandle (created after heartbeat start)
+  // Sleep state is now held on ctx.sleepHandle (populated by phase-sleep)
   let sleepHandle: import("./capabilities/sleep/index.js").SleepHandle | null = null;
   const isSleepActive = (): boolean => sleepHandle?.child !== null && sleepHandle?.child !== undefined && !sleepHandle.child.killed;
-  const platformAdapters = new Map<string, import("./types/platform.js").PlatformAdapter>();
-  const sleepAuditDir = join(memoryConfig.memoryDir, "sleep");
+  const platformAdapters = ctx.platformAdapters;
+  const sleepAuditDir = ctx.sleepAuditDir;
 
-  const busyChats = new Set<string>();
-  const pendingSessionStart = new Set<string>();
-  const seenSessions = new Set<string>();
-  const fullModeChats = new Set<string>();
-  const codingModeManager = new CodingMode(bridge.runtime);
-  const idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
+  const busyChats = ctx.busyChats;
+  const pendingSessionStart = ctx.pendingSessionStart;
+  const seenSessions = ctx.seenSessions;
   const registry = bridge.registry;
 
-  // STT/TTS config (lightweight — just reads env vars)
-  const sttConfig: SttConfig | null = config.voice.sttEnabled
-    ? { provider: "groq", apiKey: config.voice.groqApiKey, model: config.voice.sttModel }
-    : null;
-  const ttsConfig: TtsConfig | null = config.voice.ttsEnabled
-    ? { voice: config.voice.ttsVoice }
-    : null;
+  // STT/TTS/NLM config (already loaded in phase-config; locals for legacy refs)
+  const sttConfig = ctx.sttConfig;
+  const ttsConfig = ctx.ttsConfig;
+  const nlmConfig = ctx.nlmConfig;
 
-  const nlmConfig = loadNLMConfig();
-
-  // CronQueue must be initialized before pipelineDeps (which references it)
-  const cronQueue = new CronQueue(config.transport.agentCliPath, config.transport.workingDir, (entryId, command, result) => {
-    const msg = `[System] Cron task "${entryId}" failed:\nCommand: ${command}\nResult: ${result}\n\nDiagnose and fix if possible. If you can't fix it, tell the user.`;
-    transport.sendPrompt("system:cron-fix", msg).catch(err => {
-      logWarn("main", `Cron auto-fix inject failed: ${err}`);
-    });
-  });
-
-  // Wire task_manage --run to use the cron queue
-  const { setEnqueueCron } = await import("./components/transport/tool-registry.js");
-  const cronCallback: import("./components/cron/cron-queue.js").TaskCompleteCallback = (chatId, message, result, resultPath) => {
-    if (platforms.telegram && bridge.telegramAdapter) {
-      bridge.telegramAdapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
-        logWarn("main", `Cron task TG report failed: ${err}`);
-      });
-    }
-    // Inject [SYSTEM] so the agent knows the result exists
-    if (resultPath) {
-      const masterUser = loadUsers().users.find(u => u.role === "master"); const sessionKey = `${masterUser?.userId ?? "master"}:telegram`;
-      transport.sendPrompt(sessionKey, `[SYSTEM] Task "${message}" completed. If user asks for the result, use: cat ${resultPath}`).catch(() => {});
-    }
-  };
-  setEnqueueCron((id, manual) => {
-    try {
-      const entry = cronReadEntry(id);
-      if (!entry) return `❌ Entry ${id} not found`;
-      return cronQueue.enqueue(entry, cronCallback, manual);
-    } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
-  });
-
-  // Build pipeline deps (needed before platform start)
-  const pipelineDeps: import("./components/message-pipeline.js").PipelineDeps = {
-    transport, codingMode: codingModeManager, memory, memoryConfig, nlmConfig,
-    idleSave, conversationBuffer, config: {
-      agentTransport: config.transport.agentTransport,
-      workingDir: config.transport.workingDir,
-      discordA2aEnabled: config.discord.a2aEnabled,
-      discordA2aChannelId: config.discord.a2aChannelId,
-    }, startedAt,
-    sttConfig, ttsConfig,
-    busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
-    messageQueue: new Map(),
-    cronCurrentJob: () => cronQueue.currentJob,
-    enqueueCron: (entryId: string, manual?: boolean): string | null => {
-      try {
-        const entry = cronReadEntry(entryId);
-        if (!entry) return `❌ Entry ${entryId} not found`;
-        return cronQueue.enqueue(entry, cronCallback, manual);
-      } catch (err) { return `❌ ${err instanceof Error ? err.message : String(err)}`; }
-    },
-    requestShutdown: () => process.exit(0),
-    sleepProgress: () => sleepHandle?.progress ?? null,
-    loadedCapabilities: [],
-    selfHealerTask: null, // set after heartbeat registration
-  };
+  // ── Phase 5: pipeline deps ──
+  {
+    const t = Date.now();
+    await phasePipelineDeps(ctx);
+    logInfo("boot", `✓ phasePipelineDeps (${Date.now() - t}ms)`);
+  }
+  const cronQueue = ctx.cronQueue!;
+  const pipelineDeps = ctx.pipelineDeps!;
+  bridge.cronQueue = cronQueue;
+  bridge.pipelineDeps = pipelineDeps;
+  const cronCallback = createCronCallback(ctx);
 
   // Wire memory LLM callback + IPC server
   // ── Phase 4: memory IPC ──
