@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # AgentBridge External Watchdog
-# Spawns the bridge, monitors bridge.lock heartbeat, kills+restarts on stale.
+# Spawns node directly, monitors bridge.lock heartbeat, kills+restarts on stale.
 # Usage: watchdog.sh [bridge flags, e.g. --all --web --agent]
 set -uo pipefail
 
 AB="${AGENT_BRIDGE_HOME:-$HOME/.agentbridge}"
-BRIDGE="$AB/agentbridge.sh"
 LOCK="$AB/bridge.lock"
 WD_LOCK="$AB/watchdog.lock"
 LOG="$AB/logs/watchdog.log"
@@ -13,7 +12,6 @@ ENV_FILE="$AB/.env"
 
 POLL_SEC=60
 STALE_SEC="${WATCHDOG_STALE_SEC:-360}"
-# Read heartbeat interval from .env (default 300s = 5min)
 HB_SEC=300
 if [[ -f "$ENV_FILE" ]]; then
   _hb_ms=$(grep -m1 '^HEARTBEAT_INTERVAL_MS=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
@@ -21,11 +19,10 @@ if [[ -f "$ENV_FILE" ]]; then
     HB_SEC=$(( _hb_ms / 1000 ))
   fi
 fi
-# Startup timeout = heartbeat interval + 2 poll cycles buffer
 STARTUP_TIMEOUT=$(( HB_SEC + POLL_SEC * 2 ))
 CIRCUIT_MAX=3
 CIRCUIT_WINDOW=300
-MAX_LOG_BYTES=10485760  # 10MB
+MAX_LOG_BYTES=10485760
 
 BRIDGE_PID=""
 SPAWNED_AT=0
@@ -40,6 +37,14 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 mkdir -p "$AB/logs"
+
+# ── Ensure nvm/node is available ──
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+if ! command -v node &>/dev/null; then
+  echo "FATAL: node not found" >&2
+  exit 1
+fi
 
 log() {
   local ts
@@ -56,8 +61,6 @@ notify() {
 }
 
 read_lock() {
-  # Returns: pid heartbeat_ms sleep_status started_at_ms  (or "ERR" on parse failure)
-  # Pure bash — no python3/jq dependency
   if [[ ! -f "$LOCK" ]]; then echo "ERR"; return; fi
   local content
   content=$(cat "$LOCK" 2>/dev/null) || { echo "ERR"; return; }
@@ -69,9 +72,7 @@ read_lock() {
   echo "${pid:-0} ${hb:-0} ${sleep:-awake} ${started:-0}"
 }
 
-now_ms() {
-  echo $(( $(date +%s) * 1000 ))
-}
+now_ms() { echo $(( $(date +%s) * 1000 )); }
 
 wait_for_death() {
   local pid=$1 max=10 i=0
@@ -82,9 +83,7 @@ wait_for_death() {
 }
 
 write_wd_lock() {
-  local now
-  now=$(now_ms)
-  printf '{"pid":%d,"lastCheck":%s}\n' $$ "$now" > "$WD_LOCK"
+  printf '{"pid":%d,"lastCheck":%s}\n' $$ "$(now_ms)" > "$WD_LOCK"
 }
 
 rotate_log() {
@@ -101,7 +100,6 @@ rotate_log() {
 circuit_check() {
   local now
   now=$(date +%s)
-  # Prune old timestamps
   local fresh=()
   for ts in ${RESTART_TIMES[@]+"${RESTART_TIMES[@]}"}; do
     if (( now - ts < CIRCUIT_WINDOW )); then
@@ -110,7 +108,7 @@ circuit_check() {
   done
   RESTART_TIMES=(${fresh[@]+"${fresh[@]}"})
   if (( ${#RESTART_TIMES[@]} >= CIRCUIT_MAX )); then
-    return 1  # tripped
+    return 1
   fi
   return 0
 }
@@ -125,10 +123,16 @@ spawn_bridge() {
 
   RESTART_TIMES+=("$(date +%s)")
   rm -f "$LOCK"
-  log "Starting bridge: $BRIDGE $*"
-  "$BRIDGE" "$@" >> "$AB/logs/launchd.log" 2>&1 &
+
+  # Clean stale socket
+  rm -f "${ABMIND_HOME:-$HOME/.abmind}/memory.sock" 2>/dev/null || true
+
+  log "Starting bridge: node dist/main.js $*"
+  cd "$AB"
+  node dist/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
   SPAWNED_AT=$(date +%s)
-  # Wait for bridge.lock to appear with a PID (node writes it on startup)
+
+  # Wait for bridge.lock with PID
   local wait=0
   BRIDGE_PID=""
   while (( wait < 30 )); do
@@ -146,25 +150,20 @@ spawn_bridge() {
 
 kill_bridge() {
   local reason=$1
-  # Kill the node process (from bridge.lock)
   if [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
     log "Killing bridge PID=$BRIDGE_PID ($reason)"
     notify "🚨 Watchdog: $reason — killing PID $BRIDGE_PID"
     kill -9 "$BRIDGE_PID" 2>/dev/null || true
     wait_for_death "$BRIDGE_PID"
   fi
-  # Also kill any orphaned agentbridge.sh wrappers
-  pkill -f "agentbridge.sh.*--all" 2>/dev/null || true
   rm -f "$LOCK"
   BRIDGE_PID=""
 }
 
-# ── USR1 = graceful restart ──
 graceful_restart() {
   log "USR1 received — graceful restart"
   if [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
     kill -TERM "$BRIDGE_PID" 2>/dev/null || true
-    # Wait up to 10s for graceful shutdown
     local i=0
     while kill -0 "$BRIDGE_PID" 2>/dev/null && (( i < 20 )); do
       sleep 0.5
@@ -181,28 +180,30 @@ graceful_restart() {
   spawn_bridge "$@"
 }
 
-# Store bridge args for USR1 handler
 BRIDGE_ARGS=("$@")
 trap 'graceful_restart "${BRIDGE_ARGS[@]}"' USR1
-
-# ── Cleanup on exit ──
 trap 'kill_bridge "watchdog exit"; rm -f "$WD_LOCK"; exit 0' TERM INT
 
-# ── Main ──
+# ── Startup ──
 log "Watchdog starting (stale=${STALE_SEC}s, poll=${POLL_SEC}s, circuit=${CIRCUIT_MAX}/${CIRCUIT_WINDOW}s)"
+
+# Run doctor once at startup (non-fatal)
+if [ -x "$AB/scripts/doctor.sh" ]; then
+  "$AB/scripts/doctor.sh" --fix >> "$AB/logs/launchd.log" 2>&1 || true
+fi
+
 spawn_bridge "$@"
 
+# ── Monitor loop ──
 while true; do
   sleep "$POLL_SEC" &
-  wait $! 2>/dev/null || true  # allow signal interruption
+  wait $! 2>/dev/null || true
 
   write_wd_lock
   rotate_log
 
-  # Read bridge.lock
   local_lock=$(read_lock)
   if [[ "$local_lock" == "ERR" ]]; then
-    # Partial write or missing — skip this tick
     continue
   fi
 
@@ -212,12 +213,10 @@ while true; do
   lock_started=$(echo "$local_lock" | awk '{print $4}')
   now=$(now_ms)
 
-  # Update tracked PID from bridge.lock (node process, not bash wrapper)
   if [[ -n "$lock_pid" && "$lock_pid" != "0" ]]; then
     BRIDGE_PID="$lock_pid"
   fi
 
-  # Check if bridge process is alive
   if [[ -z "$BRIDGE_PID" ]] || ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
     log "Bridge process gone (PID=$BRIDGE_PID)"
     notify "🚨 Watchdog: bridge process gone, restarting"
@@ -226,15 +225,12 @@ while true; do
     continue
   fi
 
-  # Skip stale check during hardware sleep
   if [[ "$lock_sleep" == "hw_sleep" ]]; then
     continue
   fi
 
-  # Startup phase — bridge has startedAt but no heartbeat yet
   if (( lock_hb == 0 )); then
     if (( lock_started > 0 )); then
-      # Bridge wrote startedAt — it's alive, waiting for first heartbeat tick
       age_s=$(( (now - lock_started) / 1000 ))
       if (( age_s > STARTUP_TIMEOUT )); then
         kill_bridge "startup timeout (${age_s}s from startedAt, no heartbeat)"
