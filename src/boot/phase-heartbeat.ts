@@ -1,0 +1,273 @@
+/**
+ * phase-heartbeat — boot phase 9: HeartbeatSystem + all periodic tasks + watchdog.
+ *
+ * Longest phase. Handles:
+ * - bridge.lock write (pid, startedAt, version, sleepStatus)
+ * - HeartbeatSystem construction with standby-resume handler
+ * - Task registrations: tasks (cron dispatch), reminder-injector, idle-compact,
+ *   age-check (daily cycle), db-integrity, transport-health, restart-check,
+ *   self-healer, model-health
+ * - initSystemMessage singleton wire
+ * - In-proc watchdog setInterval (WD_THRESHOLD_MS = hbInterval × 3)
+ * - Capability-registered commands + heartbeat tasks
+ * - heartbeat.start() + memory.setHeartbeat()
+ * - checkBrowseTasks once on startup
+ *
+ * Must run after phase-platforms (tasks read ctx.telegramAdapter lazily via closures).
+ * Must run after phase-pipeline-deps (selfHealerTask mutates pipelineDeps in place).
+ *
+ * Populates ctx: heartbeat, selfHealerTask.
+ * Owns singletons: system-message._sender (via initSystemMessage).
+ *   message-pipeline.resetIdleCompactFlag is set indirectly via createIdleCompactTask.
+ */
+
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { HeartbeatSystem } from "../components/heartbeat-system.js";
+import { classifyResume } from "../components/platform-detect.js";
+import {
+  writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus,
+} from "../components/transport/bridge-lock-transport.js";
+import { createSelfHealerTask } from "../components/self-healer.js";
+import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "../components/heartbeat-tasks.js";
+import { checkCron, readPendingReminders, clearPendingReminders } from "../components/cron/cron-checker.js";
+import { loadUsers } from "../components/user-registry.js";
+import { logInfo, logWarn, logDebug } from "../components/logger.js";
+import { agentBridgeHome } from "../paths.js";
+import { createCronCallback } from "./phase-pipeline-deps.js";
+import type { BootCtx } from "./context.js";
+
+export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
+  const { config, memoryConfig, memory, transport, cronQueue, pipelineDeps, capabilities } = ctx;
+  if (!transport || !cronQueue || !pipelineDeps) {
+    throw new Error("phase-heartbeat: requires transport + cronQueue + pipelineDeps");
+  }
+
+  const cronCallback = createCronCallback(ctx);
+
+  // bridge.lock — track bridge lifecycle
+  try {
+    let version = "?";
+    // From dist/boot/phase-heartbeat.js: "../build-info.json" resolves to dist/build-info.json
+    try { version = JSON.parse(readFileSync(join(import.meta.dirname, "..", "build-info.json"), "utf-8")).hash; } catch { /* */ }
+    writeFileSync(ctx.bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now(), version, sleepStatus: "awake" }), "utf-8");
+  } catch { /* */ }
+
+  const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
+
+  // Watchdog: wall-clock comparison (immune to setInterval batching after sleep)
+  const WD_THRESHOLD_MS = hbIntervalMs * 3;
+  let lastKickAt = Date.now();
+  const kickWatchdog = (): void => { lastKickAt = Date.now(); };
+
+  const heartbeat = new HeartbeatSystem({
+    enabled: true,
+    intervalMs: hbIntervalMs,
+    bridgeLockPath: ctx.bridgeLockPath,
+    sleepActive: ctx.isSleepActive,
+    onTick: kickWatchdog,
+    onStandbyResume: (gapMs) => {
+      const resumeKind = classifyResume();
+      if (resumeKind === "dark") {
+        logDebug("main", `⏸️ Darkwake resume (${Math.round(gapMs / 60000)}min) — skipping tick`);
+        return;
+      }
+      logInfo("main", `⏸️ Standby resume (${Math.round(gapMs / 60000)}min, ${resumeKind}) — continuing`);
+      // Morning restart: first full wake after hardware sleep → fresh process
+      if (resumeKind === "full" && readBridgeLockField("sleepStatus") === "hw_sleep") {
+        writeSleepStatus("awake");
+        writeRestartReason("morning restart after hw_sleep");
+        logInfo("main", "🌅 Morning wake detected — restarting for fresh process");
+        process.exit(0);
+      }
+    },
+  });
+  ctx.heartbeat = heartbeat;
+
+  heartbeat.registerTask({
+    name: "tasks",
+    execute: async () => {
+      const dueTasks = checkCron();
+      for (const entry of dueTasks) cronQueue.enqueue(entry, cronCallback);
+    },
+  });
+
+  heartbeat.registerTask({
+    name: "reminder-injector",
+    execute: async () => {
+      const reminders = readPendingReminders();
+      if (reminders.length === 0) return;
+      clearPendingReminders();
+      for (const r of reminders) {
+        logInfo("main", `⏰ Injecting reminder for chat ${r.chatId}: "${r.message}"`);
+        if (ctx.telegramAdapter) {
+          ctx.telegramAdapter.injectMessage({
+            platform: "telegram",
+            channelId: String(r.chatId),
+            sessionKey: (loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master") + ":telegram",
+            senderId: String(r.chatId),
+            senderName: "cron",
+            text: `[Scheduled reminder] ${r.message}`,
+            timestamp: Date.now(),
+            threadId: r.threadId ? String(r.threadId) : undefined,
+            isGroup: false,
+            isVoice: false,
+          });
+        }
+      }
+    },
+  });
+
+  const SLEEP_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? "2", 10);
+  const SLEEP_MINUTE = parseInt(process.env["BED_TIME"]?.split(":")[1] ?? "0", 10);
+
+  // Floating compaction (idle-triggered) — createIdleCompactTask internally calls
+  // setIdleCompactReset → sets message-pipeline.resetIdleCompactFlag singleton.
+  if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
+    heartbeat.registerTask(createIdleCompactTask({
+      transport, memory, memoryDir: memoryConfig.memoryDir,
+      allowedUserIds: config.telegram.allowedUserIds,
+      busyChats: ctx.busyChats, pendingSessionStart: ctx.pendingSessionStart,
+      isSleepActive: ctx.isSleepActive,
+    }));
+  }
+
+  // System message sender — singleton: system-message._sender
+  const { initSystemMessage, sendSystemMessage } = await import("../components/system-message.js");
+  const primaryChatId = String(config.mainChatId ?? "");
+  initSystemMessage(async (prompt: string) => {
+    try {
+      const response = await transport.sendPrompt(primaryChatId, `[SYSTEM] ${prompt}`);
+      if (response && ctx.telegramAdapter) {
+        await ctx.telegramAdapter.sendNotification(primaryChatId, response);
+      }
+    } catch (err) {
+      logWarn("main", `System message failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+
+  // Daily cycle: spawn Dreamy after BED_TIME + quiet ticks
+  heartbeat.registerTask(createAgeCheckTask({
+    memory,
+    bridgeLockPath: ctx.bridgeLockPath,
+    sleepAuditDir: ctx.sleepAuditDir,
+    sleepHour: SLEEP_HOUR,
+    sleepMinute: SLEEP_MINUTE,
+    busyChats: ctx.busyChats,
+    isSleepActive: ctx.isSleepActive,
+    doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
+    startSleep: () => { ctx.sleepHandle?.spawn(); },
+    checkHwSleep: (qt, rt) => { ctx.sleepHandle?.checkHwSleep(qt, rt); },
+    cronBusy: () => cronQueue.currentJob !== null || cronQueue.pending > 0,
+  }));
+
+  heartbeat.registerTask(createDbIntegrityTask(memory));
+
+  if (transport.healthCheck) {
+    heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });
+  }
+
+  // In-proc watchdog: wall-clock comparison every 60s
+  const WD_CHECK_INTERVAL = 60_000;
+  const WD_UNKNOWN_SUPPRESS_MS = 60 * 60_000;
+  setInterval(() => {
+    const elapsed = Date.now() - lastKickAt;
+    if (elapsed <= WD_THRESHOLD_MS) return;
+    const kind = classifyResume();
+    if (kind === "dark" || (kind === "unknown" && elapsed < WD_UNKNOWN_SUPPRESS_MS)) {
+      lastKickAt = Date.now();
+      return;
+    }
+    logWarn("watchdog", `No heartbeat kick for ${Math.round(elapsed / 60000)}min (${kind}) — forcing restart`);
+    writeRestartReason("watchdog: no heartbeat kick");
+    process.exit(1);
+  }, WD_CHECK_INTERVAL);
+
+  // Restart flag check
+  heartbeat.registerTask({
+    name: "restart-check",
+    execute: async () => {
+      const req = readAndClearRestartRequested();
+      if (req) {
+        logInfo("restart-check", `Restart requested: ${req}`);
+        process.exit(0);
+      }
+    },
+  });
+
+  // Self-healing agent (optional)
+  let selfHealerTask: ReturnType<typeof createSelfHealerTask> | null = null;
+  if (process.env["SELFHEAL_ENABLED"] !== "false") {
+    selfHealerTask = createSelfHealerTask(() => ctx.telegramAdapter, config.telegram.allowedUserIds);
+    heartbeat.registerTask(selfHealerTask);
+  }
+  ctx.selfHealerTask = selfHealerTask;
+  pipelineDeps.selfHealerTask = selfHealerTask;
+
+  // Wire capability-registered commands + tasks
+  const { registerCommand } = await import("../components/command-handlers.js");
+  for (const [name, handler] of capabilities.commands) {
+    registerCommand(name, handler);
+  }
+  for (const task of capabilities.heartbeatTasks) {
+    heartbeat.registerTask(task);
+  }
+
+  // Model health check — runs once on first tick
+  let modelHealthDone = false;
+  heartbeat.registerTask({
+    name: "model-health",
+    execute: async () => {
+      if (modelHealthDone) return;
+      modelHealthDone = true;
+      if (config.transport.agentTransport !== "api") return;
+      const { loadTransport, resolveAgent } = await import("../components/transport-config.js");
+      const tc = loadTransport();
+      if (!tc) return;
+      const agents = ["professor", "dreamy", "browsie", "coding"] as const;
+      const models: Array<{ label: string; model: string }> = [];
+      for (const a of agents) {
+        const r = resolveAgent(a, tc);
+        if (r && !models.some(m => m.model === r.model)) {
+          models.push({ label: a, model: r.model });
+        }
+      }
+      const prof = resolveAgent("professor", tc);
+      const endpoint = prof?.provider.endpoint ?? "http://localhost:11434/v1";
+      const apiKey = prof?.provider.apiKeyEnv ? process.env[prof.provider.apiKeyEnv] : process.env["API_KEY"];
+      const warnings: string[] = [];
+      for (const { label, model } of models) {
+        try {
+          const res = await fetch(`${endpoint}/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+            body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!res.ok) {
+            warnings.push(`⚠️ ${label}=${model} — ${res.status} ${res.statusText}`);
+            logWarn("model-health", `${label}=${model} failed: ${res.status}`);
+          } else {
+            logInfo("model-health", `✓ ${label}=${model}`);
+          }
+        } catch (err) {
+          warnings.push(`⚠️ ${label}=${model} — ${err instanceof Error ? err.message : String(err)}`);
+          logWarn("model-health", `${label}=${model} unreachable: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (warnings.length > 0 && ctx.telegramAdapter) {
+        ctx.telegramAdapter.sendNotification(primaryChatId, `🏥 Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
+      }
+    },
+  });
+
+  // checkBrowseTasks once on startup, then heartbeat.start
+  const { checkBrowseTasks } = await import("../capabilities/browser/browse-delivery.js");
+  checkBrowseTasks();
+  heartbeat.start();
+  memory?.setHeartbeat(heartbeat);
+  logInfo("main", "💓 Heartbeat started (5-min interval)");
+
+  // Expose sendSystemMessage for phase-sleep
+  ctx.sendSystemMessage = sendSystemMessage;
+}
