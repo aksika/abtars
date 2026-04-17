@@ -19,7 +19,6 @@ import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { BrowserManager } from "./capabilities/browser/browser-manager.js";
 import { BrowserIpcServer } from "./capabilities/browser/browser-ipc-server.js";
 import { CronQueue } from "./components/cron/cron-queue.js";
-import { resetAllCtxStarts } from "./boot/ctx-start.js";
 
 
 import type { Config } from "./types/index.js";
@@ -295,21 +294,14 @@ export async function startBridge(): Promise<void> {
   bridge.heartbeat = heartbeat;
   bridge.selfHealerTask = ctx.selfHealerTask;
 
-  // --- Sleep capability (background, with retry) ---
-  const { createSleepHandle } = await import("./capabilities/sleep/index.js");
-  const { killWakeInhibit } = await import("./components/command-handlers.js");
-  const SLEEP_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? "2", 10);
-  const sleepHandle = createSleepHandle({
-    sleepHour: SLEEP_HOUR,
-    sleepAuditDir: ctx.sleepAuditDir,
-    memoryEnabled: memoryConfig.memoryEnabled,
-    onComplete: () => resetAllCtxStarts(memoryConfig.memoryDir),
-    getLastMsgTs: () => memory?.getLastMessageTimestamp(true) ?? 0,
-    sendSystemMessage: ctx.sendSystemMessage!,
-    killWakeInhibit,
-  });
-  ctx.sleepHandle = sleepHandle;
-  bridge.sleepHandle = sleepHandle;
+  // ── Phase 10: sleep ──
+  {
+    const t = Date.now();
+    const { phaseSleep } = await import("./boot/phase-sleep.js");
+    await phaseSleep(ctx);
+    logInfo("boot", `✓ phaseSleep (${Date.now() - t}ms)`);
+  }
+  bridge.sleepHandle = ctx.sleepHandle;
 
   // --- Web Dashboard wiring (conditional) ---
   await bridge.initDashboard(platforms, heartbeat, nlmConfig);
