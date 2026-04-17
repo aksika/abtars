@@ -14,11 +14,13 @@ interface Bucket {
   lastUpdate: number;
   consecutiveErrors: number;
   cooldownUntil?: number; // Retry-After absolute timestamp
+  authFailed?: boolean;   // sticky — no drain until explicit reset
 }
 
 const buckets = new Map<string, Bucket>();
 
 function drain(b: Bucket, now: number): void {
+  if (b.authFailed) return;
   const elapsed = now - b.lastUpdate;
   b.level = Math.max(0, b.level - elapsed * LEAK_RATE_PER_MS);
   b.lastUpdate = now;
@@ -31,7 +33,8 @@ export function recordError(key: string, kind: "rate_limit" | "auth" | "transien
   drain(b, now);
 
   if (kind === "auth") {
-    b.level = 1.0; // permanent — skip until drain
+    b.level = 1.0;
+    b.authFailed = true;
   } else {
     const idx = Math.min(b.consecutiveErrors, PROGRESSIVE_FILL.length - 1);
     b.level = Math.min(1.0, b.level + PROGRESSIVE_FILL[idx]!);
@@ -54,6 +57,12 @@ export function recordSuccess(key: string): void {
   if (!b) return;
   b.consecutiveErrors = 0;
   b.cooldownUntil = undefined;
+  b.authFailed = false;
+}
+
+/** Reset all buckets — called on /models restore or bridge restart. */
+export function resetAllBuckets(): void {
+  buckets.clear();
 }
 
 /** Check if a model should be skipped. */
