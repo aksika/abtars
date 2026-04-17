@@ -215,6 +215,7 @@ export async function startBridge(): Promise<void> {
   const { phaseMemoryIpc } = await import("./boot/phase-memory-ipc.js");
   const { phasePipelineDeps, createCronCallback } = await import("./boot/phase-pipeline-deps.js");
   const { phasePlatforms } = await import("./boot/phase-platforms.js");
+  const { phaseCapabilities } = await import("./boot/phase-capabilities.js");
   const ctx = createBootCtx();
   {
     const t = Date.now();
@@ -293,26 +294,16 @@ export async function startBridge(): Promise<void> {
 
   // === DEFERRED INIT: non-critical services (after platforms are accepting messages) ===
 
-  // Auto-discover capabilities (browser, hotskills, etc.)
-  const { discoverCapabilities } = await import("./capabilities/capability.js");
-  const capDir = join(import.meta.dirname, "capabilities");
-  const loaded = await discoverCapabilities(bridge.capabilities, config, memory, transport, bridge.runtime, capDir);
-  if (loaded.length > 0) {
-    logInfo("main", `🔌 Capabilities: ${loaded.join(", ")}`);
-    pipelineDeps.loadedCapabilities = ["sleep", ...loaded];
+  // ── Phase 7: capabilities + MCP daemon ──
+  // Sync bridge.capabilities with ctx.capabilities so command-handlers can read from either
+  // (transitional — once Bridge.shutdown reads from ctx, bridge.capabilities field is removable)
+  (bridge as unknown as { capabilities: typeof ctx.capabilities }).capabilities = ctx.capabilities;
+  {
+    const t = Date.now();
+    await phaseCapabilities(ctx);
+    logInfo("boot", `✓ phaseCapabilities (${Date.now() - t}ms)`);
   }
-
-  // MCP daemon
-  // mcpDaemonStarted is on bridge
-  if (config.mcpDaemon) {
-    try {
-      execFileSync("mcporter", ["daemon", "start"], { stdio: "pipe" });
-      bridge.mcpDaemonStarted = true;
-      logInfo("main", "🔌 mcporter daemon started");
-    } catch {
-      logWarn("main", "mcporter not found or daemon start failed — skipping");
-    }
-  }
+  bridge.mcpDaemonStarted = ctx.mcpDaemonStarted;
 
   if (sttConfig) logInfo("main", `🎤 STT enabled (${sttConfig.provider}/${sttConfig.model || "whisper-large-v3"})`);
   if (ttsConfig) logInfo("main", `🔊 TTS enabled (Edge TTS / ${ttsConfig.voice})`);
