@@ -32,12 +32,6 @@ fi
 
 mkdir -p "$AB/logs"
 
-# Verify python3 is available (used for JSON parsing)
-if ! command -v python3 &>/dev/null; then
-  echo "FATAL: python3 not found — watchdog requires it for JSON parsing" >&2
-  exit 1
-fi
-
 log() {
   local ts
   ts=$(date '+%Y-%m-%dT%H:%M:%S')
@@ -54,18 +48,20 @@ notify() {
 
 read_lock() {
   # Returns: pid heartbeat_ms sleep_status  (or "ERR" on parse failure)
-  python3 -c "
-import json
-try:
-    d=json.load(open('$LOCK'))
-    print(d.get('pid',0), d.get('lastHeartbeat',0), d.get('sleepStatus','awake'))
-except:
-    print('ERR')
-" 2>/dev/null
+  # Pure bash — no python3/jq dependency
+  if [[ ! -f "$LOCK" ]]; then echo "ERR"; return; fi
+  local content
+  content=$(cat "$LOCK" 2>/dev/null) || { echo "ERR"; return; }
+  local pid hb sleep
+  pid=$(echo "$content" | grep -o '"pid":[0-9]*' | grep -o '[0-9]*') || pid=0
+  hb=$(echo "$content" | grep -o '"lastHeartbeat":[0-9]*' | grep -o '[0-9]*') || hb=0
+  sleep=$(echo "$content" | grep -o '"sleepStatus":"[^"]*"' | cut -d'"' -f4) || sleep="awake"
+  echo "${pid:-0} ${hb:-0} ${sleep:-awake}"
 }
 
 now_ms() {
-  python3 -c "import time; print(int(time.time()*1000))"
+  # macOS date doesn't support %N, use perl (always available)
+  perl -MTime::HiRes=time -e 'printf "%d\n", time()*1000' 2>/dev/null || echo $(( $(date +%s) * 1000 ))
 }
 
 wait_for_death() {
@@ -79,7 +75,7 @@ wait_for_death() {
 write_wd_lock() {
   local now
   now=$(now_ms)
-  echo "{\"pid\":$$,\"lastCheck\":$now}" > "$WD_LOCK"
+  printf '{"pid":%d,"lastCheck":%s}\n' $$ "$now" > "$WD_LOCK"
 }
 
 rotate_log() {
@@ -128,7 +124,7 @@ spawn_bridge() {
   BRIDGE_PID=""
   while (( wait < 30 )); do
     if [[ -f "$LOCK" ]]; then
-      BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$LOCK')).get('pid',0))" 2>/dev/null || echo "")
+      BRIDGE_PID=$(grep -o '"pid":[0-9]*' "$LOCK" | grep -o '[0-9]*' || echo "")
       if [[ -n "$BRIDGE_PID" && "$BRIDGE_PID" != "0" ]]; then
         break
       fi
