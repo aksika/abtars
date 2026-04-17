@@ -1,13 +1,12 @@
 import { execFileSync } from "node:child_process";
 
-import { logInfo, logWarn, logError } from "./components/logger.js";
+import { logInfo, logWarn } from "./components/logger.js";
 import { MemoryManager } from "abmind/index.js";
 import type { IKiroTransport } from "./components/transport/kiro-transport.js";
 import { ServiceRegistry } from "./components/service-registry.js";
 import type { IDashboardSlot } from "./components/skeleton.js";
 import { HeartbeatSystem } from "./components/heartbeat-system.js";
 import { AgentApiServer } from "./components/agent-api-server.js";
-import { loadAgentApiConfig } from "./components/agent-api-config.js";
 import { BrowserManager } from "./capabilities/browser/browser-manager.js";
 import { BrowserIpcServer } from "./capabilities/browser/browser-ipc-server.js";
 import { CronQueue } from "./components/cron/cron-queue.js";
@@ -113,7 +112,6 @@ export async function startBridge(): Promise<void> {
   }
 
   // Legacy procedural boot — references ctx fields instead of re-reading
-  const platforms = ctx.platforms;
   const config = ctx.config;
   const memoryConfig = ctx.memoryConfig;
   const bridge = new Bridge(config, memoryConfig);
@@ -126,7 +124,6 @@ export async function startBridge(): Promise<void> {
     logInfo("boot", `✓ phaseMemory (${Date.now() - t}ms)`);
   }
   bridge.memory = ctx.memory;
-  const memory = ctx.memory;
 
   // ── Phase 3: transport ──
   {
@@ -138,9 +135,7 @@ export async function startBridge(): Promise<void> {
   // isSleepActive reads ctx.sleepHandle (set later in phase-sleep / post-heartbeat)
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.child !== null && ctx.sleepHandle?.child !== undefined && !ctx.sleepHandle.child.killed;
 
-  const registry = bridge.registry;
-
-  // STT/TTS/NLM config (already loaded in phase-config; locals for legacy refs)
+  // STT/TTS config (already loaded in phase-config; locals for legacy refs)
   const sttConfig = ctx.sttConfig;
   const ttsConfig = ctx.ttsConfig;
 
@@ -223,38 +218,16 @@ export async function startBridge(): Promise<void> {
   }
   bridge.dashboardServer = ctx.dashboardServer;
 
-  // --- Agent API service ---
-  let agentApiServer: AgentApiServer | null = null; // local ref, wired to bridge at end
-  const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
-
-  registry.register("agent-api", {
-    configured: Boolean(agentConfig.port),
-    async create() {
-      agentApiServer = new AgentApiServer({
-        config: agentConfig,
-        cliPath: config.transport.agentCliPath,
-        workingDir: config.transport.workingDir,
-        memory,
-        runtime: bridge.runtime,
-      });
-      return {
-        async start() { await agentApiServer!.start(); },
-        stop() { agentApiServer?.stop(); agentApiServer = null; },
-      };
-    },
-  });
-
-  if (platforms.agent) {
-    const result = await registry.start("agent-api");
-    if (result.ok) {
-      logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port} (allowed: ${agentConfig.allowedIps.join(", ")})`);
-    } else {
-      logError("main", `Agent API failed to start: ${result.error}`);
-    }
+  // ── Phase 12: agent-api ──
+  {
+    const t = Date.now();
+    const { phaseAgentApi } = await import("./boot/phase-agent-api.js");
+    await phaseAgentApi(ctx);
+    logInfo("boot", `✓ phaseAgentApi (${Date.now() - t}ms)`);
   }
+  bridge.agentApiServer = ctx.agentApiServer;
 
   // Wire bridge fields for shutdown
-  bridge.agentApiServer = agentApiServer;
   bridge.heartbeat = heartbeat;
   bridge.cronQueue = cronQueue;
 
