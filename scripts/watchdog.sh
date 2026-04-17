@@ -116,19 +116,34 @@ spawn_bridge() {
   rm -f "$LOCK"
   log "Starting bridge: $BRIDGE $*"
   "$BRIDGE" "$@" >> "$AB/logs/launchd.log" 2>&1 &
-  BRIDGE_PID=$!
   SPAWNED_AT=$(date +%s)
+  # Wait for bridge.lock to appear with a PID (node writes it on startup)
+  local wait=0
+  BRIDGE_PID=""
+  while (( wait < 30 )); do
+    if [[ -f "$LOCK" ]]; then
+      BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$LOCK')).get('pid',0))" 2>/dev/null || echo "")
+      if [[ -n "$BRIDGE_PID" && "$BRIDGE_PID" != "0" ]]; then
+        break
+      fi
+    fi
+    sleep 1
+    ((wait++))
+  done
   log "Bridge spawned (PID=$BRIDGE_PID)"
 }
 
 kill_bridge() {
   local reason=$1
+  # Kill the node process (from bridge.lock)
   if [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
     log "Killing bridge PID=$BRIDGE_PID ($reason)"
     notify "🚨 Watchdog: $reason — killing PID $BRIDGE_PID"
     kill -9 "$BRIDGE_PID" 2>/dev/null || true
     wait_for_death "$BRIDGE_PID"
   fi
+  # Also kill any orphaned agentbridge.sh wrappers
+  pkill -f "agentbridge.sh.*--all" 2>/dev/null || true
   rm -f "$LOCK"
   BRIDGE_PID=""
 }
@@ -173,15 +188,6 @@ while true; do
   write_wd_lock
   rotate_log
 
-  # Check if bridge process is alive
-  if [[ -z "$BRIDGE_PID" ]] || ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
-    log "Bridge process gone (PID=$BRIDGE_PID)"
-    notify "🚨 Watchdog: bridge process gone, restarting"
-    BRIDGE_PID=""
-    spawn_bridge "${BRIDGE_ARGS[@]}"
-    continue
-  fi
-
   # Read bridge.lock
   local_lock=$(read_lock)
   if [[ "$local_lock" == "ERR" ]]; then
@@ -192,6 +198,21 @@ while true; do
   lock_pid=$(echo "$local_lock" | awk '{print $1}')
   lock_hb=$(echo "$local_lock" | awk '{print $2}')
   lock_sleep=$(echo "$local_lock" | awk '{print $3}')
+  now=$(now_ms)
+
+  # Update tracked PID from bridge.lock (node process, not bash wrapper)
+  if [[ -n "$lock_pid" && "$lock_pid" != "0" ]]; then
+    BRIDGE_PID="$lock_pid"
+  fi
+
+  # Check if bridge process is alive
+  if [[ -z "$BRIDGE_PID" ]] || ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    log "Bridge process gone (PID=$BRIDGE_PID)"
+    notify "🚨 Watchdog: bridge process gone, restarting"
+    BRIDGE_PID=""
+    spawn_bridge "${BRIDGE_ARGS[@]}"
+    continue
+  fi
   now=$(now_ms)
 
   # Skip stale check during hardware sleep
