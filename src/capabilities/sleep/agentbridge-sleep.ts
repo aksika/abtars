@@ -48,7 +48,7 @@ function toIsoDate(ts: number): string {
 }
 
 /** Steps whose failure blocks watermark advance. Public so tests can derive reject targets. */
-export const ESSENTIAL_STEPS: ReadonlySet<string> = new Set(["04a-daily-summary", "04b-extract-from-daily", "retrospective", "retro-extract"]);
+export const ESSENTIAL_STEPS: ReadonlySet<string> = new Set(["daily-summary", "extract-from-daily", "retrospective", "retro-extract"]);
 const CATCHUP_MAX_AGE_DAYS = 3;
 
 /** Thrown by runSleepCycle when memory layer fails to initialize. */
@@ -243,7 +243,7 @@ class LlmBudget {
 }
 
 async function sendWithRetry(
-  _transport: import("../../components/transport/kiro-transport.js").IKiroTransport | null,
+  runtime: Pick<SubagentRuntime, "complete">,
   prompt: string,
   stepName: string,
   _verbose: boolean,
@@ -255,7 +255,7 @@ async function sendWithRetry(
       return null;
     }
     try {
-      return await getSleepRuntime().complete("dreamy", prompt, { session: "reuse" });
+      return await runtime.complete("dreamy", prompt, { session: "reuse" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `Step ${stepName} attempt ${attempt}/${MAX_RETRIES} failed: ${msg}`);
@@ -482,6 +482,7 @@ async function runCatchUp(
   memoryConfig: { memoryDir: string },
   steps: SleepStep[],
   flags: RawArgs,
+  runtime: Pick<SubagentRuntime, "complete">,
   budget?: LlmBudget,
 ): Promise<void> {
   for (const lock of locks) {
@@ -501,47 +502,47 @@ async function runCatchUp(
     logInfo(TAG, `[CATCH-UP] ${basename(lock.path)} — recovering: ${needed.join(", ")}`);
 
     // 04a — daily summary with date-range
-    if (needed.includes("04a-daily-summary")) {
+    if (needed.includes("daily-summary")) {
       const start = Date.now();
       try {
         const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
         const userId = sleepData.getPrimaryUserId();
         const dayStart = dateStrToMs(lock.dateStr);
         const dayEnd = dayStart + 86400000;
-        const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(null, p, "catch-up-04a", flags.verbose, budget).then(r => r ?? ""), {
+        const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(runtime, p, "catch-up-04a", flags.verbose, budget).then(r => r ?? ""), {
           ctxWindow, memoryDir: memoryConfig.memoryDir, userId, watermarkTs: 0,
           dateRange: { startTs: dayStart, endTs: dayEnd },
         });
         if (summary) {
           writeDailyFile(memoryConfig.memoryDir, dateStrToFormatted(lock.dateStr), summary);
-          lock.state.steps["04a-daily-summary"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
+          lock.state.steps["daily-summary"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
         } else {
-          lock.state.steps["04a-daily-summary"] = { status: "skipped" };
+          lock.state.steps["daily-summary"] = { status: "skipped" };
         }
         logInfo(TAG, `[CATCH-UP] ✓ 04a-daily-summary for ${lock.dateStr} (${((Date.now() - start) / 1000).toFixed(1)}s)`);
       } catch (err) {
         logWarn(TAG, `[CATCH-UP] ✗ 04a-daily-summary for ${lock.dateStr}: ${err instanceof Error ? err.message : String(err)}`);
-        lock.state.steps["04a-daily-summary"] = { status: "failed", duration: Math.round((Date.now() - start) / 100) / 10 };
+        lock.state.steps["daily-summary"] = { status: "failed", duration: Math.round((Date.now() - start) / 100) / 10 };
       }
       writeStateFile(lock.path, lock.state);
     }
 
     // 04b — extract from daily (needs daily file to exist)
-    if (needed.includes("04b-extract-from-daily")) {
+    if (needed.includes("extract-from-daily")) {
       const dailyPath = join(memoryConfig.memoryDir, "daily", `daily_${dateStrToFormatted(lock.dateStr)}.md`);
       if (!existsSync(dailyPath)) {
         logInfo(TAG, `[CATCH-UP] ⏭ 04b — no daily file for ${lock.dateStr}`);
-        lock.state.steps["04b-extract-from-daily"] = { status: "skipped" };
+        lock.state.steps["extract-from-daily"] = { status: "skipped" };
       } else {
         const start = Date.now();
         try {
           const userId = sleepData.getPrimaryUserId();
-          const result = await extractFromDaily(dailyPath, userId, (p) => sendWithRetry(null, p, "catch-up-04b", flags.verbose, budget).then(r => r ?? ""));
-          lock.state.steps["04b-extract-from-daily"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
+          const result = await extractFromDaily(dailyPath, userId, (p) => sendWithRetry(runtime, p, "catch-up-04b", flags.verbose, budget).then(r => r ?? ""));
+          lock.state.steps["extract-from-daily"] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
           logInfo(TAG, `[CATCH-UP] ✓ 04b-extract-from-daily for ${lock.dateStr} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
         } catch (err) {
           logWarn(TAG, `[CATCH-UP] ✗ 04b for ${lock.dateStr}: ${err instanceof Error ? err.message : String(err)}`);
-          lock.state.steps["04b-extract-from-daily"] = { status: "failed", duration: Math.round((Date.now() - start) / 100) / 10 };
+          lock.state.steps["extract-from-daily"] = { status: "failed", duration: Math.round((Date.now() - start) / 100) / 10 };
         }
       }
       writeStateFile(lock.path, lock.state);
@@ -553,7 +554,7 @@ async function runCatchUp(
       const step = steps.find(s => s.name === stepName);
       if (!step) { logWarn(TAG, `[CATCH-UP] Step file not found: ${stepName}`); continue; }
       const start = Date.now();
-      const response = await sendWithRetry(null, step.rawPrompt, `catch-up-${stepName}`, flags.verbose, budget);
+      const response = await sendWithRetry(runtime, step.rawPrompt, `catch-up-${stepName}`, flags.verbose, budget);
       if (response) {
         lock.state.steps[stepName] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
         logInfo(TAG, `[CATCH-UP] ✓ ${stepName} (${((Date.now() - start) / 1000).toFixed(1)}s)`);
@@ -590,6 +591,7 @@ export async function runSleepCycle(opts: RunOpts = {}): Promise<RunResult> {
   const now = opts.now ?? Date.now;
   const timeoutMs = opts.timeoutMs ?? SLEEP_TIMEOUT_MS;
   const backoffMs = opts.backoffMs ?? ((n: number) => [10, 30, 60][Math.min(n, 2)]! * 1000);
+  const runtime = opts.runtime ?? getSleepRuntime();
 
   if (flags.verbose) {
     setLogLevel("debug");
@@ -781,7 +783,7 @@ export async function runSleepCycle(opts: RunOpts = {}): Promise<RunResult> {
       const previousLocks = scanPreviousLocks(sleepDir, dateStr);
       if (previousLocks.length > 0) {
         logInfo(TAG, `[CATCH-UP] Found ${previousLocks.length} previous lock(s)`);
-        await runCatchUp(previousLocks, sleepData, memoryConfig, steps, flags, budget);
+        await runCatchUp(previousLocks, sleepData, memoryConfig, steps, flags, runtime, budget);
       }
 
       emitProgress("starting");
@@ -827,7 +829,7 @@ export async function runSleepCycle(opts: RunOpts = {}): Promise<RunResult> {
         writeStateFile(statePath, state);
 
         // Code-driven steps
-        if (step.name === "04a-daily-summary") {
+        if (step.name === "daily-summary") {
           try {
             const ctxWindow = parseInt(process.env["AGENT_SLEEP_CTX_WINDOW"] ?? "128000", 10);
             const userId = sleepData.getPrimaryUserId();
@@ -838,7 +840,7 @@ export async function runSleepCycle(opts: RunOpts = {}): Promise<RunResult> {
             const firstMsgDate = firstMsgTs ? new Date(firstMsgTs) : new Date(now());
             const targetDate = `${firstMsgDate.getFullYear()}-${String(firstMsgDate.getMonth() + 1).padStart(2, "0")}-${String(firstMsgDate.getDate()).padStart(2, "0")}`;
 
-            const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(null, p, "04a-daily-summary", flags.verbose, budget).then(r => r ?? ""), {
+            const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(runtime, p, "daily-summary", flags.verbose, budget).then(r => r ?? ""), {
               ctxWindow, memoryDir: memoryConfig.memoryDir, userId, watermarkTs,
             });
             if (summary) {
@@ -858,7 +860,7 @@ export async function runSleepCycle(opts: RunOpts = {}): Promise<RunResult> {
           continue;
         }
 
-        if (step.name === "04b-extract-from-daily") {
+        if (step.name === "extract-from-daily") {
           if (!dailySummaryPath) {
             state.steps[step.name] = { status: "skipped" };
             writeStateFile(statePath, state);
@@ -867,7 +869,7 @@ export async function runSleepCycle(opts: RunOpts = {}): Promise<RunResult> {
           }
           try {
             const userId = sleepData.getPrimaryUserId();
-            const result = await extractFromDaily(dailySummaryPath, userId, (p) => sendWithRetry(null, p, "04b-extract", flags.verbose, budget).then(r => r ?? ""));
+            const result = await extractFromDaily(dailySummaryPath, userId, (p) => sendWithRetry(runtime, p, "04b-extract", flags.verbose, budget).then(r => r ?? ""));
             state.steps[step.name] = { status: "ok", duration: Math.round((Date.now() - start) / 100) / 10 };
             writeFileSync(join(stepLogDir, `${String(stepIndex).padStart(2, "0")}-${step.name}.md`), result, "utf-8");
             logInfo(TAG, `[SLEEP] ✓ ${step.name} (${((Date.now() - start) / 1000).toFixed(1)}s) — ${result.slice(0, 80)}`);
@@ -883,7 +885,7 @@ export async function runSleepCycle(opts: RunOpts = {}): Promise<RunResult> {
         // Standard prompt-driven step — JIT substitution
         const prompt = substituteVars(step.rawPrompt, vars);
         const ctxBefore = -1;
-        const response = await sendWithRetry(null, prompt, step.name, flags.verbose, budget);
+        const response = await sendWithRetry(runtime, prompt, step.name, flags.verbose, budget);
         const ctxAfter = -1;
         const duration = Date.now() - start;
 
@@ -914,7 +916,10 @@ export async function runSleepCycle(opts: RunOpts = {}): Promise<RunResult> {
       }
     } finally {
       clearTimeout(timeoutHandle);
-      try { getSleepRuntime().shutdown(); } catch { /* */ }
+      if (!opts.runtime) {
+        // Only shut down the default singleton; injected runtimes are test-owned.
+        try { getSleepRuntime().shutdown(); } catch { /* */ }
+      }
     }
 
     // Set final status
