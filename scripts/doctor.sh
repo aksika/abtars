@@ -22,6 +22,68 @@ esac
 warn() { echo "[doctor] WARN: $1"; WARNS=$((WARNS + 1)); }
 fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 
+# Helper: read JSON field via python3
+json_field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],sys.argv[3]))" "$1" "$2" "${3:-0}" 2>/dev/null || echo "${3:-0}"; }
+
+# ── Watchdog health ──────────────────────────────────────────────────────────
+
+WD_LOCK="$AB/watchdog.lock"
+WD_PID=""
+WD_ALIVE=false
+if [ -f "$WD_LOCK" ]; then
+  WD_PID=$(json_field "$WD_LOCK" pid 0)
+  WD_LAST=$(json_field "$WD_LOCK" lastCheck 0)
+  if [ "$WD_PID" -gt 0 ] 2>/dev/null && kill -0 "$WD_PID" 2>/dev/null; then
+    WD_ALIVE=true
+    # Check lastCheck freshness (should be < 2 min old)
+    if [ "$WD_LAST" -gt 0 ]; then
+      WD_AGE=$(( ($(date +%s) - WD_LAST / 1000) ))
+      if [ "$WD_AGE" -gt 120 ]; then
+        warn "watchdog stale -- last check ${WD_AGE}s ago"
+      fi
+    fi
+  else
+    # Watchdog PID dead — check if bridge also dead (circuit breaker?)
+    BRIDGE_PID=$(json_field "$AB/bridge.lock" pid 0 2>/dev/null)
+    if [ "$BRIDGE_PID" -gt 0 ] 2>/dev/null && ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+      warn "watchdog and bridge both dead -- circuit breaker may have tripped. Check $AB/logs/watchdog.log"
+    else
+      warn "watchdog not running (PID $WD_PID dead)"
+    fi
+    if $FIX; then
+      if [[ "$(uname)" == "Darwin" ]] && launchctl list 2>/dev/null | grep -q agentbridge.watchdog; then
+        launchctl kickstart -k "gui/$(id -u)/com.agentbridge.watchdog" 2>/dev/null && fix "restarted watchdog via LaunchAgent"
+      elif command -v systemctl &>/dev/null && systemctl --user is-enabled agentbridge-watchdog.service &>/dev/null; then
+        systemctl --user restart agentbridge-watchdog.service 2>/dev/null && fix "restarted watchdog via systemd"
+      else
+        warn "watchdog not running -- start manually: ~/.agentbridge/watchdog.sh --all --web --agent &"
+      fi
+    fi
+  fi
+else
+  warn "watchdog.lock missing -- watchdog not running"
+  if $FIX; then
+    if [[ "$(uname)" == "Darwin" ]] && launchctl list 2>/dev/null | grep -q agentbridge.watchdog; then
+      launchctl kickstart -k "gui/$(id -u)/com.agentbridge.watchdog" 2>/dev/null && fix "started watchdog via LaunchAgent"
+    elif command -v systemctl &>/dev/null && systemctl --user is-enabled agentbridge-watchdog.service &>/dev/null; then
+      systemctl --user start agentbridge-watchdog.service 2>/dev/null && fix "started watchdog via systemd"
+    else
+      warn "start manually: ~/.agentbridge/watchdog.sh --all --web --agent &"
+    fi
+  fi
+fi
+
+# LaunchAgent / systemd check
+if [[ "$(uname)" == "Darwin" ]]; then
+  if ! launchctl list 2>/dev/null | grep -q agentbridge.watchdog; then
+    warn "watchdog LaunchAgent not loaded -- run: launchctl load ~/Library/LaunchAgents/com.agentbridge.watchdog.plist"
+  fi
+elif command -v systemctl &>/dev/null; then
+  if ! systemctl --user is-enabled agentbridge-watchdog.service &>/dev/null 2>&1; then
+    warn "watchdog systemd unit not enabled -- run: systemctl --user enable agentbridge-watchdog.service"
+  fi
+fi
+
 # 0. Migrate titok/ → secret/ (one-time)
 if [ -d "$AB/titok" ] && [ ! -d "$AB/secret" ]; then
   if $FIX || $FIX_FULL; then
@@ -44,14 +106,17 @@ for d in "$AB/secret" "$AB/secret/cookies" "$AB/memory"; do
   fi
 done
 
-# 2. Stale lock files (older than 1 hour)
+# 2. Stale lock files (older than 1 hour) — skip bridge.lock if watchdog is alive
 while IFS= read -r f; do
+  if $WD_ALIVE && [[ "$f" == *"bridge.lock"* ]]; then
+    continue  # watchdog owns bridge.lock lifecycle
+  fi
   if $FIX; then
     rm -f "$f"; fix "removed stale lock $f"
   else
     warn "stale lock: $f"
   fi
-done < <(find "$AB" -name "*.lock" -not -path "*/sleep/*" -not -path "*/node_modules/*" -mmin +60 2>/dev/null)
+done < <(find "$AB" -name "*.lock" -not -path "*/sleep/*" -not -path "*/node_modules/*" -not -name "watchdog.lock" -mmin +60 2>/dev/null)
 
 # 3. Stale sleep lock (older than 2 hours, no matching audit .md)
 for lockfile in "$AB/memory/sleep"/sleep_*.lock; do
@@ -160,11 +225,19 @@ fi
 # 10. Heartbeat liveness (startup check -- was previous session's heartbeat healthy?)
 LOCK_FILE="$AB/bridge.lock"
 if [ -f "$LOCK_FILE" ]; then
-  HB_TS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("lastHeartbeat",0))' "$LOCK_FILE" 2>/dev/null || echo 0)
+  HB_TS=$(json_field "$LOCK_FILE" lastHeartbeat 0)
   if [ "$HB_TS" -gt 0 ]; then
     HB_AGE=$(( ($(date +%s) - HB_TS / 1000) / 60 ))
     if [ "$HB_AGE" -gt 15 ]; then
       warn "heartbeat was stale before restart last tick ${HB_AGE}min ago -- heartbeat may have stopped"
+    fi
+  fi
+  # sleepStatus daytime check (macOS only)
+  if [[ "$(uname)" == "Darwin" ]]; then
+    SLEEP_STATUS=$(json_field "$LOCK_FILE" sleepStatus awake)
+    HOUR=$(date +%H)
+    if [ "$SLEEP_STATUS" = "hw_sleep" ] && [ "$HOUR" -ge 8 ] && [ "$HOUR" -le 23 ]; then
+      warn "sleepStatus is hw_sleep but it is daytime (${HOUR}:00) -- Mac should be awake"
     fi
   fi
 fi
@@ -225,6 +298,23 @@ if [ "$SLEEP_PROCS" -gt 1 ]; then
   fi
 fi
 
+# 15. Orphaned agentbridge.sh wrappers (not parented by watchdog)
+if $WD_ALIVE && [ -n "$WD_PID" ]; then
+  WRAPPER_ORPHANS=0
+  while IFS= read -r pid; do
+    PPID_OF=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [ "$PPID_OF" != "$WD_PID" ]; then
+      WRAPPER_ORPHANS=$((WRAPPER_ORPHANS + 1))
+      if $FIX; then
+        kill "$pid" 2>/dev/null && fix "killed orphaned agentbridge.sh wrapper pid $pid (parent $PPID_OF, not watchdog $WD_PID)"
+      fi
+    fi
+  done < <(pgrep -f 'agentbridge.sh.*--all' 2>/dev/null)
+  if [ "$WRAPPER_ORPHANS" -gt 0 ] && ! $FIX; then
+    warn "$WRAPPER_ORPHANS orphaned agentbridge.sh wrapper(s) not parented by watchdog"
+  fi
+fi
+
 # 13. Full fixes (--fix-full only)
 if $FIX_FULL && [ -f "$DB" ]; then
   sqlite3 "$DB" 'INSERT INTO messages_fts(messages_fts) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt messages_fts index"
@@ -244,6 +334,12 @@ if $FIX_FULL; then
 fi
 
 # Summary
+if $FIX_FULL && [ -f "$AB/logs/watchdog.log" ]; then
+  echo ""
+  echo "[doctor] Last 10 lines of watchdog.log:"
+  tail -10 "$AB/logs/watchdog.log" | sed 's/^/  /'
+fi
+
 if $FIX || $FIX_FULL; then
   echo "[doctor] Done. $FIXES fixes applied, $WARNS warnings."
 else
@@ -253,3 +349,5 @@ else
     echo "[doctor] $WARNS warnings. Run with --fix or --fix-full to repair."
   fi
 fi
+
+exit $(( WARNS > 0 ? 1 : 0 ))
