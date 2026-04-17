@@ -273,6 +273,13 @@ echo "🚀 Deploying launcher + recall CLI..."
   tail -n +3 "$PROJECT_DIR/scripts/agentbridge.sh"
 } > "$AB_HOME/agentbridge.sh"
 chmod +x "$AB_HOME/agentbridge.sh"
+# Write watchdog.sh with correct AB_HOME baked in
+{
+  echo "#!/usr/bin/env bash"
+  echo "export AGENT_BRIDGE_HOME=\"$AB_HOME\""
+  tail -n +4 "$PROJECT_DIR/scripts/watchdog.sh"
+} > "$AB_HOME/watchdog.sh"
+chmod +x "$AB_HOME/watchdog.sh"
 # Write browser-patchright.sh pointing to AB_HOME (self-contained)
 {
   echo "#!/usr/bin/env bash"
@@ -394,6 +401,14 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "  Start bridge:  ~/.agentbridge/agentbridge.sh"
-echo "  Start bridge:  ~/.agentbridge/agentbridge.sh --all"
-echo "  Stop bridge:   ~/.agentbridge/agentbridge.sh stop"
+if [[ -f "$AB/watchdog.lock" ]]; then
+  WD_PID=$(python3 -c "import json; print(json.load(open('$AB/watchdog.lock'))['pid'])" 2>/dev/null || echo "")
+  if [[ -n "$WD_PID" ]] && kill -0 "$WD_PID" 2>/dev/null; then
+    echo "  Restart bridge:  kill -USR1 $WD_PID  (watchdog graceful restart)"
+  else
+    echo "  Start watchdog:  ~/.agentbridge/watchdog.sh --all --web --agent &"
+  fi
+else
+  echo "  Start watchdog:  ~/.agentbridge/watchdog.sh --all --web --agent &"
+  echo "  Start bridge:    ~/.agentbridge/agentbridge.sh --all"
+fi
