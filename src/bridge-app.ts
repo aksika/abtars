@@ -12,7 +12,7 @@ import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
 import { logInfo, logWarn, logError, logDebug } from "./components/logger.js";
-import { MemoryManager, setLogger as setMemoryLogger } from "abmind/index.js";
+import { MemoryManager } from "abmind/index.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
 import type { IKiroTransport } from "./components/transport/kiro-transport.js";
 import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard/dashboard-config.js";
@@ -112,25 +112,6 @@ export class Bridge {
   constructor(config: Config, memoryConfig: MemoryConfig) {
     this.config = config;
     this.memoryConfig = memoryConfig;
-  }
-
-  /** Initialize memory layer + IPC server + LLM callback. */
-  async initMemory(): Promise<void> {
-    if (!this.memoryConfig.memoryEnabled) {
-      logInfo("main", "🧠 Memory disabled");
-      return;
-    }
-    setMemoryLogger({ logInfo, logWarn, logError });
-
-    // Load ABM .env.memory config
-    const { loadMemoryEnv } = await import("abmind/mem-config-env.js");
-    const memEnv = loadMemoryEnv();
-    logInfo("main", `🧠 ABM config: search=${memEnv.searchMode}, maxDB=${memEnv.maxDbSizeMb}MB, aging=${memEnv.agingEnabled}`);
-
-    const memory = new MemoryManager(this.memoryConfig);
-    await memory.initialize();
-    this.memory = memory;
-    logInfo("main", `🧠 Memory enabled (dir=${this.memoryConfig.memoryDir})`);
   }
 
   /** Wire LLM callback + start memory IPC server. Call after transport is ready. */
@@ -384,6 +365,7 @@ export async function startBridge(): Promise<void> {
   // ── Phase 1: config ──
   const { createBootCtx } = await import("./boot/context.js");
   const { phaseConfig } = await import("./boot/phase-config.js");
+  const { phaseMemory } = await import("./boot/phase-memory.js");
   const ctx = createBootCtx();
   {
     const t = Date.now();
@@ -399,8 +381,14 @@ export async function startBridge(): Promise<void> {
   const startedAt = bridge.startedAt;
   // === CRITICAL PATH: Memory → Transport → Telegram (fastest path to accepting messages) ===
 
-  await bridge.initMemory();
-  const memory = bridge.memory;
+  // ── Phase 2: memory ──
+  {
+    const t = Date.now();
+    await phaseMemory(ctx);
+    logInfo("boot", `✓ phaseMemory (${Date.now() - t}ms)`);
+  }
+  bridge.memory = ctx.memory;
+  const memory = ctx.memory;
 
   const conversationBuffer = new ConversationBuffer(50);
 
