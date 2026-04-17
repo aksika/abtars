@@ -103,13 +103,7 @@ merge_env() {
 
 merge_env "$PROJECT_DIR/.env.example" "$AB_HOME/.env"
 
-# .env.memory (ABM config — create from example if missing)
-if [ ! -f "$AB_HOME/config/.env.memory" ]; then
-  cp "$PROJECT_DIR/.env.memory.example" "$AB_HOME/config/.env.memory"
-  chmod 600 "$AB_HOME/config/.env.memory"
-  echo "   ℹ️  Created .env.memory from example"
-fi
-chmod 600 "$AB_HOME/config/.env.memory" 2>/dev/null
+# .env.memory — handled by deploy_abmind.sh (abmind owns this)
 
 # .env.skills (skill/integration config — create from example if missing)
 if [ ! -f "$AB_HOME/config/.env.skills" ]; then
