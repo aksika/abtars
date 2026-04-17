@@ -660,7 +660,7 @@ export async function startBridge(): Promise<void> {
   const bridgeLockPath = join(agentBridgeHome(), "bridge.lock");
   try {
     let version = "?";
-    try { version = JSON.parse(readFileSync(join(import.meta.dirname, "..", "build-info.json"), "utf-8")).hash; } catch { /* */ }
+    try { version = JSON.parse(readFileSync(join(import.meta.dirname, "build-info.json"), "utf-8")).hash; } catch { /* */ }
     writeFileSync(bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now(), version, sleepStatus: "awake" }), "utf-8");
   } catch { /* */ }
 
