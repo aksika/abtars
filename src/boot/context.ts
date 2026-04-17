@@ -42,7 +42,7 @@ export interface PlatformFlags {
   discord: boolean;
   web: boolean;
   agent: boolean;
-  transport?: string;
+  transport?: "tmux" | "acp" | "api";
 }
 
 export interface BootCtx {

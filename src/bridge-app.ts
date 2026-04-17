@@ -2,7 +2,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readEntry as cronReadEntry } from "./components/cron/cron-db.js";
 import { execFileSync, execSync } from "node:child_process";
-import { loadAndValidateConfig } from "./components/config.js";
 import { agentBridgeHome } from "./paths.js";
 
 import { TmuxClient } from "./components/transport/tmux-client.js";
@@ -12,11 +11,10 @@ import { createSelfHealerTask } from "./components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "./components/heartbeat-tasks.js";
 import type { SttConfig } from "./components/stt.js";
 import type { TtsConfig } from "./components/tts.js";
-import { setLogLevel, logInfo, logWarn, logError, logDebug } from "./components/logger.js";
-import { loadMemoryConfig, MemoryManager, setLogger as setMemoryLogger } from "abmind/index.js";
+import { logInfo, logWarn, logError, logDebug } from "./components/logger.js";
+import { MemoryManager, setLogger as setMemoryLogger } from "abmind/index.js";
 import { ConversationBuffer } from "./components/conversation-buffer.js";
 import type { IKiroTransport } from "./components/transport/kiro-transport.js";
-import { parsePlatformFlags } from "./components/cli-flags.js";
 import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "./components/dashboard/dashboard-config.js";
 import type { SubsystemRefs } from "./components/dashboard/dashboard-config.js";
 import { AuthGate } from "./components/auth-gate.js";
@@ -383,30 +381,22 @@ export class Bridge {
 }
 
 export async function startBridge(): Promise<void> {
-  // Ensure ~/.agentbridge/bin is in PATH for child processes (kiro-cli, gemini-cli)
-  const binDir = join(agentBridgeHome(), "bin");
-  if (!process.env["PATH"]?.includes(binDir)) {
-    process.env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`;
+  // ── Phase 1: config ──
+  const { createBootCtx } = await import("./boot/context.js");
+  const { phaseConfig } = await import("./boot/phase-config.js");
+  const ctx = createBootCtx();
+  {
+    const t = Date.now();
+    await phaseConfig(ctx);
+    logInfo("boot", `✓ phaseConfig (${Date.now() - t}ms)`);
   }
 
-  const platforms = parsePlatformFlags();
-  const config = await loadAndValidateConfig();
-  if (platforms.transport) config.transport.agentTransport = platforms.transport;
-  setLogLevel(config.logLevel);
-
-  const memoryConfig = loadMemoryConfig();
+  // Legacy procedural boot — references ctx fields instead of re-reading
+  const platforms = ctx.platforms;
+  const config = ctx.config;
+  const memoryConfig = ctx.memoryConfig;
   const bridge = new Bridge(config, memoryConfig);
   const startedAt = bridge.startedAt;
-
-  const enabledList = [
-    platforms.telegram && "telegram",
-    platforms.discord && "discord",
-  ].filter(Boolean).join(", ");
-  logInfo("main", "──────────── BRIDGE START ────────────");
-  logInfo("main", `🚀 Bridge starting (platforms=${enabledList}, log=${config.logLevel})`);
-
-  // Truncate launchd.log on startup — bridge logger takes over, previous crash output already captured
-  try { writeFileSync(join(agentBridgeHome(), "logs", "launchd.log"), "", "utf-8"); } catch { /* */ }
   // === CRITICAL PATH: Memory → Transport → Telegram (fastest path to accepting messages) ===
 
   await bridge.initMemory();
