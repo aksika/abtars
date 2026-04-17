@@ -402,7 +402,7 @@ fi
 echo ""
 echo "Next steps:"
 if [[ -f "$AB_HOME/watchdog.lock" ]]; then
-  WD_PID=$(python3 -c "import json; print(json.load(open('$AB_HOME/watchdog.lock'))['pid'])" 2>/dev/null || echo "")
+  WD_PID=$(grep -o '"pid":[0-9]*' "$AB_HOME/watchdog.lock" | grep -o '[0-9]*' || echo "")
   if [[ -n "$WD_PID" ]] && kill -0 "$WD_PID" 2>/dev/null; then
     echo "  Restart bridge:  kill -USR1 $WD_PID  (watchdog graceful restart)"
   else
