@@ -72,7 +72,7 @@ fi
 
 # --- run doctor health check ---
 if [ -x "$AB_HOME/scripts/doctor.sh" ]; then
-  "$AB_HOME/scripts/doctor.sh" --fix 2>&1 | sed 's/^/   /'
+  "$AB_HOME/scripts/doctor.sh" --fix 2>&1 | sed 's/^/   /' || true
   echo ""
 fi
 
