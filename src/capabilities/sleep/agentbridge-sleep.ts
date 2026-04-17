@@ -35,8 +35,51 @@ import type { SleepStep } from "abmind/sleep-pipeline.js";
 
 const TAG = "agentbridge-sleep";
 
-const ESSENTIAL_STEPS = new Set(["04a-daily-summary", "04b-extract-from-daily", "retrospective", "retro-extract"]);
+/** Format a timestamp as YYYYMMDD (for lock file names). */
+function toDateStr(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Format a timestamp as YYYY-MM-DD (for daily file paths). */
+function toIsoDate(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Steps whose failure blocks watermark advance. Public so tests can derive reject targets. */
+export const ESSENTIAL_STEPS: ReadonlySet<string> = new Set(["04a-daily-summary", "04b-extract-from-daily", "retrospective", "retro-extract"]);
 const CATCHUP_MAX_AGE_DAYS = 3;
+
+/** Thrown by runSleepCycle when memory layer fails to initialize. */
+export class SleepInitError extends Error {
+  constructor(message: string) { super(message); this.name = "SleepInitError"; }
+}
+
+/** Thrown by runSleepCycle when the wall-clock timeout expires before completion. */
+export class SleepTimeoutError extends Error {
+  constructor(message: string) { super(message); this.name = "SleepTimeoutError"; }
+}
+
+/** Options for runSleepCycle. All optional — defaults preserve current main() behavior. */
+export interface RunOpts {
+  flags?: RawArgs;
+  runtime?: SubagentRuntime;
+  /** Inject a deterministic clock for decision sites (today/weekday/startedAt). Observations use real Date.now. */
+  now?: () => number;
+  /** Override the wall-clock timeout in ms. Default from SLEEP_TIMEOUT_MIN env. */
+  timeoutMs?: number;
+  /** Override inter-step backoff. Default: [10,30,60]s on consecutive failures. Tests: () => 0. */
+  backoffMs?: (consecutiveFailures: number) => number;
+  /** Override memory config (temp dirs in tests). */
+  memoryConfigOverride?: Partial<import("abmind/memory-config.js").MemoryConfig>;
+}
+
+/** Result of runSleepCycle — thrown errors handled separately. */
+export interface RunResult {
+  ok: boolean;
+  failCount: number;
+}
 
 // ── Argument parsing ────────────────────────────────────────────────────────
 
@@ -534,29 +577,39 @@ async function runCatchUp(
 
 // ── Main orchestration ──────────────────────────────────────────────────────
 
-async function main(): Promise<number> {
-  const flags = parseArgs(process.argv);
+/**
+ * Run the full sleep cycle. Extracted from main() for testability (#175).
+ * - Deterministic time injection via opts.now for decision sites
+ * - Throws SleepInitError / SleepTimeoutError instead of process.exit
+ * - Returns { ok, failCount } for observable outcomes
+ *
+ * Default args preserve current main() behavior exactly.
+ */
+export async function runSleepCycle(opts: RunOpts = {}): Promise<RunResult> {
+  const flags = opts.flags ?? parseArgs(process.argv);
+  const now = opts.now ?? Date.now;
+  const timeoutMs = opts.timeoutMs ?? SLEEP_TIMEOUT_MS;
+  const backoffMs = opts.backoffMs ?? ((n: number) => [10, 30, 60][Math.min(n, 2)]! * 1000);
 
   if (flags.verbose) {
     setLogLevel("debug");
     logInfo(TAG, "Verbose mode enabled");
   }
 
-  const memoryConfig = loadMemoryConfig();
+  const memoryConfig = { ...loadMemoryConfig(), ...opts.memoryConfigOverride };
   const memory = new MemoryManager(memoryConfig);
 
   try {
     await memory.initialize();
   } catch (err) {
-    process.stderr.write(`Fatal: Failed to initialize MemoryManager — ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
+    throw new SleepInitError(`Failed to initialize MemoryManager: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   try {
     const sleepData = memory.getSleepData();
 
-    // State file path
-    const dateStr = localDate().replace(/-/g, "");
+    // State file path — use opts.now for deterministic today derivation
+    const dateStr = toDateStr(now());
     const statePath = join(memoryConfig.memoryDir, "sleep", `sleep_${dateStr}.lock`);
     const existingState = readStateFile(statePath);
     const isResume = existingState !== null && Object.values(existingState.steps).some(s => s.status === "ok");
@@ -572,7 +625,7 @@ async function main(): Promise<number> {
     const msgCount = snapshot.dbStats.messagesSinceLastSleep;
     if (msgCount === 0 && !flags.force && !isResume) {
       logInfo(TAG, `[SLEEP] No messages since last sleep — nothing to process. Use --force to run housekeeping anyway.`);
-      return 0;
+      return { ok: true, failCount: 0 };
     }
 
     // Wired pre-tasks (always run — fast, idempotent)
@@ -626,7 +679,7 @@ async function main(): Promise<number> {
 
     // Set remaining missing vars
     vars.MESSAGES_SINCE_WATERMARK = vars.CLEAN_MESSAGES; // same data, different name for gc-noise
-    vars.RETRO_PATH = join(memoryConfig.memoryDir, "daily", `daily_${localDate()}.md`);
+    vars.RETRO_PATH = join(memoryConfig.memoryDir, "daily", `daily_${toIsoDate(now())}.md`);
     try {
       const { getLatestConsolidationFile } = await import("abmind/consolidation-search.js");
       const latest = getLatestConsolidationFile(memoryConfig.memoryDir, "weekly");
@@ -648,7 +701,7 @@ async function main(): Promise<number> {
 
     if (flags.dryRun) {
       for (const step of steps) process.stdout.write(`\n--- ${step.filename} ---\n${substituteVars(step.rawPrompt, vars)}\n`);
-      return 0;
+      return { ok: true, failCount: 0 };
     }
 
     // Skip logic — candidate-driven (empty = skip)
@@ -657,7 +710,7 @@ async function main(): Promise<number> {
     // SLEEP_QUALITY tiering — controls which prompts are eligible
     const quality = (process.env["SLEEP_QUALITY"] ?? "normal").toLowerCase();
     const curationDay = (process.env["SLEEP_CURATION_DAY"] ?? "sunday").toLowerCase();
-    const today = new Date().toLocaleDateString("en", { weekday: "long" }).toLowerCase();
+    const today = new Date(now()).toLocaleDateString("en", { weekday: "long" }).toLowerCase();
     const isCurationDay = today === curationDay;
 
     const BUDGET_ONLY = new Set(["gc-noise", "daily-summary", "extract-from-daily"]);
@@ -697,7 +750,7 @@ async function main(): Promise<number> {
     const state: SleepState = existingState ?? {
       status: "ongoing",
       pid: process.pid,
-      startedAt: Date.now(),
+      startedAt: now(),
       llmCalls: 0,
       wiredResults,
       steps: {},
@@ -708,9 +761,9 @@ async function main(): Promise<number> {
 
     // 20-min wall-clock timeout
     const timeoutHandle = setTimeout(() => {
-      logError(TAG, `[SLEEP] ⏰ ${Math.round(SLEEP_TIMEOUT_MS / 60000)}-minute timeout reached — aborting`);
-      process.exit(1);
-    }, SLEEP_TIMEOUT_MS);
+      logError(TAG, `[SLEEP] ⏰ ${Math.round(timeoutMs / 60000)}-minute timeout reached — aborting`);
+      throw new SleepTimeoutError(`Sleep cycle timeout after ${Math.round(timeoutMs / 60000)} minutes`);
+    }, timeoutMs);
 
     // Resolve model name for logging (from transport.json)
     const { resolveAgent, loadTransport } = await import("../../components/transport-config.js");
@@ -782,7 +835,7 @@ async function main(): Promise<number> {
 
             // Determine target date from first unprocessed message
             const firstMsgTs = sleepData.getFirstMessageAfter(userId, watermarkTs);
-            const firstMsgDate = firstMsgTs ? new Date(firstMsgTs) : new Date();
+            const firstMsgDate = firstMsgTs ? new Date(firstMsgTs) : new Date(now());
             const targetDate = `${firstMsgDate.getFullYear()}-${String(firstMsgDate.getMonth() + 1).padStart(2, "0")}-${String(firstMsgDate.getDate()).padStart(2, "0")}`;
 
             const summary = await buildDailySummary(sleepData.getDb(), (p) => sendWithRetry(null, p, "04a-daily-summary", flags.verbose, budget).then(r => r ?? ""), {
@@ -852,10 +905,11 @@ async function main(): Promise<number> {
         if (response) { consecutiveFailures = 0; } else { consecutiveFailures++; }
         const isEssential = step.name.startsWith("04") || step.name === "00-identity";
         if (!isEssential) {
-          const delays = [10, 30, 60];
-          const delaySec = delays[Math.min(consecutiveFailures, delays.length - 1)]!;
-          logInfo(TAG, `[SLEEP] Waiting ${delaySec}s before next step`);
-          await new Promise(r => setTimeout(r, delaySec * 1000));
+          const delayMs = backoffMs(consecutiveFailures);
+          if (delayMs > 0) {
+            logInfo(TAG, `[SLEEP] Waiting ${Math.round(delayMs / 1000)}s before next step`);
+            await new Promise(r => setTimeout(r, delayMs));
+          }
         }
       }
     } finally {
@@ -925,9 +979,27 @@ async function main(): Promise<number> {
 
     emitProgress("done");
     logInfo(TAG, `[SLEEP] 🏁 ${okCount} ok, ${failCount} failed, ${skipCount} skipped | wired: ${formatWiredResults(wiredResults)} | ${totalDuration.toFixed(0)}s total`);
-    return failCount;
+    return { ok: failCount === 0, failCount };
   } finally {
     memory.close();
+  }
+}
+
+/** CLI entry point. Wraps runSleepCycle with process.exit translation. */
+async function main(): Promise<number> {
+  try {
+    const result = await runSleepCycle();
+    return result.failCount;
+  } catch (err) {
+    if (err instanceof SleepInitError) {
+      process.stderr.write(`Fatal: ${err.message}\n`);
+      process.exit(1);
+    }
+    if (err instanceof SleepTimeoutError) {
+      process.stderr.write(`Fatal: ${err.message}\n`);
+      process.exit(1);
+    }
+    throw err;
   }
 }
 
