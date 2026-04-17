@@ -76,11 +76,35 @@ fi
 # LaunchAgent / systemd check
 if [[ "$(uname)" == "Darwin" ]]; then
   if ! launchctl list 2>/dev/null | grep -q agentbridge.watchdog; then
-    warn "watchdog LaunchAgent not loaded -- run: launchctl load ~/Library/LaunchAgents/com.agentbridge.watchdog.plist"
+    if $FIX_FULL; then
+      PLIST_SRC="$(dirname "$0")/com.agentbridge.watchdog.plist"
+      PLIST_DST="$HOME/Library/LaunchAgents/com.agentbridge.watchdog.plist"
+      if [ -f "$PLIST_SRC" ]; then
+        cp "$PLIST_SRC" "$PLIST_DST"
+        launchctl load "$PLIST_DST" 2>/dev/null && fix "installed and loaded watchdog LaunchAgent"
+      else
+        warn "watchdog LaunchAgent not loaded -- plist not found at $PLIST_SRC"
+      fi
+    else
+      warn "watchdog LaunchAgent not loaded -- run with --fix-full to install"
+    fi
   fi
 elif command -v systemctl &>/dev/null; then
   if ! systemctl --user is-enabled agentbridge-watchdog.service &>/dev/null 2>&1; then
-    warn "watchdog systemd unit not enabled -- run: systemctl --user enable agentbridge-watchdog.service"
+    if $FIX_FULL; then
+      SVC_SRC="$(dirname "$0")/agentbridge-watchdog.service"
+      SVC_DST="$HOME/.config/systemd/user/agentbridge-watchdog.service"
+      if [ -f "$SVC_SRC" ]; then
+        mkdir -p "$(dirname "$SVC_DST")"
+        cp "$SVC_SRC" "$SVC_DST"
+        systemctl --user daemon-reload
+        systemctl --user enable --now agentbridge-watchdog.service 2>/dev/null && fix "installed and enabled watchdog systemd unit"
+      else
+        warn "watchdog systemd unit not enabled -- service file not found at $SVC_SRC"
+      fi
+    else
+      warn "watchdog systemd unit not enabled -- run with --fix-full to install"
+    fi
   fi
 fi
 
