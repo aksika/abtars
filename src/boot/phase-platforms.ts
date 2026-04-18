@@ -7,14 +7,13 @@
  *
  * Must run after phase-pipeline-deps (adapters consume ctx.pipelineDeps).
  *
- * No singletons owned. Writes to ctx and to bridge.* for legacy callers.
+ * No singletons owned.
  */
 
 import { logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
-import type { Bridge } from "../bridge-app.js";
 
-export async function phasePlatforms(ctx: BootCtx, bridge: Bridge): Promise<void> {
+export async function phasePlatforms(ctx: BootCtx): Promise<void> {
   const { config, platforms, transport, memory, conversationBuffer, pipelineDeps, registry, platformAdapters } = ctx;
   if (!transport || !pipelineDeps) throw new Error("phase-platforms: pipeline-deps must run first");
 
@@ -28,7 +27,6 @@ export async function phasePlatforms(ctx: BootCtx, bridge: Bridge): Promise<void
         { pipeline: pipelineDeps, conversationBuffer, transport, memory },
       );
       ctx.telegramAdapter = adapter;
-      bridge.telegramAdapter = adapter;
       platformAdapters.set("telegram", adapter);
       return {
         async start() { await adapter.start(); },
@@ -36,7 +34,6 @@ export async function phasePlatforms(ctx: BootCtx, bridge: Bridge): Promise<void
           adapter.stop();
           platformAdapters.delete("telegram");
           ctx.telegramAdapter = null;
-          bridge.telegramAdapter = null;
         },
       };
     },
@@ -78,7 +75,6 @@ export async function phasePlatforms(ctx: BootCtx, bridge: Bridge): Promise<void
         { pipeline: pipelineDeps, transport, memory, conversationBuffer },
       );
       ctx.discordAdapter = adapter;
-      bridge.discordAdapter = adapter;
       platformAdapters.set("discord", adapter);
       return {
         async start() { await adapter.start(); },
@@ -86,7 +82,6 @@ export async function phasePlatforms(ctx: BootCtx, bridge: Bridge): Promise<void
           adapter.stop();
           platformAdapters.delete("discord");
           ctx.discordAdapter = null;
-          bridge.discordAdapter = null;
         },
       };
     },
