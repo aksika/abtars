@@ -12,9 +12,8 @@
  *   agentbridge-tweet --user <handle>                  # user profile info
  */
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { agentBridgeHome } from "../paths.js";
+import { join, basename } from "node:path";
+import { agentBridgeHome, reportsDir } from "../paths.js";
 import { localDate } from "../components/env-utils.js";
 
 const AB_HOME = agentBridgeHome();
@@ -22,8 +21,30 @@ const TWITTER_DIR = join(AB_HOME, "twitterX");
 const COOKIE_PATH = join(AB_HOME, "secret", "cookies", "x-cookies.json");
 const BASE_FOLLOWS = join(TWITTER_DIR, "base.follows.json");
 const MOLTY_FOLLOWS = join(TWITTER_DIR, "molty.follows.json");
-const REPORTS_DIR = join(homedir(), "reports");
+const REPORTS_DIR = reportsDir("x");
 const OUTPUT_DIR = join(TWITTER_DIR, "output");
+
+/**
+ * Send a file to the Telegram main chat via Bot API (standalone — no bridge dep).
+ * No-op if bot token or chat id env vars are missing.
+ */
+async function sendReportToTelegram(filePath: string, caption: string): Promise<void> {
+  const token = process.env["TELEGRAM_BOT_TOKEN"];
+  const chatId = process.env["AGENTBRIDGE_MAIN_CHAT_ID"];
+  if (!token || !chatId) return;
+  if (!existsSync(filePath)) return;
+  const buf = readFileSync(filePath);
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  const blob = new Blob([buf], { type: "text/markdown" });
+  form.append("document", blob, basename(filePath));
+  form.append("caption", caption.slice(0, 1024));
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: "POST", body: form });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Telegram sendDocument failed (${res.status}): ${text}`);
+  }
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -252,6 +273,9 @@ async function runFeed(format: "json" | "md", count: number, topN: number, disco
     const reportPath = join(REPORTS_DIR, `AI-Daily-${date}.md`);
     writeFileSync(reportPath, md, "utf8");
     console.error(`📰 Newsletter written to ${reportPath}`);
+    await sendReportToTelegram(reportPath, `AI Daily ${date}`).catch((err) => {
+      console.error(`⚠ Telegram send failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
   }
 }
 
