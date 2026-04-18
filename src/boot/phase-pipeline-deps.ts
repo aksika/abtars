@@ -20,9 +20,9 @@ import { readEntry as cronReadEntry } from "../components/cron/cron-db.js";
 import { CronQueue } from "../components/cron/cron-queue.js";
 import { CodingMode } from "../components/coding-mode.js";
 import { IdleSave } from "../components/idle-save.js";
-import { loadUsers } from "../components/user-registry.js";
 import { logWarn } from "../components/logger.js";
 import { updateCtxStart } from "./ctx-start.js";
+import { existsSync } from "node:fs";
 import type { BootCtx } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/cron/cron-queue.js";
@@ -49,16 +49,19 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
 
   // cronCallback closes over ctx — reads telegramAdapter lazily (set in phase-platforms)
   const cronCallback: TaskCompleteCallback = (chatId, message, result, resultPath) => {
-    if (ctx.platforms.telegram && ctx.telegramAdapter) {
-      ctx.telegramAdapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
-        logWarn("main", `Cron task TG report failed: ${err}`);
+    if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
+    const adapter = ctx.telegramAdapter;
+
+    adapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
+      logWarn("main", `Cron task TG report failed: ${err}`);
+    });
+
+    if (resultPath && existsSync(resultPath)) {
+      adapter.sendDocument(String(chatId), resultPath, message.slice(0, 1024)).catch(err => {
+        logWarn("main", `Cron task TG sendDocument failed: ${err}`);
       });
     }
-    if (resultPath) {
-      const masterUser = loadUsers().users.find(u => u.role === "master");
-      const sessionKey = `${masterUser?.userId ?? "master"}:telegram`;
-      transport.sendPrompt(sessionKey, `[SYSTEM] Task "${message}" completed. If user asks for the result, use: cat ${resultPath}`).catch(() => {});
-    }
+    // Removed: [SYSTEM] 'cat <path>' hint. File is now in the chat; user doesn't need to cat it.
   };
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
@@ -119,15 +122,17 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
 /** Export cronCallback factory for phase-heartbeat's age-check task re-enqueue. */
 export function createCronCallback(ctx: BootCtx): TaskCompleteCallback {
   return (chatId, message, result, resultPath) => {
-    if (ctx.platforms.telegram && ctx.telegramAdapter) {
-      ctx.telegramAdapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
-        logWarn("main", `Cron task TG report failed: ${err}`);
+    if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
+    const adapter = ctx.telegramAdapter;
+
+    adapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
+      logWarn("main", `Cron task TG report failed: ${err}`);
+    });
+
+    if (resultPath && existsSync(resultPath)) {
+      adapter.sendDocument(String(chatId), resultPath, message.slice(0, 1024)).catch(err => {
+        logWarn("main", `Cron task TG sendDocument failed: ${err}`);
       });
-    }
-    if (resultPath && ctx.transport) {
-      const masterUser = loadUsers().users.find(u => u.role === "master");
-      const sessionKey = `${masterUser?.userId ?? "master"}:telegram`;
-      ctx.transport.sendPrompt(sessionKey, `[SYSTEM] Task "${message}" completed. If user asks for the result, use: cat ${resultPath}`).catch(() => {});
     }
   };
 }
