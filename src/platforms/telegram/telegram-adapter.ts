@@ -150,6 +150,13 @@ export class TelegramAdapter implements PlatformAdapter {
     await this.api.sendVoice(parseInt(channelId, 10), audio, sendOpts);
   }
 
+  /** Send a file from disk as a Telegram document. */
+  async sendDocument(channelId: string, filePath: string, caption?: string, opts?: SendOpts): Promise<number> {
+    const sendOpts: { message_thread_id?: number } = {};
+    if (opts?.threadId) sendOpts.message_thread_id = parseInt(opts.threadId, 10);
+    return this.api.sendDocument(parseInt(channelId, 10), filePath, caption, sendOpts);
+  }
+
   injectMessage(msg: InboundMessage): void {
     if (!this.poller) return;
     this.poller.injectUpdate({
