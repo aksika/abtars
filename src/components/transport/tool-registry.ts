@@ -214,6 +214,38 @@ let _enqueueCron: ((id: string, manual?: boolean) => string | null) | null = nul
 /** Inject enqueueCron from bridge for task_manage --run. */
 export function setEnqueueCron(fn: (id: string, manual?: boolean) => string | null): void { _enqueueCron = fn; }
 
+let _sendDocument: ((path: string, caption?: string) => Promise<number>) | null = null;
+
+/**
+ * Inject sendDocument from bridge for the send_document tool.
+ * Caller binds main chat id + telegram adapter; tool is a thin wrapper around that.
+ */
+export function setSendDocument(fn: ((path: string, caption?: string) => Promise<number>) | null): void { _sendDocument = fn; }
+
+const sendDocumentTool: ToolDefinition = {
+  name: "send_document",
+  description: "Send a file from disk to the user's Telegram chat. Use for delivering reports, daily summaries, logs, or any .md file the user asks for. Do not summarize — the raw file is sent as an attachment.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Absolute path to the file" },
+      caption: { type: "string", description: "Optional short caption (≤1024 chars)" },
+    },
+    required: ["path"],
+  },
+  execute: async (args) => {
+    const path = args["path"];
+    if (!path) return JSON.stringify({ error: "path is required" });
+    if (!_sendDocument) return JSON.stringify({ error: "Telegram not configured (sendDocument unavailable)" });
+    try {
+      const messageId = await _sendDocument(path, args["caption"]);
+      return JSON.stringify({ ok: true, message_id: messageId });
+    } catch (err) {
+      return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+};
+
 const taskTool: ToolDefinition = {
   name: "task_manage",
   description: "Manage scheduled/recurring tasks (cron). Add, list, remove, pause, resume, or run tasks. Use action=run to execute a task immediately via the cron queue (isolated subagent).",
@@ -248,7 +280,7 @@ const taskTool: ToolDefinition = {
   },
 };
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 

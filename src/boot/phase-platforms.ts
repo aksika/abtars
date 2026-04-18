@@ -46,6 +46,12 @@ export async function phasePlatforms(ctx: BootCtx, bridge: Bridge): Promise<void
     const result = await registry.start("telegram");
     if (result.ok) {
       logInfo("main", "📡 Telegram polling started");
+      // Wire send_document tool: binds mainChatId + adapter, exposes to tool-registry
+      const mainChatId = config.mainChatId;
+      if (mainChatId && ctx.telegramAdapter) {
+        const { setSendDocument } = await import("../components/transport/tool-registry.js");
+        setSendDocument((path, caption) => ctx.telegramAdapter!.sendDocument(String(mainChatId), path, caption));
+      }
     } else {
       logError("main", `Telegram failed to start: ${result.error}`);
     }

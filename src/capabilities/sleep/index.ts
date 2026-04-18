@@ -122,7 +122,10 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           const sleepNote = hwEnabled ? ` Hardware sleep in ~${hwSleepMin} minutes if no activity.` : "";
 
           if (opts.sendSystemMessage) {
-            opts.sendSystemMessage(`${dreamReport}${sleepNote} Send the user a brief, friendly dream report — highlight what was done and flag any issues. Do not use any tools. Respond with text only.`).catch(() => {});
+            // Plain status ping — no LLM re-render instructions.
+            // If this still hangs on the LLM pass (empirical latency check on Molty),
+            // escalate to a proper sendPlainText split in a follow-up (see #195).
+            opts.sendSystemMessage(`${dreamReport}${sleepNote}`).catch(() => {});
           }
 
           if (hwEnabled) {

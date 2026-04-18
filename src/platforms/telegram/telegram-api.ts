@@ -2,6 +2,8 @@ import type {
   TelegramUpdate,
   TelegramInlineKeyboardMarkup,
 } from "../../types/index.js";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 
 type SendMessageOptions = {
   parse_mode?: "MarkdownV2" | "HTML";
@@ -122,6 +124,38 @@ export class TelegramApi {
 
     const json = (await response.json()) as { ok: boolean; result: { message_id: number } };
     if (!json.ok) throw new Error("Telegram API sendVoice returned ok=false");
+    return json.result.message_id;
+  }
+
+  /** Send a file from disk as a Telegram document. Returns the sent message_id. */
+  async sendDocument(
+    chatId: number,
+    filePath: string,
+    caption?: string,
+    options?: { message_thread_id?: number },
+  ): Promise<number> {
+    const buf = readFileSync(filePath);
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    const blob = new Blob([buf], { type: "text/markdown" });
+    form.append("document", blob, basename(filePath));
+    if (caption) form.append("caption", caption.slice(0, 1024));
+    if (options?.message_thread_id) {
+      form.append("message_thread_id", String(options.message_thread_id));
+    }
+
+    const response = await fetch(`${this.baseUrl}/sendDocument`, {
+      method: "POST",
+      body: form,
+    });
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Telegram API sendDocument failed (${response.status}): ${text}`);
+    }
+
+    const json = (await response.json()) as { ok: boolean; result: { message_id: number } };
+    if (!json.ok) throw new Error("Telegram API sendDocument returned ok=false");
     return json.result.message_id;
   }
 
