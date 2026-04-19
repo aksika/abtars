@@ -61,7 +61,11 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
         loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master",
         sessionKey,
         "You just came online. Output ONLY a personalized greeting message.",
-        (text) => telegramAdapter.sendMessage(String(chatId), text),
+        (text) => {
+          const clean = text.replace(/\s*\[NO-REPLY\]\s*/gi, "").trim();
+          if (!clean) return Promise.resolve();
+          return telegramAdapter.sendMessage(String(chatId), clean);
+        },
       ).then(() => {
         logInfo("main", "✅ Startup session ready");
       }).catch(err => {
