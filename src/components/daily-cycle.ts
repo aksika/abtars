@@ -8,6 +8,7 @@ import type { IMemorySystem } from "abmind/imemory-system.js";
 import { logInfo } from "./logger.js";
 import { safeReadJson } from "./safe-json.js";
 import { hasSleepAuditToday } from "../capabilities/sleep/sleep-trigger.js";
+import { readBridgeLockField } from "./transport/bridge-lock-transport.js";
 
 export interface DailyCycleDeps {
   sleepHour: number;
@@ -36,6 +37,17 @@ export function getQuietTickCount(): number {
 
 /** Returns true if conditions are met for the daily restart + sleep cycle. */
 export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
+  // User-protection guards — NEVER bypass, even when forced.
+  if (deps.busyChats.size > 0 || deps.isSleepActive()) return false;
+
+  // Force-sleep request in bridge.lock — short-circuit time/audit/startedAt guards.
+  // Peek-only here; spawnSleep() clears the field via readAndClearForceSleep().
+  const forceSleep = readBridgeLockField<string>("forceSleep");
+  if (forceSleep) {
+    logInfo("bedtime", `⚡ forceSleep=${forceSleep} — bypassing bedtime/audit/startedAt guards`);
+    return true;
+  }
+
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const sleepMinutes = deps.sleepHour * 60 + deps.sleepMinute;
@@ -51,8 +63,6 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), deps.sleepHour, deps.sleepMinute).getTime();
   if (!lockData.startedAt || lockData.startedAt >= todaySleepTime) return false;
   if (!lockData.lastHeartbeat) return false; // no successful tick yet — dark wake guard
-
-  if (deps.busyChats.size > 0 || deps.isSleepActive()) return false;
 
   // Check for new messages since last tick
   let currentMsgTs = 0;

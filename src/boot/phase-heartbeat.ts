@@ -157,7 +157,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
     isSleepActive: ctx.isSleepActive,
     doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
     startSleep: () => { ctx.sleepHandle?.spawn(); },
-    checkHwSleep: (qt, rt) => { ctx.sleepHandle?.checkHwSleep(qt, rt); },
+    checkHwSleep: () => { ctx.sleepHandle?.checkHwSleep(); },
     cronBusy: () => cronQueue.currentJob !== null || cronQueue.pending > 0,
   }));
 

@@ -1,7 +1,7 @@
 /**
  * bridge.lock — single source of truth for bridge runtime state.
  * Fields: pid, startedAt, lastHeartbeat, lastPromptAt, version,
- *         sleepStatus, restartReason, restartRequested.
+ *         sleepStatus, restartReason, restartRequested, forceSleep.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -63,4 +63,19 @@ export function readAndClearRestartRequested(): string | null {
 /** Update sleep status in bridge.lock. */
 export function writeSleepStatus(status: SleepStatus): void {
   updateBridgeLockField("sleepStatus", status);
+}
+
+/** Request a forced sleep cycle on the next heartbeat tick.
+ *  See src/capabilities/sleep/index.ts spawnSleep() + src/components/daily-cycle.ts isDailyCycleDue().
+ *  Pattern mirrors writeRestartRequested/readAndClearRestartRequested. */
+export function writeForceSleep(reason: string): void {
+  updateBridgeLockField("forceSleep", `${localISO()} ${reason}`);
+}
+
+/** Read and clear the force-sleep request from bridge.lock.
+ *  Sole deleter: spawnSleep. isDailyCycleDue peeks via readBridgeLockField. */
+export function readAndClearForceSleep(): string | null {
+  const v = readBridgeLockField<string>("forceSleep");
+  if (v) updateBridgeLockField("forceSleep", null);
+  return v;
 }

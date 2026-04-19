@@ -10,7 +10,7 @@ import { compactingSessions, setIdleCompactReset } from "./message-pipeline.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind/memory-manager.js";
 import type { HeartbeatTask } from "../types/memory.js";
-import { isDailyCycleDue, getQuietTickCount, type DailyCycleDeps } from "./daily-cycle.js";
+import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";
 export interface IdleCompactDeps {
   transport: IKiroTransport;
   memory: MemoryManager | null;
@@ -68,16 +68,16 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
   };
 }
 
-export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string; startSleep?: () => void; checkHwSleep?: (quietTicks: number, requiredTicks: number) => void; cronBusy?: () => boolean };
+export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string; startSleep?: () => void; checkHwSleep?: () => void; cronBusy?: () => boolean };
 
 /** Daily cycle — spawn Dreamy after BED_TIME + quiet ticks, then hw sleep after more quiet ticks. */
 export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
-  const requiredTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
   return {
     name: "age-check",
     execute: async () => {
-      // Check hw sleep (post-Dreamy quiet ticks) — skip if cron job running
-      if (deps.checkHwSleep && !deps.cronBusy?.()) deps.checkHwSleep(getQuietTickCount(), requiredTicks);
+      // Check hw sleep (post-Dreamy quiet ticks) — skip if cron job running.
+      // checkHwSleep owns its own counter state internally; no longer driven by daily-cycle's quietTickCount.
+      if (deps.checkHwSleep && !deps.cronBusy?.()) deps.checkHwSleep();
 
       if (!isDailyCycleDue(deps)) return;
 

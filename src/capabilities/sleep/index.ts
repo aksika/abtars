@@ -5,7 +5,7 @@
  */
 
 import { spawn, execSync } from "node:child_process";
-import { writeSleepStatus } from "../../components/transport/bridge-lock-transport.js";
+import { writeSleepStatus, readAndClearForceSleep } from "../../components/transport/bridge-lock-transport.js";
 import { join, dirname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -34,7 +34,7 @@ export interface SleepHandle {
   readonly awaitingHwSleep: boolean;
   spawn(): void;
   /** Called by tick system to check if hardware sleep should fire. */
-  checkHwSleep(quietTicks: number, requiredTicks: number): void;
+  checkHwSleep(): void;
 }
 
 const MAX_RETRIES = 3;
@@ -45,7 +45,11 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
   let attempts = 0;
   let progress: SleepProgress | null = null;
   let _awaitingHwSleep = false;
-  let hwSleepAnnouncedAt = 0;
+  // Post-Dreamy hw-sleep quiet-tick tracking (internal to this closure — decoupled from
+  // daily-cycle.quietTickCount which freezes once hasSleepAuditToday returns true).
+  // Both reset when _awaitingHwSleep flips to true (see Dreamy exit handler below).
+  let postSleepQuietTicks = 0;
+  let lastMsgTsSeenByHwCheck = 0;
 
   function buildDreamReport(): string {
     let dreamReport = "Dreamy finished nightly maintenance.";
@@ -67,22 +71,30 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
   }
 
   function spawnSleep(): void {
-    const hour = new Date().getHours();
-    const WAKE_HOUR = parseInt(process.env["WAKE_TIME"]?.split(":")[0] ?? "7", 10);
-    if (opts.sleepHour <= WAKE_HOUR) {
-      if (hour < opts.sleepHour || hour >= WAKE_HOUR) {
-        logDebug("sleep", `😴 Outside sleep window (${opts.sleepHour}:00-${WAKE_HOUR}:00) — skip`);
-        return;
-      }
-    } else {
-      if (hour < opts.sleepHour && hour >= WAKE_HOUR) {
-        logDebug("sleep", `😴 Outside sleep window (${opts.sleepHour}:00-${WAKE_HOUR}:00) — skip`);
-        return;
-      }
+    const forceSleep = readAndClearForceSleep();
+    const forced = forceSleep !== null;
+    if (forced) {
+      logInfo("sleep", `⚡ forceSleep=${forceSleep} — bypassing time-window + audit-today guards`);
     }
-    if (hasSleepAuditToday(opts.sleepAuditDir)) {
-      logDebug("sleep", "😴 Sleep already done today — skip");
-      return;
+
+    if (!forced) {
+      const hour = new Date().getHours();
+      const WAKE_HOUR = parseInt(process.env["WAKE_TIME"]?.split(":")[0] ?? "7", 10);
+      if (opts.sleepHour <= WAKE_HOUR) {
+        if (hour < opts.sleepHour || hour >= WAKE_HOUR) {
+          logDebug("sleep", `😴 Outside sleep window (${opts.sleepHour}:00-${WAKE_HOUR}:00) — skip`);
+          return;
+        }
+      } else {
+        if (hour < opts.sleepHour && hour >= WAKE_HOUR) {
+          logDebug("sleep", `😴 Outside sleep window (${opts.sleepHour}:00-${WAKE_HOUR}:00) — skip`);
+          return;
+        }
+      }
+      if (hasSleepAuditToday(opts.sleepAuditDir)) {
+        logDebug("sleep", "😴 Sleep already done today — skip");
+        return;
+      }
     }
     if (child && !child.killed) return;
     attempts++;
@@ -130,7 +142,11 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
           if (hwEnabled) {
             _awaitingHwSleep = true;
-            hwSleepAnnouncedAt = Date.now();
+            // Reset hw-check counters — prevents stale state from a prior cycle (crash, force-sleep
+            // re-run) from poisoning this one, and avoids burning the first tick on a spurious
+            // reset when the very first checkHwSleep() sees currentMsgTs > 0.
+            postSleepQuietTicks = 0;
+            lastMsgTsSeenByHwCheck = opts.getLastMsgTs?.() ?? 0;
             logInfo("sleep", `💤 Awaiting hardware sleep — ${quietTicks} quiet ticks (${hwSleepMin} min) required`);
           }
         } else if (attempts < MAX_RETRIES) {
@@ -149,20 +165,41 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
   }
 
-  function checkHwSleep(quietTicks: number, requiredTicks: number): void {
+  function checkHwSleep(): void {
     if (!_awaitingHwSleep) return;
 
-    // User messaged after announcement — cancel
-    const currentMsgTs = opts.getLastMsgTs?.() ?? 0;
-    if (currentMsgTs > hwSleepAnnouncedAt) {
-      logInfo("sleep", "💤 Hardware sleep postponed — user messaged (will retry after quiet period)");
-      hwSleepAnnouncedAt = currentMsgTs;
+    // Sleep-window cutoff — give up if we've crossed out of the window. Next night retries.
+    // Mirrors spawnSleep()'s window logic for consistency.
+    const WAKE_HOUR = parseInt(process.env["WAKE_TIME"]?.split(":")[0] ?? "7", 10);
+    const BED_HOUR = opts.sleepHour;
+    const hour = new Date().getHours();
+    const inSleepWindow = (BED_HOUR < WAKE_HOUR)
+      ? (hour >= BED_HOUR && hour < WAKE_HOUR)    // normal: BED=00:30, WAKE=07:00 → sleep 00-06
+      : (hour >= BED_HOUR || hour < WAKE_HOUR);   // overnight: BED=23:00, WAKE=07:00 → sleep 23-06
+    if (!inSleepWindow) {
+      logInfo("sleep", `⏰ Past sleep window (now ${hour}:00, window ${BED_HOUR}:00-${WAKE_HOUR}:00) — abandoning hw-sleep attempt`);
+      _awaitingHwSleep = false;
+      postSleepQuietTicks = 0;
       return;
     }
 
-    if (quietTicks < requiredTicks) return;
+    // User messaged since last check — postpone and reset
+    const currentMsgTs = opts.getLastMsgTs?.() ?? 0;
+    if (currentMsgTs > lastMsgTsSeenByHwCheck) {
+      lastMsgTsSeenByHwCheck = currentMsgTs;
+      postSleepQuietTicks = 0;
+      logInfo("sleep", "💤 Hardware sleep postponed — user messaged (will retry after quiet period)");
+      return;
+    }
 
+    // Quiet tick — increment
+    const requiredTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
+    postSleepQuietTicks++;
+    if (postSleepQuietTicks < requiredTicks) return;
+
+    // Threshold reached — sleep
     _awaitingHwSleep = false;
+    postSleepQuietTicks = 0;
     // Kill any wake inhibitor from /wakeup before sleeping
     opts.killWakeInhibit?.();
     const sleepCmd = process.platform === "darwin" ? "pmset sleepnow" : "systemctl suspend";
