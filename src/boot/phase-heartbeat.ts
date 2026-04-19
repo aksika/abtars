@@ -36,6 +36,7 @@ import { logInfo, logWarn, logDebug } from "../components/logger.js";
 import { agentBridgeHome } from "../paths.js";
 import { createCronCallback } from "./phase-pipeline-deps.js";
 import type { BootCtx } from "./context.js";
+import { readEnvWithDefault } from "../components/env.js";
 
 export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   const { config, memoryConfig, memory, transport, cronQueue, pipelineDeps, capabilities } = ctx;
@@ -118,8 +119,8 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
     },
   });
 
-  const SLEEP_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? "2", 10);
-  const SLEEP_MINUTE = parseInt(process.env["BED_TIME"]?.split(":")[1] ?? "0", 10);
+  const SLEEP_HOUR = parseInt(readEnvWithDefault("BED_TIME", "2", "bedtime hour").split(":")[0] ?? "2", 10);
+  const SLEEP_MINUTE = parseInt(readEnvWithDefault("BED_TIME", "2", "bedtime hour").split(":")[1] ?? "0", 10);
 
   // Floating compaction (idle-triggered) — createIdleCompactTask internally calls
   // setIdleCompactReset → sets message-pipeline.resetIdleCompactFlag singleton.

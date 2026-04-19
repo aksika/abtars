@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { hasSleepAuditToday, runSleepCycle, parseLevel, DEFAULT_LEVEL } from "abmind";
 import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
-import { readEnv } from "../../components/env.js";
+import { readEnv, readEnvWithDefault } from "../../components/env.js";
 
 export interface SleepOpts {
   sleepHour: number;
@@ -83,7 +83,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
     if (!forced) {
       const hour = new Date().getHours();
-      const WAKE_HOUR = parseInt(process.env["WAKE_TIME"]?.split(":")[0] ?? "7", 10);
+      const WAKE_HOUR = parseInt(readEnvWithDefault("WAKE_TIME", "7", "wake hour").split(":")[0] ?? "7", 10);
       if (opts.sleepHour <= WAKE_HOUR) {
         if (hour < opts.sleepHour || hour >= WAKE_HOUR) {
           logDebug("sleep", `😴 Outside sleep window (${opts.sleepHour}:00-${WAKE_HOUR}:00) — skip`);
@@ -135,7 +135,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         // Force-sleep runs are explicit test/verify triggers — skip hw-sleep even if env enabled.
         const hwEnabled = !forced && readEnv("HARDWARE_SLEEP_AFTER_DREAMY", "hardware sleep after Dreamy disabled") === "true";
         const quietTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
-        const hbInterval = parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "300", 10);
+        const hbInterval = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10);
         const hwSleepMin = Math.round(quietTicks * hbInterval / 60);
 
         const dreamReport = buildDreamReport();
@@ -174,7 +174,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
     // Sleep-window cutoff — give up if we've crossed out of the window. Next night retries.
     // Mirrors spawnSleep()'s window logic for consistency.
-    const WAKE_HOUR = parseInt(process.env["WAKE_TIME"]?.split(":")[0] ?? "7", 10);
+    const WAKE_HOUR = parseInt(readEnvWithDefault("WAKE_TIME", "7", "wake hour").split(":")[0] ?? "7", 10);
     const BED_HOUR = opts.sleepHour;
     const hour = new Date().getHours();
     const inSleepWindow = (BED_HOUR < WAKE_HOUR)

@@ -6,6 +6,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "../paths.js";
+import { readEnvWithDefault } from "./env.js";
 import { logInfo, logWarn, logError } from "./logger.js";
 import { resetAllBuckets } from "./transport/leaky-bucket.js";
 
@@ -152,9 +153,9 @@ export type EnvFallback = {
 };
 
 export function getEnvFallback(): EnvFallback {
-  const providerName = process.env["DEFAULT_PROVIDER"] ?? "openrouter";
+  const providerName = readEnvWithDefault("DEFAULT_PROVIDER", "openrouter", "default LLM provider");
   const transport = (process.env["DEFAULT_TRANSPORT"] ?? "api") as "api" | "acp" | "tmux";
-  const model = process.env["DEFAULT_MODEL"] ?? "minimax-m2.5:cloud";
+  const model = readEnvWithDefault("DEFAULT_MODEL", "minimax-m2.5:cloud", "default LLM model");
 
   const provider: ProviderConfig = { transport };
   if (transport === "api") {
