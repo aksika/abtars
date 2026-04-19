@@ -54,12 +54,23 @@ async function armHwSleep(opts: Required<Pick<SleepOpts, "sleepHour" | "sleepAud
   const handle = createSleepHandle({ runtime: stubRuntime, ...opts, getLastMsgTs });
 
   // In-process runSleepCycle is mocked to resolve ok — arms hw-sleep on first microtask flush.
+  // Arm via a natural (non-forced) spawn: make current time inside the sleep window so
+  // spawnSleep's guards pass without readAndClearForceSleep returning a truthy value.
+  // Callers that want specific test-time semantics override vi.useFakeTimers AFTER awaiting this.
   process.env["HARDWARE_SLEEP_AFTER_DREAMY"] = "true";
-  vi.mocked(readAndClearForceSleep).mockReturnValueOnce("test-force");
+  const prevTimers = vi.isFakeTimers();
+  if (!prevTimers) {
+    vi.useFakeTimers();
+    const t = new Date();
+    t.setHours(opts.sleepHour, 30, 0, 0);
+    vi.setSystemTime(t);
+  }
   handle.spawn();
 
   // Flush microtasks so the mocked Promise chain fires (running=false, _awaitingHwSleep=true).
   for (let i = 0; i < 3; i++) await Promise.resolve();
+
+  if (!prevTimers) vi.useRealTimers();
 
   return { handle, getLastMsgTs, setMsgTs };
 }
@@ -80,13 +91,14 @@ describe("checkHwSleep", () => {
   });
 
   it("sleep-window cutoff: outside [BED, WAKE) → abandons, does not call execSync", async () => {
+    // Arm hw-sleep first (inside window), THEN jump clock outside window to test cutoff.
+    const { handle } = await armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
+    expect(handle.awaitingHwSleep).toBe(true);
+
     const now = new Date();
     now.setHours(10, 0, 0, 0);  // outside 00:30-07:00
     vi.useFakeTimers();
     vi.setSystemTime(now);
-
-    const { handle } = await armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
-    expect(handle.awaitingHwSleep).toBe(true);
 
     handle.checkHwSleep();
 
