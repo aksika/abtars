@@ -7,7 +7,7 @@
 import type { IMemorySystem } from "abmind/imemory-system.js";
 import { logInfo } from "./logger.js";
 import { safeReadJson } from "./safe-json.js";
-import { hasSleepAuditToday } from "../capabilities/sleep/sleep-trigger.js";
+import { hasSleepAuditToday } from "abmind";
 import { readBridgeLockField } from "./transport/bridge-lock-transport.js";
 
 export interface DailyCycleDeps {

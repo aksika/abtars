@@ -8,6 +8,8 @@
 
 import { resetAllCtxStarts } from "./ctx-start.js";
 import type { BootCtx } from "./context.js";
+import { SubagentRuntime } from "../components/subagent-runtime.js";
+import type { SleepRuntime } from "abmind";
 
 export async function phaseSleep(ctx: BootCtx): Promise<void> {
   const { memoryConfig, memory, sendSystemMessage } = ctx;
@@ -17,10 +19,21 @@ export async function phaseSleep(ctx: BootCtx): Promise<void> {
   const { killWakeInhibit } = await import("../components/command-handlers.js");
   const SLEEP_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? "2", 10);
 
+  // SleepRuntime adapter — wraps SubagentRuntime.complete("dreamy", ...) for the in-process orchestrator.
+  // Lazy SubagentRuntime construction — only materialized on first sleep invocation.
+  let subagent: SubagentRuntime | null = null;
+  const runtime: SleepRuntime = {
+    async complete(prompt: string): Promise<string> {
+      if (!subagent) subagent = new SubagentRuntime();
+      return subagent.complete("dreamy", prompt, { session: "reuse" });
+    },
+  };
+
   ctx.sleepHandle = createSleepHandle({
     sleepHour: SLEEP_HOUR,
     sleepAuditDir: ctx.sleepAuditDir,
     memoryEnabled: memoryConfig.memoryEnabled,
+    runtime,
     onComplete: () => resetAllCtxStarts(memoryConfig.memoryDir),
     getLastMsgTs: () => memory?.getLastMessageTimestamp(true) ?? 0,
     sendSystemMessage,

@@ -4,12 +4,12 @@
  * Parses PROGRESS:<pct>:<label> from stdout for visibility.
  */
 
-import { spawn, execSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { writeSleepStatus, readAndClearForceSleep } from "../../components/transport/bridge-lock-transport.js";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { hasSleepAuditToday } from "./sleep-trigger.js";
+import { hasSleepAuditToday, runSleepCycle, parseLevel, DEFAULT_LEVEL } from "abmind";
+import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 
 export interface SleepOpts {
@@ -17,6 +17,8 @@ export interface SleepOpts {
   sleepAuditDir: string;
   memoryEnabled: boolean;
   memoryDir?: string;
+  /** LLM runtime adapter — bridge wraps its SubagentRuntime.complete("dreamy", ...). */
+  runtime: SleepRuntime;
   onComplete: () => void;
   getLastMsgTs?: () => number;
   sendSystemMessage?: (prompt: string) => Promise<void>;
@@ -29,7 +31,8 @@ export interface SleepProgress {
 }
 
 export interface SleepHandle {
-  readonly child: import("node:child_process").ChildProcess | null;
+  /** True while a sleep cycle is running in-process. */
+  readonly isActive: boolean;
   readonly progress: SleepProgress | null;
   readonly awaitingHwSleep: boolean;
   spawn(): void;
@@ -41,13 +44,13 @@ const MAX_RETRIES = 3;
 const RETRY_MS = 5 * 60 * 1000;
 
 export function createSleepHandle(opts: SleepOpts): SleepHandle {
-  let child: import("node:child_process").ChildProcess | null = null;
+  let running = false;
   let attempts = 0;
   let progress: SleepProgress | null = null;
   let _awaitingHwSleep = false;
   // Post-Dreamy hw-sleep quiet-tick tracking (internal to this closure — decoupled from
   // daily-cycle.quietTickCount which freezes once hasSleepAuditToday returns true).
-  // Both reset when _awaitingHwSleep flips to true (see Dreamy exit handler below).
+  // Both reset when _awaitingHwSleep flips to true (see the onComplete handler below).
   let postSleepQuietTicks = 0;
   let lastMsgTsSeenByHwCheck = 0;
 
@@ -96,73 +99,72 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         return;
       }
     }
-    if (child && !child.killed) return;
+    if (running) return;
     attempts++;
     progress = null;
-    try {
-      const sleepScript = join(dirname(fileURLToPath(import.meta.url)), "agentbridge-sleep.js");
-      const proc = spawn(process.execPath, [sleepScript], { stdio: ["ignore", "pipe", "ignore"] });
-      child = proc;
+    running = true;
+    writeSleepStatus("sleeping");
+    logInfo("sleep", `😴 Sleep started in-process (attempt ${attempts}, model=dreamy)`);
 
-      let buf = "";
-      proc.stdout!.on("data", (chunk: Buffer) => {
-        buf += chunk.toString();
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) !== -1) {
-          const line = buf.slice(0, nl);
-          buf = buf.slice(nl + 1);
-          const match = line.match(/^PROGRESS:(\d+):(.+)$/);
-          if (match) progress = { percent: parseInt(match[1]!, 10), step: match[2]! };
-        }
-      });
+    const level = (() => {
+      const raw = process.env["SLEEP_QUALITY"];
+      if (!raw) return DEFAULT_LEVEL;
+      try { return parseLevel(raw); }
+      catch (err) { logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`); return DEFAULT_LEVEL; }
+    })();
 
-      proc.on("exit", (code) => {
-        child = null;
+    runSleepCycle({ runtime: opts.runtime, level })
+      .then((result) => {
+        running = false;
         progress = null;
-        if (code === 0) {
-          logInfo("sleep", `😴 Sleep finished successfully (attempt ${attempts})`);
-          writeSleepStatus("awake");
-          if (opts.memoryEnabled) opts.onComplete();
-
-          // Send dream report + announce hw sleep timing
-          const hwEnabled = process.env["HARDWARE_SLEEP_AFTER_DREAMY"] === "true";
-          const quietTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
-          const hbInterval = parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "300", 10);
-          const hwSleepMin = Math.round(quietTicks * hbInterval / 60);
-
-          const dreamReport = buildDreamReport();
-          const sleepNote = hwEnabled ? ` Hardware sleep in ~${hwSleepMin} minutes if no activity.` : "";
-
-          if (opts.sendSystemMessage) {
-            // Plain status ping — no LLM re-render instructions.
-            // If this still hangs on the LLM pass (empirical latency check on Molty),
-            // escalate to a proper sendPlainText split in a follow-up (see #195).
-            opts.sendSystemMessage(`${dreamReport}${sleepNote}`).catch(() => {});
+        logInfo("sleep", `😴 Sleep finished (ok=${result.ok}, failCount=${result.failCount}, attempt ${attempts})`);
+        writeSleepStatus("awake");
+        if (!result.ok) {
+          if (attempts < MAX_RETRIES) {
+            logWarn("sleep", `😴 Sleep had ${result.failCount} failures (attempt ${attempts}/${MAX_RETRIES}) — retry in 5min`);
+            setTimeout(spawnSleep, RETRY_MS);
+          } else {
+            logWarn("sleep", `😴 Sleep failures persist — exhausted ${MAX_RETRIES} attempts`);
           }
+          return;
+        }
 
-          if (hwEnabled) {
-            _awaitingHwSleep = true;
-            // Reset hw-check counters — prevents stale state from a prior cycle (crash, force-sleep
-            // re-run) from poisoning this one, and avoids burning the first tick on a spurious
-            // reset when the very first checkHwSleep() sees currentMsgTs > 0.
-            postSleepQuietTicks = 0;
-            lastMsgTsSeenByHwCheck = opts.getLastMsgTs?.() ?? 0;
-            logInfo("sleep", `💤 Awaiting hardware sleep — ${quietTicks} quiet ticks (${hwSleepMin} min) required`);
-          }
-        } else if (attempts < MAX_RETRIES) {
-          logWarn("sleep", `😴 Sleep failed (code=${code}, attempt ${attempts}/${MAX_RETRIES}) — retry in 5min`);
+        if (opts.memoryEnabled) opts.onComplete();
+
+        const hwEnabled = process.env["HARDWARE_SLEEP_AFTER_DREAMY"] === "true";
+        const quietTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
+        const hbInterval = parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "300", 10);
+        const hwSleepMin = Math.round(quietTicks * hbInterval / 60);
+
+        const dreamReport = buildDreamReport();
+        const sleepNote = hwEnabled ? ` Hardware sleep in ~${hwSleepMin} minutes if no activity.` : "";
+
+        if (opts.sendSystemMessage) {
+          opts.sendSystemMessage(`${dreamReport}${sleepNote}`).catch(() => {});
+        }
+
+        if (hwEnabled) {
+          _awaitingHwSleep = true;
+          // Reset hw-check counters — prevents stale state from a prior cycle (crash, force-sleep
+          // re-run) from poisoning this one, and avoids burning the first tick on a spurious
+          // reset when the very first checkHwSleep() sees currentMsgTs > 0.
+          postSleepQuietTicks = 0;
+          lastMsgTsSeenByHwCheck = opts.getLastMsgTs?.() ?? 0;
+          logInfo("sleep", `💤 Awaiting hardware sleep — ${quietTicks} quiet ticks (${hwSleepMin} min) required`);
+        }
+      })
+      .catch((err) => {
+        running = false;
+        progress = null;
+        writeSleepStatus("awake");
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempts < MAX_RETRIES) {
+          logWarn("sleep", `😴 Sleep threw (attempt ${attempts}/${MAX_RETRIES}): ${msg} — retry in 5min`);
           setTimeout(spawnSleep, RETRY_MS);
         } else {
-          logWarn("sleep", `😴 Sleep failed (code=${code}) — exhausted ${MAX_RETRIES} attempts`);
-          writeSleepStatus("awake");
+          logWarn("sleep", `😴 Sleep threw — exhausted ${MAX_RETRIES} attempts: ${msg}`);
         }
       });
-      logInfo("sleep", `😴 Sleep spawned (pid=${proc.pid}, attempt ${attempts}, model=dreamy)`);
-      writeSleepStatus("sleeping");
-    } catch (err) {
-      logWarn("sleep", `😴 Sleep spawn failed: ${err instanceof Error ? err.message : String(err)}`);
-      if (attempts < MAX_RETRIES) setTimeout(spawnSleep, RETRY_MS);
-    }
   }
 
   function checkHwSleep(): void {
@@ -210,7 +212,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
   }
 
   return {
-    get child() { return child; },
+    get isActive() { return running; },
     get progress() { return progress; },
     get awaitingHwSleep() { return _awaitingHwSleep; },
     spawn: spawnSleep,

@@ -98,7 +98,7 @@ export async function startBridge(): Promise<void> {
 
   const bridge = new Bridge(ctx);
   // Lazy isSleepActive closure — reads ctx.sleepHandle after phase-sleep sets it
-  ctx.isSleepActive = (): boolean => ctx.sleepHandle?.child !== null && ctx.sleepHandle?.child !== undefined && !ctx.sleepHandle.child.killed;
+  ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;
 
   // Run remaining phases 2-13. Only phase-shutdown needs the bridge (to wire signal handlers);
   // all other phases populate ctx directly.

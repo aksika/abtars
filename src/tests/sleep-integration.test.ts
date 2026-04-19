@@ -5,7 +5,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { hasSleepAuditToday } from "../capabilities/sleep/sleep-trigger.js";
+import { hasSleepAuditToday } from "abmind";
 
 describe("Integration: sleep guards", () => {
   let tmpDir: string;

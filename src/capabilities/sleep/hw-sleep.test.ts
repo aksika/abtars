@@ -30,29 +30,36 @@ vi.mock("../../components/transport/bridge-lock-transport.js", () => ({
   readAndClearForceSleep: vi.fn(() => null),
 }));
 
+vi.mock("abmind", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>("abmind");
+  return {
+    ...actual,
+    runSleepCycle: vi.fn(async () => ({ ok: true, failCount: 0 })),
+    hasSleepAuditToday: vi.fn(() => false),
+  };
+});
+
 import { createSleepHandle, type SleepHandle, type SleepOpts } from "./index.js";
 import { readAndClearForceSleep } from "../../components/transport/bridge-lock-transport.js";
 
-/** Drive Dreamy-exit so _awaitingHwSleep flips to true + counters reset. */
-function armHwSleep(opts: Required<Pick<SleepOpts, "sleepHour" | "sleepAuditDir" | "memoryEnabled" | "onComplete">> & Partial<SleepOpts>): { handle: SleepHandle; getLastMsgTs: () => number; setMsgTs: (t: number) => void } {
+/** Stub runtime — replaced by mocked runSleepCycle in this test file. */
+const stubRuntime = { complete: async () => "" };
+
+/** Drive Dreamy-completion so _awaitingHwSleep flips to true + counters reset.
+ *  Async because in-process runSleepCycle runs on a microtask chain. */
+async function armHwSleep(opts: Required<Pick<SleepOpts, "sleepHour" | "sleepAuditDir" | "memoryEnabled" | "onComplete">> & Partial<SleepOpts>): Promise<{ handle: SleepHandle; getLastMsgTs: () => number; setMsgTs: (t: number) => void }> {
   let msgTs = 0;
   const getLastMsgTs = () => msgTs;
   const setMsgTs = (t: number) => { msgTs = t; };
-  const handle = createSleepHandle({ ...opts, getLastMsgTs });
+  const handle = createSleepHandle({ runtime: stubRuntime, ...opts, getLastMsgTs });
 
-  // Simulate Dreamy exit: spawn fires, we grab the child, emit exit(0).
-  // This is the same path the real bridge goes through.
+  // In-process runSleepCycle is mocked to resolve ok — arms hw-sleep on first microtask flush.
   process.env["HARDWARE_SLEEP_AFTER_DREAMY"] = "true";
-  const fakeChild = new EventEmitter() as unknown as child_process.ChildProcess;
-  (fakeChild as unknown as { stdout: EventEmitter }).stdout = new EventEmitter();
-  (fakeChild as unknown as { pid: number }).pid = 99999;
-  (fakeChild as unknown as { killed: boolean }).killed = false;
-  vi.mocked(child_process.spawn).mockReturnValue(fakeChild);
-
-  // Bypass spawn's guards via the forceSleep path (one-shot).
   vi.mocked(readAndClearForceSleep).mockReturnValueOnce("test-force");
   handle.spawn();
-  fakeChild.emit("exit", 0);
+
+  // Flush microtasks so the mocked Promise chain fires (running=false, _awaitingHwSleep=true).
+  for (let i = 0; i < 3; i++) await Promise.resolve();
 
   return { handle, getLastMsgTs, setMsgTs };
 }
@@ -72,13 +79,13 @@ describe("checkHwSleep", () => {
     vi.useRealTimers();
   });
 
-  it("sleep-window cutoff: outside [BED, WAKE) → abandons, does not call execSync", () => {
+  it("sleep-window cutoff: outside [BED, WAKE) → abandons, does not call execSync", async () => {
     const now = new Date();
     now.setHours(10, 0, 0, 0);  // outside 00:30-07:00
     vi.useFakeTimers();
     vi.setSystemTime(now);
 
-    const { handle } = armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
+    const { handle } = await armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
     expect(handle.awaitingHwSleep).toBe(true);
 
     handle.checkHwSleep();
@@ -87,15 +94,15 @@ describe("checkHwSleep", () => {
     expect(vi.mocked(child_process.execSync)).not.toHaveBeenCalled();
   });
 
-  it("overnight window (BED=23, WAKE=7) stays in window at hour=23 and hour=3", () => {
+  it("overnight window (BED=23, WAKE=7) stays in window at hour=23 and hour=3", async () => {
     process.env["WAKE_TIME"] = "07:00";
-    const tryHour = (h: number, shouldSleep: boolean): void => {
+    const tryHour = async (h: number, shouldSleep: boolean): Promise<void> => {
       const now = new Date();
       now.setHours(h, 30, 0, 0);
       vi.useFakeTimers();
       vi.setSystemTime(now);
       vi.mocked(child_process.execSync).mockClear();
-      const { handle } = armHwSleep({ sleepHour: 23, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
+      const { handle } = await armHwSleep({ sleepHour: 23, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
       process.env["BED_QUIET_TICKS"] = "1";  // fire immediately on first quiet tick
       handle.checkHwSleep();  // first tick: seeds lastMsgTsSeenByHwCheck (or not, since msgTs=0)
       handle.checkHwSleep();  // second: increments or cuts off
@@ -106,12 +113,12 @@ describe("checkHwSleep", () => {
       }
       vi.useRealTimers();
     };
-    tryHour(23, true);  // 23:30 — inside overnight window, should fire
-    tryHour(3, true);   // 03:30 — inside overnight window, should fire
-    tryHour(8, false);  // 08:30 — outside window, cutoff fires, no execSync
+    await tryHour(23, true);  // 23:30 — inside overnight window, should fire
+    await tryHour(3, true);   // 03:30 — inside overnight window, should fire
+    await tryHour(8, false);  // 08:30 — outside window, cutoff fires, no execSync
   });
 
-  it("counters reset on _awaitingHwSleep flip (no stale poisoning)", () => {
+  it("counters reset on _awaitingHwSleep flip (no stale poisoning)", async () => {
     // First arm + exhaust counter to simulate a prior cycle that left state non-zero
     const now = new Date();
     now.setHours(3, 0, 0, 0);
@@ -119,25 +126,25 @@ describe("checkHwSleep", () => {
     vi.setSystemTime(now);
     process.env["BED_QUIET_TICKS"] = "3";
 
-    const { handle } = armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
+    const { handle } = await armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
     handle.checkHwSleep();  // postSleepQuietTicks=1
     handle.checkHwSleep();  // =2
     // Not yet fired. Simulate Dreamy finishing AGAIN (force-sleep re-run) → counters should reset.
-    const { handle: handle2 } = armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
+    const { handle: handle2 } = await armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
     // Only 1 call should NOT be enough to fire — confirms the counter was reset.
     vi.mocked(child_process.execSync).mockClear();
     handle2.checkHwSleep();
     expect(vi.mocked(child_process.execSync)).not.toHaveBeenCalled();
   });
 
-  it("fires pmset/systemctl after BED_QUIET_TICKS quiet ticks", () => {
+  it("fires pmset/systemctl after BED_QUIET_TICKS quiet ticks", async () => {
     const now = new Date();
     now.setHours(3, 0, 0, 0);
     vi.useFakeTimers();
     vi.setSystemTime(now);
     process.env["BED_QUIET_TICKS"] = "2";
 
-    const { handle } = armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
+    const { handle } = await armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
     handle.checkHwSleep();  // tick 1
     expect(vi.mocked(child_process.execSync)).not.toHaveBeenCalled();
     handle.checkHwSleep();  // tick 2 — fires
@@ -145,14 +152,14 @@ describe("checkHwSleep", () => {
     expect(handle.awaitingHwSleep).toBe(false);
   });
 
-  it("new user message resets counter and logs postponed", () => {
+  it("new user message resets counter and logs postponed", async () => {
     const now = new Date();
     now.setHours(3, 0, 0, 0);
     vi.useFakeTimers();
     vi.setSystemTime(now);
     process.env["BED_QUIET_TICKS"] = "2";
 
-    const { handle, setMsgTs } = armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
+    const { handle, setMsgTs } = await armHwSleep({ sleepHour: 0, sleepAuditDir: SLEEP_DIR, memoryEnabled: false, onComplete: () => {} });
     handle.checkHwSleep();  // tick 1, counter=1
     setMsgTs(Date.now());    // new user message
     handle.checkHwSleep();  // resets counter to 0, logs postponed
@@ -164,7 +171,7 @@ describe("checkHwSleep", () => {
     expect(vi.mocked(child_process.execSync)).toHaveBeenCalledTimes(1);
   });
 
-  it("no-op when _awaitingHwSleep is false", () => {
+  it("no-op when _awaitingHwSleep is false", async () => {
     const handle = createSleepHandle({
       sleepHour: 0,
       sleepAuditDir: SLEEP_DIR,
