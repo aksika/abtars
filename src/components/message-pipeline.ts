@@ -256,8 +256,9 @@ export async function handleInboundMessage(
       await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
     }
 
-    // --- [NO-REPLY] → silently drop (group chats) ---
-    if (userResponse.trim() === "[NO-REPLY]" || userResponse.trim() === "(no response)") {
+    // --- [NO-REPLY] → strip or silently drop ---
+    userResponse = userResponse.replace(/\s*\[NO-REPLY\]\s*/gi, "").trim();
+    if (!userResponse || userResponse === "(no response)") {
       logDebug(TAG, "LLM returned [NO-REPLY], dropping silently");
       return;
     }
