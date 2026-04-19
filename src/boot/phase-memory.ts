@@ -3,8 +3,8 @@
  *
  * - no-ops if memoryConfig.memoryEnabled is false
  * - wires setMemoryLogger
- * - loads ABM env config + logs settings
- * - constructs + initializes MemoryManager
+ * - constructs + initializes MemoryManager (which sources .env.memory via
+ *   loadMemoryConfig → loadMemoryEnv since abmind #210)
  *
  * Populates ctx: memory.
  *
@@ -22,11 +22,6 @@ export async function phaseMemory(ctx: BootCtx): Promise<void> {
     return;
   }
   setMemoryLogger({ logInfo, logWarn, logError });
-
-  // Load ABM .env.memory config
-  const { loadMemoryEnv } = await import("abmind/mem-config-env.js");
-  const memEnv = loadMemoryEnv();
-  logInfo("main", `🧠 ABM config: search=${memEnv.searchMode}, maxDB=${memEnv.maxDbSizeMb}MB, aging=${memEnv.agingEnabled}`);
 
   const memory = new MemoryManager(ctx.memoryConfig);
   await memory.initialize();
