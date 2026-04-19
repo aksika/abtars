@@ -5,6 +5,7 @@
  */
 
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
+import { readEnvWithDefault } from "./env.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction, compactionSummaries } from "./compaction.js";
 import { buildSessionStartContext } from "abmind/session-context.js";
@@ -189,7 +190,7 @@ export async function handleInboundMessage(
 
     if (adapter.editMessage) {
       // Edit-in-place streaming (ACP + platforms that support editMessage)
-      const rawVal = parseInt(process.env["STREAM_FLUSH_SEC"] ?? "3", 10);
+      const rawVal = parseInt(readEnvWithDefault("STREAM_FLUSH_SEC", "3", "streaming cursor flush interval") , 10);
       const FLUSH_INTERVAL = rawVal === 0 ? 0 : Math.max(2, Math.min(180, rawVal)) * 1000;
       let lastFlushed = "";
 

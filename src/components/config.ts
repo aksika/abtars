@@ -5,6 +5,7 @@ import { config as loadDotenv } from "dotenv";
 import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/index.js";
 import { loadUsers } from "./user-registry.js";
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
+import { readEnv } from "./env.js";
 import { logWarn } from "./logger.js";
 import type { LogLevel } from "./logger.js";
 export { agentBridgeHome } from "../paths.js";
@@ -73,11 +74,15 @@ async function validateCliPath(cliPath: string): Promise<void> {
  * Env-file loading is the caller's responsibility (dotenv or `--env-file`).
  */
 export async function loadAndValidateConfig(): Promise<Config> {
-  // Load .env from ~/.agentbridge/.env
+  // Env is loaded in main.ts before any module imports run; .env values are
+  // already in process.env by the time this function executes. Kept here as
+  // belt-and-suspenders for edge cases (tests importing this module without
+  // going through main.ts, or any future caller that bypasses main.ts).
   const envPath = resolve(agentBridgeHome(), ".env");
   loadDotenv({ path: envPath });
 
-  // Load .env.skills (skill/integration config — HA, Groq, embedding, NLM — never touched by deploy)
+  // Skills-level config (HA, Groq, embedding, NLM — never touched by deploy).
+  // Loaded here rather than main.ts because some skills tests import config.ts directly.
   const skillsEnvPath = resolve(agentBridgeHome(), "config", ".env.skills");
   loadDotenv({ path: skillsEnvPath, override: true });
 
@@ -197,7 +202,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const logLevel = rawLogLevel as LogLevel;
 
   // --- GROQ_API_KEY (optional, enables STT) ---
-  const groqApiKey = process.env["GROQ_API_KEY"] ?? "";
+  const groqApiKey = readEnv("GROQ_API_KEY", "STT/voice notes disabled") ?? "";
   const sttEnabled = parseBoolEnv("STT_ENABLED", groqApiKey.length > 0);
   const sttModel = process.env["STT_MODEL"] || CONFIG_DEFAULTS.voice.sttModel;
 

@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { hasSleepAuditToday, runSleepCycle, parseLevel, DEFAULT_LEVEL } from "abmind";
 import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
+import { readEnv } from "../../components/env.js";
 
 export interface SleepOpts {
   sleepHour: number;
@@ -132,7 +133,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         if (opts.memoryEnabled) opts.onComplete();
 
         // Force-sleep runs are explicit test/verify triggers — skip hw-sleep even if env enabled.
-        const hwEnabled = !forced && process.env["HARDWARE_SLEEP_AFTER_DREAMY"] === "true";
+        const hwEnabled = !forced && readEnv("HARDWARE_SLEEP_AFTER_DREAMY", "hardware sleep after Dreamy disabled") === "true";
         const quietTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
         const hbInterval = parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "300", 10);
         const hwSleepMin = Math.round(quietTicks * hbInterval / 60);
