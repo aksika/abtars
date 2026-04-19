@@ -275,16 +275,23 @@ export async function handleInboundMessage(
     const reactMatch = userResponse.trim().match(/\[REACT:(.+?)\]/);
     if (reactMatch) {
       const emoji = reactMatch[1]!;
-      userResponse = userResponse.replace(reactMatch[0], "").trim();
-      if (msg.messageId) {
-        await tryReaction(adapter, channelId, msg.messageId, emoji, msg.threadId);
-      }
-      if (!userResponse) {
-        // Reaction-only response with no user message to react to — send emoji as text
+      const stripped = userResponse.replace(reactMatch[0], "").trim();
+      if (stripped) {
+        // Case A: text + reaction → inline the emoji
+        userResponse = userResponse.replace(reactMatch[0], emoji);
+      } else {
+        // Cases B/C/D: reaction-only
+        if (msg.messageId) {
+          await tryReaction(adapter, channelId, msg.messageId, emoji, msg.threadId);
+        }
+        // Clean up streamed placeholder (cases B/C)
+        if (streamMsgId && adapter.editMessage) {
+          await adapter.editMessage(channelId, streamMsgId, emoji).catch(() => {});
+        }
         if (!msg.messageId) {
-          userResponse = emoji;
+          userResponse = emoji; // Case D: fall through to deliver
         } else {
-          return;
+          return; // Cases B/C: reaction/text already sent
         }
       }
     }
