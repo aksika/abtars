@@ -183,6 +183,10 @@ done
 [ -d "$PROJECT_DIR/logo" ] && rsync -a "$PROJECT_DIR/logo/" "$AB_HOME/logo/"
 
 # 2c. Deploy abmind (prompts, config dirs)
+# Source .env so ABMIND_HOME is available to deploy_abmind.sh
+if [ -f "$AB_HOME/.env" ]; then
+  set -a; source "$AB_HOME/.env"; set +a
+fi
 ABMIND_PKG=$(node -e "console.log(require.resolve('abmind/package.json'))" 2>/dev/null || true)
 if [ -n "$ABMIND_PKG" ]; then
   ABMIND_DIR=$(dirname "$ABMIND_PKG")
