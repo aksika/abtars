@@ -131,7 +131,8 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
         if (opts.memoryEnabled) opts.onComplete();
 
-        const hwEnabled = process.env["HARDWARE_SLEEP_AFTER_DREAMY"] === "true";
+        // Force-sleep runs are explicit test/verify triggers — skip hw-sleep even if env enabled.
+        const hwEnabled = !forced && process.env["HARDWARE_SLEEP_AFTER_DREAMY"] === "true";
         const quietTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
         const hbInterval = parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "300", 10);
         const hwSleepMin = Math.round(quietTicks * hbInterval / 60);
