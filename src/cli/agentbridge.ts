@@ -1,0 +1,115 @@
+/**
+ * agentbridge CLI top-level dispatcher (#158 Phase 1b).
+ *
+ * Subcommands:
+ *   install [--upgrade] [--force]
+ *   update [--source local|npm|github] [--from-local]
+ *   rollback [--to <version>]
+ *   status
+ *
+ * Phase 2 will add: reset, doctor, onboard, migrate.
+ * Phase 1 install intentionally does NOT run onboard — operator seeds
+ * config/ from examples only; interactive onboard is Phase 3.
+ */
+
+import { install } from './commands/install.js';
+import { rollback } from './commands/rollback.js';
+import { status } from './commands/status.js';
+import { update } from './commands/update.js';
+
+type Args = {
+  readonly command: string;
+  readonly flags: ReadonlyMap<string, string | boolean>;
+};
+
+function parseArgs(argv: readonly string[]): Args {
+  const command = argv[0] ?? '';
+  const flags = new Map<string, string | boolean>();
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === undefined) continue;
+    if (a.startsWith('--')) {
+      const eqIdx = a.indexOf('=');
+      if (eqIdx > 2) {
+        flags.set(a.slice(2, eqIdx), a.slice(eqIdx + 1));
+      } else {
+        const next = argv[i + 1];
+        if (next !== undefined && !next.startsWith('--')) {
+          flags.set(a.slice(2), next);
+          i++;
+        } else {
+          flags.set(a.slice(2), true);
+        }
+      }
+    }
+  }
+  return { command, flags };
+}
+
+function printUsage(): void {
+  process.stdout.write(
+    `agentbridge — install/update CLI (#158)
+
+Usage:
+  agentbridge install [--upgrade] [--force]
+  agentbridge update  [--source local|npm|github] [--from-local]
+  agentbridge rollback [--to <version>]
+  agentbridge status
+
+See abproject/docs/plans/158-deploy-rewrite.md for the full contract.
+`,
+  );
+}
+
+export async function main(argv: readonly string[]): Promise<number> {
+  const { command, flags } = parseArgs(argv);
+
+  try {
+    switch (command) {
+      case 'install':
+        return await install({
+          upgrade: flags.get('upgrade') === true,
+          force: flags.get('force') === true,
+          dryRun: flags.get('dry-run') === true,
+        });
+      case 'update':
+        return await update({
+          source: (flags.get('source') as 'local' | 'npm' | 'github' | undefined) ?? 'local',
+          fromLocal: flags.get('from-local') === true,
+          allowAbmindMismatch: flags.get('allow-abmind-mismatch') === true,
+        });
+      case 'rollback':
+        return await rollback({
+          to: typeof flags.get('to') === 'string' ? (flags.get('to') as string) : undefined,
+        });
+      case 'status':
+        return await status();
+      case '':
+      case 'help':
+      case '--help':
+      case '-h':
+        printUsage();
+        return 0;
+      default:
+        process.stderr.write(`unknown subcommand: ${command}\n\n`);
+        printUsage();
+        return 2;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`error: ${msg}\n`);
+    return 1;
+  }
+}
+
+// Direct-run guard: works when invoked as `node dist/cli/agentbridge.js` AND
+// as `agentbridge` (npm-installed bin). Not executed under vitest.
+const isDirectRun =
+  typeof process.argv[1] === 'string' &&
+  (process.argv[1].endsWith('agentbridge.js') ||
+    process.argv[1].endsWith('agentbridge') ||
+    process.argv[1].endsWith('agentbridge.ts'));
+
+if (isDirectRun && process.env['VITEST'] === undefined) {
+  void main(process.argv.slice(2)).then((code) => process.exit(code));
+}
