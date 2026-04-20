@@ -324,7 +324,7 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
       const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
       const running = ctx.cronCurrentJob?.entryId === e.id;
       const tick = !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
-      const label = e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
+      const label = e.title || e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
       return `${tick}  ${e.id}  ${sched.padEnd(15)}  ${label}`;
     });
     listing = lines.length > 0 ? "```\n" + lines.join("\n") + "\n```" : "(no active entries)";

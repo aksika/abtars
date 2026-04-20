@@ -17,6 +17,7 @@ import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbR
 
 export interface CronEntry {
   id: string;
+  title?: string;
   fireAt: number;
   message: string;
   chatId: number;
