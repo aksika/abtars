@@ -128,9 +128,10 @@ spawn_bridge() {
   rm -f "${ABMIND_HOME:-$HOME/.abmind}/memory.sock" 2>/dev/null || true
 
   # Note: bridge loads its own .env via src/boot/env.ts — no shell source needed.
-  log "Starting bridge: node dist/main.js $*"
+  # #158: versioned code at $AB/current/dist; shared node_modules at $AB/node_modules.
+  log "Starting bridge: node current/dist/main.js $*"
   cd "$AB"
-  node dist/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
+  node current/dist/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
   SPAWNED_AT=$(date +%s)
 
   # Wait for bridge.lock with PID

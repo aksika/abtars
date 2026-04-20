@@ -202,9 +202,10 @@ export async function install(opts: InstallOptions): Promise<number> {
 
   if (flat && opts.upgrade) {
     process.stdout.write(`Existing flat layout detected. Running migration 003-flat-to-releases...\n`);
-    // Safety check: no live processes before migration.
+    // Safety check: no live bridge processes before migration. Match the
+    // actual long-running entrypoints, not CLI invocations or test runners.
     const { spawnSync } = await import('node:child_process');
-    const pgrep = spawnSync('pgrep', ['-f', 'node.*agentbridge'], { encoding: 'utf-8' });
+    const pgrep = spawnSync('pgrep', ['-f', 'node.*\\.agentbridge.*dist/main\\.js'], { encoding: 'utf-8' });
     if (pgrep.status === 0 && pgrep.stdout.trim() !== '') {
       process.stderr.write(
         `Refused: bridge process(es) still running (pids: ${pgrep.stdout.trim().split('\n').join(', ')}).\nStop the watchdog + bridge before running --upgrade.\n`,

@@ -14,6 +14,7 @@
 
 import { readManifest, writeManifest } from '../deploy-lib-import.js';
 import { join } from 'node:path';
+import { migration003 } from './003-flat-to-releases.js';
 
 export interface MigrationContext {
   readonly home: string;
@@ -31,8 +32,8 @@ export interface Migration {
   run(ctx: MigrationContext): Promise<MigrationResult>;
 }
 
-// Registry — populated in Phase 1c (flat-to-releases) and Phase 2 (env path moves).
-const REGISTRY: readonly Migration[] = [];
+// Migrations 001/002 (.env.memory / .env.skills path moves) come in Phase 2.
+const REGISTRY: readonly Migration[] = [migration003];
 
 export async function runMigrations(opts: {
   readonly home: string;

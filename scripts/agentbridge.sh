@@ -32,7 +32,7 @@ if [[ " ${ARGS[*]} " == *" stop "* ]]; then
     kill "$pid" 2>/dev/null && echo "   Bridge stopped (pid $pid)." || echo "   Bridge not running."
     rm -f "$PIDFILE"
   else
-    pkill -f "node.*dist/main.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
+    pkill -f "node.*current/dist/main.js\|node.*dist/main.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
   fi
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux kill-session -t "$SESSION"
@@ -65,7 +65,7 @@ echo "   Node:     $(node --version)"
 echo ""
 
 # --- kill any orphaned bridge process ---
-if pkill -f "node.*dist/main.js" 2>/dev/null; then
+if pkill -f "node.*current/dist/main.js\|node.*dist/main.js" 2>/dev/null; then
   echo "   Killed orphaned bridge process."
   sleep 1
 fi
@@ -78,13 +78,17 @@ fi
 
 # --- start the bridge (no restart loop — LaunchAgent handles restarts) ---
 echo "🌉 Starting bridge..."
+# #158: code lives at $PROJECT_DIR/current (symlink to releases/<version>/);
+# node_modules/ is shared at $PROJECT_DIR/node_modules (peer to current).
+# We cd to $PROJECT_DIR (not current) so node resolves node_modules from the
+# shared location, and invoke the versioned dist via the current symlink.
 cd "$PROJECT_DIR"
 
 # Write PID file, clean up on exit
 cleanup() { rm -f "$PIDFILE"; }
 trap cleanup EXIT
 
-node dist/main.js "${ARGS[@]}" &
+node current/dist/main.js "${ARGS[@]}" &
 BRIDGE_PID=$!
 echo "$BRIDGE_PID" > "$PIDFILE"
 echo "   Bridge started (pid $BRIDGE_PID)"
