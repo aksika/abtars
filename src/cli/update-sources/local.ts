@@ -157,6 +157,15 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         );
       }
 
+      // rsync -aL dereferences file:../abmind into a full copy of abmind's
+      // tree, including abmind's own node_modules/. That nested copy may have
+      // a DIFFERENT version of better-sqlite3 (native addon). Two versions of
+      // the native addon operating on the same memory.db = SQLITE_IOERR.
+      // Fix: delete nested node_modules/ so Node resolves to the bridge's
+      // top-level better-sqlite3 for all code paths.
+      const nestedNM = join(ctx.nodeModulesDir, 'abmind', 'node_modules');
+      await rm(nestedNM, { recursive: true, force: true });
+
       const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));
 
       return { version, stagedPath, commit, branch, packageLockHash, source: 'local' };
