@@ -127,9 +127,7 @@ spawn_bridge() {
   # Clean stale socket
   rm -f "${ABMIND_HOME:-$HOME/.abmind}/memory.sock" 2>/dev/null || true
 
-  # Source .env so bridge inherits all config
-  if [[ -f "$ENV_FILE" ]]; then set -a; source "$ENV_FILE"; set +a; fi
-
+  # Note: bridge loads its own .env via src/boot/env.ts — no shell source needed.
   log "Starting bridge: node dist/main.js $*"
   cd "$AB"
   node dist/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &

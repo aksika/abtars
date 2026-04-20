@@ -1,7 +1,6 @@
 import { access, stat, constants } from "node:fs/promises";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
-import { config as loadDotenv } from "dotenv";
 import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/index.js";
 import { loadUsers } from "./user-registry.js";
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
@@ -9,7 +8,6 @@ import { readEnv } from "./env.js";
 import { logWarn } from "./logger.js";
 import type { LogLevel } from "./logger.js";
 export { agentBridgeHome } from "../paths.js";
-import { agentBridgeHome } from "../paths.js";
 
 const BOT_TOKEN_REGEX = /^\d+:[A-Za-z0-9_-]+$/;
 const SNOWFLAKE_REGEX = /^\d{17,20}$/;
@@ -74,17 +72,9 @@ async function validateCliPath(cliPath: string): Promise<void> {
  * Env-file loading is the caller's responsibility (dotenv or `--env-file`).
  */
 export async function loadAndValidateConfig(): Promise<Config> {
-  // Env is loaded in main.ts before any module imports run; .env values are
-  // already in process.env by the time this function executes. Kept here as
-  // belt-and-suspenders for edge cases (tests importing this module without
-  // going through main.ts, or any future caller that bypasses main.ts).
-  const envPath = resolve(agentBridgeHome(), ".env");
-  loadDotenv({ path: envPath });
-
-  // Skills-level config (HA, Groq, embedding, NLM — never touched by deploy).
-  // Loaded here rather than main.ts because some skills tests import config.ts directly.
-  const skillsEnvPath = resolve(agentBridgeHome(), "config", ".env.skills");
-  loadDotenv({ path: skillsEnvPath, override: true });
+  // Env is loaded by src/boot/env.ts (imported first in main.ts). By the time
+  // this function runs, `.env` + `.env.skills` + `./.env` are already merged
+  // into process.env with process.env precedence preserved.
 
   // Load transport.json + models.json (replaces transport profile .env files)
   const { loadTransport, validateAtStartup } = await import("./transport-config.js");
