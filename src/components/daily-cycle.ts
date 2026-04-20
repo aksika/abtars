@@ -56,6 +56,13 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
     return false;
   }
 
+  // Midnight wraparound: BED_TIME 0:30 means "after midnight", not "all day".
+  // If more than 7 hours have passed since BED_TIME, it's daytime — not bedtime.
+  if (nowMinutes - sleepMinutes > 7 * 60) {
+    quietTickCount = 0;
+    return false;
+  }
+
   // Single source of truth: lock file status
   if (hasSleepAuditToday(deps.sleepAuditDir)) return false;
 

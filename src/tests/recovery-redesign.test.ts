@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -73,14 +73,19 @@ describe("isDailyCycleDue — quiet tick counter", () => {
   });
 
   it("returns false before BED_TIME", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-20T00:15:00")); // 15 min past midnight, within 7h window
     const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
     // First tick: false (need 2 quiet ticks)
     expect(isDailyCycleDue(deps)).toBe(false);
     // 2nd tick: true
     expect(isDailyCycleDue(deps)).toBe(true);
+    vi.useRealTimers();
   });
 
   it("resets counter when resetBedtimeCounter is called", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-20T00:15:00"));
     const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
     // Accumulate 1 tick
     isDailyCycleDue(deps);
@@ -89,6 +94,7 @@ describe("isDailyCycleDue — quiet tick counter", () => {
     // Need 2 more ticks now
     expect(isDailyCycleDue(deps)).toBe(false);
     expect(isDailyCycleDue(deps)).toBe(true);
+    vi.useRealTimers();
   });
 
   it("returns false when busyChats is non-empty", () => {
@@ -106,17 +112,16 @@ describe("isDailyCycleDue — quiet tick counter", () => {
   });
 
   it("accumulates quiet ticks when bridge started AFTER BED_TIME (late-restart catch-up, #216)", () => {
-    // Lock simulates a bridge that respawned past BED_TIME: startedAt is recent (after today's BED_TIME),
-    // lastHeartbeat is set (bridge has ticked at least once), no sleep audit exists for today.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-20T00:15:00"));
     writeFileSync(
       join(tmpDir, "bridge.lock"),
       JSON.stringify({ pid: 1, startedAt: Date.now(), lastHeartbeat: Date.now() }),
     );
     const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
-    // Before the fix: always returned false because startedAt >= todaySleepTime.
-    // After the fix: quiet ticks accumulate and cycle becomes due.
     expect(isDailyCycleDue(deps)).toBe(false);
     expect(isDailyCycleDue(deps)).toBe(true);
+    vi.useRealTimers();
   });
 });
 
