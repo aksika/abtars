@@ -13,11 +13,14 @@ ENV_FILE="$AB/.env"
 POLL_SEC=60
 STALE_SEC="${WATCHDOG_STALE_SEC:-360}"
 HB_SEC=300
+KILL_ON_STALE="false"
 if [[ -f "$ENV_FILE" ]]; then
   _hb_sec=$(grep -m1 '^HEARTBEAT_INTERVAL_SEC=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
   if [[ -n "$_hb_sec" && "$_hb_sec" != "0" ]]; then
     HB_SEC="$_hb_sec"
   fi
+  _kill=$(grep -m1 '^WATCHDOG_KILL_ON_STALE=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
+  if [[ -n "$_kill" ]]; then KILL_ON_STALE="$_kill"; fi
 fi
 STARTUP_TIMEOUT=$(( HB_SEC + POLL_SEC * 2 ))
 CIRCUIT_MAX=3
@@ -243,7 +246,7 @@ while true; do
   fi
 
   age_sec=$(( (now - lock_hb) / 1000 ))
-  if (( age_sec > STALE_SEC )); then
+  if [[ "$KILL_ON_STALE" == "true" ]] && (( age_sec > STALE_SEC )); then
     kill_bridge "heartbeat stale (${age_sec}s)"
     spawn_bridge "${BRIDGE_ARGS[@]}"
   fi
