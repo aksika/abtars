@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { agentBridgeHome } from "../../paths.js";
 import { logInfo } from "../logger.js";
 import { CronExpressionParser } from "cron-parser";
-import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./cron-db.js";
+import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./cron-store.js";
 import type { CronEntry } from "../../cli/agentbridge-task.js";
 
 const TAG = "cron-checker";

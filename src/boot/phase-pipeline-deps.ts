@@ -16,7 +16,7 @@
  * Populates ctx: cronQueue, codingMode, idleSave, pipelineDeps.
  */
 
-import { readEntry as cronReadEntry } from "../components/cron/cron-db.js";
+import { readEntry as cronReadEntry } from "../components/cron/cron-store.js";
 import { CronQueue } from "../components/cron/cron-queue.js";
 import { CodingMode } from "../components/coding-mode.js";
 import { IdleSave } from "../components/idle-save.js";
@@ -26,10 +26,14 @@ import { existsSync } from "node:fs";
 import type { BootCtx } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/cron/cron-queue.js";
+import { migrateFromSqlite } from "../components/cron/cron-store.js";
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
   const { config, memoryConfig, transport } = ctx;
   if (!transport) throw new Error("phase-pipeline-deps: ctx.transport not set (phase-transport must run first)");
+
+  // Migrate cron entries from SQLite (memory.db) to JSON if needed — before any cron reads.
+  await migrateFromSqlite();
 
   ctx.codingMode = new CodingMode(ctx.runtime);
   ctx.idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);

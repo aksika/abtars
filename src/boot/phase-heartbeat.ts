@@ -27,6 +27,7 @@ import { HeartbeatSystem } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
 import {
   writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus,
+  appendRestartTimestamp, readRestartTimestamps,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "../components/heartbeat-tasks.js";
@@ -171,6 +172,17 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   // In-proc watchdog: wall-clock comparison every 60s
   const WD_CHECK_INTERVAL = 60_000;
   const WD_UNKNOWN_SUPPRESS_MS = 60 * 60_000;
+  const CIRCUIT_BREAKER_MAX = 3;
+  const CIRCUIT_BREAKER_WINDOW_MS = 5 * 60_000;
+
+  // Check if we're in a restart loop — suppress if so
+  const recentTimestamps = readRestartTimestamps();
+  const recentCount = recentTimestamps.filter(t => Date.now() - t < CIRCUIT_BREAKER_WINDOW_MS).length;
+  const watchdogSuppressed = recentCount >= CIRCUIT_BREAKER_MAX;
+  if (watchdogSuppressed) {
+    logWarn("watchdog", `⚡ Circuit breaker: ${recentCount} restarts in last 5min — in-process watchdog suppressed this session`);
+  }
+
   setInterval(() => {
     const elapsed = Date.now() - lastKickAt;
     if (elapsed <= WD_THRESHOLD_MS) return;
@@ -179,7 +191,12 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
       lastKickAt = Date.now();
       return;
     }
+    if (watchdogSuppressed) {
+      lastKickAt = Date.now();
+      return;
+    }
     logWarn("watchdog", `No heartbeat kick for ${Math.round(elapsed / 60000)}min (${kind}) — forcing restart`);
+    appendRestartTimestamp();
     writeRestartReason("watchdog: no heartbeat kick");
     process.exit(1);
   }, WD_CHECK_INTERVAL);

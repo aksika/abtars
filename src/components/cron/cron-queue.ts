@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { reportsDir } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt, readBridgeLockField } from "../transport/bridge-lock-transport.js";
-import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-db.js";
+import { recordRun as dbRecordRun, readEntry, writeEntry } from "./cron-store.js";
 import type { CronEntry } from "../../cli/agentbridge-task.js";
 import { localDate } from "../env-utils.js";
 

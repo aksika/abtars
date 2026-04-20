@@ -65,6 +65,19 @@ export function writeSleepStatus(status: SleepStatus): void {
   updateBridgeLockField("sleepStatus", status);
 }
 
+/** Append a restart timestamp to bridge.lock (capped at 10). Used by in-process watchdog circuit breaker. */
+export function appendRestartTimestamp(): void {
+  const ts = readBridgeLockField<number[]>("restartTimestamps") ?? [];
+  ts.push(Date.now());
+  if (ts.length > 10) ts.splice(0, ts.length - 10);
+  updateBridgeLockField("restartTimestamps", ts);
+}
+
+/** Read recent restart timestamps from bridge.lock. */
+export function readRestartTimestamps(): number[] {
+  return readBridgeLockField<number[]>("restartTimestamps") ?? [];
+}
+
 /** Request a forced sleep cycle on the next heartbeat tick.
  *  See src/capabilities/sleep/index.ts spawnSleep() + src/components/daily-cycle.ts isDailyCycleDue().
  *  Pattern mirrors writeRestartRequested/readAndClearRestartRequested. */

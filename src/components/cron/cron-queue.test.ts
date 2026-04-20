@@ -11,7 +11,7 @@ vi.mock("node:child_process", async () => {
 });
 
 // Mock cron-db so no real SQLite file is touched.
-vi.mock("./cron-db.js", () => ({
+vi.mock("./cron-store.js", () => ({
   recordRun: vi.fn(),
   readEntry: vi.fn(),
   writeEntry: vi.fn(),
