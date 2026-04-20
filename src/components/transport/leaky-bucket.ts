@@ -27,7 +27,7 @@ function drain(b: Bucket, now: number): void {
 }
 
 /** Record an error for a model. */
-export function recordError(key: string, kind: "rate_limit" | "auth" | "transient", retryAfterMs?: number): void {
+export function recordError(key: string, kind: "rate_limit" | "auth" | "transient" | "weak", retryAfterMs?: number): void {
   const now = Date.now();
   const b = buckets.get(key) ?? { level: 0, lastUpdate: now, consecutiveErrors: 0 };
   drain(b, now);
@@ -35,6 +35,8 @@ export function recordError(key: string, kind: "rate_limit" | "auth" | "transien
   if (kind === "auth") {
     b.level = 1.0;
     b.authFailed = true;
+  } else if (kind === "weak") {
+    b.level = Math.min(1.0, b.level + 0.05);
   } else {
     const idx = Math.min(b.consecutiveErrors, PROGRESSIVE_FILL.length - 1);
     b.level = Math.min(1.0, b.level + PROGRESSIVE_FILL[idx]!);

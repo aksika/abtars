@@ -125,7 +125,11 @@ export class DirectApiTransport implements IKiroTransport {
         try {
           const result = await this.agentLoop(session, ac.signal);
           this._lastAnswer = result;
-          recordSuccess(bucketKey);
+          if (!result || !result.trim()) {
+            recordError(bucketKey, "weak");
+          } else {
+            recordSuccess(bucketKey);
+          }
           return result;
         } catch (err) {
           const status = this.parseErrorStatus(err);
@@ -156,7 +160,11 @@ export class DirectApiTransport implements IKiroTransport {
           const result = await this.agentLoop(session, ac.signal);
           this._lastAnswer = result;
           const bk = `${smallest.endpoint}|${smallest.model}`;
-          recordSuccess(bk);
+          if (!result || !result.trim()) {
+            recordError(bk, "weak");
+          } else {
+            recordSuccess(bk);
+          }
           return result;
         } catch (err) {
           const status = this.parseErrorStatus(err);
