@@ -14,6 +14,8 @@
 
 import { readManifest, writeManifest } from '../deploy-lib-import.js';
 import { join } from 'node:path';
+import { migration001 } from './001-env-memory-to-config.js';
+import { migration002 } from './002-env-skills-to-config.js';
 import { migration003 } from './003-flat-to-releases.js';
 
 export interface MigrationContext {
@@ -32,8 +34,11 @@ export interface Migration {
   run(ctx: MigrationContext): Promise<MigrationResult>;
 }
 
-// Migrations 001/002 (.env.memory / .env.skills path moves) come in Phase 2.
-const REGISTRY: readonly Migration[] = [migration003];
+// Ordered by number. 003 (flat-to-releases) is the cutover and typically runs
+// first because it's the precondition for the new layout; 001/002 tidy up
+// legacy file locations after the cutover (or independently on installs that
+// never had the flat layout).
+const REGISTRY: readonly Migration[] = [migration003, migration001, migration002];
 
 export async function runMigrations(opts: {
   readonly home: string;

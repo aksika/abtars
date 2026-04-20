@@ -9,6 +9,7 @@ import { hostname } from 'node:os';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import type { SourceName } from '../update-sources/types.js';
 import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION } from '../deploy-lib-import.js';
+import { runMigrations } from '../migrations/index.js';
 
 export interface UpdateOptions {
   readonly source: SourceName;
@@ -81,6 +82,20 @@ export async function update(opts: UpdateOptions): Promise<number> {
     }
 
     process.stdout.write(`\nUpdate complete: ${staged.version}\n`);
+
+    // Run any pending migrations (excluding 003-flat-to-releases, which is
+    // gated behind `install --upgrade`). 001/002 are safe to run here.
+    const migrationResults = await runMigrations({
+      home: paths.home,
+      dryRun: false,
+      only: ['001-env-memory-to-config', '002-env-skills-to-config'],
+    });
+    const applied = migrationResults.filter((r) => r.applied);
+    if (applied.length > 0) {
+      process.stdout.write(`\nMigrations applied:\n`);
+      for (const r of applied) process.stdout.write(`  ✓ ${r.name}: ${r.message}\n`);
+    }
+
     // hashFile is unused here but imported to validate the re-export surface;
     // leaving this no-op call removed — the re-export is exercised by tests.
     void hashFile;

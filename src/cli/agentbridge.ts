@@ -12,7 +12,10 @@
  * config/ from examples only; interactive onboard is Phase 3.
  */
 
+import { doctor } from './commands/doctor.js';
 import { install } from './commands/install.js';
+import { migrate } from './commands/migrate.js';
+import { reset, type ResetScope } from './commands/reset.js';
 import { rollback } from './commands/rollback.js';
 import { status } from './commands/status.js';
 import { update } from './commands/update.js';
@@ -54,6 +57,9 @@ Usage:
   agentbridge install [--upgrade] [--force]
   agentbridge update  [--source local|npm|github] [--from-local]
   agentbridge rollback [--to <version>]
+  agentbridge reset --scope <config|config+data|full> [--yes] [--dry-run] [--no-backup]
+  agentbridge migrate [--only <name>] [--dry-run]
+  agentbridge doctor [<args passed to doctor.sh>...]
   agentbridge status
 
 See abproject/docs/plans/158-deploy-rewrite.md for the full contract.
@@ -82,6 +88,24 @@ export async function main(argv: readonly string[]): Promise<number> {
         return await rollback({
           to: typeof flags.get('to') === 'string' ? (flags.get('to') as string) : undefined,
         });
+      case 'reset':
+        return await reset({
+          scope: flags.get('scope') as ResetScope | undefined,
+          yes: flags.get('yes') === true,
+          dryRun: flags.get('dry-run') === true,
+          nonInteractive: flags.get('non-interactive') === true,
+          noBackup: flags.get('no-backup') === true,
+          force: flags.get('force') === true,
+        });
+      case 'migrate':
+        return await migrate({
+          dryRun: flags.get('dry-run') === true,
+          only: typeof flags.get('only') === 'string' ? [flags.get('only') as string] : undefined,
+        });
+      case 'doctor':
+        // Pass remaining --flags through to doctor.sh. Primitive pass-through:
+        // anything after 'doctor' except recognized flags goes to the script.
+        return await doctor(argv.slice(1).filter((a) => a !== ''));
       case 'status':
         return await status();
       case '':
