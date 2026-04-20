@@ -132,17 +132,30 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
       await mkdir(stagedPath, { recursive: true });
       await cp(join(repoRoot, 'dist'), join(stagedPath, 'dist'), { recursive: true });
 
-      // Sync node_modules/ to the shared location (authoritative source = repo's checkout).
-      // We accept the cost: node_modules/ is the one thing that can't be versioned cheaply.
+      // Sync node_modules/ to the shared location.
       //
-      // Delete destination first — package.json may have `"abmind": "file:../abmind"`
-      // which creates a symlink in the source's node_modules/abmind. If the destination
-      // has a real directory there (e.g. from a legacy rsync-based deploy), plain cp
-      // errors with ENOTDIR. Full-delete-then-copy is cheaper than trying to reconcile.
+      // Use `rsync -aL` to DEREFERENCE symlinks — critical because
+      // package.json `"abmind": "file:../abmind"` creates a symlink at
+      // node_modules/abmind pointing into the dev workspace. Plain cp
+      // preserves the symlink, so the runtime ends up with abmind code
+      // served from the developer's working tree (active live edits +
+      // test-suite contention on memory.db). We want a materialized copy.
+      //
+      // Delete destination first so rsync's --delete is unnecessary (and
+      // safer — we don't want to rsync-delete anything outside).
       await rm(ctx.nodeModulesDir, { recursive: true, force: true });
       await mkdir(ctx.nodeModulesDir, { recursive: true });
-      // Copy with force: overwrite any symlinks into regular dirs as needed.
-      await cp(join(repoRoot, 'node_modules'), ctx.nodeModulesDir, { recursive: true, force: true });
+      const rsyncResult = spawnSync(
+        'rsync',
+        ['-aL', '--quiet', `${join(repoRoot, 'node_modules')}/`, `${ctx.nodeModulesDir}/`],
+        { stdio: 'inherit' },
+      );
+      if (rsyncResult.status !== 0) {
+        throw new LocalBuildError(
+          `rsync of node_modules failed (status ${rsyncResult.status ?? -1})`,
+          `Ensure rsync is installed. Falling back to node cp would re-create symlinks.`,
+        );
+      }
 
       const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));
 
