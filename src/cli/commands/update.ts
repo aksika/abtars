@@ -6,6 +6,8 @@
  */
 
 import { hostname } from 'node:os';
+import { join } from 'node:path';
+import { copyFile, mkdir, chmod, readdir } from 'node:fs/promises';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import type { SourceName } from '../update-sources/types.js';
 import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION } from '../deploy-lib-import.js';
@@ -82,6 +84,22 @@ export async function update(opts: UpdateOptions): Promise<number> {
     }
 
     process.stdout.write(`\nUpdate complete: ${staged.version}\n`);
+
+    // Refresh all scripts from repo scripts/ directory
+    const repoScripts = join(process.cwd(), 'scripts');
+    const destScripts = join(paths.home, 'scripts');
+    await mkdir(destScripts, { recursive: true });
+    const scriptFiles = await readdir(repoScripts).catch(() => [] as string[]);
+    for (const name of scriptFiles) {
+      await copyFile(join(repoScripts, name), join(destScripts, name));
+      if (name.endsWith('.sh')) await chmod(join(destScripts, name), 0o755);
+      // Root-level copies for launcher scripts watchdog/launchd reference directly
+      if (name.endsWith('.sh')) {
+        await copyFile(join(repoScripts, name), join(paths.home, name));
+        await chmod(join(paths.home, name), 0o755);
+      }
+    }
+    process.stdout.write(`✓ scripts refreshed (${scriptFiles.length} files)\n`);
 
     // Run any pending migrations (excluding 003-flat-to-releases, which is
     // gated behind `install --upgrade`). 001/002 are safe to run here.
