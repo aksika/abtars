@@ -55,6 +55,8 @@ export async function phaseConfig(ctx: BootCtx): Promise<void> {
   ].filter(Boolean).join(", ");
   logInfo("main", "──────────── BRIDGE START ────────────");
   logInfo("main", `🚀 Bridge starting (platforms=${enabledList}, log=${ctx.config.logLevel})`);
+  if (ctx.sttConfig) logInfo("main", `🎤 STT enabled (${ctx.sttConfig.provider}/${ctx.sttConfig.model || "whisper-large-v3"})`);
+  if (ctx.ttsConfig) logInfo("main", `🔊 TTS enabled (Edge TTS / ${ctx.ttsConfig.voice})`);
 
   // Truncate launchd.log on startup — bridge logger takes over, previous crash output already captured
   try { writeFileSync(join(agentBridgeHome(), "logs", "launchd.log"), "", "utf-8"); } catch { /* */ }
