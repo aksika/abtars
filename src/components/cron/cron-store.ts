@@ -8,7 +8,6 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "
 import { join, dirname } from "node:path";
 import type { CronEntry } from "../../cli/agentbridge-task.js";
 import { agentBridgeHome } from "../../paths.js";
-import { logInfo } from "../logger.js";
 
 const storePath = (): string => join(agentBridgeHome(), "state", "cron.json");
 
@@ -64,45 +63,3 @@ export function recordRun(entryId: string, exitCode?: number): void {
 
 /** No-op — kept for API compat with tests that called closeDb() on the old SQLite store. */
 export function closeDb(): void { /* JSON store has no connection to close */ }
-
-/** Migrate from SQLite (memory.db cron_entries table) if JSON doesn't exist yet. */
-export async function migrateFromSqlite(): Promise<void> {
-  if (existsSync(storePath())) return;
-
-  const dbFile = join(agentBridgeHome(), "memory", "memory.db");
-  if (!existsSync(dbFile)) { writeAll([]); return; }
-
-  try {
-    const Database = (await import("better-sqlite3")).default;
-    const db = new Database(dbFile, { readonly: false });
-    try {
-      const rows = db.prepare("SELECT * FROM cron_entries").all() as Record<string, unknown>[];
-      if (rows.length === 0) { writeAll([]); return; }
-
-      const entries: CronEntry[] = rows.map(r => ({
-        id: r.id as string,
-        fireAt: r.fire_at as number,
-        message: r.message as string,
-        chatId: r.chat_id as number,
-        type: r.type as "reminder" | "task",
-        fired: !!(r.fired as number),
-        createdAt: r.created_at as number,
-        ...(r.executor ? { executor: r.executor as "agent" | "script" } : {}),
-        ...(r.schedule ? { schedule: r.schedule as string } : {}),
-        ...(r.priority ? { priority: r.priority as "high" | "medium" | "low" } : {}),
-        ...(r.task_file ? { taskFile: r.task_file as string } : {}),
-        ...(r.paused ? { paused: true } : {}),
-        ...(r.last_ran_at ? { lastRanAt: r.last_ran_at as number } : {}),
-        ...(r.retry_after ? { retryAfter: r.retry_after as number } : {}),
-        ...(r.retrying ? { _retrying: true } : {}),
-        history: JSON.parse((r.history as string) || "[]"),
-      }));
-
-      writeAll(entries);
-      db.exec("DROP TABLE IF EXISTS cron_entries");
-      logInfo("cron", `Migrated ${entries.length} entries from memory.db → state/cron.json`);
-    } finally { db.close(); }
-  } catch {
-    writeAll([]);
-  }
-}

@@ -26,22 +26,6 @@ export async function phaseMemory(ctx: BootCtx): Promise<void> {
   const memory = new MemoryManager(ctx.memoryConfig);
   await memory.initialize();
 
-  // WAL checkpoint — flush pending writes from a previous crash before this process starts writing.
-  try {
-    const t0 = Date.now();
-    const Database = (await import("better-sqlite3")).default;
-    const db = new Database(ctx.memoryConfig.memoryDir + "/memory.db");
-    const mode = db.pragma("journal_mode") as Array<{ journal_mode: string }>;
-    if (mode[0]?.journal_mode === "wal") {
-      db.pragma("wal_checkpoint(TRUNCATE)");
-      logInfo("main", `🧠 WAL checkpoint: ${Date.now() - t0}ms`);
-    }
-    db.close();
-  } catch (err) {
-    logError("main", `🧠 WAL checkpoint failed — DB may be corrupt: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  }
-
   ctx.memory = memory;
   logInfo("main", `🧠 Memory enabled (dir=${ctx.memoryConfig.memoryDir})`);
 }
