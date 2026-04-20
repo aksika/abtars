@@ -15,6 +15,7 @@
 import { doctor } from './commands/doctor.js';
 import { install } from './commands/install.js';
 import { migrate } from './commands/migrate.js';
+import { onboard } from './commands/onboard.js';
 import { reset, type ResetScope } from './commands/reset.js';
 import { rollback } from './commands/rollback.js';
 import { status } from './commands/status.js';
@@ -60,6 +61,7 @@ Usage:
   agentbridge reset --scope <config|config+data|full> [--yes] [--dry-run] [--no-backup]
   agentbridge migrate [--only <name>] [--dry-run]
   agentbridge doctor [<args passed to doctor.sh>...]
+  agentbridge onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   agentbridge status
 
 See abproject/docs/plans/158-deploy-rewrite.md for the full contract.
@@ -106,6 +108,17 @@ export async function main(argv: readonly string[]): Promise<number> {
         // Pass remaining --flags through to doctor.sh. Primitive pass-through:
         // anything after 'doctor' except recognized flags goes to the script.
         return await doctor(argv.slice(1).filter((a) => a !== ''));
+      case 'onboard':
+        return await onboard({
+          nonInteractive: flags.get('non-interactive') === true,
+          acceptRisk: flags.get('accept-risk') === true,
+          telegramToken: typeof flags.get('telegram-token') === 'string' ? (flags.get('telegram-token') as string) : undefined,
+          telegramChatId: typeof flags.get('telegram-chat-id') === 'string' ? (flags.get('telegram-chat-id') as string) : undefined,
+          defaultProvider: typeof flags.get('default-provider') === 'string' ? (flags.get('default-provider') as string) : undefined,
+          defaultModel: typeof flags.get('default-model') === 'string' ? (flags.get('default-model') as string) : undefined,
+          discordA2aChannel: typeof flags.get('discord-a2a-channel') === 'string' ? (flags.get('discord-a2a-channel') as string) : undefined,
+          force: flags.get('force') === true,
+        });
       case 'status':
         return await status();
       case '':
