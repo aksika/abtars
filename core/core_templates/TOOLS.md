@@ -1,5 +1,7 @@
 # Tools
 
+These are bash commands. Run them with `execute_bash`. You have shell access — use it.
+
 Run any tool with `--help` for full usage.
 
 ## Essential
