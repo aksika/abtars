@@ -24,7 +24,6 @@
 
 import { spawnSync } from 'node:child_process';
 import {
-  cp,
   lstat,
   mkdir,
   readFile,
@@ -38,6 +37,7 @@ import { basename, dirname, join } from 'node:path';
 import {
   emptyManifest,
   packagePaths,
+  safeCopyTree,
   writeManifest,
 } from '../deploy-lib-import.js';
 import type { Migration, MigrationContext, MigrationResult } from './index.js';
@@ -106,7 +106,10 @@ async function backupDir(home: string, dryRun: boolean): Promise<string> {
     // Prior failed attempt: refuse rather than silently merge.
     throw new Error(`Backup destination already exists: ${backup}. Remove it or restore, then retry.`);
   }
-  await cp(home, backup, { recursive: true, preserveTimestamps: true });
+  // safeCopyTree skips sockets/FIFOs/devices. Real runtimes contain UNIX
+  // sockets (e.g. browser-socket/browser.sock) that Node's plain cp refuses
+  // to handle with EINVAL.
+  await safeCopyTree(home, backup, { preserveTimestamps: true });
   return backup;
 }
 

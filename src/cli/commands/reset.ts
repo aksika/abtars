@@ -14,10 +14,10 @@
  *                     Prompts for backup first unless --no-backup passed.
  */
 
-import { cp, mkdir, readdir } from 'node:fs/promises';
+import { mkdir, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { basename, dirname, join } from 'node:path';
-import { isUnsafeRemovalTarget, packagePaths, readManifest, removePath, resolveUserBinDir } from '../deploy-lib-import.js';
+import { isUnsafeRemovalTarget, packagePaths, readManifest, removePath, resolveUserBinDir, safeCopyTree } from '../deploy-lib-import.js';
 
 export type ResetScope = 'config' | 'config+data' | 'full';
 
@@ -68,7 +68,8 @@ async function backupRuntime(home: string, dryRun: boolean): Promise<string | nu
     process.stdout.write(`[dry-run] cp -a ${home} ${backup}\n`);
     return backup;
   }
-  await cp(home, backup, { recursive: true, preserveTimestamps: true });
+  // safeCopyTree skips sockets/FIFOs — real runtimes have UNIX sockets.
+  await safeCopyTree(home, backup, { preserveTimestamps: true });
   return backup;
 }
 

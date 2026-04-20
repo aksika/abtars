@@ -279,8 +279,11 @@ export async function install(opts: InstallOptions): Promise<number> {
     );
   }
 
-  // Initialize manifest if brand-new install
-  if (!manifest && !opts.dryRun) {
+  // Initialize manifest if brand-new install AND migration didn't write one.
+  // (Migration 003 writes a manifest mid-flow with version + migration record;
+  // we must not clobber it here.)
+  const manifestAfter = await readManifest(paths.manifest);
+  if (manifestAfter === null && !opts.dryRun) {
     await writeManifest(paths.manifest, {
       ...emptyManifest('agentbridge', hostname()),
       version: '',
@@ -290,7 +293,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   }
 
   process.stdout.write(`\nInstall complete.\n`);
-  if (!manifest || manifest.version === '') {
+  if (!manifestAfter || manifestAfter.version === '') {
     process.stdout.write(`Next: 'agentbridge update' to build and activate the first release.\n`);
   }
   return 0;

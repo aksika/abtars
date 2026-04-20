@@ -134,7 +134,14 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
 
       // Sync node_modules/ to the shared location (authoritative source = repo's checkout).
       // We accept the cost: node_modules/ is the one thing that can't be versioned cheaply.
+      //
+      // Delete destination first — package.json may have `"abmind": "file:../abmind"`
+      // which creates a symlink in the source's node_modules/abmind. If the destination
+      // has a real directory there (e.g. from a legacy rsync-based deploy), plain cp
+      // errors with ENOTDIR. Full-delete-then-copy is cheaper than trying to reconcile.
+      await rm(ctx.nodeModulesDir, { recursive: true, force: true });
       await mkdir(ctx.nodeModulesDir, { recursive: true });
+      // Copy with force: overwrite any symlinks into regular dirs as needed.
       await cp(join(repoRoot, 'node_modules'), ctx.nodeModulesDir, { recursive: true, force: true });
 
       const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));

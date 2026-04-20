@@ -44,3 +44,5 @@ export {
   removePath,
   type RemovePlan,
 } from 'abmind/deploy-lib/cleanup.js';
+
+export { safeCopyTree } from 'abmind/deploy-lib/safe-copy.js';
