@@ -104,6 +104,20 @@ describe("isDailyCycleDue — quiet tick counter", () => {
       expect(isDailyCycleDue(deps)).toBe(false);
     }
   });
+
+  it("accumulates quiet ticks when bridge started AFTER BED_TIME (late-restart catch-up, #216)", () => {
+    // Lock simulates a bridge that respawned past BED_TIME: startedAt is recent (after today's BED_TIME),
+    // lastHeartbeat is set (bridge has ticked at least once), no sleep audit exists for today.
+    writeFileSync(
+      join(tmpDir, "bridge.lock"),
+      JSON.stringify({ pid: 1, startedAt: Date.now(), lastHeartbeat: Date.now() }),
+    );
+    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0 });
+    // Before the fix: always returned false because startedAt >= todaySleepTime.
+    // After the fix: quiet ticks accumulate and cycle becomes due.
+    expect(isDailyCycleDue(deps)).toBe(false);
+    expect(isDailyCycleDue(deps)).toBe(true);
+  });
 });
 
 // --- Watchdog countdown+kick (unit logic) ---

@@ -60,8 +60,7 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   if (hasSleepAuditToday(deps.sleepAuditDir)) return false;
 
   const lockData = safeReadJson<{ startedAt?: number; lastHeartbeat?: number }>(deps.bridgeLockPath, {});
-  const todaySleepTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), deps.sleepHour, deps.sleepMinute).getTime();
-  if (!lockData.startedAt || lockData.startedAt >= todaySleepTime) return false;
+  if (!lockData.startedAt) return false; // fail-closed on missing/corrupt lock
   if (!lockData.lastHeartbeat) return false; // no successful tick yet — dark wake guard
 
   // Check for new messages since last tick
