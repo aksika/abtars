@@ -37,6 +37,9 @@ export interface IKiroTransport {
   /** Optional callback for streaming intermediate response chunks. Set by pipeline per-message. */
   onIntermediateResponse?: (text: string) => void;
 
+  /** Optional callback fired at the start of each tool call. Set by pipeline per-message. */
+  onToolCallStart?: () => void;
+
   /** Transport-specific slash commands (e.g. /usage for kiro, /stats for gemini). */
   readonly transportCommands: string[];
 

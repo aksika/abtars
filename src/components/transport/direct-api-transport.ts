@@ -43,6 +43,7 @@ export class DirectApiTransport implements IKiroTransport {
   get currentModel(): string { return this.activeModel; }
 
   onIntermediateResponse?: (text: string) => void;
+  onToolCallStart?: () => void;
   /** Called when fallback model is selected — send notification before response. */
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
 
@@ -202,6 +203,7 @@ export class DirectApiTransport implements IKiroTransport {
         for (const tc of toolCalls) {
           if (signal.aborted) throw new Error("Aborted");
           this._lastActivityAt = Date.now();
+          this.onToolCallStart?.();
 
           let args: Record<string, string>;
           try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }

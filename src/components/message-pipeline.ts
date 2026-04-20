@@ -133,6 +133,8 @@ export async function handleInboundMessage(
   const userId = registry.byPlatformId.get(platformKey)?.userId ?? "master";
 
   let typingInterval: ReturnType<typeof setInterval> | undefined;
+  let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
+  let silentCheckTimer: ReturnType<typeof setInterval> | undefined;
   try {
     busyChats.add(sessionKey);
     resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
@@ -182,6 +184,30 @@ export async function handleInboundMessage(
       }, 8000);
     }
 
+    // --- Typing TTL + still-working ---
+    const TYPING_TTL_MS = parseInt(process.env["TYPING_TTL_MS"] ?? "300000", 10);
+    const SILENT_THRESHOLD_MS = parseInt(process.env["TYPING_SILENT_THRESHOLD_MS"] ?? "90000", 10);
+    let stillWorkingSent = false;
+    let lastVisibleOutputAt = Date.now();
+
+    typingTtlTimer = setTimeout(() => {
+      if (typingInterval) { clearInterval(typingInterval); typingInterval = undefined; }
+    }, TYPING_TTL_MS);
+
+    silentCheckTimer = setInterval(() => {
+      if (stillWorkingSent) return;
+      if (Date.now() - lastVisibleOutputAt > SILENT_THRESHOLD_MS) {
+        stillWorkingSent = true;
+        adapter.sendMessage(channelId, "⏱️ Still working...", { threadId: msg.threadId }).catch(() => {});
+      }
+    }, 10_000);
+
+    // Per-tool-call typing pulse — transport fires this on each tool execution
+    transport.onToolCallStart = () => {
+      lastVisibleOutputAt = Date.now();
+      adapter.sendTyping?.(channelId, msg.threadId).catch(() => {});
+    };
+
     // --- Intermediate streaming ---
     let intermediateDelivered = false;
     let streamMsgId: number | undefined;
@@ -196,6 +222,7 @@ export async function handleInboundMessage(
 
       transport.onIntermediateResponse = (chunk: string) => {
         streamBuffer += chunk;
+        lastVisibleOutputAt = Date.now();
       };
 
       let flushing = false;
@@ -433,6 +460,9 @@ export async function handleInboundMessage(
     }
   } finally {
     clearInterval(typingInterval);
+    clearTimeout(typingTtlTimer);
+    clearInterval(silentCheckTimer);
+    transport.onToolCallStart = undefined;
     busyChats.delete(sessionKey);
     idleSave.reset(sessionKey, chatId);
 
