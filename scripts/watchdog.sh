@@ -14,9 +14,9 @@ POLL_SEC=60
 STALE_SEC="${WATCHDOG_STALE_SEC:-360}"
 HB_SEC=300
 if [[ -f "$ENV_FILE" ]]; then
-  _hb_ms=$(grep -m1 '^HEARTBEAT_INTERVAL_MS=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
-  if [[ -n "$_hb_ms" && "$_hb_ms" != "0" ]]; then
-    HB_SEC=$(( _hb_ms / 1000 ))
+  _hb_sec=$(grep -m1 '^HEARTBEAT_INTERVAL_SEC=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
+  if [[ -n "$_hb_sec" && "$_hb_sec" != "0" ]]; then
+    HB_SEC="$_hb_sec"
   fi
 fi
 STARTUP_TIMEOUT=$(( HB_SEC + POLL_SEC * 2 ))

@@ -54,7 +54,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
     writeFileSync(ctx.bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now(), version, sleepStatus: "awake" }), "utf-8");
   } catch { /* */ }
 
-  const hbIntervalMs = (parseInt(process.env["HEARTBEAT_INTERVAL"] ?? "", 10) || 300) * 1000;
+  const hbIntervalMs = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10) * 1000;
 
   // Watchdog: wall-clock comparison (immune to setInterval batching after sleep)
   const WD_THRESHOLD_MS = hbIntervalMs * 3;
