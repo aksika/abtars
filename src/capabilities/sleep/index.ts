@@ -210,7 +210,10 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     logInfo("sleep", `💤 Putting hardware to sleep (${sleepCmd})...`);
     writeSleepStatus("hw_sleep");
     try { execSync(sleepCmd, { timeout: 5000 }); }
-    catch (err) { logWarn("sleep", `💤 Hardware sleep failed: ${err instanceof Error ? err.message : String(err)}`); }
+    catch (err) {
+      writeSleepStatus("awake"); // recover — don't leave "hw_sleep" if pmset failed
+      logWarn("sleep", `💤 Hardware sleep failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   return {
