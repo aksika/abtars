@@ -209,11 +209,19 @@ safe_cp() {
   cp "$src" "$dst"
 }
 
-# Core: deploy templates from agentbridge, then overlay personal from abproject
+# Core: deploy templates ONLY for files that don't exist yet.
+# TOOLS.md always updates (repo-owned). Everything else (SOUL.md, user_profile.md,
+# agent_notes.md, core_facts.md) is operator-owned — never overwrite once placed.
 CORE_SRC="$PROJECT_DIR/core/core_templates"
 mkdir -p "$AB_HOME/core"
 for f in "$CORE_SRC/"*.md; do
-  [ -f "$f" ] && safe_cp "$f" "$AB_HOME/core/$(basename "$f")"
+  base="$(basename "$f")"
+  if [[ "$base" == "TOOLS.md" ]]; then
+    safe_cp "$f" "$AB_HOME/core/$base"
+  elif [[ ! -f "$AB_HOME/core/$base" ]]; then
+    cp "$f" "$AB_HOME/core/$base"
+    echo "   📄 Seeded template: $base"
+  fi
 done
 
 # Prompts: always from repo
