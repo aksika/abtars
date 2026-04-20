@@ -179,7 +179,7 @@ export class TelegramApi {
         "message_reaction",
       ],
     };
-    return (await this.call("getUpdates", body, signal)) as TelegramUpdate[];
+    return (await this.call("getUpdates", body, signal, (timeout + 10) * 1000)) as TelegramUpdate[];
   }
 
   private static readonly TIMEOUT_MS = parseInt(process.env["TELEGRAM_TIMEOUT_MS"] ?? "15000", 10);
@@ -204,10 +204,12 @@ export class TelegramApi {
     method: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<unknown> {
+    const effectiveTimeout = timeoutMs ?? TelegramApi.TIMEOUT_MS;
     for (let attempt = 0; attempt < TelegramApi.MAX_ATTEMPTS; attempt++) {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(new Error("telegram timeout")), TelegramApi.TIMEOUT_MS);
+      const timer = setTimeout(() => ctrl.abort(new Error("telegram timeout")), effectiveTimeout);
       const composed = signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal;
 
       try {
