@@ -182,27 +182,64 @@ export class TelegramApi {
     return (await this.call("getUpdates", body, signal)) as TelegramUpdate[];
   }
 
+  private static readonly TIMEOUT_MS = parseInt(process.env["TELEGRAM_TIMEOUT_MS"] ?? "15000", 10);
+  private static readonly MAX_ATTEMPTS = 3;
+  private static readonly BACKOFF = [1000, 3000, 9000];
+
+  private static readonly PERMANENT_ERRORS = [
+    /chat not found/i, /bot was blocked/i, /user is deactivated/i,
+    /chat_id is empty/i, /forbidden/i, /not enough rights/i,
+    /CHAT_WRITE_FORBIDDEN/i, /have no rights/i,
+  ];
+
+  private static isPermanent(msg: string): boolean {
+    return this.PERMANENT_ERRORS.some(re => re.test(msg));
+  }
+
+  private static isTransient(msg: string): boolean {
+    return /429|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|socket hang up|network/i.test(msg);
+  }
+
   private async call(
     method: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    const response = await fetch(`${this.baseUrl}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-    });
+    for (let attempt = 0; attempt < TelegramApi.MAX_ATTEMPTS; attempt++) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(new Error("telegram timeout")), TelegramApi.TIMEOUT_MS);
+      const composed = signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal;
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`Telegram API ${method} failed (${response.status}): ${text}`);
-    }
+      try {
+        const response = await fetch(`${this.baseUrl}/${method}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: composed,
+        });
 
-    const json = (await response.json()) as { ok: boolean; result: unknown };
-    if (!json.ok) {
-      throw new Error(`Telegram API ${method} returned ok=false`);
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(`Telegram API ${method} failed (${response.status}): ${text}`);
+        }
+
+        const json = (await response.json()) as { ok: boolean; result: unknown };
+        if (!json.ok) {
+          throw new Error(`Telegram API ${method} returned ok=false`);
+        }
+        return json.result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (TelegramApi.isPermanent(msg) || (signal?.aborted)) throw err;
+        if (attempt < TelegramApi.MAX_ATTEMPTS - 1 && TelegramApi.isTransient(msg)) {
+          await new Promise(r => setTimeout(r, TelegramApi.BACKOFF[attempt]!));
+          continue;
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
     }
-    return json.result;
+    throw new Error(`Telegram API ${method}: unreachable`);
   }
 }
