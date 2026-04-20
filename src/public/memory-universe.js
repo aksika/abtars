@@ -49,9 +49,12 @@
       .then(function(r) { return r.json(); })
       .then(function(data) {
         memories = data.memories || [];
+        // #225: entities + memory_entities dropped. Viz renders memories only;
+        // entity-cluster and link code below is now dead-but-harmless (no-ops
+        // on empty arrays). Future: simplify or repurpose viz — separate ticket.
         entities = data.entities || [];
         links = data.links || [];
-        document.getElementById('mu-stats').textContent = memories.length + ' memories · ' + entities.length + ' entities';
+        document.getElementById('mu-stats').textContent = memories.length + ' memories';
         // Inject import map for Three.js ES modules
         var im = document.createElement('script');
         im.type = 'importmap';

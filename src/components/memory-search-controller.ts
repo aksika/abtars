@@ -42,9 +42,7 @@ export class MemorySearchController {
   listAll(): { status: number; body: object } {
     try {
       const memories = this.deps.memory.getAllExtractedMemories();
-      const entities = this.deps.memory.getAllEntities();
-      const links = this.deps.memory.getAllEntityLinks();
-      return { status: 200, body: { memories, entities, links } };
+      return { status: 200, body: { memories } };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `listAll failed: ${msg}`);
@@ -67,11 +65,10 @@ export class MemorySearchController {
     const timeEnd = parseOptionalNumber(params.get("timeEnd"));
     const stagesRaw = params.get("stages")?.trim();
     const stages = stagesRaw ? stagesRaw.split(",").map((s) => s.trim()).filter((s) => VALID_STAGES.has(s)) : undefined;
-    const entity = params.get("entity")?.trim() || undefined;
 
     try {
       const result = await this.deps.memory.recallSearch(
-        { translated, original, userId: userId ?? "master", limit: 10, timeStart, timeEnd, stages, entity },
+        { translated, original, userId: userId ?? "master", limit: 10, timeStart, timeEnd, stages },
       );
       this.deps.memory.bumpRecallCount(result.extractedIds);
 
