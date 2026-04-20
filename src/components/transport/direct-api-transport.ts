@@ -12,6 +12,7 @@ import { shouldSkip, recordError, recordSuccess, classifyError, getBucketLevel }
 import type { IKiroTransport } from "./kiro-transport.js";
 
 const TAG = "direct-api";
+const MODEL_API_TIMEOUT_MS = parseInt(process.env["MODEL_API_TIMEOUT_MS"] ?? "120000", 10);
 
 export interface DirectApiConfig {
   endpoint: string;       // e.g. http://localhost:20128/v1
@@ -248,6 +249,12 @@ export class DirectApiTransport implements IKiroTransport {
     session: ConversationSession,
     signal: AbortSignal,
   ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
+    // Compose pipeline signal (user /stop) with per-request timeout
+    const timeoutCtrl = new AbortController();
+    const timer = setTimeout(() => timeoutCtrl.abort(new Error("model API timeout")), MODEL_API_TIMEOUT_MS);
+    const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
+
+    try {
     const body = {
       model: this.activeModel,
       messages: session.messages,
@@ -266,7 +273,7 @@ export class DirectApiTransport implements IKiroTransport {
           method: "POST",
           headers,
           body: JSON.stringify(body),
-          signal,
+          signal: composed,
         });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
@@ -278,6 +285,7 @@ export class DirectApiTransport implements IKiroTransport {
         attempts: 3, minDelayMs: 3000,
         isRecoverable: (err) => {
           const msg = err instanceof Error ? err.message : String(err);
+          if (/model API timeout/.test(msg)) return false;
           // Don't retry 429/401/402/403 — let the bucket loop handle model switching
           if (/API error (429|401|402|403)/.test(msg)) return false;
           return !isFatal(err);
@@ -289,7 +297,7 @@ export class DirectApiTransport implements IKiroTransport {
     const toolCallAccumulator = new Map<string, { id: string; name: string; arguments: string }>();
     let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
 
-    for await (const event of parseSSEStream(response, signal)) {
+    for await (const event of parseSSEStream(response, composed)) {
       this._lastActivityAt = Date.now();
 
       switch (event.type) {
@@ -316,6 +324,9 @@ export class DirectApiTransport implements IKiroTransport {
     }));
 
     return { content: content || null, toolCalls, usage };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Accumulate streaming tool call deltas by ID (Ollama-safe: tracks by ID not index). */
