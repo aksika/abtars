@@ -1,0 +1,99 @@
+/**
+ * Regression tests for the PATH symlink collision policy (bug discovered
+ * during Phase 1 smoke on KP, 2026-04-20).
+ *
+ * Two bugs fixed here:
+ *   1. Fuzzy ownership match: code was checking target.endsWith('/.agentbridge/bin/<name>')
+ *      which treated symlinks pointing at the REAL ~/.agentbridge as "ours to
+ *      overwrite" even when AGENT_BRIDGE_HOME pointed at a throwaway dir.
+ *      Fix: require exact targetPath match.
+ *   2. Dangling symlink as "not existing": exists() used stat() which follows
+ *      symlinks and returns false on dangling targets, then symlink() fails
+ *      EEXIST. Fix: existsAny() uses lstat() for collision detection.
+ *
+ * We test via the install command's reconcilePathLink indirectly — by setting
+ * up a dangling symlink pointing at a different install's bin dir and
+ * confirming install refuses rather than clobbers.
+ */
+
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { install } from './install.js';
+
+describe('install: PATH symlink collision policy (regression #158 smoke)', () => {
+  let fakeHome: string;
+  let fakeUserBin: string;
+  let otherInstallBin: string;
+  let restoreEnvHome: string | undefined;
+  let restoreEnvHomeVar: string | undefined;
+
+  beforeEach(async () => {
+    restoreEnvHome = process.env['AGENT_BRIDGE_HOME'];
+    restoreEnvHomeVar = process.env['HOME'];
+
+    // Set up a fake home and fake user bin directory. $HOME override so
+    // resolveUserBinDir() points at our test dir, not the real ~/.local/bin.
+    const base = join(homedir(), '.cache', 'agentbridge-test');
+    await mkdir(base, { recursive: true });
+    const root = await mkdtemp(join(base, 'pathcollision-'));
+    fakeHome = join(root, '.agentbridge');
+    fakeUserBin = join(root, '.local', 'bin');
+    otherInstallBin = join(root, 'other-install', '.agentbridge', 'bin');
+    await mkdir(fakeUserBin, { recursive: true });
+    await mkdir(otherInstallBin, { recursive: true });
+
+    process.env['AGENT_BRIDGE_HOME'] = fakeHome;
+    process.env['HOME'] = root;
+  });
+
+  afterEach(async () => {
+    if (restoreEnvHome === undefined) delete process.env['AGENT_BRIDGE_HOME'];
+    else process.env['AGENT_BRIDGE_HOME'] = restoreEnvHome;
+    if (restoreEnvHomeVar !== undefined) process.env['HOME'] = restoreEnvHomeVar;
+    // Tear down the whole test root.
+    await rm(join(fakeHome, '..'), { recursive: true, force: true });
+  });
+
+  it('refuses to overwrite a PATH symlink owned by a different install', async () => {
+    // Pre-seed: ~/.local/bin/agentbridge points at the OTHER install's
+    // ~/.agentbridge/bin/agentbridge (not ours).
+    await symlink(join(otherInstallBin, 'agentbridge'), join(fakeUserBin, 'agentbridge'));
+
+    const code = await install({ upgrade: false, force: false, dryRun: false });
+
+    expect(code).toBe(4); // refusal exit
+    // Symlink was not touched.
+    const { readlink } = await import('node:fs/promises');
+    const target = await readlink(join(fakeUserBin, 'agentbridge'));
+    expect(target).toBe(join(otherInstallBin, 'agentbridge'));
+  });
+
+  it('refuses even when the other install symlink is DANGLING', async () => {
+    // Regression for the exists() bug: a dangling symlink was reported as
+    // "not exists" and then symlink() threw EEXIST mid-install.
+    const danglingTarget = join(otherInstallBin, 'agentbridge');
+    // Do NOT create the target — so the symlink is dangling.
+    await symlink(danglingTarget, join(fakeUserBin, 'agentbridge'));
+
+    const code = await install({ upgrade: false, force: false, dryRun: false });
+
+    expect(code).toBe(4);
+    // Still dangling, still there.
+    const { readlink } = await import('node:fs/promises');
+    const target = await readlink(join(fakeUserBin, 'agentbridge'));
+    expect(target).toBe(danglingTarget);
+  });
+
+  it('--force overwrites a symlink pointing at a different install', async () => {
+    await symlink(join(otherInstallBin, 'agentbridge'), join(fakeUserBin, 'agentbridge'));
+
+    const code = await install({ upgrade: false, force: true, dryRun: false });
+
+    expect(code).toBe(0);
+    const { readlink } = await import('node:fs/promises');
+    const target = await readlink(join(fakeUserBin, 'agentbridge'));
+    expect(target).toBe(join(fakeHome, 'bin', 'agentbridge'));
+  });
+});

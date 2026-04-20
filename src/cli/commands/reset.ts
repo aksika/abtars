@@ -74,15 +74,19 @@ async function backupRuntime(home: string, dryRun: boolean): Promise<string | nu
 
 async function removePathLinks(dryRun: boolean): Promise<string[]> {
   const userBinDir = resolveUserBinDir();
+  const paths = packagePaths('agentbridge');
   const { lstat, readlink, unlink } = await import('node:fs/promises');
   const removed: string[] = [];
   for (const name of OWNED_PATH_LINKS) {
     const link = join(userBinDir, name);
+    const expectedTarget = join(paths.bin, name);
     try {
       const s = await lstat(link);
       if (!s.isSymbolicLink()) continue;
       const target = await readlink(link);
-      if (!target.includes('.agentbridge/bin/')) continue;
+      // Exact-match only. Don't clobber a symlink to a DIFFERENT install
+      // just because both paths contain '.agentbridge/bin/'.
+      if (target !== expectedTarget) continue;
       if (dryRun) {
         removed.push(`[dry-run] rm ${link}`);
       } else {

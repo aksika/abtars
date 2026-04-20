@@ -36,6 +36,24 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+/**
+ * True if `p` exists as any filesystem entry — regular file, directory,
+ * symlink (including dangling). Use this for collision checks in
+ * reconcilePathLink, where a dangling symlink still occupies the inode
+ * and would cause EEXIST on symlink(). `exists()` above uses stat() which
+ * follows symlinks and returns false on dangling ones; that's wrong for
+ * collision detection.
+ */
+async function existsAny(p: string): Promise<boolean> {
+  try {
+    const { lstat } = await import('node:fs/promises');
+    await lstat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function isSymlink(p: string): Promise<boolean> {
   try {
     const { lstat } = await import('node:fs/promises');
@@ -119,7 +137,7 @@ async function reconcilePathLink(
 ): Promise<{ action: string; message?: string }> {
   const linkPath = join(userBinDir, name);
   const targetPath = join(binDir, name);
-  const linkExists = await exists(linkPath);
+  const linkExists = await existsAny(linkPath);
   if (!linkExists) {
     if (dryRun) return { action: `[dry-run] ln -s ${targetPath} ${linkPath}` };
     await symlink(targetPath, linkPath);
@@ -128,7 +146,11 @@ async function reconcilePathLink(
   if (await isSymlink(linkPath)) {
     const { readlink, unlink } = await import('node:fs/promises');
     const current = await readlink(linkPath);
-    const ownsIt = current === targetPath || current.endsWith(`/.agentbridge/bin/${name}`);
+    // "We own it" means: points at THIS install's bin dir, not a fuzzy match
+    // on any path containing /.agentbridge/bin/. A smoke-test install at
+    // AGENT_BRIDGE_HOME=~/.cache/ab-smoke-.../ must not clobber the real
+    // ~/.agentbridge symlinks. Compare absolute paths directly.
+    const ownsIt = current === targetPath;
     if (ownsIt) {
       if (dryRun) return { action: `[dry-run] overwrite ${linkPath} (we own it)` };
       await unlink(linkPath);
