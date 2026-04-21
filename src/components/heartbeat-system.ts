@@ -105,6 +105,12 @@ export class HeartbeatSystem implements ITaskSlot {
     if (gap > this.config.intervalMs * 3) {
       const gapMin = Math.round(gap / 60000);
       logInfo(TAG, `Standby resume detected — suspended ${gapMin}min`);
+      // Immediately update lastHeartbeat so external watchdog doesn't kill us
+      try {
+        const lock = JSON.parse(readFileSync(this.config.bridgeLockPath, "utf-8"));
+        lock.lastHeartbeat = Date.now();
+        writeFileSync(this.config.bridgeLockPath, JSON.stringify(lock), "utf-8");
+      } catch { /* best-effort */ }
       if (this.config.onStandbyResume) {
         this.config.onStandbyResume(gap);
         return; // skip all tasks this tick
