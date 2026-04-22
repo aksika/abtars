@@ -187,7 +187,9 @@ graceful_restart() {
 
 BRIDGE_ARGS=("$@")
 trap 'graceful_restart "${BRIDGE_ARGS[@]}"' USR1
-trap 'kill_bridge "watchdog exit"; rm -f "$WD_LOCK"; exit 0' TERM INT
+# Exit non-zero on TERM/INT so launchd KeepAlive restarts us even if a policy
+# variant treats exit 0 as "intentional shutdown, do not restart".
+trap 'kill_bridge "watchdog exit"; rm -f "$WD_LOCK"; exit 1' TERM INT
 
 # ── Startup ──
 log "Watchdog starting (stale=${STALE_SEC}s, poll=${POLL_SEC}s, circuit=${CIRCUIT_MAX}/${CIRCUIT_WINDOW}s)"

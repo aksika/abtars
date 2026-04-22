@@ -6,6 +6,7 @@
 import { execFile } from "node:child_process";
 import type { MemoryBackend } from "abmind/memory-backend.js";
 import type { InstantStoreParams } from "../../types/index.js";
+import { logWarn } from "../logger.js";
 
 export type ToolDefinition = {
   readonly name: string;
@@ -17,7 +18,34 @@ export type ToolDefinition = {
 const BASH_TIMEOUT_MS = 300_000;
 const CLI_TIMEOUT_MS = 60_000;
 
+/**
+ * Patterns that would spawn or restart a bridge/watchdog process.
+ * Blocked to prevent the LLM (especially fallback models) from accidentally
+ * starting a second bridge instance, which would cause port conflicts,
+ * Telegram 409 errors, and bridge.lock PID confusion.
+ *
+ * See post-mortem of 2026-04-22 outage: cron agent ran execute_bash that
+ * spawned a rogue bridge alongside the watchdog-supervised one.
+ */
+const BLOCKED_PATTERNS: readonly RegExp[] = [
+  /\bmain\.js\b/,                                  // node .../current/dist/main.js ...
+  /\bagentbridge\.sh\b/,                           // the launcher
+  /\bwatchdog\.sh\b/,                              // the watchdog
+  /\blaunchctl\s+(load|bootstrap|kickstart|start)\b/, // launchd bridge start
+];
+
+export function isBridgeSpawnCommand(cmd: string): boolean {
+  return BLOCKED_PATTERNS.some(p => p.test(cmd));
+}
+
 function runBash(cmd: string, timeout = BASH_TIMEOUT_MS): Promise<string> {
+  if (isBridgeSpawnCommand(cmd)) {
+    logWarn("tool-registry", `Blocked bridge-spawn command: ${cmd.slice(0, 200)}`);
+    return Promise.resolve(JSON.stringify({
+      stderr: "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision; use launchctl inspection commands (launchctl list, launchctl print) or signal the existing process instead.",
+      exit_code: 126,
+    }));
+  }
   return new Promise((resolve) => {
     execFile("bash", ["-c", cmd], { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       const result: Record<string, unknown> = {};
@@ -41,7 +69,7 @@ export function setMemoryBackend(backend: MemoryBackend | null): void {
 
 const bashTool: ToolDefinition = {
   name: "execute_bash",
-  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command.",
+  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, agentbridge.sh, watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised.",
   parameters: {
     type: "object",
     properties: { command: { type: "string", description: "The bash command to execute" } },
