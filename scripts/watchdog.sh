@@ -194,6 +194,12 @@ trap 'kill_bridge "watchdog exit"; rm -f "$WD_LOCK"; exit 1' TERM INT
 # ── Startup ──
 log "Watchdog starting (stale=${STALE_SEC}s, poll=${POLL_SEC}s, circuit=${CIRCUIT_MAX}/${CIRCUIT_WINDOW}s)"
 
+# Write wd_lock IMMEDIATELY so doctor.sh (below) sees the watchdog as healthy
+# and skips its `launchctl kickstart -k` branch. Without this, doctor.sh reads
+# a stale/missing wd_lock, concludes the watchdog is dead, and kickstart-kills
+# our own launchd job — causing a permanent boot-time self-destruct loop.
+write_wd_lock
+
 # Run doctor once at startup (non-fatal)
 if [ -x "$AB/scripts/doctor.sh" ]; then
   "$AB/scripts/doctor.sh" --fix >> "$AB/logs/launchd.log" 2>&1 || true
