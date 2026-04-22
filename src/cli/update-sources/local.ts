@@ -157,14 +157,12 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         );
       }
 
-      // rsync -aL dereferences file:../abmind into a full copy of abmind's
-      // tree, including abmind's own node_modules/. That nested copy may have
-      // a DIFFERENT version of better-sqlite3 (native addon). Two versions of
-      // the native addon operating on the same memory.db = SQLITE_IOERR.
-      // Fix: delete nested node_modules/ so Node resolves to the bridge's
-      // top-level better-sqlite3 for all code paths.
-      const nestedNM = join(ctx.nodeModulesDir, 'abmind', 'node_modules');
-      await rm(nestedNM, { recursive: true, force: true });
+      // Note: abmind's nested node_modules/ (rsync'd from its dev workspace)
+      // stays in place. Previously deleted to avoid duplicate better-sqlite3
+      // native-addon conflict (#230-related), but since f24b33f removed
+      // better-sqlite3 from agentbridge's deps, abmind's nested copy is the
+      // only one and must remain — deleting it breaks module resolution for
+      // abmind at runtime ('Cannot find package better-sqlite3').
 
       const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));
 
