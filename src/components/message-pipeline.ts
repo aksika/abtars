@@ -272,9 +272,14 @@ export async function handleInboundMessage(
     // --- Empty response ---
     if (!userResponse || !userResponse.trim()) {
       if (!intermediateDelivered) {
-        logWarn(TAG, "Empty response from transport");
-        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "🤷");
-        await adapter.sendMessage(channelId, "🤷 Model returned an empty response. Try again or /reset.", { threadId: msg.threadId });
+        if (transport.toolCallsSucceeded > 0) {
+          logDebug(TAG, `Empty text but ${transport.toolCallsSucceeded} tool call(s) succeeded — suppressing fallback`);
+          if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+        } else {
+          logWarn(TAG, "Empty response from transport");
+          if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "🤷");
+          await adapter.sendMessage(channelId, "🤷 Model returned an empty response. Try again or /reset.", { threadId: msg.threadId });
+        }
       }
       return;
     }

@@ -249,6 +249,7 @@ export class TmuxClient implements IKiroTransport {
   get answerOnly(): string {
     return this.lastAnswerOnly;
   }
+  get toolCallsSucceeded(): number { return 0; }
 
   /** Get the context window usage percentage from the last Kiro prompt (e.g. 10 for "10% >"). Returns -1 if unknown. */
   get contextPercent(): number {

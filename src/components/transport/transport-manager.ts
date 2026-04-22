@@ -109,6 +109,7 @@ export class TransportManager implements IKiroTransport {
     logInfo(TAG, "🔄 Forced restore to primary transport");
   }
   get answerOnly(): string { return this.active.answerOnly; }
+  get toolCallsSucceeded(): number { return this.active.toolCallsSucceeded; }
   get intermediateDeliveredText(): string { return this.active.intermediateDeliveredText; }
   get transportCommands(): string[] { return this.active.transportCommands; }
 

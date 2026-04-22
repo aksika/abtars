@@ -31,6 +31,7 @@ export class DirectApiTransport implements IKiroTransport {
   private systemPrompt = "";
   private _contextPercent = -1;
   private _lastAnswer = "";
+  private _toolCallsSucceeded = 0;
   private _intermediateText = "";
   private _promptStartedAt: number | null = null;
   private _lastActivityAt: number | null = null;
@@ -68,6 +69,7 @@ export class DirectApiTransport implements IKiroTransport {
     session.addUser(message);
 
     this._lastAnswer = "";
+    this._toolCallsSucceeded = 0;
     this._intermediateText = "";
     this._promptStartedAt = Date.now();
     this._lastActivityAt = Date.now();
@@ -210,6 +212,7 @@ export class DirectApiTransport implements IKiroTransport {
 
           const result = await executeToolCall(tc.function.name, args);
           session.addToolResult(tc.id, tc.function.name, result);
+          try { if (!JSON.parse(result).error) this._toolCallsSucceeded++; } catch { this._toolCallsSucceeded++; }
         }
         continue;
       }
@@ -375,6 +378,7 @@ export class DirectApiTransport implements IKiroTransport {
   get isReady(): boolean { return true; }
   get contextPercent(): number { return this._contextPercent; }
   get answerOnly(): string { return this._lastAnswer; }
+  get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
 
   /** Hot-swap the active model. Takes effect on next API call. */
   private _userModelOverride: string | null = null;

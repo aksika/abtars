@@ -31,6 +31,9 @@ export interface IKiroTransport {
   /** Clean answer text from last response (stripped of tool output/noise). Empty if not available. */
   readonly answerOnly: string;
 
+  /** Tool calls that succeeded (no error) in the last complete(). 0 if transport doesn't run tools. */
+  readonly toolCallsSucceeded: number;
+
   /** Cumulative text delivered via intermediate streaming (for tail detection). Empty if not available. */
   readonly intermediateDeliveredText: string;
 

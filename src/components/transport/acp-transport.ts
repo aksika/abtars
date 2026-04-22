@@ -36,6 +36,7 @@ export class AcpTransport implements IKiroTransport {
 
   /** ACP returns full response — no separate "answer only" extraction. */
   get answerOnly(): string { return ""; }
+  get toolCallsSucceeded(): number { return 0; }
 
   /** ACP doesn't track intermediate delivered text (edit-in-place instead). */
   get intermediateDeliveredText(): string { return ""; }

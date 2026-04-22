@@ -138,6 +138,19 @@ describe("handleInboundMessage", () => {
     expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("empty response"), expect.any(Object));
   });
 
+  it("suppresses empty-response fallback when tool calls succeeded", async () => {
+    const t = mockTransport();
+    (t.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue("");
+    Object.defineProperty(t, "toolCallsSucceeded", { get: () => 1 });
+    const adapter = mockAdapter();
+    const deps = mockDeps(t);
+
+    await handleInboundMessage(makeMsg({ messageId: 4 }), adapter, deps);
+
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
+    expect(adapter.setReaction).toHaveBeenCalledWith("100", 4, "");
+  });
+
   it("handles [NO-REPLY]", async () => {
     const noReplyTransport = mockTransport();
     (noReplyTransport.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue("[NO-REPLY]");
