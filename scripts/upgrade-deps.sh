@@ -40,7 +40,7 @@ fi
 # pipx tools — use `pipx upgrade` (no grep -P, portable).
 if command -v pipx >/dev/null 2>&1; then
   echo "🐍 pipx tools..."
-  for name in notebooklm-mcp-cli yt-dlp; do
+  for name in notebooklm-mcp-cli; do
     echo -n "  $name: "
     if pipx list --short 2>/dev/null | grep -q "^$name "; then
       pipx upgrade "$name" 2>&1 | tail -1
