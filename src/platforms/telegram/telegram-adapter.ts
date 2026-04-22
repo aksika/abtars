@@ -6,6 +6,7 @@
 
 import { TelegramApi } from "./telegram-api.js";
 import { TelegramPoller } from "./telegram-poller.js";
+import { createFileOffsetStore } from "./offset-store.js";
 import { SecurityGate } from "../../components/security-gate.js";
 import { ResponseFormatter } from "../../components/response-formatter.js";
 import { formatReactionSignal } from "../../components/reaction-signal.js";
@@ -93,8 +94,10 @@ export class TelegramAdapter implements PlatformAdapter {
       { command: "help", description: "Show all commands" },
     ]).catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
 
-    this.poller = new TelegramPoller(this.api, this.config.pollTimeoutS, (u) => this.handleUpdate(u));
-    this.poller.start();
+    const home = process.env["AGENT_BRIDGE_HOME"] ?? `${process.env["HOME"]}/.agentbridge`;
+    const offsetStore = createFileOffsetStore(`${home}/state/telegram-offset`);
+    this.poller = new TelegramPoller(this.api, this.config.pollTimeoutS, (u) => this.handleUpdate(u), offsetStore);
+    await this.poller.start();
   }
 
   stop(): void {
