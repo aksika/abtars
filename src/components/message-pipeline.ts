@@ -12,6 +12,8 @@ import { buildSessionStartContext } from "abmind/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { loadUsers, loadUserProfile } from "./user-registry.js";
 import { tryReaction } from "./reaction-handler.js";
+import { compress } from "abmind";
+import { localMonth } from "../utils/local-time.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason, readAndClearRestartReason } from "./transport/bridge-lock-transport.js";
@@ -31,6 +33,8 @@ const CTX_WARN_PCT = parseInt(process.env["CTX_WARN_PCT"] ?? "70", 10);
 const CTX_COMPACT_PCT = parseInt(process.env["CTX_COMPACT_PCT"] ?? "80", 10);
 const CTX_AGGRESSIVE_PCT = parseInt(process.env["CTX_AGGRESSIVE_PCT"] ?? "90", 10);
 const COMPACT_MAX_FAILURES = 3;
+const ACTIVE_MEMORY = (process.env["ACTIVE_MEMORY"] ?? "false").toLowerCase() === "true";
+const ACTIVE_MEMORY_LIMIT = 5;
 
 // Per-session compaction state
 const ctxWarned = new Set<string>();
@@ -161,6 +165,42 @@ export async function handleInboundMessage(
 
     if (memory) {
       prompt = preparePrompt(prompt, memory, userId, sessionKey, text, pendingSessionStart, seenSessions, msg.messageId);
+    }
+
+    // --- Active recall: inject relevant memories on non-session-start turns ---
+    if (ACTIVE_MEMORY && memory && !isSessionStart) {
+      const userEntry = registry.byUserId.get(userId);
+      const ctxPct = transport.contextPercent;
+      if (userEntry?.role !== "guest" && (ctxPct < 0 || ctxPct < CTX_COMPACT_PCT)) {
+        try {
+          const t0 = performance.now();
+          const recall = await memory.recallSearch({
+            translated: [text],
+            original: text,
+            userId,
+            limit: ACTIVE_MEMORY_LIMIT,
+            maxClassification: userEntry?.maxClass ?? 0,
+            stages: ["Sf", "S1"],
+          });
+          const hits = recall.results.filter(h => h.score > 0);
+          if (hits.length > 0) {
+            const lines = hits.map(h => compress({
+              content_en: h.content,
+              topic: h.topic ?? "general",
+              emotion_tags: h.emotionTags ?? "",
+              importance_flags: h.importanceFlags ?? "",
+              memory_type: h.memoryType ?? "fact",
+              confidence: h.confidence ?? 3,
+              date: h.createdAt ? localMonth(new Date(h.createdAt)) : h.date?.slice(0, 7),
+            }));
+            const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]\n\n`;
+            prompt = block + prompt;
+            logDebug(TAG, `Active recall: ${hits.length} hits, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
+          }
+        } catch (err) {
+          logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     }
 
     if (!isSessionStart) {
