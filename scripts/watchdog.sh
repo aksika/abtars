@@ -21,7 +21,10 @@ if [[ -f "$ENV_FILE" ]]; then
   fi
   _kill=$(grep -m1 '^WATCHDOG_KILL_ON_STALE=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
   if [[ -n "$_kill" ]]; then KILL_ON_STALE="$_kill"; fi
+  _grace=$(grep -m1 '^WATCHDOG_SUSPEND_GRACE=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
+  if [[ -n "$_grace" ]]; then SUSPEND_GRACE="$_grace"; fi
 fi
+SUSPEND_GRACE="${SUSPEND_GRACE:-true}"
 STARTUP_TIMEOUT=$(( HB_SEC + POLL_SEC * 2 ))
 CIRCUIT_MAX=3
 CIRCUIT_WINDOW=300
@@ -196,6 +199,7 @@ log "Watchdog starting (stale=${STALE_SEC}s, poll=${POLL_SEC}s, circuit=${CIRCUI
 write_wd_lock
 
 spawn_bridge "$@"
+LAST_POLL_AT=$(date +%s)
 
 # ── Monitor loop ──
 while true; do
@@ -204,6 +208,18 @@ while true; do
 
   write_wd_lock
   rotate_log
+
+  # Suspend detection: if real elapsed >> POLL_SEC, the host (laptop, VM, WSL)
+  # was suspended. Bridge was suspended too — its heartbeat is "stale" only
+  # because wall-clock advanced while both processes were frozen. Skip the
+  # staleness check for one cycle so the bridge can heartbeat on resume.
+  _now_s=$(date +%s)
+  _poll_gap=$(( _now_s - LAST_POLL_AT ))
+  LAST_POLL_AT=$_now_s
+  if [[ "$SUSPEND_GRACE" == "true" ]] && (( _poll_gap > POLL_SEC * 3 )); then
+    log "Suspend detected (poll gap ${_poll_gap}s >> ${POLL_SEC}s) — granting one-cycle grace"
+    continue
+  fi
 
   local_lock=$(read_lock)
   if [[ "$local_lock" == "ERR" ]]; then
