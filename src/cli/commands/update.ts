@@ -98,6 +98,12 @@ export async function update(opts: UpdateOptions): Promise<number> {
         await copyFile(join(repoScripts, name), join(paths.home, name));
         await chmod(join(paths.home, name), 0o755);
       }
+      // Install/refresh LaunchAgent plist on macOS
+      if (name.endsWith('.plist') && process.platform === 'darwin') {
+        const launchAgentsDir = join(process.env['HOME'] ?? '', 'Library', 'LaunchAgents');
+        await mkdir(launchAgentsDir, { recursive: true });
+        await copyFile(join(repoScripts, name), join(launchAgentsDir, name));
+      }
     }
     process.stdout.write(`✓ scripts refreshed (${scriptFiles.length} files)\n`);
 
