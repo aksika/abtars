@@ -13,6 +13,7 @@
 import { logInfo, logWarn } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { startSession } from "../components/message-pipeline.js";
+import { cleanResponse } from "../components/clean-response.js";
 import type { BootCtx } from "./context.js";
 
 async function sendBackOnline(
@@ -61,10 +62,10 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
         loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master",
         sessionKey,
         "You just came online. Output ONLY a personalized greeting message.",
-        (text) => {
-          const clean = text.replace(/\s*\[NO-REPLY\]\s*/gi, "").trim();
-          if (!clean) return Promise.resolve();
-          return telegramAdapter.sendMessage(String(chatId), clean);
+        async (text) => {
+          const { text: clean, reactionEmoji } = cleanResponse(text);
+          if (clean) await telegramAdapter.sendMessage(String(chatId), clean);
+          if (reactionEmoji) await telegramAdapter.sendMessage(String(chatId), reactionEmoji);
         },
       ).then(() => {
         logInfo("main", "✅ Startup session ready");

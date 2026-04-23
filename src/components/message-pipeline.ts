@@ -8,6 +8,7 @@ import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { readEnvWithDefault } from "./env.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction, compactionSummaries } from "./compaction.js";
+import { cleanResponse } from "./clean-response.js";
 import { buildSessionStartContext } from "abmind/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { loadUsers, loadUserProfile } from "./user-registry.js";
@@ -306,11 +307,26 @@ export async function handleInboundMessage(
 
     // --- Extract clean answer ---
     const cleanAnswer = transport.answerOnly;
-    let userResponse = (fullModeChats.has(sessionKey) ? response : (cleanAnswer || response))
-      .replace(/^\[lang:\w{2}\]\s*/i, ""); // strip lang tag from display
+    const rawResponse = fullModeChats.has(sessionKey) ? response : (cleanAnswer || response);
+    const { text: cleanedText, reactionEmoji, noReply } = cleanResponse(rawResponse);
+    let userResponse = cleanedText;
 
     // --- Empty response ---
-    if (!userResponse || !userResponse.trim()) {
+    if (!userResponse) {
+      if (noReply) {
+        logDebug(TAG, "LLM returned [NO-REPLY], dropping silently");
+        return;
+      }
+      // Reaction-only: [REACT:emoji] with no text
+      if (reactionEmoji) {
+        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+        if (streamMsgId && adapter.editMessage) {
+          await adapter.editMessage(channelId, streamMsgId, reactionEmoji).catch(() => {});
+        } else {
+          await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
+        }
+        return;
+      }
       if (!intermediateDelivered) {
         if (transport.toolCallsSucceeded > 0) {
           logDebug(TAG, `Empty text but ${transport.toolCallsSucceeded} tool call(s) succeeded — suppressing fallback`);
@@ -329,44 +345,12 @@ export async function handleInboundMessage(
       await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
     }
 
-    // --- [NO-REPLY] → strip or silently drop ---
-    userResponse = userResponse.replace(/\s*\[NO-REPLY\]\s*/gi, "").trim();
-    if (!userResponse || userResponse === "(no response)") {
-      logDebug(TAG, "LLM returned [NO-REPLY], dropping silently");
-      return;
-    }
-
     // --- Standalone emoji → try reaction, fallback to message ---
     const trimmed = userResponse.trim();
     const isEmojiOnly = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}]{1,2}$/u.test(trimmed);
     if (isEmojiOnly) {
       await tryReaction(adapter, channelId, msg.messageId, trimmed, msg.threadId);
       return;
-    }
-
-    // --- [REACT:emoji] — extract reaction, deliver remaining text if any ---
-    const reactMatch = userResponse.trim().match(/\[REACT:(.+?)\]/);
-    if (reactMatch) {
-      const emoji = reactMatch[1]!;
-      const stripped = userResponse.replace(reactMatch[0], "").trim();
-      if (stripped) {
-        // Case A: text + reaction → inline the emoji
-        userResponse = userResponse.replace(reactMatch[0], emoji);
-      } else {
-        // Cases B/C/D: reaction-only
-        if (msg.messageId) {
-          await tryReaction(adapter, channelId, msg.messageId, emoji, msg.threadId);
-        }
-        // Clean up streamed placeholder (cases B/C)
-        if (streamMsgId && adapter.editMessage) {
-          await adapter.editMessage(channelId, streamMsgId, emoji).catch(() => {});
-        }
-        if (!msg.messageId) {
-          userResponse = emoji; // Case D: fall through to deliver
-        } else {
-          return; // Cases B/C: reaction/text already sent
-        }
-      }
     }
 
     // --- Deliver response ---
@@ -403,6 +387,11 @@ export async function handleInboundMessage(
           }
         }
       }
+    }
+
+    // --- Send reaction emoji as separate message (if extracted by cleanResponse) ---
+    if (reactionEmoji) {
+      await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
     }
 
     // --- Record to memory (skip for guests) ---
