@@ -7,7 +7,7 @@
 
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { copyFile, mkdir, chmod, readdir } from 'node:fs/promises';
+import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import type { SourceName } from '../update-sources/types.js';
 import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION } from '../deploy-lib-import.js';
@@ -90,6 +90,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
     const destScripts = join(paths.home, 'scripts');
     await mkdir(destScripts, { recursive: true });
     const scriptFiles = await readdir(repoScripts).catch(() => [] as string[]);
+    const home = process.env['HOME'] ?? '';
+    let serviceChanged = false;
     for (const name of scriptFiles) {
       await copyFile(join(repoScripts, name), join(destScripts, name));
       if (name.endsWith('.sh')) await chmod(join(destScripts, name), 0o755);
@@ -98,14 +100,35 @@ export async function update(opts: UpdateOptions): Promise<number> {
         await copyFile(join(repoScripts, name), join(paths.home, name));
         await chmod(join(paths.home, name), 0o755);
       }
-      // Install/refresh LaunchAgent plist on macOS
-      if (name.endsWith('.plist') && process.platform === 'darwin') {
-        const launchAgentsDir = join(process.env['HOME'] ?? '', 'Library', 'LaunchAgents');
+      // macOS: template + install LaunchAgent plist
+      if (name.endsWith('.plist') && process.platform === 'darwin' && home) {
+        const launchAgentsDir = join(home, 'Library', 'LaunchAgents');
         await mkdir(launchAgentsDir, { recursive: true });
-        await copyFile(join(repoScripts, name), join(launchAgentsDir, name));
+        const dst = join(launchAgentsDir, name);
+        const oldContent = await readFile(dst, 'utf-8').catch(() => '');
+        const templated = (await readFile(join(repoScripts, name), 'utf-8')).replace(/\{\{HOME\}\}/g, home);
+        await writeFile(dst, templated);
+        if (oldContent !== templated) serviceChanged = true;
+      }
+      // Linux: install systemd user service
+      if (name.endsWith('.service') && process.platform === 'linux' && home) {
+        const systemdDir = join(home, '.config', 'systemd', 'user');
+        await mkdir(systemdDir, { recursive: true });
+        const dst = join(systemdDir, name);
+        const oldContent = await readFile(dst, 'utf-8').catch(() => '');
+        await copyFile(join(repoScripts, name), dst);
+        const newContent = await readFile(dst, 'utf-8').catch(() => '');
+        if (oldContent !== newContent) serviceChanged = true;
       }
     }
     process.stdout.write(`✓ scripts refreshed (${scriptFiles.length} files)\n`);
+    if (serviceChanged) {
+      if (process.platform === 'darwin') {
+        process.stdout.write(`⚠️  LaunchAgent plist updated — reload with: launchctl bootout gui/$(id -u)/com.agentbridge.watchdog && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist\n`);
+      } else {
+        process.stdout.write(`⚠️  systemd service updated — reload with: systemctl --user daemon-reload && systemctl --user restart agentbridge-watchdog\n`);
+      }
+    }
 
     // Run any pending migrations (excluding 003-flat-to-releases, which is
     // gated behind `install --upgrade`). 001/002 are safe to run here.

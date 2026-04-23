@@ -7,7 +7,7 @@ Type=simple
 ExecStart=%h/.agentbridge/watchdog.sh --all --web --agent
 Restart=on-failure
 RestartSec=5
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.agentbridge/bin:%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target

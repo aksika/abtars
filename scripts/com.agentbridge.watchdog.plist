@@ -6,7 +6,7 @@
   <string>com.agentbridge.watchdog</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/akos/.agentbridge/watchdog.sh</string>
+    <string>{{HOME}}/.agentbridge/watchdog.sh</string>
     <string>--all</string>
     <string>--web</string>
     <string>--agent</string>
@@ -18,13 +18,13 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>StandardOutPath</key>
-  <string>/Users/akos/.agentbridge/logs/watchdog-launchd.log</string>
+  <string>{{HOME}}/.agentbridge/logs/watchdog-launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/akos/.agentbridge/logs/watchdog-launchd.log</string>
+  <string>{{HOME}}/.agentbridge/logs/watchdog-launchd.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/akos/.agentbridge/bin:/Users/akos/.local/bin:/Users/akos/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>{{HOME}}/.agentbridge/bin:{{HOME}}/.local/bin:{{HOME}}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
 </dict>
 </plist>
