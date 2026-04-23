@@ -488,6 +488,178 @@ abmind is independent — uninstall separately per `abmind/docs/install.md`.
 
 ---
 
+## Troubleshooting
+
+### Bridge won't start after reboot (macOS)
+
+**Symptom:** `launchctl list | grep agentbridge` shows the watchdog with a non-zero exit status or PID `-`. Bridge process not running.
+
+**Check watchdog log:**
+```bash
+tail -30 ~/.agentbridge/logs/watchdog-launchd.log
+```
+
+| Log pattern | Cause | Fix |
+|---|---|---|
+| Repeated "Watchdog starting" every 10s, no "Starting bridge" | Watchdog self-destruct loop (doctor.sh or other startup crash) | Check `~/.agentbridge/logs/launchd.log` for errors. If doctor.sh is the cause, verify it's not called from watchdog startup. |
+| "Bridge spawned (PID=N)" then "Bridge process gone (PID=N)" in <60s | Bridge crashes on startup | Check `~/.agentbridge/logs/launchd.log` for the crash. Common: missing `better-sqlite3`, port conflict, bad `.env`. |
+| "Port 3000 is already in use" | Another bridge instance or stale process holds the port | `lsof -i :3000` to find it. Kill the stale process. If two launchd plists are loaded, remove the legacy one (see below). |
+| No log at all | Watchdog not loaded or plist missing | `ls ~/Library/LaunchAgents/com.agentbridge.watchdog.plist` — if missing, run `agentbridge update` (copies plist). Then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist`. |
+
+### Bridge won't start after reboot (Linux)
+
+```bash
+systemctl --user status agentbridge-watchdog
+journalctl --user -u agentbridge-watchdog -n 50
+```
+
+If the service file is missing: `agentbridge update` installs it to `~/.config/systemd/user/`. Then:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now agentbridge-watchdog
+```
+
+### Two bridge instances fighting (Telegram 409 Conflict)
+
+**Symptom:** Telegram poller logs `409: terminated by other getUpdates request`. Two processes polling the same bot token.
+
+**Diagnose:**
+```bash
+ps aux | grep "node.*main.js" | grep -v grep
+launchctl list | grep agentbridge   # macOS
+```
+
+If two launchd jobs are loaded (e.g. `com.agentbridge.watchdog` AND `com.agentbridge.molty`):
+```bash
+# Keep only the watchdog plist
+launchctl unload ~/Library/LaunchAgents/com.agentbridge.molty.plist
+rm ~/Library/LaunchAgents/com.agentbridge.molty.plist
+```
+
+If two node processes from the same plist: the watchdog spawns one, something else (cron agent, manual start) spawned another. Kill the rogue:
+```bash
+# Find the watchdog's bridge PID
+cat ~/.agentbridge/bridge.lock | python3 -c "import json,sys;print(json.load(sys.stdin)['pid'])"
+# Kill any OTHER node main.js process
+```
+
+### `abmind recall` / CLI tools not found from bridge
+
+**Symptom:** Model says "can't find abmind" or execute_bash returns "command not found" for `abmind`, `agentbridge-tweet`, etc.
+
+**Cause:** The bridge inherits PATH from the watchdog's launchd plist (macOS) or systemd service (Linux). If PATH doesn't include user-local bin dirs, CLI tools are invisible.
+
+**Check:**
+```bash
+# See what PATH the bridge actually has (macOS)
+ps -p $(cat ~/.agentbridge/bridge.lock | python3 -c "import json,sys;print(json.load(sys.stdin)['pid'])") -E | grep PATH
+```
+
+**Fix:** `agentbridge update` templates the plist with `$HOME`-relative paths. If you see hardcoded `/Users/akos/...` in the plist, run `agentbridge update` to regenerate it. Then reload:
+```bash
+# macOS
+launchctl bootout gui/$(id -u)/com.agentbridge.watchdog
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist
+# Linux
+systemctl --user daemon-reload && systemctl --user restart agentbridge-watchdog
+```
+
+### `better-sqlite3` not found (ERR_MODULE_NOT_FOUND)
+
+**Symptom:** Bridge crashes with `Cannot find package 'better-sqlite3' imported from .agentbridge/node_modules/abmind/dist/src/memory-db.js`.
+
+**Cause:** `better-sqlite3` is an abmind dependency. It lives at `~/.agentbridge/node_modules/abmind/node_modules/better-sqlite3/`. If this directory is missing, the deploy's rsync didn't include it.
+
+**Fix:**
+```bash
+# Ensure abmind's source checkout has it installed
+cd ~/abmind && npm install   # (or wherever abmind checkout lives)
+# Re-deploy bridge (rsync picks up abmind's node_modules)
+cd ~/agentbridge && agentbridge update
+```
+
+If the problem persists, check that `agentbridge update` is NOT deleting `~/.agentbridge/node_modules/abmind/node_modules/`. This was a known bug fixed in commit `ae65108`.
+
+### Plist changes not taking effect
+
+**Symptom:** You updated the plist (PATH, KeepAlive, etc.) but the running watchdog still uses old values.
+
+**Cause:** launchd caches the plist at load time. `launchctl kickstart -k` restarts the process but reuses the cached config. You need a full unload/reload.
+
+```bash
+launchctl bootout gui/$(id -u)/com.agentbridge.watchdog
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist
+```
+
+Or reboot. `agentbridge update` prints a hint when plist content changes.
+
+### Sleep cycle fails / Mac stays awake
+
+**Symptom:** Mac doesn't sleep after BED_TIME. Bridge log shows sleep failures.
+
+**Check:**
+```bash
+grep -E "sleep|dreamy|BUDGET|🏁" ~/.agentbridge/logs/bridge-$(date +%F).log | tail -20
+```
+
+| Pattern | Cause | Fix |
+|---|---|---|
+| "All models exhausted" on multiple steps | LLM provider rate-limited or down | Wait for provider recovery. Sleep retries up to 3 times (5min apart). Check model config: `cat ~/.agentbridge/config/transport.json`. |
+| "LLM call limit (N) reached — suspending" | Sleep budget exhausted | Normal if many steps failed (each retry burns budget). The `suspended` status now allows retry (fixed in abmind `c87847a`). |
+| "Sleep already done today — skip" after a failed attempt | Retry blocked by daily flag | Update abmind — fix `c87847a` treats `suspended` as retryable. |
+| Sleep succeeded but no "Putting hardware to sleep" | Quiet-tick countdown not reached (user messaged during wait) | Normal — bridge waits for N quiet ticks (no messages) after Dreamy finishes before calling `pmset sleepnow`. |
+| `pmset -g` shows `sleep 0` | macOS auto-sleep disabled | Not a problem — bridge uses `pmset sleepnow` (forced), not idle-based. But if the bridge's sleep cycle fails, the Mac won't auto-sleep as fallback. Set `sudo pmset -c sleep 30` if you want a safety net. |
+
+### Watchdog kills bridge with "heartbeat stale"
+
+**Symptom:** Watchdog log shows `Killing bridge PID=N (heartbeat stale (Xs))` repeatedly.
+
+**Cause:** Bridge isn't updating `lastHeartbeat` in `bridge.lock`. The watchdog's staleness threshold is `WATCHDOG_STALE_SEC` (default 360s = 6 min).
+
+**Common causes:**
+- Bridge is stuck in a long-running LLM call (model timeout)
+- Bridge event loop is blocked (sync I/O, infinite loop)
+- Bridge crashed silently (no graceful shutdown, heartbeat stops)
+
+**Check:**
+```bash
+cat ~/.agentbridge/bridge.lock   # lastHeartbeat timestamp
+tail -50 ~/.agentbridge/logs/bridge-$(date +%F).log   # last activity
+```
+
+If heartbeat is stale but bridge is responsive via Telegram, the heartbeat task may have thrown. Check for `[heartbeat]` errors in the log.
+
+### Messages lost during outage
+
+**Symptom:** User sent messages while bridge was down, but they never arrived after recovery.
+
+**Cause (pre-fix):** The Telegram poller advanced its offset before processing handlers. If the bridge crashed mid-processing, messages were acked to Telegram but never handled. Fixed in commit `7e4623c` — offset now advances only after handler success, persisted to `~/.agentbridge/state/telegram-offset`.
+
+**If still happening post-fix:** Check `~/.agentbridge/state/telegram-offset` — it should contain the last successfully-processed update_id. On restart, the poller resumes from this offset. If the file is missing or corrupt, the poller starts from 0 (Telegram replays retained updates, up to 24h).
+
+### Model returns empty response (🤷 fallback)
+
+**Symptom:** User gets `🤷 Model returned an empty response. Try again or /reset.`
+
+**Cause:** The model returned 0 characters after processing. If the model made successful tool calls (e.g. `memory_store`), the 🤷 is suppressed (fixed in `bfb72f6`). If no tool calls succeeded, the fallback fires.
+
+**Common causes:**
+- Model rate-limited (returns empty on exhaustion)
+- Model context window full (returns empty when prompt exceeds limit)
+- Model bug (specific prompt triggers empty response)
+
+**Check:** `grep "Empty response" ~/.agentbridge/logs/bridge-$(date +%F).log` — if frequent, check model health: `/models` command in Telegram, or `cat ~/.agentbridge/config/transport.json`.
+
+### execute_bash blocked ("Command blocked: this would spawn/restart a bridge")
+
+**Symptom:** Model's bash command returns `Command blocked: this would spawn/restart a bridge or watchdog process`.
+
+**Cause:** Safety guardrail in `tool-registry.ts` blocks commands matching `main.js`, `agentbridge.sh`, `watchdog.sh`, or `launchctl load/bootstrap/kickstart/start`. Prevents LLMs from accidentally spawning duplicate bridge instances (observed in the 2026-04-22 outage).
+
+**If legitimate:** The guardrail is intentionally broad. If you need to run a blocked command, do it from a terminal, not through the bot.
+
+---
+
 ## See also
 
 - `abmind/docs/install.md` — memory backend install
