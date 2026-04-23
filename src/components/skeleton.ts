@@ -25,7 +25,7 @@ export interface ISkillSlot {
   /** Scan for new/changed skills since last check. */
   checkForChanges(): Array<{ filename: string; name: string; description: string; path: string }>;
   /** Append skill to tools manifest. */
-  appendToTools(skill: { name: string; description: string }): void;
+  generateCatalog(): void;
 }
 
 /** Platform adapter slot — Telegram, Discord, etc. */

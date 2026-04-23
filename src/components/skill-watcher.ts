@@ -1,10 +1,10 @@
 /**
  * SkillWatcher — detects new/changed skill files for hot-reload via heartbeat.
+ * Generates skills_catalog.md on startup + when skills change.
  */
 
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
-import { appendFileSync } from "node:fs";
 import { logInfo, logWarn } from "./logger.js";
 import { scanForInjection } from "abmind/injection-scanner.js";
 
@@ -23,7 +23,7 @@ export class SkillWatcher implements ISkillSlot {
   private mtimes = new Map<string, number>();
   private firstTick = true;
 
-  constructor(private skillsDir: string, private toolsPath: string) {}
+  constructor(private skillsDir: string, private catalogPath: string) {}
 
   /** Scan skills dir, return new/changed skills since last check. */
   checkForChanges(): NewSkill[] {
@@ -42,7 +42,6 @@ export class SkillWatcher implements ISkillSlot {
 
         const { name, description } = this.parseSkillHeader(filepath);
         if (name) {
-          // Scan for prompt injection before accepting
           const content = readFileSync(filepath, "utf-8");
           const scan = scanForInjection(content);
           if (!scan.safe) {
@@ -55,18 +54,26 @@ export class SkillWatcher implements ISkillSlot {
       } catch { /* skip unreadable files */ }
     }
 
+    if (!this.firstTick && changed.length > 0) this.generateCatalog();
     this.firstTick = false;
     return changed;
   }
 
-  /** Append a 1-liner to TOOLS.md if not already present. */
-  appendToTools(skill: NewSkill): void {
+  /** Generate skills_catalog.md from all skill files. Called on startup + when skills change. */
+  generateCatalog(): void {
+    const files = this.scanMdFiles(this.skillsDir);
+    const entries: string[] = [];
+    for (const filepath of files) {
+      const { name, description } = this.parseSkillHeader(filepath);
+      if (name) entries.push(`- ${name}: ${description}`);
+    }
+    const content = `# Skills Catalog\n\n${entries.join("\n")}\n`;
     try {
-      const tools = readFileSync(this.toolsPath, "utf-8");
-      if (tools.includes(skill.name)) return; // already listed
-      appendFileSync(this.toolsPath, `\n- ${skill.name}: ${skill.description}`);
-      logInfo(TAG, `Appended to TOOLS.md: ${skill.name}`);
-    } catch { /* TOOLS.md may not exist */ }
+      writeFileSync(this.catalogPath, content, "utf-8");
+      logInfo(TAG, `Generated skills_catalog.md (${entries.length} skills)`);
+    } catch (err) {
+      logWarn(TAG, `Failed to write skills_catalog.md: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private scanMdFiles(dir: string): string[] {
@@ -75,7 +82,7 @@ export class SkillWatcher implements ISkillSlot {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
         if (entry.isDirectory()) results.push(...this.scanMdFiles(full));
-        else if (entry.name.endsWith(".md") && entry.name !== "TOOLS.md") results.push(full);
+        else if (entry.name.endsWith(".md") && entry.name !== "TOOLS.md" && entry.name !== "skills_catalog.md") results.push(full);
       }
     } catch { /* dir may not exist */ }
     return results;

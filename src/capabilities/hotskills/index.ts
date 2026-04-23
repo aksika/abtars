@@ -11,15 +11,17 @@ import type { CapabilityApi } from "../capability.js";
 export function register(api: CapabilityApi): void {
   const skillWatcher = new SkillWatcher(
     join(agentBridgeHome(), "skills"),
-    join(agentBridgeHome(), "skills", "TOOLS.md"),
+    join(agentBridgeHome(), "core", "skills_catalog.md"),
   );
+
+  // Generate catalog on startup
+  skillWatcher.generateCatalog();
 
   api.registerHeartbeatTask({
     name: "skill-reloader",
     execute: async () => {
       const changed = skillWatcher.checkForChanges();
       for (const skill of changed) {
-        skillWatcher.appendToTools(skill);
         const chatId = api.config.mainChatId;
         if (chatId) {
           const msg = `[NEW SKILL AVAILABLE] ${skill.name}: ${skill.description}. Read ${skill.path} if you need it.`;
