@@ -4,11 +4,11 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, platform } from "node:os";
 import { logInfo, logError } from "./logger.js";
-import { writeSleepStatus, readBridgeLockField } from "./transport/bridge-lock-transport.js";
+import { writeSleepStatus, readBridgeLockField, writeForceSleep } from "./transport/bridge-lock-transport.js";
 
 import { readEntries as cronReadEntries } from "./cron/cron-store.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
@@ -85,6 +85,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/skills": handleSkills,
   "/skill": handleSkills,
   "/wakeup": handleWakeup,
+  "/sleep": handleSleep,
 };
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
@@ -95,6 +96,7 @@ const prefixCommands: ReadonlyArray<{ prefix: string; handler: CommandHandler }>
   { prefix: "/tasks log ", handler: handleTasksLog },
   { prefix: "/cron log ", handler: handleTasksLog },
   { prefix: "/nlm", handler: handleNlm },
+  { prefix: "/sleep ", handler: handleSleepSub },
 ];
 
 const KNOWN_COMMANDS = new Set([...Object.keys(exactCommands), ...prefixCommands.map(p => p.prefix.split(" ")[0]!)]);
@@ -570,6 +572,92 @@ async function handleWakeup(_text: string, ctx: CommandContext): Promise<boolean
   return true;
 }
 
+// ── /sleep — status + force-trigger ─────────────────────────────────────────
+
+function readLatestSleepLock(auditDir: string): { date: string; status: string; llmCalls: number; steps: Record<string, { status: string }> } | null {
+  try {
+    const files = readdirSync(auditDir).filter(f => f.startsWith("sleep_") && f.endsWith(".lock")).sort();
+    if (files.length === 0) return null;
+    const latest = files[files.length - 1]!;
+    const raw = JSON.parse(readFileSync(join(auditDir, latest), "utf-8"));
+    const dateMatch = latest.match(/sleep_(\d{4})(\d{2})(\d{2})/);
+    const date = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : "unknown";
+    return { date, status: raw.status ?? "unknown", llmCalls: raw.llmCalls ?? 0, steps: raw.steps ?? {} };
+  } catch { return null; }
+}
+
+function todayLockPath(auditDir: string): string {
+  const d = new Date();
+  const ds = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  return join(auditDir, `sleep_${ds}.lock`);
+}
+
+async function handleSleep(_text: string, ctx: CommandContext): Promise<boolean> {
+  const sleepStatus = readBridgeLockField<string>("sleepStatus") ?? "awake";
+  const progress = ctx.sleepProgress?.();
+  const force = readBridgeLockField<string>("forceSleep");
+  const bedTime = process.env["BED_TIME"] ?? "0:30";
+  const auditDir = ctx.memoryConfig?.memoryDir ? join(ctx.memoryConfig.memoryDir, "sleep") : "";
+  const lock = auditDir ? readLatestSleepLock(auditDir) : null;
+
+  const lines: string[] = ["😴 Sleep status"];
+  lines.push(`  State: ${sleepStatus}${progress ? ` (${progress.step} ${progress.percent}%)` : ""}`);
+  if (lock) {
+    const counts = Object.values(lock.steps);
+    const ok = counts.filter(s => s.status === "ok").length;
+    const failed = counts.filter(s => s.status === "failed").length;
+    const skipped = counts.filter(s => s.status === "skipped").length;
+    lines.push(`  Last cycle: ${lock.date} — ${ok} ok, ${failed} failed, ${skipped} skipped (${lock.status}, ${lock.llmCalls} LLM calls)`);
+  } else {
+    lines.push("  Last cycle: (none found)");
+  }
+  lines.push(`  Schedule: BED_TIME=${bedTime}`);
+  if (force) lines.push(`  Force-trigger: ${force}`);
+  lines.push("");
+  lines.push("/sleep resume — retry failed steps");
+  lines.push("/sleep now — full fresh cycle");
+  await ctx.reply(lines.join("\n"));
+  return true;
+}
+
+async function handleSleepSub(text: string, ctx: CommandContext): Promise<boolean> {
+  const sub = text.replace(/^\/sleep\s+/i, "").trim().toLowerCase();
+  const sleepStatus = readBridgeLockField<string>("sleepStatus") ?? "awake";
+
+  if (sleepStatus === "sleeping") {
+    await ctx.reply("😴 Sleep already running.");
+    return true;
+  }
+
+  const auditDir = ctx.memoryConfig?.memoryDir ? join(ctx.memoryConfig.memoryDir, "sleep") : "";
+
+  if (sub === "resume") {
+    const lock = auditDir ? readLatestSleepLock(auditDir) : null;
+    const hasFailed = lock && Object.values(lock.steps).some(s => s.status === "failed");
+    if (!lock || lock.status === "completed" || !hasFailed) {
+      await ctx.reply("No failed sleep cycle to resume — use /sleep now for a fresh run.");
+      return true;
+    }
+    writeForceSleep("resume via /sleep resume");
+    await ctx.reply("⚡ Sleep resume queued — retries failed steps on next heartbeat tick (≤5min)");
+    logInfo(TAG, "Sleep resume triggered via /sleep resume");
+    return true;
+  }
+
+  if (sub === "now") {
+    if (auditDir) {
+      try { unlinkSync(todayLockPath(auditDir)); } catch { /* no lock to delete */ }
+    }
+    writeForceSleep("fresh via /sleep now");
+    await ctx.reply("⚡ Fresh sleep cycle queued — starts on next heartbeat tick (≤5min)");
+    logInfo(TAG, "Fresh sleep triggered via /sleep now");
+    return true;
+  }
+
+  await ctx.reply("Unknown subcommand. Use /sleep, /sleep resume, or /sleep now.");
+  return true;
+}
+
 async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> {
   const cmds = [
     "/new — Fresh session (keeps current mode)",
@@ -594,6 +682,9 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/nlm — Knowledge base (list/create/sources/query)",
     "/restart — Restart CLI session",
     "/wakeup — Wake Mac from sleep (cancel hw_sleep)",
+    "/sleep — Sleep status",
+    "/sleep resume — Retry failed sleep steps",
+    "/sleep now — Full fresh sleep cycle",
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");
