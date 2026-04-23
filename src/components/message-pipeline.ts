@@ -6,6 +6,7 @@
 
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { readEnvWithDefault } from "./env.js";
+import { localTime } from "../utils/local-time.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction, compactionSummaries } from "./compaction.js";
 import { cleanResponse } from "./clean-response.js";
@@ -149,7 +150,7 @@ export async function handleInboundMessage(
 
     // --- Build prompt ---
     const bufKey = `${msg.platform}:${channelId}`;
-    let prompt = `[${msg.platform.charAt(0).toUpperCase() + msg.platform.slice(1)}] ${text}`;
+    let prompt = `[${localTime()}] ${text}`;
     if (msg.mediaPath) {
       prompt += `\nFile saved at: ${msg.mediaPath}`;
     }
