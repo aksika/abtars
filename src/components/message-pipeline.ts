@@ -11,7 +11,7 @@ import { runCompaction, compactionSummaries } from "./compaction.js";
 import { cleanResponse } from "./clean-response.js";
 import { buildSessionStartContext } from "abmind/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
-import { loadUsers, loadUserProfile } from "./user-registry.js";
+import { loadUsers } from "./user-registry.js";
 import { tryReaction } from "./reaction-handler.js";
 import { compress } from "abmind";
 import { localMonth } from "../utils/local-time.js";
@@ -549,7 +549,7 @@ function buildSessionStartPrompt(
     logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
   }
 
-  // Inject current user identity
+  // Inject current user identity (profile already in soul bundle via getSessionBundle)
   if (sessionKey) {
     try {
       const registry = loadUsers();
@@ -557,39 +557,38 @@ function buildSessionStartPrompt(
       if (user) {
         const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
         contextParts.push(`[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).`);
-        const profile = loadUserProfile(user.userId);
-        if (profile) contextParts.push(profile);
       }
     } catch { /* registry not available */ }
   }
 
-  const ctx = buildSessionStartContext(memory, userId);
-  if (ctx) {
-    contextParts.push(ctx);
-    logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
-  }
-
-  try {
-    const userRole = loadUsers().byUserId.get(userId)?.role ?? "master";
-    if (userRole === "guest") {
-      contextParts.push("Hi! How can I help?");
-    } else if (userRole === "user") {
-      contextParts.push("[SESSION START] Returning user. Be friendly and helpful.");
-    } else {
-      const wakeUp = memory.buildWakeUp();
-      if (wakeUp) {
-        contextParts.push(wakeUp);
-        logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
-      }
-    }
-  } catch { /* wake-up builder not available */ }
-
-  // Inject compaction summary if available
+  // Compaction path: skip session-context + wake-up (compaction summary has the context)
   const compSummary = compactionSummaries.get(sessionKey ?? "");
   if (compSummary && sessionKey) {
     contextParts.push(`[COMPACTED CONVERSATION]\n${compSummary}\n[/COMPACTED CONVERSATION]`);
     compactionSummaries.delete(sessionKey);
     logInfo(TAG, `Injected compaction summary (${compSummary.length} chars)`);
+  } else {
+    // Normal path: session-context (daily + recent msgs) + wake-up (time + flashback)
+    const ctx = buildSessionStartContext(memory, userId);
+    if (ctx) {
+      contextParts.push(ctx);
+      logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
+    }
+
+    try {
+      const userRole = loadUsers().byUserId.get(userId)?.role ?? "master";
+      if (userRole === "guest") {
+        contextParts.push("Hi! How can I help?");
+      } else if (userRole === "user") {
+        contextParts.push("[SESSION START] Returning user. Be friendly and helpful.");
+      } else {
+        const wakeUp = memory.buildWakeUp();
+        if (wakeUp) {
+          contextParts.push(wakeUp);
+          logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
+        }
+      }
+    } catch { /* wake-up builder not available */ }
   }
 
   // Wrap all context, put user instruction after
