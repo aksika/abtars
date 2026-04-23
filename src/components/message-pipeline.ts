@@ -208,6 +208,18 @@ export async function handleInboundMessage(
       prompt = interceptLargeMessage(prompt).text;
     }
 
+    // --- Injection scan on user text for non-master (#157) ---
+    const userRole = registry.byUserId.get(userId)?.role;
+    if (userRole !== "master" && text.length > 10) {
+      const { scanForInjection } = await import("abmind/injection-scanner.js");
+      const scan = scanForInjection(text);
+      if (!scan.safe) {
+        logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map(f => f.category).join(", ")}`);
+        await adapter.sendMessage(channelId, "⛔ Message blocked — suspicious content detected.", { threadId: msg.threadId });
+        return;
+      }
+    }
+
     // --- Send to transport ---
     const codingSession = codingMode.has(sessionKey) ? codingMode.getSession() : null;
     const responsePromise = codingSession

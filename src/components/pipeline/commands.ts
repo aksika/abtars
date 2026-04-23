@@ -3,7 +3,7 @@
  *
  * Interrupt commands (/stop, /new, /reset, /restart) run immediately even when busy.
  * All other commands defer to the busy guard when the chat is busy.
- * Non-master messages must start with letter, digit, emoji, or /command (#145).
+ * Non-master: leading bangs stripped (#157), injection scanned pre-sendPrompt.
  */
 
 import type { Middleware } from "./middleware.js";
@@ -12,7 +12,7 @@ import type { CommandContext } from "../command-handlers.js";
 import { logInfo } from "../logger.js";
 import { loadUsers } from "../user-registry.js";
 
-const SAFE_FIRST_CHAR = /^\s*(\p{L}|\p{N}|\p{So}|\/\p{L})/u;
+const BANG_PREFIX = /^[!！ǃ❗❕‼⁉]+/u;
 
 const INTERRUPT_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/restart"]);
 const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/restart", "/compact", "/coding", "/default"]);
@@ -23,25 +23,16 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     codingMode, idleSave, busyChats, fullModeChats, pendingSessionStart,
     updateCtxStart, conversationBuffer } = deps;
 
-  // #145: block unsafe prefixes for non-master (!, //, shell escapes)
+  // #157: strip leading bangs for non-master (kiro-cli executes ! as shell)
   const registry = loadUsers();
   const platformKey = `${msg.platform}:${msg.channelId}`;
   const user = registry.byPlatformId.get(platformKey);
   const isMaster = user?.role === "master";
-  if (!isMaster && !SAFE_FIRST_CHAR.test(ctx.text)) {
-    logInfo("commands", `Blocked unsafe input from ${user?.userId ?? "unknown"}: "${ctx.text.slice(0, 20)}"`);
-    await ctx.reply("⛔ Message blocked — unsafe prefix.");
-    ctx.handled = true;
-    return;
-  }
-
-  // Injection scan for non-master users
-  if (!isMaster && ctx.text.length > 10) {
-    const { scanForInjection } = await import("abmind/injection-scanner.js");
-    const scan = scanForInjection(ctx.text);
-    if (!scan.safe) {
-      logInfo("commands", `Injection blocked from ${user?.userId ?? "unknown"}: ${scan.flags.map(f => f.category).join(", ")}`);
-      await ctx.reply("⛔ Message blocked — suspicious content detected.");
+  if (!isMaster && BANG_PREFIX.test(ctx.text)) {
+    const original = ctx.text;
+    ctx.text = ctx.text.replace(BANG_PREFIX, "");
+    logInfo("commands", `Defanged bang prefix from ${user?.userId ?? "unknown"}: "${original.slice(0, 25)}"`);
+    if (!ctx.text.trim()) {
       ctx.handled = true;
       return;
     }
