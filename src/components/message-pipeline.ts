@@ -554,7 +554,7 @@ function buildSessionStartPrompt(
     logInfo(TAG, `Injected restart reason: ${reason}`);
   }
 
-  const soul = loadSoulBundle();
+  const soul = loadSoulBundle(memory);
   if (soul) {
     contextParts.push(soul);
     logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
