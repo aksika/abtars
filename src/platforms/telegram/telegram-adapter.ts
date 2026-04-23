@@ -77,7 +77,7 @@ export class TelegramAdapter implements PlatformAdapter {
       { command: "status", description: "Bridge status" },
       { command: "stop", description: "Stop current response" },
       { command: "ctrlc", description: "Stop current response" },
-      { command: "models", description: "List and switch models" },
+      { command: "models", description: "Model, transport & agents" },
       { command: "transport", description: "Transport status" },
       { command: "heartbeat", description: "Heartbeat diagnostics" },
       { command: "memory", description: "Memory stats" },

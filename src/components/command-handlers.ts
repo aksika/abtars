@@ -390,23 +390,7 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     return true;
   }
 
-  // /models status — all agents
-  if (arg === "status") {
-    const agents = ["professor", "dreamy", "browsie", "coding"] as const;
-    const names: Record<string, string> = { professor: "Professor", dreamy: "Dreamy", browsie: "Browsie", coding: "Cody" };
-    const lines = ["📋 Agent models:"];
-    for (const a of agents) {
-      const r = tc ? resolveAgent(a, tc) : null;
-      let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
-      if (a === "professor" && r?.fallbacks.length) {
-        line += "\n" + r.fallbacks.map((f, i) => `    ↳ fb${i + 1}: ${f.model} (${f.provider})`).join("\n");
-      }
-      lines.push(line);
-    }
-    lines.push("  Cron: inherits Professor");
-    await ctx.reply(lines.join("\n"));
-    return true;
-  }
+  // /models status — removed, bare /model shows everything now
 
   // /models quick <model> — instant switch
   if (arg.startsWith("quick ") || arg.startsWith("switch ")) {
@@ -447,14 +431,30 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     return true;
   }
 
-  // /models (no arg) — show current
-  const lines = [`🤖 Model: ${currentModel}`];
-  if (prof) {
-    lines.push(`🔌 Provider: ${prof.providerName} (${prof.provider.transport})`);
-    if (prof.fallbacks.length > 0) {
-      lines.push(`🛡️ Fallbacks: ${prof.fallbacks.map(f => `${f.model} (${f.provider})`).join(", ")}`);
+  // /models (no arg) — merged status: model + transport + agents
+  const transportStatus = ctx.transport.isReady ? "✓ Connected" : "❌ Disconnected";
+  const ctxPct = ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a";
+  const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
+  const provider = prof?.providerName ?? "unknown";
+
+  const lines = [
+    `🤖 Model: ${currentModel}`,
+    `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`,
+    `📊 Context: ${ctxPct}`,
+    "",
+    "📋 Agents:",
+  ];
+  const agents = ["professor", "dreamy", "browsie", "coding"] as const;
+  const names: Record<string, string> = { professor: "Professor", dreamy: "Dreamy", browsie: "Browsie", coding: "Cody" };
+  for (const a of agents) {
+    const r = tc ? resolveAgent(a, tc) : null;
+    let line = `  ${names[a]}: ${r?.model ?? "unknown"} (${r?.providerName ?? "?"}, ${r?.provider.transport ?? "?"})`;
+    if (a === "professor" && r?.fallbacks.length) {
+      line += "\n" + r.fallbacks.map((f, i) => `    ↳ fb${i + 1}: ${f.model} (${f.provider})`).join("\n");
     }
+    lines.push(line);
   }
+  lines.push("  Cron: inherits Professor");
   lines.push("\nUse /models change to switch.");
   await ctx.reply(lines.join("\n"));
   return true;
@@ -668,9 +668,8 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/stop, /ctrlc — Stop current response",
     "/memory — Memory storage statistics",
     "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
-    "/models — Current model + provider",
+    "/models — Model, transport & agent status",
     "/models change — Switch model/provider (any agent)",
-    "/models status — All agents with model + provider",
     "/models quick <model> — Instant switch on same provider",
     "/models restore — Restore primary after fallback",
     "/tasks — Scheduled tasks",
