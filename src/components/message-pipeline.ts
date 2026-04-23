@@ -13,8 +13,7 @@ import { buildSessionStartContext } from "abmind/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { loadUsers } from "./user-registry.js";
 import { tryReaction } from "./reaction-handler.js";
-import { compress } from "abmind";
-import { localMonth } from "../utils/local-time.js";
+import { renderMemory } from "abmind";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason, readAndClearRestartReason } from "./transport/bridge-lock-transport.js";
@@ -185,14 +184,14 @@ export async function handleInboundMessage(
           });
           const hits = recall.results.filter(h => h.score > 0);
           if (hits.length > 0) {
-            const lines = hits.map(h => compress({
+            const lines = hits.map(h => renderMemory({
               content_en: h.content,
-              topic: h.topic ?? "general",
-              emotion_tags: h.emotionTags ?? "",
-              importance_flags: h.importanceFlags ?? "",
-              memory_type: h.memoryType ?? "fact",
-              confidence: h.confidence ?? 3,
-              date: h.createdAt ? localMonth(new Date(h.createdAt)) : h.date?.slice(0, 7),
+              topic: h.topic ?? undefined,
+              emotion_tags: h.emotionTags ?? undefined,
+              importance_flags: h.importanceFlags ?? undefined,
+              memory_type: h.memoryType ?? undefined,
+              confidence: h.confidence ?? undefined,
+              createdAt: h.createdAt,
             }));
             const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]\n\n`;
             prompt = block + prompt;
