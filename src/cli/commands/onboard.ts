@@ -49,8 +49,16 @@ interface WizardAnswers {
   readonly telegramChatId: string;
   readonly defaultProvider: ProviderChoice;
   readonly defaultModel: string;
+  readonly providerApiKey: string;
   readonly discordA2aChannel: string | null;
+  readonly installMode: "simple" | "supervised";
 }
+
+const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
+  openrouter: 'OPENROUTER_API_KEY',
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+};
 
 async function runInteractive(existing: WizardAnswers | null): Promise<WizardAnswers | null> {
   // Dynamic import — @clack/prompts is the only dep introduced in Phase 3;
@@ -111,6 +119,33 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     return null;
   }
 
+  const providerApiKey = await text({
+    message: `${PROVIDER_API_KEY_ENV[defaultProvider as ProviderChoice]} (for ${defaultProvider})`,
+    placeholder: existing?.providerApiKey ? '(keep existing)' : 'sk-or-v1-...',
+    initialValue: existing?.providerApiKey,
+    validate: (v) => {
+      if ((v === undefined || v.trim() === '') && !existing?.providerApiKey) return 'required — API will not work without it';
+      return undefined;
+    },
+  });
+  if (isCancel(providerApiKey)) {
+    cancel('Cancelled.');
+    return null;
+  }
+
+  const installMode = await select<"simple" | "supervised">({
+    message: 'Deployment mode',
+    options: [
+      { value: 'simple', label: 'simple — laptop/WSL, no OS supervisor (start manually)' },
+      { value: 'supervised', label: 'supervised — 24/7 host, launchd/systemd auto-restart' },
+    ],
+    initialValue: existing?.installMode ?? 'simple',
+  });
+  if (isCancel(installMode)) {
+    cancel('Cancelled.');
+    return null;
+  }
+
   const wantsDiscord = await confirm({
     message: 'Configure Discord agent-to-agent channel?',
     initialValue: existing?.discordA2aChannel !== null && existing?.discordA2aChannel !== undefined,
@@ -145,7 +180,9 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     telegramChatId: String(telegramChatId).trim(),
     defaultProvider: defaultProvider as ProviderChoice,
     defaultModel: String(defaultModel).trim() || DEFAULT_MODELS[defaultProvider as ProviderChoice],
+    providerApiKey: String(providerApiKey ?? '').trim() || existing?.providerApiKey || '',
     discordA2aChannel,
+    installMode: installMode as "simple" | "supervised",
   };
 }
 
@@ -164,7 +201,9 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     telegramChatId: opts.telegramChatId,
     defaultProvider: provider,
     defaultModel: opts.defaultModel ?? DEFAULT_MODELS[provider],
+    providerApiKey: '',
     discordA2aChannel: opts.discordA2aChannel ?? null,
+    installMode: 'supervised',
   };
 }
 
@@ -185,7 +224,9 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       telegramChatId: chatId,
       defaultProvider: VALID_PROVIDERS.includes(provider) ? provider : 'openrouter',
       defaultModel: kv.get('DEFAULT_MODEL') ?? DEFAULT_MODELS[provider] ?? DEFAULT_MODELS.openrouter,
+      providerApiKey: kv.get(PROVIDER_API_KEY_ENV[provider] ?? 'OPENROUTER_API_KEY') ?? '',
       discordA2aChannel: kv.get('DISCORD_A2A_CHANNEL_ID') ?? null,
+      installMode: 'simple',
     };
   } catch {
     return null;
@@ -194,12 +235,14 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
 
 function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   // Preserve lines the wizard doesn't own; overwrite the ones it does.
+  const providerKeyName = PROVIDER_API_KEY_ENV[answers.defaultProvider];
   const owned = new Set([
     'TELEGRAM_BOT_TOKEN',
     'MAIN_CHAT_ID',
     'DEFAULT_PROVIDER',
     'DEFAULT_MODEL',
     'DISCORD_A2A_CHANNEL_ID',
+    providerKeyName,
   ]);
   const keptLines: string[] = [];
   for (const line of existing.split('\n')) {
@@ -218,6 +261,9 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     `DEFAULT_PROVIDER=${answers.defaultProvider}`,
     `DEFAULT_MODEL=${answers.defaultModel}`,
   ];
+  if (answers.providerApiKey) {
+    newBlock.push(`${providerKeyName}=${answers.providerApiKey}`);
+  }
   if (answers.discordA2aChannel !== null) {
     newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
   }
@@ -270,6 +316,12 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   const next = mergeEnvContent(currentContent, answers);
   await writeFile(envPath, next, { mode: 0o600 });
   process.stdout.write(`\n✓ Wrote ${envPath}\n`);
-  process.stdout.write(`Next: 'agentbridge update' to build, then start the bridge via your watchdog.\n`);
+
+  // Write install mode (overrides any prior value — onboarding is authoritative)
+  const { writeInstallMode } = await import('../install-mode.js');
+  writeInstallMode(paths.home, answers.installMode);
+  process.stdout.write(`✓ install mode: ${answers.installMode}\n`);
+
+  process.stdout.write(`Next: 'agentbridge update' to build, then start the bridge${answers.installMode === 'simple' ? ' via ~/.agentbridge/agentbridge.sh' : ' via your watchdog'}.\n`);
   return 0;
 }

@@ -185,10 +185,23 @@ async function reconcilePathLink(
 async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
   const cliFile = name === 'agentbridge' ? 'agentbridge.js' : `${name}.js`;
   const target = join(currentLink, 'dist', 'cli', cliFile);
-  const content = `#!/usr/bin/env bash\nexec node "${target}" "$@"\n`;
+  // Self-bootstrapping wrapper: if current/dist/ doesn't exist yet (fresh install
+  // pre-first-update), fall back to repo checkout's dist/. After first update,
+  // current/ exists and the wrapper prefers it.
+  const fallback = join(process.cwd(), 'dist', 'cli', cliFile);
+  const content = `#!/usr/bin/env bash
+if [ -f "${target}" ]; then
+  exec node "${target}" "$@"
+elif [ -f "${fallback}" ]; then
+  exec node "${fallback}" "$@"
+else
+  echo "agentbridge: no release staged yet. Run 'npm run build' in the repo checkout, then 'agentbridge update'." >&2
+  exit 1
+fi
+`;
   const path = join(binDir, name);
   if (dryRun) {
-    process.stdout.write(`[dry-run] write wrapper ${path} -> node ${target}\n`);
+    process.stdout.write(`[dry-run] write wrapper ${path} -> node ${target} (fallback: ${fallback})\n`);
     return;
   }
   await writeFile(path, content, { mode: 0o755 });
