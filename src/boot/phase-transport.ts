@@ -43,9 +43,20 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
   let transport: IKiroTransport;
 
   // Resolve professor config from transport.json (falls back to .env)
-  const { resolveAgent, getEnvFallback, loadTransport } = await import("../components/transport-config.js");
+  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary } = await import("../components/transport-config.js");
   const tc = loadTransport();
   const prof = tc ? resolveAgent("professor", tc) : null;
+
+  // Resolve hailMary (paid emergency model, manual activation only)
+  const hm = resolveHailMary(tc);
+  if (hm) {
+    ctx.hailMary = {
+      model: hm.model,
+      endpoint: hm.endpoint,
+      apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
+    };
+    logInfo("main", `🚨 hailMary configured: ${hm.model} (manual /model emergency only)`);
+  }
   const resolved = prof ?? (() => {
     const fb = getEnvFallback();
     logWarn("main", `⚠️ Using .env fallback: ${fb.model} via ${fb.providerName}`);
@@ -67,7 +78,7 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
 
     // Build candidate list: primary + fallbacks
-    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number; lastResort?: boolean }> = [
+    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [
       { endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: resolved.model, maxContext: resolved.contextWindow },
     ];
     for (const fb of resolved.fallbacks) {

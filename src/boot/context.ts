@@ -87,6 +87,7 @@ export interface BootCtx {
   capabilitiesLoaded: string[];
   sleepHandle: SleepHandle | null;
   modelHealthRegistry: ModelHealthRegistry | null;
+  hailMary: { model: string; endpoint: string; apiKey?: string } | null;
   selfHealerTask: { enabled: boolean } | null;
   dashboardServer: IDashboardSlot | null;
   agentApiServer: AgentApiServer | null;
@@ -145,6 +146,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     capabilitiesLoaded: [],
     sleepHandle: null,
     modelHealthRegistry: null,
+    hailMary: null,
     selfHealerTask: null,
     dashboardServer: null,
     agentApiServer: null,

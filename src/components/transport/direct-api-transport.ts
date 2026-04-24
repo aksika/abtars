@@ -51,6 +51,17 @@ export class DirectApiTransport implements IKiroTransport {
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
 
   private readonly policy: FallbackPolicy | null;
+  private emergencyOverride: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null = null;
+
+  /** Activate emergency (hailMary) mode — next prompts bypass the fallback policy. */
+  setEmergencyMode(override: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null): void {
+    this.emergencyOverride = override;
+    if (override) logWarn(TAG, `🚨 EMERGENCY MODE: using ${override.model} (paid) — bypassing fallback chain`);
+    else logInfo(TAG, "Emergency mode cleared — fallback chain active");
+  }
+
+  /** True if emergency (hailMary) mode is active. */
+  get isEmergencyMode(): boolean { return this.emergencyOverride !== null; }
 
   constructor(config: DirectApiConfig, policy?: FallbackPolicy) {
     this.config = config;
@@ -84,12 +95,25 @@ export class DirectApiTransport implements IKiroTransport {
     this.abortControllers.set(sessionKey, ac);
 
     try {
+      if (this.emergencyOverride) return await this.sendEmergency(session, ac.signal);
       if (!this.policy) throw new Error("DirectApiTransport requires a FallbackPolicy");
       return await this.sendWithPolicy(session, ac.signal);
     } finally {
       this._promptStartedAt = null;
       this.abortControllers.delete(sessionKey);
     }
+  }
+
+  private async sendEmergency(session: ConversationSession, signal: AbortSignal): Promise<string> {
+    const em = this.emergencyOverride!;
+    this.activeEndpoint = em.endpoint;
+    this.activeApiKey = em.apiKey;
+    this.activeModel = em.model;
+    this._lastActivityAt = Date.now();
+    logWarn(TAG, `🚨 Emergency mode: using ${em.model}`);
+    const result = await this.agentLoop(session, signal);
+    this._lastAnswer = result;
+    return result;
   }
 
   private async sendWithPolicy(session: ConversationSession, signal: AbortSignal): Promise<string> {

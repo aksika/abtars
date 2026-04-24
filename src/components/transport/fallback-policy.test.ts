@@ -6,7 +6,7 @@ function makeCandidates(): ModelCandidate[] {
   return [
     { model: "kimi", endpoint: "ep1", apiKey: "k1", maxContext: 128000 },
     { model: "nemotron", endpoint: "ep1", apiKey: "k1", maxContext: 128000 },
-    { model: "gemini-flash", endpoint: "ep2", apiKey: "k2", maxContext: 1000000, lastResort: true },
+    { model: "gemini-flash", endpoint: "ep2", apiKey: "k2", maxContext: 1000000 },
   ];
 }
 

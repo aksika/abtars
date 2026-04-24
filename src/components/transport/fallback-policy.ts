@@ -10,7 +10,6 @@ export interface ModelCandidate {
   endpoint: string;
   apiKey?: string;
   maxContext: number;
-  lastResort?: boolean;
 }
 
 export interface FallbackDecision {

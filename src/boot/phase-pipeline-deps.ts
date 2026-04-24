@@ -111,6 +111,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
     sleepProgress: () => ctx.sleepHandle?.progress ?? null,
     loadedCapabilities: [],
     selfHealerTask: null,
+    hailMary: ctx.hailMary,
   };
   ctx.pipelineDeps = pipelineDeps;
 }

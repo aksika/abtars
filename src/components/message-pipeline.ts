@@ -58,6 +58,9 @@ export async function resetAndPrepare(opts: {
   if (opts.conversationBuffer && opts.bufKey) opts.conversationBuffer.clear(opts.bufKey);
   opts.sessions.delete(opts.sessionKey);
   opts.sessions.getOrCreate(opts.sessionKey).pendingStart = true;
+  // #254: clear emergency mode on reset — next session starts fresh
+  const t = opts.transport as unknown as { setEmergencyMode?: (o: null) => void };
+  t.setEmergencyMode?.(null);
   writeRestartReason(opts.reason);
 }
 
@@ -94,6 +97,7 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   sleepProgress?: () => { percent: number; step: string } | null;
   loadedCapabilities?: string[];
   selfHealerTask?: { enabled: boolean } | null;
+  hailMary?: { model: string; endpoint: string; apiKey?: string } | null;
 }
 
 /**

@@ -46,6 +46,7 @@ export interface CommandContext {
   sleepProgress?: PipelineDeps["sleepProgress"];
   loadedCapabilities?: PipelineDeps["loadedCapabilities"];
   selfHealerTask?: { enabled: boolean } | null;
+  hailMary?: PipelineDeps["hailMary"];
   // Per-message (optional)
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
@@ -373,12 +374,30 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
-  // /models restore — reset all model health buckets
+  // /model emergency — activate hailMary (paid) until /model restore, /reset, or wake-up
+  if (arg === "emergency" || arg === "hailmary") {
+    if (!ctx.hailMary) { await ctx.reply("❌ hailMary not configured in transport.json"); return true; }
+    const t = ctx.transport as unknown as { setEmergencyMode?: (o: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null) => void };
+    if (!t.setEmergencyMode) { await ctx.reply("❌ Transport does not support emergency mode"); return true; }
+    t.setEmergencyMode({ ...ctx.hailMary, maxContext: 1_000_000 });
+    await ctx.reply(`🚨 EMERGENCY MODE: using ${ctx.hailMary.model} (paid). Clears on /model restore, /reset, or wake-up.`);
+    return true;
+  }
+
+  // /models restore — reset all model health buckets + clear emergency mode
   if (arg === "primary" || arg === "restore") {
-    const t = ctx.transport as unknown as { policy?: { registry: { resetAll: () => void } } };
+    const t = ctx.transport as unknown as {
+      policy?: { registry: { resetAll: () => void } };
+      setEmergencyMode?: (o: null) => void;
+      isEmergencyMode?: boolean;
+    };
+    const wasEmergency = t.isEmergencyMode;
+    t.setEmergencyMode?.(null);
     if (t.policy?.registry) {
       t.policy.registry.resetAll();
-      await ctx.reply("🔌 Model health reset — all models available.");
+      await ctx.reply(wasEmergency
+        ? "🔌 Emergency mode cleared + model health reset — free models active."
+        : "🔌 Model health reset — all models available.");
     } else {
       await ctx.reply("🔌 No fallback policy configured.");
     }
@@ -435,9 +454,10 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
   const ctxPct = ctx.transport.contextPercent >= 0 ? `${ctx.transport.contextPercent}%` : "n/a";
   const mode = prof?.provider.transport?.toUpperCase() ?? "ACP";
   const provider = prof?.providerName ?? "unknown";
+  const isEmergency = (ctx.transport as unknown as { isEmergencyMode?: boolean }).isEmergencyMode === true;
 
   const lines = [
-    `🤖 Model: ${currentModel}`,
+    isEmergency ? `🚨 EMERGENCY MODE: ${currentModel} (paid)` : `🤖 Model: ${currentModel}`,
     `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`,
     `📊 Context: ${ctxPct}`,
     "",
@@ -454,6 +474,9 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     lines.push(line);
   }
   lines.push("  Cron: inherits Professor");
+  if (ctx.hailMary) {
+    lines.push(`\n🚨 hailMary: ${ctx.hailMary.model} (paid, manual /model emergency only)`);
+  }
   lines.push("\nUse /models change to switch.");
   await ctx.reply(lines.join("\n"));
   return true;

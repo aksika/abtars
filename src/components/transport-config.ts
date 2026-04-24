@@ -51,6 +51,7 @@ export type TransportConfig = {
   providers: Record<string, ProviderConfig>;
   transportDefaults?: TransportDefaults;
   maxTurns?: number;
+  hailMary?: { model: string; provider: string };
 };
 
 export type ResolvedAgent = {
@@ -99,6 +100,15 @@ export function loadTransport(): TransportConfig | null {
       return null;
     }
   }
+}
+
+/** Resolve hailMary from transport.json. Returns null if not configured. */
+export function resolveHailMary(transport?: TransportConfig | null): { model: string; endpoint: string; apiKeyEnv?: string } | null {
+  const tc = transport ?? loadTransport();
+  if (!tc?.hailMary) return null;
+  const provider = tc.providers[tc.hailMary.provider];
+  if (!provider?.endpoint) return null;
+  return { model: tc.hailMary.model, endpoint: provider.endpoint, apiKeyEnv: provider.apiKeyEnv };
 }
 
 /** Force re-read on next call (for tests). */
