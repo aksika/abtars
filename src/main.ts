@@ -10,7 +10,11 @@
  */
 
 import "./boot/env.js";
+import { initEnv } from "./components/env-schema.js";
 import { startBridge } from "./bridge-app.js";
+
+// Initialize env schema immediately after .env files are loaded
+initEnv();
 
 process.on("uncaughtException", (err) => {
   console.error(`[FATAL] Uncaught exception: ${err.stack ?? err.message ?? err}`);
