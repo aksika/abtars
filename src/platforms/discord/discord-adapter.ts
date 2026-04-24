@@ -94,12 +94,20 @@ export class DiscordAdapter implements PlatformAdapter {
   }
 
   async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<number | undefined> {
-    await this.api.sendMessage(channelId, text);
-    return undefined;
+    const id = await this.api.sendMessage(channelId, text);
+    return id ? Number(id) : undefined;
   }
 
   async sendTyping(channelId: string): Promise<void> {
     await this.api.sendTyping(channelId);
+  }
+
+  async setReaction(channelId: string, messageId: number, emoji: string): Promise<void> {
+    await this.api.setReaction(channelId, String(messageId), emoji);
+  }
+
+  async editMessage(channelId: string, messageId: number, text: string): Promise<void> {
+    await this.api.editMessage(channelId, String(messageId), text);
   }
 
   chunkResponse(text: string): string[] {

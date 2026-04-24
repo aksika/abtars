@@ -122,6 +122,36 @@ export class DiscordApi {
     } catch { /* non-critical */ }
   }
 
+  /** Add or remove a reaction on a message. Empty emoji = remove bot's reactions. */
+  async setReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel?.isTextBased()) return;
+      const message = await (channel as TextChannel).messages.fetch(messageId);
+      if (!emoji) {
+        // Remove bot's reactions
+        const botId = this.client.user?.id;
+        if (botId) {
+          for (const reaction of message.reactions.cache.values()) {
+            await reaction.users.remove(botId).catch(() => {});
+          }
+        }
+      } else {
+        await message.react(emoji);
+      }
+    } catch { /* non-critical */ }
+  }
+
+  /** Edit a previously sent message. */
+  async editMessage(channelId: string, messageId: string, text: string): Promise<void> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel?.isTextBased()) return;
+      const message = await (channel as TextChannel).messages.fetch(messageId);
+      await message.edit(text);
+    } catch { /* edit may fail if message deleted */ }
+  }
+
   /** Gracefully close the Gateway connection. */
   async disconnect(): Promise<void> {
     logInfo(TAG, "Disconnecting from Discord Gateway…");
