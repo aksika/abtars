@@ -36,6 +36,25 @@ const CTX_AGGRESSIVE_PCT = parseInt(process.env["CTX_AGGRESSIVE_PCT"] ?? "90", 1
 const COMPACT_MAX_FAILURES = 3;
 const ACTIVE_MEMORY = (process.env["ACTIVE_MEMORY"] ?? "false").toLowerCase() === "true";
 const ACTIVE_MEMORY_LIMIT = 5;
+const PRIMING_MAX = 8;
+const PRIMING_MODEL_TOPICS = process.env["PRIMING_MODEL_TOPICS"] !== "false";
+
+const STOPWORDS = new Set(["the","a","an","is","are","was","were","be","been",
+  "have","has","had","do","does","did","will","would","could","should","can",
+  "may","might","shall","it","its","this","that","what","how","when","where",
+  "who","which","why","about","for","with","from","into","just","also","very",
+  "not","but","and","or","if","so","too","let","lets","dont","you","we",
+  "my","your","our","me","us","them","they","he","she"]);
+
+function extractKeywords(text: string): string[] {
+  return text.toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !STOPWORDS.has(w))
+    .slice(0, 3);
+}
+
+const primingBuffers = new Map<string, string[]>();
 
 // Per-session compaction state
 const ctxWarned = new Set<string>();
@@ -58,6 +77,7 @@ export async function resetAndPrepare(opts: {
   await opts.transport.resetSession(opts.sessionKey);
   if (opts.conversationBuffer && opts.bufKey) opts.conversationBuffer.clear(opts.bufKey);
   opts.pendingSessionStart.add(opts.sessionKey);
+  primingBuffers.delete(opts.sessionKey);
   writeRestartReason(opts.reason);
 }
 
@@ -175,8 +195,9 @@ export async function handleInboundMessage(
       if (userEntry?.role !== "guest" && (ctxPct < 0 || ctxPct < CTX_COMPACT_PCT)) {
         try {
           const t0 = performance.now();
+          const priming = primingBuffers.get(sessionKey) ?? [];
           const recall = await memory.recallSearch({
-            translated: [text],
+            translated: [...new Set([text, ...priming])],
             original: text,
             userId,
             limit: ACTIVE_MEMORY_LIMIT,
@@ -320,7 +341,7 @@ export async function handleInboundMessage(
     // --- Extract clean answer ---
     const cleanAnswer = transport.answerOnly;
     const rawResponse = fullModeChats.has(sessionKey) ? response : (cleanAnswer || response);
-    const { text: cleanedText, reactionEmoji, noReply } = cleanResponse(rawResponse);
+    const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
     // --- Empty response ---
@@ -404,6 +425,14 @@ export async function handleInboundMessage(
     // --- Send reaction emoji as separate message (if extracted by cleanResponse) ---
     if (reactionEmoji) {
       await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
+    }
+
+    // --- Update priming buffer ---
+    if (ACTIVE_MEMORY) {
+      const modelTopics = PRIMING_MODEL_TOPICS && topics ? topics : [];
+      const regexKw = extractKeywords(text);
+      const existing = primingBuffers.get(sessionKey) ?? [];
+      primingBuffers.set(sessionKey, [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX));
     }
 
     // --- Record to memory (skip for guests) ---

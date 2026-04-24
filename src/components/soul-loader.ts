@@ -13,6 +13,15 @@ function readOr(path: string): string {
   try { return existsSync(path) ? readFileSync(path, "utf-8").trim() : ""; } catch { return ""; }
 }
 
+/** Build env-gated model behavior directives. Generated at session start. */
+function buildModelInstructions(): string {
+  const lines: string[] = [];
+  if (process.env["PRIMING_MODEL_TOPICS"] !== "false") {
+    lines.push("End each response with [TOPICS: kw1, kw2, kw3] — your top 3 topics from this exchange. Keep them English, lowercase, concise.");
+  }
+  return lines.length > 0 ? `# Model Instructions\n\n${lines.join("\n")}` : "";
+}
+
 /**
  * Build the session injection bundle: abmind 4 + host 2.
  *
@@ -43,6 +52,10 @@ export function loadSoulBundle(memory?: MemoryManager | null): string | null {
   if (coreFacts) parts.push(coreFacts);
   const skillsCatalog = readOr(join(HOST_CORE_DIR, "skills_catalog.md"));
   if (skillsCatalog) parts.push(skillsCatalog);
+
+  // Host 3: model-instructions — env-gated dynamic directives
+  const modelInstructions = buildModelInstructions();
+  if (modelInstructions) parts.push(modelInstructions);
 
   // [USERS] block
   try {
