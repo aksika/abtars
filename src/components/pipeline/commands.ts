@@ -55,8 +55,14 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     return;
   }
 
+  const { adapter } = ctx;
+  const editReply = adapter.editMessage
+    ? async (messageId: number, text: string): Promise<void> => { await adapter.editMessage!(msg.channelId, messageId, text); }
+    : undefined;
+
   const cmdCtx: CommandContext = {
     sessionKey: msg.sessionKey, chatId: ctx.chatId, userId: ctx.userId ?? "master", platform: msg.platform, reply: ctx.reply,
+    editReply,
     transport, config, startedAt,
     memory, memoryConfig, nlmConfig,
     codingMode, idleSave,

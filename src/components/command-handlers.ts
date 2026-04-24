@@ -21,7 +21,7 @@ import type { RunningJob } from "./cron/cron-queue.js";
 
 import type { Platform } from "../types/platform.js";
 export type { Platform };
-export type Reply = (text: string, opts?: { parseMode?: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }) => Promise<unknown>;
+export type Reply = (text: string, opts?: { parseMode?: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }) => Promise<number | undefined>;
 
 export interface CommandContext {
   sessionKey: string;
@@ -29,6 +29,8 @@ export interface CommandContext {
   userId: string;
   platform: Platform;
   reply: Reply;
+  /** Edit a previously-sent message by id (for placeholder → result pattern). Undefined if platform lacks editMessage. */
+  editReply?: (messageId: number, text: string) => Promise<void>;
   // From PipelineDeps
   transport: PipelineDeps["transport"];
   config: PipelineDeps["config"];
@@ -79,6 +81,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/heartbeat": handleHeartbeat,
   "/models": handleModels,
   "/model": handleModels,
+  "/emergency": handleEmergencyAlias,
   "/a2a-reset": handleA2aReset,
   "/help": handleHelp,
   "/users": handleUsers,
@@ -86,6 +89,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/skill": handleSkills,
   "/wakeup": handleWakeup,
   "/sleep": handleSleep,
+  "/mcp": handleMcp,
 };
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
@@ -363,6 +367,10 @@ async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolea
   return true;
 }
 
+
+async function handleEmergencyAlias(_text: string, ctx: CommandContext): Promise<boolean> {
+  return handleModels("/model emergency", ctx);
+}
 
 async function handleModels(text: string, ctx: CommandContext): Promise<boolean> {
   const { loadTransport, resolveAgent, getModelsForProvider, writeTransportConfig } = await import("./transport-config.js");
@@ -687,13 +695,16 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/reset default — Restore transport.default.json + fresh session",
     "/compact — Compact context window (summarize + fresh session)",
     "/status — Bridge status, transport, heartbeat",
+    "/mcp — MCP server status",
     "/stop, /ctrlc — Stop current response",
     "/memory — Memory storage statistics",
     "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
     "/models — Model, transport & agent status",
     "/models change — Switch model/provider (any agent)",
     "/models quick <model> — Instant switch on same provider",
-    "/models restore — Restore primary after fallback",
+    "/models emergency — 🚨 Activate paid hailMary model (manual)",
+    "/emergency — Shortcut for /models emergency",
+    "/models restore — Reset buckets + clear emergency mode",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",
@@ -741,6 +752,51 @@ async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean
   return true;
 }
 
+async function handleMcp(_text: string, ctx: CommandContext): Promise<boolean> {
+  // Preflight: is mcporter installed? Fast check before placeholder.
+  const version = await execAsync("mcporter", ["--version"], 2000);
+  if (!version) {
+    await ctx.reply("📦 mcporter not installed");
+    return true;
+  }
+
+  const placeholderId = await ctx.reply("📦 Checking MCP servers...");
+  const raw = await execAsync("mcporter", ["list", "--json"], 15_000);
+
+  let body: string;
+  if (!raw) {
+    body = `📦 MCP: mcporter installed (${version.split("\n")[0]}) but list failed`;
+  } else {
+    try {
+      const data = JSON.parse(raw) as { servers?: Array<{ name?: string; status?: string; tools?: number; prompts?: number; error?: string }> };
+      const servers = data.servers ?? [];
+      const ok = servers.filter(s => s.status === "ok").length;
+      const lines = [
+        "📦 MCP status",
+        `  mcporter: installed (${version.split("\n")[0]})`,
+        `  Servers: ${ok}/${servers.length} online`,
+      ];
+      for (const s of servers) {
+        const mark = s.status === "ok" ? "✓" : "✗";
+        const detail = s.status === "ok"
+          ? `tools: ${s.tools ?? 0}${s.prompts ? `, prompts: ${s.prompts}` : ""}`
+          : (s.error ?? s.status ?? "error");
+        lines.push(`    ${mark} ${s.name ?? "?"} (${detail})`);
+      }
+      body = lines.join("\n");
+    } catch {
+      body = "📦 MCP: installed, list output unparseable";
+    }
+  }
+
+  if (placeholderId !== undefined && ctx.editReply) {
+    await ctx.editReply(placeholderId, body);
+  } else {
+    await ctx.reply(body);
+  }
+  return true;
+}
+
 function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
     const child = execFile(cmd, args, { timeout: timeoutMs, encoding: "utf-8" }, (err, stdout) => {
@@ -762,12 +818,6 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     const bi = JSON.parse(readFileSync(biPath, "utf-8")) as { hash: string; date: string };
     buildInfo = ` (${bi.hash} ${bi.date.slice(0, 10)})`;
   } catch { /* */ }
-
-  // Fire async checks in parallel
-  const [, mcpRaw] = await Promise.all([
-    Promise.resolve(""),
-    execAsync("mcporter", ["list", "--json"], 15_000),
-  ]);
 
   let model = "unknown";
   if ("currentModel" in ctx.transport) {
@@ -836,20 +886,8 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     } catch { /* */ }
   }
 
-  // MCP status (already fetched async)
-  if (mcpRaw) {
-    try {
-      const data = JSON.parse(mcpRaw);
-      const servers = data.servers ?? [];
-      const ok = servers.filter((s: Record<string, unknown>) => s.status === "ok").length;
-      lines.push(`📦 MCP: ${ok}/${servers.length} servers online`);
-    } catch {
-      lines.push("📦 MCP: installed, list failed");
-    }
-  } else {
-    const hasCmd = await execAsync("mcporter", ["--version"], 5000);
-    lines.push(hasCmd ? "📦 MCP: installed, list failed" : "📦 MCP: not installed");
-  }
+  lines.push("");
+  lines.push("Use /mcp for MCP server status.");
 
   return lines;
 }
