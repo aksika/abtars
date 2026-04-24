@@ -506,7 +506,7 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
   }
   lines.push("  Cron: inherits Professor");
   if (ctx.hailMary) {
-    lines.push(`\n🚨 hailMary: ${ctx.hailMary.model} (paid, manual /model emergency only)`);
+    lines.push(`\n🚨 hailMary: ${ctx.hailMary.model} `);
   }
   lines.push("\nUse /models change to switch.");
   await ctx.reply(lines.join("\n"));

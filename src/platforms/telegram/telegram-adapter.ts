@@ -255,7 +255,11 @@ export class TelegramAdapter implements PlatformAdapter {
             await (this.deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
             await this.api.sendMessage(chatId, `✅ Switched to ${model}`);
           } else if (isProfessor) {
-            await this.api.sendMessage(chatId, `✅ ${model} (${providerName}). Use /new to apply.`);
+            // Provider changed — old transport is stale, bridge must restart to pick up new transport type.
+            const { writeRestartReason } = await import("../../components/transport/bridge-lock-transport.js");
+            writeRestartReason(`model/provider change: professor → ${model} (${providerName})`);
+            await this.api.sendMessage(chatId, `✅ ${model} (${providerName}). Restarting to apply…`);
+            setTimeout(() => process.exit(0), 500);
           } else {
             // Subagent — no reset needed
             await this.api.sendMessage(chatId, `✅ ${agentKey} → ${model} (${providerName}). Takes effect on next spawn.`);

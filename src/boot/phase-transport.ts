@@ -55,7 +55,7 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
       endpoint: hm.endpoint,
       apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
     };
-    logInfo("main", `🚨 hailMary configured: ${hm.model} (manual /model emergency only)`);
+    logInfo("main", `🚨 hailMary configured: ${hm.model} `);
   }
   const resolved = prof ?? (() => {
     const fb = getEnvFallback();
