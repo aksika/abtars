@@ -122,6 +122,12 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
   }
 
   ctx.transport = transport;
+
+  // Wire shared registry into SubagentRuntime so cron/dreamy/browsie share health state
+  if (ctx.modelHealthRegistry) {
+    ctx.runtime.setRegistry(ctx.modelHealthRegistry);
+  }
+
   logInfo("main", "✅ Transport ready");
 
   // In-process memory backend for Direct API (singleton: setMemoryBackend)

@@ -84,7 +84,7 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole): Promise<{ transport: IKiroTransport; model: string }> {
+export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry): Promise<{ transport: IKiroTransport; model: string }> {
   const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
@@ -99,22 +99,37 @@ export async function createSubagentTransport(role: SubagentRole): Promise<{ tra
 
   if (agent.provider.transport === "api") {
     const { DirectApiTransport } = await import("./transport/direct-api-transport.js");
+    const { FallbackPolicy } = await import("./transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(agent.provider.apiKeyEnv ?? "API_KEY");
 
-    // Subagent fallback: always professor's model+provider
+    // Build per-agent candidate list
+    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [
+      { endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: agent.model, maxContext: agent.contextWindow },
+    ];
+
+    // Add professor's model as fallback if different
     const profAgent = tc ? resolveAgent("professor", tc) : null;
-    const fallbacks = profAgent && profAgent.model !== agent.model
-      ? [{ endpoint: profAgent.provider.endpoint ?? agent.provider.endpoint!, apiKey: profAgent.provider.apiKeyEnv ? process.env[profAgent.provider.apiKeyEnv] : apiKey, model: profAgent.model, maxContext: profAgent.contextWindow }]
-      : undefined;
+    if (profAgent && profAgent.model !== agent.model) {
+      candidates.push({
+        endpoint: profAgent.provider.endpoint ?? agent.provider.endpoint!,
+        apiKey: profAgent.provider.apiKeyEnv ? getEnv().getApiKey(profAgent.provider.apiKeyEnv) : apiKey,
+        model: profAgent.model,
+        maxContext: profAgent.contextWindow,
+      });
+    }
+
+    // Use shared registry if provided, otherwise create isolated one
+    const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
+    const policy = new FallbackPolicy(candidates, registry ?? new ModelHealthRegistry());
 
     const transport = new DirectApiTransport({
       endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1",
       apiKey, model: agent.model,
       maxContext: agent.contextWindow, maxOutput: agent.maxOutput,
-      maxTurns: tc?.maxTurns ?? 50, fallbacks,
-    });
+      maxTurns: tc?.maxTurns ?? 50,
+    }, policy);
     await transport.initialize();
-    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${agent.model}${fallbacks ? `, fallback=${profAgent!.model}` : ""})`);
+    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${agent.model}, ${candidates.length} candidates, shared registry: ${!!registry})`);
     return { transport, model: agent.model };
   }
 

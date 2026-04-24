@@ -373,18 +373,14 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
 
   const arg = text.replace(/^\/(models?)\s*/i, "").trim().toLowerCase();
 
-  // /models restore — force switch back to primary after fallback
+  // /models restore — reset all model health buckets
   if (arg === "primary" || arg === "restore") {
-    const t = ctx.transport;
-    if ("forceRestorePrimary" in t && typeof (t as { forceRestorePrimary: unknown }).forceRestorePrimary === "function") {
-      if ((t as unknown as { isOnFallback: boolean }).isOnFallback) {
-        (t as unknown as { forceRestorePrimary: () => void }).forceRestorePrimary();
-        await ctx.reply("🔌 Restored to primary transport.");
-      } else {
-        await ctx.reply("🔌 Already on primary transport.");
-      }
+    const t = ctx.transport as unknown as { policy?: { registry: { resetAll: () => void } } };
+    if (t.policy?.registry) {
+      t.policy.registry.resetAll();
+      await ctx.reply("🔌 Model health reset — all models available.");
     } else {
-      await ctx.reply("🔌 No fallback configured.");
+      await ctx.reply("🔌 No fallback policy configured.");
     }
     return true;
   }

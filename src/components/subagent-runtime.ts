@@ -8,6 +8,8 @@ import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { logInfo, logWarn } from "./logger.js";
 import { randomBytes } from "node:crypto";
 
+import type { ModelHealthRegistry } from "./transport/model-health-registry.js";
+
 const TAG = "runtime";
 
 export type AgentName = "professor" | "dreamy" | "browsie" | "coding" | "cron";
@@ -55,6 +57,10 @@ const DEFAULT_SPAWN_TIMEOUT_MS = 600_000; // 10 min
 export class SubagentRuntime {
   private readonly cache = new Map<AgentName, CachedAgent>();
   private readonly activeSpawns = new Map<string, { abort: AbortController }>();
+  private _registry: ModelHealthRegistry | null = null;
+
+  /** Set shared model health registry (from boot ctx). */
+  setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
 
   /** Send a prompt to a named agent and get the response. */
   async complete(agent: AgentName, prompt: string, opts?: AgentOpts): Promise<string> {
@@ -138,7 +144,7 @@ export class SubagentRuntime {
   private async createAgent(agent: AgentName): Promise<CachedAgent> {
     const { createSubagentTransport } = await import("./agent-registry.js");
     const role = AGENT_TO_ROLE[agent];
-    const { transport, model } = await createSubagentTransport(role);
+    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined);
     const sessionKey = `system:${agent}`;
     const entry: CachedAgent = { transport, model, sessionKey };
     this.cache.set(agent, entry);
