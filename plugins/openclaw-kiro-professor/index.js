@@ -3,7 +3,7 @@ import { createHmac, randomBytes } from "node:crypto";
 
 const KP_HOST = "localhost";
 const KP_PORT = 3001;
-const SHARED_SECRET = "1b81ab8d47191ee700d35e5fb2af8a4c288fb65f6aabaa163084eff88554180d";
+const SHARED_SECRET = process.env.AGENT_API_TOKEN ?? "";
 const AGENT_NAME = "Molty";
 
 let authenticated = false;
@@ -36,6 +36,7 @@ function kpFetch(path, opts = {}) {
 
 async function ensureAuth() {
   if (authenticated) return;
+  if (!SHARED_SECRET) throw new Error("AGENT_API_TOKEN not set");
 
   // Step 1: Hello with our challenge
   const ourChallenge = randomBytes(32).toString("hex");
