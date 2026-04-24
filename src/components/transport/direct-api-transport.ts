@@ -9,7 +9,9 @@ import { withRetry, isFatal } from "../retry.js";
 import { ConversationSession, type ToolCall } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
-import { shouldSkip, recordError, recordSuccess, classifyError, getBucketLevel } from "./leaky-bucket.js";
+import { classifyError } from "./model-health-registry.js";
+import { shouldSkip, recordError, recordSuccess, getBucketLevel } from "./leaky-bucket.js";
+import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 
 const TAG = "direct-api";
@@ -49,15 +51,19 @@ export class DirectApiTransport implements IKiroTransport {
   /** Called when fallback model is selected — send notification before response. */
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
 
-  constructor(config: DirectApiConfig) {
+  private readonly policy: FallbackPolicy | null;
+
+  constructor(config: DirectApiConfig, policy?: FallbackPolicy) {
     this.config = config;
     this.activeEndpoint = config.endpoint;
     this.activeApiKey = config.apiKey;
     this.activeModel = config.model;
+    this.policy = policy ?? null;
   }
 
   async initialize(): Promise<void> {
-    const fb = this.config.fallbacks?.length ? ` (+${this.config.fallbacks.length} fallback${this.config.fallbacks.length > 1 ? "s" : ""})` : "";
+    const count = this.policy ? this.policy.candidates.length : (this.config.fallbacks?.length ?? 0) + 1;
+    const fb = count > 1 ? ` (+${count - 1} fallback${count > 2 ? "s" : ""})` : "";
     logInfo(TAG, `🔌 Direct API transport (${this.config.endpoint}, model: ${this.config.model}${fb})`);
   }
 
@@ -79,7 +85,98 @@ export class DirectApiTransport implements IKiroTransport {
     this.abortControllers.set(sessionKey, ac);
 
     try {
-      // Build candidate list: user override first, then primary + fallbacks
+      // --- Model selection via FallbackPolicy (or legacy config.fallbacks) ---
+      if (this.policy) {
+        return await this.sendWithPolicy(session, ac.signal);
+      }
+
+      // Legacy path: inline candidate loop (kept for backward compat until Phase 3 deletes TransportManager)
+      return await this.sendWithLegacyCandidates(session, ac.signal);
+    } finally {
+      this._promptStartedAt = null;
+      this.abortControllers.delete(sessionKey);
+    }
+  }
+
+  private async sendWithPolicy(session: ConversationSession, signal: AbortSignal): Promise<string> {
+    const policy = this.policy!;
+    const failedAttempts: Array<{ model: string; kind: string; bucket: number }> = [];
+    const isPrimary = (m: string): boolean => m === this.config.model;
+
+    // Try each candidate via policy
+    let candidate = policy.selectModel(this._lastPromptTokens);
+    while (candidate) {
+      this.activeEndpoint = candidate.endpoint;
+      this.activeApiKey = candidate.apiKey;
+      this.activeModel = candidate.model;
+      this._lastActivityAt = Date.now();
+      logDebug(TAG, `Trying model: ${candidate.model}`);
+
+      if (!isPrimary(candidate.model) && this.onFallback) {
+        const ctxPct = candidate.maxContext > 0 ? Math.round((this._lastPromptTokens / candidate.maxContext) * 100) : -1;
+        const lastFail = failedAttempts[failedAttempts.length - 1];
+        this.onFallback(candidate.model, ctxPct, lastFail?.kind);
+      }
+
+      try {
+        const result = await this.agentLoop(session, signal);
+        this._lastAnswer = result;
+        if (!result || !result.trim()) {
+          policy.recordError(candidate, "weak");
+        } else {
+          policy.recordSuccess(candidate);
+        }
+        return result;
+      } catch (err) {
+        const status = this.parseErrorStatus(err);
+        const kind = classifyError(status);
+        const retryAfterMs = this.parseRetryAfter(err);
+        policy.recordError(candidate, kind, retryAfterMs);
+        const bucket = policy.registry.getBucketLevel(candidate.model, candidate.endpoint);
+        failedAttempts.push({ model: candidate.model, kind, bucket });
+        session.rollbackToLastUser();
+        logWarn(TAG, `${candidate.model} failed (${kind}, bucket: ${bucket}%${retryAfterMs ? `, retry-after: ${Math.round(retryAfterMs / 1000)}s` : ""}): ${err instanceof Error ? err.message.slice(0, 100) : String(err)}`);
+      }
+
+      candidate = policy.selectModel(this._lastPromptTokens);
+    }
+
+    // Compaction fallback: pick smallest surviving candidate, truncate to fit
+    const surviving = policy.survivingCandidates()
+      .filter(c => c.maxContext > 0)
+      .sort((a, b) => a.maxContext - b.maxContext);
+    const smallest = surviving[0];
+
+    if (smallest && this._lastPromptTokens > smallest.maxContext * 0.95) {
+      logWarn(TAG, `Compacting session to fit ${smallest.model} (${smallest.maxContext} tokens)`);
+      session.truncateToFit(smallest.maxContext);
+      this.activeEndpoint = smallest.endpoint;
+      this.activeApiKey = smallest.apiKey;
+      this.activeModel = smallest.model;
+      if (this.onFallback) {
+        this.onFallback(`${smallest.model} (compacted)`, Math.round((session.estimateTokens() / smallest.maxContext) * 100));
+      }
+      try {
+        const result = await this.agentLoop(session, signal);
+        this._lastAnswer = result;
+        if (!result || !result.trim()) policy.recordError(smallest, "weak");
+        else policy.recordSuccess(smallest);
+        return result;
+      } catch (err) {
+        const status = this.parseErrorStatus(err);
+        policy.recordError(smallest, classifyError(status));
+        failedAttempts.push({ model: smallest.model, kind: classifyError(status), bucket: policy.registry.getBucketLevel(smallest.model, smallest.endpoint) });
+      }
+    }
+
+    const summary = failedAttempts.map(a => `  - ${a.model}: ${a.kind} (bucket: ${a.bucket}%)`).join("\n");
+    if (policy.lastDecision) {
+      logDebug(TAG, `Last decision: ${JSON.stringify(policy.lastDecision)}`);
+    }
+    throw new Error(`All models exhausted:\n${summary}`);
+  }
+
+  private async sendWithLegacyCandidates(session: ConversationSession, signal: AbortSignal): Promise<string> {
       const allCandidates = [
         { endpoint: this.config.endpoint, apiKey: this.config.apiKey, model: this.config.model, maxContext: this.config.maxContext },
         ...(this.config.fallbacks ?? []).map(fb => ({ ...fb, maxContext: fb.maxContext ?? this.config.maxContext })),
@@ -128,7 +225,7 @@ export class DirectApiTransport implements IKiroTransport {
         }
 
         try {
-          const result = await this.agentLoop(session, ac.signal);
+          const result = await this.agentLoop(session, signal);
           this._lastAnswer = result;
           if (!result || !result.trim()) {
             recordError(bucketKey, "weak");
@@ -162,7 +259,7 @@ export class DirectApiTransport implements IKiroTransport {
           this.onFallback(`${smallest.model} (compacted)`, Math.round((session.estimateTokens() / smallest.maxContext) * 100));
         }
         try {
-          const result = await this.agentLoop(session, ac.signal);
+          const result = await this.agentLoop(session, signal);
           this._lastAnswer = result;
           const bk = `${smallest.endpoint}|${smallest.model}`;
           if (!result || !result.trim()) {
@@ -181,10 +278,6 @@ export class DirectApiTransport implements IKiroTransport {
 
       const summary = failedAttempts.map(a => `  - ${a.model}: ${a.kind} (bucket: ${a.bucket}%)`).join("\n");
       throw new Error(`All models exhausted:\n${summary}`);
-    } finally {
-      this._promptStartedAt = null;
-      this.abortControllers.delete(sessionKey);
-    }
   }
 
   private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
