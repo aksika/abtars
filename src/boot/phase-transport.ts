@@ -7,7 +7,7 @@ import { getEnv } from "../components/env-schema.js";
  * - Agent resolution from transport.json (or .env fallback)
  * - Transport construction: TmuxClient / DirectApiTransport / ACP
  * - System prompt injection for Direct API
- * - TransportManager fallback wrap for non-API transports with fallbacks
+ * - FallbackPolicy + ModelHealthRegistry for API transport model selection
  * - ACP stale-process kill before spawn
  * - In-process memory backend wire for Direct API (singleton: setMemoryBackend)
  * - onFallback notification callback (Telegram + logs)
@@ -62,16 +62,30 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
     );
   } else if (resolved.provider.transport === "api") {
     const { DirectApiTransport } = await import("../components/transport/direct-api-transport.js");
+    const { ModelHealthRegistry } = await import("../components/transport/model-health-registry.js");
+    const { FallbackPolicy } = await import("../components/transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
-    const fallbacks = resolved.fallbacks.map(fb => {
+
+    // Build candidate list: primary + fallbacks
+    const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number; lastResort?: boolean }> = [
+      { endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: resolved.model, maxContext: resolved.contextWindow },
+    ];
+    for (const fb of resolved.fallbacks) {
       const fbResolved = tc ? resolveAgent("_fallback", { ...tc, agents: { ...tc.agents, _fallback: { model: fb.model, provider: fb.provider } } }) : null;
-      return {
+      candidates.push({
         endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint!,
         apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
         model: fb.model,
-        maxContext: fbResolved?.contextWindow,
-      };
-    });
+        maxContext: fbResolved?.contextWindow ?? resolved.contextWindow,
+      });
+    }
+
+    // Shared registry (stored on ctx for /models + subagent reuse)
+    if (!ctx.modelHealthRegistry) {
+      ctx.modelHealthRegistry = new ModelHealthRegistry();
+    }
+    const policy = new FallbackPolicy(candidates, ctx.modelHealthRegistry);
+
     transport = new DirectApiTransport({
       endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
       apiKey,
@@ -79,9 +93,8 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
       maxContext: resolved.contextWindow,
       maxOutput: resolved.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
-      fallbacks: fallbacks.length > 0 ? fallbacks : undefined,
-    });
-    logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model})`);
+    }, policy);
+    logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
     // ACP
     try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
@@ -103,24 +116,9 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
     if (soul) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(soul);
   }
 
-  // Fallback wrap for non-API transports
+  // Non-API fallbacks: log warning (TransportManager removed — use API transport for fallback support)
   if (resolved.fallbacks.length > 0 && resolved.provider.transport !== "api") {
-    const { TransportManager } = await import("../components/transport/transport-manager.js");
-    const fb = resolved.fallbacks[0]!;
-    transport = new TransportManager(transport, {
-      createFallback: async () => {
-        const fbAgent = tc ? resolveAgent("_fb", { ...tc, agents: { ...tc.agents, _fb: { model: fb.model, provider: fb.provider } } }) : null;
-        if (fbAgent?.provider.transport === "api") {
-          const { DirectApiTransport } = await import("../components/transport/direct-api-transport.js");
-          return new DirectApiTransport({
-            endpoint: fbAgent.provider.endpoint!, apiKey: fbAgent.provider.apiKeyEnv ? getEnv().getApiKey(fbAgent.provider.apiKeyEnv) : undefined,
-            model: fb.model, maxContext: fbAgent.contextWindow, maxOutput: fbAgent.maxOutput, maxTurns: tc?.maxTurns ?? 50,
-          });
-        }
-        return createAgentTransport("professor", { cliPath: fbAgent?.provider.cli ?? "kiro-cli", workingDir: config.transport.workingDir, model: fb.model });
-      },
-    });
-    logInfo("main", `🛡️ Transport fallback: ${fb.model} via ${fb.provider}`);
+    logWarn("main", `⚠️ Fallbacks configured for ${resolved.provider.transport} transport — only API transport supports model fallback`);
   }
 
   ctx.transport = transport;

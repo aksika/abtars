@@ -10,7 +10,6 @@ import { ConversationSession, type ToolCall } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
 import { classifyError } from "./model-health-registry.js";
-import { shouldSkip, recordError, recordSuccess, getBucketLevel } from "./leaky-bucket.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 
@@ -85,13 +84,8 @@ export class DirectApiTransport implements IKiroTransport {
     this.abortControllers.set(sessionKey, ac);
 
     try {
-      // --- Model selection via FallbackPolicy (or legacy config.fallbacks) ---
-      if (this.policy) {
-        return await this.sendWithPolicy(session, ac.signal);
-      }
-
-      // Legacy path: inline candidate loop (kept for backward compat until Phase 3 deletes TransportManager)
-      return await this.sendWithLegacyCandidates(session, ac.signal);
+      if (!this.policy) throw new Error("DirectApiTransport requires a FallbackPolicy");
+      return await this.sendWithPolicy(session, ac.signal);
     } finally {
       this._promptStartedAt = null;
       this.abortControllers.delete(sessionKey);
@@ -174,110 +168,6 @@ export class DirectApiTransport implements IKiroTransport {
       logDebug(TAG, `Last decision: ${JSON.stringify(policy.lastDecision)}`);
     }
     throw new Error(`All models exhausted:\n${summary}`);
-  }
-
-  private async sendWithLegacyCandidates(session: ConversationSession, signal: AbortSignal): Promise<string> {
-      const allCandidates = [
-        { endpoint: this.config.endpoint, apiKey: this.config.apiKey, model: this.config.model, maxContext: this.config.maxContext },
-        ...(this.config.fallbacks ?? []).map(fb => ({ ...fb, maxContext: fb.maxContext ?? this.config.maxContext })),
-      ];
-
-      // If user manually switched model, put it first
-      if (this._userModelOverride) {
-        const idx = allCandidates.findIndex(c => c.model === this._userModelOverride);
-        if (idx >= 0) {
-          const [override] = allCandidates.splice(idx, 1);
-          allCandidates.unshift(override!);
-        } else {
-          // Model not in config — add it using primary endpoint
-          allCandidates.unshift({ endpoint: this.activeEndpoint, apiKey: this.activeApiKey, model: this._userModelOverride, maxContext: this.config.maxContext });
-        }
-      }
-      const candidates = allCandidates;
-
-      const isPrimary = (c: typeof candidates[0]): boolean => c.model === this.config.model && c.endpoint === this.config.endpoint;
-      const failedAttempts: Array<{ model: string; kind: string; bucket: number }> = [];
-
-      for (const candidate of candidates) {
-        const bucketKey = `${candidate.endpoint}|${candidate.model}`;
-        if (shouldSkip(bucketKey)) {
-          logDebug(TAG, `Skipping ${candidate.model} (bucket: ${getBucketLevel(bucketKey)}%)`);
-          continue;
-        }
-
-        // Context fit check — skip if conversation won't fit
-        if (this._lastPromptTokens > 0 && candidate.maxContext > 0 && this._lastPromptTokens > candidate.maxContext * 0.95) {
-          logWarn(TAG, `Skipping ${candidate.model} — context too large (${this._lastPromptTokens} tokens > ${candidate.maxContext} limit)`);
-          continue;
-        }
-
-        this.activeEndpoint = candidate.endpoint;
-        this.activeApiKey = candidate.apiKey;
-        this.activeModel = candidate.model;
-        this._lastActivityAt = Date.now();
-        logDebug(TAG, `Trying model: ${candidate.model}`);
-
-        // Notify user on fallback
-        if (!isPrimary(candidate) && this.onFallback) {
-          const ctxPct = candidate.maxContext > 0 ? Math.round((this._lastPromptTokens / candidate.maxContext) * 100) : -1;
-          const lastFail = failedAttempts[failedAttempts.length - 1];
-          this.onFallback(candidate.model, ctxPct, lastFail?.kind);
-        }
-
-        try {
-          const result = await this.agentLoop(session, signal);
-          this._lastAnswer = result;
-          if (!result || !result.trim()) {
-            recordError(bucketKey, "weak");
-          } else {
-            recordSuccess(bucketKey);
-          }
-          return result;
-        } catch (err) {
-          const status = this.parseErrorStatus(err);
-          const kind = classifyError(status);
-          const retryAfterMs = this.parseRetryAfter(err);
-          recordError(bucketKey, kind, retryAfterMs);
-          failedAttempts.push({ model: candidate.model, kind, bucket: getBucketLevel(bucketKey) });
-          session.rollbackToLastUser(); // clean slate for fallback model
-          logWarn(TAG, `${candidate.model} failed (${kind}, bucket: ${getBucketLevel(bucketKey)}%${retryAfterMs ? `, retry-after: ${Math.round(retryAfterMs / 1000)}s` : ""}): ${err instanceof Error ? err.message.slice(0, 100) : String(err)}`);
-        }
-      }
-
-      // All models failed — try compacting session to fit smallest available model
-      const smallest = candidates
-        .filter(c => !shouldSkip(`${c.endpoint}|${c.model}`) && c.maxContext > 0)
-        .sort((a, b) => a.maxContext - b.maxContext)[0];
-
-      if (smallest && this._lastPromptTokens > smallest.maxContext * 0.95) {
-        logWarn(TAG, `Compacting session to fit ${smallest.model} (${smallest.maxContext} tokens)`);
-        session.truncateToFit(smallest.maxContext);
-        this.activeEndpoint = smallest.endpoint;
-        this.activeApiKey = smallest.apiKey;
-        this.activeModel = smallest.model;
-        if (this.onFallback) {
-          this.onFallback(`${smallest.model} (compacted)`, Math.round((session.estimateTokens() / smallest.maxContext) * 100));
-        }
-        try {
-          const result = await this.agentLoop(session, signal);
-          this._lastAnswer = result;
-          const bk = `${smallest.endpoint}|${smallest.model}`;
-          if (!result || !result.trim()) {
-            recordError(bk, "weak");
-          } else {
-            recordSuccess(bk);
-          }
-          return result;
-        } catch (err) {
-          const status = this.parseErrorStatus(err);
-          const bk = `${smallest.endpoint}|${smallest.model}`;
-          recordError(bk, classifyError(status));
-          failedAttempts.push({ model: smallest.model, kind: classifyError(status), bucket: getBucketLevel(bk) });
-        }
-      }
-
-      const summary = failedAttempts.map(a => `  - ${a.model}: ${a.kind} (bucket: ${a.bucket}%)`).join("\n");
-      throw new Error(`All models exhausted:\n${summary}`);
   }
 
   private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
@@ -475,11 +365,8 @@ export class DirectApiTransport implements IKiroTransport {
   get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
 
   /** Hot-swap the active model. Takes effect on next API call. */
-  private _userModelOverride: string | null = null;
-
   setModel(model: string): void {
     this.activeModel = model;
-    this._userModelOverride = model;
     logInfo(TAG, `Model switched (user): ${model}`);
   }
 

@@ -9,7 +9,6 @@ import { join } from "node:path";
 import { agentBridgeHome } from "../paths.js";
 import { readEnvWithDefault } from "./env.js";
 import { logInfo, logWarn, logError } from "./logger.js";
-import { resetAllBuckets } from "./transport/leaky-bucket.js";
 
 const TAG = "transport-config";
 
@@ -195,7 +194,7 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): void
   const p = join(configDir(), getEnv().transportConfig);
   writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
   cachedTransport = tc;
-  resetAllBuckets();
+  
   logInfo(TAG, reason ? `transport.json updated — ${reason} (buckets cleared)` : "transport.json updated (buckets cleared)");
 }
 
