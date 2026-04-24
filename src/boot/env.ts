@@ -7,7 +7,11 @@
  * ?? default` reads freeze the default before dotenv runs.
  *
  * Precedence (highest → lowest):
- *   process.env  >  $AGENT_BRIDGE_HOME/.env  >  $AGENT_BRIDGE_HOME/config/.env.skills  >  ./.env
+ *   process.env
+ *   $AGENT_BRIDGE_HOME/config/.env        (primary — what `agentbridge onboard` writes)
+ *   $AGENT_BRIDGE_HOME/.env               (legacy root .env — kept for backward compat)
+ *   $AGENT_BRIDGE_HOME/config/.env.skills (skill-specific overrides)
+ *   ./.env                                (cwd)
  *
  * `override: false` preserves process.env precedence — operator-set vars
  * (launchd plist, shell export) win over .env values.
@@ -18,6 +22,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 
 const home = process.env["AGENT_BRIDGE_HOME"] ?? resolve(homedir(), ".agentbridge");
+loadDotenv({ path: resolve(home, "config", ".env"), override: false });
 loadDotenv({ path: resolve(home, ".env"), override: false });
 loadDotenv({ path: resolve(home, "config", ".env.skills"), override: false });
 loadDotenv({ path: resolve(process.cwd(), ".env"), override: false });

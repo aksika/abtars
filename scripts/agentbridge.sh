@@ -17,7 +17,10 @@ PROJECT_DIR="$HOME/.agentbridge"
 ARGS=("${@:---telegram}")
 PIDFILE="$AB_HOME/bridge.pid"
 
-# Load env
+# Load env — config/.env is primary (wizard writes here); root .env is legacy fallback
+if [ -f "$AB_HOME/config/.env" ]; then
+  set -a; source "$AB_HOME/config/.env"; set +a
+fi
 if [ -f "$AB_HOME/.env" ]; then
   set -a; source "$AB_HOME/.env"; set +a
 fi
