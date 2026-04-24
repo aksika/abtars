@@ -58,13 +58,13 @@ describe('onboard command (non-interactive)', () => {
     expect(code).toBe(4);
   });
 
-  it('refuses without required flags', async () => {
+  it('accepts no flags (all fields optional now)', async () => {
     const code = await onboard({
       nonInteractive: true,
       acceptRisk: true,
       force: false,
     });
-    expect(code).toBe(4);
+    expect(code).toBe(0);
   });
 
   it('refuses with invalid provider', async () => {

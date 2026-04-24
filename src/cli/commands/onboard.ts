@@ -35,30 +35,48 @@ export interface OnboardOptions {
   readonly force: boolean;
 }
 
-type ProviderChoice = 'openrouter' | 'anthropic' | 'openai';
+type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro-free' | 'kiro-paid' | 'gemini-free' | 'gemini-paid';
 
-const VALID_PROVIDERS: readonly ProviderChoice[] = ['openrouter', 'anthropic', 'openai'];
+const VALID_PROVIDERS: readonly ProviderChoice[] = ['openrouter', 'anthropic', 'openai', 'ollama', 'kiro-free', 'kiro-paid', 'gemini-free', 'gemini-paid'];
 const DEFAULT_MODELS: Record<ProviderChoice, string> = {
-  openrouter: 'z-ai/glm-4.6',
+  openrouter: 'google/gemini-2.5-flash',
   anthropic: 'claude-sonnet-4-5-20250929',
   openai: 'gpt-4o',
+  ollama: 'kimi-k2.5:cloud',
+  'kiro-free': 'claude-sonnet-4.6',
+  'kiro-paid': 'claude-opus-4.6',
+  'gemini-free': 'gemini-2.5-flash',
+  'gemini-paid': 'gemini-2.5-pro',
 };
 
-interface WizardAnswers {
-  readonly telegramToken: string;
-  readonly telegramChatId: string;
-  readonly defaultProvider: ProviderChoice;
-  readonly defaultModel: string;
-  readonly providerApiKey: string;
-  readonly discordA2aChannel: string | null;
-  readonly installMode: "simple" | "supervised";
-}
+/** Providers that use an API key + HTTP endpoint (can validate via /v1/models). */
+const API_PROVIDERS: ReadonlySet<ProviderChoice> = new Set(['openrouter', 'anthropic', 'openai', 'ollama']);
 
-const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
+const PROVIDER_ENDPOINT: Record<string, string> = {
+  openrouter: 'https://openrouter.ai/api/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  openai: 'https://api.openai.com/v1',
+  ollama: 'http://localhost:11434/v1',
+};
+
+const PROVIDER_API_KEY_ENV: Partial<Record<ProviderChoice, string>> = {
   openrouter: 'OPENROUTER_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
 };
+
+interface WizardAnswers {
+  readonly installMode: "simple" | "supervised";
+  readonly telegramToken: string;
+  readonly telegramChatId: string;
+  readonly discordBotToken: string;
+  readonly discordAppId: string;
+  readonly discordA2aChannel: string;
+  readonly defaultProvider: ProviderChoice;
+  readonly defaultModel: string;
+  readonly providerApiKey: string;
+  readonly hailMaryModel: string;
+}
 
 async function runInteractive(existing: WizardAnswers | null): Promise<WizardAnswers | null> {
   // Dynamic import — @clack/prompts is the only dep introduced in Phase 3;
@@ -66,144 +84,182 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   const { intro, outro, text, select, confirm, isCancel, cancel } = await import('@clack/prompts');
 
   intro('agentbridge onboard — first-time setup');
+  const noteEmpty = 'press Enter to skip';
 
-  const telegramToken = await text({
-    message: 'Telegram bot token (from @BotFather)',
-    placeholder: existing?.telegramToken ?? '1234567890:AA...',
-    initialValue: existing?.telegramToken,
-    validate: (v) => {
-      if (v === undefined || v.trim() === '') return 'required';
-      return v.includes(':') ? undefined : 'expected format "<id>:<secret>"';
-    },
+  // 1. Deployment mode
+  const installMode = await select<"simple" | "supervised">({
+    message: 'Deployment mode',
+    options: [
+      { value: 'simple', label: 'simple — laptop/WSL, start manually' },
+      { value: 'supervised', label: 'supervised — 24/7 host, launchd/systemd auto-restart' },
+    ],
+    initialValue: existing?.installMode ?? 'simple',
   });
-  if (isCancel(telegramToken)) {
-    cancel('Cancelled.');
-    return null;
-  }
+  if (isCancel(installMode)) { cancel('Cancelled.'); return null; }
+
+  // 2-3. Telegram (optional)
+  const telegramToken = await text({
+    message: `Telegram bot token (from @BotFather, ${noteEmpty})`,
+    placeholder: '1234567890:AA...',
+    initialValue: existing?.telegramToken,
+    validate: (v) => (!v || v.trim() === '' || v.includes(':')) ? undefined : 'expected format "<id>:<secret>" or empty',
+  });
+  if (isCancel(telegramToken)) { cancel('Cancelled.'); return null; }
 
   const telegramChatId = await text({
-    message: 'Primary Telegram chat ID (the user who talks to the bot)',
-    placeholder: existing?.telegramChatId ?? '123456789',
+    message: `Primary Telegram chat ID (${noteEmpty})`,
+    placeholder: '123456789',
     initialValue: existing?.telegramChatId,
-    validate: (v) => {
-      if (v === undefined) return 'required';
-      return /^-?\d+$/.test(v.trim()) ? undefined : 'expected a numeric chat id';
-    },
+    validate: (v) => (!v || v.trim() === '' || /^-?\d+$/.test(v.trim())) ? undefined : 'expected numeric chat id or empty',
   });
-  if (isCancel(telegramChatId)) {
-    cancel('Cancelled.');
-    return null;
-  }
+  if (isCancel(telegramChatId)) { cancel('Cancelled.'); return null; }
 
+  // 4-6. Discord (all optional)
+  const discordBotToken = await text({
+    message: `Discord bot token (${noteEmpty})`,
+    placeholder: 'MTIzNDU2...',
+    initialValue: existing?.discordBotToken,
+  });
+  if (isCancel(discordBotToken)) { cancel('Cancelled.'); return null; }
+
+  const discordAppId = await text({
+    message: `Discord app ID (${noteEmpty})`,
+    placeholder: '987654321098765432',
+    initialValue: existing?.discordAppId,
+    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected Discord snowflake or empty',
+  });
+  if (isCancel(discordAppId)) { cancel('Cancelled.'); return null; }
+
+  const discordA2aChannel = await text({
+    message: `Discord allowed channel ID (${noteEmpty})`,
+    placeholder: '987654321098765432',
+    initialValue: existing?.discordA2aChannel,
+    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected Discord snowflake or empty',
+  });
+  if (isCancel(discordA2aChannel)) { cancel('Cancelled.'); return null; }
+
+  // 7. Provider
   const defaultProvider = await select<ProviderChoice>({
     message: 'Default transport provider',
     options: [
-      { value: 'openrouter', label: 'OpenRouter (many models, one API key)' },
-      { value: 'anthropic', label: 'Anthropic (direct)' },
-      { value: 'openai', label: 'OpenAI (direct)' },
+      { value: 'openrouter', label: 'openrouter — many models via API key' },
+      { value: 'anthropic', label: 'anthropic — Claude API (direct)' },
+      { value: 'openai', label: 'openai — GPT API (direct)' },
+      { value: 'ollama', label: 'ollama — local/cloud Ollama endpoint' },
+      { value: 'kiro-free', label: 'kiro-free — Kiro CLI (free tier)' },
+      { value: 'kiro-paid', label: 'kiro-paid — Kiro CLI (paid)' },
+      { value: 'gemini-free', label: 'gemini-free — Gemini CLI (free)' },
+      { value: 'gemini-paid', label: 'gemini-paid — Gemini CLI (paid)' },
     ],
     initialValue: existing?.defaultProvider ?? 'openrouter',
   });
-  if (isCancel(defaultProvider)) {
-    cancel('Cancelled.');
-    return null;
-  }
+  if (isCancel(defaultProvider)) { cancel('Cancelled.'); return null; }
 
+  // 8. Default model
   const defaultModel = await text({
     message: `Default model (for ${defaultProvider})`,
     placeholder: DEFAULT_MODELS[defaultProvider],
     initialValue: existing?.defaultModel ?? DEFAULT_MODELS[defaultProvider],
   });
-  if (isCancel(defaultModel)) {
-    cancel('Cancelled.');
-    return null;
-  }
+  if (isCancel(defaultModel)) { cancel('Cancelled.'); return null; }
 
-  const providerApiKey = await text({
-    message: `${PROVIDER_API_KEY_ENV[defaultProvider as ProviderChoice]} (for ${defaultProvider})`,
-    placeholder: existing?.providerApiKey ? '(keep existing)' : 'sk-or-v1-...',
-    initialValue: existing?.providerApiKey,
-    validate: (v) => {
-      if ((v === undefined || v.trim() === '') && !existing?.providerApiKey) return 'required — API will not work without it';
-      return undefined;
-    },
-  });
-  if (isCancel(providerApiKey)) {
-    cancel('Cancelled.');
-    return null;
-  }
-
-  const installMode = await select<"simple" | "supervised">({
-    message: 'Deployment mode',
-    options: [
-      { value: 'simple', label: 'simple — laptop/WSL, no OS supervisor (start manually)' },
-      { value: 'supervised', label: 'supervised — 24/7 host, launchd/systemd auto-restart' },
-    ],
-    initialValue: existing?.installMode ?? 'simple',
-  });
-  if (isCancel(installMode)) {
-    cancel('Cancelled.');
-    return null;
-  }
-
-  const wantsDiscord = await confirm({
-    message: 'Configure Discord agent-to-agent channel?',
-    initialValue: existing?.discordA2aChannel !== null && existing?.discordA2aChannel !== undefined,
-  });
-  if (isCancel(wantsDiscord)) {
-    cancel('Cancelled.');
-    return null;
-  }
-
-  let discordA2aChannel: string | null = null;
-  if (wantsDiscord) {
+  // 9. API key — only for API providers
+  let providerApiKey = existing?.providerApiKey ?? '';
+  const apiKeyEnv = PROVIDER_API_KEY_ENV[defaultProvider];
+  if (apiKeyEnv) {
     const v = await text({
-      message: 'Discord A2A channel ID',
-      placeholder: '987654321098765432',
-      initialValue: existing?.discordA2aChannel ?? undefined,
-      validate: (value) => {
-        if (value === undefined) return 'required';
-        return /^\d{10,20}$/.test(value.trim()) ? undefined : 'expected a Discord snowflake id';
-      },
+      message: `${apiKeyEnv} (${noteEmpty})`,
+      placeholder: existing?.providerApiKey ? '(keep existing)' : 'sk-or-v1-...',
+      initialValue: existing?.providerApiKey,
     });
-    if (isCancel(v)) {
-      cancel('Cancelled.');
-      return null;
+    if (isCancel(v)) { cancel('Cancelled.'); return null; }
+    providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
+  }
+
+  // 10. Availability check
+  const modelStr = String(defaultModel).trim() || DEFAULT_MODELS[defaultProvider];
+  if (API_PROVIDERS.has(defaultProvider) && providerApiKey) {
+    const check = await confirm({ message: 'Check availability (GET /v1/models)?', initialValue: true });
+    if (isCancel(check)) { cancel('Cancelled.'); return null; }
+    if (check) {
+      const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
+      const result = await checkModelAvailability(endpoint, providerApiKey, modelStr);
+      process.stdout.write(result.ok ? `✓ ${modelStr} available on ${defaultProvider}\n` : `⚠️  ${result.message}\n`);
     }
-    discordA2aChannel = String(v).trim();
+  }
+
+  // 11. Ultimate fallback (hailMary)
+  const hailMary = await text({
+    message: `Ultimate fallback model — hailMary (${noteEmpty}; uses same provider + key as above)`,
+    placeholder: 'google/gemini-2.5-flash',
+    initialValue: existing?.hailMaryModel,
+  });
+  if (isCancel(hailMary)) { cancel('Cancelled.'); return null; }
+  const hailMaryModel = String(hailMary ?? '').trim();
+
+  if (hailMaryModel && API_PROVIDERS.has(defaultProvider) && providerApiKey) {
+    const check = await confirm({ message: `Check hailMary availability (${hailMaryModel})?`, initialValue: true });
+    if (isCancel(check)) { cancel('Cancelled.'); return null; }
+    if (check) {
+      const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
+      const result = await checkModelAvailability(endpoint, providerApiKey, hailMaryModel);
+      process.stdout.write(result.ok ? `✓ ${hailMaryModel} available\n` : `⚠️  ${result.message}\n`);
+    }
   }
 
   outro('Writing config…');
 
   return {
-    telegramToken: String(telegramToken).trim(),
-    telegramChatId: String(telegramChatId).trim(),
-    defaultProvider: defaultProvider as ProviderChoice,
-    defaultModel: String(defaultModel).trim() || DEFAULT_MODELS[defaultProvider as ProviderChoice],
-    providerApiKey: String(providerApiKey ?? '').trim() || existing?.providerApiKey || '',
-    discordA2aChannel,
     installMode: installMode as "simple" | "supervised",
+    telegramToken: String(telegramToken ?? '').trim(),
+    telegramChatId: String(telegramChatId ?? '').trim(),
+    discordBotToken: String(discordBotToken ?? '').trim(),
+    discordAppId: String(discordAppId ?? '').trim(),
+    discordA2aChannel: String(discordA2aChannel ?? '').trim(),
+    defaultProvider: defaultProvider as ProviderChoice,
+    defaultModel: modelStr,
+    providerApiKey,
+    hailMaryModel,
   };
+}
+
+/** Ping GET <endpoint>/models with the API key. Returns ok=true if the model ID is listed. */
+async function checkModelAvailability(endpoint: string, apiKey: string, model: string): Promise<{ ok: boolean; message: string }> {
+  try {
+    const res = await fetch(`${endpoint}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return { ok: false, message: `provider returned ${res.status}` };
+    const json = await res.json() as { data?: Array<{ id: string }> };
+    const ids = (json.data ?? []).map(m => m.id);
+    return ids.includes(model)
+      ? { ok: true, message: 'available' }
+      : { ok: false, message: `"${model}" not found in provider's model list` };
+  } catch (err) {
+    return { ok: false, message: `check failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   if (!opts.acceptRisk) {
     return '--non-interactive requires --accept-risk (you are bypassing safety prompts)';
   }
-  if (!opts.telegramToken) return '--telegram-token required in non-interactive mode';
-  if (!opts.telegramChatId) return '--telegram-chat-id required in non-interactive mode';
   const provider = (opts.defaultProvider ?? 'openrouter') as ProviderChoice;
   if (!VALID_PROVIDERS.includes(provider)) {
     return `--default-provider must be one of: ${VALID_PROVIDERS.join(', ')}`;
   }
   return {
-    telegramToken: opts.telegramToken,
-    telegramChatId: opts.telegramChatId,
+    installMode: 'supervised',
+    telegramToken: opts.telegramToken ?? '',
+    telegramChatId: opts.telegramChatId ?? '',
+    discordBotToken: '',
+    discordAppId: '',
+    discordA2aChannel: opts.discordA2aChannel ?? '',
     defaultProvider: provider,
     defaultModel: opts.defaultModel ?? DEFAULT_MODELS[provider],
     providerApiKey: '',
-    discordA2aChannel: opts.discordA2aChannel ?? null,
-    installMode: 'supervised',
+    hailMaryModel: '',
   };
 }
 
@@ -215,18 +271,20 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
       if (m && m[1] !== undefined && m[2] !== undefined) kv.set(m[1], m[2]);
     }
-    const token = kv.get('TELEGRAM_BOT_TOKEN');
-    const chatId = kv.get('MAIN_CHAT_ID');
-    const provider = kv.get('DEFAULT_PROVIDER') as ProviderChoice | undefined;
-    if (!token || !chatId || !provider) return null;
+    const provider = (kv.get('DEFAULT_PROVIDER') ?? 'openrouter') as ProviderChoice;
+    if (!VALID_PROVIDERS.includes(provider)) return null;
+    const apiKeyEnv = PROVIDER_API_KEY_ENV[provider];
     return {
-      telegramToken: token,
-      telegramChatId: chatId,
-      defaultProvider: VALID_PROVIDERS.includes(provider) ? provider : 'openrouter',
-      defaultModel: kv.get('DEFAULT_MODEL') ?? DEFAULT_MODELS[provider] ?? DEFAULT_MODELS.openrouter,
-      providerApiKey: kv.get(PROVIDER_API_KEY_ENV[provider] ?? 'OPENROUTER_API_KEY') ?? '',
-      discordA2aChannel: kv.get('DISCORD_A2A_CHANNEL_ID') ?? null,
       installMode: 'simple',
+      telegramToken: kv.get('TELEGRAM_BOT_TOKEN') ?? '',
+      telegramChatId: kv.get('MAIN_CHAT_ID') ?? '',
+      discordBotToken: kv.get('DISCORD_BOT_TOKEN') ?? '',
+      discordAppId: kv.get('DISCORD_APP_ID') ?? '',
+      discordA2aChannel: kv.get('DISCORD_A2A_CHANNEL_ID') ?? '',
+      defaultProvider: provider,
+      defaultModel: kv.get('DEFAULT_MODEL') ?? DEFAULT_MODELS[provider],
+      providerApiKey: apiKeyEnv ? (kv.get(apiKeyEnv) ?? '') : '',
+      hailMaryModel: '',
     };
   } catch {
     return null;
@@ -234,15 +292,12 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
 }
 
 function mergeEnvContent(existing: string, answers: WizardAnswers): string {
-  // Preserve lines the wizard doesn't own; overwrite the ones it does.
   const providerKeyName = PROVIDER_API_KEY_ENV[answers.defaultProvider];
   const owned = new Set([
-    'TELEGRAM_BOT_TOKEN',
-    'MAIN_CHAT_ID',
-    'DEFAULT_PROVIDER',
-    'DEFAULT_MODEL',
-    'DISCORD_A2A_CHANNEL_ID',
-    providerKeyName,
+    'TELEGRAM_BOT_TOKEN', 'MAIN_CHAT_ID',
+    'DISCORD_BOT_TOKEN', 'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
+    'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
+    ...(providerKeyName ? [providerKeyName] : []),
   ]);
   const keptLines: string[] = [];
   for (const line of existing.split('\n')) {
@@ -250,22 +305,21 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     if (m && m[1] !== undefined && owned.has(m[1])) continue;
     keptLines.push(line);
   }
-  // Trim trailing empty lines before appending.
   while (keptLines.length > 0 && keptLines[keptLines.length - 1] === '') keptLines.pop();
 
   const newBlock = [
     '',
     '# --- agentbridge onboard-managed ---',
-    `TELEGRAM_BOT_TOKEN=${answers.telegramToken}`,
-    `MAIN_CHAT_ID=${answers.telegramChatId}`,
     `DEFAULT_PROVIDER=${answers.defaultProvider}`,
     `DEFAULT_MODEL=${answers.defaultModel}`,
   ];
-  if (answers.providerApiKey) {
+  if (answers.telegramToken) newBlock.push(`TELEGRAM_BOT_TOKEN=${answers.telegramToken}`);
+  if (answers.telegramChatId) newBlock.push(`MAIN_CHAT_ID=${answers.telegramChatId}`);
+  if (answers.discordBotToken) newBlock.push(`DISCORD_BOT_TOKEN=${answers.discordBotToken}`);
+  if (answers.discordAppId) newBlock.push(`DISCORD_APP_ID=${answers.discordAppId}`);
+  if (answers.discordA2aChannel) newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
+  if (providerKeyName && answers.providerApiKey) {
     newBlock.push(`${providerKeyName}=${answers.providerApiKey}`);
-  }
-  if (answers.discordA2aChannel !== null) {
-    newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
   }
 
   return [...keptLines, ...newBlock, ''].join('\n');
@@ -322,6 +376,19 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   writeInstallMode(paths.home, answers.installMode);
   process.stdout.write(`✓ install mode: ${answers.installMode}\n`);
 
-  process.stdout.write(`Next: 'agentbridge update' to build, then start the bridge${answers.installMode === 'simple' ? ' via ~/.agentbridge/agentbridge.sh' : ' via your watchdog'}.\n`);
+  // Write hailMary to transport.json if configured
+  if (answers.hailMaryModel) {
+    const transportPath = join(paths.config, 'transport.json');
+    let tc: Record<string, unknown> = {};
+    try {
+      tc = JSON.parse(await readFile(transportPath, 'utf-8'));
+    } catch { /* file missing/invalid — start fresh */ }
+    tc["hailMary"] = { model: answers.hailMaryModel, provider: answers.defaultProvider };
+    await writeFile(transportPath, JSON.stringify(tc, null, 2) + '\n', { mode: 0o600 });
+    process.stdout.write(`✓ hailMary: ${answers.hailMaryModel} (${answers.defaultProvider}) → ${transportPath}\n`);
+  }
+
+  process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://github.com/aksika/agentbridge/blob/main/docs/install.md\n`);
+  process.stdout.write(`\nNext: 'agentbridge update' to build, then start the bridge${answers.installMode === 'simple' ? ' via ~/.agentbridge/agentbridge.sh' : ' via your watchdog'}.\n`);
   return 0;
 }
