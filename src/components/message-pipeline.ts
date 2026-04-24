@@ -152,10 +152,9 @@ export async function handleInboundMessage(
   const chatId = ctx.chatId;
   const text = ctx.text;
 
-  // Resolve userId for memory scoping
+  // Resolve userId from sessionKey (adapter already resolved it)
   const registry = loadUsers();
-  const platformKey = sessionKey.includes(":") ? sessionKey.split(":")[0] + ":" + String(chatId) : sessionKey;
-  const userId = registry.byPlatformId.get(platformKey)?.userId ?? "master";
+  const userId = sessionKey.includes(":") ? sessionKey.split(":")[0]! : "master";
 
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;

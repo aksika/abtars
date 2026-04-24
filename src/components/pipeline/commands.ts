@@ -24,9 +24,10 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     updateCtxStart, conversationBuffer } = deps;
 
   // #157: strip leading bangs for non-master (kiro-cli executes ! as shell)
+  // Resolve user from sessionKey (adapter already resolved userId)
   const registry = loadUsers();
-  const platformKey = `${msg.platform}:${msg.channelId}`;
-  const user = registry.byPlatformId.get(platformKey);
+  const resolvedUserId = msg.sessionKey.includes(":") ? msg.sessionKey.split(":")[0]! : "master";
+  const user = registry.byUserId.get(resolvedUserId);
   const isMaster = user?.role === "master";
   if (!isMaster && BANG_PREFIX.test(ctx.text)) {
     const original = ctx.text;
