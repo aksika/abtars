@@ -2,19 +2,8 @@ import { getEnv } from "../components/env-schema.js";
 /**
  * phase-transport — boot phase 3: select, initialize, and wrap the agent transport.
  *
- * Handles:
- * - Pre-flight tmux session start (if transport=tmux)
- * - Agent resolution from transport.json (or .env fallback)
- * - Transport construction: TmuxClient / DirectApiTransport / ACP
- * - System prompt injection for Direct API
- * - FallbackPolicy + ModelHealthRegistry for API transport model selection
- * - ACP stale-process kill before spawn
- * - In-process memory backend wire for Direct API (singleton: setMemoryBackend)
- * - onFallback notification callback (Telegram + logs)
- * - Initialize context-window-start for all known users
- *
- * Populates ctx: transport.
- * Owns singleton: tool-registry.memoryBackend (via setMemoryBackend).
+ * Also exports buildTransport/rebuildTransport for /reset to pick up transport.json changes
+ * (including provider switches that can't be live-patched).
  */
 
 import { execFileSync, execSync } from "node:child_process";
@@ -40,14 +29,37 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
     }
   }
 
+  await buildTransport(ctx);
+
+  // Initialize context-window-start for all known users
+  if (memoryConfig.memoryEnabled) {
+    const reg = loadUsers();
+    for (const user of reg.users) updateCtxStart(memoryConfig.memoryDir, user.userId, ctx.startedAt);
+  }
+}
+
+/**
+ * Construct professor transport from current transport.json + env and attach to ctx.transport.
+ * Idempotent: destroys any existing ctx.transport first.
+ */
+export async function buildTransport(ctx: BootCtx): Promise<void> {
+  const { config, memoryConfig } = ctx;
+
+  // Destroy old (if any)
+  if (ctx.transport) {
+    try { await ctx.transport.destroy(); } catch (err) {
+      logWarn("main", `Old transport destroy failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    ctx.transport = null;
+  }
+
   let transport: IKiroTransport;
 
-  // Resolve professor config from transport.json (falls back to .env)
-  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary } = await import("../components/transport-config.js");
+  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache } = await import("../components/transport-config.js");
+  clearTransportCache();  // always re-read (picks up /models change writes)
   const tc = loadTransport();
   const prof = tc ? resolveAgent("professor", tc) : null;
 
-  // Resolve hailMary (paid emergency model, manual activation only)
   const hm = resolveHailMary(tc);
   if (hm) {
     ctx.hailMary = {
@@ -55,8 +67,11 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
       endpoint: hm.endpoint,
       apiKey: hm.apiKeyEnv ? getEnv().getApiKey(hm.apiKeyEnv) : undefined,
     };
-    logInfo("main", `🚨 hailMary configured: ${hm.model} `);
+    logInfo("main", `🚨 hailMary configured: ${hm.model} (manual /model emergency only)`);
+  } else {
+    ctx.hailMary = null;
   }
+
   const resolved = prof ?? (() => {
     const fb = getEnvFallback();
     logWarn("main", `⚠️ Using .env fallback: ${fb.model} via ${fb.providerName}`);
@@ -77,7 +92,6 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
     const { FallbackPolicy } = await import("../components/transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
 
-    // Build candidate list: primary + fallbacks
     const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [
       { endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: resolved.model, maxContext: resolved.contextWindow },
     ];
@@ -91,7 +105,6 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
       });
     }
 
-    // Shared registry (stored on ctx for /models + subagent reuse)
     if (!ctx.modelHealthRegistry) {
       ctx.modelHealthRegistry = new ModelHealthRegistry();
     }
@@ -107,7 +120,6 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
     }, policy);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
-    // ACP
     try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
     logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
     transport = createAgentTransport("professor", {
@@ -120,28 +132,24 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
 
   await transport.initialize();
 
-  // System prompt for direct API
   if ("setSystemPrompt" in transport && typeof (transport as { setSystemPrompt: unknown }).setSystemPrompt === "function") {
     const { loadSoulBundle } = await import("../components/soul-loader.js");
     const soul = loadSoulBundle();
     if (soul) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(soul);
   }
 
-  // Non-API fallbacks: log warning (TransportManager removed — use API transport for fallback support)
   if (resolved.fallbacks.length > 0 && resolved.provider.transport !== "api") {
     logWarn("main", `⚠️ Fallbacks configured for ${resolved.provider.transport} transport — only API transport supports model fallback`);
   }
 
   ctx.transport = transport;
 
-  // Wire shared registry into SubagentRuntime so cron/dreamy/browsie share health state
   if (ctx.modelHealthRegistry) {
     ctx.runtime.setRegistry(ctx.modelHealthRegistry);
   }
 
   logInfo("main", "✅ Transport ready");
 
-  // In-process memory backend for Direct API (singleton: setMemoryBackend)
   if (resolved.provider.transport === "api" && ctx.memory) {
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
     const { SqliteBackend } = await import("abmind/sqlite-backend.js");
@@ -151,7 +159,6 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
     logInfo("main", "🧠 In-process memory wired to tool registry");
   }
 
-  // Fallback notification callback (fires later; closes over ctx so it reads telegramAdapter when invoked)
   if ("onFallback" in transport) {
     (transport as unknown as { onFallback: (model: string, ctxPct: number, reason?: string) => void }).onFallback = (model, ctxPct, reason) => {
       const reasonTag = reason ? ` (${reason})` : "";
@@ -163,10 +170,20 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
       }
     };
   }
+}
 
-  // Initialize context-window-start for all known users
-  if (memoryConfig.memoryEnabled) {
-    const reg = loadUsers();
-    for (const user of reg.users) updateCtxStart(memoryConfig.memoryDir, user.userId, ctx.startedAt);
+/**
+ * Rebuild professor transport in place (picks up transport.json changes).
+ * Patches downstream references that captured the old transport (pipelineDeps, idleSave).
+ */
+export async function rebuildTransport(ctx: BootCtx): Promise<void> {
+  logInfo("main", "🔄 Rebuilding transport...");
+  await buildTransport(ctx);
+  if (ctx.pipelineDeps && ctx.transport) {
+    (ctx.pipelineDeps as { transport: IKiroTransport }).transport = ctx.transport;
   }
+  if (ctx.idleSave && ctx.transport) {
+    (ctx.idleSave as unknown as { transport: IKiroTransport }).transport = ctx.transport;
+  }
+  logInfo("main", "✅ Transport rebuilt");
 }

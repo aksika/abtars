@@ -98,6 +98,8 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   loadedCapabilities?: string[];
   selfHealerTask?: { enabled: boolean } | null;
   hailMary?: { model: string; endpoint: string; apiKey?: string } | null;
+  /** Rebuild professor transport in place (used by /reset to pick up provider changes). */
+  rebuildTransport?: () => Promise<void>;
 }
 
 /**

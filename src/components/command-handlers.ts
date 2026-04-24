@@ -49,6 +49,7 @@ export interface CommandContext {
   loadedCapabilities?: PipelineDeps["loadedCapabilities"];
   selfHealerTask?: { enabled: boolean } | null;
   hailMary?: PipelineDeps["hailMary"];
+  rebuildTransport?: PipelineDeps["rebuildTransport"];
   // Per-message (optional)
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
@@ -173,6 +174,18 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
     // Re-read transport.json (picks up /model changes)
     const { clearTransportCache } = await import("./transport-config.js");
     clearTransportCache();
+  }
+
+  // Rebuild transport on /reset — picks up provider changes from /models change.
+  // Same-provider model changes are cheap; cross-provider rebuilds spawn a new
+  // ACP child or swap DirectApi for ACP etc.
+  if (isReset && ctx.rebuildTransport) {
+    try {
+      await ctx.rebuildTransport();
+    } catch (err) {
+      await ctx.reply(`⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
+      return true;
+    }
   }
 
   await resetAndPrepare({

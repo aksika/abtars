@@ -112,6 +112,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
     loadedCapabilities: [],
     selfHealerTask: null,
     hailMary: ctx.hailMary,
+    rebuildTransport: async () => {
+      const { rebuildTransport } = await import("./phase-transport.js");
+      await rebuildTransport(ctx);
+    },
   };
   ctx.pipelineDeps = pipelineDeps;
 }
