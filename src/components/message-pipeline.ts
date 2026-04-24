@@ -5,19 +5,13 @@
  */
 
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
-import { localTime } from "../utils/local-time.js";
-import { interceptLargeMessage } from "./message-interceptor.js";
-import { runCompaction, compactionSummaries } from "./compaction.js";
 import { cleanResponse } from "./clean-response.js";
-import { buildSessionStartContext } from "abmind/session-context.js";
-import { loadSoulBundle } from "./soul-loader.js";
 import { loadUsers } from "./user-registry.js";
 import { tryReaction } from "./reactions.js";
 import { SessionRegistry } from "./session-registry.js";
-import { renderMemory } from "abmind";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
-import { writeRestartReason, readAndClearRestartReason } from "./transport/bridge-lock-transport.js";
+import { writeRestartReason } from "./transport/bridge-lock-transport.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind/memory-manager.js";
 import type { CodingMode } from "./coding-mode.js";
@@ -30,10 +24,6 @@ import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { getEnv } from "./env-schema.js";
 
 const TAG = "pipeline";
-
-// Context window thresholds (read once from schema — no more module-level process.env)
-const COMPACT_MAX_FAILURES = 3;
-const ACTIVE_MEMORY_LIMIT = 5;
 const PRIMING_MAX = 8;
 
 const STOPWORDS = new Set(["the","a","an","is","are","was","were","be","been",
@@ -130,7 +120,7 @@ export async function handleInboundMessage(
     sessions, updateCtxStart,
   } = deps;
 
-  const { sessionKey, channelId, isVoice, isGroup } = msg;
+  const { sessionKey, channelId, isVoice } = msg;
   const chatId = ctx.chatId;
   const text = ctx.text;
 
@@ -151,77 +141,17 @@ export async function handleInboundMessage(
     // No queueing needed
 
     // --- Build prompt ---
-    const bufKey = `${msg.platform}:${channelId}`;
-    let prompt = `[${localTime()}] ${text}`;
-    if (msg.mediaPath) {
-      prompt += `\nFile saved at: ${msg.mediaPath}`;
-    }
-    if (isGroup) {
-      const context = conversationBuffer.drain(bufKey);
-      if (context) {
-        prompt = context + text;
-        logDebug(TAG, "Prepended group context to prompt");
-      }
+    const { buildPrompt } = await import("./pipeline/prompt-builder.js");
+    const { prompt: builtPrompt } = await buildPrompt(msg, text, {
+      memory, memoryConfig, sessions, conversationBuffer, contextPercent: ctxPct,
+    }, registry);
+
+    if (builtPrompt === "__INJECTION_BLOCKED__") {
+      await adapter.sendMessage(channelId, "⛔ Message blocked — suspicious content detected.", { threadId: msg.threadId });
+      return;
     }
 
-    const isSessionStart = sessions.getOrCreate(sessionKey).pendingStart;
-
-    if (memory) {
-      prompt = preparePrompt(prompt, memory, userId, sessionKey, text, sessions, msg.messageId);
-    }
-
-    // --- Active recall: inject relevant memories on non-session-start turns ---
-    if (getEnv().activeMemory && memory && !isSessionStart) {
-      const userEntry = registry.byUserId.get(userId);
-      const ctxPct = transport.contextPercent;
-      if (userEntry?.role !== "guest" && (ctxPct < 0 || ctxPct < getEnv().ctxCompactPct)) {
-        try {
-          const t0 = performance.now();
-          const priming = sessions.get(sessionKey)?.primingTerms ?? [];
-          const recall = await memory.recallSearch({
-            translated: [...new Set([text, ...priming])],
-            original: text,
-            userId,
-            limit: ACTIVE_MEMORY_LIMIT,
-            maxClassification: userEntry?.maxClass ?? 0,
-            stages: ["Sf", "S1"],
-          });
-          const hits = recall.results.filter(h => h.score > 0);
-          if (hits.length > 0) {
-            const lines = hits.map(h => renderMemory({
-              content_en: h.content,
-              topic: h.topic ?? undefined,
-              emotion_tags: h.emotionTags ?? undefined,
-              importance_flags: h.importanceFlags ?? undefined,
-              memory_type: h.memoryType ?? undefined,
-              confidence: h.confidence ?? undefined,
-              createdAt: h.createdAt,
-            }));
-            const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]\n\n`;
-            prompt = block + prompt;
-            logDebug(TAG, `Active recall: ${hits.length} hits, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
-          }
-        } catch (err) {
-          logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-    }
-
-    if (!isSessionStart) {
-      prompt = interceptLargeMessage(prompt).text;
-    }
-
-    // --- Injection scan on user text for non-master (#157) ---
-    const userRole = registry.byUserId.get(userId)?.role;
-    if (userRole !== "master" && text.length > 10) {
-      const { scanForInjection } = await import("abmind/injection-scanner.js");
-      const scan = scanForInjection(text);
-      if (!scan.safe) {
-        logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map(f => f.category).join(", ")}`);
-        await adapter.sendMessage(channelId, "⛔ Message blocked — suspicious content detected.", { threadId: msg.threadId });
-        return;
-      }
-    }
+    let prompt = builtPrompt;
 
     // --- Send to transport ---
     const codingSession = codingMode.has(sessionKey) ? codingMode.getSession() : null;
@@ -448,48 +378,10 @@ export async function handleInboundMessage(
     const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${intermediateDelivered ? " (streamed)" : ""}${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
     updateBridgeLockField("lastPromptAt", Date.now());
-    // --- Context window management (graduated thresholds) ---
+    // --- Context window management ---
     {
-      const pct = transport.contextPercent;
-      if (pct >= 0) {
-        const failures = sessions.getOrCreate(sessionKey).compactFailures;
-
-        if (pct >= getEnv().ctxCompactPct && failures < COMPACT_MAX_FAILURES) {
-          const aggressive = pct >= getEnv().ctxAggressivePct;
-          logInfo(TAG, `📦 Context at ${pct}% (${aggressive ? "aggressive" : "compact"} threshold) — compacting`);
-          writeRestartReason(`compaction: ctx at ${pct}%`);
-          await adapter.sendMessage(channelId, `📦 Context at ${pct}% — compacting...`, { threadId: msg.threadId });
-
-          try {
-            // Safety-net transcript
-            if (memory) {
-              memory.maintenance.checkAutoCompact({
-                userId, sessionId: sessionKey, contextPercent: pct,
-                sendCompactCommand: async () => "",
-              }).catch(() => {});
-            }
-
-            await runCompaction(transport, sessionKey, sessions);
-            { const e = sessions.getOrCreate(sessionKey); e.ctxWarned = false; e.compactFailures = 0; }
-
-            await adapter.sendMessage(channelId, "📦 Compaction complete.", { threadId: msg.threadId });
-            if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, userId);
-          } catch (err) {
-            const entry = sessions.getOrCreate(sessionKey);
-            entry.compactFailures++;
-            logError(TAG, `Compaction failed (${entry.compactFailures}/${COMPACT_MAX_FAILURES})`, err);
-            if (entry.compactFailures >= COMPACT_MAX_FAILURES) {
-              await adapter.sendMessage(channelId, "⚠️ Compaction failing repeatedly — consider /reset", { threadId: msg.threadId });
-            }
-          }
-        } else if (pct >= getEnv().ctxWarnPct && !sessions.getOrCreate(sessionKey).ctxWarned) {
-          sessions.getOrCreate(sessionKey).ctxWarned = true;
-          logInfo(TAG, `⚠️ Context at ${pct}% — warning threshold`);
-          await adapter.sendMessage(channelId, `⚠️ Context window at ${pct}% — will auto-compact at ${getEnv().ctxCompactPct}%`, { threadId: msg.threadId });
-        } else if (pct >= getEnv().ctxCompactPct && failures >= COMPACT_MAX_FAILURES) {
-          logDebug(TAG, `Context at ${pct}% but compaction circuit breaker active (${failures} failures)`);
-        }
-      }
+      const { runCompactionGuard } = await import("./pipeline/compaction-guard.js");
+      await runCompactionGuard(msg, adapter, { transport, sessions, memory, memoryConfig, updateCtxStart });
     }
   } catch (err) {
     logError(TAG, `Error for ${sessionKey} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
@@ -540,6 +432,7 @@ export async function startSession(
   greeting: string,
   sendResponse: (text: string) => Promise<unknown>,
 ): Promise<void> {
+  const { buildSessionStartPrompt } = await import("./pipeline/prompt-builder.js");
   const prompt = buildSessionStartPrompt(greeting, memory, userId, sessionKey);
   logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
   const response = await transport.sendPrompt(sessionKey, prompt);
@@ -548,101 +441,4 @@ export async function startSession(
   }
 }
 
-/** Single path for session-start injection: SOUL + memory wake-up + context + user identity + restart reason. */
-function buildSessionStartPrompt(
-  prompt: string,
-  memory: MemoryManager,
-  userId: string,
-  sessionKey?: string,
-): string {
-  const contextParts: string[] = [];
 
-  const reason = readAndClearRestartReason();
-  if (reason) {
-    contextParts.push(`[SESSION START REASON] ${reason}`);
-    logInfo(TAG, `Injected restart reason: ${reason}`);
-  }
-
-  const soul = loadSoulBundle(memory);
-  if (soul) {
-    contextParts.push(soul);
-    logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
-  }
-
-  // Inject current user identity (profile already in soul bundle via getSessionBundle)
-  if (sessionKey) {
-    try {
-      const registry = loadUsers();
-      const user = registry.byUserId.get(userId);
-      if (user) {
-        const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
-        contextParts.push(`[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).`);
-      }
-    } catch { /* registry not available */ }
-  }
-
-  // Compaction path: skip session-context + wake-up (compaction summary has the context)
-  const compSummary = compactionSummaries.get(sessionKey ?? "");
-  if (compSummary && sessionKey) {
-    contextParts.push(`[COMPACTED CONVERSATION]\n${compSummary}\n[/COMPACTED CONVERSATION]`);
-    compactionSummaries.delete(sessionKey);
-    logInfo(TAG, `Injected compaction summary (${compSummary.length} chars)`);
-  } else {
-    // Normal path: session-context (daily + recent msgs) + wake-up (time + flashback)
-    const ctx = buildSessionStartContext(memory, userId);
-    if (ctx) {
-      contextParts.push(ctx);
-      logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
-    }
-
-    try {
-      const userRole = loadUsers().byUserId.get(userId)?.role ?? "master";
-      if (userRole === "guest") {
-        contextParts.push("Hi! How can I help?");
-      } else if (userRole === "user") {
-        contextParts.push("[SESSION START] Returning user. Be friendly and helpful.");
-      } else {
-        const wakeUp = memory.buildWakeUp();
-        if (wakeUp) {
-          contextParts.push(wakeUp);
-          logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
-        }
-      }
-    } catch { /* wake-up builder not available */ }
-  }
-
-  // Wrap all context, put user instruction after
-  const contextBlock = contextParts.length > 0
-    ? `[CONTEXT — do not respond to this section]\n${contextParts.join("\n\n")}\n[/CONTEXT]\n\n`
-    : "";
-
-  const result = contextBlock + prompt;
-  if (result.length < 5000) {
-    logWarn(TAG, `Session-start prompt suspiciously small (${result.length} chars) — SOUL may be missing`);
-  }
-  return result;
-}
-
-/** Inject session-start context if pending, record user message. */
-function preparePrompt(
-  prompt: string,
-  memory: MemoryManager,
-  userId: string,
-  sessionKey: string,
-  text: string,
-  sessions: SessionRegistry,
-  platformMessageId?: number,
-): string {
-  const entry = sessions.getOrCreate(sessionKey);
-  const isSessionStart = entry.pendingStart || !entry.seen;
-  if (isSessionStart) {
-    prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey);
-  }
-  entry.seen = true;
-  entry.pendingStart = false;
-  const userRole = loadUsers().byUserId.get(userId)?.role;
-  if (userRole !== "guest") {
-    memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId });
-  }
-  return prompt;
-}
