@@ -20,7 +20,7 @@ export async function transcribeAudio(
   audioBuffer: Buffer,
   filename: string,
   config: SttConfig,
-): Promise<string> {
+): Promise<{ text: string; language: string }> {
   const model = config.model || DEFAULT_MODEL;
   logInfo("stt", `Transcribing ${filename} (${audioBuffer.length} bytes) via ${config.provider}/${model}`);
 
@@ -29,6 +29,7 @@ export async function transcribeAudio(
   formData.append("file", blob, filename);
   formData.append("model", model);
   formData.append("prompt", LANGUAGE_HINT_PROMPT);
+  formData.append("response_format", "verbose_json");
 
   const endpoint = GROQ_ENDPOINT;
 
@@ -45,14 +46,15 @@ export async function transcribeAudio(
     throw new Error(`STT failed (${response.status}): ${text}`);
   }
 
-  const json = (await response.json()) as { text?: string };
+  const json = (await response.json()) as { text?: string; language?: string };
   const transcript = json.text?.trim() ?? "";
+  const language = json.language?.trim() ?? "";
 
   if (!transcript) {
     logDebug("stt", "Empty transcript returned");
-    return "";
+    return { text: "", language };
   }
 
-  logInfo("stt", `Transcript (${transcript.length} chars): "${transcript.slice(0, 80)}"`);
-  return transcript;
+  logInfo("stt", `Transcript (${transcript.length} chars, lang=${language || "?"}): "${transcript.slice(0, 80)}"`);
+  return { text: transcript, language };
 }

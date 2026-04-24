@@ -15,14 +15,15 @@ export const voiceMiddleware: Middleware = async (ctx, next) => {
         await adapter.setReaction(msg.channelId, msg.messageId, "👀");
       }
       const audioBuffer = await adapter.downloadVoice(msg.voiceFileId);
-      const transcript = await transcribeAudio(audioBuffer, "voice.ogg", deps.sttConfig);
+      const { text: transcript, language } = await transcribeAudio(audioBuffer, "voice.ogg", deps.sttConfig);
       if (!transcript) {
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(msg.channelId, msg.messageId, "");
         await ctx.reply("🤷 Couldn't transcribe the voice note.");
         ctx.handled = true;
         return;
       }
-      ctx.text = transcript;
+      const langTag = language ? `, ${language}` : "";
+      ctx.text = `[🎤 voice${langTag}] ${transcript}`;
     } catch (err) {
       logError("voice-mw", "Voice transcription failed", err);
       if (adapter.setReaction && msg.messageId) await adapter.setReaction(msg.channelId, msg.messageId, "");

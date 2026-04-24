@@ -325,7 +325,8 @@ export class TelegramAdapter implements PlatformAdapter {
           const voiceFile = message.voice || message.audio;
           const audioBuffer = await this.downloadVoice(voiceFile!.file_id);
           const { transcribeAudio } = await import("../../components/stt.js");
-          const transcript = await transcribeAudio(audioBuffer, "voice.ogg", this.deps.pipeline.sttConfig!);
+          const result = await transcribeAudio(audioBuffer, "voice.ogg", this.deps.pipeline.sttConfig!);
+          const transcript = result.text;
 
           if (!transcript) {
             await this.setReaction(String(chatId), messageId, "");
