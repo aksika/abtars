@@ -66,7 +66,6 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
           botToken: config.discord.botToken!,
           appId: config.discord.appId!,
           allowedUserIds: config.discord.allowedUserIds!,
-          allowedChannelIds: config.discord.allowedChannelIds!,
           a2aEnabled: config.discord.a2aEnabled,
           a2aChannelId: config.discord.a2aChannelId,
           a2aPeerBotId: config.discord.a2aPeerBotId,

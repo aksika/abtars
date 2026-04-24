@@ -16,6 +16,7 @@ export interface UserEntry {
   maxClass: number;
   tools: string[];
   platforms: { telegram?: number; discord?: string };
+  allowedChats?: string[];
 }
 
 export interface UserRegistry {

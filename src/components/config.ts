@@ -24,20 +24,6 @@ export function isValidSnowflake(value: string): boolean {
  * Trims whitespace and ignores empty segments.
  * Throws if any non-empty segment is not a valid snowflake.
  */
-function parseSnowflakeList(raw: string, envVarName: string): Set<string> {
-  const ids = new Set<string>();
-  for (const segment of raw.split(",")) {
-    const trimmed = segment.trim();
-    if (trimmed === "") continue;
-    if (!isValidSnowflake(trimmed)) {
-      throw new Error(
-        `${envVarName} contains invalid Discord snowflake ID "${trimmed}" — expected 17–20 digits`,
-      );
-    }
-    ids.add(trimmed);
-  }
-  return ids;
-}
 
 /**
  * Parse a comma-separated string of user IDs into a Set of numbers.
@@ -206,7 +192,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
 
   let discordAppId: string | undefined;
   let discordAllowedUserIds: Set<string> | undefined;
-  let discordAllowedChannelIds: Set<string> | undefined;
 
   if (discordEnabled) {
     // --- DISCORD_APP_ID (required when Discord enabled) ---
@@ -224,19 +209,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
       throw new Error(
         "No Discord users in users.json — add at least one user with platforms.discord",
       );
-    }
-
-    // --- DISCORD_ALLOWED_CHANNEL_IDS (required when Discord enabled, "*" = all channels) ---
-    const rawDiscordChannelIds = process.env["DISCORD_ALLOWED_CHANNEL_IDS"]?.trim() ?? "";
-    if (rawDiscordChannelIds === "*") {
-      discordAllowedChannelIds = new Set(["*"]);
-    } else {
-      discordAllowedChannelIds = parseSnowflakeList(rawDiscordChannelIds, "DISCORD_ALLOWED_CHANNEL_IDS");
-      if (discordAllowedChannelIds.size === 0) {
-        throw new Error(
-          "DISCORD_ALLOWED_CHANNEL_IDS is required when DISCORD_BOT_TOKEN is set — use \"*\" for all channels or provide comma-separated snowflake IDs",
-        );
-      }
     }
   }
 
@@ -292,7 +264,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
       botToken: discordBotToken,
       appId: discordAppId,
       allowedUserIds: discordAllowedUserIds,
-      allowedChannelIds: discordAllowedChannelIds,
       a2aEnabled: discordA2aEnabled,
       a2aChannelId: discordA2aChannelId,
       a2aPeerBotId: discordA2aPeerBotId,

@@ -40,8 +40,9 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
     if (chatId) await telegramAdapter.sendMessage(String(chatId), msg);
   } : undefined;
   const dcSend = discordAdapter ? async (msg: string): Promise<void> => {
-    const channelId = config.discord.allowedChannelIds ? [...config.discord.allowedChannelIds][0] : undefined;
-    if (channelId) await discordAdapter.sendMessage(channelId, msg);
+    const dcUser = loadUsers().users.find(u => u.platforms.discord);
+    const channelId = dcUser?.allowedChats?.[0] ?? dcUser?.platforms.discord;
+    if (channelId) await discordAdapter.sendMessage(String(channelId), msg);
   } : undefined;
 
   sendBackOnline(tgSend, dcSend).catch((err) => {

@@ -14,7 +14,6 @@ export type DiscordConfig = {
   botToken?: string;
   appId?: string;
   allowedUserIds?: Set<string>;
-  allowedChannelIds?: Set<string>;
   a2aEnabled: boolean;
   a2aChannelId?: string;
   a2aPeerBotId?: string;

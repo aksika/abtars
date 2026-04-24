@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { SecurityGate } from "./security-gate.js";
-import type { UserRegistry } from "./user-registry.js";
+import type { UserRegistry, UserEntry } from "./user-registry.js";
 
-function makeRegistry(users: Array<{ userId: string; role: "master" | "user" | "guest"; telegram?: number }>): UserRegistry {
+function makeRegistry(users: Array<{ userId: string; role: "master" | "user" | "guest"; telegram?: number; allowedChats?: string[] }>): UserRegistry {
   const registry: UserRegistry = { users: [], byPlatformId: new Map(), byUserId: new Map() };
   for (const u of users) {
-    const entry = { userId: u.userId, role: u.role, maxClass: u.role === "master" ? 3 : 0, tools: [], platforms: { telegram: u.telegram } };
+    const entry: UserEntry = { userId: u.userId, role: u.role, maxClass: u.role === "master" ? 3 : 0, tools: [], platforms: { telegram: u.telegram }, allowedChats: u.allowedChats };
     registry.users.push(entry);
     registry.byUserId.set(u.userId, entry);
     if (u.telegram) registry.byPlatformId.set(`telegram:${u.telegram}`, entry);
@@ -27,8 +27,7 @@ describe("SecurityGate", () => {
 
   it("rejects an unknown user", () => {
     const gate = new SecurityGate(makeRegistry([{ userId: "aksika", role: "master", telegram: 42 }]));
-    const result = gate.authorize("999", "telegram");
-    expect(result.authorized).toBe(false);
+    expect(gate.authorize("999", "telegram").authorized).toBe(false);
   });
 
   it("authorizeById works for legacy callers", () => {
@@ -37,18 +36,20 @@ describe("SecurityGate", () => {
     expect(gate.authorizeById("999")).toBe(false);
   });
 
-  it("checks channel when allowedChannelIds provided", () => {
-    const gate = new SecurityGate(makeRegistry([{ userId: "aksika", role: "master", telegram: 42 }]), new Set(["ch1"]));
+  it("allows all chats when allowedChats is empty", () => {
+    const gate = new SecurityGate(makeRegistry([{ userId: "aksika", role: "master", telegram: 42 }]));
+    expect(gate.authorize("42", "telegram", "any-chat").authorized).toBe(true);
+  });
+
+  it("restricts to allowedChats when set", () => {
+    const gate = new SecurityGate(makeRegistry([{ userId: "aksika", role: "master", telegram: 42, allowedChats: ["ch1", "ch2"] }]));
     expect(gate.authorize("42", "telegram", "ch1").authorized).toBe(true);
     expect(gate.authorize("42", "telegram", "ch3").authorized).toBe(false);
   });
 
-  it("allows all channels with wildcard", () => {
-    const gate = new SecurityGate(makeRegistry([{ userId: "aksika", role: "master", telegram: 42 }]), new Set(["*"]));
-    expect(gate.authorize("42", "telegram", "any").authorized).toBe(true);
-  });
-
-  it("throws when channel whitelist is empty", () => {
-    expect(() => new SecurityGate(makeRegistry([{ userId: "aksika", role: "master", telegram: 42 }]), new Set())).toThrow("at least one");
+  it("authorizeById checks allowedChats", () => {
+    const gate = new SecurityGate(makeRegistry([{ userId: "aksika", role: "master", telegram: 42, allowedChats: ["ch1"] }]));
+    expect(gate.authorizeById("42", "ch1")).toBe(true);
+    expect(gate.authorizeById("42", "ch9")).toBe(false);
   });
 });

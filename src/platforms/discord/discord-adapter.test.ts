@@ -44,7 +44,6 @@ function makeConfig(): DiscordAdapterConfig {
     botToken: "test-token",
     appId: "123456789",
     allowedUserIds: new Set(["42"]),
-    allowedChannelIds: new Set(["*"]),
     a2aEnabled: false,
     a2aRateLimitMs: 5000,
   };

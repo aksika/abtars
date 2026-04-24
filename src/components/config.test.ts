@@ -34,7 +34,6 @@ function setValidEnv() {
   delete process.env["TTS_ENABLED"];
   delete process.env["TTS_VOICE"];
   delete process.env["DISCORD_BOT_TOKEN"];
-  delete process.env["DISCORD_ALLOWED_CHANNEL_IDS"];
   delete process.env["DISCORD_A2A_CHANNEL_ID"];
   delete process.env["DISCORD_A2A_PEER_BOT_ID"];
   delete process.env["DISCORD_A2A_RATE_LIMIT_MS"];

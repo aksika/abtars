@@ -29,7 +29,6 @@ export interface DiscordAdapterConfig {
   botToken: string;
   appId: string;
   allowedUserIds: Set<string>;
-  allowedChannelIds: Set<string>;
   a2aEnabled: boolean;
   a2aChannelId?: string;
   a2aPeerBotId?: string;
@@ -57,7 +56,7 @@ export class DiscordAdapter implements PlatformAdapter {
 
   constructor(config: DiscordAdapterConfig, deps: DiscordAdapterDeps) {
     this.api = new DiscordApi(config.botToken);
-    this.securityGate = new SecurityGate(loadUsers(), config.allowedChannelIds);
+    this.securityGate = new SecurityGate(loadUsers());
     this.config = config;
     this.deps = deps;
   }
