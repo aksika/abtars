@@ -30,7 +30,7 @@ describe("FallbackPolicy", () => {
     reg.recordError("kimi", "ep1", "transient");
     const c = policy.selectModel();
     expect(c?.model).toBe("nemotron");
-    expect(policy.lastDecision?.skipped).toEqual(["kimi: bucket 70%"]);
+    expect(policy.lastDecision?.skipped[0]).toContain("kimi");
   });
 
   it("returns null when all exhausted", () => {

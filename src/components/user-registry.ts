@@ -29,8 +29,8 @@ export interface UserRegistry {
 let _override: UserRegistry | null = null;
 let _cached: UserRegistry | null = null;
 
-/** Override registry for testing. Pass null to clear. */
-export function setUserRegistryOverride(registry: UserRegistry | null): void { _override = registry; }
+/** Override registry for testing. Pass null to clear (also clears cache). */
+export function setUserRegistryOverride(registry: UserRegistry | null): void { _override = registry; _cached = null; }
 
 /** Load users from config/users.json, fallback to MAIN_CHAT_ID. Cached after first call. */
 export function loadUsers(): UserRegistry {
