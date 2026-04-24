@@ -67,6 +67,25 @@ describe("ModelHealthRegistry", () => {
     expect(entry!.status).toBe("healthy"); // 10% < 30% threshold
   });
 
+  it("drains bucket over time", () => {
+    vi.useFakeTimers();
+    reg.recordError("kimi", "ep1", "transient");
+    reg.recordError("kimi", "ep1", "transient");
+    reg.recordError("kimi", "ep1", "transient"); // 70% — at threshold
+    expect(reg.shouldSkip("kimi", "ep1")).toBe(true);
+    vi.advanceTimersByTime(10 * 60 * 1000); // 10 min → drains 30%
+    expect(reg.shouldSkip("kimi", "ep1")).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("drain does not go below zero", () => {
+    vi.useFakeTimers();
+    reg.recordError("kimi", "ep1", "weak"); // 5%
+    vi.advanceTimersByTime(60 * 60 * 1000); // 1 hour
+    expect(reg.getBucketLevel("kimi", "ep1")).toBe(0);
+    vi.useRealTimers();
+  });
+
   it("resetAll clears everything", () => {
     reg.recordError("kimi", "ep1", "transient");
     reg.resetAll();

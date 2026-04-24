@@ -136,3 +136,18 @@ describe("SubagentRuntime", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 });
+
+describe("SubagentRuntime shared registry", () => {
+  it("passes registry to createSubagentTransport when set", async () => {
+    const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
+    const registry = new ModelHealthRegistry();
+    const runtime = new SubagentRuntime();
+    runtime.setRegistry(registry);
+
+    mockSendPrompt.mockResolvedValueOnce("ok");
+    await runtime.complete("dreamy", "test");
+
+    const { createSubagentTransport } = await import("./agent-registry.js");
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry);
+  });
+});
