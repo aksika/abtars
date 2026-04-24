@@ -92,7 +92,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   // ── Voice ──
   { env: "STT_ENABLED", type: "bool", default: "false", description: "Enable speech-to-text" },
   { env: "STT_MODEL", type: "string", default: "whisper-large-v3-turbo", description: "STT model name" },
-  { env: "TTS_ENABLED", type: "bool", default: "false", description: "Enable text-to-speech" },
+  { env: "TTS_ENABLED", type: "bool", default: "true", description: "Enable text-to-speech voice replies" },
   { env: "TTS_VOICE", type: "string", default: "alloy", description: "TTS voice name" },
 
   // ── Self-healer ──
