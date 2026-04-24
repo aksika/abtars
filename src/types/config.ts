@@ -57,7 +57,7 @@ export const CONFIG_DEFAULTS = {
     agentCli: "kiro",
     agentCliPath: "kiro-cli",
     agentTransport: "acp" as AgentTransport,
-    workingDir: process.cwd(),
+    workingDir: "~/.agentbridge/workspace",
     trustMode: false,
     permissionTimeoutMs: 60_000,
     tmuxSession: "kiro-bridge",

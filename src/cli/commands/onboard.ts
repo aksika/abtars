@@ -77,6 +77,10 @@ interface WizardAnswers {
   readonly defaultModel: string;
   readonly providerApiKey: string;
   readonly hailMaryModel: string;
+  readonly bedTime: string;
+  readonly wakeTime: string;
+  readonly groqApiKey: string;
+  readonly trustMode: boolean;
 }
 
 async function runInteractive(existing: WizardAnswers | null): Promise<WizardAnswers | null> {
@@ -206,7 +210,37 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     }
   }
 
-  // 12. Summary + confirmation
+  // 12. Sleep schedule + voice + trust mode
+  const bedTime = await text({
+    message: `Bed time HH:MM — daily sleep trigger (${noteEmpty} for default 0:30)`,
+    placeholder: '0:30',
+    initialValue: existing?.bedTime,
+    validate: (v) => (!v || /^\d{1,2}:\d{2}$/.test(v.trim())) ? undefined : 'expected H:MM format',
+  });
+  if (isCancel(bedTime)) { cancel('Cancelled.'); return null; }
+
+  const wakeTime = await text({
+    message: `Wake time HH:MM (${noteEmpty} for default 7:00)`,
+    placeholder: '7:00',
+    initialValue: existing?.wakeTime,
+    validate: (v) => (!v || /^\d{1,2}:\d{2}$/.test(v.trim())) ? undefined : 'expected H:MM format',
+  });
+  if (isCancel(wakeTime)) { cancel('Cancelled.'); return null; }
+
+  const groqApiKey = await text({
+    message: `GROQ_API_KEY for voice-note transcription (${noteEmpty})`,
+    placeholder: existing?.groqApiKey ? '(keep existing)' : 'gsk_...',
+    initialValue: existing?.groqApiKey,
+  });
+  if (isCancel(groqApiKey)) { cancel('Cancelled.'); return null; }
+
+  const trustMode = await confirm({
+    message: 'TRUST_MODE — auto-approve all permission requests from the agent? (recommended for personal/automated use)',
+    initialValue: existing?.trustMode ?? true,
+  });
+  if (isCancel(trustMode)) { cancel('Cancelled.'); return null; }
+
+  // 13. Summary + confirmation
   const mask = (s: string): string => s ? (s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-4)}` : '***') : '(skipped)';
   const lines = [
     '',
@@ -221,6 +255,10 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     `  Default model:       ${modelStr}`,
     `  ${apiKeyEnv}:        ${mask(providerApiKey)}`,
     `  hailMary model:      ${hailMaryModel || '(skipped)'}`,
+    `  Bed time:            ${String(bedTime ?? '') || '(default 0:30)'}`,
+    `  Wake time:           ${String(wakeTime ?? '') || '(default 7:00)'}`,
+    `  GROQ_API_KEY:        ${mask(String(groqApiKey ?? ''))}`,
+    `  Trust mode:          ${trustMode ? 'true (auto-approve)' : 'false (prompt user)'}`,
     '',
   ];
   process.stdout.write(lines.join('\n'));
@@ -241,6 +279,10 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     defaultModel: modelStr,
     providerApiKey,
     hailMaryModel,
+    bedTime: String(bedTime ?? '').trim(),
+    wakeTime: String(wakeTime ?? '').trim(),
+    groqApiKey: String(groqApiKey ?? '').trim() || existing?.groqApiKey || '',
+    trustMode: trustMode === true,
   };
 }
 
@@ -281,6 +323,10 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     defaultModel: opts.defaultModel ?? DEFAULT_MODELS[provider],
     providerApiKey: '',
     hailMaryModel: '',
+    bedTime: '',
+    wakeTime: '',
+    groqApiKey: '',
+    trustMode: false,
   };
 }
 
@@ -306,6 +352,10 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       defaultModel: kv.get('DEFAULT_MODEL') ?? DEFAULT_MODELS[provider],
       providerApiKey: apiKeyEnv ? (kv.get(apiKeyEnv) ?? '') : '',
       hailMaryModel: '',
+      bedTime: kv.get('BED_TIME') ?? '',
+      wakeTime: kv.get('WAKE_TIME') ?? '',
+      groqApiKey: kv.get('GROQ_API_KEY') ?? '',
+      trustMode: kv.get('TRUST_MODE') === 'true',
     };
   } catch {
     return null;
@@ -318,6 +368,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'TELEGRAM_BOT_TOKEN', 'MAIN_CHAT_ID',
     'DISCORD_BOT_TOKEN', 'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
+    'BED_TIME', 'WAKE_TIME', 'GROQ_API_KEY', 'TRUST_MODE',
     ...(providerKeyName ? [providerKeyName] : []),
   ]);
   const keptLines: string[] = [];
@@ -342,6 +393,10 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   if (providerKeyName && answers.providerApiKey) {
     newBlock.push(`${providerKeyName}=${answers.providerApiKey}`);
   }
+  if (answers.bedTime) newBlock.push(`BED_TIME=${answers.bedTime}`);
+  if (answers.wakeTime) newBlock.push(`WAKE_TIME=${answers.wakeTime}`);
+  if (answers.groqApiKey) newBlock.push(`GROQ_API_KEY=${answers.groqApiKey}`);
+  newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
 }

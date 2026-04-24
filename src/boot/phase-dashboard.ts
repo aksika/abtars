@@ -16,8 +16,8 @@ import { getEnv } from "../components/env-schema.js";
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { logInfo, logError } from "../components/logger.js";
-import { loadDashboardConfig, validateDashboardConfig, buildStatusSnapshot } from "../components/dashboard/dashboard-config.js";
+import { logInfo } from "../components/logger.js";
+import { loadDashboardConfig, buildStatusSnapshot } from "../components/dashboard/dashboard-config.js";
 import type { SubsystemRefs } from "../components/dashboard/dashboard-config.js";
 import { AuthGate } from "../components/auth-gate.js";
 import { MemorySearchController } from "../components/memory-search-controller.js";
@@ -33,11 +33,25 @@ export async function phaseDashboard(ctx: BootCtx): Promise<void> {
   if (!transport || !heartbeat) throw new Error("phase-dashboard: transport + heartbeat required");
 
   const dashConfig = loadDashboardConfig(process.env);
-  try {
-    validateDashboardConfig(dashConfig, true);
-  } catch (err) {
-    logError("main", err instanceof Error ? err.message : String(err));
-    process.exit(1);
+  // Auto-generate WEB_AUTH_TOKEN if missing — persist to .env so it survives restart
+  if (!dashConfig.webAuthToken) {
+    const { randomBytes } = await import("node:crypto");
+    const { readFile, writeFile } = await import("node:fs/promises");
+    const token = randomBytes(32).toString("hex");
+    dashConfig.webAuthToken = token;
+    process.env["WEB_AUTH_TOKEN"] = token;
+    const envPath = join(process.cwd(), "config", ".env");
+    try {
+      let content = "";
+      try { content = await readFile(envPath, "utf-8"); } catch { /* missing */ }
+      content = content.replace(/^WEB_AUTH_TOKEN=.*$/m, "").trimEnd();
+      content += `\nWEB_AUTH_TOKEN=${token}\n`;
+      await writeFile(envPath, content, { mode: 0o600 });
+      logInfo("dashboard", `🔑 WEB_AUTH_TOKEN auto-generated and saved to ${envPath}`);
+    } catch (err) {
+      logInfo("dashboard", `🔑 WEB_AUTH_TOKEN auto-generated (not persisted: ${err instanceof Error ? err.message : String(err)})`);
+    }
+    logInfo("dashboard", `🔑 WEB_AUTH_TOKEN: ${token}`);
   }
 
   let logoBase64 = "";

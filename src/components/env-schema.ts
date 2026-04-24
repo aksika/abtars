@@ -30,7 +30,7 @@ interface EnvVarDef {
 const SCHEMA: readonly EnvVarDef[] = [
   // ── Core ──
   { env: "AGENT_BRIDGE_HOME", type: "string", description: "Base directory for runtime data" },
-  { env: "WORKING_DIR", type: "string", default: ".", description: "Agent working directory" },
+  { env: "WORKING_DIR", type: "string", default: "~/.agentbridge/workspace", description: "Agent working directory (sandbox)" },
   { env: "MAIN_CHAT_ID", type: "string", description: "Primary Telegram chat ID for notifications" },
   { env: "LOG_LEVEL", type: "string", default: "low", description: "Log level: off, low, debug" },
   { env: "LOG_FORMAT", type: "string", default: "text", description: "Log format: text or json" },
@@ -39,8 +39,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "AGENT_TRANSPORT", type: "string", default: "api", description: "Transport: api, acp, tmux" },
   { env: "AGENT_CLI", type: "string", default: "kiro", description: "Agent CLI name: kiro, gemini" },
   { env: "AGENT_CLI_PATH", type: "string", description: "Override path to agent CLI binary" },
-  { env: "AGENT_MAIN_MODEL", type: "string", description: "Main model identifier for agent" },
-  { env: "API_KEY", type: "string", description: "Default API key for model providers" },
+  { env: "API_KEY", type: "string", description: "Default API key fallback (prefer per-provider keys)" },
   { env: "TMUX_SESSION", type: "string", default: "kiro", description: "Tmux session name" },
   { env: "DEFAULT_TRANSPORT", type: "string", default: "api", description: "Default transport type" },
   { env: "TRANSPORT_CONFIG", type: "string", default: "transport.json", description: "Transport config filename" },
@@ -142,7 +141,6 @@ export interface EnvConfig {
   agentTransport: string;
   agentCli: string;
   agentCliPath: string | undefined;
-  agentMainModel: string | undefined;
   apiKey: string | undefined;
   tmuxSession: string;
   defaultTransport: string;
@@ -295,7 +293,6 @@ export function initEnv(): Readonly<EnvConfig> {
     agentTransport: readOr("AGENT_TRANSPORT", "api").toLowerCase(),
     agentCli: readOr("AGENT_CLI", "kiro"),
     agentCliPath: read("AGENT_CLI_PATH"),
-    agentMainModel: read("AGENT_MAIN_MODEL"),
     apiKey: read("API_KEY"),
     tmuxSession: readOr("TMUX_SESSION", "kiro"),
     defaultTransport: readOr("DEFAULT_TRANSPORT", "api"),
