@@ -2,7 +2,7 @@
  * media-utils.ts — inbound media handling: validate, detect MIME, save to disk, cleanup.
  */
 
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "../paths.js";
 import { randomBytes } from "node:crypto";
@@ -116,43 +116,4 @@ export async function saveA2AFile(buffer: Buffer, chatId: number): Promise<Saved
   logInfo(TAG, `Saved A2A file: ${filename} (${buffer.length}B, forced .txt)`);
 
   return { path, mime: "text/plain", ext: ".txt", size: buffer.length, isImage: false };
-}
-
-/**
- * FIFO cleanup: delete oldest files in received/ until total < maxBytes.
- * Returns bytes freed.
- */
-export function cleanupReceived(maxBytes = 100 * 1024 * 1024): number {
-  const baseDir = join(agentBridgeHome(), "received");
-  if (!existsSync(baseDir)) return 0;
-
-  const files: { path: string; size: number; mtime: number }[] = [];
-  for (const sub of ["media", "files"]) {
-    const dir = join(baseDir, sub);
-    if (!existsSync(dir)) continue;
-    for (const name of readdirSync(dir)) {
-      const p = join(dir, name);
-      try {
-        const s = statSync(p);
-        if (s.isFile()) files.push({ path: p, size: s.size, mtime: s.mtimeMs });
-      } catch { /* skip */ }
-    }
-  }
-
-  let total = files.reduce((sum, f) => sum + f.size, 0);
-  if (total <= maxBytes) return 0;
-
-  // Sort oldest first
-  files.sort((a, b) => a.mtime - b.mtime);
-  let freed = 0;
-  for (const f of files) {
-    if (total <= maxBytes) break;
-    try {
-      unlinkSync(f.path);
-      total -= f.size;
-      freed += f.size;
-      logInfo(TAG, `Cleanup: deleted ${f.path} (${f.size}B)`);
-    } catch { /* skip */ }
-  }
-  return freed;
 }

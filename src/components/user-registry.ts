@@ -40,12 +40,6 @@ export function loadUsers(): UserRegistry {
   return _cached;
 }
 
-/** Force reload from disk (e.g. after /users approve). */
-export function reloadUsers(): UserRegistry {
-  _cached = null;
-  return loadUsers();
-}
-
 function loadFromDisk(): UserRegistry {
   const configPath = join(agentBridgeHome(), "config", "users.json");
   const registry: UserRegistry = { users: [], byPlatformId: new Map(), byUserId: new Map() };
@@ -105,15 +99,4 @@ export function buildUsersBlock(registry: UserRegistry): string {
   return `[USERS]\n${lines.join("\n")}`;
 }
 
-/** Load per-user profile markdown from persona/core/, falling back to default user_profile.md. Returns null if not found. */
-export function loadUserProfile(userId: string): string | null {
-  try {
-    const coreDir = join(process.cwd(), "persona", "core");
-    const userProfile = join(coreDir, `user_profile_${userId}.md`);
-    const defaultProfile = join(coreDir, "user_profile.md");
-    const profilePath = existsSync(userProfile) ? userProfile : defaultProfile;
-    if (!existsSync(profilePath)) return null;
-    const profile = readFileSync(profilePath, "utf-8").trim();
-    return profile || null;
-  } catch { return null; }
-}
+

@@ -33,11 +33,6 @@ export function resetBedtimeCounter(): void {
   quietTickCount = 0;
 }
 
-/** Get current quiet tick count (for hw sleep check). */
-export function getQuietTickCount(): number {
-  return quietTickCount;
-}
-
 /** Returns true if conditions are met for the daily restart + sleep cycle. */
 export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   // User-protection guards — NEVER bypass, even when forced.

@@ -43,10 +43,6 @@ export interface TransportConfig {
   model?: string;
 }
 
-export function getAgentConfig(role: AgentRole): AgentRoleConfig {
-  return AGENT_ROLES[role];
-}
-
 export function createAgentTransport(
   role: AgentRole,
   tc: TransportConfig,

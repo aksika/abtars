@@ -22,14 +22,6 @@ export function setLogLevel(level: LogLevel): void {
   currentLevel = level;
 }
 
-export function getLogLevel(): LogLevel {
-  return currentLevel;
-}
-
-export function setFileLogging(enabled: boolean): void {
-  fileLogging = enabled;
-}
-
 function shouldLog(minLevel: LogLevel): boolean {
   return LEVEL_ORDER[currentLevel] >= LEVEL_ORDER[minLevel];
 }
@@ -90,8 +82,6 @@ export function localIso(): string {
 }
 
 let logFormat: "text" | "json" = (process.env["LOG_FORMAT"] as "json" | undefined) === "json" ? "json" : "text";
-
-export function setLogFormat(fmt: "text" | "json"): void { logFormat = fmt; }
 
 function formatLine(level: string, tag: string, msg: string): string {
   if (logFormat === "json") {

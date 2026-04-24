@@ -384,17 +384,6 @@ export function initEnv(): Readonly<EnvConfig> {
   return _env;
 }
 
-/** Lightweight init for CLI tools — only core vars, no validation warnings. */
-export function initEnvMinimal(): Readonly<Pick<EnvConfig, "agentBridgeHome" | "apiKey" | "telegramBotToken" | "mainChatId">> {
-  const read = (k: string): string | undefined => process.env[k]?.trim() || undefined;
-  return Object.freeze({
-    agentBridgeHome: read("AGENT_BRIDGE_HOME") ?? "",
-    apiKey: read("API_KEY"),
-    telegramBotToken: read("TELEGRAM_BOT_TOKEN"),
-    mainChatId: read("MAIN_CHAT_ID"),
-  });
-}
-
 /** Reset singleton (for tests only). */
 export function _resetEnv(): void { _env = null; }
 
