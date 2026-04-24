@@ -410,6 +410,67 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   }
 
   process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://github.com/aksika/agentbridge/blob/main/docs/install.md\n`);
-  process.stdout.write(`\nNext: 'agentbridge update' to build, then start the bridge${answers.installMode === 'simple' ? ' via ~/.agentbridge/agentbridge.sh' : ' via your watchdog'}.\n`);
+
+  // Skip the build+start automation in non-interactive mode (scripts expect to do it themselves)
+  if (opts.nonInteractive) {
+    process.stdout.write(`\nNext: 'agentbridge update' to build, then start the bridge.\n`);
+    return 0;
+  }
+
+  // ── Auto-run: agentbridge update ──
+  process.stdout.write(`\n── Running 'agentbridge update' ──\n`);
+  const { update } = await import('./update.js');
+  const updRc = await update({ source: 'local', fromLocal: false, allowAbmindMismatch: false });
+  if (updRc !== 0) {
+    process.stderr.write(`\n⚠️  'agentbridge update' exited with code ${updRc}. Fix and re-run manually.\n`);
+    return updRc;
+  }
+
+  // ── Auto-run: abmind install + update ──
+  process.stdout.write(`\n── Running 'abmind install && abmind update' ──\n`);
+  const { spawn } = await import('node:child_process');
+  const runAbmind = (sub: 'install' | 'update'): Promise<number> => new Promise((resolve) => {
+    // abmind is a sibling package under the workspace — resolve relative to repo root's parent.
+    const abmindRepo = join(process.cwd(), '..', 'abmind');
+    const cliPath = join(abmindRepo, 'dist', 'cli', `abmind-${sub}.js`);
+    const child = spawn('node', [cliPath], { stdio: 'inherit', cwd: abmindRepo });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+  const abInstallRc = await runAbmind('install');
+  if (abInstallRc === 0) {
+    const abUpdateRc = await runAbmind('update');
+    if (abUpdateRc !== 0) process.stderr.write(`\n⚠️  'abmind update' exited with code ${abUpdateRc}.\n`);
+  } else {
+    process.stderr.write(`\n⚠️  'abmind install' exited with code ${abInstallRc}. Skipping abmind update.\n`);
+  }
+
+  // ── Start commands — print + ask to run ──
+  const { confirm } = await import('@clack/prompts');
+  const startCmds: string[] = [];
+  if (answers.installMode === 'simple') {
+    startCmds.push(`~/.agentbridge/agentbridge.sh --all`);
+  } else {
+    if (process.platform === 'darwin') {
+      startCmds.push(`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist`);
+    } else if (process.platform === 'linux') {
+      startCmds.push(`systemctl --user daemon-reload`);
+      startCmds.push(`systemctl --user enable --now agentbridge-watchdog`);
+    }
+  }
+
+  process.stdout.write(`\n── Start the bridge ──\n`);
+  for (const cmd of startCmds) {
+    const run = await confirm({ message: `Run: ${cmd}`, initialValue: true });
+    if (run === true) {
+      await new Promise<void>((resolve) => {
+        const child = spawn('bash', ['-lc', cmd], { stdio: 'inherit' });
+        child.on('exit', () => resolve());
+      });
+    } else {
+      process.stdout.write(`  → manual: ${cmd}\n`);
+    }
+  }
+
+  process.stdout.write(`\n✓ Onboarding complete.\n`);
   return 0;
 }
