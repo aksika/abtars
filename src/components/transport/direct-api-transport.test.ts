@@ -65,3 +65,17 @@ describe("FallbackPolicy — fallback sequence", () => {
     expect(selected?.model).toBe("backup");
   });
 });
+
+describe("DirectApiTransport.switchProvider", () => {
+  it("updates endpoint+model+policy", async () => {
+    const reg = new ModelHealthRegistry();
+    const oldPolicy = new FallbackPolicy([{ model: "old", endpoint: "ep1", maxContext: 128000 }], reg);
+    const { DirectApiTransport } = await import("./direct-api-transport.js");
+    const transport = new DirectApiTransport({ endpoint: "ep1", model: "old", maxContext: 128000, maxOutput: 4096, maxTurns: 1 }, oldPolicy);
+
+    const newPolicy = new FallbackPolicy([{ model: "new", endpoint: "ep2", maxContext: 200000 }], reg);
+    transport.switchProvider({ endpoint: "ep2", apiKey: "k2", model: "new", maxContext: 200000, policy: newPolicy });
+
+    expect(transport.currentModel).toBe("new");
+  });
+});

@@ -214,7 +214,7 @@ export class TelegramAdapter implements PlatformAdapter {
         const slot = parts[1]!;
         const providerName = parts[2]!;
         const model = parts.slice(3).join(":"); // model may contain colons
-        const { loadTransport, writeTransportConfig } = await import("../../components/transport-config.js");
+        const { loadTransport, writeTransportConfig, resolveAgent } = await import("../../components/transport-config.js");
         const tc = loadTransport();
         if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
@@ -252,10 +252,39 @@ export class TelegramAdapter implements PlatformAdapter {
           const isProfessor = agentKey === "professor";
 
           if (isProfessor && !providerChanged && "setModel" in this.deps.transport) {
+            // Same provider, different model — hot swap
             await (this.deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
             await this.api.sendMessage(chatId, `✅ Switched to ${model}`);
-          } else if (isProfessor) {
-            await this.api.sendMessage(chatId, `✅ ${model} (${providerName}) written. Use /reset to apply.`);
+          } else if (isProfessor && providerChanged) {
+            // Check if transport TYPE changed
+            const oldResolved = resolveAgent("_old", { ...tc, agents: { ...tc.agents, _old: { model: "", provider: oldProvider! } } });
+            const newResolved = resolveAgent("_new", { ...tc, agents: { ...tc.agents, _new: { model, provider: providerName } } });
+            const oldType = oldResolved?.provider.transport ?? "api";
+            const newType = newResolved?.provider.transport ?? "api";
+
+            if (oldType === newType && "switchProvider" in this.deps.transport) {
+              // Same transport type, different provider — hot swap
+              try {
+                const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
+                const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
+                const apiKey = getEnv().getApiKey(newResolved?.provider.apiKeyEnv ?? "API_KEY");
+                const candidates = [{ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow }];
+                // Add fallbacks from updated config
+                for (const fb of (tc.agents["professor"]?.fallbacks ?? [])) {
+                  const fbRes = resolveAgent("_fb", { ...tc, agents: { ...tc.agents, _fb: { model: fb.model, provider: fb.provider } } });
+                  if (fbRes) candidates.push({ endpoint: fbRes.provider.endpoint!, apiKey: fbRes.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey, model: fb.model, maxContext: fbRes.contextWindow });
+                }
+                const registry = (this.deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();
+                const policy = new FallbackPolicy(candidates, registry);
+                (this.deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
+                await this.api.sendMessage(chatId, `✅ Switched to ${model} (${providerName})`);
+              } catch (err) {
+                await this.api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
+              }
+            } else {
+              // Different transport type — needs /reset
+              await this.api.sendMessage(chatId, `✅ ${model} (${providerName}) written. Transport type changed — use /reset to apply.`);
+            }
           } else {
             await this.api.sendMessage(chatId, `✅ ${agentKey} → ${model} (${providerName}). Takes effect on next spawn.`);
           }

@@ -50,7 +50,7 @@ export class DirectApiTransport implements IKiroTransport {
   /** Called when fallback model is selected — send notification before response. */
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
 
-  private readonly policy: FallbackPolicy | null;
+  private policy: FallbackPolicy | null;
   private emergencyOverride: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null = null;
 
   /** Activate emergency (hailMary) mode — next prompts bypass the fallback policy. */
@@ -392,6 +392,19 @@ export class DirectApiTransport implements IKiroTransport {
   setModel(model: string): void {
     this.activeModel = model;
     logInfo(TAG, `Model switched (user): ${model}`);
+  }
+
+  /** Hot-swap provider+model+policy. Rejects if prompt is in flight. */
+  switchProvider(opts: { endpoint: string; apiKey?: string; model: string; maxContext: number; policy: FallbackPolicy }): void {
+    if (this._promptStartedAt !== null) {
+      throw new Error("Cannot switch provider while a prompt is in progress — try after the response");
+    }
+    this.activeEndpoint = opts.endpoint;
+    this.activeApiKey = opts.apiKey;
+    this.activeModel = opts.model;
+    (this.config as { maxContext: number }).maxContext = opts.maxContext;
+    this.policy = opts.policy;
+    logInfo(TAG, `Provider switched: ${opts.model} @ ${opts.endpoint} (maxCtx=${opts.maxContext})`);
   }
 
   /** Get current active model name. */

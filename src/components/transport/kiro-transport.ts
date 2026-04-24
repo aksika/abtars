@@ -54,4 +54,7 @@ export interface IKiroTransport {
 
   /** Restart the CLI session (tmux-only). No-op if not supported. */
   restartSession?(workingDir: string, model?: string): Promise<void>;
+
+  /** Hot-swap provider+model. API transport only. Throws if prompt in flight. */
+  switchProvider?(opts: { endpoint: string; apiKey?: string; model: string; maxContext: number; policy: unknown }): void;
 }
