@@ -15,5 +15,6 @@ export type DiscordInboundMessage = {
   timestamp: number; // Unix ms
   mentionsBotId: boolean; // whether the bot was @mentioned
   mentionsEveryone: boolean; // whether @everyone or @here was used
+  hasUserMentions: boolean; // whether any @user mentions exist in the message
   attachments?: { url: string; filename: string; contentType?: string; size: number }[];
 };

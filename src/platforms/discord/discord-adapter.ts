@@ -165,8 +165,13 @@ export class DiscordAdapter implements PlatformAdapter {
       return;
     }
 
-    // Build sender prefix for LLM context (skip for DMs)
+    // Mention filter: in non-DM channels, skip if another user/bot was @mentioned but not us
     const isDM = message.channelName === null && !message.parentChannelId;
+    if (!isDM && message.hasUserMentions && !message.mentionsBotId) {
+      logDebug(TAG, `Skipped — not mentioned (channel=${effectiveChannelId})`);
+      return;
+    }
+
     const channelLabel = message.parentChannelId ? message.channelName ?? "thread" : message.channelName ?? "DM";
     const senderPrefix = isDM ? "" : `[${message.authorUsername}${message.authorIsBot ? " (bot)" : ""}] in #${channelLabel}: `;
 
