@@ -3,7 +3,7 @@ import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
 
 const MASTER_REGISTRY: UserRegistry = {
   users: [{ userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
-  byPlatformId: new Map([["telegram:100", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
+  byPlatformId: new Map([["master:telegram", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
   byUserId: new Map([["test", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }]]),
 };
 import { handleInboundMessage, type PipelineDeps } from "./message-pipeline.js";
@@ -66,7 +66,7 @@ function makeMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
   return {
     platform: "telegram",
     channelId: "100",
-    sessionKey: "telegram:100",
+    sessionKey: "master:telegram",
     senderId: "42",
     senderName: "Test",
     text: "hello",
@@ -94,7 +94,7 @@ describe("handleInboundMessage", () => {
     const deps = mockDeps(transport);
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(transport.sendPrompt).toHaveBeenCalledWith("telegram:100", expect.stringContaining("hello"));
+    expect(transport.sendPrompt).toHaveBeenCalledWith("master:telegram", expect.stringContaining("hello"));
     expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Hello from Kiro!", expect.any(Object));
   });
 
@@ -118,7 +118,7 @@ describe("handleInboundMessage", () => {
 
   it("queues message when session is busy", async () => {
     const adapter = mockAdapter();
-    const busyChats = new Set(["telegram:100"]);
+    const busyChats = new Set(["master:telegram"]);
     const deps = mockDeps(transport, { busyChats });
 
     await handleInboundMessage(makeMsg(), adapter, deps);
@@ -182,8 +182,8 @@ describe("handleInboundMessage", () => {
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(deps.busyChats.has("telegram:100")).toBe(false);
-    expect(deps.idleSave.reset).toHaveBeenCalledWith("telegram:100", 100);
+    expect(deps.busyChats.has("master:telegram")).toBe(false);
+    expect(deps.idleSave.reset).toHaveBeenCalledWith("master:telegram", 100);
   });
 
   it("handles transport error gracefully", async () => {
@@ -195,7 +195,7 @@ describe("handleInboundMessage", () => {
     await handleInboundMessage(makeMsg(), adapter, deps);
 
     expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Something went wrong"), expect.any(Object));
-    expect(deps.busyChats.has("telegram:100")).toBe(false);
+    expect(deps.busyChats.has("master:telegram")).toBe(false);
   });
 
   it("handles command and returns early", async () => {
@@ -215,7 +215,7 @@ describe("handleInboundMessage", () => {
 
     await handleInboundMessage(makeMsg({ text: "//agent list" }), adapter, deps);
 
-    expect(transport.sendPrompt).toHaveBeenCalledWith("telegram:100", expect.stringContaining("/agent list"));
+    expect(transport.sendPrompt).toHaveBeenCalledWith("master:telegram", expect.stringContaining("/agent list"));
   });
 
   it("returns early for voice without STT config", async () => {

@@ -195,7 +195,8 @@ export class DiscordAdapter implements PlatformAdapter {
     // Emotion scoring on authorized reactions
     if (isAuthorized && this.deps.memory) {
       const score = emojiToScore(emoji);
-      const updated = this.deps.memory.updateEmotionByPlatformId(channelId, messageId, score);
+      const resolvedUserId = loadUsers().byPlatformId.get("discord:" + user.id)?.userId ?? "unknown";
+      const updated = this.deps.memory.updateEmotionByPlatformId(resolvedUserId, messageId, score);
       if (updated) logDebug(TAG, `Emotion score ${score} set on msg ${reaction.message.id}`);
     }
 
