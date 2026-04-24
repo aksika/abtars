@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { safeReadJson } from "../components/safe-json.js";
+import { SessionRegistry } from "../components/session-registry.js";
 import { isDailyCycleDue, resetBedtimeCounter, type DailyCycleDeps } from "../components/daily-cycle.js";
 
 // --- safeReadJson ---
@@ -56,7 +57,7 @@ describe("isDailyCycleDue — quiet tick counter", () => {
       sleepMinute: 0,
       bridgeLockPath: join(tmpDir, "bridge.lock"),
       memory: null,
-      busyChats: new Set(),
+      sessions: new SessionRegistry(),
       isSleepActive: () => false,
       ...overrides,
     };
@@ -97,8 +98,10 @@ describe("isDailyCycleDue — quiet tick counter", () => {
     vi.useRealTimers();
   });
 
-  it("returns false when busyChats is non-empty", () => {
-    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0, busyChats: new Set(["chat:1"]) });
+  it("returns false when a session is busy", () => {
+    const busySessions = new SessionRegistry();
+    busySessions.getOrCreate("chat:1").busy = true;
+    const deps = makeDeps({ sleepHour: 0, sleepMinute: 0, sessions: busySessions });
     for (let i = 0; i < 10; i++) {
       expect(isDailyCycleDue(deps)).toBe(false);
     }

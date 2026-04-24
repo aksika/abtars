@@ -95,12 +95,8 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
     startedAt: ctx.startedAt,
     sttConfig: ctx.sttConfig,
     ttsConfig: ctx.ttsConfig,
-    busyChats: ctx.busyChats,
-    fullModeChats: ctx.fullModeChats,
-    pendingSessionStart: ctx.pendingSessionStart,
-    seenSessions: ctx.seenSessions,
+    sessions: ctx.sessions,
     updateCtxStart,
-    messageQueue: ctx.messageQueue,
     cronCurrentJob: () => cronQueue.currentJob,
     enqueueCron: (entryId, manual) => {
       try {

@@ -8,4 +8,4 @@
 export { type MessageContext, type Middleware, runPipeline, createMessageContext } from "./middleware.js";
 export { voiceMiddleware } from "./voice.js";
 export { commandMiddleware } from "./commands.js";
-export { busyGuardMiddleware, compactingSessions } from "./busy-guard.js";
+export { busyGuardMiddleware } from "./busy-guard.js";

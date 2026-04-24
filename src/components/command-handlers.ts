@@ -37,9 +37,7 @@ export interface CommandContext {
   nlmConfig: PipelineDeps["nlmConfig"];
   codingMode: PipelineDeps["codingMode"];
   idleSave: PipelineDeps["idleSave"];
-  busyChats: PipelineDeps["busyChats"];
-  fullModeChats: PipelineDeps["fullModeChats"];
-  pendingSessionStart: PipelineDeps["pendingSessionStart"];
+  sessions: PipelineDeps["sessions"];
   updateCtxStart: PipelineDeps["updateCtxStart"];
   cronCurrentJob?: RunningJob | null;
   enqueueCron?: PipelineDeps["enqueueCron"];
@@ -174,7 +172,7 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
   await resetAndPrepare({
     transport: ctx.transport, sessionKey: ctx.sessionKey,
     reason: isResetDefault ? "reset-to-defaults" : isReset ? "reset-transport" : "new-session",
-    pendingSessionStart: ctx.pendingSessionStart, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
+    sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
   const label = isResetDefault ? "🔄 Reset to defaults." : isReset ? "🔄 Transport reloaded." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
@@ -186,7 +184,7 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
 async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.reply("📦 Compacting...");
   try {
-    await runCompaction(ctx.transport, ctx.sessionKey, ctx.pendingSessionStart);
+    await runCompaction(ctx.transport, ctx.sessionKey, ctx.sessions);
     if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
     await ctx.reply("📦 Compaction complete.");
     logInfo(TAG, `Manual compaction done`);
@@ -233,7 +231,7 @@ async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean
 
 async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.transport.sendInterrupt();
-  ctx.busyChats.delete(ctx.sessionKey);
+  ctx.sessions.getOrCreate(ctx.sessionKey).busy = false;
   await ctx.reply("🛑 Ctrl+C sent to Kiro.");
   logInfo(TAG, "Ctrl+C interrupt sent");
   return true;
@@ -242,9 +240,9 @@ async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> 
 async function handleRestart(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.transport.restartSession) {
     await ctx.reply("♻️ Restarting Kiro...");
-    ctx.busyChats.delete(ctx.sessionKey);
+    ctx.sessions.getOrCreate(ctx.sessionKey).busy = false;
     await ctx.transport.restartSession(ctx.config.workingDir, process.env["AGENT_MAIN_MODEL"]);
-    ctx.pendingSessionStart.add(ctx.sessionKey);
+    ctx.sessions.getOrCreate(ctx.sessionKey).pendingStart = true;
     await ctx.reply("✓ Kiro restarted.");
   } else {
     await ctx.reply("♻️ Restarting bridge...");
@@ -255,14 +253,14 @@ async function handleRestart(_text: string, ctx: CommandContext): Promise<boolea
 
 async function handleFull(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.platform !== "telegram") { await ctx.reply("📺 Full mode is only available on Telegram."); return true; }
-  ctx.fullModeChats.add(ctx.sessionKey);
+  ctx.sessions.getOrCreate(ctx.sessionKey).fullMode = true;
   await ctx.reply("📺 Full mode — sending raw output, TTS disabled.");
   return true;
 }
 
 async function handleShort(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.platform !== "telegram") { await ctx.reply("✂️ Short mode is only available on Telegram."); return true; }
-  ctx.fullModeChats.delete(ctx.sessionKey);
+  ctx.sessions.getOrCreate(ctx.sessionKey).fullMode = false;
   await ctx.reply("✂️ Short mode — clean responses, TTS enabled.");
   return true;
 }

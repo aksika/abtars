@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { logInfo } from "./logger.js";
 import { agentBridgeHome } from "../paths.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
+import type { SessionRegistry } from "./session-registry.js";
 
 const TAG = "compaction";
 
@@ -39,7 +40,7 @@ export function extractSummary(response: string): string | null {
 export async function runCompaction(
   transport: IKiroTransport,
   sessionKey: string,
-  pendingSessionStart: Set<string>,
+  sessions: SessionRegistry,
 ): Promise<boolean> {
   const prompt = loadCompactionPrompt();
   const response = await transport.sendPrompt(sessionKey, prompt);
@@ -48,7 +49,7 @@ export async function runCompaction(
 
   compactionSummaries.set(sessionKey, summary);
   await transport.resetSession(sessionKey);
-  pendingSessionStart.add(sessionKey);
+  sessions.getOrCreate(sessionKey).pendingStart = true;
 
   logInfo(TAG, `Compaction done — ${summary.length} chars summary stored for ${sessionKey}`);
   return true;

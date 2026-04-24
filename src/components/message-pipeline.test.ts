@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setUserRegistryOverride, type UserRegistry } from "./user-registry.js";
+import { SessionRegistry } from "./session-registry.js";
 
 const MASTER_REGISTRY: UserRegistry = {
   users: [{ userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 100 } }],
@@ -52,11 +53,7 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     startedAt: Date.now(),
     sttConfig: null,
     ttsConfig: null,
-    busyChats: new Set(),
-    messageQueue: new Map(),
-    fullModeChats: new Set(),
-    pendingSessionStart: new Set(),
-    seenSessions: new Set(),
+    sessions: new SessionRegistry(),
     updateCtxStart: vi.fn(),
     ...overrides,
   };
@@ -118,8 +115,9 @@ describe("handleInboundMessage", () => {
 
   it("queues message when session is busy", async () => {
     const adapter = mockAdapter();
-    const busyChats = new Set(["master:telegram"]);
-    const deps = mockDeps(transport, { busyChats });
+    const sessions = new SessionRegistry();
+    sessions.getOrCreate("master:telegram").busy = true;
+    const deps = mockDeps(transport, { sessions });
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
@@ -182,7 +180,7 @@ describe("handleInboundMessage", () => {
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(deps.busyChats.has("master:telegram")).toBe(false);
+    expect(deps.sessions.get("master:telegram")?.busy).toBe(false);
     expect(deps.idleSave.reset).toHaveBeenCalledWith("master:telegram", 100);
   });
 
@@ -195,7 +193,7 @@ describe("handleInboundMessage", () => {
     await handleInboundMessage(makeMsg(), adapter, deps);
 
     expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Something went wrong"), expect.any(Object));
-    expect(deps.busyChats.has("master:telegram")).toBe(false);
+    expect(deps.sessions.get("master:telegram")?.busy).toBe(false);
   });
 
   it("handles command and returns early", async () => {

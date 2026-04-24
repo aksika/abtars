@@ -55,8 +55,9 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
     if (chatId) {
       const masterUser = loadUsers().users.find(u => u.role === "master");
       const sessionKey = `${masterUser?.userId ?? "master"}:telegram`;
-      ctx.seenSessions.add(sessionKey);
-      ctx.busyChats.add(sessionKey);
+      const entry = ctx.sessions.getOrCreate(sessionKey);
+      entry.seen = true;
+      entry.busy = true;
       startSession(
         transport,
         memory,
@@ -73,7 +74,7 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
       }).catch(err => {
         logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`);
       }).finally(() => {
-        ctx.busyChats.delete(sessionKey);
+        ctx.sessions.getOrCreate(sessionKey).busy = false;
       });
     }
   }

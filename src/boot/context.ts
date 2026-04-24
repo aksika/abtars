@@ -23,7 +23,9 @@ import type { SubagentRuntime } from "../components/subagent-runtime.js";
 import type { CapabilityRegistry } from "../capabilities/capability.js";
 import type { IDashboardSlot } from "../components/skeleton.js";
 import type { AgentApiServer } from "../components/agent-api-server.js";
-import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
+import type { PlatformAdapter } from "../types/platform.js";
+import { SessionRegistry as SessionRegistryClass } from "../components/session-registry.js";
+import type { SessionRegistry } from "../components/session-registry.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
 import { SubagentRuntime as SubagentRuntimeClass } from "../components/subagent-runtime.js";
@@ -76,12 +78,8 @@ export interface BootCtx {
   idleSave: IdleSave | null;
   pipelineDeps: PipelineDeps | null;
 
-  // ── Session state (stays as-is for #164; #165 replaces with SessionRegistry) ──
-  busyChats: Set<string>;
-  pendingSessionStart: Set<string>;
-  seenSessions: Set<string>;
-  fullModeChats: Set<string>;
-  messageQueue: Map<string, Array<{ msg: InboundMessage; adapter: PlatformAdapter }>>;
+  // ── Session state ──
+  sessions: SessionRegistry;
 
   // ── Subsystems ────────────────────────────────────────────────────────
   capabilities: CapabilityRegistry;
@@ -138,11 +136,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     pipelineDeps: null,
 
     // Session state
-    busyChats: new Set(),
-    pendingSessionStart: new Set(),
-    seenSessions: new Set(),
-    fullModeChats: new Set(),
-    messageQueue: new Map(),
+    sessions: new SessionRegistryClass(),
 
     // Subsystems
     capabilities: createCapabilityRegistry(),

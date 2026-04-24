@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleCommand, type CommandContext } from "./command-handlers.js";
+import { SessionRegistry } from "./session-registry.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 
@@ -31,9 +32,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     nlmConfig: { enabled: false },
     codingMode: { has: vi.fn().mockReturnValue(false), start: vi.fn(), stop: vi.fn(), getTransport: vi.fn() } as unknown as CodingMode,
     idleSave: { reset: vi.fn(), stop: vi.fn(), save: vi.fn().mockResolvedValue(undefined) } as unknown as IdleSave,
-    busyChats: new Set(),
-    fullModeChats: new Set(),
-    pendingSessionStart: new Set(),
+    sessions: new SessionRegistry(),
     updateCtxStart: vi.fn(),
     ...overrides,
   };
@@ -74,15 +73,15 @@ describe("command-handlers", () => {
     const ctx = makeCtx();
     const handled = await handleCommand("/full", ctx);
     expect(handled).toBe(true);
-    expect(ctx.fullModeChats.has("telegram:123")).toBe(true);
+    expect(ctx.sessions.get("telegram:123")?.fullMode).toBe(true);
   });
 
   it("/short disables full mode", async () => {
     const ctx = makeCtx();
-    ctx.fullModeChats.add("telegram:123");
+    ctx.sessions.getOrCreate("telegram:123").fullMode = true;
     const handled = await handleCommand("/short", ctx);
     expect(handled).toBe(true);
-    expect(ctx.fullModeChats.has("telegram:123")).toBe(false);
+    expect(ctx.sessions.get("telegram:123")?.fullMode).toBeFalsy();
   });
 
   it("/cron trigger calls enqueueCron", async () => {

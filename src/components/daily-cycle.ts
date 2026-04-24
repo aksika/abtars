@@ -10,13 +10,15 @@ import { safeReadJson } from "./safe-json.js";
 import { hasSleepAuditToday } from "abmind";
 import { readBridgeLockField } from "./transport/bridge-lock-transport.js";
 
+import type { SessionRegistry } from "./session-registry.js";
+
 export interface DailyCycleDeps {
   sleepHour: number;
   sleepMinute: number;
   bridgeLockPath: string;
   sleepAuditDir: string;
   memory: IMemorySystem | null;
-  busyChats: Set<string>;
+  sessions: SessionRegistry;
   isSleepActive: () => boolean;
 }
 
@@ -38,7 +40,7 @@ export function getQuietTickCount(): number {
 /** Returns true if conditions are met for the daily restart + sleep cycle. */
 export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   // User-protection guards — NEVER bypass, even when forced.
-  if (deps.busyChats.size > 0 || deps.isSleepActive()) return false;
+  if ([...deps.sessions.keys()].some(k => deps.sessions.get(k)?.busy) || deps.isSleepActive()) return false;
 
   // Force-sleep request in bridge.lock — short-circuit time/audit/startedAt guards.
   // Peek-only here; spawnSleep() clears the field via readAndClearForceSleep().

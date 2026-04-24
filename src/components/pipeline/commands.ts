@@ -20,7 +20,7 @@ const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/res
 export const commandMiddleware: Middleware = async (ctx, next) => {
   const { msg, deps } = ctx;
   const { transport, config, startedAt, memory, memoryConfig, nlmConfig,
-    codingMode, idleSave, busyChats, fullModeChats, pendingSessionStart,
+    codingMode, idleSave, sessions,
     updateCtxStart, conversationBuffer } = deps;
 
   // #157: strip leading bangs for non-master (kiro-cli executes ! as shell)
@@ -43,14 +43,14 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
   const cmd = trimmed.split(/\s/)[0]!.toLowerCase();
 
   // Interrupt commands: kill in-progress response first, then handle
-  if (INTERRUPT_COMMANDS.has(cmd) && busyChats.has(msg.sessionKey)) {
+  if (INTERRUPT_COMMANDS.has(cmd) && sessions.get(msg.sessionKey)?.busy) {
     logInfo("commands", `Interrupt command ${cmd} while busy — stopping current response`);
     await transport.sendInterrupt();
-    busyChats.delete(msg.sessionKey);
+    sessions.getOrCreate(msg.sessionKey).busy = false;
   }
 
   // Non-interrupt destructive commands while busy: defer to busy guard (will be queued)
-  if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && busyChats.has(msg.sessionKey)) {
+  if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && sessions.get(msg.sessionKey)?.busy) {
     await next();
     return;
   }
@@ -60,7 +60,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     transport, config, startedAt,
     memory, memoryConfig, nlmConfig,
     codingMode, idleSave,
-    busyChats, fullModeChats, pendingSessionStart,
+    sessions,
     updateCtxStart,
     cronCurrentJob: deps.cronCurrentJob?.() ?? null,
     enqueueCron: deps.enqueueCron,

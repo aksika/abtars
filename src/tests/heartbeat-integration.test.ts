@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { createAgeCheckTask } from "../components/heartbeat-tasks.js";
 import type { AgeCheckDeps } from "../components/heartbeat-tasks.js";
 import { resetBedtimeCounter } from "../components/daily-cycle.js";
+import { SessionRegistry } from "../components/session-registry.js";
 
 let tmpDir: string;
 
@@ -16,7 +17,7 @@ function makeDeps(overrides: Partial<AgeCheckDeps> = {}): AgeCheckDeps {
     memory: null,
     bridgeLockPath: join(tmpDir, "bridge.lock"),
     sleepHour: 6, sleepMinute: 0,
-    busyChats: new Set(),
+    sessions: new SessionRegistry(),
     isSleepActive: () => false,
     doctorPath: "/bin/true",
     ...overrides,
@@ -80,7 +81,9 @@ describe("Integration: age-check task", () => {
     vi.useFakeTimers({ now: new Date(2026, 3, 5, 10, 0) });
     writeFileSync(join(tmpDir, "bridge.lock"), JSON.stringify({ pid: 1, startedAt: Date.now() - 86400000, lastHeartbeat: Date.now() }));
 
-    const task = createAgeCheckTask(makeDeps({ busyChats: new Set(["telegram:100"]) }));
+    const busySessions = new SessionRegistry();
+    busySessions.getOrCreate("telegram:100").busy = true;
+    const task = createAgeCheckTask(makeDeps({ sessions: busySessions }));
     await task.execute();
 
     expect(exitSpy).not.toHaveBeenCalled();

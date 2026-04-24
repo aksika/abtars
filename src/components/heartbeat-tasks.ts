@@ -6,7 +6,8 @@
 import { execSync } from "node:child_process";
 import { logInfo, logWarn, logError } from "./logger.js";
 import { runCompaction } from "./compaction.js";
-import { compactingSessions, setIdleCompactReset } from "./message-pipeline.js";
+import { setIdleCompactReset } from "./message-pipeline.js";
+import type { SessionRegistry } from "./session-registry.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind/memory-manager.js";
 import type { HeartbeatTask } from "../types/memory.js";
@@ -16,8 +17,7 @@ export interface IdleCompactDeps {
   memory: MemoryManager | null;
   memoryDir: string;
   allowedUserIds: Set<number>;
-  busyChats: Set<string>;
-  pendingSessionStart: Set<string>;
+  sessions: SessionRegistry;
   isSleepActive: () => boolean;
 }
 
@@ -34,7 +34,9 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
     execute: async () => {
       const pct = deps.transport.contextPercent;
       if (pct < 0 || pct < pctThreshold) return false;
-      if (compactedThisIdle || deps.busyChats.size > 0 || deps.isSleepActive()) return false;
+      // Check if any session is busy
+      const anyBusy = [...deps.sessions.keys()].some(k => deps.sessions.get(k)?.busy);
+      if (compactedThisIdle || anyBusy || deps.isSleepActive()) return false;
 
       let lastMsgTs = 0;
       try {
@@ -44,24 +46,24 @@ export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
 
       const chatId = [...deps.allowedUserIds][0];
       if (!chatId) return false;
-      // Resolve userId session key from registry
       const { loadUsers } = await import("./user-registry.js");
       const registry = loadUsers();
       const user = registry.byPlatformId.get("telegram:" + chatId);
       const sessionKey = (user?.userId ?? "master") + ":telegram";
 
       logInfo("idle-compact", `☕ ctx at ${pct}%, idle ${Math.round((Date.now() - lastMsgTs) / 60000)}min — compacting`);
-      deps.busyChats.add(sessionKey);
-      compactingSessions.add(sessionKey);
+      const entry = deps.sessions.getOrCreate(sessionKey);
+      entry.busy = true;
+      entry.compacting = true;
       try {
-        await runCompaction(deps.transport, sessionKey, deps.pendingSessionStart);
+        await runCompaction(deps.transport, sessionKey, deps.sessions);
         compactedThisIdle = true;
         logInfo("idle-compact", "☕ Floating compaction complete");
       } catch (err) {
         logWarn("idle-compact", `☕ Floating compaction failed: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
-        deps.busyChats.delete(sessionKey);
-        compactingSessions.delete(sessionKey);
+        entry.busy = false;
+        entry.compacting = false;
       }
       return true;
     },
@@ -75,12 +77,8 @@ export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
   return {
     name: "age-check",
     execute: async () => {
-      // Check hw sleep (post-Dreamy quiet ticks) — skip if cron job running.
-      // checkHwSleep owns its own counter state internally; no longer driven by daily-cycle's quietTickCount.
       if (deps.checkHwSleep && !deps.cronBusy?.()) deps.checkHwSleep();
-
       if (!isDailyCycleDue(deps)) return;
-
       logInfo("age-check", `😴 BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — spawning Dreamy`);
       try { execSync(`${deps.doctorPath} --fix`, { timeout: 30000 }); } catch { /* */ }
       if (deps.startSleep) { deps.startSleep(); }
@@ -95,7 +93,7 @@ export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTa
     name: "db-integrity",
     execute: async () => {
       counter++;
-      if (counter % 72 !== 0) return; // every 72 ticks = ~6 hours
+      if (counter % 72 !== 0) return;
       if (!memory) return;
       const result = memory.maintenance.checkIntegrity();
       if (result !== "ok") {

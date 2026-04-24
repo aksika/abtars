@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { TelegramAdapter, type TelegramAdapterConfig, type TelegramAdapterDeps } from "./telegram-adapter.js";
 import type { PipelineDeps } from "../../components/message-pipeline.js";
+import { SessionRegistry } from "../../components/session-registry.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 import type { InboundMessage } from "../../types/platform.js";
 
@@ -76,10 +77,7 @@ function makeDeps(transport: IKiroTransport): TelegramAdapterDeps {
       startedAt: Date.now(),
       sttConfig: null,
       ttsConfig: null,
-      busyChats: new Set(),
-      fullModeChats: new Set(),
-      pendingSessionStart: new Set(),
-      seenSessions: new Set(),
+      sessions: new SessionRegistry(),
       updateCtxStart: vi.fn(),
     } as PipelineDeps,
     conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() } as any,

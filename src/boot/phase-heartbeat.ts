@@ -129,7 +129,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
     heartbeat.registerTask(createIdleCompactTask({
       transport, memory, memoryDir: memoryConfig.memoryDir,
       allowedUserIds: config.telegram.allowedUserIds,
-      busyChats: ctx.busyChats, pendingSessionStart: ctx.pendingSessionStart,
+      sessions: ctx.sessions,
       isSleepActive: ctx.isSleepActive,
     }));
   }
@@ -155,7 +155,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
     sleepAuditDir: ctx.sleepAuditDir,
     sleepHour: SLEEP_HOUR,
     sleepMinute: SLEEP_MINUTE,
-    busyChats: ctx.busyChats,
+    sessions: ctx.sessions,
     isSleepActive: ctx.isSleepActive,
     doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
     startSleep: () => { ctx.sleepHandle?.spawn(); },

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { DiscordAdapter, type DiscordAdapterConfig, type DiscordAdapterDeps } from "./discord-adapter.js";
 import type { PipelineDeps } from "../../components/message-pipeline.js";
+import { SessionRegistry } from "../../components/session-registry.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 
 // Mock discord.js client
@@ -74,10 +75,7 @@ function makeDeps(transport: IKiroTransport): DiscordAdapterDeps {
       startedAt: Date.now(),
       sttConfig: null,
       ttsConfig: null,
-      busyChats: new Set(),
-      fullModeChats: new Set(),
-      pendingSessionStart: new Set(),
-      seenSessions: new Set(),
+      sessions: new SessionRegistry(),
       updateCtxStart: vi.fn(),
     } as PipelineDeps,
     transport,

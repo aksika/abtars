@@ -3,6 +3,7 @@
  * Uses real pipeline + real memory, mock transport + mock adapter.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { SessionRegistry } from "../components/session-registry.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -79,11 +80,7 @@ function makeDeps(transport: IKiroTransport, memory: MemoryManager | null, overr
     config: { agentTransport: "acp", workingDir: tmpDir },
     startedAt: Date.now(),
     sttConfig: null, ttsConfig: null,
-    busyChats: new Set(),
-    messageQueue: new Map(),
-    fullModeChats: new Set(),
-    pendingSessionStart: new Set(),
-    seenSessions: new Set(),
+    sessions: new SessionRegistry(),
     updateCtxStart: vi.fn(),
     ...overrides,
   };
@@ -118,8 +115,9 @@ describe("Smoke: bridge lifecycle", () => {
   it("first message triggers SOUL injection via pendingSessionStart", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const pending = new Set(["telegram:100"]);
-    const deps = makeDeps(transport, memory, { pendingSessionStart: pending });
+    const sessions = new SessionRegistry();
+    sessions.getOrCreate("telegram:100").pendingStart = true;
+    const deps = makeDeps(transport, memory, { sessions });
 
     await handleInboundMessage(makeMsg("hello"), adapter, deps);
 
@@ -132,8 +130,9 @@ describe("Smoke: bridge lifecycle", () => {
   it("second message does NOT re-inject SOUL", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const seen = new Set(["telegram:100"]);
-    const deps = makeDeps(transport, memory, { seenSessions: seen });
+    const sessions = new SessionRegistry();
+    sessions.getOrCreate("telegram:100").seen = true;
+    const deps = makeDeps(transport, memory, { sessions });
 
     await handleInboundMessage(makeMsg("hello again"), adapter, deps);
 
@@ -144,9 +143,9 @@ describe("Smoke: bridge lifecycle", () => {
   it("resetAndPrepare triggers SOUL re-injection on next message", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const pending = new Set<string>();
-    const seen = new Set(["telegram:100"]);
-    const deps = makeDeps(transport, memory, { pendingSessionStart: pending, seenSessions: seen });
+    const sessions = new SessionRegistry();
+    sessions.getOrCreate("telegram:100").seen = true;
+    const deps = makeDeps(transport, memory, { sessions });
 
     // First message — no SOUL (already seen)
     await handleInboundMessage(makeMsg("msg1"), adapter, deps);
@@ -155,7 +154,7 @@ describe("Smoke: bridge lifecycle", () => {
     // Reset
     await resetAndPrepare({
       transport, sessionKey: "telegram:100", reason: "test-reset",
-      pendingSessionStart: pending,
+      sessions,
     });
 
     // Next message — SOUL re-injected
@@ -167,8 +166,9 @@ describe("Smoke: bridge lifecycle", () => {
   it("session-start prompt bypasses interceptor (not truncated)", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const pending = new Set(["telegram:100"]);
-    const deps = makeDeps(transport, memory, { pendingSessionStart: pending });
+    const sessions = new SessionRegistry();
+    sessions.getOrCreate("telegram:100").pendingStart = true;
+    const deps = makeDeps(transport, memory, { sessions });
 
     await handleInboundMessage(makeMsg("hello"), adapter, deps);
 

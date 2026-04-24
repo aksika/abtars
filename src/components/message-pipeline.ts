@@ -14,6 +14,7 @@ import { buildSessionStartContext } from "abmind/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { loadUsers } from "./user-registry.js";
 import { tryReaction } from "./reactions.js";
+import { SessionRegistry } from "./session-registry.js";
 import { renderMemory } from "abmind";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
@@ -53,31 +54,24 @@ function extractKeywords(text: string): string[] {
     .filter(w => w.length >= 3 && !STOPWORDS.has(w))
     .slice(0, 3);
 }
-
-const primingBuffers = new Map<string, string[]>();
-
-// Per-session compaction state
-const ctxWarned = new Set<string>();
-const compactFailures = new Map<string, number>();
-/** Sessions currently being compacted (for coffee message). */
-export { compactingSessions } from "./pipeline/busy-guard.js";
+export { SessionRegistry } from "./session-registry.js";
 /** Reset by bridge-app on inbound message to re-enable floating compaction. */
 export let resetIdleCompactFlag: (() => void) | null = null;
 export function setIdleCompactReset(fn: () => void): void { resetIdleCompactFlag = fn; }
 
-/** Shared session reset: reset transport, clear buffer, mark for SOUL re-injection. */
+/** Shared session reset: reset transport, clear buffer, delete session entry. */
 export async function resetAndPrepare(opts: {
   transport: IKiroTransport;
   sessionKey: string;
   reason: string;
-  pendingSessionStart: Set<string>;
+  sessions: SessionRegistry;
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
 }): Promise<void> {
   await opts.transport.resetSession(opts.sessionKey);
   if (opts.conversationBuffer && opts.bufKey) opts.conversationBuffer.clear(opts.bufKey);
-  opts.pendingSessionStart.add(opts.sessionKey);
-  primingBuffers.delete(opts.sessionKey);
+  opts.sessions.delete(opts.sessionKey);
+  opts.sessions.getOrCreate(opts.sessionKey).pendingStart = true;
   writeRestartReason(opts.reason);
 }
 
@@ -105,17 +99,9 @@ export interface VoiceDeps {
   ttsConfig: TtsConfig | null;
 }
 
-/** Shared mutable session state. */
-export interface SessionState {
-  busyChats: Set<string>;
-  messageQueue: Map<string, Array<{ msg: InboundMessage; adapter: PlatformAdapter }>>;
-  fullModeChats: Set<string>;
-  pendingSessionStart: Set<string>;
-  seenSessions: Set<string>;
-}
-
 /** Pipeline dependencies — composed from focused interfaces. */
-export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps, SessionState {
+export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
+  sessions: SessionRegistry;
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
   requestShutdown?: () => void;
@@ -145,7 +131,7 @@ export async function handleInboundMessage(
     transport, codingMode, memory, memoryConfig,
     idleSave, conversationBuffer,
     ttsConfig,
-    busyChats, fullModeChats, pendingSessionStart, seenSessions, updateCtxStart,
+    sessions, updateCtxStart,
   } = deps;
 
   const { sessionKey, channelId, isVoice, isGroup } = msg;
@@ -156,11 +142,12 @@ export async function handleInboundMessage(
   const registry = loadUsers();
   const userId = sessionKey.includes(":") ? sessionKey.split(":")[0]! : "master";
 
+  const busyEntry = sessions.getOrCreate(sessionKey);
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
   let silentCheckTimer: ReturnType<typeof setInterval> | undefined;
   try {
-    busyChats.add(sessionKey);
+    busyEntry.busy = true;
     resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
     const ctxPct = transport.contextPercent;
     logInfo(TAG, `← [${msg.platform}] ${isVoice ? "🎤 " : ""}"${text.slice(0, 60)}"${ctxPct >= 0 ? ` (ctx: ${ctxPct}%)` : ""}`);
@@ -181,10 +168,10 @@ export async function handleInboundMessage(
       }
     }
 
-    const isSessionStart = pendingSessionStart.has(sessionKey);
+    const isSessionStart = sessions.getOrCreate(sessionKey).pendingStart;
 
     if (memory) {
-      prompt = preparePrompt(prompt, memory, userId, sessionKey, text, pendingSessionStart, seenSessions, msg.messageId);
+      prompt = preparePrompt(prompt, memory, userId, sessionKey, text, sessions, msg.messageId);
     }
 
     // --- Active recall: inject relevant memories on non-session-start turns ---
@@ -194,7 +181,7 @@ export async function handleInboundMessage(
       if (userEntry?.role !== "guest" && (ctxPct < 0 || ctxPct < CTX_COMPACT_PCT)) {
         try {
           const t0 = performance.now();
-          const priming = primingBuffers.get(sessionKey) ?? [];
+          const priming = sessions.get(sessionKey)?.primingTerms ?? [];
           const recall = await memory.recallSearch({
             translated: [...new Set([text, ...priming])],
             original: text,
@@ -339,7 +326,7 @@ export async function handleInboundMessage(
 
     // --- Extract clean answer ---
     const cleanAnswer = transport.answerOnly;
-    const rawResponse = fullModeChats.has(sessionKey) ? response : (cleanAnswer || response);
+    const rawResponse = sessions.get(sessionKey)?.fullMode ? response : (cleanAnswer || response);
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
@@ -430,8 +417,8 @@ export async function handleInboundMessage(
     if (ACTIVE_MEMORY) {
       const modelTopics = PRIMING_MODEL_TOPICS && topics ? topics : [];
       const regexKw = extractKeywords(text);
-      const existing = primingBuffers.get(sessionKey) ?? [];
-      primingBuffers.set(sessionKey, [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX));
+      const existing = sessions.get(sessionKey)?.primingTerms ?? [];
+      sessions.getOrCreate(sessionKey).primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
     }
 
     // --- Record to memory (skip for guests) ---
@@ -445,7 +432,7 @@ export async function handleInboundMessage(
     }
 
     // --- TTS for voice notes ---
-    if (isVoice && ttsConfig && !fullModeChats.has(sessionKey) && adapter.sendVoice) {
+    if (isVoice && ttsConfig && !sessions.get(sessionKey)?.fullMode && adapter.sendVoice) {
       try {
         await adapter.sendTyping?.(channelId, msg.threadId);
         const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
@@ -470,7 +457,7 @@ export async function handleInboundMessage(
     {
       const pct = transport.contextPercent;
       if (pct >= 0) {
-        const failures = compactFailures.get(sessionKey) ?? 0;
+        const failures = sessions.getOrCreate(sessionKey).compactFailures;
 
         if (pct >= CTX_COMPACT_PCT && failures < COMPACT_MAX_FAILURES) {
           const aggressive = pct >= CTX_AGGRESSIVE_PCT;
@@ -487,22 +474,21 @@ export async function handleInboundMessage(
               }).catch(() => {});
             }
 
-            await runCompaction(transport, sessionKey, pendingSessionStart);
-            ctxWarned.delete(sessionKey);
-            compactFailures.delete(sessionKey);
+            await runCompaction(transport, sessionKey, sessions);
+            { const e = sessions.getOrCreate(sessionKey); e.ctxWarned = false; e.compactFailures = 0; }
 
             await adapter.sendMessage(channelId, "📦 Compaction complete.", { threadId: msg.threadId });
             if (memoryConfig.memoryEnabled) updateCtxStart(memoryConfig.memoryDir, userId);
           } catch (err) {
-            const count = (compactFailures.get(sessionKey) ?? 0) + 1;
-            compactFailures.set(sessionKey, count);
-            logError(TAG, `Compaction failed (${count}/${COMPACT_MAX_FAILURES})`, err);
-            if (count >= COMPACT_MAX_FAILURES) {
+            const entry = sessions.getOrCreate(sessionKey);
+            entry.compactFailures++;
+            logError(TAG, `Compaction failed (${entry.compactFailures}/${COMPACT_MAX_FAILURES})`, err);
+            if (entry.compactFailures >= COMPACT_MAX_FAILURES) {
               await adapter.sendMessage(channelId, "⚠️ Compaction failing repeatedly — consider /reset", { threadId: msg.threadId });
             }
           }
-        } else if (pct >= CTX_WARN_PCT && !ctxWarned.has(sessionKey)) {
-          ctxWarned.add(sessionKey);
+        } else if (pct >= CTX_WARN_PCT && !sessions.getOrCreate(sessionKey).ctxWarned) {
+          sessions.getOrCreate(sessionKey).ctxWarned = true;
           logInfo(TAG, `⚠️ Context at ${pct}% — warning threshold`);
           await adapter.sendMessage(channelId, `⚠️ Context window at ${pct}% — will auto-compact at ${CTX_COMPACT_PCT}%`, { threadId: msg.threadId });
         } else if (pct >= CTX_COMPACT_PCT && failures >= COMPACT_MAX_FAILURES) {
@@ -524,7 +510,7 @@ export async function handleInboundMessage(
 
     if (isContextOverflow) {
       logWarn(TAG, `Context overflow detected — auto-resetting session`);
-      await resetAndPrepare({ transport, sessionKey, reason: `ctx-overflow: ${errStr.slice(0, 100)}`, pendingSessionStart });
+      await resetAndPrepare({ transport, sessionKey, reason: `ctx-overflow: ${errStr.slice(0, 100)}`, sessions });
       await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(() => {});
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
@@ -537,15 +523,14 @@ export async function handleInboundMessage(
     clearTimeout(typingTtlTimer);
     clearInterval(silentCheckTimer);
     transport.onToolCallStart = undefined;
-    busyChats.delete(sessionKey);
+    busyEntry.busy = false;
     idleSave.reset(sessionKey, chatId);
 
     // Drain queued messages
-    const queued = deps.messageQueue.get(sessionKey);
-    if (queued?.length) {
-      const next = queued.shift()!;
-      if (queued.length === 0) deps.messageQueue.delete(sessionKey);
-      logInfo(TAG, `Draining queued message for ${sessionKey} (${queued.length} remaining)`);
+    const entry = sessions.get(sessionKey);
+    if (entry?.queue.length) {
+      const next = entry.queue.shift()!;
+      logInfo(TAG, `Draining queued message for ${sessionKey} (${entry.queue.length} remaining)`);
       handleInboundMessage(next.msg, next.adapter, deps).catch(e => logError(TAG, "Queue drain error", e));
     }
   }
@@ -650,16 +635,16 @@ function preparePrompt(
   userId: string,
   sessionKey: string,
   text: string,
-  pending: Set<string>,
-  seen: Set<string>,
+  sessions: SessionRegistry,
   platformMessageId?: number,
 ): string {
-  const isSessionStart = pending.has(sessionKey) || !seen.has(sessionKey);
+  const entry = sessions.getOrCreate(sessionKey);
+  const isSessionStart = entry.pendingStart || !entry.seen;
   if (isSessionStart) {
     prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey);
   }
-  seen.add(sessionKey);
-  pending.delete(sessionKey);
+  entry.seen = true;
+  entry.pendingStart = false;
   const userRole = loadUsers().byUserId.get(userId)?.role;
   if (userRole !== "guest") {
     memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId });
