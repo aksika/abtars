@@ -76,3 +76,90 @@ describe("TelegramApi.sendDocument", () => {
     expect(form.has("caption")).toBe(false);
   });
 });
+
+describe("TelegramApi.fetchWithRetry (retry paths)", () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  const tmpFile = join(tmpdir(), "telegram-api-retry.md");
+
+  beforeEach(() => {
+    writeFileSync(tmpFile, "# hello", "utf-8");
+    fetchSpy.mockReset();
+  });
+
+  afterEach(() => {
+    try { unlinkSync(tmpFile); } catch { /* ignore */ }
+  });
+
+  it("sendVoice: retries on 502 and succeeds on attempt 2", async () => {
+    fetchSpy
+      .mockResolvedValueOnce({ ok: false, status: 502, text: async () => "bad gateway" } as unknown as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, result: { message_id: 7 } }) } as unknown as Response);
+
+    const api = new TelegramApi("t");
+    const id = await api.sendVoice(1, Buffer.from("audio"));
+
+    expect(id).toBe(7);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    // Each attempt must build a fresh FormData (factory pattern)
+    const body1 = (fetchSpy.mock.calls[0]![1] as RequestInit).body as FormData;
+    const body2 = (fetchSpy.mock.calls[1]![1] as RequestInit).body as FormData;
+    expect(body1).not.toBe(body2);
+  }, 15_000);
+
+  it("sendDocument: retries on ECONNRESET and succeeds on attempt 3", async () => {
+    const econnreset = Object.assign(new Error("socket hang up ECONNRESET"), { code: "ECONNRESET" });
+    fetchSpy
+      .mockRejectedValueOnce(econnreset)
+      .mockRejectedValueOnce(econnreset)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, result: { message_id: 99 } }) } as unknown as Response);
+
+    const api = new TelegramApi("t");
+    const id = await api.sendDocument(1, tmpFile);
+
+    expect(id).toBe(99);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  }, 20_000);
+
+  it("downloadFile: retries on network timeout", async () => {
+    const timeout = new Error("fetch timed out");
+    fetchSpy
+      .mockRejectedValueOnce(timeout)
+      .mockResolvedValueOnce({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      } as unknown as Response);
+
+    const api = new TelegramApi("t");
+    const buf = await api.downloadFile("voice/abc.ogg");
+
+    expect(buf).toEqual(Buffer.from([1, 2, 3]));
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  }, 15_000);
+
+  it("downloadFile: does NOT retry on 404 (expired file = permanent)", async () => {
+    fetchSpy.mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: async () => "Not Found",
+    } as unknown as Response);
+
+    const api = new TelegramApi("t");
+    await expect(api.downloadFile("voice/expired.ogg")).rejects.toThrow(/downloadFile failed \(404\)/);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("respects outer AbortSignal mid-retry", async () => {
+    const ctrl = new AbortController();
+    fetchSpy.mockImplementation(async () => {
+      ctrl.abort(new Error("user cancelled"));
+      throw new Error("network timeout");
+    });
+
+    const api = new TelegramApi("t");
+    await expect(
+      api.getUpdates(0, 1, ctrl.signal),
+    ).rejects.toThrow(/network timeout|user cancelled/);
+    // First attempt runs; after abort no further retries
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});

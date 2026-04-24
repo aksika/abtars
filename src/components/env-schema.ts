@@ -56,6 +56,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   // ── Telegram ──
   { env: "TELEGRAM_BOT_TOKEN", type: "string", description: "Telegram bot token" },
   { env: "TELEGRAM_TIMEOUT_MS", type: "int", default: "15000", description: "Telegram API timeout (ms)" },
+  { env: "TELEGRAM_FILE_TIMEOUT_MS", type: "int", default: "60000", description: "Telegram file up/download timeout (ms) — downloadFile, sendDocument" },
   { env: "POLL_TIMEOUT_S", type: "int", default: "30", description: "Telegram long-poll timeout (seconds)" },
 
   // ── Discord ──
@@ -158,6 +159,7 @@ export interface EnvConfig {
   // Telegram
   telegramBotToken: string | undefined;
   telegramTimeoutMs: number;
+  telegramFileTimeoutMs: number;
   pollTimeoutS: number;
 
   // Discord
@@ -308,6 +310,7 @@ export function initEnv(): Readonly<EnvConfig> {
 
     telegramBotToken: read("TELEGRAM_BOT_TOKEN"),
     telegramTimeoutMs: parseIntSafe(readOr("TELEGRAM_TIMEOUT_MS", "15000"), "TELEGRAM_TIMEOUT_MS"),
+    telegramFileTimeoutMs: parseIntSafe(readOr("TELEGRAM_FILE_TIMEOUT_MS", "60000"), "TELEGRAM_FILE_TIMEOUT_MS"),
     pollTimeoutS: parseIntSafe(readOr("POLL_TIMEOUT_S", "30"), "POLL_TIMEOUT_S"),
 
     discordBotToken: read("DISCORD_BOT_TOKEN"),
