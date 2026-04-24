@@ -45,7 +45,7 @@ def main():
         "cost": {"input": in_cost, "output": out_cost},
         "transports": transports,
         "description": desc,
-        "addedAt": str(date.today()),
+        "validatedAt": str(date.today()),
     }
 
     # Validate all entries
