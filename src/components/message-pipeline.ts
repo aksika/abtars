@@ -13,7 +13,7 @@ import { cleanResponse } from "./clean-response.js";
 import { buildSessionStartContext } from "abmind/session-context.js";
 import { loadSoulBundle } from "./soul-loader.js";
 import { loadUsers } from "./user-registry.js";
-import { tryReaction } from "./reaction-handler.js";
+import { tryReaction } from "./reactions.js";
 import { renderMemory } from "abmind";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";

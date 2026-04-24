@@ -11,7 +11,9 @@ import { loadUsers } from "../../components/user-registry.js";
 import { ResponseFormatter } from "../../components/response-formatter.js";
 import { A2ARouter } from "../../components/a2a-router.js";
 import { interceptLargeMessage } from "../../components/message-interceptor.js";
-import { formatReactionSignal } from "../../components/reaction-signal.js";
+import { formatReactionSignal } from "../../components/reactions.js";
+
+export const DISCORD_CAPABILITIES: PlatformCapabilities = { voice: false, reactions: true, typing: true, threads: true };
 import { emojiToScore } from "abmind/emotion-utils.js";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
@@ -43,12 +45,7 @@ export interface DiscordAdapterDeps {
 
 export class DiscordAdapter implements PlatformAdapter {
   readonly name = "discord" as const;
-  readonly capabilities: PlatformCapabilities = {
-    voice: false,
-    reactions: true,
-    typing: false,
-    threads: true,
-  };
+  readonly capabilities: PlatformCapabilities = DISCORD_CAPABILITIES;
 
   private readonly api: DiscordApi;
   private readonly securityGate: SecurityGate;

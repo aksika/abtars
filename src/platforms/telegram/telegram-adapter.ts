@@ -9,8 +9,9 @@ import { TelegramPoller } from "./telegram-poller.js";
 import { createFileOffsetStore } from "./offset-store.js";
 import { SecurityGate } from "../../components/security-gate.js";
 import { ResponseFormatter } from "../../components/response-formatter.js";
-import { formatReactionSignal } from "../../components/reaction-signal.js";
-import { routeReaction } from "../../components/reaction-router.js";
+import { formatReactionSignal, routeReaction } from "../../components/reactions.js";
+
+export const TELEGRAM_CAPABILITIES: PlatformCapabilities = { voice: true, reactions: true, typing: true, threads: true };
 import { emojiToScore } from "abmind/emotion-utils.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
@@ -38,12 +39,7 @@ export interface TelegramAdapterDeps {
 
 export class TelegramAdapter implements PlatformAdapter {
   readonly name = "telegram" as const;
-  readonly capabilities: PlatformCapabilities = {
-    voice: true,
-    reactions: true,
-    typing: true,
-    threads: true,
-  };
+  readonly capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES;
 
   private readonly api: TelegramApi;
   private readonly securityGate: SecurityGate;
