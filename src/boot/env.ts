@@ -7,11 +7,16 @@
  * ?? default` reads freeze the default before dotenv runs.
  *
  * Precedence (highest → lowest):
- *   process.env
- *   $AGENT_BRIDGE_HOME/config/.env        (primary — what `agentbridge onboard` writes)
- *   $AGENT_BRIDGE_HOME/.env               (legacy root .env — kept for backward compat)
- *   $AGENT_BRIDGE_HOME/config/.env.skills (skill-specific overrides)
+ *   process.env                           (ops override — launchd/systemd/shell export)
+ *   $AGENT_BRIDGE_HOME/.env               (legacy root — real values on existing installs)
+ *   $AGENT_BRIDGE_HOME/config/.env        (new primary — what `agentbridge onboard` writes)
+ *   $AGENT_BRIDGE_HOME/config/.env.skills (skill-specific)
  *   ./.env                                (cwd)
+ *
+ * Root .env wins over config/.env because existing installs carry real operator
+ * secrets in root .env, while config/.env starts as a template with empty values
+ * (TELEGRAM_BOT_TOKEN= etc.). Empty-but-present would mask the real one under
+ * `override: false`, so root goes first.
  *
  * `override: false` preserves process.env precedence — operator-set vars
  * (launchd plist, shell export) win over .env values.
@@ -22,7 +27,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 
 const home = process.env["AGENT_BRIDGE_HOME"] ?? resolve(homedir(), ".agentbridge");
-loadDotenv({ path: resolve(home, "config", ".env"), override: false });
 loadDotenv({ path: resolve(home, ".env"), override: false });
+loadDotenv({ path: resolve(home, "config", ".env"), override: false });
 loadDotenv({ path: resolve(home, "config", ".env.skills"), override: false });
 loadDotenv({ path: resolve(process.cwd(), ".env"), override: false });
