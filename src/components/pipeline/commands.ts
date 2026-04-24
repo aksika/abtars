@@ -51,6 +51,16 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
 
   // Non-interrupt destructive commands while busy: defer to busy guard (will be queued)
   if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && sessions.get(msg.sessionKey)?.busy) {
+    const deferredWording: Record<string, string> = {
+      "/compact": "⏳ Will /compact after current response finishes.",
+      "/coding": "⏳ Will switch to coding mode after current response finishes.",
+      "/default": "⏳ Will switch to default mode after current response finishes.",
+    };
+    const specific = deferredWording[cmd];
+    if (specific) {
+      await ctx.reply(specific);
+      ctx.deferReply = true;
+    }
     await next();
     return;
   }

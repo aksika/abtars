@@ -25,6 +25,8 @@ export interface MessageContext {
   readonly reply: Reply;
   /** Set to true by any middleware that fully handled the message. */
   handled: boolean;
+  /** Set to true when a specific deferred-command reply has fired — busy-guard skips its generic queue notification. */
+  deferReply?: boolean;
   /** Response from transport (set by transport middleware). */
   response?: string;
   /** Clean answer extracted from response. */

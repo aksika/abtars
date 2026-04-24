@@ -51,4 +51,16 @@ describe("busyGuardMiddleware", () => {
     expect(ctx.deps.transport.sendInterrupt).toHaveBeenCalled();
     expect(next).toHaveBeenCalled();
   });
+
+  it("skips generic notification when ctx.deferReply is set", async () => {
+    const ctx = makeCtx();
+    ctx.deps.sessions.getOrCreate("master:tg").busy = true;
+    ctx.deferReply = true;
+    const next = vi.fn();
+    await busyGuardMiddleware(ctx, next);
+    expect(ctx.handled).toBe(true);
+    expect(ctx.adapter.sendMessage).not.toHaveBeenCalled();
+    // Still queued
+    expect(ctx.deps.sessions.get("master:tg")?.queue).toHaveLength(1);
+  });
 });

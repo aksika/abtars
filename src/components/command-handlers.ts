@@ -188,15 +188,28 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
 }
 
 async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
-  await ctx.reply("📦 Compacting...");
+  const placeholderId = await ctx.reply("📦 Compacting...");
+  let done = false;
+  const editTick = async (label: string): Promise<void> => {
+    if (done || placeholderId === undefined || !ctx.editReply) return;
+    try { await ctx.editReply(placeholderId, label); } catch { /* edit race — ignore */ }
+  };
+  const tick15 = setTimeout(() => { void editTick("📦 Compacting... (15s)"); }, 15_000);
+  const tick30 = setTimeout(() => { void editTick("📦 Still compacting... (30s)"); }, 30_000);
   try {
     await runCompaction(ctx.transport, ctx.sessionKey, ctx.sessions);
+    done = true;
     if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
     await ctx.reply("📦 Compaction complete.");
     logInfo(TAG, `Manual compaction done`);
   } catch (err) {
+    done = true;
     logError(TAG, "Manual compaction failed", err);
     await ctx.reply("❌ Compaction failed. Try /reset to start fresh.");
+  } finally {
+    done = true;
+    clearTimeout(tick15);
+    clearTimeout(tick30);
   }
   return true;
 }
@@ -290,6 +303,7 @@ async function handleFacts(_text: string, ctx: CommandContext): Promise<boolean>
 }
 
 async function handleTasksList(_text: string, ctx: CommandContext): Promise<boolean> {
+  const placeholderId = await ctx.reply("⏰ Loading tasks...");
   const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
   let listing: string;
   try {
@@ -341,7 +355,12 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
     const ago = Math.round((Date.now() - j.startedAt) / 1000);
     running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.message}`;
   }
-  await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "Markdown" });
+  const body = `⏰ ${now}\n\n${listing}${running}`;
+  if (placeholderId !== undefined && ctx.editReply) {
+    await ctx.editReply(placeholderId, body);
+  } else {
+    await ctx.reply(body, { parseMode: "Markdown" });
+  }
   return true;
 }
 
@@ -355,15 +374,27 @@ async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<bo
 
 async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolean> {
   const id = text.replace(/^\/(tasks|cron) log /, "").trim();
+  const placeholderId = await ctx.reply("📋 Loading task log...");
   try {
     const raw = await execAsync("agentbridge-task", ["history", id], 5000);
     if (!raw) throw new Error("empty");
     const data = JSON.parse(raw);
-    if (!data.ok) { await ctx.reply(`❌ ${data.error}`); return true; }
+    if (!data.ok) {
+      const msg = `❌ ${data.error}`;
+      if (placeholderId !== undefined && ctx.editReply) await ctx.editReply(placeholderId, msg);
+      else await ctx.reply(msg);
+      return true;
+    }
     const runs = (data.runs as { ranAt: string; exitCode?: number }[]).slice(-5);
     const lines = runs.map(r => `${r.ranAt}  exit=${r.exitCode ?? "?"}`);
-    await ctx.reply(`📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``, { parseMode: "Markdown" });
-  } catch { await ctx.reply("❌ Failed to read history"); }
+    const body = `📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``;
+    if (placeholderId !== undefined && ctx.editReply) await ctx.editReply(placeholderId, body);
+    else await ctx.reply(body, { parseMode: "Markdown" });
+  } catch {
+    const msg = "❌ Failed to read history";
+    if (placeholderId !== undefined && ctx.editReply) await ctx.editReply(placeholderId, msg);
+    else await ctx.reply(msg);
+  }
   return true;
 }
 
