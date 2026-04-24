@@ -306,9 +306,13 @@ export async function install(opts: InstallOptions): Promise<number> {
     process.stdout.write(`✓ manifest initialized at ${paths.manifest}\n`);
   }
 
-  // Write install mode
-  const { writeInstallMode } = await import("../install-mode.js");
-  const mode = opts.mode ?? "supervised";
+  // Write install mode. Priority:
+  //   1. --mode flag (explicit) — always wins
+  //   2. existing install-mode file — preserved (don't clobber on --force)
+  //   3. default: supervised (backward-compat for installs that predate this feature)
+  const { writeInstallMode, readInstallMode } = await import("../install-mode.js");
+  const existingMode = readInstallMode(home);
+  const mode = opts.mode ?? existingMode ?? "supervised";
   writeInstallMode(home, mode);
   process.stdout.write(`✓ install mode: ${mode}\n`);
 
