@@ -35,18 +35,16 @@ export interface OnboardOptions {
   readonly force: boolean;
 }
 
-type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro-free' | 'kiro-paid' | 'gemini-free' | 'gemini-paid';
+type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro' | 'gemini';
 
-const VALID_PROVIDERS: readonly ProviderChoice[] = ['openrouter', 'anthropic', 'openai', 'ollama', 'kiro-free', 'kiro-paid', 'gemini-free', 'gemini-paid'];
+const VALID_PROVIDERS: readonly ProviderChoice[] = ['openrouter', 'anthropic', 'openai', 'ollama', 'kiro', 'gemini'];
 const DEFAULT_MODELS: Record<ProviderChoice, string> = {
   openrouter: 'google/gemini-2.5-flash',
   anthropic: 'claude-sonnet-4-5-20250929',
   openai: 'gpt-4o',
   ollama: 'kimi-k2.5:cloud',
-  'kiro-free': 'claude-sonnet-4.6',
-  'kiro-paid': 'claude-opus-4.6',
-  'gemini-free': 'gemini-2.5-flash',
-  'gemini-paid': 'gemini-2.5-pro',
+  kiro: 'claude-sonnet-4.6',
+  gemini: 'gemini-2.5-flash',
 };
 
 /** Providers that use an API key + HTTP endpoint (can validate via /v1/models). */
@@ -59,10 +57,13 @@ const PROVIDER_ENDPOINT: Record<string, string> = {
   ollama: 'http://localhost:11434/v1',
 };
 
-const PROVIDER_API_KEY_ENV: Partial<Record<ProviderChoice, string>> = {
+const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
   openrouter: 'OPENROUTER_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
+  ollama: 'OLLAMA_API_KEY',
+  kiro: 'KIRO_API_KEY',
+  gemini: 'GEMINI_API_KEY',
 };
 
 interface WizardAnswers {
@@ -146,10 +147,8 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
       { value: 'anthropic', label: 'anthropic — Claude API (direct)' },
       { value: 'openai', label: 'openai — GPT API (direct)' },
       { value: 'ollama', label: 'ollama — local/cloud Ollama endpoint' },
-      { value: 'kiro-free', label: 'kiro-free — Kiro CLI (free tier)' },
-      { value: 'kiro-paid', label: 'kiro-paid — Kiro CLI (paid)' },
-      { value: 'gemini-free', label: 'gemini-free — Gemini CLI (free)' },
-      { value: 'gemini-paid', label: 'gemini-paid — Gemini CLI (paid)' },
+      { value: 'kiro', label: 'kiro — Kiro CLI (free or paid; tier via model)' },
+      { value: 'gemini', label: 'gemini — Gemini CLI (free or paid; tier via model)' },
     ],
     initialValue: existing?.defaultProvider ?? 'openrouter',
   });
@@ -163,13 +162,13 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(defaultModel)) { cancel('Cancelled.'); return null; }
 
-  // 9. API key — only for API providers
-  let providerApiKey = existing?.providerApiKey ?? '';
+  // 9. API key — every provider now has an env var; always ask, allow skip
   const apiKeyEnv = PROVIDER_API_KEY_ENV[defaultProvider];
-  if (apiKeyEnv) {
+  let providerApiKey = existing?.providerApiKey ?? '';
+  {
     const v = await text({
       message: `${apiKeyEnv} (${noteEmpty})`,
-      placeholder: existing?.providerApiKey ? '(keep existing)' : 'sk-or-v1-...',
+      placeholder: existing?.providerApiKey ? '(keep existing)' : 'sk-or-v1-... or leave blank',
       initialValue: existing?.providerApiKey,
     });
     if (isCancel(v)) { cancel('Cancelled.'); return null; }
@@ -206,6 +205,28 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
       process.stdout.write(result.ok ? `✓ ${hailMaryModel} available\n` : `⚠️  ${result.message}\n`);
     }
   }
+
+  // 12. Summary + confirmation
+  const mask = (s: string): string => s ? (s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-4)}` : '***') : '(skipped)';
+  const lines = [
+    '',
+    '── Summary ──',
+    `  Deployment mode:     ${installMode}`,
+    `  Telegram token:      ${mask(String(telegramToken ?? ''))}`,
+    `  Telegram chat ID:    ${String(telegramChatId ?? '') || '(skipped)'}`,
+    `  Discord bot token:   ${mask(String(discordBotToken ?? ''))}`,
+    `  Discord app ID:      ${String(discordAppId ?? '') || '(skipped)'}`,
+    `  Discord channel ID:  ${String(discordA2aChannel ?? '') || '(skipped)'}`,
+    `  Provider:            ${defaultProvider}`,
+    `  Default model:       ${modelStr}`,
+    `  ${apiKeyEnv}:        ${mask(providerApiKey)}`,
+    `  hailMary model:      ${hailMaryModel || '(skipped)'}`,
+    '',
+  ];
+  process.stdout.write(lines.join('\n'));
+
+  const ok = await confirm({ message: 'Looks good? Write config?', initialValue: true });
+  if (isCancel(ok) || !ok) { cancel('Cancelled — no files written.'); return null; }
 
   outro('Writing config…');
 
