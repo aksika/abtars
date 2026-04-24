@@ -92,6 +92,11 @@ export async function update(opts: UpdateOptions): Promise<number> {
     const scriptFiles = await readdir(repoScripts).catch(() => [] as string[]);
     const home = process.env['HOME'] ?? '';
     let serviceChanged = false;
+
+    // Resolve install mode — skip supervisor artifacts in simple mode
+    const { resolveInstallMode } = await import('../install-mode.js');
+    const installMode = resolveInstallMode(paths.home);
+
     for (const name of scriptFiles) {
       await copyFile(join(repoScripts, name), join(destScripts, name));
       if (name.endsWith('.sh')) await chmod(join(destScripts, name), 0o755);
@@ -100,8 +105,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
         await copyFile(join(repoScripts, name), join(paths.home, name));
         await chmod(join(paths.home, name), 0o755);
       }
-      // macOS: template + install LaunchAgent plist
-      if (name.endsWith('.plist') && process.platform === 'darwin' && home) {
+      // macOS: template + install LaunchAgent plist (supervised only)
+      if (name.endsWith('.plist') && process.platform === 'darwin' && home && installMode === 'supervised') {
         const launchAgentsDir = join(home, 'Library', 'LaunchAgents');
         await mkdir(launchAgentsDir, { recursive: true });
         const dst = join(launchAgentsDir, name);
@@ -110,8 +115,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
         await writeFile(dst, templated);
         if (oldContent !== templated) serviceChanged = true;
       }
-      // Linux: install systemd user service
-      if (name.endsWith('.service') && process.platform === 'linux' && home) {
+      // Linux: install systemd user service (supervised only)
+      if (name.endsWith('.service') && process.platform === 'linux' && home && installMode === 'supervised') {
         const systemdDir = join(home, '.config', 'systemd', 'user');
         await mkdir(systemdDir, { recursive: true });
         const dst = join(systemdDir, name);

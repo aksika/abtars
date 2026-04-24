@@ -20,13 +20,22 @@ case "${1:-}" in
   --fix)      FIX=true ;;
 esac
 
+# Read install mode (simple skips supervisor checks)
+INSTALL_MODE=$(head -n1 "$AB/install-mode" 2>/dev/null || echo "supervised")
+INSTALL_MODE=$(echo "$INSTALL_MODE" | tr -d '[:space:]')
+if [[ "$INSTALL_MODE" != "simple" && "$INSTALL_MODE" != "supervised" ]]; then
+  INSTALL_MODE="supervised"
+fi
+
 warn() { echo "[doctor] WARN: $1"; WARNS=$((WARNS + 1)); }
 fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 
 # Helper: read JSON field via python3
 json_field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],sys.argv[3]))" "$1" "$2" "${3:-0}" 2>/dev/null || echo "${3:-0}"; }
 
-# ── Watchdog health ──────────────────────────────────────────────────────────
+# ── Watchdog health (supervised mode only) ───────────────────────────────────
+
+if [[ "$INSTALL_MODE" == "supervised" ]]; then
 
 WD_LOCK="$AB/watchdog.lock"
 WD_PID=""
@@ -74,7 +83,8 @@ else
   fi
 fi
 
-# LaunchAgent / systemd check
+# LaunchAgent / systemd check (supervised mode only)
+if [[ "$INSTALL_MODE" == "supervised" ]]; then
 if [[ "$(uname)" == "Darwin" ]]; then
   if ! launchctl list 2>/dev/null | grep -q agentbridge.watchdog; then
     if $FIX_FULL; then
@@ -108,6 +118,8 @@ elif command -v systemctl &>/dev/null; then
     fi
   fi
 fi
+fi # end supervised-only watchdog block
+fi # end supervised-only supervisor check
 
 # 0. Migrate titok/ → secret/ (one-time)
 if [ -d "$AB/titok" ] && [ ! -d "$AB/secret" ]; then

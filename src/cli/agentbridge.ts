@@ -55,7 +55,7 @@ function printUsage(): void {
     `agentbridge — install/update CLI (#158)
 
 Usage:
-  agentbridge install [--upgrade] [--force]
+  agentbridge install [--upgrade] [--force] [--mode=simple|supervised]
   agentbridge update  [--source local|npm|github] [--from-local]
   agentbridge rollback [--to <version>]
   agentbridge reset --scope <config|config+data|full> [--yes] [--dry-run] [--no-backup]
@@ -79,6 +79,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           upgrade: flags.get('upgrade') === true,
           force: flags.get('force') === true,
           dryRun: flags.get('dry-run') === true,
+          mode: flags.get('mode') === 'simple' ? 'simple' : flags.get('mode') === 'supervised' ? 'supervised' : undefined,
         });
       case 'update':
         return await update({

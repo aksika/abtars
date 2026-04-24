@@ -20,6 +20,7 @@ export interface InstallOptions {
   readonly upgrade: boolean;
   readonly force: boolean;
   readonly dryRun: boolean;
+  readonly mode?: "simple" | "supervised";
 }
 
 // Files placed into ~/.agentbridge/bin/ at install time. Each is a thin
@@ -291,6 +292,12 @@ export async function install(opts: InstallOptions): Promise<number> {
     });
     process.stdout.write(`✓ manifest initialized at ${paths.manifest}\n`);
   }
+
+  // Write install mode
+  const { writeInstallMode } = await import("../install-mode.js");
+  const mode = opts.mode ?? "supervised";
+  writeInstallMode(home, mode);
+  process.stdout.write(`✓ install mode: ${mode}\n`);
 
   process.stdout.write(`\nInstall complete.\n`);
   if (!manifestAfter || manifestAfter.version === '') {
