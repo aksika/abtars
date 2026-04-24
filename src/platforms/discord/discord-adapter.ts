@@ -95,7 +95,11 @@ export class DiscordAdapter implements PlatformAdapter {
 
   async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<number | undefined> {
     await this.api.sendMessage(channelId, text);
-    return undefined; // Discord sendMessage doesn't return message ID in current API wrapper
+    return undefined;
+  }
+
+  async sendTyping(channelId: string): Promise<void> {
+    await this.api.sendTyping(channelId);
   }
 
   chunkResponse(text: string): string[] {

@@ -254,14 +254,14 @@ async function handleRestart(_text: string, ctx: CommandContext): Promise<boolea
 }
 
 async function handleFull(_text: string, ctx: CommandContext): Promise<boolean> {
-  if (ctx.platform !== "telegram") return false;
+  if (ctx.platform !== "telegram") { await ctx.reply("📺 Full mode is only available on Telegram."); return true; }
   ctx.fullModeChats.add(ctx.sessionKey);
   await ctx.reply("📺 Full mode — sending raw output, TTS disabled.");
   return true;
 }
 
 async function handleShort(_text: string, ctx: CommandContext): Promise<boolean> {
-  if (ctx.platform !== "telegram") return false;
+  if (ctx.platform !== "telegram") { await ctx.reply("✂️ Short mode is only available on Telegram."); return true; }
   ctx.fullModeChats.delete(ctx.sessionKey);
   await ctx.reply("✂️ Short mode — clean responses, TTS enabled.");
   return true;
@@ -418,6 +418,10 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
 
   // /models change — 3-step picker
   if (arg === "change") {
+    if (ctx.platform !== "telegram") {
+      await ctx.reply("🤖 Use /models quick <model> to switch on this platform.\nExample: /models quick claude-sonnet-4");
+      return true;
+    }
     const AGENT_LABELS: Array<{ key: string; label: string }> = [
       { key: "professor", label: "Professor (main)" },
       { key: "professor_fb1", label: "Professor fallback 1" },

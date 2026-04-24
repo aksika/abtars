@@ -114,6 +114,14 @@ export class DiscordApi {
     return sent.id;
   }
 
+  /** Send typing indicator to a channel. */
+  async sendTyping(channelId: string): Promise<void> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (channel?.isTextBased()) await (channel as TextChannel).sendTyping();
+    } catch { /* non-critical */ }
+  }
+
   /** Gracefully close the Gateway connection. */
   async disconnect(): Promise<void> {
     logInfo(TAG, "Disconnecting from Discord Gateway…");
