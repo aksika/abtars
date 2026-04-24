@@ -35,3 +35,5 @@ persona/tasks/
 .test-*
 backlog.db-wal
 backlog.db-shm
+# Test fixture dirs (created by vitest, cleaned in beforeEach)
+.test-sleep-trigger/

@@ -40,13 +40,6 @@ export type VoiceConfig = {
   ttsVoice: string;
 };
 
-export type ModelConfig = {
-  mainModel: string;
-  browseModel: string;
-  sleepModel: string;
-  codingModel: string;
-};
-
 /** Bridge configuration loaded from .env and validated at startup. */
 export type Config = {
   mainChatId: string;
@@ -54,7 +47,6 @@ export type Config = {
   discord: DiscordConfig;
   transport: TransportConfig;
   voice: VoiceConfig;
-  models: ModelConfig;
   logLevel: LogLevel;
   mcpDaemon: boolean;
 };
@@ -86,12 +78,6 @@ export const CONFIG_DEFAULTS = {
     sttModel: "whisper-large-v3",
     ttsEnabled: true,
     ttsVoice: "en-US-AndrewMultilingualNeural",
-  },
-  models: {
-    mainModel: "claude-sonnet-4.6",
-    browseModel: "claude-sonnet-4.6",
-    sleepModel: "claude-opus-4.6",
-    codingModel: "claude-opus-4.6",
   },
   logLevel: "low" as LogLevel,
   mcpDaemon: false,

@@ -111,9 +111,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
   const agentTransport = rawTransport as AgentTransport;
 
-  // --- AGENT_MODEL (legacy — models now come from transport.json) ---
-  const mainModel = "from-transport-json";
-
   // --- WORKING_DIR (optional, default cwd) ---
   let workingDir = getEnv().workingDir;
   // Expand ~ to home directory (Node doesn't do this automatically)
@@ -287,12 +284,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
       sttModel,
       ttsEnabled,
       ttsVoice,
-    },
-    models: {
-      mainModel,
-      browseModel: mainModel,
-      sleepModel: mainModel,
-      codingModel: mainModel,
     },
     logLevel,
     mcpDaemon: parseBoolEnv("MCPORTER_DAEMON", CONFIG_DEFAULTS.mcpDaemon),
