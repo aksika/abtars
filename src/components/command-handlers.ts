@@ -257,16 +257,8 @@ async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> 
 }
 
 async function handleRestart(_text: string, ctx: CommandContext): Promise<boolean> {
-  if (ctx.transport.restartSession) {
-    await ctx.reply("♻️ Restarting Kiro...");
-    ctx.sessions.getOrCreate(ctx.sessionKey).busy = false;
-    await ctx.transport.restartSession(ctx.config.workingDir, getEnv().agentMainModel);
-    ctx.sessions.getOrCreate(ctx.sessionKey).pendingStart = true;
-    await ctx.reply("✓ Kiro restarted.");
-  } else {
-    await ctx.reply("♻️ Restarting bridge...");
-    setTimeout(() => ctx.requestShutdown?.(), 500);
-  }
+  await ctx.reply("♻️ Restarting bridge...");
+  setTimeout(() => ctx.requestShutdown?.(0), 500);
   return true;
 }
 

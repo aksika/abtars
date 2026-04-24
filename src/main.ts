@@ -1,6 +1,6 @@
 /**
  * AgentBridge — entry point.
- * Parses CLI args, starts the bridge, handles fatal errors.
+ * Internal restart loop: exit code 0 = restart, non-zero = die.
  *
  * CRITICAL: `./boot/env.js` MUST be the first import. ES static imports are
  * hoisted above body statements, so loading dotenv in the body runs too late —
@@ -10,10 +10,10 @@
  */
 
 import "./boot/env.js";
-import { initEnv } from "./components/env-schema.js";
+import { initEnv, _resetEnv } from "./components/env-schema.js";
 import { startBridge } from "./bridge-app.js";
+import { logInfo } from "./components/logger.js";
 
-// Initialize env schema immediately after .env files are loaded
 initEnv();
 
 process.on("uncaughtException", (err) => {
@@ -26,7 +26,15 @@ process.on("unhandledRejection", (reason) => {
   process.exit(1);
 });
 
-startBridge().catch((err) => {
+(async () => {
+  while (true) {
+    const code = await startBridge();
+    if (code !== 0) process.exit(code);
+    logInfo("main", "♻️ Bridge restart requested — restarting...");
+    _resetEnv(); // re-read env on restart (config may have changed)
+    initEnv();
+  }
+})().catch((err) => {
   console.error("Fatal error:", err);
   process.exit(1);
 });

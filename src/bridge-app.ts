@@ -26,7 +26,16 @@ import { phaseShutdown } from "./boot/phase-shutdown.js";
  * (done from phaseShutdown, which passes this instance in).
  */
 export class Bridge {
+  private _exitCode = 1;
+  private _resolve: ((code: number) => void) | null = null;
+
   constructor(private readonly ctx: BootCtx) {}
+
+  /** Set the exit code and trigger shutdown. Called by /restart (0) or signals (1). */
+  requestShutdown(code: number): void {
+    this._exitCode = code;
+    void this.shutdown();
+  }
 
   async shutdown(): Promise<void> {
     logInfo("main", "🛑 Shutting down...");
@@ -58,7 +67,13 @@ export class Bridge {
     if (this.ctx.mcpDaemonStarted) {
       await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
     }
-    process.exit(0);
+    clearTimeout(forceTimer);
+    this._resolve?.(this._exitCode);
+  }
+
+  /** Returns a promise that resolves with the exit code when shutdown completes. */
+  waitForExit(): Promise<number> {
+    return new Promise(resolve => { this._resolve = resolve; });
   }
 }
 
@@ -86,7 +101,7 @@ export const BOOT_PHASES = [
   phaseShutdown,
 ] as const;
 
-export async function startBridge(): Promise<void> {
+export async function startBridge(): Promise<number> {
   const ctx = createBootCtx();
 
   // Phase 1: config — must run first so Bridge can be constructed
@@ -97,11 +112,11 @@ export async function startBridge(): Promise<void> {
   }
 
   const bridge = new Bridge(ctx);
-  // Lazy isSleepActive closure — reads ctx.sleepHandle after phase-sleep sets it
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;
 
-  // Run remaining phases 2-13. Only phase-shutdown needs the bridge (to wire signal handlers);
-  // all other phases populate ctx directly.
+  // Wire requestShutdown into pipelineDeps (used by /restart, /reset default)
+  ctx.requestShutdownWithCode = (code: number) => bridge.requestShutdown(code);
+
   for (const phase of BOOT_PHASES.slice(1)) {
     const t = Date.now();
     if (phase === phaseShutdown) {
@@ -111,4 +126,6 @@ export async function startBridge(): Promise<void> {
     }
     logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
   }
+
+  return bridge.waitForExit();
 }

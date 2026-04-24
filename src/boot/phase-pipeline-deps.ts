@@ -107,7 +107,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
         return `❌ ${err instanceof Error ? err.message : String(err)}`;
       }
     },
-    requestShutdown: () => process.exit(0),
+    requestShutdown: (code?: number) => ctx.requestShutdownWithCode(code ?? 0),
     sleepProgress: () => ctx.sleepHandle?.progress ?? null,
     loadedCapabilities: [],
     selfHealerTask: null,

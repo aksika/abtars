@@ -93,7 +93,7 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   sessions: SessionRegistry;
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
-  requestShutdown?: () => void;
+  requestShutdown?: (code?: number) => void;
   sleepProgress?: () => { percent: number; step: string } | null;
   loadedCapabilities?: string[];
   selfHealerTask?: { enabled: boolean } | null;

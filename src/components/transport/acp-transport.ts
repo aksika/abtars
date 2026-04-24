@@ -277,6 +277,12 @@ export class AcpTransport implements IKiroTransport {
     logInfo(this.tag, `Model switched to: ${model} (session reset)`);
   }
 
+  async restartSession(): Promise<void> {
+    this.destroy();
+    await this.initialize();
+    logInfo(this.tag, "Session restarted (CLI respawned)");
+  }
+
   getModel(): string { return this.modelId ?? "unknown"; }
 
   private handleSessionUpdate(params: SessionNotification): void {

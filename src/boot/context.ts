@@ -95,6 +95,7 @@ export interface BootCtx {
 
   // ── Callbacks (closures set by phases for cross-phase use) ────────────
   isSleepActive: () => boolean;
+  requestShutdownWithCode: (code: number) => void;
   /** Set by phase-heartbeat; used by phase-sleep to hook the sleep handle. */
   sendSystemMessage?: (prompt: string) => Promise<void>;
 }
@@ -153,7 +154,8 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     mcpDaemonStarted: false,
 
     // Callbacks
-    isSleepActive: () => false,  // overwritten in phase-transport
+    isSleepActive: () => false,
+    requestShutdownWithCode: () => process.exit(1),
   };
   return { ...defaults, ...overrides };
 }
