@@ -1,3 +1,4 @@
+import { getEnv } from "../env-schema.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import {
@@ -202,7 +203,7 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
-  private readonly _promptTimeoutMs = parseInt(process.env["PROMPT_TIMEOUT_SEC"] ?? "180", 10) * 1000; // default 3 min
+  private readonly _promptTimeoutMs = getEnv().promptTimeoutSec * 1000; // default 3 min
 
   private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -361,9 +362,9 @@ export class AcpTransport implements IKiroTransport {
   private _watchdogL1Done = false;
   private _watchdogLastActionAt = 0;
   private readonly _watchdogCooldown = 60 * 60 * 1000;
-  private readonly _toolTimeout = (parseInt(process.env["WATCHDOG_TOOL_TIMEOUT_SEC"] ?? "180", 10)) * 1000;
-  private readonly _silentTimeout = (parseInt(process.env["WATCHDOG_SILENT_SEC"] ?? "300", 10)) * 1000;
-  private readonly _endlessTimeout = (parseInt(process.env["WATCHDOG_ENDLESS_SEC"] ?? "600", 10)) * 1000;
+  private readonly _toolTimeout = getEnv().watchdogToolTimeoutSec * 1000;
+  private readonly _silentTimeout = getEnv().watchdogSilentSec * 1000;
+  private readonly _endlessTimeout = getEnv().watchdogEndlessSec * 1000;
 
   async healthCheck(): Promise<void> {
     if (this.promptStartedAt <= this.lastSuccessAt) { this._watchdogL1Done = false; return; }

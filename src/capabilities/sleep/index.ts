@@ -1,3 +1,4 @@
+import { getEnv } from "../../components/env-schema.js";
 /**
  * Sleep capability — spawn nightly sleep cycle via tick system.
  * One path: BED_TIME + quiet ticks → Dreamy → quiet ticks → hardware sleep.
@@ -108,7 +109,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     logInfo("sleep", `😴 Sleep started in-process (attempt ${attempts}, model=dreamy)`);
 
     const level = (() => {
-      const raw = process.env["SLEEP_QUALITY"];
+      const raw = getEnv().sleepQuality;
       if (!raw) return DEFAULT_LEVEL;
       try { return parseLevel(raw); }
       catch (err) { logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`); return DEFAULT_LEVEL; }
@@ -134,7 +135,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
         // Force-sleep runs are explicit test/verify triggers — skip hw-sleep even if env enabled.
         const hwEnabled = !forced && readEnv("HARDWARE_SLEEP_AFTER_DREAMY", "hardware sleep after Dreamy disabled") === "true";
-        const quietTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
+        const quietTicks = getEnv().bedQuietTicks;
         const hbInterval = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10);
         const hwSleepMin = Math.round(quietTicks * hbInterval / 60);
 
@@ -197,7 +198,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
 
     // Quiet tick — increment
-    const requiredTicks = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10);
+    const requiredTicks = getEnv().bedQuietTicks;
     postSleepQuietTicks++;
     if (postSleepQuietTicks < requiredTicks) return;
 

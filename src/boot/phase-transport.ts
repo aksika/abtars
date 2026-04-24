@@ -1,3 +1,4 @@
+import { getEnv } from "../components/env-schema.js";
 /**
  * phase-transport — boot phase 3: select, initialize, and wrap the agent transport.
  *
@@ -61,12 +62,12 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
     );
   } else if (resolved.provider.transport === "api") {
     const { DirectApiTransport } = await import("../components/transport/direct-api-transport.js");
-    const apiKey = resolved.provider.apiKeyEnv ? process.env[resolved.provider.apiKeyEnv] : process.env["API_KEY"];
+    const apiKey = getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY");
     const fallbacks = resolved.fallbacks.map(fb => {
       const fbResolved = tc ? resolveAgent("_fallback", { ...tc, agents: { ...tc.agents, _fallback: { model: fb.model, provider: fb.provider } } }) : null;
       return {
         endpoint: fbResolved?.provider.endpoint ?? resolved.provider.endpoint!,
-        apiKey: fbResolved?.provider.apiKeyEnv ? process.env[fbResolved.provider.apiKeyEnv] : apiKey,
+        apiKey: fbResolved?.provider.apiKeyEnv ? getEnv().getApiKey(fbResolved.provider.apiKeyEnv) : apiKey,
         model: fb.model,
         maxContext: fbResolved?.contextWindow,
       };
@@ -112,7 +113,7 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
         if (fbAgent?.provider.transport === "api") {
           const { DirectApiTransport } = await import("../components/transport/direct-api-transport.js");
           return new DirectApiTransport({
-            endpoint: fbAgent.provider.endpoint!, apiKey: fbAgent.provider.apiKeyEnv ? process.env[fbAgent.provider.apiKeyEnv] : undefined,
+            endpoint: fbAgent.provider.endpoint!, apiKey: fbAgent.provider.apiKeyEnv ? getEnv().getApiKey(fbAgent.provider.apiKeyEnv) : undefined,
             model: fb.model, maxContext: fbAgent.contextWindow, maxOutput: fbAgent.maxOutput, maxTurns: tc?.maxTurns ?? 50,
           });
         }

@@ -1,3 +1,4 @@
+import { getEnv } from "../components/env-schema.js";
 /**
  * Capability system — typed registration API for bridge subsystems.
  *
@@ -87,7 +88,7 @@ export async function discoverCapabilities(
   const { join } = await import("node:path");
 
   const disabled = new Set(
-    (process.env["DISABLED_CAPABILITIES"] ?? "").split(",").map(s => s.trim()).filter(Boolean),
+    getEnv().disabledCapabilities.split(",").map(s => s.trim()).filter(Boolean),
   );
 
   const loaded: string[] = [];

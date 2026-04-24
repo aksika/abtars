@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 /**
  * Unified command handlers for all platforms (Telegram, Discord).
  * Platform-specific commands check ctx.platform internally.
@@ -241,7 +242,7 @@ async function handleRestart(_text: string, ctx: CommandContext): Promise<boolea
   if (ctx.transport.restartSession) {
     await ctx.reply("♻️ Restarting Kiro...");
     ctx.sessions.getOrCreate(ctx.sessionKey).busy = false;
-    await ctx.transport.restartSession(ctx.config.workingDir, process.env["AGENT_MAIN_MODEL"]);
+    await ctx.transport.restartSession(ctx.config.workingDir, getEnv().agentMainModel);
     ctx.sessions.getOrCreate(ctx.sessionKey).pendingStart = true;
     await ctx.reply("✓ Kiro restarted.");
   } else {
@@ -564,7 +565,7 @@ async function handleWakeup(_text: string, ctx: CommandContext): Promise<boolean
     child.unref();
     _wakeInhibitPid = child.pid;
     writeSleepStatus("awake");
-    const bedTime = process.env["BED_TIME"] ?? "0:30";
+    const bedTime = getEnv().bedTime.raw;
     await ctx.reply(`☀️ Awake! Will sleep again at ${bedTime} or when requested.`);
     logInfo("wakeup", `Emergency wake — inhibit pid=${child.pid}`);
   } else {
@@ -598,7 +599,7 @@ async function handleSleep(_text: string, ctx: CommandContext): Promise<boolean>
   const sleepStatus = readBridgeLockField<string>("sleepStatus") ?? "awake";
   const progress = ctx.sleepProgress?.();
   const force = readBridgeLockField<string>("forceSleep");
-  const bedTime = process.env["BED_TIME"] ?? "0:30";
+  const bedTime = getEnv().bedTime.raw;
   const auditDir = ctx.memoryConfig?.memoryDir ? join(ctx.memoryConfig.memoryDir, "sleep") : "";
   const lock = auditDir ? readLatestSleepLock(auditDir) : null;
 

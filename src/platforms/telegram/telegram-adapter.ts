@@ -1,3 +1,5 @@
+import { getEnv } from "../../components/env-schema.js";
+import { agentBridgeHome } from "../../paths.js";
 /**
  * Telegram platform adapter — wraps TelegramApi, TelegramPoller, SecurityGate.
  * Handles Telegram-specific pre-processing (voice, reactions, groups, mentions)
@@ -91,7 +93,7 @@ export class TelegramAdapter implements PlatformAdapter {
       { command: "sleep", description: "Sleep status / resume / now" },
     ]).catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
 
-    const home = process.env["AGENT_BRIDGE_HOME"] ?? `${process.env["HOME"]}/.agentbridge`;
+    const home = agentBridgeHome();
     const offsetStore = createFileOffsetStore(`${home}/state/telegram-offset`);
     this.poller = new TelegramPoller(this.api, this.config.pollTimeoutS, (u) => this.handleUpdate(u), offsetStore);
     await this.poller.start();
@@ -219,7 +221,7 @@ export class TelegramAdapter implements PlatformAdapter {
         if (provider?.transport === "api") {
           try {
             const endpoint = provider.endpoint ?? "";
-            const apiKey = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : process.env["API_KEY"];
+            const apiKey = getEnv().getApiKey(provider.apiKeyEnv ?? "API_KEY");
             const headers: Record<string, string> = {};
             if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
             const res = await fetch(`${endpoint}/models`, { headers, signal: AbortSignal.timeout(5000) });

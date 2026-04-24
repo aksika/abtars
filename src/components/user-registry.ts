@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 /**
  * User registry — loads users from config/users.json.
  * Falls back to MAIN_CHAT_ID.
@@ -76,7 +77,7 @@ function loadFromDisk(): UserRegistry {
 
   // Fallback: MAIN_CHAT_ID → single master
   if (registry.users.length === 0) {
-    const mainChatId = process.env["MAIN_CHAT_ID"]?.trim();
+    const mainChatId = getEnv().mainChatId;
     if (mainChatId) {
       const entry: UserEntry = {
         userId: "master",

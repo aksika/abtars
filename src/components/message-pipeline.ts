@@ -5,7 +5,6 @@
  */
 
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
-import { readEnvWithDefault } from "./env.js";
 import { localTime } from "../utils/local-time.js";
 import { interceptLargeMessage } from "./message-interceptor.js";
 import { runCompaction, compactionSummaries } from "./compaction.js";
@@ -28,17 +27,14 @@ import type { RunningJob } from "./cron/cron-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 
+import { getEnv } from "./env-schema.js";
+
 const TAG = "pipeline";
 
-// Context window thresholds
-const CTX_WARN_PCT = parseInt(process.env["CTX_WARN_PCT"] ?? "70", 10);
-const CTX_COMPACT_PCT = parseInt(process.env["CTX_COMPACT_PCT"] ?? "80", 10);
-const CTX_AGGRESSIVE_PCT = parseInt(process.env["CTX_AGGRESSIVE_PCT"] ?? "90", 10);
+// Context window thresholds (read once from schema — no more module-level process.env)
 const COMPACT_MAX_FAILURES = 3;
-const ACTIVE_MEMORY = (process.env["ACTIVE_MEMORY"] ?? "false").toLowerCase() === "true";
 const ACTIVE_MEMORY_LIMIT = 5;
 const PRIMING_MAX = 8;
-const PRIMING_MODEL_TOPICS = process.env["PRIMING_MODEL_TOPICS"] !== "false";
 
 const STOPWORDS = new Set(["the","a","an","is","are","was","were","be","been",
   "have","has","had","do","does","did","will","would","could","should","can",
@@ -175,10 +171,10 @@ export async function handleInboundMessage(
     }
 
     // --- Active recall: inject relevant memories on non-session-start turns ---
-    if (ACTIVE_MEMORY && memory && !isSessionStart) {
+    if (getEnv().activeMemory && memory && !isSessionStart) {
       const userEntry = registry.byUserId.get(userId);
       const ctxPct = transport.contextPercent;
-      if (userEntry?.role !== "guest" && (ctxPct < 0 || ctxPct < CTX_COMPACT_PCT)) {
+      if (userEntry?.role !== "guest" && (ctxPct < 0 || ctxPct < getEnv().ctxCompactPct)) {
         try {
           const t0 = performance.now();
           const priming = sessions.get(sessionKey)?.primingTerms ?? [];
@@ -245,8 +241,8 @@ export async function handleInboundMessage(
     }
 
     // --- Typing TTL + still-working ---
-    const TYPING_TTL_MS = parseInt(process.env["TYPING_TTL_MS"] ?? "300000", 10);
-    const SILENT_THRESHOLD_MS = parseInt(process.env["TYPING_SILENT_THRESHOLD_MS"] ?? "90000", 10);
+    const TYPING_TTL_MS = getEnv().typingTtlMs;
+    const SILENT_THRESHOLD_MS = getEnv().typingSilentThresholdMs;
     let stillWorkingSent = false;
     let lastVisibleOutputAt = Date.now();
 
@@ -276,8 +272,7 @@ export async function handleInboundMessage(
 
     if (adapter.editMessage) {
       // Edit-in-place streaming (ACP + platforms that support editMessage)
-      const rawVal = parseInt(readEnvWithDefault("STREAM_FLUSH_SEC", "3", "streaming cursor flush interval") , 10);
-      const FLUSH_INTERVAL = rawVal === 0 ? 0 : Math.max(2, Math.min(180, rawVal)) * 1000;
+      const FLUSH_INTERVAL = getEnv().streamFlushSec === 0 ? 0 : Math.max(2, Math.min(180, getEnv().streamFlushSec)) * 1000;
       let lastFlushed = "";
 
       transport.onIntermediateResponse = (chunk: string) => {
@@ -414,8 +409,8 @@ export async function handleInboundMessage(
     }
 
     // --- Update priming buffer ---
-    if (ACTIVE_MEMORY) {
-      const modelTopics = PRIMING_MODEL_TOPICS && topics ? topics : [];
+    if (getEnv().activeMemory) {
+      const modelTopics = getEnv().primingModelTopics && topics ? topics : [];
       const regexKw = extractKeywords(text);
       const existing = sessions.get(sessionKey)?.primingTerms ?? [];
       sessions.getOrCreate(sessionKey).primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
@@ -459,8 +454,8 @@ export async function handleInboundMessage(
       if (pct >= 0) {
         const failures = sessions.getOrCreate(sessionKey).compactFailures;
 
-        if (pct >= CTX_COMPACT_PCT && failures < COMPACT_MAX_FAILURES) {
-          const aggressive = pct >= CTX_AGGRESSIVE_PCT;
+        if (pct >= getEnv().ctxCompactPct && failures < COMPACT_MAX_FAILURES) {
+          const aggressive = pct >= getEnv().ctxAggressivePct;
           logInfo(TAG, `📦 Context at ${pct}% (${aggressive ? "aggressive" : "compact"} threshold) — compacting`);
           writeRestartReason(`compaction: ctx at ${pct}%`);
           await adapter.sendMessage(channelId, `📦 Context at ${pct}% — compacting...`, { threadId: msg.threadId });
@@ -487,11 +482,11 @@ export async function handleInboundMessage(
               await adapter.sendMessage(channelId, "⚠️ Compaction failing repeatedly — consider /reset", { threadId: msg.threadId });
             }
           }
-        } else if (pct >= CTX_WARN_PCT && !sessions.getOrCreate(sessionKey).ctxWarned) {
+        } else if (pct >= getEnv().ctxWarnPct && !sessions.getOrCreate(sessionKey).ctxWarned) {
           sessions.getOrCreate(sessionKey).ctxWarned = true;
           logInfo(TAG, `⚠️ Context at ${pct}% — warning threshold`);
-          await adapter.sendMessage(channelId, `⚠️ Context window at ${pct}% — will auto-compact at ${CTX_COMPACT_PCT}%`, { threadId: msg.threadId });
-        } else if (pct >= CTX_COMPACT_PCT && failures >= COMPACT_MAX_FAILURES) {
+          await adapter.sendMessage(channelId, `⚠️ Context window at ${pct}% — will auto-compact at ${getEnv().ctxCompactPct}%`, { threadId: msg.threadId });
+        } else if (pct >= getEnv().ctxCompactPct && failures >= COMPACT_MAX_FAILURES) {
           logDebug(TAG, `Context at ${pct}% but compaction circuit breaker active (${failures} failures)`);
         }
       }

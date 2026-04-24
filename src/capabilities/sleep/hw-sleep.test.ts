@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { _resetEnv } from "../../components/env-schema.js";
 import { EventEmitter } from "node:events";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -87,6 +88,7 @@ describe("checkHwSleep", () => {
   afterEach(() => {
     rmSync(HOME, { recursive: true, force: true });
     delete process.env["HARDWARE_SLEEP_AFTER_DREAMY"];
+    _resetEnv();
     vi.useRealTimers();
   });
 

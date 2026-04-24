@@ -1,3 +1,4 @@
+import { getEnv } from "../components/env-schema.js";
 /**
  * phase-dashboard — boot phase 11: initialize web dashboard (if --web).
  *
@@ -80,7 +81,7 @@ export async function phaseDashboard(ctx: BootCtx): Promise<void> {
   const authGate = new AuthGate(dashConfig.webAuthToken);
   const memorySearchController = memory ? new MemorySearchController({ memory }) : null;
 
-  const customModule = process.env["DASHBOARD_MODULE"];
+  const customModule = getEnv().dashboardModule;
   let dashboardServer: IDashboardSlot;
   if (customModule) {
     const mod = await import(customModule);

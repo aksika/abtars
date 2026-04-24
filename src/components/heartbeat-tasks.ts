@@ -5,6 +5,7 @@
 
 import { execSync } from "node:child_process";
 import { logInfo, logWarn, logError } from "./logger.js";
+import { getEnv } from "./env-schema.js";
 import { runCompaction } from "./compaction.js";
 import { setIdleCompactReset } from "./message-pipeline.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -23,8 +24,8 @@ export interface IdleCompactDeps {
 
 /** Floating compaction — triggers when context is high and user is idle. */
 export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
-  const pctThreshold = parseInt(process.env["CTX_IDLE_COMPACT_PCT"] ?? "65", 10);
-  const idleMinutes = parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10);
+  const pctThreshold = getEnv().ctxIdleCompactPct;
+  const idleMinutes = getEnv().ctxIdleCompactMin;
   let compactedThisIdle = false;
   setIdleCompactReset(() => { compactedThisIdle = false; });
 

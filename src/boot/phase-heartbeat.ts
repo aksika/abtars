@@ -1,3 +1,4 @@
+import { getEnv } from "../components/env-schema.js";
 /**
  * phase-heartbeat — boot phase 9: HeartbeatSystem + all periodic tasks + watchdog.
  *
@@ -125,7 +126,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
 
   // Floating compaction (idle-triggered) — createIdleCompactTask internally calls
   // setIdleCompactReset → sets message-pipeline.resetIdleCompactFlag singleton.
-  if (parseInt(process.env["CTX_IDLE_COMPACT_MIN"] ?? "10", 10) > 0) {
+  if (getEnv().ctxIdleCompactMin > 0) {
     heartbeat.registerTask(createIdleCompactTask({
       transport, memory, memoryDir: memoryConfig.memoryDir,
       allowedUserIds: config.telegram.allowedUserIds,
@@ -215,7 +216,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
 
   // Self-healing agent (optional)
   let selfHealerTask: ReturnType<typeof createSelfHealerTask> | null = null;
-  if (process.env["SELFHEAL_ENABLED"] !== "false") {
+  if (getEnv().selfhealEnabled) {
     selfHealerTask = createSelfHealerTask(() => ctx.telegramAdapter, config.telegram.allowedUserIds);
     heartbeat.registerTask(selfHealerTask);
   }
@@ -252,7 +253,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
       }
       const prof = resolveAgent("professor", tc);
       const endpoint = prof?.provider.endpoint ?? "http://localhost:11434/v1";
-      const apiKey = prof?.provider.apiKeyEnv ? process.env[prof.provider.apiKeyEnv] : process.env["API_KEY"];
+      const apiKey = getEnv().getApiKey(prof?.provider.apiKeyEnv ?? "API_KEY");
       const warnings: string[] = [];
       for (const { label, model } of models) {
         try {

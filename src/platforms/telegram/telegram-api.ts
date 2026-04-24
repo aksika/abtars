@@ -1,3 +1,4 @@
+import { getEnv } from "../../components/env-schema.js";
 import type {
   TelegramUpdate,
   TelegramInlineKeyboardMarkup,
@@ -182,7 +183,7 @@ export class TelegramApi {
     return (await this.call("getUpdates", body, signal, (timeout + 10) * 1000)) as TelegramUpdate[];
   }
 
-  private static readonly TIMEOUT_MS = parseInt(process.env["TELEGRAM_TIMEOUT_MS"] ?? "15000", 10);
+  private static readonly TIMEOUT_MS = getEnv().telegramTimeoutMs;
   private static readonly MAX_ATTEMPTS = 3;
   private static readonly BACKOFF = [1000, 3000, 9000];
 

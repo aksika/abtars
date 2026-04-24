@@ -1,3 +1,4 @@
+import { getEnv } from "../../components/env-schema.js";
 import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
 import { execFileSync } from "node:child_process";
@@ -66,7 +67,7 @@ export class BrowserManager {
 
   constructor(config?: BrowserConfig) {
     this._config = config ?? parseBrowserConfig();
-    this._containerIdleStopMs = parseInt(process.env["BROWSER_IDLE_STOP_MIN"] ?? "10", 10) * 60_000;
+    this._containerIdleStopMs = getEnv().browserIdleStopMin * 60_000;
     this._startIdleCheck();
   }
 
@@ -111,12 +112,12 @@ export class BrowserManager {
   }
 
   private async _launchPatchright(): Promise<Browser> {
-    const headed = process.env["BROWSER_HEADED"] === "1";
+    const headed = getEnv().browserHeaded;
     const args = headed ? [] : ["--headless=new"];
-    if (process.env["BROWSER_NO_SANDBOX"] === "1") args.push("--no-sandbox");
+    if (getEnv().browserNoSandbox) args.push("--no-sandbox");
     return chromium.launch({
       headless: !headed,
-      channel: process.env["BROWSER_CHANNEL"] || undefined,
+      channel: getEnv().browserChannel,
       args,
     });
   }

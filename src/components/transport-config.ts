@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 /**
  * transport-config.ts — Load and validate transport.json + models.json.
  * Falls back to .env defaults if JSON is broken.
@@ -71,7 +72,7 @@ function configDir(): string {
 }
 
 export function loadModels(): ModelCatalog {
-  const p = join(configDir(), process.env["MODELS_CONFIG"]?.replace("config/", "") ?? "models.json");
+  const p = join(configDir(), getEnv().modelsConfig);
   try {
     return JSON.parse(readFileSync(p, "utf-8")) as ModelCatalog;
   } catch (err) {
@@ -83,7 +84,7 @@ export function loadModels(): ModelCatalog {
 export function loadTransport(): TransportConfig | null {
   if (cachedTransport) return cachedTransport;
   const dir = configDir();
-  const p = join(dir, process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
+  const p = join(dir, getEnv().transportConfig);
   try {
     cachedTransport = JSON.parse(readFileSync(p, "utf-8")) as TransportConfig;
     logInfo(TAG, `Loaded transport config (${Object.keys(cachedTransport.agents).length} agents, ${Object.keys(cachedTransport.providers).length} providers)`);
@@ -154,7 +155,7 @@ export type EnvFallback = {
 
 export function getEnvFallback(): EnvFallback {
   const providerName = readEnvWithDefault("DEFAULT_PROVIDER", "openrouter", "default LLM provider");
-  const transport = (process.env["DEFAULT_TRANSPORT"] ?? "api") as "api" | "acp" | "tmux";
+  const transport = getEnv().defaultTransport as "api" | "acp" | "tmux";
   const model = readEnvWithDefault("DEFAULT_MODEL", "minimax-m2.5:cloud", "default LLM model");
 
   const provider: ProviderConfig = { transport };
@@ -191,7 +192,7 @@ export function validateAtStartup(): void {
 // ── Write ───────────────────────────────────────────────────────────────────
 
 export function writeTransportConfig(tc: TransportConfig, reason?: string): void {
-  const p = join(configDir(), process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
+  const p = join(configDir(), getEnv().transportConfig);
   writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
   cachedTransport = tc;
   resetAllBuckets();
@@ -202,7 +203,7 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): void
 export function resetToDefaults(): boolean {
   const dir = configDir();
   const defaultPath = join(dir, "transport.default.json");
-  const activePath = join(dir, process.env["TRANSPORT_CONFIG"]?.replace("config/", "") ?? "transport.json");
+  const activePath = join(dir, getEnv().transportConfig);
   try {
     // Backup current before overwriting
     try { writeFileSync(activePath.replace(".json", ".old.json"), readFileSync(activePath, "utf-8"), "utf-8"); } catch { /* no current to backup */ }

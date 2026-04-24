@@ -1,3 +1,4 @@
+import { getEnv } from "../../components/env-schema.js";
 /**
  * Validates URLs against a configurable allowlist of domain patterns.
  * Prevents the agent from navigating to arbitrary domains.
@@ -48,7 +49,7 @@ export class DomainAllowlist {
 
   /** Create a DomainAllowlist from the BROWSER_ALLOWED_DOMAINS env var. */
   static fromEnv(): DomainAllowlist {
-    const raw = process.env["BROWSER_ALLOWED_DOMAINS"] ?? "";
+    const raw = getEnv().browserAllowedDomains;
     const patterns = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
     return new DomainAllowlist(patterns);
   }

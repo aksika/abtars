@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { DomainAllowlist } from "./domain-allowlist.js";
+import { _resetEnv } from "../../components/env-schema.js";
 
 // ── Constructor & getters ───────────────────────────────────────────────────
 
@@ -95,6 +96,7 @@ describe("DomainAllowlist", () => {
     const originalEnv = process.env["BROWSER_ALLOWED_DOMAINS"];
 
     afterEach(() => {
+      _resetEnv();
       if (originalEnv === undefined) {
         delete process.env["BROWSER_ALLOWED_DOMAINS"];
       } else {

@@ -5,6 +5,7 @@ import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/inde
 import { loadUsers } from "./user-registry.js";
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
 import { readEnv } from "./env.js";
+import { getEnv } from "./env-schema.js";
 import { logWarn } from "./logger.js";
 import type { LogLevel } from "./logger.js";
 export { agentBridgeHome } from "../paths.js";
@@ -72,7 +73,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- TELEGRAM_BOT_TOKEN (required) ---
-  const token = process.env["TELEGRAM_BOT_TOKEN"] ?? "";
+  const token = getEnv().telegramBotToken ?? "";
   if (!BOT_TOKEN_REGEX.test(token)) {
     throw new Error(
       "TELEGRAM_BOT_TOKEN is missing or invalid — expected format: <numeric_id>:<alphanumeric_secret>",
@@ -84,7 +85,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const telegramIds = registry.users
     .filter(u => u.platforms.telegram)
     .map(u => u.platforms.telegram!);
-  const mainChatId = process.env["MAIN_CHAT_ID"]?.trim();
+  const mainChatId = getEnv().mainChatId;
   if (mainChatId) telegramIds.push(parseInt(mainChatId, 10));
   const allowedUserIds = new Set(telegramIds.filter(id => id > 0));
   if (allowedUserIds.size === 0) {
@@ -94,9 +95,9 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- AGENT_CLI_PATH ---
-  const agentCli = process.env["AGENT_CLI"] || CONFIG_DEFAULTS.transport.agentCli;
+  const agentCli = getEnv().agentCli;
   const defaultCliPath = agentCli === "gemini" ? "gemini" : agentCli === "kiro" ? "kiro-cli" : agentCli;
-  const agentCliPath = process.env["AGENT_CLI_PATH"] || defaultCliPath;
+  const agentCliPath = getEnv().agentCliPath || defaultCliPath;
   try {
     await validateCliPath(agentCliPath);
   } catch {
@@ -104,7 +105,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- AGENT_TRANSPORT ---
-  const rawTransport = (process.env["AGENT_TRANSPORT"] || CONFIG_DEFAULTS.transport.agentTransport).toLowerCase();
+  const rawTransport = getEnv().agentTransport;
   if (rawTransport !== "tmux" && rawTransport !== "acp" && rawTransport !== "api") {
     throw new Error(`AGENT_TRANSPORT must be "tmux", "acp", or "api", got "${rawTransport}"`);
   }
@@ -114,7 +115,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const mainModel = "from-transport-json";
 
   // --- WORKING_DIR (optional, default cwd) ---
-  let workingDir = process.env["WORKING_DIR"] || CONFIG_DEFAULTS.transport.workingDir;
+  let workingDir = getEnv().workingDir;
   // Expand ~ to home directory (Node doesn't do this automatically)
   if (workingDir.startsWith("~")) {
     workingDir = resolve(homedir(), workingDir.slice(1).replace(/^[/\\]/, ""));
@@ -156,7 +157,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
 
 
   // --- TMUX_SESSION (optional, default "kiro-bridge") ---
-  const tmuxSession = process.env["TMUX_SESSION"] || CONFIG_DEFAULTS.transport.tmuxSession;
+  const tmuxSession = getEnv().tmuxSession;
 
   // --- TMUX_CAPTURE_DELAY_SEC (optional, default 3) ---
   const tmuxCaptureDelaySec = parseNumberEnv(
@@ -171,7 +172,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   );
 
   // --- LOG_LEVEL (optional, default "low") ---
-  const rawLogLevel = (process.env["LOG_LEVEL"] || CONFIG_DEFAULTS.logLevel).toLowerCase();
+  const rawLogLevel = getEnv().logLevel;
   if (rawLogLevel !== "off" && rawLogLevel !== "low" && rawLogLevel !== "debug") {
     throw new Error(`LOG_LEVEL must be "off", "low", or "debug", got "${rawLogLevel}"`);
   }
@@ -180,14 +181,14 @@ export async function loadAndValidateConfig(): Promise<Config> {
   // --- GROQ_API_KEY (optional, enables STT) ---
   const groqApiKey = readEnv("GROQ_API_KEY", "STT/voice notes disabled") ?? "";
   const sttEnabled = parseBoolEnv("STT_ENABLED", groqApiKey.length > 0);
-  const sttModel = process.env["STT_MODEL"] || CONFIG_DEFAULTS.voice.sttModel;
+  const sttModel = getEnv().sttModel;
 
   // --- TTS (optional, default enabled) ---
   const ttsEnabled = parseBoolEnv("TTS_ENABLED", CONFIG_DEFAULTS.voice.ttsEnabled);
-  const ttsVoice = process.env["TTS_VOICE"] || CONFIG_DEFAULTS.voice.ttsVoice;
+  const ttsVoice = getEnv().ttsVoice;
 
   // --- DISCORD_BOT_TOKEN (optional — Discord disabled if absent) ---
-  const discordBotToken = process.env["DISCORD_BOT_TOKEN"]?.trim() || undefined;
+  const discordBotToken = getEnv().discordBotToken;
   const discordEnabled = !!discordBotToken;
 
   let discordAppId: string | undefined;
@@ -195,7 +196,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
 
   if (discordEnabled) {
     // --- DISCORD_APP_ID (required when Discord enabled) ---
-    const rawAppId = process.env["DISCORD_APP_ID"]?.trim() || undefined;
+    const rawAppId = getEnv().discordAppId;
     if (!rawAppId || !isValidSnowflake(rawAppId)) {
       throw new Error(
         "DISCORD_APP_ID is required and must be a valid Discord snowflake ID (17–20 digits) when DISCORD_BOT_TOKEN is set",
@@ -213,7 +214,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- DISCORD_A2A_CHANNEL_ID (optional) ---
-  const rawA2aChannelId = process.env["DISCORD_A2A_CHANNEL_ID"]?.trim() || undefined;
+  const rawA2aChannelId = getEnv().discordA2aChannelId;
   let discordA2aChannelId: string | undefined;
   if (rawA2aChannelId) {
     if (!isValidSnowflake(rawA2aChannelId)) {
@@ -225,7 +226,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- DISCORD_A2A_PEER_BOT_ID (required when A2A channel is set) ---
-  const rawPeerBotId = process.env["DISCORD_A2A_PEER_BOT_ID"]?.trim() || undefined;
+  const rawPeerBotId = getEnv().discordA2aPeerBotId;
   let discordA2aPeerBotId: string | undefined;
   if (rawPeerBotId) {
     if (!isValidSnowflake(rawPeerBotId)) {

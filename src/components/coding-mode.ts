@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 import type { AgentSession } from "./subagent-runtime.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
 import { logInfo } from "./logger.js";
@@ -31,7 +32,7 @@ export class CodingMode {
     this.sessions.add(sessionKey);
     await this.agentSession.sendPrompt(sessionKey, [
       "[SYSTEM] You are the coding agent for AgentBridge.",
-      `Project root: ${process.env["WORKING_DIR"] || process.cwd()}`,
+      `Project root: ${getEnv().workingDir || process.cwd()}`,
       "Read docs/specs/system.asbuilt.md and docs/specs/memory.asbuilt.md before making changes.",
       "Always create a new git branch before coding. Switch back to main when done.",
     ].join("\n"));

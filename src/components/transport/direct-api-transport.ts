@@ -1,3 +1,4 @@
+import { getEnv } from "../env-schema.js";
 /**
  * Direct API Transport — talks to any OpenAI-compatible endpoint.
  * Implements IKiroTransport with its own agent loop (send → stream → tools → loop).
@@ -12,7 +13,7 @@ import { shouldSkip, recordError, recordSuccess, classifyError, getBucketLevel }
 import type { IKiroTransport } from "./kiro-transport.js";
 
 const TAG = "direct-api";
-const MODEL_API_TIMEOUT_MS = parseInt(process.env["MODEL_API_TIMEOUT_MS"] ?? "120000", 10);
+
 
 export interface DirectApiConfig {
   endpoint: string;       // e.g. http://localhost:20128/v1
@@ -256,7 +257,7 @@ export class DirectApiTransport implements IKiroTransport {
   ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
     // Compose pipeline signal (user /stop) with per-request timeout
     const timeoutCtrl = new AbortController();
-    const timer = setTimeout(() => timeoutCtrl.abort(new Error("model API timeout")), MODEL_API_TIMEOUT_MS);
+    const timer = setTimeout(() => timeoutCtrl.abort(new Error("model API timeout")), getEnv().modelApiTimeoutMs);
     const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
 
     try {
@@ -398,7 +399,7 @@ export class DirectApiTransport implements IKiroTransport {
   get promptStartedAt(): number | null { return this._promptStartedAt; }
   get lastActivityAt(): number | null { return this._lastActivityAt; }
 
-  private readonly _stuckTimeout = (parseInt(process.env["WATCHDOG_SILENT_SEC"] ?? "300", 10)) * 1000;
+  private readonly _stuckTimeout = getEnv().watchdogSilentSec * 1000;
 
   async healthCheck(): Promise<void> {
     if (!this._promptStartedAt) return;

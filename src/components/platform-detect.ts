@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 /**
  * Platform-specific wake classification.
  * Detects whether a resume from sleep is a background wake (darkwake) or full user wake.
@@ -20,8 +21,8 @@ export function classifyResume(): ResumeKind {
   const status = readBridgeLockField<string>("sleepStatus");
   if (status === "hw_sleep") {
     const hour = new Date().getHours();
-    const WAKE_HOUR = parseInt(process.env["WAKE_TIME"]?.split(":")[0] ?? "7", 10);
-    const BED_HOUR = parseInt(process.env["BED_TIME"]?.split(":")[0] ?? "0", 10);
+    const WAKE_HOUR = getEnv().wakeTime.hour;
+    const BED_HOUR = getEnv().bedTime.hour;
     const inSleepWindow = (BED_HOUR < WAKE_HOUR)
       ? (hour >= BED_HOUR && hour < WAKE_HOUR)
       : (hour >= BED_HOUR || hour < WAKE_HOUR);

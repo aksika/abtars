@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logWarn } from "./logger.js";
@@ -16,7 +17,7 @@ function readOr(path: string): string {
 /** Build env-gated model behavior directives. Generated at session start. */
 function buildModelInstructions(): string {
   const lines: string[] = [];
-  if (process.env["PRIMING_MODEL_TOPICS"] !== "false") {
+  if (getEnv().primingModelTopics) {
     lines.push("End each response with [TOPICS: kw1, kw2, kw3] — your top 3 topics from this exchange. Keep them English, lowercase, concise.");
   }
   return lines.length > 0 ? `# Model Instructions\n\n${lines.join("\n")}` : "";

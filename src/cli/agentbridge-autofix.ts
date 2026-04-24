@@ -6,7 +6,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const AB_HOME = process.env["AGENTBRIDGE_HOME"] || join(process.env["HOME"] || "~", ".agentbridge");
+const AB_HOME = process.env["AGENT_BRIDGE_HOME"] || join(process.env["HOME"] || "~", ".agentbridge");
 const RULES_PATH = join(AB_HOME, "config", "auto-fix.json");
 
 interface Rule { pattern: string; instruction: string; cooldownMin: number; enabled: boolean }

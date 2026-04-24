@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 /**
  * agent-registry.ts — Centralized agent role configuration.
  * Single factory for all agent transports. Transport-agnostic.
@@ -28,9 +29,9 @@ const AGENT_ROLES: Record<AgentRole, AgentRoleConfig> = {
 
 function resolveModel(role: AgentRole): string | undefined {
   switch (role) {
-    case "dreamy": return process.env["SLEEP_MODEL"] || undefined;
-    case "browsie": return process.env["BROWSING_AGENT"] || undefined;
-    case "coding": return process.env["CODING_MODEL"] || undefined;
+    case "dreamy": return getEnv().sleepModel;
+    case "browsie": return getEnv().browsingAgent;
+    case "coding": return getEnv().codingModel;
     default: return undefined;
   }
 }
@@ -98,7 +99,7 @@ export async function createSubagentTransport(role: SubagentRole): Promise<{ tra
 
   if (agent.provider.transport === "api") {
     const { DirectApiTransport } = await import("./transport/direct-api-transport.js");
-    const apiKey = agent.provider.apiKeyEnv ? process.env[agent.provider.apiKeyEnv] : process.env["API_KEY"];
+    const apiKey = getEnv().getApiKey(agent.provider.apiKeyEnv ?? "API_KEY");
 
     // Subagent fallback: always professor's model+provider
     const profAgent = tc ? resolveAgent("professor", tc) : null;

@@ -32,7 +32,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "AGENT_BRIDGE_HOME", type: "string", description: "Base directory for runtime data" },
   { env: "WORKING_DIR", type: "string", default: ".", description: "Agent working directory" },
   { env: "MAIN_CHAT_ID", type: "string", description: "Primary Telegram chat ID for notifications" },
-  { env: "LOG_LEVEL", type: "string", default: "info", description: "Log level: debug, info, warn, error" },
+  { env: "LOG_LEVEL", type: "string", default: "low", description: "Log level: off, low, debug" },
   { env: "LOG_FORMAT", type: "string", default: "text", description: "Log format: text or json" },
 
   // ── Transport ──
@@ -85,7 +85,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "BED_TIME", type: "time", default: "0:30", description: "Daily sleep trigger time (H:MM or HH:MM)" },
   { env: "WAKE_TIME", type: "time", default: "7:00", description: "Wake time for platform detection" },
   { env: "BED_QUIET_TICKS", type: "int", default: "2", description: "Quiet heartbeat ticks before sleep (×5min)" },
-  { env: "HARDWARE_SLEEP_AFTER_DREAMY", type: "int", description: "Quiet ticks after Dreamy before hw sleep" },
+  { env: "HARDWARE_SLEEP_AFTER_DREAMY", type: "bool", default: "false", description: "Enable hardware sleep after Dreamy completes" },
   { env: "SLEEP_MODEL", type: "string", description: "Model override for Dreamy sleep agent" },
   { env: "SLEEP_QUALITY", type: "string", description: "Sleep quality override" },
 
@@ -187,7 +187,7 @@ export interface EnvConfig {
   bedTime: TimeValue;
   wakeTime: TimeValue;
   bedQuietTicks: number;
-  hardwareSleepAfterDreamy: number | undefined;
+  hardwareSleepAfterDreamy: boolean;
   sleepModel: string | undefined;
   sleepQuality: string | undefined;
 
@@ -255,10 +255,10 @@ function parseBool(raw: string): boolean {
 
 let _env: Readonly<EnvConfig> | null = null;
 
-/** Get the parsed env config. Throws if initEnv() hasn't been called. */
+/** Get the parsed env config. Auto-initializes on first call if needed. */
 export function getEnv(): Readonly<EnvConfig> {
-  if (!_env) throw new Error("getEnv() called before initEnv() — env not initialized");
-  return _env;
+  if (!_env) initEnv();
+  return _env!;
 }
 
 /** Initialize env config from process.env. Call once at boot. */
@@ -287,7 +287,7 @@ export function initEnv(): Readonly<EnvConfig> {
     agentBridgeHome: readOr("AGENT_BRIDGE_HOME", ""),
     workingDir: readOr("WORKING_DIR", "."),
     mainChatId: read("MAIN_CHAT_ID"),
-    logLevel: readOr("LOG_LEVEL", "info").toLowerCase(),
+    logLevel: readOr("LOG_LEVEL", "low").toLowerCase(),
     logFormat: readOr("LOG_FORMAT", "text") === "json" ? "json" : "text",
 
     agentTransport: readOr("AGENT_TRANSPORT", "api").toLowerCase(),
@@ -332,7 +332,7 @@ export function initEnv(): Readonly<EnvConfig> {
     bedTime: parseTime(readOr("BED_TIME", "0:30"), "BED_TIME"),
     wakeTime: parseTime(readOr("WAKE_TIME", "7:00"), "WAKE_TIME"),
     bedQuietTicks: parseIntSafe(readOr("BED_QUIET_TICKS", "2"), "BED_QUIET_TICKS"),
-    hardwareSleepAfterDreamy: read("HARDWARE_SLEEP_AFTER_DREAMY") ? parseIntSafe(read("HARDWARE_SLEEP_AFTER_DREAMY")!, "HARDWARE_SLEEP_AFTER_DREAMY") : undefined,
+    hardwareSleepAfterDreamy: parseBool(readOr("HARDWARE_SLEEP_AFTER_DREAMY", "false")),
     sleepModel: read("SLEEP_MODEL"),
     sleepQuality: read("SLEEP_QUALITY"),
 

@@ -30,8 +30,9 @@ describe("env-schema", () => {
     expect(Object.isFrozen(env)).toBe(true);
   });
 
-  it("getEnv throws before init", () => {
-    expect(() => getEnv()).toThrow("not initialized");
+  it("getEnv auto-initializes on first call", () => {
+    const env = getEnv();
+    expect(env.bedTime.hour).toBe(0);
   });
 
   it("getEnv returns same object after init", () => {

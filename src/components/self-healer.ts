@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 import { localISO } from "../utils/local-time.js";
 /**
  * Self-healer heartbeat task — scans bridge log for ERROR lines.
@@ -58,7 +59,7 @@ export function createSelfHealerTask(
   let lastTs = localISO();
   let bridgeStartTs = "";
   const errorStates = new Map<string, ErrorState>();
-  let enabled = process.env["SELFHEAL_ENABLED"] === "true";
+  let enabled = getEnv().selfhealEnabled;
   let autoFixRunning = false;
 
   const task: HeartbeatTask & { enabled: boolean } = {

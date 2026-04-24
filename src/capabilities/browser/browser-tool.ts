@@ -1,3 +1,4 @@
+import { getEnv } from "../../components/env-schema.js";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readFileSync } from "node:fs";
@@ -16,7 +17,7 @@ const MAX_PAGE_ELEMENTS = 50;
 
 /** Read navigation timeout from env, default 30 000 ms. */
 function getNavigationTimeout(): number {
-  const raw = process.env["WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_MS"];
+  const raw = String(getEnv().webScrapePlaywrightTimeoutMs);
   if (raw === undefined || raw === "") return 30_000;
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return 30_000;
@@ -91,7 +92,7 @@ export class BrowserTool {
     }
 
     // SSRF protection: reject private/internal IPs
-    if (process.env["SSRF_CHECK"] !== "0") {
+    if (getEnv().ssrfCheck) {
       try {
         const { hostname } = new URL(url);
         const { isPrivateHost } = await import("./ssrf-guard.js");

@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 /**
  * Daily cycle check — shared by standby handler and age-check heartbeat task.
  *
@@ -22,7 +23,7 @@ export interface DailyCycleDeps {
   isSleepActive: () => boolean;
 }
 
-const QUIET_TICKS_REQUIRED = parseInt(process.env["BED_QUIET_TICKS"] ?? "2", 10); // default 2 × 5min = 10min
+
 
 let quietTickCount = 0;
 let lastSeenMsgTs = 0;
@@ -89,7 +90,7 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
 
   // No new messages this tick — increment quiet counter
   quietTickCount++;
-  logInfo("bedtime", `Quiet tick ${quietTickCount}/${QUIET_TICKS_REQUIRED} (BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")})`);
+  logInfo("bedtime", `Quiet tick ${quietTickCount}/${getEnv().bedQuietTicks} (BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")})`);
 
-  return quietTickCount >= QUIET_TICKS_REQUIRED;
+  return quietTickCount >= getEnv().bedQuietTicks;
 }

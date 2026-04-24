@@ -1,3 +1,4 @@
+import { getEnv } from "./env-schema.js";
 /**
  * Telegram /nlm command handler — calls `nlm` CLI directly.
  *
@@ -22,10 +23,10 @@ export type NLMConfig = {
 };
 
 export function loadNLMConfig(): NLMConfig {
-  const raw = process.env["NOTEBOOKLM_ENABLED"];
+  const raw = String(getEnv().notebooklmEnabled);
   return {
     enabled: raw === "true" || raw === "1",
-    defaultNotebook: process.env["NOTEBOOKLM_DEFAULT_NOTEBOOK"] || "",
+    defaultNotebook: getEnv().notebooklmDefaultNotebook,
   };
 }
 

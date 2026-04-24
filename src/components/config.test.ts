@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { loadAndValidateConfig } from "./config.js";
+import { _resetEnv } from "./env-schema.js";
 import * as fs from "node:fs/promises";
 
 // Mock fs/promises so we don't hit the real filesystem
@@ -42,6 +43,7 @@ function setValidEnv() {
 describe("loadAndValidateConfig", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    _resetEnv();
     setValidEnv();
     // Default: stat returns a directory
     vi.mocked(fs.stat).mockResolvedValue({ isDirectory: () => true } as any);
@@ -149,10 +151,10 @@ describe("loadAndValidateConfig", () => {
     expect(config.transport.permissionTimeoutMs).toBe(30_000);
   });
 
-  it("falls back to default when PERMISSION_TIMEOUT_MS is not a number", async () => {
+  it("throws when PERMISSION_TIMEOUT_MS is not a number", async () => {
     process.env["PERMISSION_TIMEOUT_MS"] = "abc";
-    const config = await loadAndValidateConfig();
-    expect(config.transport.permissionTimeoutMs).toBe(60000);
+    _resetEnv();
+    await expect(loadAndValidateConfig()).rejects.toThrow("PERMISSION_TIMEOUT_MS");
   });
 
   // --- POLL_TIMEOUT_S ---
@@ -163,9 +165,9 @@ describe("loadAndValidateConfig", () => {
     expect(config.telegram.pollTimeoutS).toBe(60);
   });
 
-  it("falls back to default when POLL_TIMEOUT_S is not a number", async () => {
+  it("throws when POLL_TIMEOUT_S is not a number", async () => {
     process.env["POLL_TIMEOUT_S"] = "nope";
-    const config = await loadAndValidateConfig();
-    expect(config.telegram.pollTimeoutS).toBe(30);
+    _resetEnv();
+    await expect(loadAndValidateConfig()).rejects.toThrow("POLL_TIMEOUT_S");
   });
 });

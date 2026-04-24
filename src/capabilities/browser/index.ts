@@ -1,3 +1,4 @@
+import { getEnv } from "../../components/env-schema.js";
 /**
  * Browser capability — browse-spawn IPC + browse-checker heartbeat.
  * Level 1 (lightpanda fetch) is handled by the agent via skill — no bridge code needed.
@@ -25,7 +26,7 @@ export function register(api: CapabilityApi): void {
   let browserIpc: BrowserIpcServer | null = null;
 
   const ensureBrowserIpc = async (): Promise<void> => {
-    if (browserIpc || process.env["BROWSER_DOCKER"] === "1") return;
+    if (browserIpc || getEnv().browserDocker) return;
     browserIpc = new BrowserIpcServer(browserTool);
     await browserIpc.start();
     logInfo("browser", `🔌 Browser IPC listening on ${browserIpc.socketPath}`);
