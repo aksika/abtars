@@ -157,9 +157,10 @@ export class DiscordAdapter implements PlatformAdapter {
       return;
     }
 
-    // Build sender prefix for LLM context
+    // Build sender prefix for LLM context (skip for DMs)
+    const isDM = message.channelName === null && !message.parentChannelId;
     const channelLabel = message.parentChannelId ? message.channelName ?? "thread" : message.channelName ?? "DM";
-    const senderPrefix = `[${message.authorUsername}${message.authorIsBot ? " (bot)" : ""}] in #${channelLabel}: `;
+    const senderPrefix = isDM ? "" : `[${message.authorUsername}${message.authorIsBot ? " (bot)" : ""}] in #${channelLabel}: `;
 
     const inbound: InboundMessage = {
       platform: "discord",
@@ -169,7 +170,7 @@ export class DiscordAdapter implements PlatformAdapter {
       senderName: message.authorUsername,
       text: senderPrefix + text,
       timestamp: message.timestamp,
-      isGroup: true,
+      isGroup: !isDM,
       isVoice: false,
       mediaPath,
       rawPlatformData: message,
