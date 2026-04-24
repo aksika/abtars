@@ -21,7 +21,7 @@ User asks about model recommendations, best deals, or you need to evaluate if a 
     "cost": { "input": 0.0, "output": 0.0 },
     "transports": ["ollama", "openrouter"],
     "description": "High IQ free model, top Intelligence Index score",
-    "addedAt": "2026-04-13"
+    "validatedAt": "2026-04-13"
   }
 }
 ```
@@ -30,7 +30,7 @@ User asks about model recommendations, best deals, or you need to evaluate if a 
 - **cost**: per million tokens in USD. `0.0` = free
 - **transports**: provider names from transport.json that can serve this model
 - **description**: why this model was added (scout writes this)
-- **addedAt**: date when scouted (auto-set by script)
+- **validatedAt**: date when last verified alive (auto-set by script)
 
 ## Scouting workflow
 
@@ -94,7 +94,7 @@ python3 ~/.agentbridge/scripts/scout-add-model.py \
 
 The script automatically:
 - Backs up models.json to `.old`
-- Sets `addedAt` to today's date
+- Sets `validatedAt` to today's date
 - Validates all entries after write
 - Restores from backup if validation fails
 
