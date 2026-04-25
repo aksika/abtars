@@ -492,6 +492,7 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
       return true;
     }
     const AGENT_LABELS: Array<{ key: string; label: string }> = [
+      { key: "_provider", label: "🔌 Provider" },
       { key: "professor", label: "Professor (main)" },
       { key: "professor_fb1", label: "Professor fallback 1" },
       { key: "professor_fb2", label: "Professor fallback 2" },
