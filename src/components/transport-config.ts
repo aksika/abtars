@@ -88,6 +88,12 @@ export function loadTransport(): TransportConfig | null {
   try {
     cachedTransport = JSON.parse(readFileSync(p, "utf-8")) as TransportConfig;
     logInfo(TAG, `Loaded transport config (${Object.keys(cachedTransport.agents).length} agents, ${Object.keys(cachedTransport.providers).length} providers)`);
+    const repairs = validateAndRepair(cachedTransport);
+    if (repairs.length > 0) {
+      for (const r of repairs) logWarn(TAG, `Auto-repaired: ${r.agent} was on ${r.oldProvider} — ${r.reason}`);
+      writeTransportConfig(cachedTransport, `invariant auto-repair (${repairs.length} agents)`);
+      pendingRepairs = repairs;
+    }
     return cachedTransport;
   } catch {
     // Fallback to transport.default.json
@@ -114,6 +120,57 @@ export function resolveHailMary(transport?: TransportConfig | null): { model: st
 /** Force re-read on next call (for tests). */
 export function clearTransportCache(): void {
   cachedTransport = null;
+}
+
+// ── Invariant validation ────────────────────────────────────────────────────
+
+export type RepairEntry = { agent: string; oldProvider: string; reason: string };
+
+/** Stashed repairs from last loadTransport() — consumed by model-health task. */
+let pendingRepairs: RepairEntry[] = [];
+export function consumeRepairs(): RepairEntry[] {
+  const r = pendingRepairs;
+  pendingRepairs = [];
+  return r;
+}
+
+/**
+ * Validate transport invariant: all agents must share professor's transport type.
+ * For acp/tmux, provider name must also match (single child process).
+ * Violations are auto-repaired (subagent reset to professor's assignment).
+ */
+export function validateAndRepair(tc: TransportConfig): RepairEntry[] {
+  const profAssignment = tc.agents["professor"];
+  if (!profAssignment) return [];
+  const profProvider = tc.providers[profAssignment.provider];
+  if (!profProvider) return [];
+
+  const profType = profProvider.transport;
+  const repairs: RepairEntry[] = [];
+
+  for (const [agent, assignment] of Object.entries(tc.agents)) {
+    if (agent === "professor") continue;
+    const provider = tc.providers[assignment.provider];
+    if (!provider) continue;
+
+    const agentType = provider.transport;
+    let violation = false;
+
+    if (agentType !== profType) {
+      // Cross-transport-type violation
+      violation = true;
+    } else if (profType !== "api" && assignment.provider !== profAssignment.provider) {
+      // ACP/tmux: must share exact provider (single child process)
+      violation = true;
+    }
+
+    if (violation) {
+      repairs.push({ agent, oldProvider: assignment.provider, reason: `${provider.transport} incompatible with professor (${profType}/${profAssignment.provider})` });
+      tc.agents[agent] = { model: profAssignment.model, provider: profAssignment.provider };
+    }
+  }
+
+  return repairs;
 }
 
 // ── Resolution ──────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { resolveAgent, getEnvFallback, clearTransportCache } from "./transport-config.js";
+import { resolveAgent, getEnvFallback, clearTransportCache, validateAndRepair } from "./transport-config.js";
 import type { TransportConfig, ModelCatalog } from "./transport-config.js";
 
 const MODELS: ModelCatalog = {
@@ -68,5 +68,65 @@ describe("getEnvFallback", () => {
     expect(fb.providerName).toBe("openrouter");
     expect(fb.provider.transport).toBe("api");
     expect(fb.model).toBe("minimax-m2.5:cloud");
+  });
+});
+
+describe("validateAndRepair", () => {
+  const providers = {
+    ollama: { transport: "api" as const, endpoint: "http://localhost:11434/v1" },
+    openrouter: { transport: "api" as const, endpoint: "https://openrouter.ai/api/v1", apiKeyEnv: "OPENROUTER_API_KEY" },
+    kiro: { transport: "acp" as const, cli: "kiro-cli" },
+    gemini: { transport: "acp" as const, cli: "gemini-cli" },
+  };
+
+  it("accepts all-api mixed providers", () => {
+    const tc = {
+      agents: {
+        professor: { model: "m1", provider: "ollama" },
+        dreamy: { model: "m2", provider: "openrouter" },
+      },
+      providers,
+    };
+    expect(validateAndRepair(tc)).toEqual([]);
+  });
+
+  it("accepts acp agents matching professor's provider", () => {
+    const tc = {
+      agents: {
+        professor: { model: "m1", provider: "kiro" },
+        dreamy: { model: "m2", provider: "kiro" },
+      },
+      providers,
+    };
+    expect(validateAndRepair(tc)).toEqual([]);
+  });
+
+  it("repairs cross-transport violation (subagent api, professor acp)", () => {
+    const tc = {
+      agents: {
+        professor: { model: "m1", provider: "kiro" },
+        dreamy: { model: "m2", provider: "ollama" },
+      },
+      providers,
+    };
+    const repairs = validateAndRepair(tc);
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0]!.agent).toBe("dreamy");
+    expect(tc.agents["dreamy"]!.provider).toBe("kiro");
+    expect(tc.agents["dreamy"]!.model).toBe("m1");
+  });
+
+  it("repairs acp provider mismatch (single child process)", () => {
+    const tc = {
+      agents: {
+        professor: { model: "m1", provider: "kiro" },
+        dreamy: { model: "m2", provider: "gemini" },
+      },
+      providers,
+    };
+    const repairs = validateAndRepair(tc);
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0]!.agent).toBe("dreamy");
+    expect(tc.agents["dreamy"]!.provider).toBe("kiro");
   });
 });

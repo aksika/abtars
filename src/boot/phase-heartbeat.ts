@@ -239,41 +239,65 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
     execute: async () => {
       if (modelHealthDone) return;
       modelHealthDone = true;
-      if (config.transport.agentTransport !== "api") return;
-      const { loadTransport, resolveAgent } = await import("../components/transport-config.js");
+      const { loadTransport, resolveAgent, consumeRepairs } = await import("../components/transport-config.js");
       const tc = loadTransport();
       if (!tc) return;
-      const agents = ["professor", "dreamy", "browsie", "coding"] as const;
-      const models: Array<{ label: string; model: string }> = [];
-      for (const a of agents) {
-        const r = resolveAgent(a, tc);
-        if (r && !models.some(m => m.model === r.model)) {
-          models.push({ label: a, model: r.model });
-        }
-      }
-      const prof = resolveAgent("professor", tc);
-      const endpoint = prof?.provider.endpoint ?? "http://localhost:11434/v1";
-      const apiKey = getEnv().getApiKey(prof?.provider.apiKeyEnv ?? "API_KEY");
+
+      // Consume any invariant auto-repairs from boot
+      const repairs = consumeRepairs();
       const warnings: string[] = [];
-      for (const { label, model } of models) {
-        try {
-          const res = await fetch(`${endpoint}/chat/completions`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-            body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (!res.ok) {
-            warnings.push(`⚠️ ${label}=${model} — ${res.status} ${res.statusText}`);
-            logWarn("model-health", `${label}=${model} failed: ${res.status}`);
-          } else {
-            logInfo("model-health", `✓ ${label}=${model}`);
+      if (repairs.length > 0) {
+        for (const r of repairs) warnings.push(`🔧 ${r.agent} auto-repaired: was ${r.oldProvider} — ${r.reason}`);
+      }
+
+      const prof = resolveAgent("professor", tc);
+      if (!prof) return;
+      const profType = prof.provider.transport ?? "api";
+
+      if (profType === "api") {
+        // Per-agent HTTP probe
+        const agents = ["professor", "dreamy", "browsie", "coding"] as const;
+        const probed = new Set<string>();
+        for (const a of agents) {
+          const r = resolveAgent(a, tc);
+          if (!r || probed.has(r.model)) continue;
+          probed.add(r.model);
+          const endpoint = r.provider.endpoint ?? "http://localhost:11434/v1";
+          const apiKey = getEnv().getApiKey(r.provider.apiKeyEnv ?? "API_KEY");
+          try {
+            const res = await fetch(`${endpoint}/chat/completions`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+              body: JSON.stringify({ model: r.model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (!res.ok) {
+              warnings.push(`⚠️ ${a}=${r.model} — ${res.status} ${res.statusText}`);
+              logWarn("model-health", `${a}=${r.model} failed: ${res.status}`);
+            } else {
+              logInfo("model-health", `✓ ${a}=${r.model}`);
+            }
+          } catch (err) {
+            warnings.push(`⚠️ ${a}=${r.model} — ${err instanceof Error ? err.message : String(err)}`);
+            logWarn("model-health", `${a}=${r.model} unreachable: ${err instanceof Error ? err.message : String(err)}`);
           }
-        } catch (err) {
-          warnings.push(`⚠️ ${label}=${model} — ${err instanceof Error ? err.message : String(err)}`);
-          logWarn("model-health", `${label}=${model} unreachable: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else if (profType === "acp" || profType === "tmux") {
+        // Lightweight: check if transport is connected
+        const transport = ctx.transport;
+        if (transport && "isConnected" in transport && typeof (transport as { isConnected?: () => boolean }).isConnected === "function") {
+          const connected = (transport as { isConnected: () => boolean }).isConnected();
+          if (connected) {
+            logInfo("model-health", `✓ ${profType} transport connected`);
+          } else {
+            warnings.push(`⚠️ ${profType} transport not connected`);
+            logWarn("model-health", `${profType} transport not connected`);
+          }
+        } else {
+          logInfo("model-health", `✓ ${profType} transport (no isConnected check available)`);
         }
       }
+
       if (warnings.length > 0 && ctx.telegramAdapter) {
         ctx.telegramAdapter.sendNotification(primaryChatId, `🏥 Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
       }
