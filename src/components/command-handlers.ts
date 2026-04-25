@@ -501,8 +501,8 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
   const isEmergency = (ctx.transport as unknown as { isEmergencyMode?: boolean }).isEmergencyMode === true;
 
   const lines = [
-    isEmergency ? `🚨 EMERGENCY MODE: ${currentModel} (paid)` : `🤖 Model: ${currentModel}`,
     `🔌 Transport: ${mode} (${provider}) — ${transportStatus}`,
+    isEmergency ? `🚨 EMERGENCY MODE: ${currentModel} (paid)` : `🤖 Model: ${currentModel}`,
     `📊 Context: ${ctxPct}`,
     "",
     "📋 Agents:",
@@ -885,11 +885,11 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
 
   const lines = [
     `AgentBridge v${version}${buildInfo}`,
+    transportLine,
     `🤖 Model: ${model}`,
     ...(fallbackModels.length > 0 ? [`   Fallbacks: ${fallbackModels.join(", ")}`] : []),
     `📊 Context window: ${ctxPct}`,
     `⏱️ Uptime: ${uptime}`,
-    transportLine,
   ];
   if (cronInfo) {
     const mins = Math.round(cronInfo.intervalMs / 60000);
