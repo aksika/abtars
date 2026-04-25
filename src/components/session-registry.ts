@@ -59,6 +59,13 @@ export class SessionRegistry {
     this.entries.delete(key);
   }
 
+  /** Mark every tracked session as needing session-start injection on its next message. */
+  markAllPendingStart(): void {
+    for (const entry of this.entries.values()) {
+      entry.pendingStart = true;
+    }
+  }
+
   has(key: string): boolean {
     return this.entries.has(key);
   }

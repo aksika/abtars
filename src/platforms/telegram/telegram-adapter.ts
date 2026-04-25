@@ -291,6 +291,7 @@ export class TelegramAdapter implements PlatformAdapter {
           if (isProfessor && !providerChanged && "setModel" in this.deps.transport) {
             // Same provider, different model — hot swap
             await (this.deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
+            this.deps.pipeline.sessions.markAllPendingStart();
             await this.api.sendMessage(chatId, `✅ Switched to ${model}`);
           } else if (isProfessor && providerChanged && oldType === newType && "switchProvider" in this.deps.transport) {
             // Same transport type, different provider — hot swap
@@ -306,6 +307,7 @@ export class TelegramAdapter implements PlatformAdapter {
               const registry = (this.deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();
               const policy = new FallbackPolicy(candidates, registry);
               (this.deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
+              this.deps.pipeline.sessions.markAllPendingStart();
               await this.api.sendMessage(chatId, `✅ Switched to ${model} (${providerName})`);
             } catch (err) {
               await this.api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
@@ -325,6 +327,7 @@ export class TelegramAdapter implements PlatformAdapter {
         if ("setModel" in transport && typeof (transport as { setModel: unknown }).setModel === "function") {
           try {
             await (transport as { setModel: (m: string) => Promise<void> | void }).setModel(newModel);
+            this.deps.pipeline.sessions.markAllPendingStart();
             if (chatId) await this.api.sendMessage(chatId, `🤖 Model switched → ${newModel}`);
           } catch (err) {
             if (chatId) await this.api.sendMessage(chatId, `❌ Model switch failed: ${err instanceof Error ? err.message : String(err)}`);
