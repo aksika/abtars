@@ -129,4 +129,21 @@ describe("validateAndRepair", () => {
     expect(repairs[0]!.agent).toBe("dreamy");
     expect(tc.agents["dreamy"]!.provider).toBe("kiro");
   });
+
+  it("removes fallbacks with incompatible transport", () => {
+    const tc = {
+      agents: {
+        professor: { model: "m1", provider: "kiro", fallbacks: [
+          { model: "m2", provider: "ollama" },
+          { model: "m3", provider: "kiro" },
+        ] },
+      },
+      providers,
+    };
+    const repairs = validateAndRepair(tc);
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0]!.agent).toBe("professor_fb1");
+    expect(tc.agents["professor"]!.fallbacks).toHaveLength(1);
+    expect(tc.agents["professor"]!.fallbacks![0]!.model).toBe("m3");
+  });
 });

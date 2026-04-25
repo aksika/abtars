@@ -170,6 +170,23 @@ export function validateAndRepair(tc: TransportConfig): RepairEntry[] {
     }
   }
 
+  // Validate professor fallbacks — must also match professor's transport type
+  const fallbacks = profAssignment.fallbacks;
+  if (fallbacks) {
+    for (let i = fallbacks.length - 1; i >= 0; i--) {
+      const fb = fallbacks[i]!;
+      const fbProvider = tc.providers[fb.provider];
+      if (!fbProvider) continue;
+      const fbType = fbProvider.transport;
+      if (fbType !== profType || (profType !== "api" && fb.provider !== profAssignment.provider)) {
+        repairs.push({ agent: `professor_fb${i + 1}`, oldProvider: fb.provider, reason: `fallback ${fbProvider.transport} incompatible with professor (${profType}/${profAssignment.provider})` });
+        fallbacks.splice(i, 1);
+      }
+    }
+  }
+
+  // hailMary is exempt — manual emergency override that rebuilds transport
+
   return repairs;
 }
 
