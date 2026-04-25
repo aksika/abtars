@@ -158,8 +158,30 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
 
 // ── Handler implementations ─────────────────────────────────────────────────
 
-async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
+/** Core new-session logic — reusable from model-switch paths. */
+export async function triggerNewSession(ctx: CommandContext, reason = "new-session"): Promise<void> {
   await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
+  await resetAndPrepare({
+    transport: ctx.transport, sessionKey: ctx.sessionKey,
+    reason, sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
+  });
+  if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
+}
+
+/** Core reset-session logic — clears cache, rebuilds transport, resets session. */
+export async function triggerResetSession(ctx: CommandContext): Promise<void> {
+  await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
+  const { clearTransportCache } = await import("./transport-config.js");
+  clearTransportCache();
+  if (ctx.rebuildTransport) await ctx.rebuildTransport();
+  await resetAndPrepare({
+    transport: ctx.transport, sessionKey: ctx.sessionKey,
+    reason: "reset-transport", sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
+  });
+  if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
+}
+
+async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
   const isReset = text.startsWith("/reset");
   const isResetDefault = text.trim().toLowerCase() === "/reset default";
 
@@ -170,30 +192,18 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
   if (isResetDefault) {
     const { resetToDefaults } = await import("./transport-config.js");
     resetToDefaults();
+    await triggerNewSession(ctx, "reset-to-defaults");
   } else if (isReset) {
-    // Re-read transport.json (picks up /model changes)
-    const { clearTransportCache } = await import("./transport-config.js");
-    clearTransportCache();
-  }
-
-  // Rebuild transport on /reset — picks up provider changes from /models change.
-  // Same-provider model changes are cheap; cross-provider rebuilds spawn a new
-  // ACP child or swap DirectApi for ACP etc.
-  if (isReset && ctx.rebuildTransport) {
     try {
-      await ctx.rebuildTransport();
+      await triggerResetSession(ctx);
     } catch (err) {
       await ctx.reply(`⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
       return true;
     }
+  } else {
+    await triggerNewSession(ctx);
   }
 
-  await resetAndPrepare({
-    transport: ctx.transport, sessionKey: ctx.sessionKey,
-    reason: isResetDefault ? "reset-to-defaults" : isReset ? "reset-transport" : "new-session",
-    sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
-  });
-  if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
   const label = isResetDefault ? "🔄 Reset to defaults." : isReset ? "🔄 Transport reloaded." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
   await ctx.reply(label);
   logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
@@ -470,7 +480,7 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }
-    ctx.sessions.markAllPendingStart();
+    await triggerNewSession(ctx, "model-switch");
     await ctx.reply(`✅ Switched to ${newModel}`);
     return true;
   }
