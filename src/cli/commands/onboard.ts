@@ -91,6 +91,7 @@ interface WizardAnswers {
   readonly bedTime: string;
   readonly wakeTime: string;
   readonly groqApiKey: string;
+  readonly embeddingEnabled: boolean;
   readonly trustMode: boolean;
 }
 
@@ -253,6 +254,30 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(groqApiKey)) { cancel('Cancelled.'); return null; }
 
+  // 12b. Embeddings
+  const embeddingEnabled = await confirm({
+    message: 'Enable memory embeddings? (requires ollama + 274MB model)',
+    initialValue: existing?.embeddingEnabled ?? false,
+  });
+  if (isCancel(embeddingEnabled)) { cancel('Cancelled.'); return null; }
+
+  if (embeddingEnabled) {
+    const { checkEmbeddingHealth } = await import('abmind/embedding-health.js');
+    const health = await checkEmbeddingHealth();
+    if (!health.reachable) {
+      process.stdout.write(`\n⚠️  ollama not found. Install with:\n   curl -fsSL https://ollama.com/install.sh | sh\n   Then re-run onboard.\n\n`);
+    } else if (!health.modelPulled) {
+      const pull = await confirm({ message: 'Pull nomic-embed-text (274MB)?', initialValue: true });
+      if (!isCancel(pull) && pull) {
+        process.stdout.write('Pulling nomic-embed-text...\n');
+        const { spawnSync } = await import('node:child_process');
+        spawnSync('ollama', ['pull', 'nomic-embed-text'], { stdio: 'inherit' });
+      }
+    } else {
+      process.stdout.write('✓ ollama + nomic-embed-text ready\n');
+    }
+  }
+
   const trustMode = await confirm({
     message: 'TRUST_MODE — auto-approve all permission requests from the agent? (recommended for personal/automated use)',
     initialValue: existing?.trustMode ?? true,
@@ -278,6 +303,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     `  Bed time:            ${String(bedTime ?? '') || '(default 0:30)'}`,
     `  Wake time:           ${String(wakeTime ?? '') || '(default 7:00)'}`,
     `  GROQ_API_KEY:        ${mask(String(groqApiKey ?? ''))}`,
+    `  Embeddings:          ${embeddingEnabled ? 'enabled' : 'disabled'}`,
     `  Trust mode:          ${trustMode ? 'true (auto-approve)' : 'false (prompt user)'}`,
     '',
   ];
@@ -303,6 +329,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     bedTime: String(bedTime ?? '').trim(),
     wakeTime: String(wakeTime ?? '').trim(),
     groqApiKey: String(groqApiKey ?? '').trim() || existing?.groqApiKey || '',
+    embeddingEnabled: embeddingEnabled === true,
     trustMode: trustMode === true,
   };
 }
@@ -348,6 +375,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     bedTime: '',
     wakeTime: '',
     groqApiKey: '',
+    embeddingEnabled: false,
     trustMode: false,
   };
 }
@@ -378,6 +406,7 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       bedTime: kv.get('BED_TIME') ?? '',
       wakeTime: kv.get('WAKE_TIME') ?? '',
       groqApiKey: kv.get('GROQ_API_KEY') ?? '',
+      embeddingEnabled: kv.get('EMBEDDING_ENABLED') === 'true',
       trustMode: kv.get('TRUST_MODE') === 'true',
     };
   } catch {
@@ -391,7 +420,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'TELEGRAM_BOT_TOKEN', 'MAIN_CHAT_ID',
     'DISCORD_BOT_TOKEN', 'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
-    'BED_TIME', 'WAKE_TIME', 'GROQ_API_KEY', 'TRUST_MODE',
+    'BED_TIME', 'WAKE_TIME', 'GROQ_API_KEY', 'EMBEDDING_ENABLED', 'TRUST_MODE',
     ...(providerKeyName ? [providerKeyName] : []),
   ]);
   const keptLines: string[] = [];
@@ -419,6 +448,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   if (answers.bedTime) newBlock.push(`BED_TIME=${answers.bedTime}`);
   if (answers.wakeTime) newBlock.push(`WAKE_TIME=${answers.wakeTime}`);
   if (answers.groqApiKey) newBlock.push(`GROQ_API_KEY=${answers.groqApiKey}`);
+  newBlock.push(`EMBEDDING_ENABLED=${answers.embeddingEnabled ? 'true' : 'false'}`);
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
