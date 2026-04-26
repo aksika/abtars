@@ -314,12 +314,6 @@ export async function install(opts: InstallOptions): Promise<number> {
       spawnSync('cp', ['-r', ...readdirSync(abmindSrc).map(f => join(abmindSrc, f)), abmindHome], { stdio: 'inherit' });
       process.stdout.write(`✓ restored abmind data\n`);
     }
-    // Run abmind migrations on restored DB
-    const abmindRepo = join(repoRoot, '..', 'abmind');
-    if (fileExists(join(abmindRepo, 'package.json'))) {
-      const migResult = spawnSync('node', [join(abmindRepo, 'dist', 'cli', 'abmind.js'), 'migrate'], { encoding: 'utf-8', stdio: 'inherit' });
-      if (migResult.status === 0) process.stdout.write(`✓ abmind migrations applied\n`);
-    }
     // Cleanup
     spawnSync('rm', ['-rf', tmpDir]);
     process.stdout.write(`\nRestore complete.\n`);
