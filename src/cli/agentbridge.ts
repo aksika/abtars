@@ -14,9 +14,9 @@
 
 import { doctor } from './commands/doctor.js';
 import { install } from './commands/install.js';
+import { backup } from './commands/backup.js';
 import { migrate } from './commands/migrate.js';
 import { onboard } from './commands/onboard.js';
-import { reset, type ResetScope } from './commands/reset.js';
 import { rollback } from './commands/rollback.js';
 import { status } from './commands/status.js';
 import { update } from './commands/update.js';
@@ -55,10 +55,10 @@ function printUsage(): void {
     `agentbridge — install/update CLI (#158)
 
 Usage:
-  agentbridge install [--upgrade] [--force] [--mode=simple|supervised]
+  agentbridge install [--force] [--mode=simple|supervised] [--restore <backup.zip>]
   agentbridge update  [--source local|npm|github] [--from-local]
   agentbridge rollback [--to <version>]
-  agentbridge reset --scope <config|config+data|full> [--yes] [--dry-run] [--no-backup]
+  agentbridge backup
   agentbridge migrate [--only <name>] [--dry-run]
   agentbridge doctor [<args passed to doctor.sh>...]
   agentbridge onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
@@ -76,7 +76,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     switch (command) {
       case 'install':
         return await install({
-          upgrade: flags.get('upgrade') === true,
+          restore: typeof flags.get('restore') === 'string' ? (flags.get('restore') as string) : undefined,
           force: flags.get('force') === true,
           dryRun: flags.get('dry-run') === true,
           mode: flags.get('mode') === 'simple' ? 'simple' : flags.get('mode') === 'supervised' ? 'supervised' : undefined,
@@ -91,15 +91,8 @@ export async function main(argv: readonly string[]): Promise<number> {
         return await rollback({
           to: typeof flags.get('to') === 'string' ? (flags.get('to') as string) : undefined,
         });
-      case 'reset':
-        return await reset({
-          scope: flags.get('scope') as ResetScope | undefined,
-          yes: flags.get('yes') === true,
-          dryRun: flags.get('dry-run') === true,
-          nonInteractive: flags.get('non-interactive') === true,
-          noBackup: flags.get('no-backup') === true,
-          force: flags.get('force') === true,
-        });
+      case 'backup':
+        return await backup();
       case 'migrate':
         return await migrate({
           dryRun: flags.get('dry-run') === true,

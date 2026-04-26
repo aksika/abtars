@@ -11,13 +11,13 @@
  */
 
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { readdirSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { runMigrations } from '../migrations/index.js';
 import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
 
 export interface InstallOptions {
-  readonly upgrade: boolean;
+  readonly restore?: string;
   readonly force: boolean;
   readonly dryRun: boolean;
   readonly mode?: "simple" | "supervised";
@@ -62,13 +62,6 @@ async function isSymlink(p: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** True if `~/.agentbridge/dist/` exists without `~/.agentbridge/releases/` — pre-158 layout. */
-async function isFlatLayout(home: string): Promise<boolean> {
-  const hasDist = await exists(join(home, 'dist'));
-  const hasReleases = await exists(join(home, 'releases'));
-  return hasDist && !hasReleases;
 }
 
 async function createSkeleton(home: string, dryRun: boolean): Promise<void> {
@@ -201,37 +194,13 @@ export async function install(opts: InstallOptions): Promise<number> {
   const repoRoot = process.cwd();
 
   const homeExists = await exists(home);
-  const flat = homeExists ? await isFlatLayout(home) : false;
   const manifest = homeExists ? await readManifest(paths.manifest) : null;
 
-  if (homeExists && flat && !opts.upgrade) {
-    process.stderr.write(
-      `Existing ~/.agentbridge uses pre-158 flat layout.\nRe-run with --upgrade to migrate to the versioned-releases layout.\n`,
-    );
-    return 2;
-  }
-
-  if (homeExists && !flat && manifest && !opts.force && !opts.upgrade) {
+  if (homeExists && manifest && !opts.force && !opts.restore) {
     process.stderr.write(
       `~/.agentbridge already installed at version ${manifest.version || '(unset)'}.\nUse 'agentbridge update' to upgrade, or --force to re-seed missing config.\n`,
     );
     return 2;
-  }
-
-  if (flat && opts.upgrade) {
-    process.stdout.write(`Existing flat layout detected. Running migration 003-flat-to-releases...\n`);
-    // Safety check: no live bridge processes before migration. Match the
-    // actual long-running entrypoints, not CLI invocations or test runners.
-    const { spawnSync } = await import('node:child_process');
-    const pgrep = spawnSync('pgrep', ['-f', 'node.*\\.agentbridge.*dist/main\\.js'], { encoding: 'utf-8' });
-    if (pgrep.status === 0 && pgrep.stdout.trim() !== '') {
-      process.stderr.write(
-        `Refused: bridge process(es) still running (pids: ${pgrep.stdout.trim().split('\n').join(', ')}).\nStop the watchdog + bridge before running --upgrade.\n`,
-      );
-      return 3;
-    }
-    const migrated = await runMigrations({ home, dryRun: opts.dryRun, only: ['003-flat-to-releases'] });
-    process.stdout.write(`Migration result: ${migrated.map((m) => `${m.name}=${m.applied ? 'applied' : 'skipped'}`).join(', ')}\n`);
   }
 
   // Create skeleton (idempotent)
@@ -299,7 +268,7 @@ export async function install(opts: InstallOptions): Promise<number> {
     await writeManifest(paths.manifest, {
       ...emptyManifest('agentbridge', hostname()),
       version: '',
-      preMigrationBackup: flat ? join(dirname(home), '.agentbridge.pre-158.bak') : null,
+      preMigrationBackup: null,
     });
     process.stdout.write(`✓ manifest initialized at ${paths.manifest}\n`);
   }
@@ -313,6 +282,48 @@ export async function install(opts: InstallOptions): Promise<number> {
   const mode = opts.mode ?? existingMode ?? "supervised";
   writeInstallMode(home, mode);
   process.stdout.write(`✓ install mode: ${mode}\n`);
+
+  // Restore from backup zip
+  if (opts.restore) {
+    const { spawnSync } = await import('node:child_process');
+    const { existsSync: fileExists } = await import('node:fs');
+    const zipPath = opts.restore;
+    if (!fileExists(zipPath)) {
+      process.stderr.write(`error: backup file not found: ${zipPath}\n`);
+      return 1;
+    }
+    // Extract to temp dir
+    const tmpDir = join(process.env['TMPDIR'] ?? '/tmp', `agentbridge-restore-${Date.now()}`);
+    const unzip = spawnSync('unzip', ['-o', zipPath, '-d', tmpDir], { encoding: 'utf-8' });
+    if (unzip.status !== 0) {
+      process.stderr.write(`error: unzip failed: ${unzip.stderr}\n`);
+      return 1;
+    }
+    // Copy agentbridge files
+    const abSrc = join(tmpDir, 'agentbridge');
+    if (fileExists(abSrc)) {
+      spawnSync('cp', ['-r', ...readdirSync(abSrc).map(f => join(abSrc, f)), home], { stdio: 'inherit' });
+      process.stdout.write(`✓ restored agentbridge config\n`);
+    }
+    // Copy abmind files
+    const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(home), '.abmind');
+    const abmindSrc = join(tmpDir, 'abmind');
+    if (fileExists(abmindSrc)) {
+      spawnSync('cp', ['-r', ...readdirSync(abmindSrc).map(f => join(abmindSrc, f)), abmindHome], { stdio: 'inherit' });
+      process.stdout.write(`✓ restored abmind data\n`);
+    }
+    // Run abmind migrations on restored DB
+    const abmindRepo = join(repoRoot, '..', 'abmind');
+    if (fileExists(join(abmindRepo, 'package.json'))) {
+      const migResult = spawnSync('node', [join(abmindRepo, 'dist', 'cli', 'abmind.js'), 'migrate'], { encoding: 'utf-8', stdio: 'inherit' });
+      if (migResult.status === 0) process.stdout.write(`✓ abmind migrations applied\n`);
+    }
+    // Cleanup
+    spawnSync('rm', ['-rf', tmpDir]);
+    process.stdout.write(`\nRestore complete.\n`);
+    process.stdout.write(`Next: 'agentbridge update' to build and activate.\n`);
+    return 0;
+  }
 
   process.stdout.write(`\nInstall complete.\n`);
   if (!manifestAfter || manifestAfter.version === '') {
