@@ -9,7 +9,7 @@
   ],
   "lazyRoots": [
     "memory", "workspace", "reports", "received", "backup",
-    "skills", "agents", "tasks", "prompts", "core", "secret"
+    "skills", "agents", "tasks", "prompts", "core", "secret", "overflow"
   ],
   "configSeeds": [
     { "source": ".env.example", "dest": "config/.env", "mode": "0600" },
