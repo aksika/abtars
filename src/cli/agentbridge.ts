@@ -15,7 +15,6 @@
 import { doctor } from './commands/doctor.js';
 import { install } from './commands/install.js';
 import { backup } from './commands/backup.js';
-import { migrate } from './commands/migrate.js';
 import { onboard } from './commands/onboard.js';
 import { rollback } from './commands/rollback.js';
 import { restart } from './commands/restart.js';
@@ -60,7 +59,6 @@ Usage:
   agentbridge update  [--source local|npm|github] [--from-local]
   agentbridge rollback [--to <version>]
   agentbridge backup
-  agentbridge migrate [--only <name>] [--dry-run]
   agentbridge doctor [<args passed to doctor.sh>...]
   agentbridge onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   agentbridge restart [--cold]
@@ -95,11 +93,6 @@ export async function main(argv: readonly string[]): Promise<number> {
         });
       case 'backup':
         return await backup(typeof flags.get('output') === 'string' ? (flags.get('output') as string) : undefined);
-      case 'migrate':
-        return await migrate({
-          dryRun: flags.get('dry-run') === true,
-          only: typeof flags.get('only') === 'string' ? [flags.get('only') as string] : undefined,
-        });
       case 'doctor':
         // Pass remaining --flags through to doctor.sh. Primitive pass-through:
         // anything after 'doctor' except recognized flags goes to the script.
