@@ -164,10 +164,7 @@ export async function buildTransport(ctx: BootCtx): Promise<void> {
       const reasonTag = reason ? ` (${reason})` : "";
       const msg = `⚡ Fallback${reasonTag}: ${model}${ctxPct >= 0 ? ` (ctx: ~${ctxPct}%)` : ""}`;
       logInfo("main", msg);
-      const chatId = ctx.config.mainChatId;
-      if (chatId && ctx.telegramAdapter) {
-        ctx.telegramAdapter.sendNotification(String(chatId), msg);
-      }
+      import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(() => {});
     };
   }
 }

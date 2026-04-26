@@ -439,6 +439,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   ];
   if (answers.telegramToken) newBlock.push(`TELEGRAM_BOT_TOKEN=${answers.telegramToken}`);
   if (answers.telegramChatId) newBlock.push(`MAIN_CHAT_ID=${answers.telegramChatId}`);
+  else if (answers.discordA2aChannel) newBlock.push(`MAIN_CHAT_ID=${answers.discordA2aChannel}`);
   if (answers.discordBotToken) newBlock.push(`DISCORD_BOT_TOKEN=${answers.discordBotToken}`);
   if (answers.discordAppId) newBlock.push(`DISCORD_APP_ID=${answers.discordAppId}`);
   if (answers.discordA2aChannel) newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);

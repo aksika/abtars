@@ -72,23 +72,30 @@ export async function loadAndValidateConfig(): Promise<Config> {
     logWarn("config", "transport.json not loaded — using .env defaults");
   }
 
-  // --- TELEGRAM_BOT_TOKEN (required) ---
+  // --- TELEGRAM_BOT_TOKEN (optional — only required if TG is the desired platform) ---
   const token = getEnv().telegramBotToken ?? "";
-  if (!BOT_TOKEN_REGEX.test(token)) {
+  const hasTelegramToken = BOT_TOKEN_REGEX.test(token);
+
+  // --- DISCORD_BOT_TOKEN (optional) ---
+  const discordToken = getEnv().discordBotToken ?? "";
+  const hasDiscordToken = discordToken.length > 20;
+
+  if (!hasTelegramToken && !hasDiscordToken) {
     throw new Error(
-      "TELEGRAM_BOT_TOKEN is missing or invalid — expected format: <numeric_id>:<alphanumeric_secret>",
+      "No platform configured — set TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN in config/.env (run agentbridge onboard)",
     );
   }
 
-  // --- User IDs (from users.json, fallback to MAIN_CHAT_ID) ---
+  // --- User IDs (from users.json, fallback to MAIN_CHAT_ID for TG only) ---
   const registry = loadUsers();
   const telegramIds = registry.users
     .filter(u => u.platforms.telegram)
     .map(u => u.platforms.telegram!);
   const mainChatId = getEnv().mainChatId;
-  if (mainChatId) telegramIds.push(parseInt(mainChatId, 10));
+  if (mainChatId && hasTelegramToken) telegramIds.push(parseInt(mainChatId, 10));
   const allowedUserIds = new Set(telegramIds.filter(id => id > 0));
-  if (allowedUserIds.size === 0) {
+  const hasDiscordUsers = registry.users.some(u => u.platforms.discord);
+  if (allowedUserIds.size === 0 && !hasDiscordUsers) {
     throw new Error(
       "No users configured — create config/users.json or set MAIN_CHAT_ID",
     );

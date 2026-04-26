@@ -141,8 +141,9 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   initSystemMessage(async (prompt: string) => {
     try {
       const response = await transport.sendPrompt(primaryChatId, `[SYSTEM] ${prompt}`);
-      if (response && ctx.telegramAdapter) {
-        await ctx.telegramAdapter.sendNotification(primaryChatId, response);
+      if (response) {
+        const { sendNotification } = await import("../components/notification.js");
+        sendNotification(ctx, response);
       }
     } catch (err) {
       logWarn("main", `System message failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -298,8 +299,9 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
         }
       }
 
-      if (warnings.length > 0 && ctx.telegramAdapter) {
-        ctx.telegramAdapter.sendNotification(primaryChatId, `🏥 Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
+      if (warnings.length > 0) {
+        const { sendNotification } = await import("../components/notification.js");
+        sendNotification(ctx, `🏥 Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
       }
     },
   });
