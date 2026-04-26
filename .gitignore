@@ -38,3 +38,5 @@ backlog.db-shm
 # Test fixture dirs (created by vitest, cleaned in beforeEach)
 .test-sleep-trigger/
 backlog.db
+bundle/
+src/capabilities/_registry.generated.ts
