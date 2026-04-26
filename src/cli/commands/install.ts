@@ -240,11 +240,15 @@ export async function install(opts: InstallOptions): Promise<number> {
 
   // Create abmind skeleton — agentbridge depends on abmind at runtime
   const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(home), '.abmind');
-  const abmindDirs = [join(abmindHome, 'config'), join(abmindHome, 'memory'), join(abmindHome, 'memory', 'sleep')];
+  const abmindDirs = [
+    { path: join(abmindHome, 'config'), mode: 0o700 },
+    { path: join(abmindHome, 'memory'), mode: 0o700 },
+    { path: join(abmindHome, 'memory', 'sleep') },
+  ];
   if (opts.dryRun) {
-    process.stdout.write(`[dry-run] mkdir -p: ${abmindDirs.join(', ')}\n`);
+    process.stdout.write(`[dry-run] mkdir -p: ${abmindDirs.map(d => d.path).join(', ')}\n`);
   } else {
-    for (const d of abmindDirs) await mkdir(d, { recursive: true });
+    for (const d of abmindDirs) await mkdir(d.path, { recursive: true, mode: d.mode });
   }
   process.stdout.write(`✓ abmind skeleton at ${abmindHome}\n`);
 
