@@ -17,18 +17,9 @@ PROJECT_DIR="$HOME/.agentbridge"
 ARGS=("${@:---telegram}")
 PIDFILE="$AB_HOME/bridge.pid"
 
-# Load env — root .env is primary (real operator values on existing installs);
-# config/.env is fallback (template-style, may have empty placeholders)
-if [ -f "$AB_HOME/.env" ]; then
-  set -a; source "$AB_HOME/.env"; set +a
-fi
+# Load env from config/.env (single source of truth)
 if [ -f "$AB_HOME/config/.env" ]; then
-  # Only load keys not already set — mirror dotenv's override:false semantics
-  while IFS='=' read -r key val; do
-    [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
-    [ -n "${!key:-}" ] && continue
-    export "$key=$val"
-  done < <(grep -E '^[A-Z_][A-Z0-9_]*=' "$AB_HOME/config/.env")
+  set -a; source "$AB_HOME/config/.env"; set +a
 fi
 
 SESSION="${TMUX_SESSION:-kiro-bridge}"
