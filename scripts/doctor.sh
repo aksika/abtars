@@ -33,6 +33,21 @@ fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 # Helper: read JSON field via python3
 json_field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],sys.argv[3]))" "$1" "$2" "${3:-0}" 2>/dev/null || echo "${3:-0}"; }
 
+# Helper: cross-platform file mode (replaces stat -c %a which fails on macOS)
+file_mode() { python3 -c "import os; print(oct(os.stat('$1').st_mode & 0o777)[2:])" 2>/dev/null; }
+
+# Helper: process age in seconds from ps -o etime= (POSIX, both macOS + Linux)
+ps_age_seconds() {
+  ps -o etime= -p "$1" 2>/dev/null | python3 -c "
+import sys
+t = sys.stdin.read().strip()
+if not t: sys.exit(1)
+parts = t.replace('-', ':').split(':')
+mul = [1, 60, 3600, 86400]
+print(sum(int(p) * m for p, m in zip(reversed(parts), mul)))
+" 2>/dev/null
+}
+
 # ── Manifest reconciliation (install-time state) ────────────────────────────
 MANIFEST="$AB/current/install-manifest.json"
 if [ -f "$MANIFEST" ] && command -v python3 &>/dev/null; then
@@ -170,7 +185,7 @@ fi # end supervised-only supervisor check
 
 # 1. Directory permissions (sensitive dirs should be 700) -- fix-full only
 for d in "$AB/secret" "$AB/secret/cookies" "$ABMIND/memory"; do
-  if [ -d "$d" ] && [ "$(stat -c %a "$d" 2>/dev/null)" != "700" ]; then
+  if [ -d "$d" ] && [ "$(file_mode "$d")" != "700" ]; then
     if $FIX_FULL; then
       chmod 700 "$d"; fix "$d permissions → 700"
     else
@@ -384,6 +399,73 @@ if $FIX_FULL; then
       warn "git push would fail -- check upstream/auth"
     fi
   fi
+fi
+
+# 16. Hooks health
+HOOKS_CONFIG="$AB/config/hooks.json"
+
+# 16a. hooks.json validity
+if [ -f "$HOOKS_CONFIG" ]; then
+  if ! python3 -c "import json; json.load(open('$HOOKS_CONFIG'))" 2>/dev/null; then
+    warn "hooks.json is not valid JSON — hooks silently disabled"
+  fi
+fi
+
+# 16b. Hooks dir permissions
+if [ -d "$AB/hooks" ]; then
+  HMODE=$(file_mode "$AB/hooks")
+  if [ -n "$HMODE" ] && [ "$HMODE" != "700" ]; then
+    if $FIX; then chmod 700 "$AB/hooks" && fix "hooks dir → 700"
+    else warn "hooks dir mode $HMODE, expected 700 — hooks disabled"; fi
+  fi
+fi
+
+# 16c. Referenced scripts exist + executable
+if [ -f "$HOOKS_CONFIG" ]; then
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    resolved="${cmd/#\~\/.agentbridge/$AB}"
+    resolved="${resolved/#\~/$HOME}"
+    if [ ! -f "$resolved" ]; then
+      warn "hooks.json references missing script: $resolved"
+    elif [ ! -x "$resolved" ]; then
+      if $FIX; then chmod +x "$resolved" && fix "chmod +x $resolved"
+      else warn "hook script not executable: $resolved"; fi
+    fi
+  done < <(python3 -c "
+import json
+try:
+    c = json.load(open('$HOOKS_CONFIG'))
+    for hooks in c.get('hooks', {}).values():
+        for h in hooks or []:
+            print(h.get('command', ''))
+except Exception: pass
+" 2>/dev/null)
+fi
+
+# 16d. Stuck hook processes (>60s)
+if [ -d "$AB/hooks" ]; then
+  while IFS= read -r pid; do
+    AGE=$(ps_age_seconds "$pid")
+    [ -z "$AGE" ] && continue
+    if [ "$AGE" -gt 60 ]; then
+      if $FIX; then
+        kill -TERM "$pid" 2>/dev/null
+        sleep 2
+        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+        fix "killed stuck hook $pid (${AGE}s)"
+      else
+        warn "stuck hook $pid (${AGE}s) — run with --fix"
+      fi
+    fi
+  done < <(pgrep -f "$AB/hooks/" 2>/dev/null)
+fi
+
+# 16e. Hook log file size
+if [ -d "$AB/logs" ]; then
+  while IFS= read -r f; do
+    warn "hook log large: $f ($(du -h "$f" | cut -f1)) — consider rotation"
+  done < <(find "$AB/logs" -name '*.jsonl' -size +100M 2>/dev/null)
 fi
 
 # Summary
