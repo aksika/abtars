@@ -20,8 +20,8 @@
  *     edits config/.env directly post-onboard)
  */
 
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { packagePaths, readManifest } from '../deploy-lib-import.js';
 
 export interface OnboardOptions {
