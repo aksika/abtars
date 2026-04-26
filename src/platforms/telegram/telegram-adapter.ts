@@ -420,7 +420,7 @@ export class TelegramAdapter implements PlatformAdapter {
               await this.api.sendMessage(chatId, `⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}. Try /reset manually.`);
             }
           } else {
-            await this.api.sendMessage(chatId, `✅ ${agentKey} → ${model} (${providerName}). Takes effect on next spawn.`);
+            await this.api.sendMessage(chatId, `✅ ${agentKey} → ${model} (${providerName})`);
           }
         }
       } else if (data.startsWith("model:")) {

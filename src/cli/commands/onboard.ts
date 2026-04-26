@@ -115,7 +115,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
 
   // 1b. User name (for personal greeting)
   const userName = await text({
-    message: 'Your name (the bot will greet you personally)',
+    message: 'Your name',
     placeholder: 'e.g. Alex',
     initialValue: existing?.userName ?? '',
   });
@@ -390,7 +390,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   const owned = new Set([
     'TELEGRAM_BOT_TOKEN', 'MAIN_CHAT_ID',
     'DISCORD_BOT_TOKEN', 'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
-    'DEFAULT_PROVIDER', 'DEFAULT_MODEL', 'USER_DISPLAY_NAME',
+    'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
     'BED_TIME', 'WAKE_TIME', 'GROQ_API_KEY', 'TRUST_MODE',
     ...(providerKeyName ? [providerKeyName] : []),
   ]);
@@ -408,7 +408,6 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     `DEFAULT_PROVIDER=${answers.defaultProvider}`,
     `DEFAULT_MODEL=${answers.defaultModel}`,
   ];
-  if (answers.userName) newBlock.push(`USER_DISPLAY_NAME=${answers.userName}`);
   if (answers.telegramToken) newBlock.push(`TELEGRAM_BOT_TOKEN=${answers.telegramToken}`);
   if (answers.telegramChatId) newBlock.push(`MAIN_CHAT_ID=${answers.telegramChatId}`);
   if (answers.discordBotToken) newBlock.push(`DISCORD_BOT_TOKEN=${answers.discordBotToken}`);
@@ -532,6 +531,19 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       };
       await writeFile(usersPath, JSON.stringify(users, null, 2) + '\n', { mode: 0o600 });
       process.stdout.write(`✓ users.json → ${usersPath}\n`);
+    }
+  }
+
+  // Seed abmind user_profile.md with user's name (if abmind is in use and file doesn't exist)
+  if (answers.userName) {
+    const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(paths.home), '.abmind');
+    const profileDir = join(abmindHome, 'memory', 'core');
+    const profilePath = join(profileDir, 'user_profile.md');
+    const { existsSync: profileExists } = await import('node:fs');
+    if (!profileExists(profilePath)) {
+      await mkdir(profileDir, { recursive: true });
+      await writeFile(profilePath, `# User Profile\n\nName: ${answers.userName}\n`, { mode: 0o600 });
+      process.stdout.write(`✓ user_profile.md → ${profilePath}\n`);
     }
   }
 
