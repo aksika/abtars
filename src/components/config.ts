@@ -58,9 +58,7 @@ async function validateCliPath(cliPath: string): Promise<void> {
  *
  * Env-file loading is the caller's responsibility (dotenv or `--env-file`).
  */
-export async function loadAndValidateConfig(
-  platforms: { telegram: boolean; discord: boolean } = { telegram: true, discord: false },
-): Promise<Config> {
+export async function loadAndValidateConfig(): Promise<Config> {
   // Env is loaded by src/boot/env.ts (imported first in main.ts). By the time
   // this function runs, `.env` + `.env.skills` + `./.env` are already merged
   // into process.env with process.env precedence preserved.
@@ -74,9 +72,9 @@ export async function loadAndValidateConfig(
     logWarn("config", "transport.json not loaded — using .env defaults");
   }
 
-  // --- TELEGRAM_BOT_TOKEN (required only if telegram platform requested) ---
+  // --- TELEGRAM_BOT_TOKEN (required) ---
   const token = getEnv().telegramBotToken ?? "";
-  if (platforms.telegram && !BOT_TOKEN_REGEX.test(token)) {
+  if (!BOT_TOKEN_REGEX.test(token)) {
     throw new Error(
       "TELEGRAM_BOT_TOKEN is missing or invalid — expected format: <numeric_id>:<alphanumeric_secret>",
     );
@@ -84,20 +82,13 @@ export async function loadAndValidateConfig(
 
   // --- User IDs (from users.json, fallback to MAIN_CHAT_ID) ---
   const registry = loadUsers();
-  const mainChatId = getEnv().mainChatId;
-
-  // Collect IDs from whichever platform is active
   const telegramIds = registry.users
     .filter(u => u.platforms.telegram)
     .map(u => u.platforms.telegram!);
-  if (mainChatId && platforms.telegram) telegramIds.push(parseInt(mainChatId, 10));
+  const mainChatId = getEnv().mainChatId;
+  if (mainChatId) telegramIds.push(parseInt(mainChatId, 10));
   const allowedUserIds = new Set(telegramIds.filter(id => id > 0));
-
-  const discordIds = registry.users
-    .filter(u => u.platforms.discord)
-    .map(u => u.platforms.discord!);
-
-  if (allowedUserIds.size === 0 && discordIds.length === 0 && (platforms.telegram || platforms.discord)) {
+  if (allowedUserIds.size === 0) {
     throw new Error(
       "No users configured — create config/users.json or set MAIN_CHAT_ID",
     );
