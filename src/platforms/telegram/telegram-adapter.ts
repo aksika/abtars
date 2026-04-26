@@ -259,15 +259,9 @@ export class TelegramAdapter implements PlatformAdapter {
             tc.agents[role] = { model: defaults[role]?.model ?? profDefault.model, provider: providerName };
           }
         } else {
-          // No defaults — keep current models, repoint provider
-          tc.agents["professor"] = { ...tc.agents["professor"]!, provider: providerName };
-          if (oldType !== newType && tc.agents["professor"]?.fallbacks) {
-            tc.agents["professor"]!.fallbacks = [];
-          }
-          for (const [agent, assignment] of Object.entries(tc.agents)) {
-            if (agent === "professor") continue;
-            tc.agents[agent] = { ...assignment, provider: providerName };
-          }
+          // No defaults — refuse switch (model names may be invalid on the new provider)
+          await this.api.sendMessage(chatId, `❌ Provider ${providerName} has no defaults configured. Edit transport.json to add a defaults block before switching.`);
+          return;
         }
         writeTransportConfig(tc, `provider → ${providerName}${defaults ? " (defaults loaded)" : " (all agents)"}`);
 
