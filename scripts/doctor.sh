@@ -255,15 +255,11 @@ if [ -f "$DB" ]; then
 fi
 
 # 9. Embedding health (only if EMBEDDING_ENABLED=true)
-if grep -q "^EMBEDDING_ENABLED=true" "$AB/.env" 2>/dev/null; then
+if grep -q "^EMBEDDING_ENABLED=true" "$AB/config/.env" "$AB/.env" 2>/dev/null; then
   if ! command -v ollama &>/dev/null; then
     warn "EMBEDDING_ENABLED but ollama not installed"
   elif ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
-    if $FIX; then
-      sudo systemctl start ollama 2>/dev/null && sleep 2 && fix "started ollama service"
-    else
-      warn "EMBEDDING_ENABLED but ollama not running"
-    fi
+    warn "EMBEDDING_ENABLED but ollama not running — start with: systemctl start ollama"
   elif ! ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
     if $FIX; then
       ollama pull nomic-embed-text &>/dev/null && fix "pulled nomic-embed-text model"
