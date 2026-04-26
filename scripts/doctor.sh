@@ -20,17 +20,17 @@ case "${1:-}" in
   --fix)      FIX=true ;;
 esac
 
-# Read install mode from manifest (simple skips supervisor checks)
-INSTALL_MODE=$(json_field "$AB/manifest.json" installMode supervised)
-if [[ "$INSTALL_MODE" != "simple" && "$INSTALL_MODE" != "supervised" ]]; then
-  INSTALL_MODE="supervised"
-fi
-
 warn() { echo "[doctor] WARN: $1"; WARNS=$((WARNS + 1)); }
 fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 
 # Helper: read JSON field via python3
 json_field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],sys.argv[3]))" "$1" "$2" "${3:-0}" 2>/dev/null || echo "${3:-0}"; }
+
+# Read install mode from manifest (simple skips supervisor checks)
+INSTALL_MODE=$(json_field "$AB/manifest.json" installMode supervised)
+if [[ "$INSTALL_MODE" != "simple" && "$INSTALL_MODE" != "supervised" ]]; then
+  INSTALL_MODE="supervised"
+fi
 
 # Helper: cross-platform file mode (replaces stat -c %a which fails on macOS)
 file_mode() { python3 -c "import os; print(oct(os.stat('$1').st_mode & 0o777)[2:])" 2>/dev/null; }

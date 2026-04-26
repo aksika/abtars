@@ -132,13 +132,12 @@ export async function loadAndValidateConfig(): Promise<Config> {
       );
     }
   } catch (err) {
-    // Re-throw our own descriptive error; wrap unknown fs errors.
     if (err instanceof Error && err.message.startsWith("WORKING_DIR")) {
       throw err;
     }
-    throw new Error(
-      `WORKING_DIR "${workingDir}" does not exist or is not accessible`,
-    );
+    // Create if missing (lazy dir)
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(workingDir, { recursive: true });
   }
 
   // --- TRUST_MODE (optional boolean, default false) ---
