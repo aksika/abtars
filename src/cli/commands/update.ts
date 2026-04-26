@@ -85,11 +85,20 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
     process.stdout.write(`\nUpdate complete: ${staged.version}\n`);
 
-    // Refresh all scripts from repo scripts/ directory
+    // Refresh scripts from repo — manifest-driven
+    const { loadManifest } = await import('../install-manifest.js');
+    const installManifest = loadManifest(process.cwd());
     const repoScripts = join(process.cwd(), 'scripts');
     const destScripts = join(paths.home, 'scripts');
     await mkdir(destScripts, { recursive: true });
-    const scriptFiles = await readdir(repoScripts).catch(() => [] as string[]);
+    const allScriptFiles = await readdir(repoScripts).catch(() => [] as string[]);
+    // Filter by manifest include patterns
+    const matchesInclude = (name: string): boolean =>
+      installManifest.scripts.include.some(pattern => {
+        const ext = pattern.replace("*", "");
+        return name.endsWith(ext);
+      });
+    const scriptFiles = allScriptFiles.filter(matchesInclude);
     const home = process.env['HOME'] ?? '';
     let serviceChanged = false;
 
@@ -97,26 +106,34 @@ export async function update(opts: UpdateOptions): Promise<number> {
     const { resolveInstallMode } = await import('../install-mode.js');
     const installMode = resolveInstallMode(paths.home);
 
+    const isExecutable = (name: string): boolean => {
+      const ext = installManifest.scripts.executable.replace("*", "");
+      return name.endsWith(ext);
+    };
+
     for (const name of scriptFiles) {
       await copyFile(join(repoScripts, name), join(destScripts, name));
-      if (name.endsWith('.sh')) await chmod(join(destScripts, name), 0o755);
+      if (isExecutable(name)) await chmod(join(destScripts, name), 0o755);
       // Root-level copies for launcher scripts watchdog/launchd reference directly
-      if (name.endsWith('.sh')) {
+      if (isExecutable(name)) {
         await copyFile(join(repoScripts, name), join(paths.home, name));
         await chmod(join(paths.home, name), 0o755);
       }
       // macOS: template + install LaunchAgent plist (supervised only)
-      if (name.endsWith('.plist') && process.platform === 'darwin' && home && installMode === 'supervised') {
+      const macService = installManifest.services.supervised.macos;
+      if (macService && name === macService.plist && process.platform === 'darwin' && home && installMode === 'supervised') {
         const launchAgentsDir = join(home, 'Library', 'LaunchAgents');
         await mkdir(launchAgentsDir, { recursive: true });
         const dst = join(launchAgentsDir, name);
         const oldContent = await readFile(dst, 'utf-8').catch(() => '');
-        const templated = (await readFile(join(repoScripts, name), 'utf-8')).replace(/\{\{HOME\}\}/g, home);
+        let templated = await readFile(join(repoScripts, name), 'utf-8');
+        for (const ph of macService.placeholders) templated = templated.replaceAll(ph, home);
         await writeFile(dst, templated);
         if (oldContent !== templated) serviceChanged = true;
       }
       // Linux: install systemd user service (supervised only)
-      if (name.endsWith('.service') && process.platform === 'linux' && home && installMode === 'supervised') {
+      const linuxService = installManifest.services.supervised.linux;
+      if (linuxService?.units.includes(name) && process.platform === 'linux' && home && installMode === 'supervised') {
         const systemdDir = join(home, '.config', 'systemd', 'user');
         await mkdir(systemdDir, { recursive: true });
         const dst = join(systemdDir, name);
@@ -135,12 +152,14 @@ export async function update(opts: UpdateOptions): Promise<number> {
       }
     }
 
-    // Run any pending migrations (excluding 003-flat-to-releases, which is
-    // gated behind `install --upgrade`). 001/002 are safe to run here.
+    // Run pending migrations — manifest-driven
+    const updateMigrations = installManifest.postInstall
+      .filter(p => p.when === "update" && p.run === "migration")
+      .map(p => p.id);
     const migrationResults = await runMigrations({
       home: paths.home,
       dryRun: false,
-      only: ['001-env-memory-to-config', '002-env-skills-to-config'],
+      only: updateMigrations,
     });
     const applied = migrationResults.filter((r) => r.applied);
     if (applied.length > 0) {
