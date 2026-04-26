@@ -244,5 +244,41 @@
     ],
     "description": "InclusionAI Ling 2.6 1T. Free OpenRouter. 262K context.",
     "validatedAt": "2026-04-24"
+  },
+  "google/gemini-2.5-flash": {
+    "contextWindow": 1000000,
+    "maxOutput": 65536,
+    "rank": 3,
+    "cost": {
+      "input": 0.15,
+      "output": 0.6
+    },
+    "transports": [
+      "openrouter"
+    ]
+  },
+  "moonshotai/kimi-k2.5:cloud": {
+    "contextWindow": 262144,
+    "maxOutput": 16384,
+    "rank": 2,
+    "cost": {
+      "input": 0.0,
+      "output": 0.0
+    },
+    "transports": [
+      "openrouter"
+    ]
+  },
+  "minimax/minimax-m2.5:cloud": {
+    "contextWindow": 128000,
+    "maxOutput": 8192,
+    "rank": 3,
+    "cost": {
+      "input": 0.0,
+      "output": 0.0
+    },
+    "transports": [
+      "openrouter"
+    ]
   }
 }
