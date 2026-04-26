@@ -233,9 +233,9 @@ export class TelegramAdapter implements PlatformAdapter {
           await this.api.sendMessage(chatId, `📋 Models on ${resolved.providerName}:`, { reply_markup: { inline_keyboard: buttons } });
         }
       } else if (data.startsWith("mprovglobal:")) {
-        // Global provider switch — apply to professor + cascade
+        // Global provider switch — apply defaults if available, cascade all agents
         const providerName = data.slice(12);
-        const { loadTransport, writeTransportConfig, resolveAgent } = await import("../../components/transport-config.js");
+        const { loadTransport, writeTransportConfig, resolveAgent, loadProviderDefaults } = await import("../../components/transport-config.js");
         const tc = loadTransport();
         if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
         const newProvider = tc.providers[providerName];
@@ -245,20 +245,33 @@ export class TelegramAdapter implements PlatformAdapter {
         const oldType = prof?.provider.transport ?? "api";
         const newType = newProvider.transport;
 
-        // Update professor's provider (keep current model)
-        const profModel = tc.agents["professor"]?.model ?? "";
-        tc.agents["professor"] = { ...tc.agents["professor"]!, provider: providerName };
+        // Load defaults for the new provider (if defined)
+        const defaults = loadProviderDefaults(providerName, tc);
+        if (defaults) {
+          // Apply defaults: professor gets model + fallbacks, subagents get model
+          const profDefault = defaults["professor"]!;
+          tc.agents["professor"] = {
+            model: profDefault.model,
+            provider: providerName,
+            fallbacks: profDefault.fallbacks?.map(m => ({ model: m, provider: providerName })) ?? [],
+          };
+          for (const role of ["dreamy", "browsie", "coding"]) {
+            tc.agents[role] = { model: defaults[role]?.model ?? profDefault.model, provider: providerName };
+          }
+        } else {
+          // No defaults — keep current models, repoint provider
+          tc.agents["professor"] = { ...tc.agents["professor"]!, provider: providerName };
+          if (oldType !== newType && tc.agents["professor"]?.fallbacks) {
+            tc.agents["professor"]!.fallbacks = [];
+          }
+          for (const [agent, assignment] of Object.entries(tc.agents)) {
+            if (agent === "professor") continue;
+            tc.agents[agent] = { ...assignment, provider: providerName };
+          }
+        }
+        writeTransportConfig(tc, `provider → ${providerName}${defaults ? " (defaults loaded)" : " (all agents)"}`);
 
-        // Cascade all subagents to new provider
-        for (const [agent, assignment] of Object.entries(tc.agents)) {
-          if (agent === "professor") continue;
-          tc.agents[agent] = { ...assignment, provider: providerName };
-        }
-        // Remove fallbacks if cross-transport
-        if (oldType !== newType && tc.agents["professor"]?.fallbacks) {
-          tc.agents["professor"]!.fallbacks = [];
-        }
-        writeTransportConfig(tc, `provider → ${providerName} (all agents)`);
+        const profModel = tc.agents["professor"]!.model;
 
         if (oldType === newType && oldType === "api" && "switchProvider" in this.deps.transport) {
           // Same transport type — hot swap professor

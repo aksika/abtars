@@ -5,7 +5,7 @@ import { getEnv } from "./env-schema.js";
  */
 
 import { AcpTransport } from "./transport/acp-transport.js";
-import { logInfo } from "./logger.js";
+import { logInfo, logWarn } from "./logger.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
 export type AgentRole = "professor" | "dreamy" | "browsie" | "coding" | "cron";
@@ -114,6 +114,17 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       });
     }
 
+    // Append fallbackChain entries as last-resort candidates
+    const chain = agent.provider.fallbackChain ?? [];
+    for (const chainModel of chain) {
+      if (!candidates.some(c => c.model === chainModel)) {
+        candidates.push({
+          endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1",
+          apiKey, model: chainModel, maxContext: agent.contextWindow,
+        });
+      }
+    }
+
     // Use shared registry if provided, otherwise create isolated one
     const { ModelHealthRegistry } = await import("./transport/model-health-registry.js");
     const policy = new FallbackPolicy(candidates, registry ?? new ModelHealthRegistry());
@@ -129,16 +140,32 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     return { transport, model: agent.model };
   }
 
-  // ACP path
+  // ACP path — try configured model, then fallbackChain on failure
   const { loadAndValidateConfig } = await import("./config.js");
   const config = await loadAndValidateConfig();
-  const transport = createAgentTransport(SUBAGENT_ACP_ROLE[role], {
-    cliPath: agent.provider.cli ?? config.transport.agentCliPath,
-    workingDir: config.transport.workingDir,
-    agentCli: agent.provider.cli ?? config.transport.agentCli,
-    model: agent.model,
-  });
-  await transport.initialize();
-  logInfo("subagent", `${role} transport: ACP ${agent.providerName} (model=${agent.model})`);
-  return { transport, model: agent.model };
+  const chain = agent.provider.fallbackChain ?? [];
+  const modelsToTry = [agent.model, ...chain.filter(m => m !== agent.model)];
+
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const model = modelsToTry[i]!;
+    const transport = createAgentTransport(SUBAGENT_ACP_ROLE[role], {
+      cliPath: agent.provider.cli ?? config.transport.agentCliPath,
+      workingDir: config.transport.workingDir,
+      agentCli: agent.provider.cli ?? config.transport.agentCli,
+      model,
+    });
+    try {
+      await transport.initialize();
+      if (i > 0) logWarn("subagent", `${role}: configured model failed, fell back to ${model}`);
+      logInfo("subagent", `${role} transport: ACP ${agent.providerName} (model=${model}${i > 0 ? ", fallback" : ""})`);
+      return { transport, model };
+    } catch (err) {
+      if (i < modelsToTry.length - 1) {
+        logWarn("subagent", `${role}: model ${model} init failed (${err instanceof Error ? err.message : String(err)}), trying ${modelsToTry[i + 1]}`);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error(`${role}: all models exhausted (tried ${modelsToTry.join(", ")})`);
 }

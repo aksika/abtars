@@ -39,6 +39,8 @@ export type ProviderConfig = {
   cli?: string;
   endpoint?: string;
   apiKeyEnv?: string;
+  defaults?: Record<string, { model: string; fallbacks?: string[] }>;
+  fallbackChain?: string[];
 };
 
 export type TransportDefaults = {
@@ -305,6 +307,22 @@ export function resetToDefaults(): boolean {
 
 export function getAvailableProviders(tc: TransportConfig): Array<{ name: string; config: ProviderConfig }> {
   return Object.entries(tc.providers).map(([name, config]) => ({ name, config }));
+}
+
+/** Load a provider's defaults block. Missing subagents inherit professor's model. */
+export function loadProviderDefaults(providerName: string, tc?: TransportConfig | null): Record<string, { model: string; fallbacks?: string[] }> | null {
+  const config = tc ?? loadTransport();
+  if (!config) return null;
+  const provider = config.providers[providerName];
+  if (!provider?.defaults) return null;
+  const defaults = provider.defaults;
+  if (!defaults["professor"]) return null;
+  const profModel = defaults["professor"].model;
+  const result: Record<string, { model: string; fallbacks?: string[] }> = { ...defaults };
+  for (const role of ["dreamy", "browsie", "coding"]) {
+    if (!result[role]) result[role] = { model: profModel };
+  }
+  return result;
 }
 
 // ── Model helpers ───────────────────────────────────────────────────────────

@@ -530,8 +530,11 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     lines.push(line);
   }
   lines.push("  Cron: inherits Professor");
+  if (prof?.provider.fallbackChain?.length) {
+    lines.push(`\n🛟 Fallback chain: ${prof.provider.fallbackChain.join(" → ")}`);
+  }
   if (ctx.hailMary) {
-    lines.push(`\n🚨 hailMary: ${ctx.hailMary.model} `);
+    lines.push(`🚨 hailMary: ${ctx.hailMary.model} `);
   }
   lines.push("\nUse /models change to switch.");
   await ctx.reply(lines.join("\n"));

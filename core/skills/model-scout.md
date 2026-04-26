@@ -8,7 +8,15 @@ User asks about model recommendations, best deals, or you need to evaluate if a 
 ## Config files
 
 - **models.json** — `~/.agentbridge/config/models.json` (hot-reloaded)
-- **transport.json** — `~/.agentbridge/config/transport.json` (lists providers)
+- **transport.json** — `~/.agentbridge/config/transport.json` (lists providers, defaults, fallbackChain)
+
+## transport.json provider fields (relevant to scouting)
+
+Each provider in `transport.json` may have:
+- **`defaults`** — `Record<agent, { model, fallbacks? }>` — preset models loaded on `/model change → provider`. Professor is required; missing subagents inherit professor's model.
+- **`fallbackChain`** — `string[]` — ordered list of always-available models tried when the configured model fails. Used by subagent runtime (not professor).
+
+When proposing new models, consider whether they should be added to a provider's `defaults` or `fallbackChain`.
 
 ## models.json schema
 
@@ -101,7 +109,8 @@ The script automatically:
 ### 5. Test
 
 ```
-/models quick <model>
+/model change → pick provider → verify defaults loaded
+/model (check fallback chain displayed)
 ```
 
 ## Liveness test
