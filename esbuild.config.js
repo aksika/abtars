@@ -61,7 +61,7 @@ const result = await esbuild.build({
     agentbridge: "src/main.ts",
     "agentbridge-cli": "src/cli/agentbridge.ts",
     "agentbridge-browser": "src/cli/agentbridge-browser.ts",
-    "agentbridge-restart": "src/cli/agentbridge-restart.ts",
+    "agentbridge-restart": "src/cli/commands/restart.ts",
     "agentbridge-tweet": "src/cli/agentbridge-tweet.ts",
   },
   bundle: true,
