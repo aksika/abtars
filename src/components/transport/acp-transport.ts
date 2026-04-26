@@ -199,6 +199,17 @@ export class AcpTransport implements IKiroTransport {
       this.responseChunks.delete(sessionId);
       return chunks.join("") || "(no response)";
     } finally {
+      // AfterPrompt hook — observe-only
+      const durationMs = Date.now() - this.promptStartedAt;
+      import("../hooks/hook-system.js").then(({ hasHooks, fire }) => {
+        if (!hasHooks("AfterPrompt")) return;
+        fire("AfterPrompt", {
+          event: "AfterPrompt", timestamp: new Date().toISOString(),
+          sessionKey, platform: "", userId: "",
+          model: this.modelId ?? "unknown", durationMs,
+          inputTokens: null, outputTokens: null,
+        }).catch(() => {});
+      }).catch(() => {});
       this._promptActive = false;
     }
   }

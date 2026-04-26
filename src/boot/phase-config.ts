@@ -60,4 +60,8 @@ export async function phaseConfig(ctx: BootCtx): Promise<void> {
 
   // Truncate launchd.log on startup — bridge logger takes over, previous crash output already captured
   try { writeFileSync(join(agentBridgeHome(), "logs", "launchd.log"), "", "utf-8"); } catch { /* */ }
+
+  // Load hooks config
+  const { loadHookConfig } = await import("../components/hooks/hook-system.js");
+  loadHookConfig();
 }

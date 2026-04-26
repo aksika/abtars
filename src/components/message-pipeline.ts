@@ -118,6 +118,21 @@ export async function handleInboundMessage(
   await runPipeline(ctx, [voiceMiddleware, commandMiddleware, busyGuardMiddleware]);
   if (ctx.handled) return;
 
+  // --- BeforeMessage hook ---
+  const { hasHooks, fire: fireHook } = await import("./hooks/hook-system.js");
+  if (hasHooks("BeforeMessage")) {
+    const userId = msg.sessionKey.includes(":") ? msg.sessionKey.split(":")[0]! : "master";
+    const result = await fireHook("BeforeMessage", {
+      event: "BeforeMessage", timestamp: new Date().toISOString(),
+      sessionKey: msg.sessionKey, platform: msg.platform, userId,
+      chatId: String(ctx.chatId), text: ctx.text,
+    });
+    if (result?.decision === "block") {
+      logInfo(TAG, `BeforeMessage hook blocked: ${result.reason ?? "no reason"}`);
+      return;
+    }
+  }
+
   // --- Core transport/response handling (will become middleware incrementally) ---
   const {
     transport, codingMode, memory, memoryConfig,
@@ -384,6 +399,16 @@ export async function handleInboundMessage(
     const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${intermediateDelivered ? " (streamed)" : ""}${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
     updateBridgeLockField("lastPromptAt", Date.now());
+
+    // --- AfterMessage hook ---
+    if (hasHooks("AfterMessage")) {
+      fireHook("AfterMessage", {
+        event: "AfterMessage", timestamp: new Date().toISOString(),
+        sessionKey, platform: msg.platform, userId,
+        chatId: String(chatId), text: text,
+        response: userResponse, model: ("currentModel" in transport ? String((transport as Record<string, unknown>).currentModel) : "unknown"), success: true,
+      }).catch(() => {});
+    }
     // --- Context window management ---
     {
       const { runCompactionGuard } = await import("./pipeline/compaction-guard.js");
@@ -393,6 +418,16 @@ export async function handleInboundMessage(
     logError(TAG, `Error for ${sessionKey} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
     if (adapter.setReaction && msg.messageId) {
       await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+    }
+
+    // AfterMessage hook on error
+    if (hasHooks("AfterMessage")) {
+      fireHook("AfterMessage", {
+        event: "AfterMessage", timestamp: new Date().toISOString(),
+        sessionKey, platform: msg.platform, userId,
+        chatId: String(chatId), text: text, success: false,
+        error: err instanceof Error ? err.message : String(err),
+      }).catch(() => {});
     }
 
     // Auto-reset on context window overflow (ValidationException or actual context errors)

@@ -127,5 +127,11 @@ export async function startBridge(): Promise<number> {
     logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
   }
 
+  // Fire BridgeStart hook after all phases complete
+  const { hasHooks, fire } = await import("./components/hooks/hook-system.js");
+  if (hasHooks("BridgeStart")) {
+    await fire("BridgeStart", { event: "BridgeStart", timestamp: new Date().toISOString(), sessionKey: "", platform: "", userId: "" });
+  }
+
   return bridge.waitForExit();
 }

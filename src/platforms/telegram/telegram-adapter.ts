@@ -91,6 +91,7 @@ export class TelegramAdapter implements PlatformAdapter {
       { command: "compact", description: "Compact context window" },
       { command: "status", description: "Bridge status" },
       { command: "mcp", description: "MCP server status" },
+      { command: "hooks", description: "List configured hooks" },
       { command: "stop", description: "Stop current response" },
       { command: "ctrlc", description: "Stop current response" },
       { command: "models", description: "Model, transport & agents" },

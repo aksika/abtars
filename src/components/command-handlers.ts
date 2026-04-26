@@ -91,6 +91,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/wakeup": handleWakeup,
   "/sleep": handleSleep,
   "/mcp": handleMcp,
+  "/hooks": handleHooks,
 };
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
@@ -160,16 +161,29 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
 
 /** Core new-session logic — reusable from model-switch paths. */
 export async function triggerNewSession(ctx: CommandContext, reason = "new-session"): Promise<void> {
+  // SessionEnd hook before teardown
+  const { hasHooks, fire: fireHook } = await import("./hooks/hook-system.js");
+  if (hasHooks("SessionEnd")) {
+    await fireHook("SessionEnd", { event: "SessionEnd", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason }).catch(() => {});
+  }
   await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
   await resetAndPrepare({
     transport: ctx.transport, sessionKey: ctx.sessionKey,
     reason, sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
+  // SessionStart hook after reset
+  if (hasHooks("SessionStart")) {
+    await fireHook("SessionStart", { event: "SessionStart", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason }).catch(() => {});
+  }
 }
 
 /** Core reset-session logic — clears cache, rebuilds transport, resets session. */
 export async function triggerResetSession(ctx: CommandContext): Promise<void> {
+  const { hasHooks, fire: fireHook } = await import("./hooks/hook-system.js");
+  if (hasHooks("SessionEnd")) {
+    await fireHook("SessionEnd", { event: "SessionEnd", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason: "reset-transport" }).catch(() => {});
+  }
   await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
   const { clearTransportCache } = await import("./transport-config.js");
   clearTransportCache();
@@ -179,6 +193,9 @@ export async function triggerResetSession(ctx: CommandContext): Promise<void> {
     reason: "reset-transport", sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
+  if (hasHooks("SessionStart")) {
+    await fireHook("SessionStart", { event: "SessionStart", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason: "reset-transport" }).catch(() => {});
+  }
 }
 
 async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
@@ -747,6 +764,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/compact — Compact context window (summarize + fresh session)",
     "/status — Bridge status, transport, heartbeat",
     "/mcp — MCP server status",
+    "/hooks — List configured hooks",
     "/stop, /ctrlc — Stop current response",
     "/memory — Memory storage statistics",
     "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
@@ -800,6 +818,21 @@ async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean
     } catch { /* dir doesn't exist */ }
   }
   await ctx.reply(total > 0 ? `📚 Skills (${total}):\n\n${sections.join("\n\n")}` : "📚 No skills found.");
+  return true;
+}
+
+async function handleHooks(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { getHookSummary } = await import("./hooks/hook-system.js");
+  const summary = getHookSummary();
+  const lines = ["🪝 Hooks:"];
+  for (const { event, hooks } of summary) {
+    if (hooks.length === 0) {
+      lines.push(`  ${event}: (none)`);
+    } else {
+      lines.push(`  ${event}: ${hooks.map(h => `${h.name} (${h.timeout ?? 5000}ms)`).join(", ")}`);
+    }
+  }
+  await ctx.reply(lines.join("\n"));
   return true;
 }
 

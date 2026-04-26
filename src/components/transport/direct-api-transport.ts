@@ -99,6 +99,18 @@ export class DirectApiTransport implements IKiroTransport {
       if (!this.policy) throw new Error("DirectApiTransport requires a FallbackPolicy");
       return await this.sendWithPolicy(session, ac.signal);
     } finally {
+      // AfterPrompt hook — observe-only, fire-and-forget
+      const durationMs = Date.now() - (this._promptStartedAt ?? Date.now());
+      import("../hooks/hook-system.js").then(({ hasHooks, fire }) => {
+        if (!hasHooks("AfterPrompt")) return;
+        fire("AfterPrompt", {
+          event: "AfterPrompt", timestamp: new Date().toISOString(),
+          sessionKey, platform: "", userId: "",
+          model: this.activeModel, durationMs,
+          inputTokens: this._lastPromptTokens || null,
+          outputTokens: null, // not tracked per-prompt in DirectApi
+        }).catch(() => {});
+      }).catch(() => {});
       this._promptStartedAt = null;
       this.abortControllers.delete(sessionKey);
     }
