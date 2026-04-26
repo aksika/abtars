@@ -1,0 +1,38 @@
+{
+  "manifestVersion": 2,
+  "directories": [
+    { "path": "config", "mode": "0700" },
+    { "path": "logs" },
+    { "path": "scripts" },
+    { "path": "bin" },
+    { "path": "releases" }
+  ],
+  "lazyRoots": [
+    "memory", "workspace", "reports", "received", "backup",
+    "skills", "agents", "tasks", "prompts", "core"
+  ],
+  "configSeeds": [
+    { "source": ".env.example", "dest": "config/.env", "mode": "0600" },
+    { "source": ".env.skills.example", "dest": "config/.env.skills", "mode": "0600" }
+  ],
+  "requiredConfigs": [
+    { "path": "config/transport.json", "remediation": "run 'agentbridge onboard'" },
+    { "path": "config/users.json", "remediation": "run 'agentbridge onboard'" }
+  ],
+  "scripts": {
+    "include": ["*.sh", "*.py", "*.plist", "*.service"],
+    "executable": "*.sh"
+  },
+  "services": {
+    "supervised": {
+      "macos": { "plist": "com.agentbridge.watchdog.plist", "placeholders": ["{{HOME}}"] },
+      "linux": { "units": ["agentbridge@.service", "agentbridge-watchdog.service"] }
+    }
+  },
+  "cliWrappers": ["agentbridge", "agentbridge-browser", "agentbridge-restart", "agentbridge-tweet"],
+  "postInstall": [
+    { "id": "001-env-memory-to-config", "run": "migration", "when": "update" },
+    { "id": "002-env-skills-to-config", "run": "migration", "when": "update" },
+    { "id": "003-flat-to-releases", "run": "migration", "when": "install-upgrade" }
+  ]
+}

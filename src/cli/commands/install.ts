@@ -23,10 +23,9 @@ export interface InstallOptions {
   readonly mode?: "simple" | "supervised";
 }
 
-// Files placed into ~/.agentbridge/bin/ at install time. Each is a thin
-// wrapper that invokes `node current/dist/cli/<name>.js "$@"`. Regenerated
-// on every install / flat-to-releases migration.
-const CLI_WRAPPERS = ['agentbridge', 'agentbridge-browser', 'agentbridge-restart', 'agentbridge-tweet'] as const;
+// CLI wrappers are read from install-manifest.json at runtime.
+// Each is a thin wrapper that invokes `node current/dist/cli/<name>.js "$@"`.
+// Regenerated on every install / flat-to-releases migration.
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -73,42 +72,25 @@ async function isFlatLayout(home: string): Promise<boolean> {
 }
 
 async function createSkeleton(home: string, dryRun: boolean): Promise<void> {
-  const dirs = [
-    join(home, 'config'),
-    join(home, 'logs'),
-    join(home, 'memory'),
-    join(home, 'reports'),
-    join(home, 'received'),
-    join(home, 'workspace'),
-    join(home, 'backup'),
-    join(home, 'bin'),
-    join(home, 'releases'),
-    join(home, 'skills', 'core'),
-    join(home, 'skills', 'personal'),
-    join(home, 'skills', 'auto'),
-    join(home, 'skills', 'downloaded'),
-    join(home, 'agents'),
-    join(home, 'tasks'),
-    join(home, 'prompts'),
-    join(home, 'core'),
-  ];
+  const { loadManifest } = await import('../install-manifest.js');
+  const manifest = loadManifest();
+  const dirs = manifest.directories.map(d => join(home, d.path));
   if (dryRun) {
     process.stdout.write(`[dry-run] mkdir -p:\n  ${dirs.join('\n  ')}\n`);
     return;
   }
-  for (const d of dirs) await mkdir(d, { recursive: true });
+  for (const d of manifest.directories) {
+    await mkdir(join(home, d.path), { recursive: true, mode: d.mode ? parseInt(d.mode, 8) : undefined });
+  }
 }
 
-async function seedConfig(repoRoot: string, configDir: string, dryRun: boolean): Promise<readonly string[]> {
-  // Minimal seed: copy .env.example → config/.env if config/.env missing.
-  // Additional config files (transport.json, models.json, users.json) are
-  // operator-provided or created by Phase 3 onboard — we don't seed those.
-  const pairs: Array<readonly [string, string]> = [
-    [join(repoRoot, '.env.example'), join(configDir, '.env')],
-    [join(repoRoot, '.env.skills.example'), join(configDir, '.env.skills')],
-  ];
+async function seedConfig(repoRoot: string, _configDir: string, dryRun: boolean, home: string): Promise<readonly string[]> {
+  const { loadManifest } = await import('../install-manifest.js');
+  const manifest = loadManifest(repoRoot);
   const seeded: string[] = [];
-  for (const [src, dst] of pairs) {
+  for (const seed of manifest.configSeeds) {
+    const src = join(repoRoot, seed.source);
+    const dst = join(home, seed.dest);
     if (!(await exists(src))) continue;
     if (await exists(dst)) continue;
     if (dryRun) {
@@ -116,7 +98,7 @@ async function seedConfig(repoRoot: string, configDir: string, dryRun: boolean):
       continue;
     }
     const content = await readFile(src, 'utf-8');
-    await writeFile(dst, content, { mode: 0o600 });
+    await writeFile(dst, content, { mode: seed.mode ? parseInt(seed.mode, 8) : 0o644 });
     seeded.push(basename(dst));
   }
   return seeded;
@@ -257,16 +239,18 @@ export async function install(opts: InstallOptions): Promise<number> {
   process.stdout.write(`✓ skeleton at ${home}\n`);
 
   // Seed config from examples (only missing ones)
-  const seeded = await seedConfig(repoRoot, paths.config, opts.dryRun);
+  const seeded = await seedConfig(repoRoot, paths.config, opts.dryRun, home);
   if (seeded.length > 0) {
     process.stdout.write(`✓ seeded config: ${seeded.join(', ')}\n`);
   }
 
   // Write wrappers (always overwrite — they're regenerable thin shims)
+  const { loadManifest: loadInstallManifest } = await import('../install-manifest.js');
+  const installManifest = loadInstallManifest(repoRoot);
   if (!opts.dryRun) {
     await mkdir(paths.bin, { recursive: true });
   }
-  for (const name of CLI_WRAPPERS) {
+  for (const name of installManifest.cliWrappers) {
     await writeWrapper(paths.bin, name, paths.current, opts.dryRun);
   }
   process.stdout.write(`✓ wrappers in ${paths.bin}\n`);
@@ -274,7 +258,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   // Reconcile PATH symlinks
   if (!opts.dryRun) await mkdir(userBinDir, { recursive: true });
   const refused: string[] = [];
-  for (const name of CLI_WRAPPERS) {
+  for (const name of installManifest.cliWrappers) {
     const r = await reconcilePathLink(paths.bin, userBinDir, name, opts.force, opts.dryRun);
     if (r.action === 'refused') {
       refused.push(r.message ?? name);
