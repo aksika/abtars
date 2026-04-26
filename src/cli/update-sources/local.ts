@@ -117,13 +117,38 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
       const version = `${pkgVersion}-${commit}`;
 
       // Install deps into the shared node_modules/ (if not skipped).
-      // We install in the repo's working tree, then copy the resulting
-      // node_modules/ to the home's shared location.
       if (opts.skipInstall !== true) {
         runCmd('npm', ['install', '--no-audit', '--no-fund'], repoRoot);
       }
 
-      // Build dist/
+      // Build: bundle mode (esbuild) or legacy mode (tsc)
+      const useBundle = process.env['AGENTBRIDGE_BUILD_MODE'] !== 'tsc';
+
+      if (useBundle) {
+        // Bundle mode: esbuild → bundle/ + pruned native deps
+        runCmd('npm', ['run', 'bundle'], repoRoot);
+
+        const stagedPath = join(ctx.releasesDir, version);
+        await rm(stagedPath, { recursive: true, force: true });
+        await mkdir(stagedPath, { recursive: true });
+        await cp(join(repoRoot, 'bundle'), join(stagedPath, 'bundle'), { recursive: true });
+
+        // Copy pruned native deps (better-sqlite3 + transitive)
+        const abmindNM = join(repoRoot, '..', 'abmind', 'node_modules');
+        const nativeDir = join(stagedPath, 'node_modules');
+        await mkdir(nativeDir, { recursive: true });
+        for (const dep of ['better-sqlite3', 'bindings', 'file-uri-to-path']) {
+          const src = join(abmindNM, dep);
+          const dst = join(nativeDir, dep);
+          try { await cp(src, dst, { recursive: true, dereference: true }); }
+          catch { /* dep may not exist on all platforms */ }
+        }
+
+        const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));
+        return { version, stagedPath, commit, branch, packageLockHash, source: 'local' };
+      }
+
+      // Legacy tsc mode (AGENTBRIDGE_BUILD_MODE=tsc)
       runCmd('npm', ['run', 'build'], repoRoot);
 
       // Stage releases/<version>/dist/
