@@ -18,6 +18,7 @@ import { backup } from './commands/backup.js';
 import { migrate } from './commands/migrate.js';
 import { onboard } from './commands/onboard.js';
 import { rollback } from './commands/rollback.js';
+import { restart } from './commands/restart.js';
 import { status } from './commands/status.js';
 import { update } from './commands/update.js';
 
@@ -62,6 +63,7 @@ Usage:
   agentbridge migrate [--only <name>] [--dry-run]
   agentbridge doctor [<args passed to doctor.sh>...]
   agentbridge onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
+  agentbridge restart [--cold]
   agentbridge status
 
 See abproject/docs/plans/158-deploy-rewrite.md for the full contract.
@@ -115,6 +117,8 @@ export async function main(argv: readonly string[]): Promise<number> {
         });
       case 'status':
         return await status();
+      case 'restart':
+        return await restart({ cold: flags.get('cold') === true });
       case '':
       case 'help':
       case '--help':

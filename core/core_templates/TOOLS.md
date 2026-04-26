@@ -1,27 +1,23 @@
+---
+alwaysApply: true
+---
 # Tools
 
-These are bash commands. Run them with `execute_bash`. You have shell access — use it.
+All `agentbridge-*` tools are in `~/.agentbridge/bin/`.
 
-Run any tool with `--help` for full usage.
+Run any tool with `--help` for full usage. See linked skill for behavioral rules.
 
-## Essential
+## Memory Tools
 
-```
-abmind recall --translated "kw1,kw2" --chat-id <CHAT_ID>
-abmind store --translated "English" --original "original" --memory-type fact --emotion-score 0 --chat-id <CHAT_ID>
-abmind edit --memory-id <N> [--credibility N] [--classification N] [--caller kp]
-```
+See `memory-tools.md` for recall, store, edit, expand commands and ABM-L format.
 
-**CRITICAL:** `--translated` = English version. `--original` = user's ACTUAL words in whatever language they used. If user spoke English, `--original` is English. NEVER fabricate a translation.
+## Bridge Tools
 
-## Classification (0-3)
-0=UNCLASSIFIED, 1=RESTRICTED (default), 2=CONFIDENTIAL, 3=SECRET (never disclosed).
-Decisions are always ≥1. SECRET is permanent.
-
-## Trust (0-3)
-3=owner, 2=self, 1=peer (read-only), 0=untrusted (report-only).
-Destructive actions require trust ≥2.
-
-## Store & Edit
-Store when user says "remember" or info is important. Don't store greetings/small talk.
-Content edits require user request. Attribute edits are free. Translation fixes are free.
+| Tool | Purpose | Skill |
+|------|---------|-------|
+| `agentbridge-todo` | Manage todo list | `todo` |
+| `agentbridge-cron` | Schedule reminders/tasks | `cron` |
+| `agentbridge-browse` | Delegate browser tasks | `browse-delegate` |
+| `agentbridge-tweet` | X/Twitter feeds | `fxtwitter` |
+| `agentbridge-autofix` | Manage self-healer auto-fix rules | `healthcheck` |
+| `agentbridge-rss` | RSS/Atom feed fetcher | — |

@@ -170,6 +170,14 @@ export async function update(opts: UpdateOptions): Promise<number> {
     // hashFile is unused here but imported to validate the re-export surface;
     // leaving this no-op call removed — the re-export is exercised by tests.
     void hashFile;
+
+    // Auto-restart bridge on new code
+    process.stdout.write("\nRestarting bridge...\n");
+    const { restart } = await import("./restart.js");
+    await restart({ cold: true }).catch((err: unknown) => {
+      process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    });
+
     return 0;
   } finally {
     await release();
