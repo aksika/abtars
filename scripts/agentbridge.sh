@@ -41,7 +41,7 @@ if [[ " ${ARGS[*]} " == *" stop "* ]]; then
     kill "$pid" 2>/dev/null && echo "   Bridge stopped (pid $pid)." || echo "   Bridge not running."
     rm -f "$PIDFILE"
   else
-    pkill -f "node.*current/dist/main.js\|node.*dist/main.js\|node.*current/bundle/agentbridge.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
+    pkill -f "node.*\.agentbridge/current/main.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
   fi
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux kill-session -t "$SESSION"
@@ -74,7 +74,7 @@ echo "   Node:     $(node --version)"
 echo ""
 
 # --- kill any orphaned bridge process ---
-if pkill -f "node.*current/dist/main.js\|node.*dist/main.js\|node.*current/bundle/agentbridge.js" 2>/dev/null; then
+if pkill -f "node.*\.agentbridge/current/main.js" 2>/dev/null; then
   echo "   Killed orphaned bridge process."
   sleep 1
 fi
@@ -93,16 +93,10 @@ cd "$PROJECT_DIR"
 cleanup() { rm -f "$PIDFILE"; }
 trap cleanup EXIT
 
-# Detect bundle vs legacy layout
-if [ -f "current/bundle/agentbridge.js" ]; then
-  ENTRY="current/bundle/agentbridge.js"
-  # Native deps live alongside the bundle
-  export NODE_PATH="current/node_modules:${NODE_PATH:-}"
-else
-  ENTRY="current/dist/main.js"
-fi
+# Stable entry point: main.js symlink created by agentbridge update.
+export NODE_PATH="current/node_modules:${NODE_PATH:-}"
 
-node "$ENTRY" "${ARGS[@]}" &
+node "current/main.js" "${ARGS[@]}" &
 BRIDGE_PID=$!
 echo "$BRIDGE_PID" > "$PIDFILE"
 echo "   Bridge started (pid $BRIDGE_PID)"

@@ -41,6 +41,17 @@ export async function update(opts: UpdateOptions): Promise<number> {
     });
     process.stdout.write(`✓ staged ${staged.version} at ${staged.stagedPath}\n`);
 
+    // Create stable entry point symlink (main.js → bundle or dist)
+    {
+      const { existsSync, unlinkSync, symlinkSync } = await import("node:fs");
+      const mainLink = join(staged.stagedPath, "main.js");
+      try { unlinkSync(mainLink); } catch { /* ENOENT ok */ }
+      const entry = existsSync(join(staged.stagedPath, "bundle", "agentbridge.js"))
+        ? "bundle/agentbridge.js"
+        : "dist/main.js";
+      symlinkSync(entry, mainLink);
+    }
+
     // Flip current → releases/<version>
     await activate(paths.current, staged.version);
     process.stdout.write(`✓ current -> releases/${staged.version}\n`);
