@@ -168,17 +168,6 @@ fi
 fi # end supervised-only watchdog block
 fi # end supervised-only supervisor check
 
-# 0. Migrate titok/ → secret/ (one-time)
-if [ -d "$AB/titok" ] && [ ! -d "$AB/secret" ]; then
-  if $FIX || $FIX_FULL; then
-    mv "$AB/titok" "$AB/secret"
-    chmod 700 "$AB/secret"
-    fix "migrated titok/ → secret/"
-  else
-    warn "titok/ should be renamed to secret/ — run with --fix"
-  fi
-fi
-
 # 1. Directory permissions (sensitive dirs should be 700) -- fix-full only
 for d in "$AB/secret" "$AB/secret/cookies" "$ABMIND/memory"; do
   if [ -d "$d" ] && [ "$(stat -c %a "$d" 2>/dev/null)" != "700" ]; then
