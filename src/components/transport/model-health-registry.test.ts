@@ -42,9 +42,9 @@ describe("ModelHealthRegistry", () => {
     expect(health.get("ep1|kimi")?.status).not.toBe("auth_failed");
   });
 
-  it("weak error adds small fill", () => {
+  it("weak error adds fill", () => {
     reg.recordError("kimi", "ep1", "weak");
-    expect(reg.getBucketLevel("kimi", "ep1")).toBe(5); // 0.05 = 5%
+    expect(reg.getBucketLevel("kimi", "ep1")).toBe(35); // 0.35 = 35%
   });
 
   it("cooldown skips until expired", () => {
@@ -80,7 +80,7 @@ describe("ModelHealthRegistry", () => {
 
   it("drain does not go below zero", () => {
     vi.useFakeTimers();
-    reg.recordError("kimi", "ep1", "weak"); // 5%
+    reg.recordError("kimi", "ep1", "weak"); // 35%
     vi.advanceTimersByTime(60 * 60 * 1000); // 1 hour
     expect(reg.getBucketLevel("kimi", "ep1")).toBe(0);
     vi.useRealTimers();

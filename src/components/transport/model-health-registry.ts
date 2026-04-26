@@ -57,7 +57,7 @@ export class ModelHealthRegistry {
       b.level = 1.0;
       b.authFailed = true;
     } else if (kind === "weak") {
-      b.level = Math.min(1.0, b.level + 0.05);
+      b.level = Math.min(1.0, b.level + 0.35);
     } else {
       const idx = Math.min(b.consecutiveErrors, PROGRESSIVE_FILL.length - 1);
       b.level = Math.min(1.0, b.level + PROGRESSIVE_FILL[idx]!);
