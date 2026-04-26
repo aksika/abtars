@@ -216,7 +216,7 @@ if [ -f "$COOKIE" ]; then
 fi
 
 # 5. Required dirs exist
-for d in "$AB/skills" "$AB/logs" "$ABMIND/memory/sleep" "$ABMIND/memory/retrospectives"; do
+for d in "$AB/skills" "$AB/logs"; do
   if [ ! -d "$d" ]; then
     if $FIX; then
       mkdir -p "$d"; fix "created missing dir $d"
@@ -324,12 +324,6 @@ if [ -f "$DB" ]; then
   if [ "$SCHEMA_VER" -lt 8 ]; then
     warn "memory.db schema version is $SCHEMA_VER expected >=8 -- ABM v2 migration pending"
   fi
-fi
-
-# 13. .env.memory exists (in abmind home)
-ABMIND="${ABMIND_HOME:-$HOME/.abmind}"
-if [ ! -f "$ABMIND/config/.env.memory" ]; then
-  warn ".env.memory missing at $ABMIND/config/ -- ABM config defaults will be used"
 fi
 
 # 14. Orphaned kiro-cli processes

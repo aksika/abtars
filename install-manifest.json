@@ -17,6 +17,7 @@
   ],
   "requiredConfigs": [
     { "path": "config/transport.json", "remediation": "run 'agentbridge onboard'" },
+    { "path": "config/models.json", "remediation": "copy from a reference install or run 'agentbridge onboard'" },
     { "path": "config/users.json", "remediation": "run 'agentbridge onboard'" }
   ],
   "scripts": {
