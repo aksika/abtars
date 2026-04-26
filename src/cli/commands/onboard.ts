@@ -78,6 +78,7 @@ const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
 
 interface WizardAnswers {
   readonly installMode: "simple" | "supervised";
+  readonly userName: string;
   readonly telegramToken: string;
   readonly telegramChatId: string;
   readonly discordBotToken: string;
@@ -111,6 +112,14 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     initialValue: existing?.installMode ?? 'simple',
   });
   if (isCancel(installMode)) { cancel('Cancelled.'); return null; }
+
+  // 1b. User name (for personal greeting)
+  const userName = await text({
+    message: 'Your name (the bot will greet you personally)',
+    placeholder: 'e.g. Alex',
+    initialValue: existing?.userName ?? '',
+  });
+  if (isCancel(userName)) { cancel('Cancelled.'); return null; }
 
   // 2-3. Telegram (optional)
   const telegramToken = await text({
@@ -256,6 +265,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     '',
     '── Summary ──',
     `  Deployment mode:     ${installMode}`,
+    `  Your name:           ${String(userName ?? '') || '(skipped)'}`,
     `  Telegram token:      ${mask(String(telegramToken ?? ''))}`,
     `  Telegram chat ID:    ${String(telegramChatId ?? '') || '(skipped)'}`,
     `  Discord bot token:   ${mask(String(discordBotToken ?? ''))}`,
@@ -280,6 +290,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
 
   return {
     installMode: installMode as "simple" | "supervised",
+    userName: String(userName ?? '').trim(),
     telegramToken: String(telegramToken ?? '').trim(),
     telegramChatId: String(telegramChatId ?? '').trim(),
     discordBotToken: String(discordBotToken ?? '').trim(),
@@ -324,6 +335,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   }
   return {
     installMode: 'supervised',
+    userName: '',
     telegramToken: opts.telegramToken ?? '',
     telegramChatId: opts.telegramChatId ?? '',
     discordBotToken: '',
@@ -353,6 +365,7 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
     const apiKeyEnv = PROVIDER_API_KEY_ENV[provider];
     return {
       installMode: 'simple',
+      userName: kv.get('USER_DISPLAY_NAME') ?? '',
       telegramToken: kv.get('TELEGRAM_BOT_TOKEN') ?? '',
       telegramChatId: kv.get('MAIN_CHAT_ID') ?? '',
       discordBotToken: kv.get('DISCORD_BOT_TOKEN') ?? '',
@@ -377,7 +390,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   const owned = new Set([
     'TELEGRAM_BOT_TOKEN', 'MAIN_CHAT_ID',
     'DISCORD_BOT_TOKEN', 'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
-    'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
+    'DEFAULT_PROVIDER', 'DEFAULT_MODEL', 'USER_DISPLAY_NAME',
     'BED_TIME', 'WAKE_TIME', 'GROQ_API_KEY', 'TRUST_MODE',
     ...(providerKeyName ? [providerKeyName] : []),
   ]);
@@ -395,6 +408,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     `DEFAULT_PROVIDER=${answers.defaultProvider}`,
     `DEFAULT_MODEL=${answers.defaultModel}`,
   ];
+  if (answers.userName) newBlock.push(`USER_DISPLAY_NAME=${answers.userName}`);
   if (answers.telegramToken) newBlock.push(`TELEGRAM_BOT_TOKEN=${answers.telegramToken}`);
   if (answers.telegramChatId) newBlock.push(`MAIN_CHAT_ID=${answers.telegramChatId}`);
   if (answers.discordBotToken) newBlock.push(`DISCORD_BOT_TOKEN=${answers.discordBotToken}`);
@@ -494,6 +508,31 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
     await writeFile(transportPath, JSON.stringify(tc, null, 2) + '\n', { mode: 0o600 });
     process.stdout.write(`✓ transport.json → ${transportPath}\n`);
+  }
+
+  // Write users.json
+  {
+    const usersPath = join(paths.config, 'users.json');
+    const { existsSync: usersExist } = await import('node:fs');
+    if (!usersExist(usersPath)) {
+      const userId = answers.userName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'user';
+      const platforms: Record<string, unknown> = {};
+      if (answers.telegramChatId) platforms["telegram"] = parseInt(answers.telegramChatId, 10) || answers.telegramChatId;
+      if (answers.discordAppId) platforms["discord"] = answers.discordAppId;
+      const users = {
+        users: [{
+          userId,
+          displayName: answers.userName || userId,
+          role: "master",
+          maxClass: 3,
+          tools: ["all"],
+          platforms,
+          allowedChats: [],
+        }],
+      };
+      await writeFile(usersPath, JSON.stringify(users, null, 2) + '\n', { mode: 0o600 });
+      process.stdout.write(`✓ users.json → ${usersPath}\n`);
+    }
   }
 
   process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://github.com/aksika/agentbridge/blob/main/docs/install.md\n`);
