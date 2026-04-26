@@ -493,9 +493,16 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   }
 
   // ── Auto-run: agentbridge update ──
+  // Only auto-update if we're inside the agentbridge repo (git repo with package.json)
+  const { existsSync } = await import('node:fs');
+  const inRepo = existsSync(join(process.cwd(), '.git')) && existsSync(join(process.cwd(), 'package.json'));
+  if (!inRepo) {
+    process.stdout.write(`\nNext: cd into the agentbridge repo and run 'agentbridge update' to build and activate.\n`);
+    return 0;
+  }
   process.stdout.write(`\n── Running 'agentbridge update' ──\n`);
   const { update } = await import('./update.js');
-  const updRc = await update({ source: 'local', fromLocal: false, allowAbmindMismatch: false });
+  const updRc = await update({ source: 'local', fromLocal: true, allowAbmindMismatch: false });
   if (updRc !== 0) {
     process.stderr.write(`\n⚠️  'agentbridge update' exited with code ${updRc}. Fix and re-run manually.\n`);
     return updRc;
