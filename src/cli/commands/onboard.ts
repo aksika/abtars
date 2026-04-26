@@ -164,7 +164,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
       { value: 'kiro', label: 'kiro — Kiro CLI (free or paid; tier via model)' },
       { value: 'gemini', label: 'gemini — Gemini CLI (free or paid; tier via model)' },
     ],
-    initialValue: existing?.defaultProvider ?? 'openrouter',
+    initialValue: existing?.defaultProvider ?? 'kiro',
   });
   if (isCancel(defaultProvider)) { cancel('Cancelled.'); return null; }
 
@@ -205,7 +205,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   const hailMary = await text({
     message: `Ultimate fallback model — hailMary (${noteEmpty}; uses same provider + key as above)`,
     placeholder: 'google/gemini-2.5-flash',
-    initialValue: existing?.hailMaryModel,
+    initialValue: existing?.hailMaryModel ?? 'google/gemini-2.5-flash',
   });
   if (isCancel(hailMary)) { cancel('Cancelled.'); return null; }
   const hailMaryModel = String(hailMary ?? '').trim();
