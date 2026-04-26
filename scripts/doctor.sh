@@ -33,6 +33,50 @@ fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 # Helper: read JSON field via python3
 json_field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],sys.argv[3]))" "$1" "$2" "${3:-0}" 2>/dev/null || echo "${3:-0}"; }
 
+# ── Manifest reconciliation (install-time state) ────────────────────────────
+MANIFEST="$AB/current/install-manifest.json"
+if [ -f "$MANIFEST" ] && command -v python3 &>/dev/null; then
+  MANIFEST_FIX_FLAG=""
+  if $FIX; then MANIFEST_FIX_FLAG="--fix"; fi
+  python3 -c "
+import json, os, sys, shutil, stat
+
+manifest = json.load(open('$MANIFEST'))
+home = '$AB'
+fix_mode = '--fix' in sys.argv
+
+for d in manifest.get('directories', []):
+    p = os.path.join(home, d['path'])
+    mode = d.get('mode')
+    if os.path.isdir(p):
+        if mode:
+            actual = oct(os.stat(p).st_mode & 0o777)
+            expected = oct(int(mode, 8))
+            if actual != expected:
+                if fix_mode:
+                    os.chmod(p, int(mode, 8))
+                    print(f'[manifest] FIX: {d[\"path\"]}/ permissions {actual} -> {expected}')
+                else:
+                    print(f'[manifest] WARN: {d[\"path\"]}/ permissions {actual}, expected {expected}')
+        else:
+            print(f'[manifest] OK: {d[\"path\"]}/')
+    elif fix_mode:
+        os.makedirs(p, mode=int(mode, 8) if mode else 0o755, exist_ok=True)
+        print(f'[manifest] FIX: created {d[\"path\"]}/')
+    else:
+        print(f'[manifest] WARN: {d[\"path\"]}/ MISSING')
+
+for req in manifest.get('requiredConfigs', []):
+    p = os.path.join(home, req['path'])
+    if os.path.exists(p):
+        print(f'[manifest] OK: {req[\"path\"]}')
+    else:
+        print(f'[manifest] WARN: {req[\"path\"]} MISSING -- {req[\"remediation\"]}')
+" $MANIFEST_FIX_FLAG 2>/dev/null || echo "[manifest] check skipped (python3 error)"
+else
+  echo "[manifest] check skipped (manifest not found or python3 missing)"
+fi
+
 # ── Watchdog health (supervised mode only) ───────────────────────────────────
 
 if [[ "$INSTALL_MODE" == "supervised" ]]; then
