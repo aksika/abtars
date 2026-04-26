@@ -238,6 +238,16 @@ export async function install(opts: InstallOptions): Promise<number> {
   await createSkeleton(home, opts.dryRun);
   process.stdout.write(`✓ skeleton at ${home}\n`);
 
+  // Create abmind skeleton — agentbridge depends on abmind at runtime
+  const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(home), '.abmind');
+  const abmindDirs = [join(abmindHome, 'config'), join(abmindHome, 'memory'), join(abmindHome, 'memory', 'sleep')];
+  if (opts.dryRun) {
+    process.stdout.write(`[dry-run] mkdir -p: ${abmindDirs.join(', ')}\n`);
+  } else {
+    for (const d of abmindDirs) await mkdir(d, { recursive: true });
+  }
+  process.stdout.write(`✓ abmind skeleton at ${abmindHome}\n`);
+
   // Seed config from examples (only missing ones)
   const seeded = await seedConfig(repoRoot, paths.config, opts.dryRun, home);
   if (seeded.length > 0) {
