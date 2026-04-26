@@ -31,7 +31,7 @@ export async function phaseConfig(ctx: BootCtx): Promise<void> {
   }
 
   ctx.platforms = parsePlatformFlags();
-  ctx.config = await loadAndValidateConfig();
+  ctx.config = await loadAndValidateConfig(ctx.platforms);
   if (ctx.platforms.transport) ctx.config.transport.agentTransport = ctx.platforms.transport;
   setLogLevel(ctx.config.logLevel);
 
