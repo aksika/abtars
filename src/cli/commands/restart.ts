@@ -39,7 +39,7 @@ async function killBridge(pid: number): Promise<void> {
   // Verify PID is actually the bridge (Linux /proc, fallback: skip check)
   try {
     const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
-    if (!cmdline.includes("agentbridge")) {
+    if (!cmdline.includes("agentbridge") && !cmdline.includes("main.js") && !cmdline.includes("bundle")) {
       process.stdout.write(`⚠️ PID ${pid} is not agentbridge — stale PID file\n`);
       return;
     }
