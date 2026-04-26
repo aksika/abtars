@@ -19,13 +19,9 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
     } else {
       entry.queue.push({ msg, adapter });
       logDebug("busy-guard", `Queued "${ctx.text.slice(0, 40)}" for ${msg.sessionKey} (${entry.queue.length} pending)`);
-      // Skip generic notification if a specific deferred-command reply already fired (e.g. /compact while busy).
+      // Log only — don't spam the user with queue notifications
       if (!ctx.deferReply) {
-        const queueMsg = entry.compacting
-          ? "☕ Hold on, just tidying up my thoughts over coffee... I'll get to you in a moment!"
-          : `⏳ Queued (${entry.queue.length}) — will process after current response.`;
-        try { await adapter.sendMessage(msg.channelId, queueMsg, { threadId: msg.threadId }); }
-        catch { logDebug("busy-guard", `Queue notification failed for ${msg.sessionKey} — message still queued`); }
+        logDebug("busy-guard", `Queue notification: ${entry.compacting ? "compacting" : `queued (${entry.queue.length})`} for ${msg.sessionKey}`);
       }
       ctx.handled = true;
       return;
