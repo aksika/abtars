@@ -207,18 +207,16 @@ for lockfile in "$ABMIND/memory/sleep"/sleep_*.lock; do
   fi
 done
 
-# 4. Cookie file exists and is valid JSON
+# 4. Cookie file exists and is valid JSON (only if cookies dir exists — optional feature)
 COOKIE="$AB/secret/cookies/x-cookies.json"
 if [ -f "$COOKIE" ]; then
   if ! python3 -c "import json; json.load(open('$COOKIE'))" 2>/dev/null; then
     warn "$COOKIE is not valid JSON -- cookie auth will fail"
   fi
-else
-  warn "no X cookies found -- tweet replies/discovery won't work"
 fi
 
 # 5. Required dirs exist
-for d in "$AB/twitterX" "$AB/twitterX/output" "$AB/skills" "$AB/logs" "$ABMIND/memory/sleep" "$ABMIND/memory/retrospectives"; do
+for d in "$AB/skills" "$AB/logs" "$ABMIND/memory/sleep" "$ABMIND/memory/retrospectives"; do
   if [ ! -d "$d" ]; then
     if $FIX; then
       mkdir -p "$d"; fix "created missing dir $d"
@@ -227,11 +225,6 @@ for d in "$AB/twitterX" "$AB/twitterX/output" "$AB/skills" "$AB/logs" "$ABMIND/m
     fi
   fi
 done
-
-# 6. Follows file exists
-if [ ! -f "$AB/twitterX/base.follows.json" ]; then
-  warn "base.follows.json missing -- tweet feed won't run"
-fi
 
 # 7. Recent backup check
 BACKUP_DIR="$HOME/.backup-agentbridge"
