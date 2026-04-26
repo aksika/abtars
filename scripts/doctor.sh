@@ -79,6 +79,9 @@ fi
 
 # ── Watchdog health (supervised mode only) ───────────────────────────────────
 
+WD_ALIVE=false
+WD_PID=""
+
 if [[ "$INSTALL_MODE" == "supervised" ]]; then
 
 WD_LOCK="$AB/watchdog.lock"

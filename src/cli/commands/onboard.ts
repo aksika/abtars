@@ -38,6 +38,16 @@ export interface OnboardOptions {
 type ProviderChoice = 'openrouter' | 'anthropic' | 'openai' | 'ollama' | 'kiro' | 'gemini';
 
 const VALID_PROVIDERS: readonly ProviderChoice[] = ['openrouter', 'anthropic', 'openai', 'ollama', 'kiro', 'gemini'];
+
+/** Map onboard choice → transport.json provider name */
+const PROVIDER_TRANSPORT_NAME: Record<ProviderChoice, string> = {
+  openrouter: 'openrouter',
+  anthropic: 'anthropic',
+  openai: 'openai',
+  ollama: 'ollama',
+  kiro: 'kiro-free',
+  gemini: 'gemini-free',
+};
 const DEFAULT_MODELS: Record<ProviderChoice, string> = {
   openrouter: 'google/gemini-2.5-flash',
   anthropic: 'claude-sonnet-4-5-20250929',
@@ -469,15 +479,17 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       };
     }
     if (!tc["agents"]) {
+      const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
       tc["agents"] = {
-        "professor": { "model": answers.defaultModel, "provider": answers.defaultProvider },
-        "dreamy": { "model": answers.defaultModel, "provider": answers.defaultProvider },
-        "browsie": { "model": answers.defaultModel, "provider": answers.defaultProvider },
-        "coding": { "model": answers.defaultModel, "provider": answers.defaultProvider },
+        "professor": { "model": answers.defaultModel, "provider": provName },
+        "dreamy": { "model": answers.defaultModel, "provider": provName },
+        "browsie": { "model": answers.defaultModel, "provider": provName },
+        "coding": { "model": answers.defaultModel, "provider": provName },
       };
     }
     if (answers.hailMaryModel) {
-      tc["hailMary"] = { model: answers.hailMaryModel, provider: answers.defaultProvider };
+      const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
+      tc["hailMary"] = { model: answers.hailMaryModel, provider: provName };
     }
 
     await writeFile(transportPath, JSON.stringify(tc, null, 2) + '\n', { mode: 0o600 });
