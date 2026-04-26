@@ -452,16 +452,36 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   writeInstallMode(paths.home, answers.installMode);
   process.stdout.write(`✓ install mode: ${answers.installMode}\n`);
 
-  // Write hailMary to transport.json if configured
-  if (answers.hailMaryModel) {
+  // Write transport.json with selected provider + model
+  {
     const transportPath = join(paths.config, 'transport.json');
     let tc: Record<string, unknown> = {};
     try {
       tc = JSON.parse(await readFile(transportPath, 'utf-8'));
     } catch { /* file missing/invalid — start fresh */ }
-    tc["hailMary"] = { model: answers.hailMaryModel, provider: answers.defaultProvider };
+
+    // Seed providers and agents if not already present
+    if (!tc["providers"]) {
+      tc["providers"] = {
+        "kiro-free": { "transport": "acp", "cli": "kiro-cli" },
+        "ollama": { "transport": "api", "endpoint": "http://localhost:11434/v1" },
+        "openrouter": { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" },
+      };
+    }
+    if (!tc["agents"]) {
+      tc["agents"] = {
+        "professor": { "model": answers.defaultModel, "provider": answers.defaultProvider },
+        "dreamy": { "model": answers.defaultModel, "provider": answers.defaultProvider },
+        "browsie": { "model": answers.defaultModel, "provider": answers.defaultProvider },
+        "coding": { "model": answers.defaultModel, "provider": answers.defaultProvider },
+      };
+    }
+    if (answers.hailMaryModel) {
+      tc["hailMary"] = { model: answers.hailMaryModel, provider: answers.defaultProvider };
+    }
+
     await writeFile(transportPath, JSON.stringify(tc, null, 2) + '\n', { mode: 0o600 });
-    process.stdout.write(`✓ hailMary: ${answers.hailMaryModel} (${answers.defaultProvider}) → ${transportPath}\n`);
+    process.stdout.write(`✓ transport.json → ${transportPath}\n`);
   }
 
   process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://github.com/aksika/agentbridge/blob/main/docs/install.md\n`);
