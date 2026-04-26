@@ -13,7 +13,8 @@
   ],
   "configSeeds": [
     { "source": ".env.example", "dest": "config/.env", "mode": "0600" },
-    { "source": ".env.skills.example", "dest": "config/.env.skills", "mode": "0600" }
+    { "source": ".env.skills.example", "dest": "config/.env.skills", "mode": "0600" },
+    { "source": "models.default.json", "dest": "config/models.json" }
   ],
   "requiredConfigs": [
     { "path": "config/transport.json", "remediation": "run 'agentbridge onboard'" },

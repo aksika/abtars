@@ -226,18 +226,16 @@ for d in "$AB/skills" "$AB/logs"; do
   fi
 done
 
-# 7. Recent backup check
+# 7. Recent backup check (skip on fresh installs)
 BACKUP_DIR="$HOME/.backup-agentbridge"
 if [ -d "$BACKUP_DIR" ]; then
   LATEST=$(find "$BACKUP_DIR" -name "agentbridge-*.zip" -mtime -2 2>/dev/null | head -1)
   if [ -z "$LATEST" ]; then
     warn "no backup in last 2 days -- check daily-backup.sh cron"
   fi
-else
-  warn "backup dir $BACKUP_DIR missing -- backups never ran"
 fi
 
-# 8. Memory DB health
+# 8. Memory DB health (skip if DB doesn't exist yet — fresh install)
 if [ -f "$DB" ]; then
   INTEGRITY=$(sqlite3 "$DB" "PRAGMA integrity_check;" 2>/dev/null | head -1)
   if [ "$INTEGRITY" != "ok" ]; then
@@ -254,8 +252,6 @@ if [ -f "$DB" ]; then
   if [ -z "$LATEST_SLEEP" ]; then
     warn "no sleep audit in last 3 days -- GC/consolidation not running"
   fi
-else
-  warn "memory.db not found"
 fi
 
 # 9. Embedding health (only if EMBEDDING_ENABLED=true)

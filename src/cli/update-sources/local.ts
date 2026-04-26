@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { cp, mkdir, readFile, rm } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hashFile } from 'abmind/deploy-lib/releases.js';
 import type { PrepareContext, StagedRelease, UpdateSource } from './types.js';
@@ -133,6 +133,9 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         await mkdir(stagedPath, { recursive: true });
         await cp(join(repoRoot, 'bundle'), join(stagedPath, 'bundle'), { recursive: true });
 
+        // Copy install-manifest.json for doctor reconciliation
+        await copyFile(join(repoRoot, 'install-manifest.json'), join(stagedPath, 'install-manifest.json'));
+
         // Copy pruned native deps (better-sqlite3 + transitive)
         const abmindNM = join(repoRoot, '..', 'abmind', 'node_modules');
         const nativeDir = join(stagedPath, 'node_modules');
@@ -156,6 +159,9 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
       await rm(stagedPath, { recursive: true, force: true });
       await mkdir(stagedPath, { recursive: true });
       await cp(join(repoRoot, 'dist'), join(stagedPath, 'dist'), { recursive: true });
+
+      // Copy install-manifest.json for doctor reconciliation
+      await copyFile(join(repoRoot, 'install-manifest.json'), join(stagedPath, 'install-manifest.json'));
 
       // Sync node_modules/ to the shared location.
       //
