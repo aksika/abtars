@@ -23,11 +23,14 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-function readInstallMode(home: string): "simple" | "supervised" | null {
-  const p = join(home, "install-mode");
-  if (!existsSync(p)) return null;
-  const raw = readFileSync(p, "utf-8").trim();
-  return raw === "simple" || raw === "supervised" ? raw : null;
+function readInstallMode(home: string): "simple" | "supervised" {
+  try {
+    const mf = JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"));
+    const mode = mf.installMode;
+    return mode === "simple" || mode === "supervised" ? mode : "supervised";
+  } catch {
+    return "supervised";
+  }
 }
 
 function supervisorInstalled(): boolean {

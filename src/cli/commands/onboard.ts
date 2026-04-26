@@ -501,9 +501,10 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   await writeFile(envPath, next, { mode: 0o600 });
   process.stdout.write(`\n✓ Wrote ${envPath}\n`);
 
-  // Write install mode (overrides any prior value — onboarding is authoritative)
-  const { writeInstallMode } = await import('../install-mode.js');
-  writeInstallMode(paths.home, answers.installMode);
+  // Write install mode to manifest
+  const { writeManifest } = await import('../deploy-lib-import.js');
+  const mf = await readManifest(paths.manifest);
+  if (mf) await writeManifest(paths.manifest, { ...mf, installMode: answers.installMode });
   process.stdout.write(`✓ install mode: ${answers.installMode}\n`);
 
   // Write transport.json with selected provider + model

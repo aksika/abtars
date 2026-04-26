@@ -20,9 +20,8 @@ case "${1:-}" in
   --fix)      FIX=true ;;
 esac
 
-# Read install mode (simple skips supervisor checks)
-INSTALL_MODE=$(head -n1 "$AB/install-mode" 2>/dev/null || echo "supervised")
-INSTALL_MODE=$(echo "$INSTALL_MODE" | tr -d '[:space:]')
+# Read install mode from manifest (simple skips supervisor checks)
+INSTALL_MODE=$(json_field "$AB/manifest.json" installMode supervised)
 if [[ "$INSTALL_MODE" != "simple" && "$INSTALL_MODE" != "supervised" ]]; then
   INSTALL_MODE="supervised"
 fi

@@ -114,8 +114,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     let serviceChanged = false;
 
     // Resolve install mode — skip supervisor artifacts in simple mode
-    const { resolveInstallMode } = await import('../install-mode.js');
-    const installMode = resolveInstallMode(paths.home);
+    const installMode = (await readManifest(paths.manifest))?.installMode ?? "supervised";
 
     const isExecutable = (name: string): boolean => {
       const ext = installManifest.scripts.executable.replace("*", "");
