@@ -12,12 +12,14 @@ const AB_SAVE = ["config", "skills", "prompts", "core", "secret", "tasks", "logo
 const ABMIND_SAVE = ["config", "prompts", "secret"];
 const ABMIND_MEMORY_SAVE = ["core"]; // subdirs of memory/ to include
 
-export async function backup(): Promise<number> {
+export async function backup(outputDir?: string): Promise<number> {
   const abHome = agentBridgeHome();
   const abmindHome = process.env["ABMIND_HOME"] ?? join(dirname(abHome), ".abmind");
   const timestamp = new Date().toISOString().replace(/[T:]/g, "-").replace(/\..+/, "");
   const zipName = `agentbridge-backup-${timestamp}.zip`;
-  const zipPath = join(process.cwd(), zipName);
+  const destDir = outputDir ?? process.cwd();
+  mkdirSync(destDir, { recursive: true });
+  const zipPath = join(destDir, zipName);
 
   // Collect files to zip
   const files: Array<{ absPath: string; zipPath: string }> = [];

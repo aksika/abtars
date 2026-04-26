@@ -94,7 +94,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           to: typeof flags.get('to') === 'string' ? (flags.get('to') as string) : undefined,
         });
       case 'backup':
-        return await backup();
+        return await backup(typeof flags.get('output') === 'string' ? (flags.get('output') as string) : undefined);
       case 'migrate':
         return await migrate({
           dryRun: flags.get('dry-run') === true,
