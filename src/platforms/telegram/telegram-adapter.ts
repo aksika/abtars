@@ -217,20 +217,22 @@ export class TelegramAdapter implements PlatformAdapter {
           const buttons = providers.map(p => [{ text: p.name, callback_data: `mprovglobal:${p.name}` }]);
           await this.api.sendMessage(chatId, "🔌 Pick provider:", { reply_markup: { inline_keyboard: buttons } });
         } else {
-          // Agent slot — skip provider, show models on slot's current provider directly
-          const { loadTransport, resolveAgent, getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
+          // Agent slot — show provider picker filtered by current transport kind, current provider marked ✅
+          const { loadTransport, resolveAgent, getAvailableProviders } = await import("../../components/transport-config.js");
           const tc = loadTransport();
           if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
           const effectiveSlot = slot.startsWith("professor_fb") ? "professor" : slot;
           const resolved = resolveAgent(effectiveSlot, tc);
           if (!resolved) { await this.api.sendMessage(chatId, `❌ No config for ${slot}`); return; }
-          const models = getModelsForProvider(resolved.providerName);
-          if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No models for ${resolved.providerName}`); return; }
-          const buttons = models.map(m => [{
-            text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`,
-            callback_data: `mset:${slot}:${resolved.providerName}:${m.id}`,
+          const currentTransport = resolved.provider.transport;
+          const currentProvider = resolved.providerName;
+          const providers = getAvailableProviders(tc).filter(p => p.config.transport === currentTransport);
+          if (providers.length === 0) { await this.api.sendMessage(chatId, `❌ No ${currentTransport} providers`); return; }
+          const buttons = providers.map(p => [{
+            text: p.name === currentProvider ? `✅ ${p.name} (current)` : p.name,
+            callback_data: `mprov:${slot}:${p.name}`,
           }]);
-          await this.api.sendMessage(chatId, `📋 Models on ${resolved.providerName}:`, { reply_markup: { inline_keyboard: buttons } });
+          await this.api.sendMessage(chatId, `🔌 Pick provider for ${slot}:`, { reply_markup: { inline_keyboard: buttons } });
         }
       } else if (data.startsWith("mprovglobal:")) {
         // Global provider switch — apply defaults if available, cascade all agents
@@ -284,7 +286,14 @@ export class TelegramAdapter implements PlatformAdapter {
             await this.api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
           }
         } else if (oldType !== newType) {
-          await this.api.sendMessage(chatId, `✅ All agents → ${providerName}. Transport type changed — use /reset to apply.`);
+          // Cross-transport — auto /reset
+          try {
+            if (this.deps.pipeline.rebuildTransport) await this.deps.pipeline.rebuildTransport();
+            await this.resetSessionForModelSwitch(chatId, "cross-transport-provider-switch");
+            await this.api.sendMessage(chatId, `🔄 All agents → ${providerName}. Transport rebuilt.`);
+          } catch (err) {
+            await this.api.sendMessage(chatId, `⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}. Try /reset manually.`);
+          }
         } else {
           await this.api.sendMessage(chatId, `✅ All agents → ${providerName}`);
         }
@@ -300,14 +309,21 @@ export class TelegramAdapter implements PlatformAdapter {
         }]);
         await this.api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
       } else if (data.startsWith("mset:")) {
-        // Step 3: user picked model — liveness check + write + switch
+        // Step 3: user picked model — validate + write + switch
         const parts = data.split(":");
         const slot = parts[1]!;
         const providerName = parts[2]!;
         const model = parts.slice(3).join(":"); // model may contain colons
-        const { loadTransport, writeTransportConfig, resolveAgent } = await import("../../components/transport-config.js");
+        const { loadTransport, writeTransportConfig, resolveAgent, getModelsForProvider } = await import("../../components/transport-config.js");
         const tc = loadTransport();
         if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
+
+        // Safety net: validate model is served by this provider
+        const validModels = getModelsForProvider(providerName);
+        if (!validModels.some(m => m.id === model)) {
+          await this.api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`);
+          return;
+        }
 
         // Liveness check
         const provider = tc.providers[providerName];
@@ -394,9 +410,15 @@ export class TelegramAdapter implements PlatformAdapter {
               await this.api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
             }
           } else if (isProfessor && providerChanged) {
-            // Different transport type — needs /reset
+            // Different transport type — auto /reset (rebuild transport + session reset)
             const cascadeNote = oldType !== newType ? " Subagents also reset." : "";
-            await this.api.sendMessage(chatId, `✅ ${model} (${providerName}) written. Transport type changed — use /reset to apply.${cascadeNote}`);
+            try {
+              if (this.deps.pipeline.rebuildTransport) await this.deps.pipeline.rebuildTransport();
+              await this.resetSessionForModelSwitch(chatId, "cross-transport-switch");
+              await this.api.sendMessage(chatId, `🔄 Switched to ${model} (${providerName}). Transport rebuilt.${cascadeNote}`);
+            } catch (err) {
+              await this.api.sendMessage(chatId, `⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}. Try /reset manually.`);
+            }
           } else {
             await this.api.sendMessage(chatId, `✅ ${agentKey} → ${model} (${providerName}). Takes effect on next spawn.`);
           }
