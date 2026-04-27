@@ -157,7 +157,7 @@ async function reconcilePathLink(
   };
 }
 
-async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
+export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
   const bundleFile = name === 'agentbridge' ? 'agentbridge-cli.js' : `${name}.js`;
   const target = join(currentLink, 'bundle', bundleFile);
   // Fallback: pre-bundle dist/ layout (tsc build) for installs that haven't migrated yet.

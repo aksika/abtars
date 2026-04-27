@@ -154,6 +154,15 @@ export async function update(opts: UpdateOptions): Promise<number> {
       }
     }
     process.stdout.write(`✓ scripts refreshed (${scriptFiles.length} files)\n`);
+
+    // Regenerate CLI bin wrappers (#310) — keeps wrapper paths in sync with build layout
+    const { writeWrapper } = await import('./install.js');
+    await mkdir(paths.bin, { recursive: true });
+    for (const name of installManifest.cliWrappers) {
+      await writeWrapper(paths.bin, name, paths.current, false);
+    }
+    process.stdout.write(`✓ wrappers refreshed (${installManifest.cliWrappers.length} files)\n`);
+
     if (serviceChanged) {
       if (process.platform === 'darwin') {
         process.stdout.write(`⚠️  LaunchAgent plist updated — reload with: launchctl bootout gui/$(id -u)/com.agentbridge.watchdog && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist\n`);
