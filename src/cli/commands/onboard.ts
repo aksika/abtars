@@ -77,7 +77,7 @@ const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
 };
 
 interface WizardAnswers {
-  readonly installMode: "simple" | "supervised";
+  readonly installMode: "simple" | "supervised" | "supervised-daemon";
   readonly userName: string;
   readonly telegramToken: string;
   readonly telegramChatId: string;
@@ -104,11 +104,12 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   const noteEmpty = 'press Enter to skip';
 
   // 1. Deployment mode
-  const installMode = await select<"simple" | "supervised">({
+  const installMode = await select<"simple" | "supervised" | "supervised-daemon">({
     message: 'Deployment mode',
     options: [
       { value: 'simple', label: 'simple — laptop/WSL, start manually' },
-      { value: 'supervised', label: 'supervised — 24/7 host, launchd/systemd auto-restart' },
+      { value: 'supervised', label: 'supervised — 24/7 host, launchd/systemd user-scope auto-restart' },
+      { value: 'supervised-daemon', label: 'supervised-daemon — server/headless, system-scope (requires sudo once)' },
     ],
     initialValue: existing?.installMode ?? 'simple',
   });
@@ -315,7 +316,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   outro('Writing config…');
 
   return {
-    installMode: installMode as "simple" | "supervised",
+    installMode: installMode as "simple" | "supervised" | "supervised-daemon",
     userName: String(userName ?? '').trim(),
     telegramToken: String(telegramToken ?? '').trim(),
     telegramChatId: String(telegramChatId ?? '').trim(),

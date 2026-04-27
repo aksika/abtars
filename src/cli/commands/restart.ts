@@ -65,6 +65,19 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
   const bridgeAlive = bridgePid != null && bridgePid > 0 && pidAlive(bridgePid);
 
   if (cold) {
+    // Under supervised-daemon, cold restart requires sudo — refuse and print instructions
+    const manifestPath = join(home, "manifest.json");
+    const installMode = readJsonField(manifestPath, "installMode") as string | undefined;
+    if (installMode === "supervised-daemon") {
+      const platform = process.platform;
+      if (platform === "darwin") {
+        process.stderr.write(`Cold restart under supervised-daemon requires sudo:\n  sudo -k launchctl kickstart -k system/com.agentbridge.daemon\n`);
+      } else {
+        process.stderr.write(`Cold restart under supervised-daemon requires sudo:\n  sudo -k systemctl restart agentbridge\n`);
+      }
+      return 1;
+    }
+
     if (bridgeAlive) await killBridge(bridgePid!);
     const argv = (readJsonField(lockFile, "argv") as string[] | undefined) ?? ["--telegram"];
     return spawnLauncher(home, argv);

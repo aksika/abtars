@@ -1,6 +1,8 @@
 /**
  * AgentBridge — entry point.
  * Internal restart loop: exit code 0 = restart, non-zero = die.
+ * Under SUPERVISION (supervised-daemon mode), the loop is disabled —
+ * the system supervisor (systemd/launchd) handles restarts.
  *
  * CRITICAL: `./boot/env.js` MUST be the first import. ES static imports are
  * hoisted above body statements, so loading dotenv in the body runs too late —
@@ -27,11 +29,17 @@ process.on("unhandledRejection", (reason) => {
 });
 
 (async () => {
+  const supervision = process.env["SUPERVISION"];
+  if (supervision) {
+    logInfo("main", `🔒 Supervised by ${supervision} — internal restart loop disabled`);
+    const code = await startBridge();
+    process.exit(code);
+  }
   while (true) {
     const code = await startBridge();
     if (code !== 0) process.exit(code);
     logInfo("main", "♻️ Bridge restart requested — restarting...");
-    _resetEnv(); // re-read env on restart (config may have changed)
+    _resetEnv();
     initEnv();
   }
 })().catch((err) => {

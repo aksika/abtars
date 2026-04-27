@@ -7,11 +7,16 @@
 
 import { hostname } from 'node:os';
 import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import type { SourceName } from '../update-sources/types.js';
 import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION } from '../deploy-lib-import.js';
 import { runMigrations } from '../migrations/index.js';
+
+function readJsonField(file: string, field: string): unknown {
+  try { return JSON.parse(readFileSync(file, 'utf-8'))[field]; } catch { return undefined; }
+}
 
 export interface UpdateOptions {
   readonly source: SourceName;
@@ -191,11 +196,42 @@ export async function update(opts: UpdateOptions): Promise<number> {
     void hashFile;
 
     // Auto-restart bridge on new code
-    process.stdout.write("\nRestarting bridge...\n");
-    const { restart } = await import("./restart.js");
-    await restart({ cold: true }).catch((err: unknown) => {
-      process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
-    });
+    const manifestForRestart = await readManifest(paths.manifest);
+    const restartMode = manifestForRestart?.installMode ?? "supervised";
+
+    if (restartMode === "supervised-daemon") {
+      // Send USR1 to watchdog for graceful restart — no sudo needed
+      process.stdout.write("\nRestarting bridge via watchdog...\n");
+      const wdLock = join(paths.home, "watchdog.lock");
+      const wdPid = readJsonField(wdLock, "pid") as number | undefined;
+      if (wdPid && wdPid > 0) {
+        try {
+          process.kill(wdPid, "SIGUSR1");
+          process.stdout.write(`♻️ USR1 sent to watchdog (PID ${wdPid}) — bridge will restart\n`);
+        } catch {
+          process.stdout.write(`⚠️ Could not signal watchdog (PID ${wdPid}). Restart manually:\n`);
+          if (process.platform === "darwin") {
+            process.stdout.write(`  sudo -k launchctl kickstart -k system/com.agentbridge.daemon\n`);
+          } else {
+            process.stdout.write(`  sudo -k systemctl restart agentbridge\n`);
+          }
+        }
+      } else {
+        process.stdout.write(`⚠️ Watchdog PID not found. Restart manually:\n`);
+        if (process.platform === "darwin") {
+          process.stdout.write(`  sudo -k launchctl kickstart -k system/com.agentbridge.daemon\n`);
+        } else {
+          process.stdout.write(`  sudo -k systemctl restart agentbridge\n`);
+        }
+      }
+    } else {
+      // simple + supervised: cold restart as before
+      process.stdout.write("\nRestarting bridge...\n");
+      const { restart } = await import("./restart.js");
+      await restart({ cold: true }).catch((err: unknown) => {
+        process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      });
+    }
 
     return 0;
   } finally {

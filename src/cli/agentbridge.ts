@@ -79,7 +79,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           restore: typeof flags.get('restore') === 'string' ? (flags.get('restore') as string) : undefined,
           force: flags.get('force') === true,
           dryRun: flags.get('dry-run') === true,
-          mode: flags.get('mode') === 'simple' ? 'simple' : flags.get('mode') === 'supervised' ? 'supervised' : undefined,
+          mode: flags.get('mode') === 'simple' ? 'simple' : flags.get('mode') === 'supervised' ? 'supervised' : flags.get('mode') === 'supervised-daemon' ? 'supervised-daemon' : undefined,
         });
       case 'update':
         return await update({

@@ -11,7 +11,7 @@
  */
 
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
-import { readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
@@ -20,7 +20,7 @@ export interface InstallOptions {
   readonly restore?: string;
   readonly force: boolean;
   readonly dryRun: boolean;
-  readonly mode?: "simple" | "supervised";
+  readonly mode?: "simple" | "supervised" | "supervised-daemon";
 }
 
 // CLI wrappers are read from install-manifest.json at runtime.
@@ -186,6 +186,131 @@ function isPathOnPATH(userBinDir: string): boolean {
   return PATH.split(':').some((p) => p === userBinDir);
 }
 
+function isWSL(): boolean {
+  try {
+    return existsSync("/proc/sys/fs/binfmt_misc/WSLInterop")
+      || /microsoft/i.test(readFileSync("/proc/version", "utf-8"));
+  } catch { return false; }
+}
+
+async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: boolean): Promise<number> {
+  const platform = process.platform;
+
+  // WSL guard
+  if (platform === 'linux' && isWSL()) {
+    process.stderr.write(
+      `supervised-daemon on WSL can't survive Windows-level lifecycle events.\n` +
+      `Recommended: --mode=simple (run from tmux).\n` +
+      `Re-run with --mode=simple to proceed.\n`,
+    );
+    return 2;
+  }
+
+  // Sudo check — supervised-daemon requires root for system-scope service install
+  const sudoUser = process.env['SUDO_USER'];
+  if (process.getuid?.() !== 0) {
+    process.stderr.write(
+      `supervised-daemon requires sudo for system-scope service install.\n` +
+      `Run: sudo -k agentbridge install --mode=supervised-daemon\n`,
+    );
+    return 2;
+  }
+  if (!sudoUser) {
+    process.stderr.write(
+      `Cannot determine target user — $SUDO_USER is not set.\n` +
+      `Run via: sudo -k agentbridge install --mode=supervised-daemon\n` +
+      `(Do not use 'su -' — it doesn't set SUDO_USER.)\n`,
+    );
+    return 2;
+  }
+
+  // Validate that a normal install exists
+  const currentLink = join(home, 'current');
+  if (!existsSync(currentLink)) {
+    process.stderr.write(
+      `No release staged at ${currentLink}.\n` +
+      `Run 'agentbridge install' and 'agentbridge update' as ${sudoUser} first,\n` +
+      `then re-run with sudo for supervised-daemon.\n`,
+    );
+    return 2;
+  }
+
+  const userGroup = sudoUser; // primary group = username on most systems
+
+  if (platform === 'darwin') {
+    // Resolve actual primary group on macOS
+    const { execSync } = await import('node:child_process');
+    let group = userGroup;
+    try { group = execSync(`id -gn ${sudoUser}`, { encoding: 'utf-8' }).trim(); } catch { /* fallback */ }
+
+    const plistSrc = join(repoRoot, 'scripts', 'com.agentbridge.daemon.plist');
+    if (!existsSync(plistSrc)) {
+      process.stderr.write(`Template not found: ${plistSrc}\n`);
+      return 1;
+    }
+    let content = readFileSync(plistSrc, 'utf-8');
+    content = content.replaceAll('{{USER}}', sudoUser).replaceAll('{{GROUP}}', group);
+    const dst = '/Library/LaunchDaemons/com.agentbridge.daemon.plist';
+
+    if (dryRun) {
+      process.stdout.write(`[dry-run] write ${dst}\n[dry-run] launchctl bootstrap system ${dst}\n`);
+      return 0;
+    }
+
+    // Remove existing user-scope LaunchAgent if present
+    const userAgent = join('/Users', sudoUser, 'Library', 'LaunchAgents', 'com.agentbridge.watchdog.plist');
+    if (existsSync(userAgent)) {
+      const { execFileSync } = await import('node:child_process');
+      try { execFileSync('launchctl', ['bootout', `gui/${process.env['SUDO_UID'] ?? ''}`, userAgent]); } catch { /* may not be loaded */ }
+      process.stdout.write(`✓ disabled user-scope LaunchAgent\n`);
+    }
+
+    const { writeFileSync, chmodSync } = await import('node:fs');
+    writeFileSync(dst, content);
+    chmodSync(dst, 0o644);
+    const { execFileSync } = await import('node:child_process');
+    try { execFileSync('launchctl', ['bootstrap', 'system', dst]); } catch { /* already loaded */ }
+    process.stdout.write(`✓ LaunchDaemon installed at ${dst}\n`);
+    process.stdout.write(`✓ supervised-daemon active — bridge runs as ${sudoUser}, survives logout + reboot\n`);
+    return 0;
+  }
+
+  if (platform === 'linux') {
+    // systemd check
+    const { execSync } = await import('node:child_process');
+    try { execSync('systemctl --version', { stdio: 'ignore' }); } catch {
+      process.stderr.write(`systemctl not found — supervised-daemon requires systemd.\n`);
+      return 2;
+    }
+
+    const unitSrc = join(repoRoot, 'scripts', 'agentbridge-daemon.service');
+    if (!existsSync(unitSrc)) {
+      process.stderr.write(`Template not found: ${unitSrc}\n`);
+      return 1;
+    }
+    let content = readFileSync(unitSrc, 'utf-8');
+    content = content.replaceAll('{{USER}}', sudoUser);
+    const dst = '/etc/systemd/system/agentbridge.service';
+
+    if (dryRun) {
+      process.stdout.write(`[dry-run] write ${dst}\n[dry-run] systemctl enable --now agentbridge\n`);
+      return 0;
+    }
+
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(dst, content);
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('systemctl', ['daemon-reload']);
+    execFileSync('systemctl', ['enable', '--now', 'agentbridge']);
+    process.stdout.write(`✓ systemd unit installed at ${dst}\n`);
+    process.stdout.write(`✓ supervised-daemon active — bridge runs as ${sudoUser}, survives logout + reboot\n`);
+    return 0;
+  }
+
+  process.stderr.write(`supervised-daemon is not supported on ${platform}.\n`);
+  return 2;
+}
+
 export async function install(opts: InstallOptions): Promise<number> {
   const paths = packagePaths('agentbridge');
   const home = paths.home;
@@ -283,6 +408,11 @@ export async function install(opts: InstallOptions): Promise<number> {
     await writeManifest(paths.manifest, { ...manifestForMode, installMode: mode });
   }
   process.stdout.write(`✓ install mode: ${mode}\n`);
+
+  // --- supervised-daemon: system-scope service install (additive, does not touch simple/supervised paths) ---
+  if (mode === 'supervised-daemon') {
+    return installSupervisedDaemon(home, repoRoot, opts.dryRun);
+  }
 
   // Restore from backup zip
   if (opts.restore) {
