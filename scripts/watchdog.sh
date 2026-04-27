@@ -137,7 +137,7 @@ spawn_bridge() {
   # Stable entry point: main.js symlink created by agentbridge update.
   log "Starting bridge: node current/main.js $*"
   cd "$AB"
-  NODE_PATH="current/node_modules:$NODE_PATH" node current/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
+  NODE_PATH="current/node_modules:${NODE_PATH:-}" node current/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
   SPAWNED_AT=$(date +%s)
 
   # Wait for bridge.lock with PID
