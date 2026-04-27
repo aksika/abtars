@@ -1,7 +1,7 @@
 /**
  * Dashboard UI — HTML/CSS/JS for the Kiro Professor Web UI.
  *
- * CSS and JS are loaded from src/public/ (static files).
+ * CSS and JS are loaded from ./public/ (static files, colocated with this module).
  * HTML fragments are inline (they have dynamic parts).
  *
  * Exports:
@@ -14,7 +14,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const publicDir = join(__dirname, "..", "..", "public");
+const publicDir = join(__dirname, "public");
 
 let _css: string | null = null;
 let _js: string | null = null;
