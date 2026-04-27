@@ -135,6 +135,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 const isDirectRun =
   typeof process.argv[1] === 'string' &&
   (process.argv[1].endsWith('agentbridge.js') ||
+    process.argv[1].endsWith('agentbridge-cli.js') ||
     process.argv[1].endsWith('agentbridge') ||
     process.argv[1].endsWith('agentbridge.ts'));
 
