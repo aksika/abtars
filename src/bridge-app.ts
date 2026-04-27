@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 
-import { logInfo, logWarn } from "./components/logger.js";
+import { logInfo, logWarn, logError } from "./components/logger.js";
 import type { BootCtx } from "./boot/context.js";
 import { createBootCtx } from "./boot/context.js";
 import { phaseConfig } from "./boot/phase-config.js";
@@ -121,10 +121,19 @@ export async function startBridge(): Promise<number> {
     const t = Date.now();
     if (phase === phaseShutdown) {
       await phaseShutdown(ctx, bridge);
+      logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
+    } else if (phase === phaseDashboard) {
+      // Optional phase — dashboard failure must not crash the bridge (#308)
+      try {
+        await phaseDashboard(ctx);
+        logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
+      } catch (err) {
+        logError("boot", `✗ phaseDashboard failed — continuing without dashboard`, err);
+      }
     } else {
       await (phase as (ctx: BootCtx) => Promise<void>)(ctx);
+      logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
     }
-    logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
   }
 
   // Fire BridgeStart hook after all phases complete
