@@ -29,7 +29,8 @@ describe("busyGuardMiddleware", () => {
     await busyGuardMiddleware(ctx, next);
     expect(ctx.handled).toBe(true);
     expect(next).not.toHaveBeenCalled();
-    expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Queued"), expect.any(Object));
+    expect(ctx.adapter.sendMessage).not.toHaveBeenCalled();
+    expect(ctx.deps.sessions.get("master:tg")?.queue).toHaveLength(1);
   });
 
   it("shows coffee message when compacting", async () => {

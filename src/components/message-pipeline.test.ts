@@ -113,18 +113,6 @@ describe("handleInboundMessage", () => {
     expect(adapter.sendTyping).toHaveBeenCalled();
   });
 
-  it("queues message when session is busy", async () => {
-    const adapter = mockAdapter();
-    const sessions = new SessionRegistry();
-    sessions.getOrCreate("master:telegram").busy = true;
-    const deps = mockDeps(transport, { sessions });
-
-    await handleInboundMessage(makeMsg(), adapter, deps);
-
-    expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Queued"), expect.any(Object));
-    expect(transport.sendPrompt).not.toHaveBeenCalled();
-  });
-
   it("handles empty response", async () => {
     const emptyTransport = mockTransport();
     (emptyTransport.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue("");

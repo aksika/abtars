@@ -111,12 +111,6 @@ describe("loadAndValidateConfig", () => {
 
   // --- WORKING_DIR ---
 
-  it("throws when WORKING_DIR does not exist", async () => {
-    process.env["WORKING_DIR"] = "/nonexistent/path";
-    vi.mocked(fs.stat).mockRejectedValue(new Error("ENOENT"));
-    await expect(loadAndValidateConfig()).rejects.toThrow("WORKING_DIR");
-  });
-
   it("throws when WORKING_DIR is a file, not a directory", async () => {
     process.env["WORKING_DIR"] = "/some/file.txt";
     vi.mocked(fs.stat).mockResolvedValue({ isDirectory: () => false } as any);

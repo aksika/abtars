@@ -22,7 +22,7 @@ describe("boot/env — bootstrap populates process.env from .env", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "boot-env-"));
     mkdirSync(join(tmpDir, "config"), { recursive: true });
-    writeFileSync(join(tmpDir, ".env"), `${TEST_KEY}=from-dotenv\n`);
+    writeFileSync(join(tmpDir, "config", ".env"), `${TEST_KEY}=from-dotenv\n`);
     writeFileSync(join(tmpDir, "config", ".env.skills"), `${SKILLS_KEY}=from-skills\n`);
     process.env["AGENT_BRIDGE_HOME"] = tmpDir;
     delete process.env[TEST_KEY];
