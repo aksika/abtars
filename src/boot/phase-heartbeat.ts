@@ -53,7 +53,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
     let version = "?";
     // From dist/boot/phase-heartbeat.js: "../build-info.json" resolves to dist/build-info.json
     try { version = JSON.parse(readFileSync(join(import.meta.dirname, "..", "build-info.json"), "utf-8")).hash; } catch { /* */ }
-    writeFileSync(ctx.bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now(), version, sleepStatus: "awake", argv: process.argv.slice(2) }), "utf-8");
+    writeFileSync(ctx.bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now(), version, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
   } catch { /* */ }
 
   const hbIntervalMs = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10) * 1000;
@@ -61,6 +61,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   // Watchdog: wall-clock comparison (immune to setInterval batching after sleep)
   const WD_THRESHOLD_MS = hbIntervalMs * 3;
   let lastKickAt = Date.now();
+  let lastCheckAt = Date.now();
   const kickWatchdog = (): void => { lastKickAt = Date.now(); };
 
   const heartbeat = new HeartbeatSystem({
@@ -186,7 +187,15 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   }
 
   setInterval(() => {
-    const elapsed = Date.now() - lastKickAt;
+    const now = Date.now();
+    const checkGap = now - lastCheckAt;
+    lastCheckAt = now;
+    // Suspend detection: if timer fired much later than expected, process was suspended
+    if (checkGap > WD_CHECK_INTERVAL * 3) {
+      lastKickAt = now;
+      return;
+    }
+    const elapsed = now - lastKickAt;
     if (elapsed <= WD_THRESHOLD_MS) return;
     const kind = classifyResume();
     if (kind === "dark" || (kind === "unknown" && elapsed < WD_UNKNOWN_SUPPRESS_MS)) {
