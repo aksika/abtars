@@ -9,6 +9,7 @@ import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { tryReaction } from "./reactions.js";
 import { SessionRegistry } from "./session-registry.js";
+import { ModelNotFoundError } from "./transport/acp-transport.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason } from "./transport/bridge-lock-transport.js";
@@ -415,7 +416,13 @@ export async function handleInboundMessage(
       await runCompactionGuard(msg, adapter, { transport, sessions, memory, memoryConfig, updateCtxStart });
     }
   } catch (err) {
-    logError(TAG, `Error for ${sessionKey} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
+    // #287: model not found — surface actionable message to user
+    if (err instanceof ModelNotFoundError) {
+      logWarn(TAG, `Model not found for ${sessionKey}: ${err.message}`);
+      await adapter.sendMessage(channelId, `❌ ${err.message}\nUse /model to switch.`, { threadId: msg.threadId });
+    } else {
+      logError(TAG, `Error for ${sessionKey} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
+    }
     if (adapter.setReaction && msg.messageId) {
       await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
     }

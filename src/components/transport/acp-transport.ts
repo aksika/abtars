@@ -1,6 +1,11 @@
 import { getEnv } from "../env-schema.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+
+export class ModelNotFoundError extends Error {
+  constructor(message: string) { super(message); this.name = "ModelNotFoundError"; }
+}
+
 import {
   ClientSideConnection,
   PROTOCOL_VERSION,
@@ -55,6 +60,7 @@ export class AcpTransport implements IKiroTransport {
   /** Currently in-flight tool call (null if none). */
   toolInFlight: { title: string; startedAt: number } | null = null;
   private _promptActive = false;
+  private _modelNotFound = false;
   /** Last prompt sent (for watchdog re-send). */
   lastPromptText = "";
   /** Last session key used (for watchdog re-send). */
@@ -138,6 +144,9 @@ export class AcpTransport implements IKiroTransport {
               this.lastContextPercent = Math.ceil(pct);
             }
           }
+          if (method === "_kiro.dev/agent/not_found" || method === "_kiro.dev/model/not_found") {
+            this._modelNotFound = true;
+          }
         },
       }),
       stream,
@@ -194,6 +203,14 @@ export class AcpTransport implements IKiroTransport {
 
       logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
       this.lastSuccessAt = Date.now();
+
+      // #287: if model/agent not found was flagged during this session, reject the response
+      if (this._modelNotFound) {
+        this._modelNotFound = false;
+        this.responseChunks.delete(sessionId);
+        const model = this.modelId ?? "unknown";
+        throw new ModelNotFoundError(`Model "${model}" not available — kiro-cli fell back to generic agent`);
+      }
 
       const chunks = this.responseChunks.get(sessionId) ?? [];
       this.responseChunks.delete(sessionId);
