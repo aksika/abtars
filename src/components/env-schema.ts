@@ -266,12 +266,14 @@ export function initEnv(): Readonly<EnvConfig> {
   const knownVars = new Set(SCHEMA.map(s => s.env));
   const warnings: string[] = [];
 
-  // Detect unknown vars in .env (typo detection)
+  // Detect unknown vars in .env (stale/typo detection)
   const envKeys = Object.keys(process.env).filter(k => /^[A-Z_]+$/.test(k));
   for (const k of envKeys) {
     if (!knownVars.has(k) && !SYSTEM_ENV_VARS.has(k)) {
       const suggestion = findClosest(k, knownVars);
-      if (suggestion) warnings.push(`Unknown env var ${k} — did you mean ${suggestion}?`);
+      warnings.push(suggestion
+        ? `Unknown env var ${k} — did you mean ${suggestion}?`
+        : `Unknown env var ${k} — not used by any code, consider removing`);
     }
   }
 
