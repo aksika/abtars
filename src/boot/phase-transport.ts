@@ -157,6 +157,34 @@ export async function buildTransport(ctx: BootCtx): Promise<void> {
     await backend.initialize();
     setMemoryBackend(backend);
     logInfo("main", "🧠 In-process memory wired to tool registry");
+
+    // Wire context engine for automatic compaction
+    const db = ctx.memory.getDb?.() ?? ctx.memory.getDatabase?.();
+    if (db && resolved.contextWindow >= 128000) {
+      const { ContextEngine } = await import("abmind");
+      const { createContextOrchestrator } = await import("../components/context/index.js");
+      const contextEngine = new ContextEngine(db);
+      const orchestrator = createContextOrchestrator(
+        contextEngine,
+        async (systemPrompt: string, userPrompt: string) => {
+          // Use the transport itself for summarization (same model, same endpoint)
+          const { streamSingleCompletion } = await import("../components/transport/stream-single.js");
+          return streamSingleCompletion({
+            endpoint: resolved.provider.endpoint ?? "http://localhost:11434/v1",
+            apiKey: getEnv().getApiKey(resolved.provider.apiKeyEnv ?? "API_KEY") ?? undefined,
+            model: resolved.model,
+            systemPrompt,
+            userPrompt,
+            maxTokens: 4096,
+          });
+        },
+        (_chatId: string) => {
+          try { return ctx.memory?.getLastMessageTimestamp(true) ?? null; } catch { return null; }
+        },
+      );
+      (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).contextOrchestrator = orchestrator;
+      logInfo("main", "📦 Context engine wired (auto-compaction active)");
+    }
   }
 
   if ("onFallback" in transport) {
