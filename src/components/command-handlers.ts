@@ -14,7 +14,7 @@ import { writeSleepStatus, readBridgeLockField, writeForceSleep } from "./transp
 import { readEntries as cronReadEntries } from "./cron/cron-store.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import { agentBridgeHome } from "../paths.js";
-import { runCompaction } from "./compaction.js";
+// Legacy compaction removed — /compact now uses context orchestrator via transport
 import { resetAndPrepare } from "./message-pipeline.js";
 import type { PipelineDeps } from "./message-pipeline.js";
 import type { RunningJob } from "./cron/cron-queue.js";
@@ -228,28 +228,19 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
 }
 
 async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
-  const placeholderId = await ctx.reply("📦 Compacting...");
-  let done = false;
-  const editTick = async (label: string): Promise<void> => {
-    if (done || placeholderId === undefined || !ctx.editReply) return;
-    try { await ctx.editReply(placeholderId, label); } catch { /* edit race — ignore */ }
-  };
-  const tick15 = setTimeout(() => { void editTick("📦 Compacting... (15s)"); }, 15_000);
-  const tick30 = setTimeout(() => { void editTick("📦 Still compacting... (30s)"); }, 30_000);
   try {
-    await runCompaction(ctx.transport, ctx.sessionKey, ctx.sessions);
-    done = true;
-    if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
-    await ctx.reply("📦 Compaction complete.");
-    logInfo(TAG, `Manual compaction done`);
+    // Context engine compaction — force compact via transport's orchestrator
+    const transport = ctx.transport as { contextOrchestrator?: { forceCompact(chatId: string, budget: number): Promise<boolean> }; config?: { maxContext: number } };
+    if (transport.contextOrchestrator) {
+      const budget = (transport as any).config?.maxContext ?? 200000;
+      const success = await transport.contextOrchestrator.forceCompact(ctx.sessionKey, budget);
+      await ctx.reply(success ? "📦 Compaction complete." : "📦 Nothing to compact.");
+    } else {
+      await ctx.reply("📦 Context engine not active for this transport.");
+    }
   } catch (err) {
-    done = true;
     logError(TAG, "Manual compaction failed", err);
-    await ctx.reply("❌ Compaction failed. Try /reset to start fresh.");
-  } finally {
-    done = true;
-    clearTimeout(tick15);
-    clearTimeout(tick30);
+    await ctx.reply("❌ Compaction failed.");
   }
   return true;
 }

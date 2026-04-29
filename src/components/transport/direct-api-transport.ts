@@ -41,6 +41,7 @@ export class DirectApiTransport implements IKiroTransport {
   private activeApiKey?: string;
   private activeModel: string;
   private _lastPromptTokens = 0;
+  private _activeSessionKey = "";
 
   /** Currently active model (may differ from config if on fallback). */
   get currentModel(): string { return this.activeModel; }
@@ -49,6 +50,9 @@ export class DirectApiTransport implements IKiroTransport {
   onToolCallStart?: () => void;
   /** Called when fallback model is selected — send notification before response. */
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
+
+  /** Context orchestrator — when set, messages are built from DB instead of in-memory session. */
+  contextOrchestrator?: import("../context/context-orchestrator.js").ContextOrchestrator;
 
   private policy: FallbackPolicy | null;
   private emergencyOverride: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null = null;
@@ -83,6 +87,23 @@ export class DirectApiTransport implements IKiroTransport {
 
   async sendPrompt(sessionKey: string, message: string): Promise<string> {
     const session = this.getOrCreateSession(sessionKey);
+    this._activeSessionKey = sessionKey;
+
+    // If context orchestrator is active, rebuild messages from DB
+    if (this.contextOrchestrator) {
+      try {
+        const ctx = await this.contextOrchestrator.getContext(sessionKey, this.config.maxContext);
+        // Replace session messages with DB-backed context + system prompt
+        session.messages = [
+          { role: "system" as const, content: this.systemPrompt },
+          ...ctx.messages.map(m => ({ role: m.role as "user" | "assistant" | "tool", content: m.content })),
+        ];
+        if (ctx.compacted) logDebug(TAG, `Context compacted for ${sessionKey}`);
+      } catch (err) {
+        logWarn(TAG, `Context engine failed, falling back to in-memory: ${err}`);
+      }
+    }
+
     session.addUser(message);
 
     this._lastAnswer = "";
@@ -216,6 +237,8 @@ export class DirectApiTransport implements IKiroTransport {
         session.updateTokens(usage.prompt_tokens);
         this._contextPercent = session.contextPercent;
         this._lastPromptTokens = usage.prompt_tokens;
+        // Reactive feedback: if over threshold, flag for next buildContext
+        this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
       }
 
       if (toolCalls.length > 0) {

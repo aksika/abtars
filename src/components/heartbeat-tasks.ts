@@ -4,9 +4,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { logInfo, logWarn, logError } from "./logger.js";
-import { getEnv } from "./env-schema.js";
-import { runCompaction } from "./compaction.js";
+import { logInfo, logError } from "./logger.js";
 import { setIdleCompactReset } from "./message-pipeline.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
@@ -22,52 +20,13 @@ export interface IdleCompactDeps {
   isSleepActive: () => boolean;
 }
 
-/** Floating compaction — triggers when context is high and user is idle. */
-export function createIdleCompactTask(deps: IdleCompactDeps): HeartbeatTask {
-  const pctThreshold = getEnv().ctxIdleCompactPct;
-  const idleMinutes = getEnv().ctxIdleCompactMin;
-  let compactedThisIdle = false;
-  setIdleCompactReset(() => { compactedThisIdle = false; });
-
+/** Idle compaction removed — context engine handles compaction automatically via buildContext(). */
+export function createIdleCompactTask(_deps: IdleCompactDeps): HeartbeatTask {
+  setIdleCompactReset(() => {});
   return {
     name: "idle-compact",
-    heavy: true,
-    execute: async () => {
-      const pct = deps.transport.contextPercent;
-      if (pct < 0 || pct < pctThreshold) return false;
-      // Check if any session is busy
-      const anyBusy = [...deps.sessions.keys()].some(k => deps.sessions.get(k)?.busy);
-      if (compactedThisIdle || anyBusy || deps.isSleepActive()) return false;
-
-      let lastMsgTs = 0;
-      try {
-        lastMsgTs = deps.memory?.getLastMessageTimestamp(true) ?? 0;
-      } catch { return false; }
-      if (Date.now() - lastMsgTs < idleMinutes * 60 * 1000) return false;
-
-      const chatId = [...deps.allowedUserIds][0];
-      if (!chatId) return false;
-      const { loadUsers } = await import("./user-registry.js");
-      const registry = loadUsers();
-      const user = registry.byPlatformId.get("telegram:" + chatId);
-      const sessionKey = (user?.userId ?? "master") + ":telegram";
-
-      logInfo("idle-compact", `☕ ctx at ${pct}%, idle ${Math.round((Date.now() - lastMsgTs) / 60000)}min — compacting`);
-      const entry = deps.sessions.getOrCreate(sessionKey);
-      entry.busy = true;
-      entry.compacting = true;
-      try {
-        await runCompaction(deps.transport, sessionKey, deps.sessions);
-        compactedThisIdle = true;
-        logInfo("idle-compact", "☕ Floating compaction complete");
-      } catch (err) {
-        logWarn("idle-compact", `☕ Floating compaction failed: ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        entry.busy = false;
-        entry.compacting = false;
-      }
-      return true;
-    },
+    heavy: false,
+    execute: async () => false,
   };
 }
 

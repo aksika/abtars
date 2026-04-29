@@ -40,7 +40,7 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
   });
 
   if (platforms.telegram) {
-    const result = await registry.start("telegram");
+    const result = await registry.start("telegram", { backgroundRetry: true });
     if (result.ok) {
       logInfo("main", "📡 Telegram polling started");
       // Wire send_document tool: binds mainChatId + adapter, exposes to tool-registry
@@ -49,6 +49,8 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
         const { setSendDocument } = await import("../components/transport/tool-registry.js");
         setSendDocument((path, caption) => ctx.telegramAdapter!.sendDocument(String(mainChatId), path, caption));
       }
+    } else if (result.retryingInBackground) {
+      logWarn("main", `Telegram failed to start: ${result.error} — retrying in background`);
     } else {
       logError("main", `Telegram failed to start: ${result.error}`);
     }
@@ -87,11 +89,13 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
   });
 
   if (platforms.discord) {
-    const result = await registry.start("discord");
+    const result = await registry.start("discord", { backgroundRetry: true });
     if (result.ok) {
       logInfo("main", "📡 Discord polling started");
     } else if (result.error?.includes("not configured")) {
       logWarn("main", "Discord flag set but not configured — skipping");
+    } else if (result.retryingInBackground) {
+      logWarn("main", `Discord failed to start: ${result.error} — retrying in background`);
     } else {
       logError("main", `Discord failed to start: ${result.error}`);
     }

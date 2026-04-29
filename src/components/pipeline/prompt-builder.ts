@@ -13,7 +13,6 @@ import { renderMemory } from "abmind";
 import { buildSessionStartContext } from "abmind/session-context.js";
 import { getEnv } from "../env-schema.js";
 import { readAndClearRestartReason } from "../transport/bridge-lock-transport.js";
-import { compactionSummaries } from "../compaction.js";
 import type { SessionRegistry } from "../session-registry.js";
 import type { MemoryManager } from "abmind/memory-manager.js";
 import type { ConversationBuffer } from "../conversation-buffer.js";
@@ -164,11 +163,9 @@ export function buildSessionStartPrompt(
     } catch { /* registry not available */ }
   }
 
-  const compSummary = compactionSummaries.get(sessionKey ?? "");
+  const compSummary = null; // Legacy compaction removed — context engine handles summaries
   if (compSummary && sessionKey) {
-    contextParts.push(`[COMPACTED CONVERSATION]\n${compSummary}\n[/COMPACTED CONVERSATION]`);
-    compactionSummaries.delete(sessionKey);
-    logInfo(TAG, `Injected compaction summary (${compSummary.length} chars)`);
+    // Dead path — kept for type safety during transition
   } else {
     const ctx = buildSessionStartContext(memory, userId);
     if (ctx) {
