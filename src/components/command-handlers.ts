@@ -371,7 +371,10 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
       return `${tick}  ${e.id}  ${sched.padEnd(15)}  ${label}`;
     });
     listing = lines.length > 0 ? "```\n" + lines.join("\n") + "\n```" : "(no active entries)";
-  } catch { listing = "(failed to read cron)"; }
+  } catch (err) {
+    logError("tasks", `Failed to read cron: ${err instanceof Error ? err.message : String(err)}`);
+    listing = "(no active entries)";
+  }
   let running = "";
   if (ctx.cronCurrentJob) {
     const j = ctx.cronCurrentJob;
