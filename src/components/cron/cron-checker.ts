@@ -74,6 +74,23 @@ export function checkCron(): CronEntry[] {
   for (const entry of entries) {
     if (entry.fired || entry.paused || entry.fireAt > now) continue;
 
+    // #327: stale detection — if past the catch-up window, advance to next occurrence
+    if (entry.schedule && entry.fireAt <= now) {
+      const maxDelay = (entry.catchUp ?? 0) * 3600_000;
+      // Only consider stale if missed by more than one full interval (at minimum 5 min)
+      const MIN_STALE_MS = 5 * 60_000;
+      const staleThreshold = Math.max(maxDelay, MIN_STALE_MS);
+      if (now - entry.fireAt > staleThreshold) {
+        try {
+          const expr = CronExpressionParser.parse(entry.schedule);
+          entry.fireAt = expr.next().getTime();
+          writeEntry(entry);
+          logInfo(TAG, `⏭️ Stale "${entry.id}" — advanced to next occurrence`);
+        } catch { /* invalid schedule, let it fire */ }
+        continue;
+      }
+    }
+
     entry.lastRanAt = now;
     const wasRetry = !!entry._retrying;
     if (entry.schedule) {

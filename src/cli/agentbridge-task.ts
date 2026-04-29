@@ -24,6 +24,7 @@ export interface CronEntry {
   type: "reminder" | "task";
   executor?: "agent" | "script";
   schedule?: string;
+  catchUp?: number;  // hours: max delay after fireAt before skipping to next. 0 = no catch-up (default).
   priority?: "high" | "medium" | "low";
   taskFile?: string;
   paused?: boolean;

@@ -274,17 +274,18 @@ export class CronQueue {
 
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
 
+    // Set current BEFORE any await — prevents race where enqueue() sees _current=null
+    // and calls processNext() again while we're awaiting the dynamic import.
+    this.setCurrent(entry, 0, "agent");
+
     const { SubagentRuntime } = await import("../subagent-runtime.js");
     const runtime = new SubagentRuntime();
 
-    // 30-min hard timeout
+    // 30-min hard timeout (starts at execution, not enqueue)
     this.timeout = setTimeout(() => {
       logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min) — shutting down runtime`);
       runtime.shutdown();
     }, AGENT_TIMEOUT_MS);
-
-    // Use a fake PID — SubagentRuntime manages the process internally
-    this.setCurrent(entry, 0, "agent");
 
     runtime.complete("cron", prompt)
       .then((response) => {
