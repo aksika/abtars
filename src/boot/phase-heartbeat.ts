@@ -244,9 +244,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
 
   // Model health check — runs once on first tick
   let modelHealthDone = false;
-  heartbeat.registerTask({
-    name: "model-health",
-    execute: async () => {
+  const runModelHealth = async (): Promise<void> => {
       if (modelHealthDone) return;
       modelHealthDone = true;
       const { loadTransport, resolveAgent, consumeRepairs } = await import("../components/transport-config.js");
@@ -312,8 +310,11 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
         const { sendNotification } = await import("../components/notification.js");
         sendNotification(ctx, `🏥 Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
       }
-    },
-  });
+  };
+  heartbeat.registerTask({ name: "model-health", execute: runModelHealth });
+
+  // #318: fire model-health immediately at boot (don't wait for first tick)
+  queueMicrotask(() => { runModelHealth().catch(() => {}); });
 
   // checkBrowseTasks once on startup, then heartbeat.start
   const { checkBrowseTasks } = await import("../capabilities/browser/browse-delivery.js");
