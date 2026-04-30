@@ -71,8 +71,27 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
         },
       ).then(() => {
         logInfo("main", "✅ Startup session ready");
-      }).catch(err => {
-        logWarn("main", `Startup greeting failed: ${err instanceof Error ? err.message : JSON.stringify(err)}`);
+      }).catch(async (err) => {
+        logWarn("main", `Startup greeting failed (attempt 1): ${err instanceof Error ? err.message : String(err)}`);
+        // #328: retry once after 60s (model may still be loading after deploy)
+        await new Promise(r => setTimeout(r, 60_000));
+        try {
+          await startSession(
+            transport,
+            memory!,
+            loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master",
+            sessionKey,
+            "You just came online. Output ONLY a personalized greeting message.",
+            async (text) => {
+              const { text: clean, reactionEmoji } = cleanResponse(text);
+              if (clean) await telegramAdapter.sendMessage(String(chatId), clean);
+              if (reactionEmoji) await telegramAdapter.sendMessage(String(chatId), reactionEmoji);
+            },
+          );
+          logInfo("main", "✅ Startup session ready (retry succeeded)");
+        } catch (retryErr) {
+          logWarn("main", `Startup greeting retry failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
+        }
       }).finally(() => {
         ctx.sessions.getOrCreate(sessionKey).busy = false;
       });

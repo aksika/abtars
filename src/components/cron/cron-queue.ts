@@ -22,6 +22,37 @@ const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const RETRY_DELAY_MS = 10 * 60 * 1000; // skip 1 cycle (2 × 5min)
 const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+const STATE_FILE = join(homedir(), ".agentbridge", "cron-queue-state.json");
+
+interface PersistedState {
+  pid: number;
+  currentJob: { entryId: string; message: string; startedAt: number; type: string } | null;
+  queue: Array<{ entryId: string; message: string; priority: string; manual: boolean }>;
+}
+
+function persistState(current: RunningJob | null, queue: QueuedJob[]): void {
+  try {
+    const state: PersistedState = {
+      pid: process.pid,
+      currentJob: current ? { entryId: current.entryId, message: current.message, startedAt: current.startedAt, type: current.type } : null,
+      queue: queue.map(j => ({ entryId: j.entry.id, message: j.entry.message, priority: j.entry.priority ?? "medium", manual: j.manual ?? false })),
+    };
+    writeFileSync(STATE_FILE, JSON.stringify(state), "utf-8");
+  } catch { /* best-effort */ }
+}
+
+function loadStaleState(): PersistedState | null {
+  try {
+    if (!existsSync(STATE_FILE)) return null;
+    const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as PersistedState;
+    // If PID matches current process, state is ours (not stale)
+    if (raw.pid === process.pid) return null;
+    // If bridge was in hw_sleep, don't mark as failed (watchdog-aware)
+    const sleepStatus = readBridgeLockField("sleepStatus");
+    if (sleepStatus === "hw_sleep") return null;
+    return raw;
+  } catch { return null; }
+}
 
 function recordRunToFile(entryId: string, exitCode?: number): void {
   dbRecordRun(entryId, exitCode);
@@ -130,6 +161,19 @@ export class CronQueue {
 
   constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback) {
     this.onFailInject = onFailInject;
+    // #267: recover stale state from previous process
+    const stale = loadStaleState();
+    if (stale) {
+      if (stale.currentJob) {
+        logWarn(TAG, `Stale in-flight job detected: "${stale.currentJob.entryId}" (PID ${stale.pid} dead) — marking failed`);
+        recordRunToFile(stale.currentJob.entryId, 1);
+      }
+      if (stale.queue.length > 0) {
+        logWarn(TAG, `${stale.queue.length} stale queued job(s) from previous process — dropped`);
+      }
+      // Clear stale state
+      persistState(null, []);
+    }
   }
 
   /** Currently running job, or null. */
@@ -157,6 +201,7 @@ export class CronQueue {
     }
     this.queue.splice(i, 0, { entry, onComplete, manual });
     logInfo(TAG, `Enqueued "${entry.id}" (${entry.executor ?? "agent"}, ${entry.priority ?? "medium"}${manual ? ", manual" : ""}) — ${this.queue.length} pending`);
+    persistState(this._current, this.queue);
 
     if (!this._current) this.processNext();
     return null;
@@ -189,12 +234,13 @@ export class CronQueue {
       startedAt: Date.now(),
       type,
     };
+    persistState(this._current, this.queue);
   }
 
   private clearCurrent(): void {
     if (this.timeout) { clearTimeout(this.timeout); this.timeout = null; }
     this._current = null;
-    
+    persistState(this._current, this.queue);
   }
 
   private tryInjectFailure(entry: CronEntry, result: string): void {

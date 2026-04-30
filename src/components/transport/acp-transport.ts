@@ -235,6 +235,10 @@ export class AcpTransport implements IKiroTransport {
 
   private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // #329: abort immediately if model is known-dead (flag set during handshake)
+      if (this._modelNotFound) {
+        throw new ModelNotFoundError(`Model "${this.modelId ?? "unknown"}" not available — use /model to switch`);
+      }
       try {
         if (!this.client) throw new Error("ACP not initialized");
         const result = await Promise.race([
