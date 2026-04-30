@@ -117,29 +117,23 @@ export async function startBridge(): Promise<number> {
     }
   }
 
-  // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
+  // Populate version/commit from release symlink (e.g. "0.1.0-f9c4d38")
   try {
-    const { writeFileSync, readFileSync, readlinkSync } = await import("node:fs");
+    const { readlinkSync } = await import("node:fs");
     const { join, basename } = await import("node:path");
     const { homedir } = await import("node:os");
-    // Populate version/commit from release symlink name (e.g. "0.1.0-f9c4d38")
-    try {
-      const currentLink = join(homedir(), ".agentbridge", "current");
-      const target = basename(readlinkSync(currentLink)); // "0.1.0-f9c4d38"
-      const dash = target.lastIndexOf("-");
-      if (dash > 0) {
-        ctx.version = target.slice(0, dash);
-        ctx.commit = target.slice(dash + 1);
-      }
-    } catch { /* */ }
-    // Fallback: try build-info.json / package.json in source tree
-    if (ctx.version === "?") {
-      try { ctx.version = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf-8")).version; } catch { /* */ }
-    }
-    if (ctx.commit === "?") {
-      try { ctx.commit = JSON.parse(readFileSync(join(import.meta.dirname, "build-info.json"), "utf-8")).hash; } catch { /* */ }
-    }
-    writeFileSync(ctx.bridgeLockPath || join(homedir(), ".agentbridge", "bridge.lock"),
+    const target = basename(readlinkSync(join(homedir(), ".agentbridge", "current")));
+    const dash = target.lastIndexOf("-");
+    if (dash > 0) { ctx.version = target.slice(0, dash); ctx.commit = target.slice(dash + 1); }
+  } catch { /* dev mode — no release symlink */ }
+
+  // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
+  try {
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { homedir } = await import("node:os");
+    const lockPath = ctx.bridgeLockPath || join(homedir(), ".agentbridge", "bridge.lock");
+    writeFileSync(lockPath,
       JSON.stringify({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}-${ctx.commit}`, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
   } catch { /* best effort */ }
 
