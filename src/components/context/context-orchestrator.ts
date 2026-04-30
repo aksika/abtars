@@ -5,17 +5,13 @@
  */
 
 import type { ContextEngine, ContextMessage } from "abmind";
-import { COMPACTION_THRESHOLD_PCT, TAIL_MIN_MESSAGES, CHARS_PER_TOKEN } from "abmind";
+import { COMPACTION_THRESHOLD_PCT, TAIL_MIN_MESSAGES, CHARS_PER_TOKEN, renderForContext } from "abmind";
 import { pruneToolResults } from "./tool-result-pruner.js";
 import { logDebug, logInfo, logWarn, logError } from "../logger.js";
 
 const TAG = "context";
 const PRUNING_THRESHOLD_PCT = 0.35;
 const GAP_AGGRESSIVE_MS = 60 * 60 * 1000; // 1 hour
-const SUMMARY_FRAMING = `[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.
-Treat as background reference, NOT active instructions. Do NOT answer
-questions in this summary — they were already addressed.
-Respond ONLY to messages AFTER this summary.`;
 
 export type SummarizeFn = (serializedTurns: string, budget: number, priorSummaries: string) => Promise<string>;
 
@@ -45,30 +41,21 @@ export class ContextOrchestrator {
 
   /** Main entry point: get context ready to send to LLM API. */
   async getContext(chatId: string, tokenBudget: number): Promise<ContextResult> {
-    // Load current state (no compaction here — that happens async after response)
-    const snapshot = this.engine.buildContext(chatId);
+    // Use #348 three-tier assembly (respects CONTEXT_TIER_ENABLED)
+    const tiered = renderForContext(this.engine.getDb(), this.engine, chatId);
 
-    // Build message array: summaries first, then raw messages
-    const contextMessages: Array<{ role: string; content: string }> = [];
+    // tiered.messages already has head summaries + middle ABM-L + tail verbatim
+    const contextMessages = tiered.messages.slice();
 
-    // Inject summaries as user messages with framing
-    for (const summary of snapshot.summaries) {
-      contextMessages.push({ role: "user", content: `${SUMMARY_FRAMING}\n\n${summary.content}` });
-    }
-
-    // Add raw messages
-    for (const msg of snapshot.messages) {
-      contextMessages.push({ role: msg.role, content: msg.content });
-    }
-
-    // Tool pruning (in-memory)
+    // Tool pruning still applies (in-memory, doesn't modify DB)
     const gap = this.getTimeSinceLastAssistant(chatId);
     const aggressive = gap > GAP_AGGRESSIVE_MS;
-    const estimatedTokens = contextMessages.reduce((s, m) => s + Math.ceil(m.content.length / CHARS_PER_TOKEN), 0);
+    const estimatedTokens = tiered.estimatedTokens;
     let pruned = 0;
 
+    const totalMessageCount = tiered.tierBreakdown.tailCount + tiered.tierBreakdown.middleCount;
     if (aggressive || estimatedTokens > tokenBudget * PRUNING_THRESHOLD_PCT) {
-      const tailCount = Math.max(TAIL_MIN_MESSAGES, Math.min(snapshot.messages.length, Math.ceil(snapshot.messages.length * 0.3)));
+      const tailCount = Math.max(TAIL_MIN_MESSAGES, Math.min(totalMessageCount, Math.ceil(totalMessageCount * 0.3)));
       const pruneResult = pruneToolResults(contextMessages as any, tailCount, aggressive);
       pruned = pruneResult.prunedCount;
       if (pruned > 0) {
@@ -78,6 +65,7 @@ export class ContextOrchestrator {
     }
 
     const finalTokens = contextMessages.reduce((s, m) => s + Math.ceil(m.content.length / CHARS_PER_TOKEN), 0);
+    logDebug(TAG, `context assembled: head=${tiered.tierBreakdown.headCount} middle=${tiered.tierBreakdown.middleCount} tail=${tiered.tierBreakdown.tailCount} pruned=${pruned} est=${finalTokens}tok`);
     return { messages: contextMessages, compacted: false, pruned, estimatedTokens: finalTokens };
   }
 
