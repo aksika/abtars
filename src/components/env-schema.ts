@@ -270,6 +270,10 @@ export function initEnv(): Readonly<EnvConfig> {
   const envKeys = Object.keys(process.env).filter(k => /^[A-Z_]+$/.test(k));
   for (const k of envKeys) {
     if (!knownVars.has(k) && !SYSTEM_ENV_VARS.has(k)) {
+      // Allow *_API_KEY pattern (provider keys referenced dynamically by transport.json)
+      if (k.endsWith("_API_KEY") || k.endsWith("_API_ID")) continue;
+      // Allow HA_* (Home Assistant, loaded from .env.skills)
+      if (k.startsWith("HA_")) continue;
       const suggestion = findClosest(k, knownVars);
       warnings.push(suggestion
         ? `Unknown env var ${k} — did you mean ${suggestion}?`
@@ -393,14 +397,31 @@ export function _resetEnv(): void { _env = null; }
 
 /** System env vars to ignore in unknown-var detection. */
 const SYSTEM_ENV_VARS = new Set([
+  // POSIX / Linux
   "HOME", "PATH", "USER", "SHELL", "TERM", "LANG", "LC_ALL", "EDITOR",
-  "NODE_ENV", "NODE_PATH", "NODE_OPTIONS", "NPM_CONFIG_PREFIX",
-  "VITEST", "CI", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
-  "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO", "COLORTERM",
-  "WT_SESSION", "WT_PROFILE_ID", "WSLENV", "WSL_DISTRO_NAME", "WSL_INTEROP",
   "HOSTTYPE", "HOSTNAME", "LOGNAME", "OLDPWD", "PWD", "SHLVL", "TMPDIR",
-  "XDG_DATA_DIRS", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "LESSOPEN", "LESSCLOSE",
-  "_", "LS_COLORS", "PULSE_SERVER", "WAYLAND_DISPLAY",
+  "XDG_DATA_DIRS", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+  "LESSOPEN", "LESSCLOSE", "_", "LS_COLORS", "COLORTERM",
+  "DISPLAY", "PULSE_SERVER", "WAYLAND_DISPLAY",
+  "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_CONNECTION",
+  "GPG_AGENT_INFO",
+  // Node
+  "NODE_ENV", "NODE_PATH", "NODE_OPTIONS", "NPM_CONFIG_PREFIX", "NVM_DIR",
+  "VITEST", "CI",
+  // WSL
+  "WT_SESSION", "WT_PROFILE_ID", "WSLENV", "WSL_DISTRO_NAME", "WSL_INTEROP",
+  // macOS
+  "XPC_FLAGS", "XPC_SERVICE_NAME", "__CF_USER_TEXT_ENCODING",
+  "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COMMAND_MODE",
+  // sudo / install-time
+  "SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND",
+  // Agent API + Dashboard (read outside getEnv by dedicated config loaders)
+  "AGENT_API_ALLOWED_IPS", "AGENT_API_PORT", "AGENT_API_TOKEN",
+  "AGENT_CHAT_ID", "AGENT_CODENAME", "AGENT_SESSION_KEY",
+  "WEB_AUTH_TOKEN", "WEB_PORT", "WEB_HOST",
+  // Sleep / capabilities
+  "SUPERVISION", "SLEEP_TIMEOUT_MIN", "NOTEBOOKLM_CLI_PATH",
+  "BROWSER_ENGINE", "BROWSER_SOCKET_PATH",
 ]);
 
 /** Find closest known var name (Levenshtein distance ≤ 3). */
