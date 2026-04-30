@@ -32,7 +32,7 @@ export type DashboardServerDeps = {
   getStatus: () => StatusSnapshot;
   registry: ServiceRegistry;
   memorySearchController: MemorySearchController | null;
-  dashboardHtml: string;
+  agentApiConfig?: { port: number; allowedIps: string[] } | null;
 };
 
 // ── DashboardServer ─────────────────────────────────────────────────────────
@@ -111,7 +111,7 @@ export class DashboardServer implements IDashboardSlot {
 
   // ── HTTP Request Handler ──────────────────────────────────────────────
 
-  private handleRequest(
+  private async handleRequest(
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): void {
@@ -120,21 +120,35 @@ export class DashboardServer implements IDashboardSlot {
       const method = req.method ?? "GET";
       const pathname = url.split("?")[0];
 
-      // GET / — serve dashboard HTML (unauthenticated)
+      // GET / — serve static index.html
       if (method === "GET" && pathname === "/") {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(this.deps.dashboardHtml);
+        const indexPath = join(dirname(fileURLToPath(import.meta.url)), "public", "index.html");
+        if (existsSync(indexPath)) {
+          let html = readFileSync(indexPath, "utf-8");
+          // Inject capability flags into <body> tag
+          const agentApi = this.deps.agentApiConfig;
+          if (agentApi) {
+            html = html.replace('data-has-agent-api="false"', 'data-has-agent-api="true"');
+            html = html.replace('data-agent-api-port=""', `data-agent-api-port="${agentApi.port}"`);
+          }
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(html);
+        } else {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("index.html not found");
+        }
         return;
       }
 
-      // GET /*.js or /*.css — serve static files from dist/public/
-      if (method === "GET" && /^\/([\w-]+)\.(js|css)$/.test(pathname ?? "")) {
-        const filename = pathname!.slice(1);
-        const filePath = join(dirname(fileURLToPath(import.meta.url)), "public", filename);
+      // Static files — serve from public/ (supports nested paths)
+      if (method === "GET" && /^\/(js|css|assets|[\w-]+\.(js|css|jpg|png|ico))/.test(pathname ?? "")) {
+        const safePath = (pathname ?? "").replace(/\.\./g, "");
+        const filePath = join(dirname(fileURLToPath(import.meta.url)), "public", safePath);
         if (existsSync(filePath)) {
-          const ext = filename.endsWith(".css") ? "text/css" : "text/javascript";
-          res.writeHead(200, { "Content-Type": `${ext}; charset=utf-8` });
-          res.end(readFileSync(filePath, "utf-8"));
+          const ext = safePath.split(".").pop() ?? "";
+          const mimeTypes: Record<string, string> = { js: "text/javascript", css: "text/css", jpg: "image/jpeg", png: "image/png", ico: "image/x-icon", html: "text/html" };
+          res.writeHead(200, { "Content-Type": (mimeTypes[ext] ?? "application/octet-stream") + (["js", "css", "html"].includes(ext) ? "; charset=utf-8" : "") });
+          res.end(readFileSync(filePath));
           return;
         }
       }
@@ -247,6 +261,27 @@ export class DashboardServer implements IDashboardSlot {
           const result = handleCronAction(id!, action!);
           res.writeHead(result.ok ? 200 : 404, { "Content-Type": "application/json" });
           res.end(JSON.stringify(result));
+        } catch (err) {
+          this.sendError(res, 500, err);
+        }
+        return;
+      }
+
+      // GET /api/status — REST endpoint for current status snapshot
+      if (method === "GET" && pathname === "/api/status") {
+        if (!this.deps.authGate.guard(req, res)) return;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(this.deps.getStatus()));
+        return;
+      }
+
+      // GET /api/cron — list all cron entries
+      if (method === "GET" && pathname === "/api/cron") {
+        if (!this.deps.authGate.guard(req, res)) return;
+        try {
+          const { readEntries } = await import("../cron/cron-store.js");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, entries: readEntries() }));
         } catch (err) {
           this.sendError(res, 500, err);
         }

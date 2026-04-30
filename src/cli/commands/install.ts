@@ -454,5 +454,17 @@ export async function install(opts: InstallOptions): Promise<number> {
   if (!manifestAfter || manifestAfter.version === '') {
     process.stdout.write(`Next: 'agentbridge update' to build and activate the first release.\n`);
   }
+
+  // #334: Post-install healthcheck — validate operator channel exists (only on --restore)
+  if (!opts.dryRun && opts.restore) {
+    const { validateMinimumViability, formatValidationError } = await import('./install-validate.js');
+    const validation = validateMinimumViability(paths.config);
+    if (!validation.ok) {
+      const invocation = `agentbridge install --restore ${opts.restore}`;
+      process.stderr.write("\n" + formatValidationError(validation, invocation) + "\n");
+      return 1;
+    }
+  }
+
   return 0;
 }
