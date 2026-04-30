@@ -83,6 +83,7 @@ export async function buildPrompt(
       try {
         const t0 = performance.now();
         const priming = sessions.get(sessionKey)?.primingTerms ?? [];
+        const now = new Date();
         const recall = await memory.recallSearch({
           translated: [...new Set([text, ...priming])],
           original: text,
@@ -90,6 +91,7 @@ export async function buildPrompt(
           limit: ACTIVE_MEMORY_LIMIT,
           maxClassification: userEntry?.maxClass ?? 0,
           stages: ["Sf", "S1"],
+          currentContext: { hour: now.getHours(), dayOfWeek: now.getDay() },
         });
         const hits = recall.results.filter(h => h.score > 0);
         if (hits.length > 0) {
