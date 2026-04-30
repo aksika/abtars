@@ -29,7 +29,7 @@ import type { TaskCompleteCallback } from "../components/cron/cron-queue.js";
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
   const { config, memoryConfig, transport } = ctx;
-  if (!transport) throw new Error("phase-pipeline-deps: ctx.transport not set (phase-transport must run first)");
+  if (!transport) { ctx.phaseHealth.set(phasePipelineDeps.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePipelineDeps.name}: skipping — transport not available`); return; }
 
   ctx.codingMode = new CodingMode(ctx.runtime);
   ctx.idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);

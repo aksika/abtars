@@ -104,35 +104,46 @@ export const BOOT_PHASES = [
 export async function startBridge(): Promise<number> {
   const ctx = createBootCtx();
 
-  // Phase 1: config — must run first so Bridge can be constructed
+  // Phase 1: config — own try/catch, falls back to empty defaults (#331)
   {
     const t = Date.now();
-    await phaseConfig(ctx);
-    logInfo("boot", `✓ phaseConfig (${Date.now() - t}ms)`);
+    try {
+      await phaseConfig(ctx);
+      ctx.phaseHealth.set(phaseConfig.name, { status: "ok" });
+      logInfo("boot", `✓ ${phaseConfig.name} (${Date.now() - t}ms)`);
+    } catch (err) {
+      ctx.phaseHealth.set(phaseConfig.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
+      logError("boot", `✗ ${phaseConfig.name} failed — continuing with empty defaults`, err);
+    }
   }
+
+  // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
+  try {
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(ctx.bridgeLockPath || (await import("node:path")).join((await import("node:os")).homedir(), ".agentbridge", "bridge.lock"),
+      JSON.stringify({ pid: process.pid, startedAt: Date.now(), version: "?", sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
+  } catch { /* best effort */ }
 
   const bridge = new Bridge(ctx);
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;
-
-  // Wire requestShutdown into pipelineDeps (used by /restart, /reset default)
   ctx.requestShutdownWithCode = (code: number) => bridge.requestShutdown(code);
 
+  // All other phases — universal try/catch, no phase can crash the bridge (#331)
   for (const phase of BOOT_PHASES.slice(1)) {
     const t = Date.now();
-    if (phase === phaseShutdown) {
-      await phaseShutdown(ctx, bridge);
-      logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
-    } else if (phase === phaseDashboard) {
-      // Optional phase — dashboard failure must not crash the bridge (#308)
-      try {
-        await phaseDashboard(ctx);
-        logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
-      } catch (err) {
-        logError("boot", `✗ phaseDashboard failed — continuing without dashboard`, err);
+    try {
+      if (phase === phaseShutdown) {
+        await phaseShutdown(ctx, bridge);
+      } else {
+        await (phase as (ctx: BootCtx) => Promise<void>)(ctx);
       }
-    } else {
-      await (phase as (ctx: BootCtx) => Promise<void>)(ctx);
+      if (!ctx.phaseHealth.has(phase.name)) {
+        ctx.phaseHealth.set(phase.name, { status: "ok" });
+      }
       logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
+    } catch (err) {
+      ctx.phaseHealth.set(phase.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
+      logError("boot", `✗ ${phase.name} failed — continuing without it`, err);
     }
   }
 

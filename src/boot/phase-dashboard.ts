@@ -16,7 +16,7 @@ import { getEnv } from "../components/env-schema.js";
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { logInfo } from "../components/logger.js";
+import { logInfo, logWarn } from "../components/logger.js";
 import { loadDashboardConfig, buildStatusSnapshot } from "../components/dashboard/dashboard-config.js";
 import type { SubsystemRefs } from "../components/dashboard/dashboard-config.js";
 import { AuthGate } from "../components/auth-gate.js";
@@ -30,7 +30,7 @@ import type { BootCtx } from "./context.js";
 export async function phaseDashboard(ctx: BootCtx): Promise<void> {
   const { platforms, config, memory, transport, registry, heartbeat, nlmConfig } = ctx;
   if (!platforms.web) return;
-  if (!transport || !heartbeat) throw new Error("phase-dashboard: transport + heartbeat required");
+  if (!transport || !heartbeat) { ctx.phaseHealth.set(phaseDashboard.name, { status: "skipped", error: "no transport/heartbeat" }); logWarn("boot", `${phaseDashboard.name}: skipping — deps not available`); return; }
 
   const dashConfig = loadDashboardConfig(process.env);
   // Auto-generate WEB_AUTH_TOKEN if missing — persist to .env so it survives restart

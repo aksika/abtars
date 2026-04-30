@@ -98,6 +98,9 @@ export interface BootCtx {
   requestShutdownWithCode: (code: number) => void;
   /** Set by phase-heartbeat; used by phase-sleep to hook the sleep handle. */
   sendSystemMessage?: (prompt: string) => Promise<void>;
+
+  // ── Boot health (populated by dispatcher + phases) ────────────────────
+  phaseHealth: Map<string, { status: "ok" | "failed" | "skipped"; error?: string }>;
 }
 
 /**
@@ -156,6 +159,9 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     // Callbacks
     isSleepActive: () => false,
     requestShutdownWithCode: () => process.exit(1),
+
+    // Boot health
+    phaseHealth: new Map(),
   };
   return { ...defaults, ...overrides };
 }

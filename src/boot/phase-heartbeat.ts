@@ -43,7 +43,7 @@ import { readEnvWithDefault } from "../components/env.js";
 export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   const { config, memoryConfig, memory, transport, cronQueue, pipelineDeps, capabilities } = ctx;
   if (!transport || !cronQueue || !pipelineDeps) {
-    throw new Error("phase-heartbeat: requires transport + cronQueue + pipelineDeps");
+    ctx.phaseHealth.set(phaseHeartbeat.name, { status: "skipped", error: "no transport/cronQueue/pipelineDeps" }); logWarn("boot", `${phaseHeartbeat.name}: skipping — deps not available`); return;
   }
 
   const cronCallback = createCronCallback(ctx);

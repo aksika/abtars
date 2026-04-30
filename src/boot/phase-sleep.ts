@@ -7,6 +7,7 @@
  */
 
 import { resetAllCtxStarts } from "./ctx-start.js";
+import { logWarn } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
 import { SubagentRuntime } from "../components/subagent-runtime.js";
 import type { SleepRuntime } from "abmind";
@@ -14,7 +15,7 @@ import { readEnvWithDefault } from "../components/env.js";
 
 export async function phaseSleep(ctx: BootCtx): Promise<void> {
   const { memoryConfig, memory, sendSystemMessage } = ctx;
-  if (!sendSystemMessage) throw new Error("phase-sleep: ctx.sendSystemMessage not set (phase-heartbeat must run first)");
+  if (!sendSystemMessage) { ctx.phaseHealth.set(phaseSleep.name, { status: "skipped", error: "no sendSystemMessage" }); logWarn("boot", `${phaseSleep.name}: skipping — heartbeat not available`); return; }
 
   const { createSleepHandle } = await import("../capabilities/sleep/index.js");
   const { killWakeInhibit } = await import("../components/command-handlers.js");

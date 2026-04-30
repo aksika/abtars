@@ -15,7 +15,7 @@ import type { BootCtx } from "./context.js";
 
 export async function phasePlatforms(ctx: BootCtx): Promise<void> {
   const { config, platforms, transport, memory, conversationBuffer, pipelineDeps, registry, platformAdapters } = ctx;
-  if (!transport || !pipelineDeps) throw new Error("phase-platforms: pipeline-deps must run first");
+  if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phasePlatforms.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePlatforms.name}: skipping — transport not available`); return; }
 
   // --- Telegram service ---
   registry.register("telegram", {

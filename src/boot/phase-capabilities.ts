@@ -16,7 +16,7 @@ import type { BootCtx } from "./context.js";
 
 export async function phaseCapabilities(ctx: BootCtx): Promise<void> {
   const { config, memory, transport, runtime, capabilities, pipelineDeps } = ctx;
-  if (!transport || !pipelineDeps) throw new Error("phase-capabilities: transport + pipeline-deps required");
+  if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phaseCapabilities.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phaseCapabilities.name}: skipping — transport not available`); return; }
 
   const { discoverCapabilities } = await import("../capabilities/capability.js");
   // From dist/boot/phase-capabilities.js: "../capabilities" resolves to dist/capabilities
