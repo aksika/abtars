@@ -71,6 +71,7 @@ const exactCommands: Record<string, CommandHandler> = {
   "/coding": handleCoding,
   "/default": handleDefault,
   "/status": handleStatus,
+  "/doctor": handleDoctor,
   "/stop": handleStop,
   "/ctrlc": handleStop,
   "/restart": handleRestart,
@@ -273,6 +274,19 @@ async function handleDefault(_text: string, ctx: CommandContext): Promise<boolea
   await ctx.codingMode.stop(ctx.sessionKey);
   await ctx.reply("🔄 Back to KP.");
   logInfo(TAG, `Default mode restored for ${ctx.sessionKey}`);
+  return true;
+}
+
+async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { getDoctorReport, renderDoctorText } = await import("./doctor/index.js");
+  const force = _text.trim().toLowerCase() === "force";
+  const report = await getDoctorReport({
+    memory: ctx.memory,
+    transport: ctx.transport,
+    telegramAdapter: (ctx as any).telegramAdapter ?? null,
+    discordAdapter: (ctx as any).discordAdapter ?? null,
+  }, { force });
+  await ctx.reply(renderDoctorText(report));
   return true;
 }
 

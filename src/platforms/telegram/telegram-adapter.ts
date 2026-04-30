@@ -90,6 +90,7 @@ export class TelegramAdapter implements PlatformAdapter {
       { command: "reset", description: "Fresh session + exit coding" },
       { command: "compact", description: "Compact context window" },
       { command: "status", description: "Bridge status" },
+      { command: "doctor", description: "Deep healthcheck (probes all subsystems)" },
       { command: "mcp", description: "MCP server status" },
       { command: "hooks", description: "List configured hooks" },
       { command: "stop", description: "Stop current response" },

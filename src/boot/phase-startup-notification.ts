@@ -14,38 +14,22 @@ import { logInfo, logWarn } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { startSession } from "../components/message-pipeline.js";
 import { cleanResponse } from "../components/clean-response.js";
+import { sendToMainChat } from "../components/main-chat.js";
 import type { BootCtx } from "./context.js";
 
-async function sendBackOnline(
-  sendTelegram?: (msg: string) => Promise<void>,
-  sendDiscord?: (msg: string) => Promise<void>,
-): Promise<void> {
-  const msg = "🔄 Back online.";
+async function sendBackOnline(ctx: BootCtx): Promise<void> {
+  await sendToMainChat(
+    { telegram: ctx.telegramAdapter, discord: ctx.discordAdapter },
+    "🔄 Back online.",
+  );
   logInfo("main", "Startup: Back online notification sent");
-  const results = await Promise.allSettled([
-    sendTelegram?.(msg).catch(() => {}),
-    sendDiscord?.(msg).catch(() => {}),
-  ]);
-  for (const r of results) {
-    if (r.status === "rejected") logWarn("main", `Back online send failed: ${r.reason}`);
-  }
 }
 
 export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
-  const { config, memoryConfig, memory, transport, telegramAdapter, discordAdapter } = ctx;
+  const { config, memoryConfig, memory, transport, telegramAdapter } = ctx;
   if (!memoryConfig.memoryEnabled) return;
 
-  const tgSend = telegramAdapter ? async (msg: string): Promise<void> => {
-    const chatId = config.mainChatId;
-    if (chatId) await telegramAdapter.sendMessage(String(chatId), msg);
-  } : undefined;
-  const dcSend = discordAdapter ? async (msg: string): Promise<void> => {
-    const dcUser = loadUsers().users.find(u => u.platforms.discord);
-    const channelId = dcUser?.allowedChats?.[0] ?? dcUser?.platforms.discord;
-    if (channelId) await discordAdapter.sendMessage(String(channelId), msg);
-  } : undefined;
-
-  sendBackOnline(tgSend, dcSend).catch((err) => {
+  sendBackOnline(ctx).catch((err) => {
     logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
   });
 

@@ -1,16 +1,14 @@
 /**
- * sendNotification — send a notification to the user's main channel.
- * Tries Telegram first, falls back to Discord. Fire-and-forget.
+ * sendNotification — send a notification to the operator's main channel.
+ * Routes via MAIN_CHAT_PROVIDER. Fire-and-forget.
  */
 
 import type { BootCtx } from "../boot/context.js";
+import { sendToMainChat } from "./main-chat.js";
 
 export function sendNotification(ctx: BootCtx, msg: string): void {
-  const chatId = String(ctx.config.mainChatId ?? "");
-  if (!chatId) return;
-  if (ctx.telegramAdapter) {
-    ctx.telegramAdapter.sendNotification(chatId, msg);
-  } else if (ctx.discordAdapter) {
-    ctx.discordAdapter.sendMessage(chatId, msg).catch(() => {});
-  }
+  sendToMainChat(
+    { telegram: ctx.telegramAdapter, discord: ctx.discordAdapter },
+    msg,
+  ).catch(() => {});
 }

@@ -31,7 +31,8 @@ const SCHEMA: readonly EnvVarDef[] = [
   // ── Core ──
   { env: "AGENT_BRIDGE_HOME", type: "string", description: "Base directory for runtime data" },
   { env: "WORKING_DIR", type: "string", default: "~/.agentbridge/workspace", description: "Agent working directory (sandbox)" },
-  { env: "MAIN_CHAT_ID", type: "string", description: "Primary Telegram chat ID for notifications" },
+  { env: "MAIN_CHAT_ID", type: "string", description: "Primary chat ID for operator notifications" },
+  { env: "MAIN_CHAT_PROVIDER", type: "string", default: "telegram", description: "Platform for MAIN_CHAT_ID: telegram | discord" },
   { env: "LOG_LEVEL", type: "string", default: "low", description: "Log level: off, low, debug" },
   { env: "LOG_FORMAT", type: "string", default: "text", description: "Log format: text or json" },
 
@@ -134,6 +135,7 @@ export interface EnvConfig {
   agentBridgeHome: string;
   workingDir: string;
   mainChatId: string | undefined;
+  mainChatProvider: "telegram" | "discord";
   logLevel: string;
   logFormat: "text" | "json";
 
@@ -293,6 +295,7 @@ export function initEnv(): Readonly<EnvConfig> {
     agentBridgeHome: readOr("AGENT_BRIDGE_HOME", ""),
     workingDir: readOr("WORKING_DIR", "."),
     mainChatId: read("MAIN_CHAT_ID"),
+    mainChatProvider: (read("MAIN_CHAT_PROVIDER") ?? "telegram") === "discord" ? "discord" : "telegram",
     logLevel: readOr("LOG_LEVEL", "low").toLowerCase(),
     logFormat: readOr("LOG_FORMAT", "text") === "json" ? "json" : "text",
 
