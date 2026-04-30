@@ -22,7 +22,7 @@ import { getEnv } from "../components/env-schema.js";
  *   message-pipeline.resetIdleCompactFlag is set indirectly via createIdleCompactTask.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HeartbeatSystem } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
@@ -50,10 +50,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
 
   // bridge.lock — track bridge lifecycle
   try {
-    let version = "?";
-    // From dist/boot/phase-heartbeat.js: "../build-info.json" resolves to dist/build-info.json
-    try { version = JSON.parse(readFileSync(join(import.meta.dirname, "..", "build-info.json"), "utf-8")).hash; } catch { /* */ }
-    writeFileSync(ctx.bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now(), version, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
+    writeFileSync(ctx.bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: ctx.startedAt, version: `${ctx.version}-${ctx.commit}`, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
   } catch { /* */ }
 
   const hbIntervalMs = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10) * 1000;
