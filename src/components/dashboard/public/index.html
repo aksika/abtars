@@ -45,6 +45,10 @@
 <div class="card" id="card-subsystems">
   <h2>🏥 Subsystems</h2>
   <div id="subsystem-grid" style="font-size:0.82rem;line-height:1.8;font-family:monospace;"></div>
+  <hr style="border-color:#0f3460;margin:12px 0;">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button class="btn-search-toggle" data-action="toggle-overlay" data-target="log-overlay">📋 Log</button>
+  </div>
 </div>
 
 <!-- Platforms -->
@@ -115,19 +119,24 @@
   <div id="cron-entries"><div style="color:#666;font-size:0.82rem;">Loading...</div></div>
 </div>
 
-<!-- Log -->
-<div class="card" id="card-log">
-  <h2>📋 Log</h2>
-  <div style="display:flex;gap:6px;margin-bottom:8px;">
-    <button class="log-level-btn lvl-info active" data-action="toggle-log-level" data-level="info">info</button>
-    <button class="log-level-btn lvl-warn active" data-action="toggle-log-level" data-level="warn">warn</button>
-    <button class="log-level-btn lvl-error active" data-action="toggle-log-level" data-level="error">error</button>
-    <button class="log-level-btn lvl-debug" data-action="toggle-log-level" data-level="debug">debug</button>
-  </div>
-  <div id="log-entries" style="max-height:500px;overflow-y:auto;font-size:0.78rem;font-family:monospace;line-height:1.5;"></div>
-</div>
-
 </main>
+
+<!-- Log Overlay -->
+<div id="log-overlay" class="overlay-panel" style="display:none;">
+  <div class="overlay-header">
+    <h2>📋 Log</h2>
+    <button class="btn-close-overlay" data-action="toggle-overlay" data-target="log-overlay">✕</button>
+  </div>
+  <div class="overlay-body" style="flex-direction:column;">
+    <div style="display:flex;gap:6px;margin-bottom:8px;">
+      <button class="log-level-btn lvl-info active" data-action="toggle-log-level" data-level="info">info</button>
+      <button class="log-level-btn lvl-warn active" data-action="toggle-log-level" data-level="warn">warn</button>
+      <button class="log-level-btn lvl-error active" data-action="toggle-log-level" data-level="error">error</button>
+      <button class="log-level-btn lvl-debug" data-action="toggle-log-level" data-level="debug">debug</button>
+    </div>
+    <div id="log-entries" style="flex:1;overflow-y:auto;font-size:0.78rem;font-family:monospace;line-height:1.5;"></div>
+  </div>
+</div>
 
 <!-- Search Overlay -->
 <div id="search-overlay" class="overlay-panel" style="display:none;">

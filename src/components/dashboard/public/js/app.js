@@ -243,6 +243,7 @@ function updateA2ATraffic(agentApi) {
 
 // ── Log Panel ────────────────────────────────────────────────────────────────
 const logLevels = { info: true, warn: true, error: true, debug: false };
+let logPollTimer = null;
 
 function fetchLogs() {
   const active = Object.keys(logLevels).filter(k => logLevels[k]);
@@ -348,7 +349,15 @@ document.body.addEventListener("click", (e) => {
     }
     case "toggle-overlay": {
       const el = document.getElementById(target.dataset.target);
-      if (el) el.style.display = el.style.display === "none" ? "flex" : "none";
+      if (el) {
+        const show = el.style.display === "none";
+        el.style.display = show ? "flex" : "none";
+        // Start/stop log polling when log overlay toggles
+        if (target.dataset.target === "log-overlay") {
+          if (show) { fetchLogs(); logPollTimer = setInterval(fetchLogs, 5000); }
+          else { clearInterval(logPollTimer); logPollTimer = null; }
+        }
+      }
       break;
     }
     case "toggle-a2a-panel": {
@@ -425,5 +434,4 @@ if (kwInput) {
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 connect();
-fetchLogs();
-setInterval(fetchLogs, 10000);
+// Logs fetched on overlay open, not on page load
