@@ -45,29 +45,8 @@ export class ContextOrchestrator {
 
   /** Main entry point: get context ready to send to LLM API. */
   async getContext(chatId: string, tokenBudget: number): Promise<ContextResult> {
-    let compacted = false;
-
-    // Load current state
-    let snapshot = this.engine.buildContext(chatId);
-
-    // Check if compaction needed (pending flag or over threshold)
-    const shouldCompact = snapshot.pendingCompaction ||
-      snapshot.estimatedTokens > tokenBudget * COMPACTION_THRESHOLD_PCT;
-
-    if (shouldCompact && snapshot.messages.length > TAIL_MIN_MESSAGES) {
-      const success = await this.runCompaction(chatId, tokenBudget);
-      if (success) {
-        compacted = true;
-        snapshot = this.engine.buildContext(chatId); // reload
-      }
-    }
-
-    // Check condensation
-    const cond = this.engine.needsCondensation(chatId);
-    if (cond.needed) {
-      await this.runCondensation(chatId, cond.leafIds);
-      snapshot = this.engine.buildContext(chatId);
-    }
+    // Load current state (no compaction here — that happens async after response)
+    const snapshot = this.engine.buildContext(chatId);
 
     // Build message array: summaries first, then raw messages
     const contextMessages: Array<{ role: string; content: string }> = [];
@@ -99,15 +78,37 @@ export class ContextOrchestrator {
     }
 
     const finalTokens = contextMessages.reduce((s, m) => s + Math.ceil(m.content.length / CHARS_PER_TOKEN), 0);
-    return { messages: contextMessages, compacted, pruned, estimatedTokens: finalTokens };
+    return { messages: contextMessages, compacted: false, pruned, estimatedTokens: finalTokens };
   }
 
-  /** Handle post-response feedback: if actual tokens exceeded threshold, flag for next call. */
-  onApiResponse(chatId: string, promptTokens: number, tokenBudget: number): void {
-    if (promptTokens > tokenBudget * COMPACTION_THRESHOLD_PCT) {
-      this.engine.setPendingCompaction(chatId);
-      logDebug(TAG, `Pending compaction set for ${chatId} (${promptTokens} > ${Math.floor(tokenBudget * COMPACTION_THRESHOLD_PCT)})`);
+  /** Call AFTER response is delivered to user. Fires compaction async if needed. */
+  async afterResponse(chatId: string, tokenBudget: number, promptTokens?: number): Promise<void> {
+    // Check if compaction needed (from actual API token count or pending flag)
+    const snapshot = this.engine.buildContext(chatId);
+    const shouldCompact = snapshot.pendingCompaction ||
+      (promptTokens != null && promptTokens > tokenBudget * COMPACTION_THRESHOLD_PCT) ||
+      snapshot.estimatedTokens > tokenBudget * COMPACTION_THRESHOLD_PCT;
+
+    if (shouldCompact && snapshot.messages.length > TAIL_MIN_MESSAGES) {
+      // Fire async — don't block the user
+      this.runCompaction(chatId, tokenBudget).catch(err => {
+        logWarn(TAG, `Background compaction failed for ${chatId}: ${err}`);
+      });
     }
+
+    // Check condensation
+    const cond = this.engine.needsCondensation(chatId);
+    if (cond.needed) {
+      this.runCondensation(chatId, cond.leafIds).catch(err => {
+        logWarn(TAG, `Background condensation failed for ${chatId}: ${err}`);
+      });
+    }
+  }
+
+  /** Handle post-response feedback: trigger async compaction if over threshold. */
+  onApiResponse(chatId: string, promptTokens: number, tokenBudget: number): void {
+    // Fire-and-forget — user already has their response
+    this.afterResponse(chatId, tokenBudget, promptTokens).catch(() => {});
   }
 
   /** Force compaction (manual /compact or reactive overflow). */
