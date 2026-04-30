@@ -125,7 +125,7 @@ export async function startBridge(): Promise<number> {
     const target = basename(readlinkSync(join(homedir(), ".agentbridge", "current")));
     const dash = target.lastIndexOf("-");
     if (dash > 0) { ctx.version = target.slice(0, dash); ctx.commit = target.slice(dash + 1); }
-  } catch { /* dev mode — no release symlink */ }
+  } catch (err) { logWarn("boot", `version detection failed: ${err}`); }
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
   try {
