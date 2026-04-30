@@ -119,9 +119,20 @@ export async function startBridge(): Promise<number> {
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
   try {
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(ctx.bridgeLockPath || (await import("node:path")).join((await import("node:os")).homedir(), ".agentbridge", "bridge.lock"),
-      JSON.stringify({ pid: process.pid, startedAt: Date.now(), version: "?", sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
+    const { writeFileSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { homedir } = await import("node:os");
+    // Populate version/commit from build-info
+    try {
+      const bi = JSON.parse(readFileSync(join(import.meta.dirname, "build-info.json"), "utf-8"));
+      ctx.commit = bi.hash ?? "?";
+    } catch { /* */ }
+    try {
+      const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf-8"));
+      ctx.version = pkg.version ?? "?";
+    } catch { /* */ }
+    writeFileSync(ctx.bridgeLockPath || join(homedir(), ".agentbridge", "bridge.lock"),
+      JSON.stringify({ pid: process.pid, startedAt: Date.now(), version: ctx.version, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
   } catch { /* best effort */ }
 
   const bridge = new Bridge(ctx);

@@ -5,6 +5,8 @@ import type { TrafficEntry } from "../components/agent-api-server.js";
 export type StatusSnapshot = {
   timestamp: string;
   uptimeMs: number;
+  version: string;
+  commit: string;
   platforms: PlatformStates;
   services: Record<string, { configured: boolean; running: boolean }>;
   transport: TransportStatus;
@@ -15,6 +17,8 @@ export type StatusSnapshot = {
   gwsAuth: boolean;
   xAuth: boolean;
   agentApi: { traffic: TrafficEntry[] } | null;
+  model: ModelStatus;
+  subsystems: SubsystemStatus[];
 };
 
 export type CronEntryStatus = {
@@ -80,4 +84,16 @@ export type WebSearchResult = {
 export type MemorySearchResponse = {
   results: WebSearchResult[];
   layers: Record<string, { status: string; hits?: number; ms?: number }>;
+};
+
+export type ModelStatus = {
+  name: string;
+  provider: string;
+  fallbackChain: string[];
+};
+
+export type SubsystemStatus = {
+  name: string;
+  status: "ok" | "failed" | "skipped" | "stopped" | "retrying";
+  detail?: string;
 };

@@ -83,6 +83,8 @@ function updateDashboard(snap) {
   // Bridge Health
   setText("health-uptime", formatUptime(snap.uptimeMs));
   setText("health-timestamp", new Date(snap.timestamp).toLocaleTimeString());
+  setText("health-version", snap.version && snap.commit ? `v${snap.version} (${snap.commit})` : "—");
+  setText("health-model", snap.model ? `${snap.model.name} (${snap.model.provider})` : "—");
 
   // Platforms
   if (snap.services) {
@@ -161,6 +163,9 @@ function updateDashboard(snap) {
 
   // A2A
   updateA2ATraffic(snap.agentApi);
+
+  // Subsystem health grid
+  if (snap.subsystems) updateSubsystemGrid(snap.subsystems);
 }
 
 function updateServiceRow(name, state) {
@@ -313,6 +318,18 @@ function listChatIds() {
     container.innerHTML = '<div style="padding:6px 0;color:#e0e0e0;"><strong>Stored Chat IDs:</strong><br>' +
       data.userIds.map(id => `<span style="cursor:pointer;color:#64b5f6;margin-right:12px;" data-action="select-chat-id" data-id="${id}">${id}</span>`).join("") + "</div>";
   }).catch(() => {});
+}
+
+// ── Subsystem Health Grid ─────────────────────────────────────────────────────
+function updateSubsystemGrid(subsystems) {
+  const container = document.getElementById("subsystem-grid");
+  if (!container || !subsystems.length) return;
+  container.innerHTML = subsystems.map(s => {
+    const icon = s.status === "ok" ? "✓" : s.status === "skipped" ? "○" : s.status === "retrying" ? "↻" : "✗";
+    const color = s.status === "ok" ? "#4caf50" : s.status === "skipped" ? "#9e9e9e" : s.status === "retrying" ? "#ff9800" : "#f44336";
+    const detail = s.detail ? ` <span style="color:#888;">— ${escHtml(s.detail)}</span>` : "";
+    return `<div><span style="color:${color};font-weight:bold;">${icon}</span> ${escHtml(s.name)}${detail}</div>`;
+  }).join("");
 }
 
 // ── Event Delegation ─────────────────────────────────────────────────────────

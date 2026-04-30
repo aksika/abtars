@@ -143,6 +143,9 @@ export async function buildTransport(ctx: BootCtx): Promise<void> {
   }
 
   ctx.transport = transport;
+  ctx.modelName = resolved.model;
+  ctx.modelProvider = resolved.providerName;
+  ctx.fallbackChain = resolved.fallbacks.map((f: { model: string }) => f.model);
 
   if (ctx.modelHealthRegistry) {
     ctx.runtime.setRegistry(ctx.modelHealthRegistry);

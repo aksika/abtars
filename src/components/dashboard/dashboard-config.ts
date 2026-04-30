@@ -105,6 +105,10 @@ export type SubsystemRefs = {
   userId?: string;
   notebooklm: boolean;
   agentApi: { getTrafficLog: () => TrafficEntry[] } | null;
+  version?: string;
+  commit?: string;
+  model?: { name: string; provider: string; fallbackChain: string[] };
+  subsystems?: Array<{ name: string; status: "ok" | "failed" | "skipped" | "stopped" | "retrying"; detail?: string }>;
 };
 
 /**
@@ -162,6 +166,8 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
   return {
     timestamp: localIso(),
     uptimeMs: now - refs.startedAt,
+    version: refs.version ?? "?",
+    commit: refs.commit ?? "?",
     platforms,
     services: refs.services,
     transport,
@@ -172,6 +178,8 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     gwsAuth: existsSync(resolve(homedir(), ".config", "gws", "credentials.enc")),
     xAuth: existsSync(resolve(agentBridgeHome(), "secret", "cookies", "x-cookies.json")),
     agentApi: refs.agentApi ? { traffic: refs.agentApi.getTrafficLog() } : null,
+    model: refs.model ?? { name: "unknown", provider: "unknown", fallbackChain: [] },
+    subsystems: refs.subsystems ?? [],
   };
 }
 

@@ -101,6 +101,13 @@ export interface BootCtx {
 
   // ── Boot health (populated by dispatcher + phases) ────────────────────
   phaseHealth: Map<string, { status: "ok" | "failed" | "skipped"; error?: string }>;
+
+  // ── Metadata (populated by phase-config / phase-transport) ────────────
+  version: string;
+  commit: string;
+  modelName: string;
+  modelProvider: string;
+  fallbackChain: string[];
 }
 
 /**
@@ -162,6 +169,13 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
 
     // Boot health
     phaseHealth: new Map(),
+
+    // Metadata
+    version: "?",
+    commit: "?",
+    modelName: "unknown",
+    modelProvider: "unknown",
+    fallbackChain: [],
   };
   return { ...defaults, ...overrides };
 }

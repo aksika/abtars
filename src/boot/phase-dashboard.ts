@@ -57,6 +57,14 @@ export async function phaseDashboard(ctx: BootCtx): Promise<void> {
 
   const getStatus = (): ReturnType<typeof buildStatusSnapshot> => {
     const svcStates = registry.getStates();
+
+    // Subsystem health from phaseHealth
+    const subsystems = [...ctx.phaseHealth.entries()].map(([name, h]) => ({
+      name: name.replace("phase", "").replace(/([A-Z])/g, " $1").trim(),
+      status: h.status as "ok" | "failed" | "skipped",
+      ...(h.error ? { detail: h.error } : {}),
+    }));
+
     const refs: SubsystemRefs = {
       startedAt: ctx.startedAt,
       telegramPoller: { running: svcStates.telegram?.running ?? false },
@@ -73,6 +81,10 @@ export async function phaseDashboard(ctx: BootCtx): Promise<void> {
         : null,
       notebooklm: nlmConfig.enabled,
       agentApi: ctx.agentApiServer ? { getTrafficLog: () => ctx.agentApiServer!.getTrafficLog() } : null,
+      version: ctx.version ?? "?",
+      commit: ctx.commit ?? "?",
+      model: { name: ctx.modelName ?? "unknown", provider: ctx.modelProvider ?? "unknown", fallbackChain: ctx.fallbackChain ?? [] },
+      subsystems,
     };
     return buildStatusSnapshot(refs);
   };
