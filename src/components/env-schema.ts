@@ -82,6 +82,16 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "ACTIVE_MEMORY", type: "bool", default: "false", description: "Enable ambient recall on every turn" },
   { env: "PRIMING_MODEL_TOPICS", type: "bool", default: "true", description: "Use model-generated topics for priming" },
 
+  // ── ABM-L rendering (abmind, read by abmind directly) ──
+  { env: "ABML_VERSION", type: "string", default: "plain", description: "ABM-L codec: plain | v0 | v1" },
+  { env: "ABML_MIN_CHARS", type: "int", default: "100", description: "Min chars before ABM-L compression kicks in (v0)" },
+
+  // ── Three-tier context assembly (#348, abmind) ──
+  { env: "CONTEXT_TIER_ENABLED", type: "bool", default: "true", description: "Enable three-tier context assembly (#348)" },
+  { env: "CONTEXT_TIER_TAIL", type: "int", default: "20", description: "Last N turns kept verbatim (#348 tail)" },
+  { env: "CONTEXT_TIER_MIDDLE", type: "int", default: "50", description: "Next M turns rendered as ABM-L (#348 middle)" },
+  { env: "COMPACTION_LLM_ENABLED", type: "bool", default: "false", description: "LLM refinement for middle-tier rendering (#348 Phase 2)" },
+
   // ── Sleep ──
   { env: "BED_TIME", type: "time", default: "0:30", description: "Daily sleep trigger time (H:MM or HH:MM)" },
   { env: "WAKE_TIME", type: "time", default: "7:00", description: "Wake time for platform detection" },
