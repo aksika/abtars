@@ -1,4 +1,7 @@
 import { execFileSync } from "node:child_process";
+import { writeFileSync, readlinkSync } from "node:fs";
+import { join, basename } from "node:path";
+import { homedir } from "node:os";
 
 import { logInfo, logWarn, logError } from "./components/logger.js";
 import type { BootCtx } from "./boot/context.js";
@@ -119,9 +122,6 @@ export async function startBridge(): Promise<number> {
 
   // Populate version/commit from release symlink (e.g. "0.1.0-f9c4d38")
   try {
-    const { readlinkSync } = await import("node:fs");
-    const { join, basename } = await import("node:path");
-    const { homedir } = await import("node:os");
     const target = basename(readlinkSync(join(homedir(), ".agentbridge", "current")));
     const dash = target.lastIndexOf("-");
     if (dash > 0) { ctx.version = target.slice(0, dash); ctx.commit = target.slice(dash + 1); }
@@ -129,9 +129,6 @@ export async function startBridge(): Promise<number> {
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
   try {
-    const { writeFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { homedir } = await import("node:os");
     const lockPath = ctx.bridgeLockPath || join(homedir(), ".agentbridge", "bridge.lock");
     writeFileSync(lockPath,
       JSON.stringify({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}-${ctx.commit}`, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
