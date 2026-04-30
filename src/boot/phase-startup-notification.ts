@@ -29,9 +29,12 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
   const { config, memoryConfig, memory, transport, telegramAdapter } = ctx;
   if (!memoryConfig.memoryEnabled) return;
 
-  sendBackOnline(ctx).catch((err) => {
-    logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
-  });
+  // #324: Delay back-online notification to let platforms connect (they start async in background)
+  setTimeout(() => {
+    sendBackOnline(ctx).catch((err) => {
+      logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }, 5000);
 
   // Startup session: SOUL + context + personalized greeting → Telegram
   if (telegramAdapter && memory && transport) {

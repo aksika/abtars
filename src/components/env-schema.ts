@@ -263,6 +263,23 @@ export function getEnv(): Readonly<EnvConfig> {
   return _env!;
 }
 
+/** Sanitized config dump — masks API keys/tokens, shows everything else. For /status. */
+export function envDump(): Record<string, string> {
+  const env = getEnv();
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === "function") continue;
+    const strVal = value == null ? "(not set)" : String(value);
+    // Mask anything that looks like a secret
+    if (/token|key|secret|password/i.test(key) && strVal.length > 4) {
+      result[key] = strVal.slice(0, 4) + "…" + strVal.slice(-2);
+    } else {
+      result[key] = strVal;
+    }
+  }
+  return result;
+}
+
 /** Initialize env config from process.env. Call once at boot. */
 export function initEnv(): Readonly<EnvConfig> {
   const knownVars = new Set(SCHEMA.map(s => s.env));

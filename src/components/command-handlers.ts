@@ -301,9 +301,16 @@ async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean
       bridgeLockPath: ctx.bridgeLockPath ?? "",
       heartbeat: null,
     });
-    await ctx.reply(renderStatusText(status));
+    let text = renderStatusText(status);
+    // #255: append sanitized env dump on /status full
+    if (_text.trim().toLowerCase() === "full") {
+      const { envDump } = await import("./env-schema.js");
+      const dump = envDump();
+      const envLines = Object.entries(dump).slice(0, 30).map(([k, v]) => `  ${k}: ${v}`);
+      text += "\n\n📋 Config (top 30):\n" + envLines.join("\n");
+    }
+    await ctx.reply(text);
   } else {
-    // Fallback: old buildStatusLines (phaseHealth not plumbed yet)
     const lines = await buildStatusLines(ctx);
     await ctx.reply(lines.join("\n"));
   }
