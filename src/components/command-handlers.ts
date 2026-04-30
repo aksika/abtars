@@ -285,8 +285,22 @@ async function handleDefault(_text: string, ctx: CommandContext): Promise<boolea
 }
 
 async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = _text.trim().toLowerCase();
+
+  // /doctor fix → run doctor.sh --fix
+  if (arg === "fix" || arg === "fix-full") {
+    const flag = arg === "fix-full" ? "--fix-full" : "--fix";
+    try {
+      const raw = await execAsync("bash", [join(agentBridgeHome(), "scripts", "doctor.sh"), flag], 30000);
+      await ctx.reply(`🩺 doctor.sh ${flag}:\n${raw || "(no output)"}`);
+    } catch (err) {
+      await ctx.reply(`❌ doctor.sh failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
   const { getDoctorReport, renderDoctorText } = await import("./doctor/index.js");
-  const force = _text.trim().toLowerCase() === "force";
+  const force = arg === "force";
   const svcStates = ctx.registry?.getStates() ?? {};
   const report = await getDoctorReport({
     memory: ctx.memory,
