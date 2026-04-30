@@ -3,8 +3,8 @@
  * One collector, many renderers. Used by /status (text), dashboard (HTML), future API (JSON).
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readlinkSync } from "node:fs";
+import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import type { ServiceState } from "./service-registry.js";
 
@@ -37,17 +37,13 @@ export interface StatusContext {
 }
 
 export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus> {
-  // Version + commit
+  // Version + commit from release symlink
   let version = "?";
   let commit = "?";
   try {
-    const biPath = join(import.meta.dirname, "..", "build-info.json");
-    const bi = JSON.parse(readFileSync(biPath, "utf-8")) as { hash: string; date: string };
-    commit = bi.hash;
-  } catch { /* */ }
-  try {
-    const pkgPath = join(import.meta.dirname, "..", "..", "package.json");
-    version = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+    const target = basename(readlinkSync(join(homedir(), ".agentbridge", "current")));
+    const dash = target.lastIndexOf("-");
+    if (dash > 0) { version = target.slice(0, dash); commit = target.slice(dash + 1); }
   } catch { /* */ }
 
   // Model + transport

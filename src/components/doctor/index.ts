@@ -25,6 +25,7 @@ export interface DoctorCtx {
   telegramRunning?: boolean;
   discordRunning?: boolean;
   config?: { webPort?: number } | null;
+  phaseHealth?: Map<string, { status: "ok" | "failed" | "skipped"; error?: string }>;
 }
 
 type ProbeFn = (ctx: DoctorCtx) => Promise<ProbeResult>;
@@ -142,6 +143,18 @@ export async function getDoctorReport(ctx: DoctorCtx, opts?: { force?: boolean }
       return r;
     }))
   );
+
+  // Add boot phases not covered by active probes
+  const probedNames = new Set(results.map(r => r.name));
+  if (ctx.phaseHealth) {
+    for (const [name, h] of ctx.phaseHealth) {
+      const short = name.replace("phase", "").replace(/([A-Z])/g, " $1").trim().toLowerCase();
+      if (!probedNames.has(short) && !probedNames.has(short.replace(" ", ""))) {
+        results.push({ name: short, status: h.status === "ok" ? "ok" : h.status === "skipped" ? "skipped" : "failed", latencyMs: 0, detail: h.error ?? (h.status === "ok" ? "boot ok" : undefined) });
+      }
+    }
+  }
+
   const totalMs = Date.now() - start;
 
   const report: DoctorReport = { results, totalMs, cached: false };

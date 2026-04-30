@@ -293,6 +293,7 @@ async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean
     transport: ctx.transport,
     telegramRunning: svcStates.telegram?.running ?? false,
     discordRunning: svcStates.discord?.running ?? false,
+    phaseHealth: ctx.phaseHealth,
   }, { force });
   await ctx.reply(renderDoctorText(report));
   return true;
