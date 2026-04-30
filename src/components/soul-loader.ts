@@ -64,6 +64,11 @@ export function loadSoulBundle(memory?: MemoryManager | null): string | null {
     if (registry.users.length > 0) parts.push(buildUsersBlock(registry));
   } catch { /* user registry not available */ }
 
+  // Current date/time — prevents model from hallucinating temporal context
+  const now = new Date();
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  parts.push(`[CURRENT TIME] ${now.toLocaleDateString("en-GB")} ${days[now.getDay()]}, ${now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`);
+
   if (parts.length === 0) {
     logWarn(TAG, "No session bundle files found");
     return null;
