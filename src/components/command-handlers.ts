@@ -50,6 +50,9 @@ export interface CommandContext {
   selfHealerTask?: { enabled: boolean } | null;
   hailMary?: PipelineDeps["hailMary"];
   rebuildTransport?: PipelineDeps["rebuildTransport"];
+  phaseHealth?: PipelineDeps["phaseHealth"];
+  registry?: PipelineDeps["registry"];
+  bridgeLockPath?: PipelineDeps["bridgeLockPath"];
   // Per-message (optional)
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
@@ -274,8 +277,22 @@ async function handleDefault(_text: string, ctx: CommandContext): Promise<boolea
 }
 
 async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean> {
-  const lines = await buildStatusLines(ctx);
-  await ctx.reply(lines.join("\n"));
+  if (ctx.phaseHealth && ctx.registry) {
+    const { getSystemStatus, renderStatusText } = await import("./system-status.js");
+    const status = await getSystemStatus({
+      phaseHealth: ctx.phaseHealth,
+      registry: ctx.registry,
+      transport: ctx.transport,
+      startedAt: ctx.startedAt,
+      bridgeLockPath: ctx.bridgeLockPath ?? "",
+      heartbeat: null,
+    });
+    await ctx.reply(renderStatusText(status));
+  } else {
+    // Fallback: old buildStatusLines (phaseHealth not plumbed yet)
+    const lines = await buildStatusLines(ctx);
+    await ctx.reply(lines.join("\n"));
+  }
   return true;
 }
 

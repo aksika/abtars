@@ -101,6 +101,12 @@ export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   hailMary?: { model: string; endpoint: string; apiKey?: string } | null;
   /** Rebuild professor transport in place (used by /reset to pick up provider changes). */
   rebuildTransport?: () => Promise<void>;
+  /** Boot-time phase health (#331). */
+  phaseHealth?: Map<string, { status: "ok" | "failed" | "skipped"; error?: string }>;
+  /** Service registry for live state (#331). */
+  registry?: { getStates(): Record<string, import("./service-registry.js").ServiceState> };
+  /** bridge.lock path for heartbeat liveness check. */
+  bridgeLockPath?: string;
 }
 
 /**

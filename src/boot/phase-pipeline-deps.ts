@@ -116,6 +116,9 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
       const { rebuildTransport } = await import("./phase-transport.js");
       await rebuildTransport(ctx);
     },
+    phaseHealth: ctx.phaseHealth,
+    registry: ctx.registry,
+    bridgeLockPath: ctx.bridgeLockPath,
   };
   ctx.pipelineDeps = pipelineDeps;
 }
