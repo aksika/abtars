@@ -227,6 +227,13 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
 
   const label = isResetDefault ? "🔄 Reset to defaults." : isReset ? "🔄 Transport reloaded." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
   await ctx.reply(label);
+
+  // Send greeting for /new (not /reset — reset is a technical operation)
+  if (!isReset && ctx.memory) {
+    const { startSession } = await import("./message-pipeline.js");
+    startSession(ctx.transport, ctx.memory, ctx.userId, ctx.sessionKey, "Greet the user briefly. You just started a fresh session.", (text) => ctx.reply(text)).catch(() => {});
+  }
+
   logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
   return true;
 }
