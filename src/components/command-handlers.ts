@@ -391,9 +391,8 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
   const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
   let listing: string;
   try {
-    const raw = await execAsync("agentbridge", ["task", "list"], 5000);
-    if (!raw) throw new Error("empty");
-    const entries = JSON.parse(raw).entries ?? JSON.parse(raw);
+    const { readEntries } = await import("./cron/cron-store.js");
+    const entries = readEntries();
     const active = entries.filter((e: any) => !e.fired && !e.paused);
     active.sort((a: any, b: any) => {
       const timeOf = (e: any): number => {
