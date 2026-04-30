@@ -114,7 +114,7 @@ export class DashboardServer implements IDashboardSlot {
   private async handleRequest(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-  ): void {
+  ): Promise<void> {
     try {
       const url = req.url ?? "/";
       const method = req.method ?? "GET";

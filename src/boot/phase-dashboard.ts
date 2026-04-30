@@ -4,17 +4,15 @@ import { getEnv } from "../components/env-schema.js";
  *
  * - No-op if ctx.platforms.web is false
  * - Loads + validates dashboard config (exits on failure)
- * - Loads logo (optional)
  * - Constructs DashboardServer (or DASHBOARD_MODULE-pluggable) + AuthGate
  *   + MemorySearchController + getStatus snapshot closure
- * - Starts server
+ * - Starts server (serves static frontend from public/)
  *
  * Populates ctx: dashboardServer.
  *
  * No singletons owned.
  */
 
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logWarn } from "../components/logger.js";
 import { loadDashboardConfig, buildStatusSnapshot } from "../components/dashboard/dashboard-config.js";
@@ -22,7 +20,6 @@ import type { SubsystemRefs } from "../components/dashboard/dashboard-config.js"
 import { AuthGate } from "../components/auth-gate.js";
 import { MemorySearchController } from "../components/memory-search-controller.js";
 import { DashboardServer } from "../components/dashboard/dashboard-server.js";
-import { renderDashboardHtml } from "../components/dashboard/dashboard-ui.js";
 import { loadAgentApiConfig } from "../components/agent-api-config.js";
 import type { IDashboardSlot, DashboardSlotOpts } from "../components/skeleton.js";
 import type { BootCtx } from "./context.js";
@@ -54,21 +51,9 @@ export async function phaseDashboard(ctx: BootCtx): Promise<void> {
     logInfo("dashboard", `🔑 WEB_AUTH_TOKEN: ${token}`);
   }
 
-  let logoBase64 = "";
-  try {
-    const logoPath = join(process.cwd(), "logo", "KiroProfessor.jpg");
-    logoBase64 = readFileSync(logoPath).toString("base64");
-  } catch {
-    // Logo is optional
-  }
-
   const agentApiOpts = platforms.agent
-    ? (() => { try { return loadAgentApiConfig(process.env as Record<string, string | undefined>); } catch { return undefined; } })()
-    : undefined;
-  const dashboardHtml = renderDashboardHtml(
-    logoBase64,
-    agentApiOpts ? { agentApi: { port: agentApiOpts.port, allowedIps: agentApiOpts.allowedIps } } : undefined,
-  );
+    ? (() => { try { return loadAgentApiConfig(process.env as Record<string, string | undefined>); } catch { return null; } })()
+    : null;
 
   const getStatus = (): ReturnType<typeof buildStatusSnapshot> => {
     const svcStates = registry.getStates();
@@ -112,7 +97,7 @@ export async function phaseDashboard(ctx: BootCtx): Promise<void> {
       getStatus,
       registry,
       memorySearchController,
-      dashboardHtml,
+      agentApiConfig: agentApiOpts ? { port: agentApiOpts.port, allowedIps: agentApiOpts.allowedIps } : null,
     });
   }
 

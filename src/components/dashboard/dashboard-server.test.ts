@@ -10,7 +10,6 @@ import type { MemorySearchController } from "../memory-search-controller.js";
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 const TEST_TOKEN = "test-secret-token";
-const TEST_HTML = "<html><body>Dashboard</body></html>";
 
 function makeConfig(overrides?: Partial<DashboardConfig>): DashboardConfig {
   return {
@@ -67,7 +66,7 @@ function makeDeps(overrides?: Partial<DashboardServerDeps>): DashboardServerDeps
     getStatus: makeSnapshot,
     registry: mockRegistry(),
     memorySearchController: mockMemorySearchController(),
-    dashboardHtml: TEST_HTML,
+    agentApiConfig: null,
     ...overrides,
   };
 }
@@ -154,7 +153,7 @@ describe("DashboardServer", () => {
 
       expect(res.status).toBe(200);
       expect(res.headers["content-type"]).toContain("text/html");
-      expect(res.body).toBe(TEST_HTML);
+      expect(res.body).toContain("Kiro Professor Dashboard");
     });
   });
 
