@@ -22,8 +22,8 @@ export interface DoctorReport {
 export interface DoctorCtx {
   memory?: { getStats: () => any; getCronInfo: () => any } | null;
   transport?: { sendPrompt: (key: string, msg: string) => Promise<string> } | null;
-  telegramAdapter?: { api?: { getMe?: () => Promise<any> } } | null;
-  discordAdapter?: { client?: { ws?: { ping?: number } } } | null;
+  telegramRunning?: boolean;
+  discordRunning?: boolean;
   config?: { webPort?: number } | null;
 }
 
@@ -59,24 +59,14 @@ const probeMemory: ProbeFn = async (ctx) => {
 
 const probeTelegram: ProbeFn = async (ctx) => {
   const start = Date.now();
-  if (!ctx.telegramAdapter) return { name: "telegram", status: "skipped", latencyMs: 0, detail: "not running" };
-  try {
-    await (ctx.telegramAdapter as any).api?.getMe?.();
-    return { name: "telegram", status: "ok", latencyMs: Date.now() - start };
-  } catch (err) {
-    return { name: "telegram", status: "failed", latencyMs: Date.now() - start, detail: String(err) };
-  }
+  if (!ctx.telegramRunning) return { name: "telegram", status: "skipped", latencyMs: 0, detail: "not configured" };
+  return { name: "telegram", status: "ok", latencyMs: Date.now() - start, detail: "running" };
 };
 
 const probeDiscord: ProbeFn = async (ctx) => {
   const start = Date.now();
-  if (!ctx.discordAdapter) return { name: "discord", status: "skipped", latencyMs: 0, detail: "not running" };
-  try {
-    const ping = (ctx.discordAdapter as any).client?.ws?.ping;
-    return { name: "discord", status: "ok", latencyMs: Date.now() - start, detail: ping != null ? `ws ping ${ping}ms` : undefined };
-  } catch (err) {
-    return { name: "discord", status: "failed", latencyMs: Date.now() - start, detail: String(err) };
-  }
+  if (!ctx.discordRunning) return { name: "discord", status: "skipped", latencyMs: 0, detail: "not configured" };
+  return { name: "discord", status: "ok", latencyMs: Date.now() - start, detail: "running" };
 };
 
 const probeHeartbeat: ProbeFn = async (ctx) => {

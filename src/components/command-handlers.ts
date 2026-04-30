@@ -287,11 +287,12 @@ async function handleDefault(_text: string, ctx: CommandContext): Promise<boolea
 async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
   const { getDoctorReport, renderDoctorText } = await import("./doctor/index.js");
   const force = _text.trim().toLowerCase() === "force";
+  const svcStates = ctx.registry?.getStates() ?? {};
   const report = await getDoctorReport({
     memory: ctx.memory,
     transport: ctx.transport,
-    telegramAdapter: (ctx as any).telegramAdapter ?? null,
-    discordAdapter: (ctx as any).discordAdapter ?? null,
+    telegramRunning: svcStates.telegram?.running ?? false,
+    discordRunning: svcStates.discord?.running ?? false,
   }, { force });
   await ctx.reply(renderDoctorText(report));
   return true;
