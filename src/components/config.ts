@@ -6,7 +6,7 @@ import { loadUsers } from "./user-registry.js";
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
 import { readEnv } from "./env.js";
 import { getEnv } from "./env-schema.js";
-import { logWarn } from "./logger.js";
+import { logWarn, logError } from "./logger.js";
 import type { LogLevel } from "./logger.js";
 export { agentBridgeHome } from "../paths.js";
 
@@ -81,9 +81,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const hasDiscordToken = discordToken.length > 20;
 
   if (!hasTelegramToken && !hasDiscordToken) {
-    throw new Error(
-      "No platform configured — set TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN in config/.env (run agentbridge onboard)",
-    );
+    logError("config", "No platform configured — set TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN in config/.env (run agentbridge onboard)");
   }
 
   // --- User IDs (from users.json, fallback to MAIN_CHAT_ID for TG only) ---
@@ -96,9 +94,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const allowedUserIds = new Set(telegramIds.filter(id => id > 0));
   const hasDiscordUsers = registry.users.some(u => u.platforms.discord);
   if (allowedUserIds.size === 0 && !hasDiscordUsers) {
-    throw new Error(
-      "No users configured — create config/users.json or set MAIN_CHAT_ID",
-    );
+    logError("config", "No users configured — create config/users.json or set MAIN_CHAT_ID");
   }
 
   // --- AGENT_CLI_PATH ---
@@ -108,15 +104,15 @@ export async function loadAndValidateConfig(): Promise<Config> {
   try {
     await validateCliPath(agentCliPath);
   } catch {
-    throw new Error(`CLI binary "${agentCliPath}" is not accessible or not executable`);
+    logError("config", `CLI binary "${agentCliPath}" is not accessible or not executable — will fail at prompt time`);
   }
 
   // --- AGENT_TRANSPORT ---
   const rawTransport = getEnv().agentTransport;
   if (rawTransport !== "tmux" && rawTransport !== "acp" && rawTransport !== "api") {
-    throw new Error(`AGENT_TRANSPORT must be "tmux", "acp", or "api", got "${rawTransport}"`);
+    logError("config", `AGENT_TRANSPORT must be "tmux", "acp", or "api", got "${rawTransport}" — defaulting to "api"`);
   }
-  const agentTransport = rawTransport as AgentTransport;
+  const agentTransport = (rawTransport === "tmux" || rawTransport === "acp" || rawTransport === "api" ? rawTransport : "api") as AgentTransport;
 
   // --- WORKING_DIR (optional, default cwd) ---
   let workingDir = getEnv().workingDir;

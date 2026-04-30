@@ -7,11 +7,11 @@ export interface AgentApiConfig {
   agentCodename: string;
 }
 
-export function loadAgentApiConfig(env: Record<string, string | undefined>): AgentApiConfig {
+export function loadAgentApiConfig(env: Record<string, string | undefined>): AgentApiConfig | null {
   const rawIps = env["AGENT_API_ALLOWED_IPS"] ?? "";
   const allowedIps = rawIps.split(",").map((s) => s.trim()).filter(Boolean);
   if (allowedIps.length === 0) {
-    throw new Error("AGENT_API_ALLOWED_IPS is required when --agent is enabled (comma-separated IPs)");
+    return null; // Missing config — caller skips agent-api gracefully
   }
   return {
     port: parseInt(env["AGENT_API_PORT"] || "3001", 10),

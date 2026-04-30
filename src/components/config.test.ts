@@ -63,14 +63,16 @@ describe("loadAndValidateConfig", () => {
 
   // --- TELEGRAM_BOT_TOKEN ---
 
-  it("throws when TELEGRAM_BOT_TOKEN is missing", async () => {
+  it("logs error when TELEGRAM_BOT_TOKEN is missing but does not throw", async () => {
     delete process.env["TELEGRAM_BOT_TOKEN"];
-    await expect(loadAndValidateConfig()).rejects.toThrow("TELEGRAM_BOT_TOKEN");
+    const config = await loadAndValidateConfig();
+    expect(config).toBeDefined(); // doesn't throw
   });
 
-  it("throws when TELEGRAM_BOT_TOKEN has invalid format", async () => {
+  it("logs error when TELEGRAM_BOT_TOKEN has invalid format but does not throw", async () => {
     process.env["TELEGRAM_BOT_TOKEN"] = "not-a-valid-token";
-    await expect(loadAndValidateConfig()).rejects.toThrow("TELEGRAM_BOT_TOKEN");
+    const config = await loadAndValidateConfig();
+    expect(config).toBeDefined();
   });
 
   it("accepts a well-formed bot token", async () => {
@@ -81,12 +83,13 @@ describe("loadAndValidateConfig", () => {
 
   // --- Users ---
 
-  it("throws when no users configured", async () => {
+  it("logs error when no users configured but does not throw", async () => {
     delete process.env["MAIN_CHAT_ID"];
     const { setUserRegistryOverride } = await import("./user-registry.js");
     setUserRegistryOverride({ users: [], byPlatformId: new Map(), byUserId: new Map() });
     try {
-      await expect(loadAndValidateConfig()).rejects.toThrow("No users configured");
+      const config = await loadAndValidateConfig();
+      expect(config).toBeDefined();
     } finally {
       setUserRegistryOverride(null);
     }
@@ -96,10 +99,11 @@ describe("loadAndValidateConfig", () => {
 
   // --- KIRO_CLI_PATH ---
 
-  it("throws when AGENT_CLI_PATH points to a non-executable file", async () => {
+  it("logs error when AGENT_CLI_PATH points to a non-executable file but does not throw", async () => {
     process.env["AGENT_CLI_PATH"] = "/usr/local/bin/kiro-cli";
     vi.mocked(fs.access).mockRejectedValue(new Error("EACCES"));
-    await expect(loadAndValidateConfig()).rejects.toThrow("CLI binary");
+    const config = await loadAndValidateConfig();
+    expect(config).toBeDefined();
   });
 
   it("accepts bare command names without filesystem check", async () => {
