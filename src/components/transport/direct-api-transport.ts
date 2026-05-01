@@ -253,7 +253,7 @@ export class DirectApiTransport implements IKiroTransport {
           let args: Record<string, string>;
           try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
 
-          const result = await executeToolCall(tc.function.name, args);
+          const result = await executeToolCall(tc.function.name, args, { userId: this._activeSessionKey?.split(":")[0] || "master" });
           session.addToolResult(tc.id, tc.function.name, result);
           try { if (!JSON.parse(result).error) this._toolCallsSucceeded++; } catch { this._toolCallsSucceeded++; }
         }

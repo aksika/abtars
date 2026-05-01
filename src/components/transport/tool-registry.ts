@@ -12,7 +12,7 @@ export type ToolDefinition = {
   readonly name: string;
   readonly description: string;
   readonly parameters: Record<string, unknown>;
-  execute(args: Record<string, string>): Promise<string>;
+  execute(args: Record<string, string>, context?: { userId: string }): Promise<string>;
 };
 
 const BASH_TIMEOUT_MS = 300_000;
@@ -93,11 +93,11 @@ const memoryStoreTool: ToolDefinition = {
     },
     required: ["translated", "type"],
   },
-  async execute(args): Promise<string> {
+  async execute(args, context): Promise<string> {
     if (memoryBackend) {
       try {
         const params: InstantStoreParams = {
-          userId: "master",
+          userId: context?.userId ?? "master",
           contentEn: args["translated"] ?? "",
           contentOriginal: args["original"] ?? args["translated"] ?? "",
           memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
@@ -131,12 +131,12 @@ const memoryRecallTool: ToolDefinition = {
     },
     required: ["query"],
   },
-  async execute(args): Promise<string> {
+  async execute(args, context): Promise<string> {
     if (memoryBackend) {
       try {
         const result = await memoryBackend.recall({
           translated: [args["query"] ?? ""],
-          userId: "master",
+          userId: context?.userId ?? "master",
           limit: parseInt(args["limit"] ?? "10", 10),
         });
         return JSON.stringify(result);
@@ -319,8 +319,8 @@ export function getToolSchemas(): Array<{ type: "function"; function: { name: st
   }));
 }
 
-export async function executeToolCall(name: string, args: Record<string, string>): Promise<string> {
+export async function executeToolCall(name: string, args: Record<string, string>, context?: { userId: string }): Promise<string> {
   const tool = ALL_TOOLS.find(t => t.name === name);
   if (!tool) return JSON.stringify({ error: `Unknown tool: ${name}` });
-  return tool.execute(args);
+  return tool.execute(args, context);
 }
