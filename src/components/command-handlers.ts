@@ -286,7 +286,7 @@ async function handleDefault(_text: string, ctx: CommandContext): Promise<boolea
 }
 
 async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
-  const arg = _text.trim().toLowerCase();
+  const arg = _text.replace(/^\/doctor\s*/i, "").trim().toLowerCase();
 
   // /doctor fix → run doctor.sh --fix
   if (arg === "fix" || arg === "fix-full") {
