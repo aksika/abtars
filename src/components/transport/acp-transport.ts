@@ -7,6 +7,24 @@ export class ModelNotFoundError extends Error {
   constructor(message: string) { super(message); this.name = "ModelNotFoundError"; }
 }
 
+/**
+ * Thrown when an in-flight ACP operation is rejected because the kiro-cli
+ * child process exited. Callers can distinguish from timeouts and other
+ * failures via `instanceof AcpExitError`. #160.
+ */
+export class AcpExitError extends Error {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly reason = "exit" as const;
+
+  constructor(code: number | null, signal: NodeJS.Signals | null) {
+    super(`kiro-cli exited before operation completed (code=${code}, signal=${signal})`);
+    this.name = "AcpExitError";
+    this.code = code;
+    this.signal = signal;
+  }
+}
+
 import {
   ClientSideConnection,
   PROTOCOL_VERSION,
@@ -117,6 +135,15 @@ export class AcpTransport implements IKiroTransport {
       if (this.agent === thisProcess) {
         this.agent = null;
         this.client = null;
+        // #160: reject all in-flight operations immediately so callers surface
+        // the failure in one tick instead of waiting for the prompt timeout.
+        if (this.inFlight.size > 0) {
+          const err = new AcpExitError(code, signal);
+          const count = this.inFlight.size;
+          for (const entry of this.inFlight) entry.reject(err);
+          this.inFlight.clear();
+          logWarn(this.tag, `rejected ${count} in-flight ACP op(s) due to child exit`);
+        }
         // Auto-reinitialize on unexpected exit
         if ((code !== 0 || signal) && this.autoReinit) {
           logWarn(this.tag, "Unexpected kiro-cli exit — auto-reinitializing in 5s");
@@ -200,7 +227,8 @@ export class AcpTransport implements IKiroTransport {
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.
     try {
-      const result = await this.promptWithRetry(sessionId, message);
+      // #160: track in-flight so child-exit can reject immediately
+      const result = await this.trackInFlight("prompt", sessionId, () => this.promptWithRetry(sessionId, message));
 
       logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
       this.lastSuccessAt = Date.now();
@@ -233,6 +261,40 @@ export class AcpTransport implements IKiroTransport {
   }
 
   private readonly _promptTimeoutMs = getEnv().promptTimeoutSec * 1000; // default 3 min
+
+  /**
+   * #160: tracks in-flight user-visible ACP operations so the child-exit
+   * handler can reject them immediately instead of letting them wait for
+   * the prompt timeout (or hang forever on code paths without a timeout).
+   * `executeCommand` routes through `sendPrompt`, so it's protected via the
+   * "prompt" op type.
+   */
+  private inFlight = new Set<{
+    op: "prompt" | "cancel";
+    sessionId: string | undefined;
+    reject: (err: Error) => void;
+  }>();
+
+  /**
+   * Wraps a user-visible ACP operation so that a child-process exit can
+   * reject the caller immediately. Happy path adds one Set insert + delete.
+   */
+  private async trackInFlight<T>(
+    op: "prompt" | "cancel",
+    sessionId: string | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    let entry!: { op: typeof op; sessionId: string | undefined; reject: (err: Error) => void };
+    const racer = new Promise<never>((_, reject) => {
+      entry = { op, sessionId, reject };
+      this.inFlight.add(entry);
+    });
+    try {
+      return await Promise.race([work(), racer]);
+    } finally {
+      this.inFlight.delete(entry);
+    }
+  }
 
   private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -286,15 +348,27 @@ export class AcpTransport implements IKiroTransport {
     if (!this.client) return;
     for (const sessionId of this.sessions.values()) {
       try {
-        await this.client.cancel({ sessionId });
-      } catch {
-        // ignore
+        // #160: track cancel op so child-exit can reject immediately
+        await this.trackInFlight("cancel", sessionId, () => this.client!.cancel({ sessionId }));
+      } catch (err) {
+        // Cancel is best-effort; swallow but record
+        if (err instanceof AcpExitError) {
+          logDebug(this.tag, `cancel skipped (child exited): ${sessionId}`);
+        }
+        // else ignore — pre-existing behavior
       }
     }
   }
 
   destroy(): void {
     this.sessions.clear();
+    // #160: reject any in-flight ops so they don't hang waiting for a child
+    // that's about to be killed (or already gone).
+    if (this.inFlight.size > 0) {
+      const err = new AcpExitError(null, null);
+      for (const entry of this.inFlight) entry.reject(err);
+      this.inFlight.clear();
+    }
     if (this.agent) {
       this.agent.kill("SIGTERM");
       this.agent = null;
