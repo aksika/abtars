@@ -16,6 +16,7 @@ export interface UserEntry {
   role: "master" | "user" | "guest";
   maxClass: number;
   tools: string[];
+  languages?: string[];
   platforms: { telegram?: number; discord?: string };
   allowedChats?: string[];
 }
@@ -56,6 +57,7 @@ function loadFromDisk(): UserRegistry {
           role: u.role,
           maxClass: typeof u.maxClass === "number" ? u.maxClass : (u.role === "master" ? 3 : 0),
           tools: Array.isArray(u.tools) ? u.tools : (u.role === "master" ? ["all"] : []),
+          languages: Array.isArray(u.languages) ? u.languages : undefined,
           platforms: u.platforms ?? {},
         };
         registry.users.push(entry);
