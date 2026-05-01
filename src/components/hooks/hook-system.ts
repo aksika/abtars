@@ -89,16 +89,30 @@ function runOne(hook: HookEntry, input: HookInput): Promise<HookOutput | null> {
 
     let stdout = "";
     let stderr = "";
-    child.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
-    child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const MAX_STDOUT = 1_048_576;
+    const MAX_STDERR = 65_536;
+    child.stdout?.on("data", (d: Buffer) => {
+      stdoutBytes += d.length;
+      if (stdoutBytes > MAX_STDOUT) { child.kill("SIGTERM"); logWarn(TAG, `${hook.name} stdout exceeded 1MB — killed`); return; }
+      stdout += d.toString();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      if (stderrBytes > MAX_STDERR) return;
+      stderrBytes += d.length;
+      stderr += d.toString();
+    });
 
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 1000);
+      killTimer = setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 1000);
     }, timeout);
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       if (stderr.trim()) logDebug(TAG, `${hook.name} stderr: ${stderr.trim().slice(0, 200)}`);
       if (code !== 0) {
         logDebug(TAG, `${hook.name} exited ${code}`);
