@@ -387,7 +387,6 @@ async function handleFacts(_text: string, ctx: CommandContext): Promise<boolean>
 }
 
 async function handleTasksList(_text: string, ctx: CommandContext): Promise<boolean> {
-  const placeholderId = await ctx.reply("⏰ Loading tasks...");
   const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
   let listing: string;
   try {
@@ -441,12 +440,7 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
     const ago = Math.round((Date.now() - j.startedAt) / 1000);
     running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.message}`;
   }
-  const body = `⏰ ${now}\n\n${listing}${running}`;
-  if (placeholderId !== undefined && ctx.editReply) {
-    await ctx.editReply(placeholderId, body);
-  } else {
-    await ctx.reply(body, { parseMode: "HTML" });
-  }
+  await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "HTML" });
   return true;
 }
 
