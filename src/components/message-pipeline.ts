@@ -15,7 +15,7 @@ import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import { writeRestartReason } from "./transport/bridge-lock-transport.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
-import type { MemoryManager } from "abmind/memory-manager.js";
+import type { MemoryManager } from "abmind";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";

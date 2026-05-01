@@ -17,4 +17,4 @@ export type {
   MemoryTier,
   VectorSearchResult,
   MemorySearchParams,
-} from "abmind/mem-types.js";
+} from "abmind";

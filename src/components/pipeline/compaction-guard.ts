@@ -10,7 +10,7 @@ import { logDebug } from "../logger.js";
 import type { SessionRegistry } from "../session-registry.js";
 import type { IKiroTransport } from "../transport/kiro-transport.js";
 import type { PlatformAdapter, InboundMessage } from "../../types/platform.js";
-import type { MemoryManager } from "abmind/memory-manager.js";
+import type { MemoryManager } from "abmind";
 
 const TAG = "pipeline";
 

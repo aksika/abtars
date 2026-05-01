@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { logInfo, logWarn } from "./logger.js";
 import { agentBridgeHome } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
-import type { MemoryManager } from "abmind/memory-manager.js";
+import type { MemoryManager } from "abmind";
 
 const TAG = "soul-loader";
 const HOST_CORE_DIR = join(agentBridgeHome(), "core");

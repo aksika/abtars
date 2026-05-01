@@ -12,7 +12,7 @@
  * internal logger, not an agentbridge singleton).
  */
 
-import { MemoryManager, setLogger as setMemoryLogger } from "abmind/index.js";
+import { MemoryManager, setLogger as setMemoryLogger } from "abmind";
 import { logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
 

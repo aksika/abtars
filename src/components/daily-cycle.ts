@@ -5,7 +5,7 @@ import { getEnv } from "./env-schema.js";
  * After BED_TIME, counts quiet ticks (no new messages). After 6 quiet ticks
  * (~30min at 5min heartbeat), triggers sleep. Any new message resets the counter.
  */
-import type { IMemorySystem } from "abmind/imemory-system.js";
+import type { IMemorySystem } from "abmind";
 import { logInfo } from "./logger.js";
 import { safeReadJson } from "./safe-json.js";
 import { hasSleepAuditToday } from "abmind";

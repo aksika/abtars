@@ -4,7 +4,7 @@
  */
 
 import { execFile } from "node:child_process";
-import type { MemoryBackend } from "abmind/memory-backend.js";
+import type { MemoryBackend } from "abmind";
 import type { InstantStoreParams } from "../../types/index.js";
 import { logWarn } from "../logger.js";
 

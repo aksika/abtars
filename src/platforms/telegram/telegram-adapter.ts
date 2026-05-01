@@ -14,14 +14,14 @@ import { ResponseFormatter } from "../../components/response-formatter.js";
 import { formatReactionSignal, routeReaction } from "../../components/reactions.js";
 
 export const TELEGRAM_CAPABILITIES: PlatformCapabilities = { voice: true, reactions: true, typing: true, threads: true };
-import { emojiToScore } from "abmind/emotion-utils.js";
+import { emojiToScore } from "abmind";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
 import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { TelegramUpdate } from "../../types/index.js";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
-import type { IMemorySystem } from "abmind/imemory-system.js";
+import type { IMemorySystem } from "abmind";
 import { loadUsers } from "../../components/user-registry.js";
 
 const TAG = "telegram";

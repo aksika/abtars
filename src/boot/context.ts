@@ -9,9 +9,8 @@
  */
 
 import type { Config } from "../types/index.js";
-import type { MemoryConfig } from "abmind/index.js";
+import type { MemoryConfig, MemoryManager } from "abmind";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
-import type { MemoryManager } from "abmind/memory-manager.js";
 import type { HeartbeatSystem } from "../components/heartbeat-system.js";
 import type { ServiceRegistry } from "../components/service-registry.js";
 import type { CronQueue } from "../components/cron/cron-queue.js";

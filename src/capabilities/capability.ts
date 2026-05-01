@@ -10,7 +10,7 @@ import { logError } from "../components/logger.js";
 
 import type { HeartbeatTask } from "../types/memory.js";
 import type { Config } from "../types/config.js";
-import type { IMemorySystem } from "abmind/imemory-system.js";
+import type { IMemorySystem } from "abmind";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { SubagentRuntime } from "../components/subagent-runtime.js";
 import type { CommandContext } from "../components/command-handlers.js";

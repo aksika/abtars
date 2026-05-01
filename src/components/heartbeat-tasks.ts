@@ -9,7 +9,7 @@ import { logInfo, logError } from "./logger.js";
 import { setIdleCompactReset } from "./message-pipeline.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
-import type { MemoryManager } from "abmind/memory-manager.js";
+import type { MemoryManager } from "abmind";
 import type { HeartbeatTask } from "../types/memory.js";
 import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";
 export interface IdleCompactDeps {

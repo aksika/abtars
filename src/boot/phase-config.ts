@@ -15,7 +15,7 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAndValidateConfig } from "../components/config.js";
-import { loadMemoryConfig } from "abmind/index.js";
+import { loadMemoryConfig } from "abmind";
 import { parsePlatformFlags } from "../components/cli-flags.js";
 import { setLogLevel, logInfo } from "../components/logger.js";
 import { loadNLMConfig } from "../components/nlm-command-handler.js";

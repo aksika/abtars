@@ -7,7 +7,7 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import { logInfo, logWarn } from "./logger.js";
-import { scanForInjection } from "abmind/injection-scanner.js";
+import { scanForInjection } from "abmind";
 
 import type { ISkillSlot } from "./skeleton.js";
 

@@ -3,7 +3,7 @@
  * Each slot has a specific contract. Implementations are swappable.
  */
 
-import type { IMemorySystem } from "abmind/imemory-system.js";
+import type { IMemorySystem } from "abmind";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
 import type { StatusSnapshot } from "../types/status.js";

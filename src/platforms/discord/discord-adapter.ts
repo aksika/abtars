@@ -14,13 +14,13 @@ import { interceptLargeMessage } from "../../components/message-interceptor.js";
 import { formatReactionSignal } from "../../components/reactions.js";
 
 export const DISCORD_CAPABILITIES: PlatformCapabilities = { voice: false, reactions: true, typing: true, threads: true };
-import { emojiToScore } from "abmind/emotion-utils.js";
+import { emojiToScore } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { DiscordInboundMessage } from "../../types/index.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
-import type { IMemorySystem } from "abmind/imemory-system.js";
+import type { IMemorySystem } from "abmind";
 import type { ConversationBuffer } from "../../components/conversation-buffer.js";
 
 const TAG = "discord";
