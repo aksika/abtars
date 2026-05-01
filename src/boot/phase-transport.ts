@@ -156,7 +156,7 @@ export async function buildTransport(ctx: BootCtx): Promise<void> {
 
   if (resolved.provider.transport === "api" && ctx.memory) {
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
-    const { SqliteBackend } = await import("abmind/sqlite-backend.js");
+    const { SqliteBackend } = await import("abmind");
     const backend = new SqliteBackend(memoryConfig);
     await backend.initialize();
     setMemoryBackend(backend);

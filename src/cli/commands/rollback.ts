@@ -40,7 +40,7 @@ export async function rollback(opts: RollbackOptions): Promise<number> {
   }
 
   if (!(await releaseExists(paths.releases, target))) {
-    const available = [manifest.version, ...manifest.priorReleases.map((r) => r.version)];
+    const available = [manifest.version, ...manifest.priorReleases.map((r: PriorRelease) => r.version)];
     process.stderr.write(
       `Target release '${target}' does not exist in ${paths.releases}.\nAvailable: ${available.join(', ')}\n` +
         `If pruned, rebuild from the target's git SHA with 'agentbridge update' instead.\n`,
@@ -60,7 +60,7 @@ export async function rollback(opts: RollbackOptions): Promise<number> {
           activatedAt: manifest.activatedAt,
           packageLockHash: manifest.packageLockHash,
         }
-      : manifest.priorReleases.find((r) => r.version === target) ?? null;
+      : manifest.priorReleases.find((r: PriorRelease) => r.version === target) ?? null;
   if (
     manifest.packageLockHash &&
     targetRecord?.packageLockHash &&
@@ -88,7 +88,7 @@ export async function rollback(opts: RollbackOptions): Promise<number> {
       activatedAt: manifest.activatedAt,
       packageLockHash: manifest.packageLockHash,
     };
-    const remainingPriors = manifest.priorReleases.filter((r) => r.version !== target);
+    const remainingPriors = manifest.priorReleases.filter((r: PriorRelease) => r.version !== target);
     await writeManifest(paths.manifest, {
       ...manifest,
       version: target,

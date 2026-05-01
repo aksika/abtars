@@ -121,7 +121,7 @@ export async function buildPrompt(
 
   // --- Injection scan for non-master ---
   if (userRole !== "master" && text.length > 10) {
-    const { scanForInjection } = await import("abmind/injection-scanner.js");
+    const { scanForInjection } = await import("abmind");
     const scan = scanForInjection(text);
     if (!scan.safe) {
       logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map(f => f.category).join(", ")}`);

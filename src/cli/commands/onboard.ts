@@ -264,7 +264,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   if (isCancel(embeddingEnabled)) { cancel('Cancelled.'); return null; }
 
   if (embeddingEnabled) {
-    const { checkEmbeddingHealth } = await import('abmind/embedding-health.js');
+    const { checkEmbeddingHealth } = await import('abmind');
     const health = await checkEmbeddingHealth();
     if (!health.reachable) {
       process.stdout.write(`\n⚠️  ollama not found. Install with:\n   curl -fsSL https://ollama.com/install.sh | sh\n   Then re-run onboard.\n\n`);

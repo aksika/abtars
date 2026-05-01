@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import type { SourceName } from '../update-sources/types.js';
-import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION } from '../deploy-lib-import.js';
+import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION, type PriorRelease } from '../deploy-lib-import.js';
 import { runMigrations } from '../migrations/index.js';
 
 function readJsonField(file: string, field: string): unknown {
@@ -92,7 +92,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     // Prune old releases
     const pruned = await pruneReleases(
       paths.releases,
-      [staged.version, ...newPriorReleases.map((r) => r.version)],
+      [staged.version, ...newPriorReleases.map((r: PriorRelease) => r.version)],
       staged.version,
       RETENTION,
     );

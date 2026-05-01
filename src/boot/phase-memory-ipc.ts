@@ -20,8 +20,8 @@ export async function phaseMemoryIpc(ctx: BootCtx): Promise<void> {
   });
   logInfo("main", "🧠 Memory LLM callback registered");
 
-  const { MemoryIpcServer } = await import("abmind/memory-ipc-server.js");
-  const { SqliteBackend } = await import("abmind/sqlite-backend.js");
+  const { MemoryIpcServer } = await import("abmind");
+  const { SqliteBackend } = await import("abmind");
   const ipcBackend = new SqliteBackend(ctx.memoryConfig);
   await ipcBackend.initialize();
   const memoryIpc = new MemoryIpcServer(ipcBackend);

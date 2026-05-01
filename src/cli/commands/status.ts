@@ -3,7 +3,7 @@
  * Read-only. Exit code 0 on healthy install, 1 otherwise.
  */
 
-import { inspectLock, packagePaths, readCurrent, readManifest } from '../deploy-lib-import.js';
+import { inspectLock, packagePaths, readCurrent, readManifest, type PriorRelease } from '../deploy-lib-import.js';
 
 export async function status(): Promise<number> {
   const paths = packagePaths('agentbridge');
@@ -30,7 +30,7 @@ export async function status(): Promise<number> {
     `  current ->:    ${current ?? '(missing)'}`,
     `  host:          ${manifest.host}`,
     `  migrations:    ${manifest.migrationsApplied.length > 0 ? manifest.migrationsApplied.join(', ') : '(none)'}`,
-    `  prior:         ${manifest.priorReleases.length > 0 ? manifest.priorReleases.map((r) => r.version).join(', ') : '(none)'}`,
+    `  prior:         ${manifest.priorReleases.length > 0 ? manifest.priorReleases.map((r: PriorRelease) => r.version).join(', ') : '(none)'}`,
   ];
   if (lock.held) {
     lines.push(
