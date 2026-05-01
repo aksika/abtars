@@ -428,10 +428,9 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
       const running = ctx.cronCurrentJob?.entryId === e.id;
       const tick = !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
       const label = e.title || e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
-      const schedEsc = sched.replace(/\*/g, "\\*");
-      return `${tick}  ${e.id.padEnd(22)}${schedEsc.padEnd(16)}${label}`;
+      return `${tick}  ${e.id.padEnd(22)}${sched.padEnd(16)}${label}`;
     });
-    listing = lines.length > 0 ? "```\n" + lines.join("\n") + "\n```" : "(no active entries)";
+    listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
   } catch (err) {
     logError("tasks", `Failed to read cron: ${err instanceof Error ? err.message : String(err)}`);
     listing = "(no active entries)";
@@ -446,7 +445,7 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
   if (placeholderId !== undefined && ctx.editReply) {
     await ctx.editReply(placeholderId, body);
   } else {
-    await ctx.reply(body, { parseMode: "Markdown" });
+    await ctx.reply(body, { parseMode: "HTML" });
   }
   return true;
 }
