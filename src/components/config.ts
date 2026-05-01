@@ -172,10 +172,10 @@ export async function loadAndValidateConfig(): Promise<Config> {
 
   // --- LOG_LEVEL (optional, default "low") ---
   const rawLogLevel = getEnv().logLevel;
-  if (rawLogLevel !== "off" && rawLogLevel !== "low" && rawLogLevel !== "debug") {
-    throw new Error(`LOG_LEVEL must be "off", "low", or "debug", got "${rawLogLevel}"`);
+  if (rawLogLevel !== "off" && rawLogLevel !== "low" && rawLogLevel !== "debug" && rawLogLevel !== "trace") {
+    logError("config", `LOG_LEVEL must be "off", "low", "debug", or "trace", got "${rawLogLevel}" — defaulting to "low"`);
   }
-  const logLevel = rawLogLevel as LogLevel;
+  const logLevel = (rawLogLevel === "off" || rawLogLevel === "low" || rawLogLevel === "debug" || rawLogLevel === "trace" ? rawLogLevel : "low") as LogLevel;
 
   // --- GROQ_API_KEY (optional, enables STT) ---
   const groqApiKey = readEnv("GROQ_API_KEY", "STT/voice notes disabled") ?? "";

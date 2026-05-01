@@ -2,10 +2,10 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "../paths.js";
 
-/** Log levels: OFF = silent, LOW = operational info, DEBUG = everything */
-export type LogLevel = "off" | "low" | "debug";
+/** Log levels: OFF = silent, LOW = operational info, DEBUG = verbose trace, TRACE = debug + anomaly diagnostics */
+export type LogLevel = "off" | "low" | "debug" | "trace";
 
-const LEVEL_ORDER: Record<LogLevel, number> = { off: 0, low: 1, debug: 2 };
+const LEVEL_ORDER: Record<LogLevel, number> = { off: 0, low: 1, debug: 2, trace: 3 };
 const LOG_DIR = join(agentBridgeHome(), "logs");
 
 /** Get today's log filename: bridge-YYYY-MM-DD.log */
@@ -121,6 +121,14 @@ export function logError(tag: string, msg: string, err?: unknown): void {
 export function logDebug(tag: string, msg: string): void {
   if (!shouldLog("debug")) return;
   const line = formatLine("debug", tag, msg);
+  console.log(`[${tag}] ${msg}`);
+  writeToFile(line);
+}
+
+/** TRACE: debug + anomaly diagnostics (swallowed errors, catch-block traces) */
+export function logTrace(tag: string, msg: string): void {
+  if (!shouldLog("trace")) return;
+  const line = formatLine("trace", tag, msg);
   console.log(`[${tag}] ${msg}`);
   writeToFile(line);
 }

@@ -1,4 +1,5 @@
 import { getEnv } from "../components/env-schema.js";
+import { logError } from "../components/logger.js";
 /**
  * Capability system — typed registration API for bridge subsystems.
  *
@@ -111,7 +112,7 @@ export async function discoverCapabilities(
       const api = createCapabilityApi(registry, config, memory, transport, runtime);
       mod.register(api);
       loaded.push(manifest.name);
-    } catch { /* skip broken capabilities */ }
+    } catch (err) { logError("capabilities", `Failed to load capability "${manifest.name}": ${err instanceof Error ? err.message : String(err)}`); }
   }
 
   return loaded;
