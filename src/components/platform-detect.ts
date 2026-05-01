@@ -1,3 +1,4 @@
+import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 /**
  * Platform-specific wake classification.
@@ -46,7 +47,7 @@ function classifyMacOS(): ResumeKind {
     );
     if (out.includes("DarkWake")) return "dark";
     if (out.includes("Wake")) return "full";
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("platform_detect", "op", err); }
   return "unknown";
 }
 
@@ -59,6 +60,6 @@ function classifyLinux(): ResumeKind {
       { timeout: 3000, encoding: "utf-8" },
     );
     if (out.trim().length > 0) return "full";
-  } catch { /* journalctl not available or no systemd */ }
+  } catch (err) { logAndSwallow("platform_detect", "op", err); }
   return "unknown";
 }

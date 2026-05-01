@@ -5,6 +5,7 @@
  * Tasks     → spawns kiro-cli subprocess, calls onTaskComplete callback
  */
 
+import { logAndSwallow } from "../log-and-swallow.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "../../paths.js";
@@ -86,7 +87,7 @@ export function checkCron(): CronEntry[] {
           entry.fireAt = expr.next().getTime();
           writeEntry(entry);
           logInfo(TAG, `⏭️ Stale "${entry.id}" — advanced to next occurrence`);
-        } catch { /* invalid schedule, let it fire */ }
+        } catch (err) { logAndSwallow("cron_checker", "op", err); }
         continue;
       }
     }

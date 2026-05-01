@@ -1,3 +1,4 @@
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
 import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
@@ -276,7 +277,7 @@ export class BrowserManager {
   private _stopContainer(): void {
     try {
       execFileSync("docker", ["stop", "agentbridge-browser"], { stdio: "pipe", timeout: 10_000 });
-    } catch { /* container may not be running */ }
+    } catch (err) { logAndSwallow("browser_manager", "op", err); }
   }
 
   // -------------------------------------------------------------------------

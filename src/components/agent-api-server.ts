@@ -1,3 +1,4 @@
+import { logAndSwallow } from "./log-and-swallow.js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { readFileSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
@@ -90,7 +91,7 @@ export class AgentApiServer {
       ];
       this.agentRules = "";
       for (const p of candidates) {
-        try { this.agentRules = readFileSync(p, "utf8"); break; } catch { /* next */ }
+        try { this.agentRules = readFileSync(p, "utf8"); break; } catch (err) { logAndSwallow("agent_api_server", "op", err); }
       }
     } catch {
       this.agentRules = "";

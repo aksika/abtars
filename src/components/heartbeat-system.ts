@@ -1,3 +1,4 @@
+import { logAndSwallow } from "./log-and-swallow.js";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { writeFileSync, readFileSync } from "node:fs";
 import type { HeartbeatTask } from "../types/memory.js";
@@ -110,7 +111,7 @@ export class HeartbeatSystem implements ITaskSlot {
         const lock = JSON.parse(readFileSync(this.config.bridgeLockPath, "utf-8"));
         lock.lastHeartbeat = Date.now();
         writeFileSync(this.config.bridgeLockPath, JSON.stringify(lock), "utf-8");
-      } catch { /* best-effort */ }
+      } catch (err) { logAndSwallow("heartbeat_system", "op", err); }
       if (this.config.onStandbyResume) {
         this.config.onStandbyResume(gap);
         return; // skip all tasks this tick
@@ -143,7 +144,7 @@ export class HeartbeatSystem implements ITaskSlot {
       const lock = JSON.parse(readFileSync(this.config.bridgeLockPath, "utf-8"));
       lock.lastHeartbeat = Date.now();
       writeFileSync(this.config.bridgeLockPath, JSON.stringify(lock), "utf-8");
-    } catch { /* best-effort */ }
+    } catch (err) { logAndSwallow("heartbeat_system", "op", err); }
 
     // Kick the watchdog
     this.config.onTick?.();

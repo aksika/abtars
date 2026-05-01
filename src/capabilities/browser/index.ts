@@ -1,3 +1,4 @@
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
 /**
  * Browser capability — browse-spawn IPC + browse-checker heartbeat.
@@ -34,7 +35,7 @@ export function register(api: CapabilityApi): void {
 
   // Browse-spawn IPC — CLI sends task, bridge spawns via runtime
   const spawnSocketPath = join(agentBridgeHome(), "browse-spawn.sock");
-  try { unlinkSync(spawnSocketPath); } catch { /* */ }
+  try { unlinkSync(spawnSocketPath); } catch (err) { logAndSwallow("index", "op", err); }
 
   const spawnServer = net.createServer((conn) => {
     let buf = "";

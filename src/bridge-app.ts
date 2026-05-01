@@ -1,3 +1,4 @@
+import { logAndSwallow } from "./components/log-and-swallow.js";
 import { execFileSync } from "node:child_process";
 import { writeFileSync, readlinkSync } from "node:fs";
 import { join, basename } from "node:path";
@@ -132,7 +133,7 @@ export async function startBridge(): Promise<number> {
     const lockPath = ctx.bridgeLockPath || join(homedir(), ".agentbridge", "bridge.lock");
     writeFileSync(lockPath,
       JSON.stringify({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}-${ctx.commit}`, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
-  } catch { /* best effort */ }
+  } catch (err) { logAndSwallow("bridge_app", "op", err); }
 
   const bridge = new Bridge(ctx);
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;

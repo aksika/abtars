@@ -3,6 +3,7 @@
  * One collector, many renderers. Used by /status (text), dashboard (HTML), future API (JSON).
  */
 
+import { logAndSwallow } from "./log-and-swallow.js";
 import { readFileSync, readlinkSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
@@ -44,7 +45,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
     const target = basename(readlinkSync(join(homedir(), ".agentbridge", "current")));
     const dash = target.lastIndexOf("-");
     if (dash > 0) { version = target.slice(0, dash); commit = target.slice(dash + 1); }
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("system_status", "op", err); }
 
   // Model + transport
   let model = "unknown";
@@ -59,7 +60,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
       transportType = (prof.provider.transport ?? "acp").toUpperCase();
       transportProvider = prof.providerName ?? "unknown";
     }
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("system_status", "op", err); }
 
   // Subsystem health: merge phaseHealth + ServiceRegistry live state
   const serviceStates = ctx.registry.getStates();
@@ -89,7 +90,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
         const lock = JSON.parse(readFileSync(ctx.bridgeLockPath, "utf-8"));
         const ago = Math.round((Date.now() - (lock.lastHeartbeat || 0)) / 60000);
         entry.detail = `5min, last tick ${ago}m ago`;
-      } catch { /* */ }
+      } catch (err) { logAndSwallow("system_status", "op", err); }
     }
     if (name === "phaseDashboard" && health.status === "ok") {
       entry.detail = ":3000";
@@ -108,7 +109,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
       pending: entries.filter((e: any) => !e.fired && !e.schedule).length,
       paused: entries.filter((e: any) => e.paused).length,
     };
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("system_status", "op", err); }
 
   // Last backup
   let lastBackup: string | null = null;
@@ -117,7 +118,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
     const bd = join(homedir(), ".backup-agentbridge");
     const bk = readdirSync(bd).filter((f: string) => f.startsWith("agentbridge-")).sort();
     if (bk.length > 0) lastBackup = bk[bk.length - 1] ?? null;
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("system_status", "op", err); }
 
   return {
     version,

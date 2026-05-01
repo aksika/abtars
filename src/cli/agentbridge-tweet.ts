@@ -11,6 +11,7 @@
  *   agentbridge-tweet --search "query"                 # search X (user auth)
  *   agentbridge-tweet --user <handle>                  # user profile info
  */
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import { agentBridgeHome, reportsDir } from "../paths.js";
@@ -121,7 +122,7 @@ function loadFollows(): string[] {
         raw.handles?.forEach((h) => handles.add(h.replace(/^@/, "").toLowerCase()));
         raw.entries?.forEach((e) => handles.add(e.handle.replace(/^@/, "").toLowerCase()));
       }
-    } catch { /* skip malformed */ }
+    } catch (err) { logAndSwallow("agentbridge_tweet", "op", err); }
   }
   return [...handles];
 }
@@ -183,7 +184,7 @@ async function fetchTimeline(handle: string, count: number): Promise<RankedTweet
   if (auth) {
     try {
       return await fetchTimelineGql(user.id, user.fullName ?? clean, clean, count);
-    } catch { /* fall through to guest */ }
+    } catch (err) { logAndSwallow("agentbridge_tweet", "op", err); }
   }
 
   // Guest fallback (returns by engagement, not chronological)
@@ -479,7 +480,7 @@ async function runDiscover(topTweets: RankedTweet[], knownHandles: string[]): Pr
             replyLikes: reply.likes,
             replyText: reply.text.slice(0, 200),
           });
-        } catch { /* skip */ }
+        } catch (err) { logAndSwallow("agentbridge_tweet", "op", err); }
       }
     } catch (e: any) {
       console.error(`  ⚠ Replies failed for ${tweet.id}: ${e.message}`);

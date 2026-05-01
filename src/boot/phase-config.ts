@@ -11,6 +11,7 @@
  * sleepAuditDir, sttConfig, ttsConfig, nlmConfig.
  */
 
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAndValidateConfig } from "../components/config.js";
@@ -59,7 +60,7 @@ export async function phaseConfig(ctx: BootCtx): Promise<void> {
   if (ctx.ttsConfig) logInfo("main", `🔊 TTS enabled (Edge TTS / ${ctx.ttsConfig.voice})`);
 
   // Truncate launchd.log on startup — bridge logger takes over, previous crash output already captured
-  try { writeFileSync(join(agentBridgeHome(), "logs", "launchd.log"), "", "utf-8"); } catch { /* */ }
+  try { writeFileSync(join(agentBridgeHome(), "logs", "launchd.log"), "", "utf-8"); } catch (err) { logAndSwallow("phase_config", "op", err); }
 
   // Load hooks config
   const { loadHookConfig } = await import("../components/hooks/hook-system.js");

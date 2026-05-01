@@ -3,6 +3,7 @@
  * that benefit from being independently readable and testable.
  */
 
+import { logAndSwallow } from "./log-and-swallow.js";
 import { execSync } from "node:child_process";
 import { logInfo, logError } from "./logger.js";
 import { setIdleCompactReset } from "./message-pipeline.js";
@@ -40,7 +41,7 @@ export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
       if (deps.checkHwSleep && !deps.cronBusy?.()) deps.checkHwSleep();
       if (!isDailyCycleDue(deps)) return;
       logInfo("age-check", `😴 BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — spawning Dreamy`);
-      try { execSync(`${deps.doctorPath} --fix`, { timeout: 30000 }); } catch { /* */ }
+      try { execSync(`${deps.doctorPath} --fix`, { timeout: 30000 }); } catch (err) { logAndSwallow("heartbeat_tasks", "op", err); }
       if (deps.startSleep) { deps.startSleep(); }
     },
   };

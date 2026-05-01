@@ -1,3 +1,4 @@
+import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 /**
  * transport-config.ts — Load and validate transport.json + models.json.
@@ -291,7 +292,7 @@ export function resetToDefaults(): boolean {
   const activePath = join(dir, getEnv().transportConfig);
   try {
     // Backup current before overwriting
-    try { writeFileSync(activePath.replace(".json", ".old.json"), readFileSync(activePath, "utf-8"), "utf-8"); } catch { /* no current to backup */ }
+    try { writeFileSync(activePath.replace(".json", ".old.json"), readFileSync(activePath, "utf-8"), "utf-8"); } catch (err) { logAndSwallow("transport_config", "op", err); }
     const defaults = readFileSync(defaultPath, "utf-8");
     writeFileSync(activePath, defaults, "utf-8");
     cachedTransport = null;

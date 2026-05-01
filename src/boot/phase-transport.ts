@@ -1,3 +1,4 @@
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
  * phase-transport — boot phase 3: select, initialize, and wrap the agent transport.
@@ -120,7 +121,7 @@ export async function buildTransport(ctx: BootCtx): Promise<void> {
     }, policy);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
-    try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch { /* ok */ }
+    try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch (err) { logAndSwallow("phase_transport", "op", err); }
     logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
     transport = createAgentTransport("professor", {
       cliPath: resolved.provider.cli ?? config.transport.agentCliPath,

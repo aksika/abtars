@@ -1,3 +1,4 @@
+import { logAndSwallow } from "../log-and-swallow.js";
 import { localISO } from "../../utils/local-time.js";
 /**
  * Dashboard HTTP server with WebSocket support via the `ws` library.
@@ -95,7 +96,7 @@ export class DashboardServer implements IDashboardSlot {
 
       // Force-close all WebSocket clients so server.close() doesn't hang
       for (const client of this.wss.clients) {
-        try { client.terminate(); } catch { /* best-effort */ }
+        try { client.terminate(); } catch (err) { logAndSwallow("dashboard_server", "op", err); }
       }
 
       this.wss.close(() => {

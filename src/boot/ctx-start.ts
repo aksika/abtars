@@ -6,6 +6,7 @@
  * after sleep), and message-pipeline (update on session turn).
  */
 
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -13,7 +14,7 @@ import { join } from "node:path";
 export function updateCtxStart(memoryDir: string, userId: string, ts = Date.now()): void {
   const p = join(memoryDir, "context-window-start.json");
   let data: Record<string, number> = {};
-  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch { /* new file */ }
+  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch (err) { logAndSwallow("ctx_start", "op", err); }
   data[userId] = ts;
   writeFileSync(p, JSON.stringify(data), "utf-8");
 }

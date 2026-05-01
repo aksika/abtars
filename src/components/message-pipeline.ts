@@ -4,6 +4,7 @@
  * streaming → response delivery → memory → auto-compact.
  */
 
+import { logAndSwallow } from "./log-and-swallow.js";
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
@@ -253,7 +254,7 @@ export async function handleInboundMessage(
               await adapter.editMessage!(channelId, streamMsgId, text + " ▍");
             }
             lastFlushed = text;
-          } catch { /* edit may fail if text unchanged or too fast */ }
+          } catch (err) { logAndSwallow("message_pipeline", "op", err); }
           flushing = false;
         }, FLUSH_INTERVAL);
       }
@@ -332,7 +333,7 @@ export async function handleInboundMessage(
       try {
         await adapter.editMessage(channelId, streamMsgId, userResponse);
         lastSentMsgId = streamMsgId;
-      } catch { /* final edit may fail if identical */ }
+      } catch (err) { logAndSwallow("message_pipeline", "op", err); }
     } else if (!intermediateDelivered) {
       const chunks = adapter.chunkResponse(userResponse);
       logDebug(TAG, `Sending ${chunks.length} chunk(s)`);

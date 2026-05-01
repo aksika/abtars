@@ -1,3 +1,4 @@
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
 /**
  * Sleep capability — spawn nightly sleep cycle via tick system.
@@ -71,7 +72,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         if (skipped.length > 0) dreamReport += ` Skipped: ${skipped.join(", ")}.`;
         if (failed.length > 0) dreamReport += ` ⚠️ FAILED: ${failed.join(", ")}. Please review.`;
       }
-    } catch { /* lock file not readable */ }
+    } catch (err) { logAndSwallow("index", "op", err); }
     return dreamReport;
   }
 

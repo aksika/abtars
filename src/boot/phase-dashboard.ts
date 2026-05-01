@@ -1,3 +1,4 @@
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
  * phase-dashboard — boot phase 11: initialize web dashboard (if --web).
@@ -40,7 +41,7 @@ export async function phaseDashboard(ctx: BootCtx): Promise<void> {
     const envPath = join(process.cwd(), "config", ".env");
     try {
       let content = "";
-      try { content = await readFile(envPath, "utf-8"); } catch { /* missing */ }
+      try { content = await readFile(envPath, "utf-8"); } catch (err) { logAndSwallow("phase_dashboard", "op", err); }
       content = content.replace(/^WEB_AUTH_TOKEN=.*$/m, "").trimEnd();
       content += `\nWEB_AUTH_TOKEN=${token}\n`;
       await writeFile(envPath, content, { mode: 0o600 });

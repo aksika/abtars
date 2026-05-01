@@ -1,3 +1,4 @@
+import { logAndSwallow } from "../log-and-swallow.js";
 import { getEnv } from "../env-schema.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
@@ -275,7 +276,7 @@ export class AcpTransport implements IKiroTransport {
         const prof = resolveAgent("professor", tc);
         if (prof?.model) this.modelId = prof.model;
       }
-    } catch { /* keep current model */ }
+    } catch (err) { logAndSwallow("acp_transport", "op", err); }
     this.destroy();
     await this.initialize();
   }

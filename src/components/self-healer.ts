@@ -1,3 +1,4 @@
+import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 import { localISO } from "../utils/local-time.js";
 /**
@@ -47,7 +48,7 @@ interface ErrorState {
 
 function logAutoFix(message: string): void {
   const dir = join(agentBridgeHome(), "logs");
-  try { mkdirSync(dir, { recursive: true }); } catch { /* */ }
+  try { mkdirSync(dir, { recursive: true }); } catch (err) { logAndSwallow("self_healer", "op", err); }
   const date = new Date().toISOString().slice(0, 10);
   appendFileSync(join(dir, `autofix-${date}.log`), `${localISO()} ${message}\n`);
 }
@@ -162,7 +163,7 @@ export function createSelfHealerTask(
         for (const [key, s] of errorStates) {
           if (now - s.lastNotifiedAt > NOTIFY_COOLDOWN_MS * 2) errorStates.delete(key);
         }
-      } catch { /* log file not readable — skip */ }
+      } catch (err) { logAndSwallow("self_healer", "op", err); }
     },
   };
   return task;

@@ -1,3 +1,4 @@
+import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -36,7 +37,7 @@ export function loadSoulBundle(memory?: MemoryManager | null): string | null {
 
   // abmind 4 — prefer getSessionBundle(), fall back to host core dir
   let bundle: { soul: string; profile: string; notes: string; memoryTools: string } | null = null;
-  try { bundle = memory?.getSessionBundle() ?? null; } catch { /* memory not ready */ }
+  try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow("soul_loader", "op", err); }
 
   const soul = bundle?.soul || readOr(join(HOST_CORE_DIR, "SOUL.md"));
   const profile = bundle?.profile || readOr(join(HOST_CORE_DIR, "user_profile.md"));
@@ -62,7 +63,7 @@ export function loadSoulBundle(memory?: MemoryManager | null): string | null {
   try {
     const registry = loadUsers();
     if (registry.users.length > 0) parts.push(buildUsersBlock(registry));
-  } catch { /* user registry not available */ }
+  } catch (err) { logAndSwallow("soul_loader", "op", err); }
 
   // Current date/time — prevents model from hallucinating temporal context
   const now = new Date();

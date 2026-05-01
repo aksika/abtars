@@ -3,6 +3,7 @@
  * Generates skills_catalog.md on startup + when skills change.
  */
 
+import { logAndSwallow } from "./log-and-swallow.js";
 import { readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import { logInfo, logWarn } from "./logger.js";
@@ -51,7 +52,7 @@ export class SkillWatcher implements ISkillSlot {
           }
           changed.push({ filename: key, name, description, path: filepath });
         }
-      } catch { /* skip unreadable files */ }
+      } catch (err) { logAndSwallow("skill_watcher", "op", err); }
     }
 
     if (!this.firstTick && changed.length > 0) this.generateCatalog();
@@ -84,7 +85,7 @@ export class SkillWatcher implements ISkillSlot {
         if (entry.isDirectory()) results.push(...this.scanMdFiles(full));
         else if (entry.name.endsWith(".md") && entry.name !== "TOOLS.md" && entry.name !== "skills_catalog.md") results.push(full);
       }
-    } catch { /* dir may not exist */ }
+    } catch (err) { logAndSwallow("skill_watcher", "op", err); }
     return results;
   }
 

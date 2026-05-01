@@ -1,3 +1,4 @@
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import {
   Client,
   GatewayIntentBits,
@@ -119,7 +120,7 @@ export class DiscordApi {
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel?.isTextBased()) await (channel as TextChannel).sendTyping();
-    } catch { /* non-critical */ }
+    } catch (err) { logAndSwallow("discord_api", "op", err); }
   }
 
   /** Add or remove a reaction on a message. Empty emoji = remove bot's reactions. */
@@ -139,7 +140,7 @@ export class DiscordApi {
       } else {
         await message.react(emoji);
       }
-    } catch { /* non-critical */ }
+    } catch (err) { logAndSwallow("discord_api", "op", err); }
   }
 
   /** Edit a previously sent message. */
@@ -149,7 +150,7 @@ export class DiscordApi {
       if (!channel?.isTextBased()) return;
       const message = await (channel as TextChannel).messages.fetch(messageId);
       await message.edit(text);
-    } catch { /* edit may fail if message deleted */ }
+    } catch (err) { logAndSwallow("discord_api", "op", err); }
   }
 
   /** Gracefully close the Gateway connection. */

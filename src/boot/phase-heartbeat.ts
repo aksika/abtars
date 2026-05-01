@@ -1,3 +1,4 @@
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
  * phase-heartbeat — boot phase 9: HeartbeatSystem + all periodic tasks + watchdog.
@@ -51,7 +52,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   // bridge.lock — track bridge lifecycle
   try {
     writeFileSync(ctx.bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: ctx.startedAt, version: `${ctx.version}-${ctx.commit}`, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("phase_heartbeat", "op", err); }
 
   const hbIntervalMs = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10) * 1000;
 

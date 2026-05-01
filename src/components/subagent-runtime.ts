@@ -4,6 +4,7 @@
  * Caches transports per agent, handles session lifecycle + fallback.
  */
 
+import { logAndSwallow } from "./log-and-swallow.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { logInfo, logWarn } from "./logger.js";
 import { randomBytes } from "node:crypto";
@@ -92,7 +93,7 @@ export class SubagentRuntime {
     return {
       sendPrompt: (sessionKey: string, prompt: string) => cached.transport.sendPrompt(sessionKey, prompt),
       destroy: async () => {
-        try { cached.transport.destroy(); } catch { /* best effort */ }
+        try { cached.transport.destroy(); } catch (err) { logAndSwallow("subagent_runtime", "op", err); }
         this.cache.delete(agent);
         logInfo(TAG, `${agent} session destroyed`);
       },
@@ -135,7 +136,7 @@ export class SubagentRuntime {
     this.activeSpawns.clear();
 
     for (const [name, cached] of this.cache) {
-      try { cached.transport.destroy(); } catch { /* best effort */ }
+      try { cached.transport.destroy(); } catch (err) { logAndSwallow("subagent_runtime", "op", err); }
       logInfo(TAG, `${name} transport closed`);
     }
     this.cache.clear();

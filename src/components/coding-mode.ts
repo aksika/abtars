@@ -1,3 +1,4 @@
+import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 import type { AgentSession } from "./subagent-runtime.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
@@ -42,7 +43,7 @@ export class CodingMode {
   async stop(sessionKey: string): Promise<void> {
     this.sessions.delete(sessionKey);
     if (this.agentSession && this.sessions.size === 0) {
-      try { await this.agentSession.sendPrompt(sessionKey, "Run: git checkout main"); } catch { /* ok */ }
+      try { await this.agentSession.sendPrompt(sessionKey, "Run: git checkout main"); } catch (err) { logAndSwallow("coding_mode", "op", err); }
       await this.agentSession.destroy();
       this.agentSession = null;
     }

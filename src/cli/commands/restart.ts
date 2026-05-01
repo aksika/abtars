@@ -4,6 +4,7 @@
  * Cold (--cold): kill process + spawn new launcher. Always, both modes.
  */
 
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -43,7 +44,7 @@ async function killBridge(pid: number): Promise<void> {
       process.stdout.write(`⚠️ PID ${pid} is not agentbridge — stale PID file\n`);
       return;
     }
-  } catch { /* /proc not available (macOS) — proceed without verify */ }
+  } catch (err) { logAndSwallow("restart", "op", err); }
 
   try { process.kill(pid, "SIGTERM"); } catch { return; }
   process.stdout.write(`🛑 Killing bridge (PID ${pid})...\n`);
@@ -52,7 +53,7 @@ async function killBridge(pid: number): Promise<void> {
     await new Promise(r => setTimeout(r, 500));
     if (!pidAlive(pid)) return;
   }
-  try { process.kill(pid, "SIGKILL"); } catch { /* */ }
+  try { process.kill(pid, "SIGKILL"); } catch (err) { logAndSwallow("restart", "op", err); }
   await new Promise(r => setTimeout(r, 1000));
 }
 

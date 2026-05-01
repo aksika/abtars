@@ -10,6 +10,7 @@
  *     re-seeds missing config and reconciles symlinks, no code changes).
  */
 
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { hostname } from 'node:os';
@@ -241,7 +242,7 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
     // Resolve actual primary group on macOS
     const { execSync } = await import('node:child_process');
     let group = userGroup;
-    try { group = execSync(`id -gn ${sudoUser}`, { encoding: 'utf-8' }).trim(); } catch { /* fallback */ }
+    try { group = execSync(`id -gn ${sudoUser}`, { encoding: 'utf-8' }).trim(); } catch (err) { logAndSwallow("install", "op", err); }
 
     const plistSrc = join(repoRoot, 'scripts', 'com.agentbridge.daemon.plist');
     if (!existsSync(plistSrc)) {
@@ -261,7 +262,7 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
     const userAgent = join('/Users', sudoUser, 'Library', 'LaunchAgents', 'com.agentbridge.watchdog.plist');
     if (existsSync(userAgent)) {
       const { execFileSync } = await import('node:child_process');
-      try { execFileSync('launchctl', ['bootout', `gui/${process.env['SUDO_UID'] ?? ''}`, userAgent]); } catch { /* may not be loaded */ }
+      try { execFileSync('launchctl', ['bootout', `gui/${process.env['SUDO_UID'] ?? ''}`, userAgent]); } catch (err) { logAndSwallow("install", "op", err); }
       process.stdout.write(`✓ disabled user-scope LaunchAgent\n`);
     }
 
@@ -269,7 +270,7 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
     writeFileSync(dst, content);
     chmodSync(dst, 0o644);
     const { execFileSync } = await import('node:child_process');
-    try { execFileSync('launchctl', ['bootstrap', 'system', dst]); } catch { /* already loaded */ }
+    try { execFileSync('launchctl', ['bootstrap', 'system', dst]); } catch (err) { logAndSwallow("install", "op", err); }
     process.stdout.write(`✓ LaunchDaemon installed at ${dst}\n`);
     process.stdout.write(`✓ supervised-daemon active — bridge runs as ${sudoUser}, survives logout + reboot\n`);
     return 0;

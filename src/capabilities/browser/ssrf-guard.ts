@@ -3,6 +3,7 @@
  * Adapted from NemoClaw's ssrf.ts.
  */
 
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { resolve4, resolve6 } from "node:dns/promises";
 
 const PRIVATE_RANGES_V4: ReadonlyArray<[number, number, number]> = [
@@ -45,12 +46,12 @@ export async function isPrivateHost(hostname: string): Promise<boolean> {
   try {
     const v4 = await timeout(resolve4(hostname));
     if (v4.some(isPrivateV4)) return true;
-  } catch { /* no A record or timeout */ }
+  } catch (err) { logAndSwallow("ssrf_guard", "op", err); }
 
   try {
     const v6 = await timeout(resolve6(hostname));
     if (v6.some(isPrivateV6)) return true;
-  } catch { /* no AAAA record or timeout */ }
+  } catch (err) { logAndSwallow("ssrf_guard", "op", err); }
 
   return false;
 }

@@ -3,6 +3,7 @@
  * Fields: pid, startedAt, lastHeartbeat, lastPromptAt, version,
  *         sleepStatus, restartReason, restartRequested, forceSleep.
  */
+import { logAndSwallow } from "../log-and-swallow.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { agentBridgeHome } from "../../paths.js";
@@ -25,7 +26,7 @@ export function updateBridgeLockField(key: string, value: unknown): void {
     const lock = JSON.parse(readFileSync(p, "utf-8"));
     lock[key] = value;
     writeFileSync(p, JSON.stringify(lock), "utf-8");
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
 }
 
 /** Read a field from bridge.lock. Returns null if missing/unreadable. */

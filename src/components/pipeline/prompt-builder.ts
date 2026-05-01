@@ -4,6 +4,7 @@
  * active recall, large-message interception, injection scan.
  */
 
+import { logAndSwallow } from "../log-and-swallow.js";
 import { logInfo, logDebug } from "../logger.js";
 import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
@@ -162,7 +163,7 @@ export function buildSessionStartPrompt(
         const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
         contextParts.push(`[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).`);
       }
-    } catch { /* registry not available */ }
+    } catch (err) { logAndSwallow("prompt_builder", "op", err); }
   }
 
   const compSummary = null; // Legacy compaction removed — context engine handles summaries
@@ -188,7 +189,7 @@ export function buildSessionStartPrompt(
           logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
         }
       }
-    } catch { /* wake-up builder not available */ }
+    } catch (err) { logAndSwallow("prompt_builder", "op", err); }
   }
 
   const contextBlock = contextParts.length > 0

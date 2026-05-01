@@ -20,6 +20,7 @@
  *     edits config/.env directly post-onboard)
  */
 
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { packagePaths, readManifest } from '../deploy-lib-import.js';
@@ -514,7 +515,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     let tc: Record<string, unknown> = {};
     try {
       tc = JSON.parse(await readFile(transportPath, 'utf-8'));
-    } catch { /* file missing/invalid — start fresh */ }
+    } catch (err) { logAndSwallow("onboard", "op", err); }
 
     // Seed providers and agents if not already present
     if (!tc["providers"]) {

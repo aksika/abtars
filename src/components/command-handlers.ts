@@ -1,3 +1,4 @@
+import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 /**
  * Unified command handlers for all platforms (Telegram, Discord).
@@ -631,7 +632,7 @@ async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<bool
       const agoMin = Math.round((Date.now() - lock.lastHeartbeat) / 60000);
       lines.push("", `🫀 Last tick: ${agoMin}min ago`);
     }
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("command_handlers", "op", err); }
 
   await ctx.reply(lines.join("\n"));
   return true;
@@ -686,7 +687,7 @@ let _wakeInhibitPid: number | null = null;
 /** Kill the wake inhibitor process (called before hw sleep). */
 export function killWakeInhibit(): void {
   if (_wakeInhibitPid) {
-    try { process.kill(_wakeInhibitPid); } catch { /* already dead */ }
+    try { process.kill(_wakeInhibitPid); } catch (err) { logAndSwallow("command_handlers", "op", err); }
     logInfo("wakeup", `Killed wake inhibitor pid=${_wakeInhibitPid}`);
     _wakeInhibitPid = null;
   }
@@ -792,7 +793,7 @@ async function handleSleepSub(text: string, ctx: CommandContext): Promise<boolea
 
   if (sub === "now") {
     if (auditDir) {
-      try { unlinkSync(todayLockPath(auditDir)); } catch { /* no lock to delete */ }
+      try { unlinkSync(todayLockPath(auditDir)); } catch (err) { logAndSwallow("command_handlers", "op", err); }
     }
     writeForceSleep("fresh via /sleep now");
     await ctx.reply("⚡ Fresh sleep cycle queued — starts on next heartbeat tick (≤5min)");
@@ -863,7 +864,7 @@ async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean
         total += files.length;
         sections.push(`${group} (${files.length}):\n${files.map(f => `  • ${f.replace(/\.md$/, "")}`).join("\n")}`);
       }
-    } catch { /* dir doesn't exist */ }
+    } catch (err) { logAndSwallow("command_handlers", "op", err); }
   }
   await ctx.reply(total > 0 ? `📚 Skills (${total}):\n\n${sections.join("\n\n")}` : "📚 No skills found.");
   return true;
@@ -944,12 +945,12 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   try {
     const pkgPath = join(import.meta.dirname, "..", "..", "package.json");
     version = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("command_handlers", "op", err); }
   try {
     const biPath = join(import.meta.dirname, "..", "build-info.json");
     const bi = JSON.parse(readFileSync(biPath, "utf-8")) as { hash: string; date: string };
     buildInfo = ` (${bi.hash} ${bi.date.slice(0, 10)})`;
-  } catch { /* */ }
+  } catch (err) { logAndSwallow("command_handlers", "op", err); }
 
   let model = "unknown";
   if ("currentModel" in ctx.transport) {
@@ -1003,19 +1004,19 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     try {
       const lock = JSON.parse(readFileSync(join(agentBridgeHome(), "bridge.lock"), "utf-8"));
       if (lock.lastHeartbeat > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - lock.lastHeartbeat) / 60000)}min ago`);
-    } catch { /* */ }
+    } catch (err) { logAndSwallow("command_handlers", "op", err); }
     try {
       const ce = cronReadEntries();
       const r = ce.filter(e => e.schedule && !e.paused).length;
       const p = ce.filter(e => !e.fired && !e.schedule).length;
       const pa = ce.filter(e => e.paused).length;
       lines.push(`⏰ Tasks: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
-    } catch { /* */ }
+    } catch (err) { logAndSwallow("command_handlers", "op", err); }
     try {
       const bd = join(homedir(), ".backup-agentbridge");
       const bk = readdirSync(bd).filter(f => f.startsWith("agentbridge-")).sort();
       if (bk.length > 0) lines.push(`💾 Last backup: ${bk[bk.length - 1]}`);
-    } catch { /* */ }
+    } catch (err) { logAndSwallow("command_handlers", "op", err); }
   }
 
   lines.push("");

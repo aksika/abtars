@@ -7,6 +7,7 @@
  * Duplicate prevention: same entry ID can't be queued or running twice.
  */
 
+import { logAndSwallow } from "../log-and-swallow.js";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
@@ -38,7 +39,7 @@ function persistState(current: RunningJob | null, queue: QueuedJob[]): void {
       queue: queue.map(j => ({ entryId: j.entry.id, message: j.entry.message, priority: j.entry.priority ?? "medium", manual: j.manual ?? false })),
     };
     writeFileSync(STATE_FILE, JSON.stringify(state), "utf-8");
-  } catch { /* best-effort */ }
+  } catch (err) { logAndSwallow("cron_queue", "op", err); }
 }
 
 function loadStaleState(): PersistedState | null {

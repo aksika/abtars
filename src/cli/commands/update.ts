@@ -5,6 +5,7 @@
  * "not yet supported" stub (Phase 5 will add NpmSource).
  */
 
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
@@ -50,7 +51,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     {
       const { existsSync, unlinkSync, symlinkSync } = await import("node:fs");
       const mainLink = join(staged.stagedPath, "main.js");
-      try { unlinkSync(mainLink); } catch { /* ENOENT ok */ }
+      try { unlinkSync(mainLink); } catch (err) { logAndSwallow("update", "op", err); }
       const entry = existsSync(join(staged.stagedPath, "bundle", "agentbridge.js"))
         ? "bundle/agentbridge.js"
         : "dist/main.js";

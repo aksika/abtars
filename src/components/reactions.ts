@@ -4,6 +4,7 @@
  * Allowed list, fallback map, routing, formatting, API call + text fallback.
  */
 
+import { logAndSwallow } from "./log-and-swallow.js";
 import type { PlatformAdapter, Platform } from "../types/index.js";
 import { logDebug } from "./logger.js";
 
@@ -84,7 +85,7 @@ export async function tryReaction(
       await adapter.setReaction(channelId, messageId, fallback);
       logDebug(TAG, `Reaction: ${emoji}${emoji !== fallback ? ` → ${fallback}` : ""}`);
       return true;
-    } catch { /* fall through to text */ }
+    } catch (err) { logAndSwallow("reactions", "op", err); }
   }
 
   await adapter.sendMessage(channelId, emoji, { threadId });
