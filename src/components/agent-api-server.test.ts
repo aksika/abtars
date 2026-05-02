@@ -28,7 +28,7 @@ describe("AgentApiServer", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "agentapi-test-"));
     process.env.HOME = tmpDir;
-    mkdirSync(join(tmpDir, ".agentbridge", "logs"), { recursive: true });
+    mkdirSync(join(tmpDir, ".abtars", "logs"), { recursive: true });
   });
 
   afterEach(async () => {

@@ -1,7 +1,7 @@
 /**
  * Regression test for #221 Stage A — bootstrap env module.
  *
- * Contract: importing `boot/env.js` loads `$AGENT_BRIDGE_HOME/.env` into
+ * Contract: importing `boot/env.js` loads `$ABTARS_HOME/.env` into
  * process.env as a side effect of module evaluation. main.ts imports it
  * FIRST so subsequent static imports (hoisted above main.ts body) see the
  * populated env at their own module-level read time.
@@ -17,14 +17,14 @@ const SKILLS_KEY = "__BOOT_ENV_SKILLS_KEY";
 
 describe("boot/env — bootstrap populates process.env from .env", () => {
   let tmpDir: string;
-  const savedHome = process.env["AGENT_BRIDGE_HOME"];
+  const savedHome = process.env["ABTARS_HOME"];
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "boot-env-"));
     mkdirSync(join(tmpDir, "config"), { recursive: true });
     writeFileSync(join(tmpDir, "config", ".env"), `${TEST_KEY}=from-dotenv\n`);
     writeFileSync(join(tmpDir, "config", ".env.skills"), `${SKILLS_KEY}=from-skills\n`);
-    process.env["AGENT_BRIDGE_HOME"] = tmpDir;
+    process.env["ABTARS_HOME"] = tmpDir;
     delete process.env[TEST_KEY];
     delete process.env[SKILLS_KEY];
     vi.resetModules();
@@ -32,19 +32,19 @@ describe("boot/env — bootstrap populates process.env from .env", () => {
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
-    if (savedHome === undefined) delete process.env["AGENT_BRIDGE_HOME"];
-    else process.env["AGENT_BRIDGE_HOME"] = savedHome;
+    if (savedHome === undefined) delete process.env["ABTARS_HOME"];
+    else process.env["ABTARS_HOME"] = savedHome;
     delete process.env[TEST_KEY];
     delete process.env[SKILLS_KEY];
   });
 
-  it("populates process.env from $AGENT_BRIDGE_HOME/.env on import", async () => {
+  it("populates process.env from $ABTARS_HOME/.env on import", async () => {
     expect(process.env[TEST_KEY]).toBeUndefined();
     await import("./env.js");
     expect(process.env[TEST_KEY]).toBe("from-dotenv");
   });
 
-  it("also populates from $AGENT_BRIDGE_HOME/config/.env.skills", async () => {
+  it("also populates from $ABTARS_HOME/config/.env.skills", async () => {
     expect(process.env[SKILLS_KEY]).toBeUndefined();
     await import("./env.js");
     expect(process.env[SKILLS_KEY]).toBe("from-skills");

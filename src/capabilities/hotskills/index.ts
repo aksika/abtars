@@ -5,13 +5,13 @@
 import { join } from "node:path";
 import { SkillWatcher } from "../../components/skill-watcher.js";
 import { logInfo } from "../../components/logger.js";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 import type { CapabilityApi } from "../capability.js";
 
 export function register(api: CapabilityApi): void {
   const skillWatcher = new SkillWatcher(
-    join(agentBridgeHome(), "skills"),
-    join(agentBridgeHome(), "core", "skills_catalog.md"),
+    join(abtarsHome(), "skills"),
+    join(abtarsHome(), "core", "skills_catalog.md"),
   );
 
   // Generate catalog on startup

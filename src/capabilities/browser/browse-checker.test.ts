@@ -14,7 +14,7 @@ describe("browse-delivery", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "browsechk-test-"));
     process.env.HOME = tmpDir;
-    memDir = join(tmpDir, ".agentbridge", "memory");
+    memDir = join(tmpDir, ".abtars", "memory");
     mkdirSync(memDir, { recursive: true });
     browsePath = join(memDir, "pending_browse.json");
     remindersPath = join(memDir, "pending_reminders.json");
@@ -54,7 +54,7 @@ describe("browse-delivery", () => {
     expect(reminders[0].chatId).toBe(42);
     expect(reminders[0].message).toContain("Browse task complete");
 
-    const subDir = join(tmpDir, ".agentbridge", "subagents");
+    const subDir = join(tmpDir, ".abtars", "subagents");
     const files = readdirSync(subDir) as string[];
     const report = files.find((f: string) => f.startsWith("browse_abc123"));
     expect(report).toBeDefined();
@@ -71,7 +71,7 @@ describe("browse-delivery", () => {
 
     deliverBrowseResult(entry, "");
 
-    const subDir = join(tmpDir, ".agentbridge", "subagents");
+    const subDir = join(tmpDir, ".abtars", "subagents");
     const files = readdirSync(subDir) as string[];
     const report = files.find((f: string) => f.startsWith("browse_empty1"));
     const content = readFileSync(join(subDir, report!), "utf-8");

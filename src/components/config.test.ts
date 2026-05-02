@@ -10,7 +10,7 @@ vi.mock("node:fs/promises", () => ({
   constants: { F_OK: 0, X_OK: 1 },
 }));
 
-// Mock dotenv so the real ~/.agentbridge/.env doesn't override test env vars
+// Mock dotenv so the real ~/.abtars/.env doesn't override test env vars
 vi.mock("dotenv", () => ({
   config: vi.fn(),
 }));

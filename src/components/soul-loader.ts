@@ -3,12 +3,12 @@ import { getEnv } from "./env-schema.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logWarn } from "./logger.js";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
 import type { MemoryManager } from "abmind";
 
 const TAG = "soul-loader";
-const HOST_CORE_DIR = join(agentBridgeHome(), "core");
+const HOST_CORE_DIR = join(abtarsHome(), "core");
 
 /** Read a single file, return empty string on failure. */
 function readOr(path: string): string {
@@ -28,8 +28,8 @@ function buildModelInstructions(): string {
  * Build the session injection bundle: abmind 4 + host 2.
  *
  * abmind files via memory.getSessionBundle() (SOUL, profile, notes, memory-tools).
- * Transition fallback: if memory unavailable or file missing, reads from ~/.agentbridge/core/.
- * Host files (core_facts.md, skills_catalog.md) always from ~/.agentbridge/core/.
+ * Transition fallback: if memory unavailable or file missing, reads from ~/.abtars/core/.
+ * Host files (core_facts.md, skills_catalog.md) always from ~/.abtars/core/.
  * Appends [USERS] block.
  */
 export function loadSoulBundle(memory?: MemoryManager | null): string | null {

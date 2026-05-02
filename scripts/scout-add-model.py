@@ -11,7 +11,7 @@ import json, sys, shutil
 from pathlib import Path
 from datetime import date
 
-MODELS_PATH = Path.home() / ".agentbridge" / "config" / "models.json"
+MODELS_PATH = Path.home() / ".abtars" / "config" / "models.json"
 REQUIRED = {"contextWindow", "maxOutput", "rank", "cost", "transports"}
 
 def main():

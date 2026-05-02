@@ -123,14 +123,14 @@ export async function startBridge(): Promise<number> {
 
   // Populate version/commit from release symlink (e.g. "0.1.0-f9c4d38")
   try {
-    const target = basename(readlinkSync(join(homedir(), ".agentbridge", "current")));
+    const target = basename(readlinkSync(join(homedir(), ".abtars", "current")));
     const dash = target.lastIndexOf("-");
     if (dash > 0) { ctx.version = target.slice(0, dash); ctx.commit = target.slice(dash + 1); }
   } catch (err) { /* dev mode — no release symlink */ }
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
   try {
-    const lockPath = ctx.bridgeLockPath || join(homedir(), ".agentbridge", "bridge.lock");
+    const lockPath = ctx.bridgeLockPath || join(homedir(), ".abtars", "bridge.lock");
     writeFileSync(lockPath,
       JSON.stringify({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}-${ctx.commit}`, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
   } catch (err) { logAndSwallow("bridge_app", "op", err); }

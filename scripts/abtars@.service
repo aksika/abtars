@@ -1,13 +1,13 @@
 [Unit]
-Description=AgentBridge — AI agent bridge for Telegram/Discord
+Description=Abtars — AI agent bridge for Telegram/Discord
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=%i
-WorkingDirectory=%h/.agentbridge
-ExecStart=%h/.agentbridge/agentbridge.sh --all
+WorkingDirectory=%h/.abtars
+ExecStart=%h/.abtars/abtars.sh --all
 Restart=always
 RestartSec=60
 Environment=NODE_ENV=production
@@ -15,7 +15,7 @@ Environment=NODE_ENV=production
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=agentbridge
+SyslogIdentifier=abtars
 
 [Install]
 WantedBy=default.target

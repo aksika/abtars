@@ -4,19 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // We test by calling main() with custom argv, but the CLI writes to a hardcoded
-// path (~/.agentbridge/memory/todo.md). To isolate, we mock the path via env override.
+// path (~/.abtars/memory/todo.md). To isolate, we mock the path via env override.
 // Instead, we test the file operations directly by temporarily pointing HOME.
 
 const originalHome = process.env.HOME;
 
-describe("agentbridge-todo", () => {
+describe("abtars-todo", () => {
   let tmpDir: string;
   let todoPath: string;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "todo-test-"));
     process.env.HOME = tmpDir;
-    todoPath = join(tmpDir, ".agentbridge", "memory", "todo.md");
+    todoPath = join(tmpDir, ".abtars", "memory", "todo.md");
   });
 
   afterEach(() => {
@@ -27,12 +27,12 @@ describe("agentbridge-todo", () => {
   // Dynamic import so HOME is picked up fresh each time
   async function run(args: string[]): Promise<string> {
     // Re-import to pick up new HOME
-    const mod = await import("./agentbridge-todo.js");
+    const mod = await import("./abtars-todo.js");
     const logs: string[] = [];
     const origLog = console.log;
     console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
     try {
-      mod.main(["node", "agentbridge-todo", ...args]);
+      mod.main(["node", "abtars-todo", ...args]);
     } finally {
       console.log = origLog;
     }

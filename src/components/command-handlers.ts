@@ -14,7 +14,7 @@ import { writeSleepStatus, readBridgeLockField, writeForceSleep } from "./transp
 
 import { readEntries as cronReadEntries } from "./cron/cron-store.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 // Legacy compaction removed — /compact now uses context orchestrator via transport
 import { resetAndPrepare } from "./message-pipeline.js";
 import type { PipelineDeps } from "./message-pipeline.js";
@@ -292,7 +292,7 @@ async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean
   if (arg === "fix" || arg === "fix-full") {
     const flag = arg === "fix-full" ? "--fix-full" : "--fix";
     try {
-      const raw = await execAsync("bash", [join(agentBridgeHome(), "scripts", "doctor.sh"), flag], 30000);
+      const raw = await execAsync("bash", [join(abtarsHome(), "scripts", "doctor.sh"), flag], 30000);
       await ctx.reply(`🩺 doctor.sh ${flag}:\n${raw || "(no output)"}`);
     } catch (err) {
       await ctx.reply(`❌ doctor.sh failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -457,7 +457,7 @@ async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolea
   const id = text.replace(/^\/(tasks|cron) log /, "").trim();
   const placeholderId = await ctx.reply("📋 Loading task log...");
   try {
-    const raw = await execAsync("agentbridge-task", ["history", id], 5000);
+    const raw = await execAsync("abtars-task", ["history", id], 5000);
     if (!raw) throw new Error("empty");
     const data = JSON.parse(raw);
     if (!data.ok) {
@@ -649,7 +649,7 @@ async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<bool
 
   // Last tick age
   try {
-    const lock = JSON.parse(readFileSync(join(agentBridgeHome(), "bridge.lock"), "utf-8"));
+    const lock = JSON.parse(readFileSync(join(abtarsHome(), "bridge.lock"), "utf-8"));
     if (lock.lastHeartbeat > 0) {
       const agoMin = Math.round((Date.now() - lock.lastHeartbeat) / 60000);
       lines.push("", `🫀 Last tick: ${agoMin}min ago`);
@@ -875,7 +875,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
 }
 
 async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
-  const base = join(agentBridgeHome(), "skills");
+  const base = join(abtarsHome(), "skills");
   const groups = ["core", "personal", "auto", "downloaded"] as const;
   const sections: string[] = [];
   let total = 0;
@@ -1008,7 +1008,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   const fallbackModels = prof?.fallbacks.map(f => `${f.model} (${f.provider})`) ?? [];
 
   const lines = [
-    `AgentBridge v${version}${buildInfo}`,
+    `Abtars v${version}${buildInfo}`,
     transportLine,
     `🤖 Model: ${model}`,
     ...(fallbackModels.length > 0 ? [`   Fallbacks: ${fallbackModels.join(", ")}`] : []),
@@ -1029,7 +1029,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
       lines.push(`😴 Sleep: ${sp.percent}% (${sp.step})`);
     }
     try {
-      const lock = JSON.parse(readFileSync(join(agentBridgeHome(), "bridge.lock"), "utf-8"));
+      const lock = JSON.parse(readFileSync(join(abtarsHome(), "bridge.lock"), "utf-8"));
       if (lock.lastHeartbeat > 0) lines.push(`🫀 Last tick: ${Math.round((Date.now() - lock.lastHeartbeat) / 60000)}min ago`);
     } catch (err) { logAndSwallow("command_handlers", "op", err); }
     try {
@@ -1040,8 +1040,8 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
       lines.push(`⏰ Tasks: ${r} recurring, ${p} pending${pa ? `, ${pa} paused` : ""}`);
     } catch (err) { logAndSwallow("command_handlers", "op", err); }
     try {
-      const bd = join(homedir(), ".backup-agentbridge");
-      const bk = readdirSync(bd).filter(f => f.startsWith("agentbridge-")).sort();
+      const bd = join(homedir(), ".backup-abtars");
+      const bk = readdirSync(bd).filter(f => f.startsWith("abtars-")).sort();
       if (bk.length > 0) lines.push(`💾 Last backup: ${bk[bk.length - 1]}`);
     } catch (err) { logAndSwallow("command_handlers", "op", err); }
   }
@@ -1069,8 +1069,8 @@ async function handleUsers(text: string, ctx: CommandContext): Promise<boolean> 
     const platformId = parts[2];
     const { writeFileSync, readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const { agentBridgeHome } = await import("../paths.js");
-    const configPath = join(agentBridgeHome(), "config", "users.json");
+    const { abtarsHome } = await import("../paths.js");
+    const configPath = join(abtarsHome(), "config", "users.json");
     try {
       const raw = JSON.parse(readFileSync(configPath, "utf-8"));
       const users = Array.isArray(raw.users) ? raw.users : [];
@@ -1092,8 +1092,8 @@ async function handleUsers(text: string, ctx: CommandContext): Promise<boolean> 
     const targetUserId = parts[2];
     const { writeFileSync, readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const { agentBridgeHome } = await import("../paths.js");
-    const configPath = join(agentBridgeHome(), "config", "users.json");
+    const { abtarsHome } = await import("../paths.js");
+    const configPath = join(abtarsHome(), "config", "users.json");
     try {
       const raw = JSON.parse(readFileSync(configPath, "utf-8"));
       const users = (Array.isArray(raw.users) ? raw.users : []).filter((u: { userId: string }) => u.userId !== targetUserId);

@@ -1,7 +1,7 @@
 /**
- * #372 — agentbridge stop tests.
+ * #372 — abtars stop tests.
  *
- * Strategy: create a real temp AGENT_BRIDGE_HOME with real lock files, spawn
+ * Strategy: create a real temp ABTARS_HOME with real lock files, spawn
  * real child processes (sleep infinity / controlled children) as the "watchdog"
  * and "bridge," then run stop() and verify the processes die + locks are removed.
  *
@@ -15,9 +15,9 @@ import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { stop } from "./stop.js";
 
-describe("#372 — agentbridge stop", () => {
+describe("#372 — abtars stop", () => {
   let tmpHome: string;
-  const savedHome = process.env["AGENT_BRIDGE_HOME"];
+  const savedHome = process.env["ABTARS_HOME"];
   const procs: ChildProcess[] = [];
   const origWrite = process.stdout.write.bind(process.stdout);
   const origErrWrite = process.stderr.write.bind(process.stderr);
@@ -44,7 +44,7 @@ describe("#372 — agentbridge stop", () => {
     // Use node running a tight sleep loop, with argv[0] label so cmdline contains the needle
     const args = label === "watchdog"
       ? ["-e", "setInterval(()=>{}, 1000)", "watchdog.sh"]
-      : ["-e", "setInterval(()=>{}, 1000)", "agentbridge-main.js"];
+      : ["-e", "setInterval(()=>{}, 1000)", "abtars-main.js"];
     const child = spawn("node", args, { stdio: "ignore", detached: false });
     procs.push(child);
     if (!child.pid) throw new Error("failed to spawn dummy");
@@ -65,7 +65,7 @@ describe("#372 — agentbridge stop", () => {
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), "stop-test-"));
-    process.env["AGENT_BRIDGE_HOME"] = tmpHome;
+    process.env["ABTARS_HOME"] = tmpHome;
   });
 
   afterEach(async () => {
@@ -75,8 +75,8 @@ describe("#372 — agentbridge stop", () => {
       if (p.pid) { try { process.kill(p.pid, "SIGKILL"); } catch { /* gone */ } }
     }
     procs.length = 0;
-    if (savedHome === undefined) delete process.env["AGENT_BRIDGE_HOME"];
-    else process.env["AGENT_BRIDGE_HOME"] = savedHome;
+    if (savedHome === undefined) delete process.env["ABTARS_HOME"];
+    else process.env["ABTARS_HOME"] = savedHome;
     rmSync(tmpHome, { recursive: true, force: true });
   });
 

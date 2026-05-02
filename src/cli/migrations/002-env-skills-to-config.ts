@@ -1,5 +1,5 @@
 /**
- * Migration 002: legacy ~/.agentbridge/.env.skills → ~/.agentbridge/config/.env.skills.
+ * Migration 002: legacy ~/.abtars/.env.skills → ~/.abtars/config/.env.skills.
  *
  * See 001-env-memory-to-config.ts for rationale. Same shape, different file.
  */

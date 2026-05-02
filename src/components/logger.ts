@@ -1,12 +1,12 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 
 /** Log levels: OFF = silent, LOW = operational info, DEBUG = verbose trace, TRACE = debug + anomaly diagnostics */
 export type LogLevel = "off" | "low" | "debug" | "trace";
 
 const LEVEL_ORDER: Record<LogLevel, number> = { off: 0, low: 1, debug: 2, trace: 3 };
-const LOG_DIR = join(agentBridgeHome(), "logs");
+const LOG_DIR = join(abtarsHome(), "logs");
 
 /** Get today's log filename: bridge-YYYY-MM-DD.log */
 export function getLogFile(): string {
@@ -38,16 +38,16 @@ function writeToFile(line: string): void {
 
 // ── Credential redaction ────────────────────────────────────────────────────
 //
-// INTENTIONALLY DUPLICATED across agentbridge and abmind — they are
+// INTENTIONALLY DUPLICATED across abtars and abmind — they are
 // independent products that both need this utility. If you add or
 // modify a pattern here, also update the sibling file:
-//   agentbridge/src/components/logger.ts (SECRET_PATTERNS + redactSecrets)
+//   abtars/src/components/logger.ts (SECRET_PATTERNS + redactSecrets)
 //   abmind/src/redact-secrets.ts          (SECRET_PATTERNS + redactSecrets)
 //
 // Do NOT create an import relationship between them. Each product stays
 // independent so the bridge can run against a different memory backend
 // and abmind can ship as a standalone npm package without pulling
-// agentbridge in for a utility function.
+// abtars in for a utility function.
 //
 // See abproject/docs/plans/178-redact-secrets-move.md for the rationale.
 

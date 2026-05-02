@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# doctor.sh -- health check and repair for ~/.agentbridge
+# doctor.sh -- health check and repair for ~/.abtars
 #
 # Usage:
 #   doctor.sh              # diagnose only -- prints warnings, changes nothing
@@ -7,7 +7,7 @@
 #   doctor.sh --fix-full   # all safe fixes + FTS rebuild, WAL checkpoint, git push check
 set -uo pipefail
 
-AB="$HOME/.agentbridge"
+AB="$HOME/.abtars"
 ABMIND="${ABMIND_HOME:-$HOME/.abmind}"
 DB="$ABMIND/memory/memory.db"
 FIX=false
@@ -122,24 +122,24 @@ if [ -f "$WD_LOCK" ]; then
       warn "watchdog not running (PID $WD_PID dead)"
     fi
     if $FIX; then
-      if [[ "$(uname)" == "Darwin" ]] && launchctl list 2>/dev/null | grep -q agentbridge.watchdog; then
-        launchctl kickstart -k "gui/$(id -u)/com.agentbridge.watchdog" 2>/dev/null && fix "restarted watchdog via LaunchAgent"
-      elif command -v systemctl &>/dev/null && systemctl --user is-enabled agentbridge-watchdog.service &>/dev/null; then
-        systemctl --user restart agentbridge-watchdog.service 2>/dev/null && fix "restarted watchdog via systemd"
+      if [[ "$(uname)" == "Darwin" ]] && launchctl list 2>/dev/null | grep -q abtars.watchdog; then
+        launchctl kickstart -k "gui/$(id -u)/com.abtars.watchdog" 2>/dev/null && fix "restarted watchdog via LaunchAgent"
+      elif command -v systemctl &>/dev/null && systemctl --user is-enabled abtars-watchdog.service &>/dev/null; then
+        systemctl --user restart abtars-watchdog.service 2>/dev/null && fix "restarted watchdog via systemd"
       else
-        warn "watchdog not running -- start manually: ~/.agentbridge/watchdog.sh --all --web --agent &"
+        warn "watchdog not running -- start manually: ~/.abtars/watchdog.sh --all --web --agent &"
       fi
     fi
   fi
 else
   warn "watchdog.lock missing -- watchdog not running"
   if $FIX; then
-    if [[ "$(uname)" == "Darwin" ]] && launchctl list 2>/dev/null | grep -q agentbridge.watchdog; then
-      launchctl kickstart -k "gui/$(id -u)/com.agentbridge.watchdog" 2>/dev/null && fix "started watchdog via LaunchAgent"
-    elif command -v systemctl &>/dev/null && systemctl --user is-enabled agentbridge-watchdog.service &>/dev/null; then
-      systemctl --user start agentbridge-watchdog.service 2>/dev/null && fix "started watchdog via systemd"
+    if [[ "$(uname)" == "Darwin" ]] && launchctl list 2>/dev/null | grep -q abtars.watchdog; then
+      launchctl kickstart -k "gui/$(id -u)/com.abtars.watchdog" 2>/dev/null && fix "started watchdog via LaunchAgent"
+    elif command -v systemctl &>/dev/null && systemctl --user is-enabled abtars-watchdog.service &>/dev/null; then
+      systemctl --user start abtars-watchdog.service 2>/dev/null && fix "started watchdog via systemd"
     else
-      warn "start manually: ~/.agentbridge/watchdog.sh --all --web --agent &"
+      warn "start manually: ~/.abtars/watchdog.sh --all --web --agent &"
     fi
   fi
 fi
@@ -147,10 +147,10 @@ fi
 # LaunchAgent / systemd check (supervised mode only)
 if [[ "$INSTALL_MODE" == "supervised" ]]; then
 if [[ "$(uname)" == "Darwin" ]]; then
-  if ! launchctl list 2>/dev/null | grep -q agentbridge.watchdog; then
+  if ! launchctl list 2>/dev/null | grep -q abtars.watchdog; then
     if $FIX_FULL; then
-      PLIST_SRC="$(dirname "$0")/com.agentbridge.watchdog.plist"
-      PLIST_DST="$HOME/Library/LaunchAgents/com.agentbridge.watchdog.plist"
+      PLIST_SRC="$(dirname "$0")/com.abtars.watchdog.plist"
+      PLIST_DST="$HOME/Library/LaunchAgents/com.abtars.watchdog.plist"
       if [ -f "$PLIST_SRC" ]; then
         cp "$PLIST_SRC" "$PLIST_DST"
         launchctl load "$PLIST_DST" 2>/dev/null && fix "installed and loaded watchdog LaunchAgent"
@@ -162,15 +162,15 @@ if [[ "$(uname)" == "Darwin" ]]; then
     fi
   fi
 elif command -v systemctl &>/dev/null; then
-  if ! systemctl --user is-enabled agentbridge-watchdog.service &>/dev/null 2>&1; then
+  if ! systemctl --user is-enabled abtars-watchdog.service &>/dev/null 2>&1; then
     if $FIX_FULL; then
-      SVC_SRC="$(dirname "$0")/agentbridge-watchdog.service"
-      SVC_DST="$HOME/.config/systemd/user/agentbridge-watchdog.service"
+      SVC_SRC="$(dirname "$0")/abtars-watchdog.service"
+      SVC_DST="$HOME/.config/systemd/user/abtars-watchdog.service"
       if [ -f "$SVC_SRC" ]; then
         mkdir -p "$(dirname "$SVC_DST")"
         cp "$SVC_SRC" "$SVC_DST"
         systemctl --user daemon-reload
-        systemctl --user enable --now agentbridge-watchdog.service 2>/dev/null && fix "installed and enabled watchdog systemd unit"
+        systemctl --user enable --now abtars-watchdog.service 2>/dev/null && fix "installed and enabled watchdog systemd unit"
       else
         warn "watchdog systemd unit not enabled -- service file not found at $SVC_SRC"
       fi
@@ -241,9 +241,9 @@ for d in "$AB/skills" "$AB/logs"; do
 done
 
 # 7. Recent backup check (skip on fresh installs)
-BACKUP_DIR="$HOME/.backup-agentbridge"
+BACKUP_DIR="$HOME/.backup-abtars"
 if [ -d "$BACKUP_DIR" ]; then
-  LATEST=$(find "$BACKUP_DIR" -name "agentbridge-*.zip" -mtime -2 2>/dev/null | head -1)
+  LATEST=$(find "$BACKUP_DIR" -name "abtars-*.zip" -mtime -2 2>/dev/null | head -1)
   if [ -z "$LATEST" ]; then
     warn "no backup in last 2 days -- check daily-backup.sh cron"
   fi
@@ -349,23 +349,23 @@ if [ "$KIRO_PROCS" -gt 1 ]; then
   fi
 fi
 
-# 12b. Orphaned agentbridge-sleep processes
-SLEEP_PROCS=$(pgrep -f 'agentbridge-sleep' 2>/dev/null | wc -l)
+# 12b. Orphaned abtars-sleep processes
+SLEEP_PROCS=$(pgrep -f 'abtars-sleep' 2>/dev/null | wc -l)
 if [ "$SLEEP_PROCS" -gt 1 ]; then
   if $FIX; then
-    PIDS=$(pgrep -f 'agentbridge-sleep' 2>/dev/null | sort -n)
+    PIDS=$(pgrep -f 'abtars-sleep' 2>/dev/null | sort -n)
     NEWEST=$(echo "$PIDS" | tail -1)
     for pid in $PIDS; do
       if [ "$pid" != "$NEWEST" ]; then
-        kill "$pid" 2>/dev/null && fix "killed orphaned agentbridge-sleep pid $pid"
+        kill "$pid" 2>/dev/null && fix "killed orphaned abtars-sleep pid $pid"
       fi
     done
   else
-    warn "$SLEEP_PROCS agentbridge-sleep processes running -- likely orphans"
+    warn "$SLEEP_PROCS abtars-sleep processes running -- likely orphans"
   fi
 fi
 
-# 15. Orphaned agentbridge.sh wrappers (not parented by watchdog)
+# 15. Orphaned abtars.sh wrappers (not parented by watchdog)
 if $WD_ALIVE && [ -n "$WD_PID" ]; then
   WRAPPER_ORPHANS=0
   while IFS= read -r pid; do
@@ -373,12 +373,12 @@ if $WD_ALIVE && [ -n "$WD_PID" ]; then
     if [ "$PPID_OF" != "$WD_PID" ]; then
       WRAPPER_ORPHANS=$((WRAPPER_ORPHANS + 1))
       if $FIX; then
-        kill "$pid" 2>/dev/null && fix "killed orphaned agentbridge.sh wrapper pid $pid (parent $PPID_OF, not watchdog $WD_PID)"
+        kill "$pid" 2>/dev/null && fix "killed orphaned abtars.sh wrapper pid $pid (parent $PPID_OF, not watchdog $WD_PID)"
       fi
     fi
-  done < <(pgrep -f 'agentbridge.sh.*--all' 2>/dev/null)
+  done < <(pgrep -f 'abtars.sh.*--all' 2>/dev/null)
   if [ "$WRAPPER_ORPHANS" -gt 0 ] && ! $FIX; then
-    warn "$WRAPPER_ORPHANS orphaned agentbridge.sh wrapper(s) not parented by watchdog"
+    warn "$WRAPPER_ORPHANS orphaned abtars.sh wrapper(s) not parented by watchdog"
   fi
 fi
 
@@ -423,7 +423,7 @@ fi
 if [ -f "$HOOKS_CONFIG" ]; then
   while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
-    resolved="${cmd/#\~\/.agentbridge/$AB}"
+    resolved="${cmd/#\~\/.abtars/$AB}"
     resolved="${resolved/#\~/$HOME}"
     if [ ! -f "$resolved" ]; then
       warn "hooks.json references missing script: $resolved"

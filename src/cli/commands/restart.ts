@@ -1,5 +1,5 @@
 /**
- * agentbridge restart [--cold] — unified restart command.
+ * abtars restart [--cold] — unified restart command.
  * Warm (default): writeRestartRequested → main.ts internal loop restarts.
  * Cold (--cold): kill process + spawn new launcher. Always, both modes.
  */
@@ -8,8 +8,8 @@ import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-function agentBridgeHome(): string {
-  return process.env["AGENT_BRIDGE_HOME"] ?? join(process.env["HOME"] ?? "", ".agentbridge");
+function abtarsHome(): string {
+  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
 }
 
 function readJsonField(file: string, field: string): unknown {
@@ -25,7 +25,7 @@ function pidAlive(pid: number): boolean {
 
 async function spawnLauncher(home: string, argv: string[]): Promise<number> {
   const { spawn } = await import("node:child_process");
-  const launcher = join(home, "agentbridge.sh");
+  const launcher = join(home, "abtars.sh");
   if (!existsSync(launcher)) {
     process.stderr.write(`Launcher not found: ${launcher}\n`);
     return 1;
@@ -40,8 +40,8 @@ async function killBridge(pid: number): Promise<void> {
   // Verify PID is actually the bridge (Linux /proc, fallback: skip check)
   try {
     const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8");
-    if (!cmdline.includes("agentbridge") && !cmdline.includes("main.js") && !cmdline.includes("bundle")) {
-      process.stdout.write(`⚠️ PID ${pid} is not agentbridge — stale PID file\n`);
+    if (!cmdline.includes("abtars") && !cmdline.includes("main.js") && !cmdline.includes("bundle")) {
+      process.stdout.write(`⚠️ PID ${pid} is not abtars — stale PID file\n`);
       return;
     }
   } catch (err) { logAndSwallow("restart", "op", err); }
@@ -58,7 +58,7 @@ async function killBridge(pid: number): Promise<void> {
 }
 
 export async function restart(opts: { cold?: boolean }): Promise<number> {
-  const home = agentBridgeHome();
+  const home = abtarsHome();
   const lockFile = join(home, "bridge.lock");
   const cold = opts.cold ?? false;
 
@@ -72,9 +72,9 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
     if (installMode === "supervised-daemon") {
       const platform = process.platform;
       if (platform === "darwin") {
-        process.stderr.write(`Cold restart under supervised-daemon requires sudo:\n  sudo -k launchctl kickstart -k system/com.agentbridge.daemon\n`);
+        process.stderr.write(`Cold restart under supervised-daemon requires sudo:\n  sudo -k launchctl kickstart -k system/com.abtars.daemon\n`);
       } else {
-        process.stderr.write(`Cold restart under supervised-daemon requires sudo:\n  sudo -k systemctl restart agentbridge\n`);
+        process.stderr.write(`Cold restart under supervised-daemon requires sudo:\n  sudo -k systemctl restart abtars\n`);
       }
       return 1;
     }

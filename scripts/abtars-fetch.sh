@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# agentbridge-fetch — fetch a URL and return clean markdown.
-# Usage: agentbridge-fetch <url>
+# abtars-fetch — fetch a URL and return clean markdown.
+# Usage: abtars-fetch <url>
 # Returns truncated markdown to stdout. Exits 1 on error.
 set -euo pipefail
 
 MAX_CHARS=50000
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: agentbridge-fetch <url>" >&2
+  echo "Usage: abtars-fetch <url>" >&2
   exit 1
 fi
 
 URL="$1"
 
 if ! command -v lightpanda &>/dev/null; then
-  echo "ERROR: lightpanda not installed. Use Level 2 browse (agentbridge-browse) instead." >&2
+  echo "ERROR: lightpanda not installed. Use Level 2 browse (abtars-browse) instead." >&2
   exit 1
 fi
 
@@ -28,7 +28,7 @@ OUTPUT=$(lightpanda fetch \
   "$URL" 2>/dev/null)
 
 if [[ -z "$OUTPUT" ]]; then
-  echo "ERROR: Empty response. Page may require JavaScript or login. Use Level 2 browse (agentbridge-browse) instead." >&2
+  echo "ERROR: Empty response. Page may require JavaScript or login. Use Level 2 browse (abtars-browse) instead." >&2
   exit 1
 fi
 

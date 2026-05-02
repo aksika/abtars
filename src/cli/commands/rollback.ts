@@ -1,5 +1,5 @@
 /**
- * `agentbridge rollback [--to vX.Y.Z]` — flip `current` to a prior release.
+ * `abtars rollback [--to vX.Y.Z]` — flip `current` to a prior release.
  *
  * Default target: the most recently prior release (manifest.priorReleases[0]).
  * Validates target exists and has compatible package-lock hash.
@@ -22,7 +22,7 @@ export interface RollbackOptions {
 }
 
 export async function rollback(opts: RollbackOptions): Promise<number> {
-  const paths = packagePaths('agentbridge');
+  const paths = packagePaths('abtars');
   const manifest = await readManifest(paths.manifest);
   if (!manifest || !manifest.version) {
     process.stderr.write(`No active release; nothing to roll back.\n`);
@@ -43,7 +43,7 @@ export async function rollback(opts: RollbackOptions): Promise<number> {
     const available = [manifest.version, ...manifest.priorReleases.map((r: PriorRelease) => r.version)];
     process.stderr.write(
       `Target release '${target}' does not exist in ${paths.releases}.\nAvailable: ${available.join(', ')}\n` +
-        `If pruned, rebuild from the target's git SHA with 'agentbridge update' instead.\n`,
+        `If pruned, rebuild from the target's git SHA with 'abtars update' instead.\n`,
     );
     return 2;
   }
@@ -70,7 +70,7 @@ export async function rollback(opts: RollbackOptions): Promise<number> {
       `v${manifest.version} pinned different deps than v${target} (package-lock hashes differ).\n` +
         `Rollback via symlink is unsafe. Instead:\n` +
         `  git checkout ${targetRecord.commit ?? '<commit-from-manifest>'}\n` +
-        `  agentbridge update --from-local\n` +
+        `  abtars update --from-local\n` +
         `This rebuilds node_modules/ to match the target release.\n`,
     );
     return 3;

@@ -8,14 +8,14 @@
 import { logAndSwallow } from "../log-and-swallow.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 import { logInfo } from "../logger.js";
 import { CronExpressionParser } from "cron-parser";
 import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./cron-store.js";
-import type { CronEntry } from "../../cli/agentbridge-task.js";
+import type { CronEntry } from "../../cli/abtars-task.js";
 
 const TAG = "cron-checker";
-const memoryDir = (): string => join(agentBridgeHome(), "memory");
+const memoryDir = (): string => join(abtarsHome(), "memory");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
 
 export interface PendingReminder {

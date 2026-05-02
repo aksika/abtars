@@ -389,7 +389,7 @@ describe("BrowserTool", () => {
       });
 
       expect(result.success).toBe(true);
-      expect(result.filePath).toContain("agentbridge-screenshot-");
+      expect(result.filePath).toContain("abtars-screenshot-");
       expect(result.filePath).toContain(".png");
     });
 

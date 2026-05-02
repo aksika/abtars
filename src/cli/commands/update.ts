@@ -1,5 +1,5 @@
 /**
- * `agentbridge update` — build current checkout, stage new release, flip symlink.
+ * `abtars update` — build current checkout, stage new release, flip symlink.
  *
  * Phase 1 implements --source local only. Other sources error with a
  * "not yet supported" stub (Phase 5 will add NpmSource).
@@ -33,7 +33,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     return 2;
   }
 
-  const paths = packagePaths('agentbridge');
+  const paths = packagePaths('abtars');
   const release = await acquireLock(paths.lock, `update --source ${opts.source}`);
 
   try {
@@ -52,8 +52,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
       const { existsSync, unlinkSync, symlinkSync } = await import("node:fs");
       const mainLink = join(staged.stagedPath, "main.js");
       try { unlinkSync(mainLink); } catch (err) { logAndSwallow("update", "op", err); }
-      const entry = existsSync(join(staged.stagedPath, "bundle", "agentbridge.js"))
-        ? "bundle/agentbridge.js"
+      const entry = existsSync(join(staged.stagedPath, "bundle", "abtars.js"))
+        ? "bundle/abtars.js"
         : "dist/main.js";
       symlinkSync(entry, mainLink);
     }
@@ -78,7 +78,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
       : prior?.priorReleases ?? [];
 
     await writeManifest(paths.manifest, {
-      ...(prior ?? emptyManifest('agentbridge', hostname())),
+      ...(prior ?? emptyManifest('abtars', hostname())),
       version: staged.version,
       commit: staged.commit,
       branch: staged.branch,
@@ -171,9 +171,9 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
     if (serviceChanged) {
       if (process.platform === 'darwin') {
-        process.stdout.write(`⚠️  LaunchAgent plist updated — reload with: launchctl bootout gui/$(id -u)/com.agentbridge.watchdog && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist\n`);
+        process.stdout.write(`⚠️  LaunchAgent plist updated — reload with: launchctl bootout gui/$(id -u)/com.abtars.watchdog && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist\n`);
       } else {
-        process.stdout.write(`⚠️  systemd service updated — reload with: systemctl --user daemon-reload && systemctl --user restart agentbridge-watchdog\n`);
+        process.stdout.write(`⚠️  systemd service updated — reload with: systemctl --user daemon-reload && systemctl --user restart abtars-watchdog\n`);
       }
     }
 
@@ -212,17 +212,17 @@ export async function update(opts: UpdateOptions): Promise<number> {
         } catch {
           process.stdout.write(`⚠️ Could not signal watchdog (PID ${wdPid}). Restart manually:\n`);
           if (process.platform === "darwin") {
-            process.stdout.write(`  sudo -k launchctl kickstart -k system/com.agentbridge.daemon\n`);
+            process.stdout.write(`  sudo -k launchctl kickstart -k system/com.abtars.daemon\n`);
           } else {
-            process.stdout.write(`  sudo -k systemctl restart agentbridge\n`);
+            process.stdout.write(`  sudo -k systemctl restart abtars\n`);
           }
         }
       } else {
         process.stdout.write(`⚠️ Watchdog PID not found. Restart manually:\n`);
         if (process.platform === "darwin") {
-          process.stdout.write(`  sudo -k launchctl kickstart -k system/com.agentbridge.daemon\n`);
+          process.stdout.write(`  sudo -k launchctl kickstart -k system/com.abtars.daemon\n`);
         } else {
-          process.stdout.write(`  sudo -k systemctl restart agentbridge\n`);
+          process.stdout.write(`  sudo -k systemctl restart abtars\n`);
         }
       }
     } else {

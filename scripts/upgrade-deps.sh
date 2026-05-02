@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# upgrade-deps.sh — Upgrade all external dependencies (agentbridge + abmind).
+# upgrade-deps.sh — Upgrade all external dependencies (abtars + abmind).
 # Portable: macOS and Linux. Runs weekly via cron; safe to run manually.
-# Does not restart the bridge. Deploy with `agentbridge update` to activate.
+# Does not restart the bridge. Deploy with `abtars update` to activate.
 
 # Intentionally no `set -e`: one failing step must not skip later steps.
 set -uo pipefail
@@ -29,7 +29,7 @@ npm_update() {
   echo ""
 }
 
-npm_update "agentbridge" "$BRIDGE_ROOT"
+npm_update "abtars" "$BRIDGE_ROOT"
 if [[ -n "$ABMIND_ROOT" ]]; then
   npm_update "abmind" "$ABMIND_ROOT"
 else
@@ -61,4 +61,4 @@ fi
 
 echo "🤖 kiro-cli: $(kiro-cli --version 2>/dev/null || echo 'not found') — update via kiro.dev"
 echo ""
-echo "✅ Done. Activate with: (cd abmind && abmind update) && (cd agentbridge && agentbridge update)"
+echo "✅ Done. Activate with: (cd abmind && abmind update) && (cd abtars && abtars update)"

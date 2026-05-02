@@ -1,5 +1,5 @@
 /**
- * Migration 001: legacy ~/.agentbridge/.env.memory → ~/.agentbridge/config/.env.memory.
+ * Migration 001: legacy ~/.abtars/.env.memory → ~/.abtars/config/.env.memory.
  *
  * Historical context: pre-158 deploy.sh had inline `mv` lines to relocate
  * .env.memory into config/. This migration captures that move as a typed,

@@ -6,7 +6,7 @@
 import { logAndSwallow } from "../log-and-swallow.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 import { localISO } from "../../utils/local-time.js";
 
 export type SleepStatus = "awake" | "sleeping" | "hw_sleep";
@@ -14,14 +14,14 @@ export type SleepStatus = "awake" | "sleeping" | "hw_sleep";
 /** Read lastPromptAt from bridge.lock. Returns 0 if missing/unreadable. */
 export function readLastPromptAt(): number {
   try {
-    const lock = JSON.parse(readFileSync(join(agentBridgeHome(), "bridge.lock"), "utf-8"));
+    const lock = JSON.parse(readFileSync(join(abtarsHome(), "bridge.lock"), "utf-8"));
     return typeof lock.lastPromptAt === "number" ? lock.lastPromptAt : 0;
   } catch { return 0; }
 }
 
 /** Update a single field in bridge.lock (read-merge-write). */
 export function updateBridgeLockField(key: string, value: unknown): void {
-  const p = join(agentBridgeHome(), "bridge.lock");
+  const p = join(abtarsHome(), "bridge.lock");
   try {
     const lock = JSON.parse(readFileSync(p, "utf-8"));
     lock[key] = value;
@@ -32,7 +32,7 @@ export function updateBridgeLockField(key: string, value: unknown): void {
 /** Read a field from bridge.lock. Returns null if missing/unreadable. */
 export function readBridgeLockField<T = unknown>(key: string): T | null {
   try {
-    const lock = JSON.parse(readFileSync(join(agentBridgeHome(), "bridge.lock"), "utf-8"));
+    const lock = JSON.parse(readFileSync(join(abtarsHome(), "bridge.lock"), "utf-8"));
     return lock[key] ?? null;
   } catch { return null; }
 }

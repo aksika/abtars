@@ -78,18 +78,18 @@ describe("SSRF protection", () => {
 
 describe("path traversal protection", () => {
   it("allows paths within root", () => {
-    expect(isWithinRoot("memory/test.db", "/home/user/.agentbridge")).toBe(true);
+    expect(isWithinRoot("memory/test.db", "/home/user/.abtars")).toBe(true);
   });
 
   it("blocks ../ escape", () => {
-    expect(isWithinRoot("../../.ssh/authorized_keys", "/home/user/.agentbridge")).toBe(false);
+    expect(isWithinRoot("../../.ssh/authorized_keys", "/home/user/.abtars")).toBe(false);
   });
 
   it("blocks absolute path outside root", () => {
-    expect(isWithinRoot("/etc/passwd", "/home/user/.agentbridge")).toBe(false);
+    expect(isWithinRoot("/etc/passwd", "/home/user/.abtars")).toBe(false);
   });
 
   it("allows root itself", () => {
-    expect(isWithinRoot(".", "/home/user/.agentbridge")).toBe(true);
+    expect(isWithinRoot(".", "/home/user/.abtars")).toBe(true);
   });
 });

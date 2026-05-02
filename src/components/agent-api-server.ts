@@ -4,7 +4,7 @@ import { readFileSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { createHmac, randomBytes } from "crypto";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import type { IMemorySystem } from "abmind";
 import { scanForInjection } from "abmind";
@@ -79,7 +79,7 @@ export class AgentApiServer {
     this.memory = deps.memory;
     this.runtime = deps.runtime;
     this.server = createServer((req, res) => this.handle(req, res));
-    this.logDir = join(agentBridgeHome(), "logs", "agents");
+    this.logDir = join(abtarsHome(), "logs", "agents");
     mkdirSync(this.logDir, { recursive: true });
     this.logFile = this.newLogFile();
     try {
@@ -87,7 +87,7 @@ export class AgentApiServer {
       const name = deps.config.agentCodename;
       const candidates = [
         join(base, `../../agents/${name}.md`),
-        join(agentBridgeHome(), "agents", `${name}.md`),
+        join(abtarsHome(), "agents", `${name}.md`),
       ];
       this.agentRules = "";
       for (const p of candidates) {

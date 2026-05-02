@@ -29,8 +29,8 @@ interface EnvVarDef {
 // All env vars in one place. Add new vars here, nowhere else.
 const SCHEMA: readonly EnvVarDef[] = [
   // ── Core ──
-  { env: "AGENT_BRIDGE_HOME", type: "string", description: "Base directory for runtime data" },
-  { env: "WORKING_DIR", type: "string", default: "~/.agentbridge/workspace", description: "Agent working directory (sandbox)" },
+  { env: "ABTARS_HOME", type: "string", description: "Base directory for runtime data" },
+  { env: "WORKING_DIR", type: "string", default: "~/.abtars/workspace", description: "Agent working directory (sandbox)" },
   { env: "MAIN_CHAT_ID", type: "string", description: "Primary chat ID for operator notifications" },
   { env: "MAIN_CHAT_PROVIDER", type: "string", default: "telegram", description: "Platform for MAIN_CHAT_ID: telegram | discord" },
   { env: "LOG_LEVEL", type: "string", default: "low", description: "Log level: off, low, debug" },
@@ -142,7 +142,7 @@ export interface TimeValue { hour: number; minute: number; raw: string; }
 
 export interface EnvConfig {
   // Core
-  agentBridgeHome: string;
+  abtarsHome: string;
   workingDir: string;
   mainChatId: string | undefined;
   mainChatProvider: "telegram" | "discord";
@@ -319,7 +319,7 @@ export function initEnv(): Readonly<EnvConfig> {
   }
 
   const env: EnvConfig = {
-    agentBridgeHome: readOr("AGENT_BRIDGE_HOME", ""),
+    abtarsHome: readOr("ABTARS_HOME", ""),
     workingDir: readOr("WORKING_DIR", "."),
     mainChatId: read("MAIN_CHAT_ID"),
     mainChatProvider: (read("MAIN_CHAT_PROVIDER") ?? "telegram") === "discord" ? "discord" : "telegram",

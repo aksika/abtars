@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CronEntry } from "../../cli/agentbridge-task.js";
+import type { CronEntry } from "../../cli/abtars-task.js";
 import { writeEntry, readEntries, closeDb } from "./cron-store.js";
 
 const originalHome = process.env.HOME;
@@ -15,7 +15,7 @@ describe("cron-checker", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "cronchk-test-"));
     process.env.HOME = tmpDir;
-    memDir = join(tmpDir, ".agentbridge", "memory");
+    memDir = join(tmpDir, ".abtars", "memory");
     mkdirSync(memDir, { recursive: true });
     remindersPath = join(memDir, "pending_reminders.json");
     closeDb(); // force fresh DB for new HOME

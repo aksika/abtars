@@ -15,18 +15,18 @@ describe('onboard command (non-interactive)', () => {
   let restoreEnv: string | undefined;
 
   beforeEach(async () => {
-    restoreEnv = process.env['AGENT_BRIDGE_HOME'];
-    const base = join(homedir(), '.cache', 'agentbridge-test');
+    restoreEnv = process.env['ABTARS_HOME'];
+    const base = join(homedir(), '.cache', 'abtars-test');
     await mkdir(base, { recursive: true });
     fakeHome = await mkdtemp(join(base, 'onboard-'));
-    process.env['AGENT_BRIDGE_HOME'] = fakeHome;
+    process.env['ABTARS_HOME'] = fakeHome;
 
     // Seed what `install` would have created.
     await mkdir(join(fakeHome, 'config'), { recursive: true });
     await writeFile(
       join(fakeHome, 'manifest.json'),
       JSON.stringify({
-        package: 'agentbridge',
+        package: 'abtars',
         version: '',
         commit: null,
         branch: null,
@@ -42,8 +42,8 @@ describe('onboard command (non-interactive)', () => {
   });
 
   afterEach(async () => {
-    if (restoreEnv === undefined) delete process.env['AGENT_BRIDGE_HOME'];
-    else process.env['AGENT_BRIDGE_HOME'] = restoreEnv;
+    if (restoreEnv === undefined) delete process.env['ABTARS_HOME'];
+    else process.env['ABTARS_HOME'] = restoreEnv;
     await rm(fakeHome, { recursive: true, force: true });
   });
 
@@ -154,8 +154,8 @@ describe('onboard command (non-interactive)', () => {
   });
 
   it('refuses if not installed (no manifest)', async () => {
-    const unitialized = await mkdtemp(join(homedir(), '.cache', 'agentbridge-test', 'empty-'));
-    process.env['AGENT_BRIDGE_HOME'] = unitialized;
+    const unitialized = await mkdtemp(join(homedir(), '.cache', 'abtars-test', 'empty-'));
+    process.env['ABTARS_HOME'] = unitialized;
     try {
       const code = await onboard({
         nonInteractive: true,

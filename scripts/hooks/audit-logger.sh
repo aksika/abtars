@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# audit-logger.sh — Canonical hook example for agentbridge.
-# Appends each hook event as a JSON line to ~/.agentbridge/logs/audit.jsonl.
+# audit-logger.sh — Canonical hook example for abtars.
+# Appends each hook event as a JSON line to ~/.abtars/logs/audit.jsonl.
 #
 # Install:
-#   mkdir -p ~/.agentbridge/hooks && chmod 700 ~/.agentbridge/hooks
-#   cp scripts/hooks/audit-logger.sh ~/.agentbridge/hooks/
-#   chmod +x ~/.agentbridge/hooks/audit-logger.sh
+#   mkdir -p ~/.abtars/hooks && chmod 700 ~/.abtars/hooks
+#   cp scripts/hooks/audit-logger.sh ~/.abtars/hooks/
+#   chmod +x ~/.abtars/hooks/audit-logger.sh
 #
-# Then add to ~/.agentbridge/config/hooks.json:
+# Then add to ~/.abtars/config/hooks.json:
 #   { "enabled": true, "hooks": {
-#       "BeforeMessage": [{ "name": "audit-in", "command": "~/.agentbridge/hooks/audit-logger.sh" }],
-#       "AfterMessage":  [{ "name": "audit-out", "command": "~/.agentbridge/hooks/audit-logger.sh" }],
-#       "AfterPrompt":   [{ "name": "audit-prompt", "command": "~/.agentbridge/hooks/audit-logger.sh" }]
+#       "BeforeMessage": [{ "name": "audit-in", "command": "~/.abtars/hooks/audit-logger.sh" }],
+#       "AfterMessage":  [{ "name": "audit-out", "command": "~/.abtars/hooks/audit-logger.sh" }],
+#       "AfterPrompt":   [{ "name": "audit-prompt", "command": "~/.abtars/hooks/audit-logger.sh" }]
 #   }}
 
-LOG="${AGENT_BRIDGE_HOME:-$HOME/.agentbridge}/logs/audit.jsonl"
+LOG="${ABTARS_HOME:-$HOME/.abtars}/logs/audit.jsonl"
 mkdir -p "$(dirname "$LOG")"
 
 # Read JSON from stdin, append to log

@@ -15,7 +15,7 @@ const LOG_PREFIX = "[browser-manager]";
 const DEFAULTS = {
   BROWSER_SESSION_TIMEOUT_MS: 300_000,
   BROWSER_MAX_SESSIONS: 3,
-  WEB_SCRAPE_USER_AGENT: "Mozilla/5.0 (compatible; AgentBridge/1.0)",
+  WEB_SCRAPE_USER_AGENT: "Mozilla/5.0 (compatible; Abtars/1.0)",
 } as const;
 
 export type BrowserEngine = "patchright";
@@ -276,7 +276,7 @@ export class BrowserManager {
 
   private _stopContainer(): void {
     try {
-      execFileSync("docker", ["stop", "agentbridge-browser"], { stdio: "pipe", timeout: 10_000 });
+      execFileSync("docker", ["stop", "abtars-browser"], { stdio: "pipe", timeout: 10_000 });
     } catch (err) { logAndSwallow("browser_manager", "op", err); }
   }
 

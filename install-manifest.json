@@ -17,9 +17,9 @@
     { "source": "models.default.json", "dest": "config/models.json" }
   ],
   "requiredConfigs": [
-    { "path": "config/transport.json", "remediation": "run 'agentbridge onboard'" },
-    { "path": "config/models.json", "remediation": "copy from a reference install or run 'agentbridge onboard'" },
-    { "path": "config/users.json", "remediation": "run 'agentbridge onboard'" }
+    { "path": "config/transport.json", "remediation": "run 'abtars onboard'" },
+    { "path": "config/models.json", "remediation": "copy from a reference install or run 'abtars onboard'" },
+    { "path": "config/users.json", "remediation": "run 'abtars onboard'" }
   ],
   "scripts": {
     "include": ["*.sh", "*.py", "*.plist", "*.service"],
@@ -27,11 +27,11 @@
   },
   "services": {
     "supervised": {
-      "macos": { "plist": "com.agentbridge.watchdog.plist", "placeholders": ["{{HOME}}"] },
-      "linux": { "units": ["agentbridge@.service", "agentbridge-watchdog.service"] }
+      "macos": { "plist": "com.abtars.watchdog.plist", "placeholders": ["{{HOME}}"] },
+      "linux": { "units": ["abtars@.service", "abtars-watchdog.service"] }
     }
   },
-  "cliWrappers": ["agentbridge", "agentbridge-browser", "agentbridge-restart", "agentbridge-tweet"],
+  "cliWrappers": ["abtars", "abtars-browser", "abtars-restart", "abtars-tweet"],
   "postInstall": [
     { "id": "001-env-memory-to-config", "run": "migration", "when": "update" },
     { "id": "002-env-skills-to-config", "run": "migration", "when": "update" },

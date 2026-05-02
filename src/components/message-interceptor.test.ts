@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { interceptLargeMessage } from "./message-interceptor.js";
 
 // Override OVERFLOW_DIR for tests by monkey-patching the module internals isn't clean,
-// so we test the function directly — it writes to ~/.agentbridge/overflow/ in prod,
+// so we test the function directly — it writes to ~/.abtars/overflow/ in prod,
 // but we can verify the logic with the default threshold.
 
 describe("interceptLargeMessage", () => {

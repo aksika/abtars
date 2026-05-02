@@ -191,7 +191,7 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
       // Note: abmind's nested node_modules/ (rsync'd from its dev workspace)
       // stays in place. Previously deleted to avoid duplicate better-sqlite3
       // native-addon conflict (#230-related), but since f24b33f removed
-      // better-sqlite3 from agentbridge's deps, abmind's nested copy is the
+      // better-sqlite3 from abtars's deps, abmind's nested copy is the
       // only one and must remain — deleting it breaks module resolution for
       // abmind at runtime ('Cannot find package better-sqlite3').
 

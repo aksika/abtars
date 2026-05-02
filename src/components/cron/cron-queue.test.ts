@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import * as child_process from "node:child_process";
 import { CronQueue } from "./cron-queue.js";
-import type { CronEntry } from "../../cli/agentbridge-task.js";
+import type { CronEntry } from "../../cli/abtars-task.js";
 
 // Mock child_process.spawn so no real bash commands run.
 vi.mock("node:child_process", async () => {

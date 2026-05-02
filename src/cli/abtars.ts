@@ -1,5 +1,5 @@
 /**
- * agentbridge CLI top-level dispatcher (#158 Phase 1b).
+ * abtars CLI top-level dispatcher (#158 Phase 1b).
  *
  * Subcommands:
  *   install [--upgrade] [--force]
@@ -53,18 +53,18 @@ function parseArgs(argv: readonly string[]): Args {
 
 function printUsage(): void {
   process.stdout.write(
-    `agentbridge — install/update CLI (#158)
+    `abtars — install/update CLI (#158)
 
 Usage:
-  agentbridge install [--force] [--mode=simple|supervised|supervised-daemon] [--restore <backup.zip>]
-  agentbridge update  [--source local|npm|github] [--from-local]
-  agentbridge rollback [--to <version>]
-  agentbridge backup
-  agentbridge doctor [<args passed to doctor.sh>...]
-  agentbridge onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
-  agentbridge restart [--cold]
-  agentbridge stop [--force]
-  agentbridge status
+  abtars install [--force] [--mode=simple|supervised|supervised-daemon] [--restore <backup.zip>]
+  abtars update  [--source local|npm|github] [--from-local]
+  abtars rollback [--to <version>]
+  abtars backup
+  abtars doctor [<args passed to doctor.sh>...]
+  abtars onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
+  abtars restart [--cold]
+  abtars stop [--force]
+  abtars status
 
 See abproject/docs/plans/158-deploy-rewrite.md for the full contract.
 `,
@@ -134,14 +134,14 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 }
 
-// Direct-run guard: works when invoked as `node dist/cli/agentbridge.js` AND
-// as `agentbridge` (npm-installed bin). Not executed under vitest.
+// Direct-run guard: works when invoked as `node dist/cli/abtars.js` AND
+// as `abtars` (npm-installed bin). Not executed under vitest.
 const isDirectRun =
   typeof process.argv[1] === 'string' &&
-  (process.argv[1].endsWith('agentbridge.js') ||
-    process.argv[1].endsWith('agentbridge-cli.js') ||
-    process.argv[1].endsWith('agentbridge') ||
-    process.argv[1].endsWith('agentbridge.ts'));
+  (process.argv[1].endsWith('abtars.js') ||
+    process.argv[1].endsWith('abtars-cli.js') ||
+    process.argv[1].endsWith('abtars') ||
+    process.argv[1].endsWith('abtars.ts'));
 
 if (isDirectRun && process.env['VITEST'] === undefined) {
   void main(process.argv.slice(2)).then((code) => process.exit(code));

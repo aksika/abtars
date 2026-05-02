@@ -1,22 +1,22 @@
 /**
- * `agentbridge backup` — zip config + data from both agentbridge and abmind.
+ * `abtars backup` — zip config + data from both abtars and abmind.
  * Uses SQLite db.backup() for WAL-safe memory.db copy.
  */
 
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 
 const AB_SAVE = ["config", "skills", "prompts", "core", "secret", "tasks", "logo"];
 const ABMIND_SAVE = ["config", "prompts", "secret"];
 const ABMIND_MEMORY_SAVE = ["core"]; // subdirs of memory/ to include
 
 export async function backup(outputDir?: string): Promise<number> {
-  const abHome = agentBridgeHome();
+  const abHome = abtarsHome();
   const abmindHome = process.env["ABMIND_HOME"] ?? join(dirname(abHome), ".abmind");
   const timestamp = new Date().toISOString().replace(/[T:]/g, "-").replace(/\..+/, "");
-  const zipName = `agentbridge-backup-${timestamp}.zip`;
+  const zipName = `abtars-backup-${timestamp}.zip`;
   const destDir = outputDir ?? process.cwd();
   mkdirSync(destDir, { recursive: true });
   const zipPath = join(destDir, zipName);
@@ -24,10 +24,10 @@ export async function backup(outputDir?: string): Promise<number> {
   // Collect files to zip
   const files: Array<{ absPath: string; zipPath: string }> = [];
 
-  // agentbridge dirs
+  // abtars dirs
   for (const dir of AB_SAVE) {
     const abs = join(abHome, dir);
-    if (existsSync(abs)) collectDir(abs, `agentbridge/${dir}`, files);
+    if (existsSync(abs)) collectDir(abs, `abtars/${dir}`, files);
   }
 
   // abmind dirs
@@ -61,7 +61,7 @@ export async function backup(outputDir?: string): Promise<number> {
   }
 
   // Create zip using system zip command
-  const tmpDir = join(process.env["TMPDIR"] ?? "/tmp", `agentbridge-backup-${Date.now()}`);
+  const tmpDir = join(process.env["TMPDIR"] ?? "/tmp", `abtars-backup-${Date.now()}`);
   mkdirSync(tmpDir, { recursive: true });
 
   for (const f of files) {

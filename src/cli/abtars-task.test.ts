@@ -5,13 +5,13 @@ import { join } from "node:path";
 
 const originalHome = process.env.HOME;
 
-describe("agentbridge-task", () => {
+describe("abtars-task", () => {
   let tmpDir: string;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "cron-test-"));
     process.env.HOME = tmpDir;
-    mkdirSync(join(tmpDir, ".agentbridge", "memory"), { recursive: true });
+    mkdirSync(join(tmpDir, ".abtars", "memory"), { recursive: true });
   });
 
   afterEach(async () => {
@@ -26,12 +26,12 @@ describe("agentbridge-task", () => {
     // Force re-import to pick up new HOME
     const { closeDb } = await import("../components/cron/cron-store.js");
     closeDb();
-    const mod = await import("./agentbridge-task.js");
+    const mod = await import("./abtars-task.js");
     const logs: string[] = [];
     const origLog = console.log;
     console.log = (...a: unknown[]) => logs.push(a.map(String).join(" "));
     try {
-      mod.main(["node", "agentbridge-task", ...args]);
+      mod.main(["node", "abtars-task", ...args]);
     } finally {
       console.log = origLog;
     }

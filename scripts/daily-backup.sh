@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AB="$HOME/.agentbridge"
-DEST="$HOME/.backup-agentbridge"
+AB="$HOME/.abtars"
+DEST="$HOME/.backup-abtars"
 DATE=$(date +%Y%m%d)
 
 mkdir -p "$DEST"
 
 # Zip backup
 cd "$AB"
-zip -qr "$DEST/agentbridge-$DATE.zip" \
+zip -qr "$DEST/abtars-$DATE.zip" \
   memory/ core/ skills/ prompts/ tasks/ topics/ reports/ finance/ \
   -x "memory/pending_*" "memory/memory.db-wal" "memory/memory.db-shm"
 
@@ -22,7 +22,7 @@ if [ -f "$DB_KEY" ] && [ -f "$AB/memory/memory.db" ]; then
 fi
 
 # Prune >7 days
-find "$DEST" -name "agentbridge-*.zip" -mtime +7 -delete
+find "$DEST" -name "abtars-*.zip" -mtime +7 -delete
 
 # Git commit + push
 cd "$AB"

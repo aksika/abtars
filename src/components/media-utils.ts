@@ -4,7 +4,7 @@
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import { randomBytes } from "node:crypto";
 import { fileTypeFromBuffer } from "file-type";
 import { logInfo, logWarn } from "./logger.js";
@@ -12,8 +12,8 @@ import { logInfo, logWarn } from "./logger.js";
 const TAG = "media";
 const MAX_FILE_BYTES = 16 * 1024 * 1024; // 16MB
 
-const MEDIA_DIR = join(agentBridgeHome(), "received", "media");
-const FILES_DIR = join(agentBridgeHome(), "received", "files");
+const MEDIA_DIR = join(abtarsHome(), "received", "media");
+const FILES_DIR = join(abtarsHome(), "received", "files");
 
 const IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 

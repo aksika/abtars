@@ -5,16 +5,16 @@
 
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../../components/logger.js";
 import { localDate } from "../../components/env-utils.js";
 import { appendReminder } from "../../components/cron/cron-checker.js";
-import { readPendingBrowse, writePendingBrowse } from "./agentbridge-browse.js";
-import type { PendingBrowseEntry } from "./agentbridge-browse.js";
+import { readPendingBrowse, writePendingBrowse } from "./abtars-browse.js";
+import type { PendingBrowseEntry } from "./abtars-browse.js";
 
 const TAG = "browse-delivery";
 
-const subagentsDir = (): string => join(agentBridgeHome(), "subagents");
+const subagentsDir = (): string => join(abtarsHome(), "subagents");
 
 /** Deliver result for a browse task. Called by runtime.spawn() callback. */
 export function deliverBrowseResult(entry: PendingBrowseEntry, result: string): void {

@@ -1,7 +1,7 @@
 /**
  * context-bridge.ts — Bridges the context engine into the existing transport.
  * Provides the summarization prompt and LLM call wrapper.
- * This is the glue between abmind's ContextEngine and agentbridge's transport.
+ * This is the glue between abmind's ContextEngine and abtars's transport.
  */
 
 import type { ContextEngine } from "abmind";
@@ -38,7 +38,7 @@ Target ~{budget} tokens. Be concrete.`;
 
 /**
  * Create a SummarizeFn that uses the provided LLM call function.
- * The llmCall function should match the signature used elsewhere in agentbridge.
+ * The llmCall function should match the signature used elsewhere in abtars.
  */
 export function createSummarizeFn(
   llmCall: (systemPrompt: string, userPrompt: string) => Promise<string>,

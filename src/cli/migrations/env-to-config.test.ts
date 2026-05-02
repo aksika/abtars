@@ -8,7 +8,7 @@ import { migration002 } from './002-env-skills-to-config.js';
 describe('env-to-config migrations (001, 002)', () => {
   let fakeHome: string;
   beforeEach(async () => {
-    const base = join(homedir(), '.cache', 'agentbridge-test');
+    const base = join(homedir(), '.cache', 'abtars-test');
     await mkdir(base, { recursive: true });
     fakeHome = await mkdtemp(join(base, 'envmig-'));
     await mkdir(join(fakeHome, 'config'), { recursive: true });

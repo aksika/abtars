@@ -11,7 +11,7 @@ import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { logInfo, logWarn } from "./logger.js";
 import { getLogFile } from "./logger.js";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import type { HeartbeatTask } from "../types/memory.js";
 import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
 
@@ -33,7 +33,7 @@ interface AutoFixRule {
 
 function loadAutoFixRules(): AutoFixRule[] {
   try {
-    const p = join(agentBridgeHome(), "config", "auto-fix.json");
+    const p = join(abtarsHome(), "config", "auto-fix.json");
     const rules = JSON.parse(readFileSync(p, "utf-8")) as AutoFixRule[];
     return rules.filter(r => r.enabled && r.pattern && r.instruction);
   } catch { return []; }
@@ -47,7 +47,7 @@ interface ErrorState {
 }
 
 function logAutoFix(message: string): void {
-  const dir = join(agentBridgeHome(), "logs");
+  const dir = join(abtarsHome(), "logs");
   try { mkdirSync(dir, { recursive: true }); } catch (err) { logAndSwallow("self_healer", "op", err); }
   const date = new Date().toISOString().slice(0, 10);
   appendFileSync(join(dir, `autofix-${date}.log`), `${localISO()} ${message}\n`);

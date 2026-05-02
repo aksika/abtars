@@ -1,6 +1,6 @@
 /**
  * Re-export of abmind's deploy-lib primitives, so command files can import
- * from a single stable path inside agentbridge. If we ever decide to vendor
+ * from a single stable path inside abtars. If we ever decide to vendor
  * or fork deploy-lib, only this file changes.
  *
  * All imports go through abmind's "./deploy-lib" subpath export (#355).
@@ -8,7 +8,7 @@
 
 export {
   packagePaths,
-  resolveBridgeHome,
+  resolveAbtarsHome,
   resolveAbmindHome,
   resolveUserBinDir,
   type PackagePaths,

@@ -9,7 +9,7 @@
  * Populates ctx: memory.
  *
  * Owns no module-level singletons (setMemoryLogger is a setter on abmind's
- * internal logger, not an agentbridge singleton).
+ * internal logger, not an abtars singleton).
  */
 
 import { MemoryManager, setLogger as setMemoryLogger } from "abmind";

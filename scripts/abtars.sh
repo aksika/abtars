@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# agentbridge.sh — One-command launcher for the AgentBridge.
+# abtars.sh — One-command launcher for the Abtars.
 #
 # PID-guarded: if bridge is already running, exits silently.
 # LaunchAgent handles restarts — no internal restart loop.
 #
 # Usage:
-#   ~/.agentbridge/agentbridge.sh                  # default: --telegram
-#   ~/.agentbridge/agentbridge.sh --telegram
-#   ~/.agentbridge/agentbridge.sh --all
-#   ~/.agentbridge/agentbridge.sh stop             # kill bridge + tmux session
+#   ~/.abtars/abtars.sh                  # default: --telegram
+#   ~/.abtars/abtars.sh --telegram
+#   ~/.abtars/abtars.sh --all
+#   ~/.abtars/abtars.sh stop             # kill bridge + tmux session
 
 set -euo pipefail
 
-AB_HOME="${HOME}/.agentbridge"
-PROJECT_DIR="$HOME/.agentbridge"
+AB_HOME="${HOME}/.abtars"
+PROJECT_DIR="$HOME/.abtars"
 ARGS=("${@:---telegram}")
 PIDFILE="$AB_HOME/bridge.pid"
 
@@ -26,13 +26,13 @@ SESSION="${TMUX_SESSION:-kiro-bridge}"
 
 # --- stop command ---
 if [[ " ${ARGS[*]} " == *" stop "* ]]; then
-  echo "🛑 Stopping agentbridge..."
+  echo "🛑 Stopping abtars..."
   if [ -f "$PIDFILE" ]; then
     pid=$(cat "$PIDFILE")
     kill "$pid" 2>/dev/null && echo "   Bridge stopped (pid $pid)." || echo "   Bridge not running."
     rm -f "$PIDFILE"
   else
-    pkill -f "node.*\.agentbridge/current/main.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
+    pkill -f "node.*\.abtars/current/main.js" 2>/dev/null && echo "   Bridge stopped." || echo "   Bridge not running."
   fi
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux kill-session -t "$SESSION"
@@ -59,13 +59,13 @@ fi
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
-echo "🚀 AgentBridge launcher"
+echo "🚀 Abtars launcher"
 echo "   Args:     ${ARGS[*]}"
 echo "   Node:     $(node --version)"
 echo ""
 
 # --- kill any orphaned bridge process ---
-if pkill -f "node.*\.agentbridge/current/main.js" 2>/dev/null; then
+if pkill -f "node.*\.abtars/current/main.js" 2>/dev/null; then
   echo "   Killed orphaned bridge process."
   sleep 1
 fi
@@ -84,7 +84,7 @@ cd "$PROJECT_DIR"
 cleanup() { rm -f "$PIDFILE"; }
 trap cleanup EXIT
 
-# Stable entry point: main.js symlink created by agentbridge update.
+# Stable entry point: main.js symlink created by abtars update.
 export NODE_PATH="current/node_modules:${NODE_PATH:-}"
 
 node "current/main.js" "${ARGS[@]}" &

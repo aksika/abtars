@@ -23,7 +23,7 @@ describe("parseBrowserConfig", () => {
     const cfg = parseBrowserConfig();
     expect(cfg.sessionTimeoutMs).toBe(300_000);
     expect(cfg.maxSessions).toBe(3);
-    expect(cfg.userAgent).toBe("Mozilla/5.0 (compatible; AgentBridge/1.0)");
+    expect(cfg.userAgent).toBe("Mozilla/5.0 (compatible; Abtars/1.0)");
   });
 
   it("parses valid numeric env vars", () => {
@@ -81,7 +81,7 @@ describe("parseBrowserConfig", () => {
   it("falls back to default user agent for empty string", () => {
     process.env["WEB_SCRAPE_USER_AGENT"] = "   ";
     const cfg = parseBrowserConfig();
-    expect(cfg.userAgent).toBe("Mozilla/5.0 (compatible; AgentBridge/1.0)");
+    expect(cfg.userAgent).toBe("Mozilla/5.0 (compatible; Abtars/1.0)");
   });
 });
 

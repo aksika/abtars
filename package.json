@@ -1,12 +1,12 @@
 {
-  "name": "agentbridge",
+  "name": "abtars",
   "version": "0.1.0",
   "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc && rm -rf dist/components/dashboard/public && cp -r src/components/dashboard/public dist/components/dashboard/public && git log -1 --format='{\"hash\":\"%h\",\"date\":\"%ci\"}' > dist/build-info.json",
-    "bundle": "cd ../abmind && npm run build && cd ../agentbridge && node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public",
+    "bundle": "cd ../abmind && npm run build && cd ../abtars && node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public",
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
@@ -43,9 +43,9 @@
     "vitest": "^4.1.5"
   },
   "bin": {
-    "agentbridge": "dist/cli/agentbridge.js",
-    "agentbridge-browser": "dist/cli/agentbridge-browser.js",
-    "agentbridge-tweet": "dist/cli/agentbridge-tweet.js"
+    "abtars": "dist/cli/abtars.js",
+    "abtars-browser": "dist/cli/abtars-browser.js",
+    "abtars-tweet": "dist/cli/abtars-tweet.js"
   },
   "license": "Apache-2.0"
 }

@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 /**
- * agentbridge-todo — persistent todo list CLI.
+ * abtars-todo — persistent todo list CLI.
  *
  * Usage:
- *   agentbridge-todo add "Export X/Twitter session cookies"
- *   agentbridge-todo list
- *   agentbridge-todo done 3
- *   agentbridge-todo remove 3
+ *   abtars-todo add "Export X/Twitter session cookies"
+ *   abtars-todo list
+ *   abtars-todo done 3
+ *   abtars-todo remove 3
  *
- * File: ~/.agentbridge/memory/todo.md
+ * File: ~/.abtars/memory/todo.md
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import { localDate } from "../components/env-utils.js";
 
-const todoPath = (): string => join(agentBridgeHome(), "memory", "todo.md");
+const todoPath = (): string => join(abtarsHome(), "memory", "todo.md");
 const HEADER = "# Todo List\n";
 
 function ensureFile(): void {
   const p = todoPath();
-  const dir = join(agentBridgeHome(), "memory");
+  const dir = join(abtarsHome(), "memory");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   if (!existsSync(p)) writeFileSync(p, HEADER, "utf-8");
 }
@@ -95,12 +95,12 @@ export function main(argv: string[] = process.argv): void {
 
   if (args.includes('--help')) {
     console.log(`Usage:
-  agentbridge-todo add "description"
-  agentbridge-todo list
-  agentbridge-todo done <number>
-  agentbridge-todo remove <number>
+  abtars-todo add "description"
+  abtars-todo list
+  abtars-todo done <number>
+  abtars-todo remove <number>
 
-File: ~/.agentbridge/memory/todo.md`);
+File: ~/.abtars/memory/todo.md`);
     process.exit(0);
   }
 
@@ -109,7 +109,7 @@ File: ~/.agentbridge/memory/todo.md`);
   switch (command) {
     case "add": {
       const desc = args[1];
-      if (!desc) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-todo add \"description\"" })); process.exit(1); }
+      if (!desc) { console.log(JSON.stringify({ ok: false, error: "Usage: abtars-todo add \"description\"" })); process.exit(1); }
       add(desc);
       break;
     }
@@ -118,22 +118,22 @@ File: ~/.agentbridge/memory/todo.md`);
       break;
     case "done": {
       const n = parseInt(args[1] ?? "", 10);
-      if (!Number.isFinite(n)) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-todo done <number>" })); process.exit(1); }
+      if (!Number.isFinite(n)) { console.log(JSON.stringify({ ok: false, error: "Usage: abtars-todo done <number>" })); process.exit(1); }
       done(n);
       break;
     }
     case "remove": {
       const n = parseInt(args[1] ?? "", 10);
-      if (!Number.isFinite(n)) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-todo remove <number>" })); process.exit(1); }
+      if (!Number.isFinite(n)) { console.log(JSON.stringify({ ok: false, error: "Usage: abtars-todo remove <number>" })); process.exit(1); }
       remove(n);
       break;
     }
     default:
-      console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-todo <add|list|done|remove> [args]" }));
+      console.log(JSON.stringify({ ok: false, error: "Usage: abtars-todo <add|list|done|remove> [args]" }));
       process.exit(1);
   }
 }
 
-const isDirectRun = process.argv[1]?.endsWith("agentbridge-todo.ts") ||
-  process.argv[1]?.endsWith("agentbridge-todo.js");
+const isDirectRun = process.argv[1]?.endsWith("abtars-todo.ts") ||
+  process.argv[1]?.endsWith("abtars-todo.js");
 if (isDirectRun) main();

@@ -2,12 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs, validateArgs, loadBrowsePrompt } from "./agentbridge-browse.js";
+import { parseArgs, validateArgs, loadBrowsePrompt } from "./abtars-browse.js";
 
 const originalHome = process.env.HOME;
 const originalCwd = process.cwd;
 
-describe("agentbridge-browse", () => {
+describe("abtars-browse", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -68,7 +68,7 @@ describe("agentbridge-browse", () => {
 
   describe("loadBrowsePrompt", () => {
     it("loads template and replaces variables", () => {
-      const promptDir = join(tmpDir, ".agentbridge", "prompts");
+      const promptDir = join(tmpDir, ".abtars", "prompts");
       mkdirSync(promptDir, { recursive: true });
       writeFileSync(join(promptDir, "browsing_prompt.md"), "Task: ${TASK}\nID: ${TASK_ID}\nReport: ${REPORT_FILE}", "utf-8");
 

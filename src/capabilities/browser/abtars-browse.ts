@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /**
- * agentbridge-browse — spawn a browser subagent for autonomous web tasks.
+ * abtars-browse — spawn a browser subagent for autonomous web tasks.
  *
  * Usage:
- *   agentbridge-browse --task "check X notifications" --chat-id 7773842843
- *   agentbridge-browse --task "post on FB" --chat-id 123 --timeout 600
- *   agentbridge-browse --task "research topic" --chat-id 123 --dry-run
+ *   abtars-browse --task "check X notifications" --chat-id 7773842843
+ *   abtars-browse --task "post on FB" --chat-id 123 --timeout 600
+ *   abtars-browse --task "research topic" --chat-id 123 --dry-run
  *
  * Returns immediately. The subagent runs detached and results are delivered
  * via pending_reminders.json → bridge picks up → sends to chat.
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
 import { localDate } from "../../components/env-utils.js";
@@ -72,7 +72,7 @@ export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId
 // --- Prompt loading ---
 
 export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string): string {
-  const path = join(agentBridgeHome(), "prompts", "browsing_prompt.md");
+  const path = join(abtarsHome(), "prompts", "browsing_prompt.md");
 
   if (!existsSync(path)) {
     throw new Error(`browsing_prompt.md not found at ${path}`);
@@ -98,7 +98,7 @@ export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string)
 
 // --- Pending browse file ---
 
-const pendingPath = (): string => join(agentBridgeHome(), "memory", "pending_browse.json");
+const pendingPath = (): string => join(abtarsHome(), "memory", "pending_browse.json");
 
 export function readPendingBrowse(): PendingBrowseEntry[] {
   const p = pendingPath();
@@ -108,7 +108,7 @@ export function readPendingBrowse(): PendingBrowseEntry[] {
 }
 
 export function writePendingBrowse(entries: PendingBrowseEntry[]): void {
-  const dir = join(agentBridgeHome(), "memory");
+  const dir = join(abtarsHome(), "memory");
   mkdirSync(dir, { recursive: true });
   writeFileSync(pendingPath(), JSON.stringify(entries, null, 2), "utf-8");
 }
@@ -117,16 +117,16 @@ export function writePendingBrowse(entries: PendingBrowseEntry[]): void {
 
 export async function main(argv: string[] = process.argv): Promise<void> {
   if (argv.includes("--help")) {
-    console.log(`agentbridge-browse — delegate a browser task to the Browsie agent.
+    console.log(`abtars-browse — delegate a browser task to the Browsie agent.
 
 Usage:
-  agentbridge-browse --task "check X notifications" --chat-id ID
-  agentbridge-browse --task "research topic" --chat-id ID --timeout 600
-  agentbridge-browse --task "research topic" --chat-id ID --dry-run`);
+  abtars-browse --task "check X notifications" --chat-id ID
+  abtars-browse --task "research topic" --chat-id ID --timeout 600
+  abtars-browse --task "research topic" --chat-id ID --dry-run`);
     process.exit(0);
   }
 
-  loadDotenv({ path: join(agentBridgeHome(), ".env") });
+  loadDotenv({ path: join(abtarsHome(), ".env") });
   const raw = parseArgs(argv);
   const validation = validateArgs(raw);
 
@@ -145,12 +145,12 @@ Usage:
     return;
   }
 
-  mkdirSync(join(agentBridgeHome(), "subagents"), { recursive: true });
+  mkdirSync(join(abtarsHome(), "subagents"), { recursive: true });
 
   const prompt = loadBrowsePrompt(task, chatId, taskId);
 
   // Send spawn request to bridge via IPC
-  const spawnSocket = join(agentBridgeHome(), "browse-spawn.sock");
+  const spawnSocket = join(abtarsHome(), "browse-spawn.sock");
   const net = await import("node:net");
   const result = await new Promise<{ ok: boolean; taskId?: string; error?: string }>((resolve, reject) => {
     const conn = net.createConnection(spawnSocket);
@@ -172,6 +172,6 @@ Usage:
   console.log(JSON.stringify(result));
 }
 
-const isDirectRun = process.argv[1]?.endsWith("agentbridge-browse.ts") ||
-  process.argv[1]?.endsWith("agentbridge-browse.js");
+const isDirectRun = process.argv[1]?.endsWith("abtars-browse.ts") ||
+  process.argv[1]?.endsWith("abtars-browse.js");
 if (isDirectRun) main();

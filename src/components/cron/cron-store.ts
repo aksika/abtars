@@ -1,15 +1,15 @@
 /**
  * cron-store.ts — JSON-backed cron entry storage.
- * Replaces cron-db.ts (SQLite in memory.db) with ~/.agentbridge/state/cron.json.
+ * Replaces cron-db.ts (SQLite in memory.db) with ~/.abtars/state/cron.json.
  * Same API surface for callers.
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
-import type { CronEntry } from "../../cli/agentbridge-task.js";
-import { agentBridgeHome } from "../../paths.js";
+import type { CronEntry } from "../../cli/abtars-task.js";
+import { abtarsHome } from "../../paths.js";
 
-const storePath = (): string => join(agentBridgeHome(), "state", "cron.json");
+const storePath = (): string => join(abtarsHome(), "state", "cron.json");
 
 function readAll(): CronEntry[] {
   const p = storePath();

@@ -1,12 +1,12 @@
 /**
- * `agentbridge install [--upgrade]` — first-time setup.
+ * `abtars install [--upgrade]` — first-time setup.
  *
  * Phase 1 behavior:
- *   - No existing ~/.agentbridge: create dirs, seed config/ from .env.example,
+ *   - No existing ~/.abtars: create dirs, seed config/ from .env.example,
  *     create PATH symlinks. Does NOT run onboard (Phase 3).
- *   - Existing ~/.agentbridge with flat layout (pre-158): refuse unless
+ *   - Existing ~/.abtars with flat layout (pre-158): refuse unless
  *     --upgrade, then run migration 003-flat-to-releases (Phase 1c).
- *   - Existing ~/.agentbridge with new layout: refuse unless --force (which
+ *   - Existing ~/.abtars with new layout: refuse unless --force (which
  *     re-seeds missing config and reconciles symlinks, no code changes).
  */
 
@@ -102,7 +102,7 @@ async function seedConfig(repoRoot: string, _configDir: string, dryRun: boolean,
  * Reconcile a single PATH symlink at ~/.local/bin/<name>.
  * Policy (plan §"PATH symlink collision"):
  *   - Missing  → create
- *   - Symlink pointing into our own ~/.agentbridge/bin/ → overwrite
+ *   - Symlink pointing into our own ~/.abtars/bin/ → overwrite
  *   - Anything else → refuse with message, unless force
  */
 async function reconcilePathLink(
@@ -124,9 +124,9 @@ async function reconcilePathLink(
     const { readlink, unlink } = await import('node:fs/promises');
     const current = await readlink(linkPath);
     // "We own it" means: points at THIS install's bin dir, not a fuzzy match
-    // on any path containing /.agentbridge/bin/. A smoke-test install at
-    // AGENT_BRIDGE_HOME=~/.cache/ab-smoke-.../ must not clobber the real
-    // ~/.agentbridge symlinks. Compare absolute paths directly.
+    // on any path containing /.abtars/bin/. A smoke-test install at
+    // ABTARS_HOME=~/.cache/ab-smoke-.../ must not clobber the real
+    // ~/.abtars symlinks. Compare absolute paths directly.
     const ownsIt = current === targetPath;
     if (ownsIt) {
       if (dryRun) return { action: `[dry-run] overwrite ${linkPath} (we own it)` };
@@ -159,10 +159,10 @@ async function reconcilePathLink(
 }
 
 export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
-  const bundleFile = name === 'agentbridge' ? 'agentbridge-cli.js' : `${name}.js`;
+  const bundleFile = name === 'abtars' ? 'abtars-cli.js' : `${name}.js`;
   const target = join(currentLink, 'bundle', bundleFile);
   // Fallback: pre-bundle dist/ layout (tsc build) for installs that haven't migrated yet.
-  const distFile = name === 'agentbridge' ? 'agentbridge.js' : `${name}.js`;
+  const distFile = name === 'abtars' ? 'abtars.js' : `${name}.js`;
   const fallback = join(currentLink, 'dist', 'cli', distFile);
   const content = `#!/usr/bin/env bash
 if [ -f "${target}" ]; then
@@ -170,7 +170,7 @@ if [ -f "${target}" ]; then
 elif [ -f "${fallback}" ]; then
   exec node "${fallback}" "$@"
 else
-  echo "agentbridge: no release staged yet. Run 'agentbridge update' or 'npm run bundle' in the repo checkout." >&2
+  echo "abtars: no release staged yet. Run 'abtars update' or 'npm run bundle' in the repo checkout." >&2
   exit 1
 fi
 `;
@@ -212,14 +212,14 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
   if (process.getuid?.() !== 0) {
     process.stderr.write(
       `supervised-daemon requires sudo for system-scope service install.\n` +
-      `Run: sudo -k agentbridge install --mode=supervised-daemon\n`,
+      `Run: sudo -k abtars install --mode=supervised-daemon\n`,
     );
     return 2;
   }
   if (!sudoUser) {
     process.stderr.write(
       `Cannot determine target user — $SUDO_USER is not set.\n` +
-      `Run via: sudo -k agentbridge install --mode=supervised-daemon\n` +
+      `Run via: sudo -k abtars install --mode=supervised-daemon\n` +
       `(Do not use 'su -' — it doesn't set SUDO_USER.)\n`,
     );
     return 2;
@@ -230,7 +230,7 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
   if (!existsSync(currentLink)) {
     process.stderr.write(
       `No release staged at ${currentLink}.\n` +
-      `Run 'agentbridge install' and 'agentbridge update' as ${sudoUser} first,\n` +
+      `Run 'abtars install' and 'abtars update' as ${sudoUser} first,\n` +
       `then re-run with sudo for supervised-daemon.\n`,
     );
     return 2;
@@ -244,14 +244,14 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
     let group = userGroup;
     try { group = execSync(`id -gn ${sudoUser}`, { encoding: 'utf-8' }).trim(); } catch (err) { logAndSwallow("install", "op", err); }
 
-    const plistSrc = join(repoRoot, 'scripts', 'com.agentbridge.daemon.plist');
+    const plistSrc = join(repoRoot, 'scripts', 'com.abtars.daemon.plist');
     if (!existsSync(plistSrc)) {
       process.stderr.write(`Template not found: ${plistSrc}\n`);
       return 1;
     }
     let content = readFileSync(plistSrc, 'utf-8');
     content = content.replaceAll('{{USER}}', sudoUser).replaceAll('{{GROUP}}', group);
-    const dst = '/Library/LaunchDaemons/com.agentbridge.daemon.plist';
+    const dst = '/Library/LaunchDaemons/com.abtars.daemon.plist';
 
     if (dryRun) {
       process.stdout.write(`[dry-run] write ${dst}\n[dry-run] launchctl bootstrap system ${dst}\n`);
@@ -259,7 +259,7 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
     }
 
     // Remove existing user-scope LaunchAgent if present
-    const userAgent = join('/Users', sudoUser, 'Library', 'LaunchAgents', 'com.agentbridge.watchdog.plist');
+    const userAgent = join('/Users', sudoUser, 'Library', 'LaunchAgents', 'com.abtars.watchdog.plist');
     if (existsSync(userAgent)) {
       const { execFileSync } = await import('node:child_process');
       try { execFileSync('launchctl', ['bootout', `gui/${process.env['SUDO_UID'] ?? ''}`, userAgent]); } catch (err) { logAndSwallow("install", "op", err); }
@@ -284,17 +284,17 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
       return 2;
     }
 
-    const unitSrc = join(repoRoot, 'scripts', 'agentbridge-daemon.service');
+    const unitSrc = join(repoRoot, 'scripts', 'abtars-daemon.service');
     if (!existsSync(unitSrc)) {
       process.stderr.write(`Template not found: ${unitSrc}\n`);
       return 1;
     }
     let content = readFileSync(unitSrc, 'utf-8');
     content = content.replaceAll('{{USER}}', sudoUser);
-    const dst = '/etc/systemd/system/agentbridge.service';
+    const dst = '/etc/systemd/system/abtars.service';
 
     if (dryRun) {
-      process.stdout.write(`[dry-run] write ${dst}\n[dry-run] systemctl enable --now agentbridge\n`);
+      process.stdout.write(`[dry-run] write ${dst}\n[dry-run] systemctl enable --now abtars\n`);
       return 0;
     }
 
@@ -302,7 +302,7 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
     writeFileSync(dst, content);
     const { execFileSync } = await import('node:child_process');
     execFileSync('systemctl', ['daemon-reload']);
-    execFileSync('systemctl', ['enable', '--now', 'agentbridge']);
+    execFileSync('systemctl', ['enable', '--now', 'abtars']);
     process.stdout.write(`✓ systemd unit installed at ${dst}\n`);
     process.stdout.write(`✓ supervised-daemon active — bridge runs as ${sudoUser}, survives logout + reboot\n`);
     return 0;
@@ -313,7 +313,7 @@ async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: b
 }
 
 export async function install(opts: InstallOptions): Promise<number> {
-  const paths = packagePaths('agentbridge');
+  const paths = packagePaths('abtars');
   const home = paths.home;
   const userBinDir = resolveUserBinDir();
   const repoRoot = process.cwd();
@@ -323,7 +323,7 @@ export async function install(opts: InstallOptions): Promise<number> {
 
   if (homeExists && manifest && !opts.force && !opts.restore) {
     process.stderr.write(
-      `~/.agentbridge already installed at version ${manifest.version || '(unset)'}.\nUse 'agentbridge update' to upgrade, or --force to re-seed missing config.\n`,
+      `~/.abtars already installed at version ${manifest.version || '(unset)'}.\nUse 'abtars update' to upgrade, or --force to re-seed missing config.\n`,
     );
     return 2;
   }
@@ -332,7 +332,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   await createSkeleton(home, opts.dryRun);
   process.stdout.write(`✓ skeleton at ${home}\n`);
 
-  // Create abmind skeleton — agentbridge depends on abmind at runtime
+  // Create abmind skeleton — abtars depends on abmind at runtime
   const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(home), '.abmind');
   const abmindDirs = [
     { path: join(abmindHome, 'config'), mode: 0o700 },
@@ -391,7 +391,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   const manifestAfter = await readManifest(paths.manifest);
   if (manifestAfter === null && !opts.dryRun) {
     await writeManifest(paths.manifest, {
-      ...emptyManifest('agentbridge', hostname()),
+      ...emptyManifest('abtars', hostname()),
       version: '',
       preMigrationBackup: null,
     });
@@ -425,17 +425,17 @@ export async function install(opts: InstallOptions): Promise<number> {
       return 1;
     }
     // Extract to temp dir
-    const tmpDir = join(process.env['TMPDIR'] ?? '/tmp', `agentbridge-restore-${Date.now()}`);
+    const tmpDir = join(process.env['TMPDIR'] ?? '/tmp', `abtars-restore-${Date.now()}`);
     const unzip = spawnSync('unzip', ['-o', zipPath, '-d', tmpDir], { encoding: 'utf-8' });
     if (unzip.status !== 0) {
       process.stderr.write(`error: unzip failed: ${unzip.stderr}\n`);
       return 1;
     }
-    // Copy agentbridge files
-    const abSrc = join(tmpDir, 'agentbridge');
+    // Copy abtars files
+    const abSrc = join(tmpDir, 'abtars');
     if (fileExists(abSrc)) {
       spawnSync('cp', ['-r', ...readdirSync(abSrc).map(f => join(abSrc, f)), home], { stdio: 'inherit' });
-      process.stdout.write(`✓ restored agentbridge config\n`);
+      process.stdout.write(`✓ restored abtars config\n`);
     }
     // Copy abmind files
     const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(home), '.abmind');
@@ -447,13 +447,13 @@ export async function install(opts: InstallOptions): Promise<number> {
     // Cleanup
     spawnSync('rm', ['-rf', tmpDir]);
     process.stdout.write(`\nRestore complete.\n`);
-    process.stdout.write(`Next: 'agentbridge update' to build and activate.\n`);
+    process.stdout.write(`Next: 'abtars update' to build and activate.\n`);
     return 0;
   }
 
   process.stdout.write(`\nInstall complete.\n`);
   if (!manifestAfter || manifestAfter.version === '') {
-    process.stdout.write(`Next: 'agentbridge update' to build and activate the first release.\n`);
+    process.stdout.write(`Next: 'abtars update' to build and activate the first release.\n`);
   }
 
   // #334: Post-install healthcheck — validate operator channel exists (only on --restore)
@@ -461,7 +461,7 @@ export async function install(opts: InstallOptions): Promise<number> {
     const { validateMinimumViability, formatValidationError } = await import('./install-validate.js');
     const validation = validateMinimumViability(paths.config);
     if (!validation.ok) {
-      const invocation = `agentbridge install --restore ${opts.restore}`;
+      const invocation = `abtars install --restore ${opts.restore}`;
       process.stderr.write("\n" + formatValidationError(validation, invocation) + "\n");
       return 1;
     }

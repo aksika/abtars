@@ -1,5 +1,5 @@
 /**
- * AgentBridge — entry point.
+ * Abtars — entry point.
  * Internal restart loop: exit code 0 = restart, non-zero = die.
  * Under SUPERVISION (supervised-daemon mode), the loop is disabled —
  * the system supervisor (systemd/launchd) handles restarts.

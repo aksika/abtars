@@ -3,13 +3,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { BrowserAction, BrowserToolResult } from "../../types/browser.js";
 import type { BrowserTool } from "./browser-tool.js";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 
 const LOG_PREFIX = "[browser-ipc]";
 
-/** Default socket path: ~/.agentbridge/browser.sock */
+/** Default socket path: ~/.abtars/browser.sock */
 export function getDefaultSocketPath(): string {
-  return path.join(agentBridgeHome(), "browser-socket", "browser.sock");
+  return path.join(abtarsHome(), "browser-socket", "browser.sock");
 }
 
 /**

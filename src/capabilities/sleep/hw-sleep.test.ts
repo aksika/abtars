@@ -22,7 +22,7 @@ vi.mock("node:child_process", async () => {
 });
 
 vi.mock("../../paths.js", () => ({
-  agentBridgeHome: () => HOME,
+  abtarsHome: () => HOME,
   reportsDir: (cat: string) => join(HOME, "reports", cat),
 }));
 

@@ -8,7 +8,7 @@ import { readEnv } from "./env.js";
 import { getEnv } from "./env-schema.js";
 import { logWarn, logError } from "./logger.js";
 import type { LogLevel } from "./logger.js";
-export { agentBridgeHome } from "../paths.js";
+export { abtarsHome } from "../paths.js";
 
 const BOT_TOKEN_REGEX = /^\d+:[A-Za-z0-9_-]+$/;
 const SNOWFLAKE_REGEX = /^\d{17,20}$/;
@@ -81,7 +81,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
   const hasDiscordToken = discordToken.length > 20;
 
   if (!hasTelegramToken && !hasDiscordToken) {
-    logError("config", "No platform configured — set TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN in config/.env (run agentbridge onboard)");
+    logError("config", "No platform configured — set TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN in config/.env (run abtars onboard)");
   }
 
   // --- User IDs (from users.json, fallback to MAIN_CHAT_ID for TG only) ---

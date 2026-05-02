@@ -1,5 +1,5 @@
 /**
- * `agentbridge onboard` — first-time interactive configuration wizard
+ * `abtars onboard` — first-time interactive configuration wizard
  * (plan #158 Phase 3, subsumes ticket #153).
  *
  * Two modes:
@@ -101,7 +101,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   // keep it off the critical path for Phase 1-2 subcommands.
   const { intro, outro, text, select, confirm, isCancel, cancel } = await import('@clack/prompts');
 
-  intro('agentbridge onboard — first-time setup');
+  intro('abtars onboard — first-time setup');
   const noteEmpty = 'press Enter to skip';
 
   // 1. Deployment mode
@@ -435,7 +435,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
 
   const newBlock = [
     '',
-    '# --- agentbridge onboard-managed ---',
+    '# --- abtars onboard-managed ---',
     `DEFAULT_PROVIDER=${answers.defaultProvider}`,
     `DEFAULT_MODEL=${answers.defaultModel}`,
   ];
@@ -458,11 +458,11 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
 }
 
 export async function onboard(opts: OnboardOptions): Promise<number> {
-  const paths = packagePaths('agentbridge');
+  const paths = packagePaths('abtars');
   const manifest = await readManifest(paths.manifest);
   if (!manifest) {
     process.stderr.write(
-      `Not installed yet. Run 'agentbridge install' first.\n(Manifest not found at ${paths.manifest}.)\n`,
+      `Not installed yet. Run 'abtars install' first.\n(Manifest not found at ${paths.manifest}.)\n`,
     );
     return 2;
   }
@@ -581,27 +581,27 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     }
   }
 
-  process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://github.com/aksika/agentbridge/blob/main/docs/install.md\n`);
+  process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://github.com/aksika/abtars/blob/main/docs/install.md\n`);
 
   // Skip the build+start automation in non-interactive mode (scripts expect to do it themselves)
   if (opts.nonInteractive) {
-    process.stdout.write(`\nNext: 'agentbridge update' to build, then start the bridge.\n`);
+    process.stdout.write(`\nNext: 'abtars update' to build, then start the bridge.\n`);
     return 0;
   }
 
-  // ── Auto-run: agentbridge update ──
-  // Only auto-update if we're inside the agentbridge repo (git repo with package.json)
+  // ── Auto-run: abtars update ──
+  // Only auto-update if we're inside the abtars repo (git repo with package.json)
   const { existsSync } = await import('node:fs');
   const inRepo = existsSync(join(process.cwd(), '.git')) && existsSync(join(process.cwd(), 'package.json'));
   if (!inRepo) {
-    process.stdout.write(`\nNext: cd into the agentbridge repo and run 'agentbridge update' to build and activate.\n`);
+    process.stdout.write(`\nNext: cd into the abtars repo and run 'abtars update' to build and activate.\n`);
     return 0;
   }
-  process.stdout.write(`\n── Running 'agentbridge update' ──\n`);
+  process.stdout.write(`\n── Running 'abtars update' ──\n`);
   const { update } = await import('./update.js');
   const updRc = await update({ source: 'local', fromLocal: true, allowAbmindMismatch: false });
   if (updRc !== 0) {
-    process.stderr.write(`\n⚠️  'agentbridge update' exited with code ${updRc}. Fix and re-run manually.\n`);
+    process.stderr.write(`\n⚠️  'abtars update' exited with code ${updRc}. Fix and re-run manually.\n`);
     return updRc;
   }
 
@@ -627,13 +627,13 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   const { confirm } = await import('@clack/prompts');
   const startCmds: string[] = [];
   if (answers.installMode === 'simple') {
-    startCmds.push(`~/.agentbridge/agentbridge.sh --all`);
+    startCmds.push(`~/.abtars/abtars.sh --all`);
   } else {
     if (process.platform === 'darwin') {
-      startCmds.push(`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist`);
+      startCmds.push(`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist`);
     } else if (process.platform === 'linux') {
       startCmds.push(`systemctl --user daemon-reload`);
-      startCmds.push(`systemctl --user enable --now agentbridge-watchdog`);
+      startCmds.push(`systemctl --user enable --now abtars-watchdog`);
     }
   }
 

@@ -1,6 +1,6 @@
 import { getEnv } from "../../components/env-schema.js";
 import { BOT_COMMANDS } from "../../components/command-registry.js";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 /**
  * Telegram platform adapter — wraps TelegramApi, TelegramPoller, SecurityGate.
  * Handles Telegram-specific pre-processing (voice, reactions, groups, mentions)
@@ -89,7 +89,7 @@ export class TelegramAdapter implements PlatformAdapter {
     await this.api.setMyCommands(BOT_COMMANDS.map(c => ({ command: c.name, description: c.description })))
       .catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
 
-    const home = agentBridgeHome();
+    const home = abtarsHome();
     const offsetStore = createFileOffsetStore(`${home}/state/telegram-offset`);
     this.poller = new TelegramPoller(this.api, this.config.pollTimeoutS, (u) => this.handleUpdate(u), offsetStore);
     await this.poller.start();

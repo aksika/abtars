@@ -1,5 +1,5 @@
 /**
- * ABSkeleton — typed slot interfaces for AgentBridge's modular architecture.
+ * ABSkeleton — typed slot interfaces for Abtars's modular architecture.
  * Each slot has a specific contract. Implementations are swappable.
  */
 

@@ -10,7 +10,7 @@
  */
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { parseArgs, validateArgs } from "./agentbridge-browser.js";
+import { parseArgs, validateArgs } from "./abtars-browser.js";
 
 const VALID_ACTIONS = [
   "navigate",
@@ -24,7 +24,7 @@ const VALID_ACTIONS = [
 
 const VALID_ACTION_SET = new Set<string>(VALID_ACTIONS);
 
-describe("agentbridge-browser — Property 1: CLI action validation", () => {
+describe("abtars-browser — Property 1: CLI action validation", () => {
   /**
    * For any random string used as --action, it is accepted iff it is one of
    * the 7 valid action types. All others are rejected with an error.
@@ -32,7 +32,7 @@ describe("agentbridge-browser — Property 1: CLI action validation", () => {
   it("accepts only the 7 valid action types and rejects all others", () => {
     fc.assert(
       fc.property(fc.string(), (actionStr) => {
-        const raw = parseArgs(["node", "agentbridge-browser", "--action", actionStr]);
+        const raw = parseArgs(["node", "abtars-browser", "--action", actionStr]);
         const result = validateArgs(raw);
 
         if (VALID_ACTION_SET.has(actionStr)) {
@@ -65,7 +65,7 @@ describe("agentbridge-browser — Property 1: CLI action validation", () => {
         (action) => {
           // Build argv with all possible params so no required-param errors
           const argv = [
-            "node", "agentbridge-browser",
+            "node", "abtars-browser",
             "--action", action,
             "--url", "https://example.com",
             "--selector", "#test",
@@ -90,7 +90,7 @@ describe("agentbridge-browser — Property 1: CLI action validation", () => {
    * Missing --action is always rejected.
    */
   it("rejects when --action is missing entirely", () => {
-    const raw = parseArgs(["node", "agentbridge-browser"]);
+    const raw = parseArgs(["node", "abtars-browser"]);
     const result = validateArgs(raw);
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -102,7 +102,7 @@ describe("agentbridge-browser — Property 1: CLI action validation", () => {
    * Default session-id is "default" when not specified.
    */
   it("defaults session-id to 'default'", () => {
-    const raw = parseArgs(["node", "agentbridge-browser", "--action", "screenshot"]);
+    const raw = parseArgs(["node", "abtars-browser", "--action", "screenshot"]);
     const result = validateArgs(raw);
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -115,7 +115,7 @@ describe("agentbridge-browser — Property 1: CLI action validation", () => {
    */
   it("parses --full-page flag", () => {
     const raw = parseArgs([
-      "node", "agentbridge-browser",
+      "node", "abtars-browser",
       "--action", "screenshot",
       "--full-page",
     ]);

@@ -58,7 +58,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import type { TrafficEntry } from "../agent-api-server.js";
 import { localIso } from "../logger.js";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 
 export type {
   StatusSnapshot, CronEntryStatus, PlatformStates, TransportStatus,
@@ -176,7 +176,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     cron: readCronStatus(),
     notebooklm: refs.notebooklm ? { enabled: true } : null,
     gwsAuth: existsSync(resolve(homedir(), ".config", "gws", "credentials.enc")),
-    xAuth: existsSync(resolve(agentBridgeHome(), "secret", "cookies", "x-cookies.json")),
+    xAuth: existsSync(resolve(abtarsHome(), "secret", "cookies", "x-cookies.json")),
     agentApi: refs.agentApi ? { traffic: refs.agentApi.getTrafficLog() } : null,
     model: refs.model ?? { name: "unknown", provider: "unknown", fallbackChain: [] },
     subsystems: refs.subsystems ?? [],

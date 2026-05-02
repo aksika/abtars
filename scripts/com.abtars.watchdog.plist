@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.agentbridge.watchdog</string>
+  <string>com.abtars.watchdog</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{{HOME}}/.agentbridge/watchdog.sh</string>
+    <string>{{HOME}}/.abtars/watchdog.sh</string>
     <string>--all</string>
     <string>--web</string>
     <string>--agent</string>
@@ -18,13 +18,13 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>StandardOutPath</key>
-  <string>{{HOME}}/.agentbridge/logs/watchdog-launchd.log</string>
+  <string>{{HOME}}/.abtars/logs/watchdog-launchd.log</string>
   <key>StandardErrorPath</key>
-  <string>{{HOME}}/.agentbridge/logs/watchdog-launchd.log</string>
+  <string>{{HOME}}/.abtars/logs/watchdog-launchd.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>{{HOME}}/.agentbridge/bin:{{HOME}}/.local/bin:{{HOME}}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>{{HOME}}/.abtars/bin:{{HOME}}/.local/bin:{{HOME}}/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
 </dict>
 </plist>

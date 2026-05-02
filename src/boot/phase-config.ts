@@ -2,8 +2,8 @@
  * phase-config — boot phase 1: parse CLI flags, load config, set log level.
  *
  * Side effects:
- * - Prepends ~/.agentbridge/bin to PATH
- * - Truncates ~/.agentbridge/logs/launchd.log
+ * - Prepends ~/.abtars/bin to PATH
+ * - Truncates ~/.abtars/logs/launchd.log
  * - Sets log level (module-level singleton: logger.currentLevel)
  * - Emits BRIDGE START + startup log lines
  *
@@ -19,14 +19,14 @@ import { loadMemoryConfig } from "abmind";
 import { parsePlatformFlags } from "../components/cli-flags.js";
 import { setLogLevel, logInfo } from "../components/logger.js";
 import { loadNLMConfig } from "../components/nlm-command-handler.js";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import type { BootCtx } from "./context.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
 
 export async function phaseConfig(ctx: BootCtx): Promise<void> {
-  // Ensure ~/.agentbridge/bin is in PATH for child processes (kiro-cli, gemini-cli)
-  const binDir = join(agentBridgeHome(), "bin");
+  // Ensure ~/.abtars/bin is in PATH for child processes (kiro-cli, gemini-cli)
+  const binDir = join(abtarsHome(), "bin");
   if (!process.env["PATH"]?.includes(binDir)) {
     process.env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`;
   }
@@ -38,7 +38,7 @@ export async function phaseConfig(ctx: BootCtx): Promise<void> {
 
   ctx.memoryConfig = loadMemoryConfig();
   // startedAt set by createBootCtx; preserved here
-  ctx.bridgeLockPath = join(agentBridgeHome(), "bridge.lock");
+  ctx.bridgeLockPath = join(abtarsHome(), "bridge.lock");
   ctx.sleepAuditDir = join(ctx.memoryConfig.memoryDir, "sleep");
 
   // STT/TTS/NLM config (lightweight — just reads env vars)
@@ -60,7 +60,7 @@ export async function phaseConfig(ctx: BootCtx): Promise<void> {
   if (ctx.ttsConfig) logInfo("main", `🔊 TTS enabled (Edge TTS / ${ctx.ttsConfig.voice})`);
 
   // Truncate launchd.log on startup — bridge logger takes over, previous crash output already captured
-  try { writeFileSync(join(agentBridgeHome(), "logs", "launchd.log"), "", "utf-8"); } catch (err) { logAndSwallow("phase_config", "op", err); }
+  try { writeFileSync(join(abtarsHome(), "logs", "launchd.log"), "", "utf-8"); } catch (err) { logAndSwallow("phase_config", "op", err); }
 
   // Load hooks config
   const { loadHookConfig } = await import("../components/hooks/hook-system.js");

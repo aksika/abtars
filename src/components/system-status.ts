@@ -42,7 +42,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
   let version = "?";
   let commit = "?";
   try {
-    const target = basename(readlinkSync(join(homedir(), ".agentbridge", "current")));
+    const target = basename(readlinkSync(join(homedir(), ".abtars", "current")));
     const dash = target.lastIndexOf("-");
     if (dash > 0) { version = target.slice(0, dash); commit = target.slice(dash + 1); }
   } catch (err) { logAndSwallow("system_status", "op", err); }
@@ -115,8 +115,8 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
   let lastBackup: string | null = null;
   try {
     const { readdirSync } = await import("node:fs");
-    const bd = join(homedir(), ".backup-agentbridge");
-    const bk = readdirSync(bd).filter((f: string) => f.startsWith("agentbridge-")).sort();
+    const bd = join(homedir(), ".backup-abtars");
+    const bk = readdirSync(bd).filter((f: string) => f.startsWith("abtars-")).sort();
     if (bk.length > 0) lastBackup = bk[bk.length - 1] ?? null;
   } catch (err) { logAndSwallow("system_status", "op", err); }
 
@@ -148,7 +148,7 @@ function phaseToService(phaseName: string): string | null {
 export function renderStatusText(status: SystemStatus): string {
   const uptime = formatUptime(status.uptimeMs);
   const lines: string[] = [
-    `AgentBridge v${status.version} (${status.commit})`,
+    `Abtars v${status.version} (${status.commit})`,
     `🤖 Model: ${status.model}`,
     `⏱️ Uptime: ${uptime}`,
     "",

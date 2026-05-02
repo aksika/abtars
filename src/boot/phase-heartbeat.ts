@@ -36,7 +36,7 @@ import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/cron/cron-checker.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import { createCronCallback } from "./phase-pipeline-deps.js";
 import type { BootCtx } from "./context.js";
 import { readEnvWithDefault } from "../components/env.js";
@@ -158,7 +158,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
     sleepMinute: SLEEP_MINUTE,
     sessions: ctx.sessions,
     isSleepActive: ctx.isSleepActive,
-    doctorPath: join(agentBridgeHome(), "scripts", "doctor.sh"),
+    doctorPath: join(abtarsHome(), "scripts", "doctor.sh"),
     startSleep: () => { ctx.sleepHandle?.spawn(); },
     checkHwSleep: () => { ctx.sleepHandle?.checkHwSleep(); },
     cronBusy: () => cronQueue.currentJob !== null || cronQueue.pending > 0,

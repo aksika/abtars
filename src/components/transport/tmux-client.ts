@@ -3,7 +3,7 @@ import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn } from "../logger.js";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 
 // Kiro CLI prompt pattern: "N% >" or "N% !>" where N is a number (context usage percentage)
 // The "!" appears in trust-all-tools mode
@@ -71,7 +71,7 @@ export class TmuxClient implements IKiroTransport {
       // Send the message — use temp file for long prompts to avoid tmux command length limit
       try {
         if (message.length > 4000) {
-          const tmpDir = join(agentBridgeHome(), "tmp");
+          const tmpDir = join(abtarsHome(), "tmp");
           mkdirSync(tmpDir, { recursive: true });
           const tmpFile = join(tmpDir, `prompt-${Date.now()}.txt`);
           writeFileSync(tmpFile, message);

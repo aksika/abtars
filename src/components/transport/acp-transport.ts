@@ -184,7 +184,7 @@ export class AcpTransport implements IKiroTransport {
     const initResult = await this.client.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
-      clientInfo: { name: "agentbridge", version: "1.0.0" },
+      clientInfo: { name: "abtars", version: "1.0.0" },
     });
     logInfo(this.tag, `ACP initialized (agent: ${initResult.agentInfo?.name ?? "unknown"})`);
   }

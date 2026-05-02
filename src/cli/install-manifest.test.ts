@@ -22,7 +22,7 @@ describe("loadManifest", () => {
     expect(m.manifestVersion).toBe(2);
     expect(m.directories.length).toBeGreaterThan(0);
     expect(m.lazyRoots.length).toBeGreaterThan(0);
-    expect(m.cliWrappers).toContain("agentbridge");
+    expect(m.cliWrappers).toContain("abtars");
   });
 });
 

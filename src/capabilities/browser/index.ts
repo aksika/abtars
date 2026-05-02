@@ -11,10 +11,10 @@ import { BrowserTool } from "./browser-tool.js";
 import { BrowserIpcServer } from "./browser-ipc-server.js";
 import { DomainAllowlist } from "./domain-allowlist.js";
 import { checkBrowseTasks, deliverBrowseResult } from "./browse-delivery.js";
-import { readPendingBrowse, writePendingBrowse } from "./agentbridge-browse.js";
-import type { PendingBrowseEntry } from "./agentbridge-browse.js";
+import { readPendingBrowse, writePendingBrowse } from "./abtars-browse.js";
+import type { PendingBrowseEntry } from "./abtars-browse.js";
 import { logInfo, logWarn } from "../../components/logger.js";
-import { agentBridgeHome } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 import type { CapabilityApi } from "../capability.js";
 import * as net from "node:net";
 import { join } from "node:path";
@@ -34,7 +34,7 @@ export function register(api: CapabilityApi): void {
   };
 
   // Browse-spawn IPC — CLI sends task, bridge spawns via runtime
-  const spawnSocketPath = join(agentBridgeHome(), "browse-spawn.sock");
+  const spawnSocketPath = join(abtarsHome(), "browse-spawn.sock");
   try { unlinkSync(spawnSocketPath); } catch (err) { logAndSwallow("index", "op", err); }
 
   const spawnServer = net.createServer((conn) => {

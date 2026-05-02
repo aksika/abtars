@@ -152,7 +152,7 @@ describe("Feature: playwright-web-ingestion, Property 16: Environment variable p
   const DEFAULTS: BrowserConfig = {
     sessionTimeoutMs: 300_000,
     maxSessions: 3,
-    userAgent: "Mozilla/5.0 (compatible; AgentBridge/1.0)",
+    userAgent: "Mozilla/5.0 (compatible; Abtars/1.0)",
   };
 
   const savedEnv: Record<string, string | undefined> = {};

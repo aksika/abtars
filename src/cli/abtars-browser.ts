@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /**
- * agentbridge-browser — standalone CLI for agent-initiated browser control.
+ * abtars-browser — standalone CLI for agent-initiated browser control.
  *
  * Gives the LLM agent direct control over a headless Chromium browser.
  * Follows the same pattern as abmind recall and abmind store.
  *
  * Usage:
- *   agentbridge-browser --action navigate --url "https://example.com" --session-id default
- *   agentbridge-browser --action fill --selector "#email" --value "user@example.com" --session-id auth
- *   agentbridge-browser --action click --selector "text=Sign In" --session-id auth
- *   agentbridge-browser --action extract_text --session-id auth
- *   agentbridge-browser --action screenshot --full-page --session-id auth
- *   agentbridge-browser --action get_page_info --session-id auth
- *   agentbridge-browser --action close_session --session-id auth
+ *   abtars-browser --action navigate --url "https://example.com" --session-id default
+ *   abtars-browser --action fill --selector "#email" --value "user@example.com" --session-id auth
+ *   abtars-browser --action click --selector "text=Sign In" --session-id auth
+ *   abtars-browser --action extract_text --session-id auth
+ *   abtars-browser --action screenshot --full-page --session-id auth
+ *   abtars-browser --action get_page_info --session-id auth
+ *   abtars-browser --action close_session --session-id auth
  *
  * Output (success):
  *   { "success": true, "title": "Example", "url": "https://example.com", "status": 200 }
@@ -205,8 +205,8 @@ async function main() {
 
 // Only run when executed as a script, not when imported for testing
 const isDirectRun =
-  process.argv[1]?.endsWith("agentbridge-browser.ts") ||
-  process.argv[1]?.endsWith("agentbridge-browser.js");
+  process.argv[1]?.endsWith("abtars-browser.ts") ||
+  process.argv[1]?.endsWith("abtars-browser.js");
 if (isDirectRun) {
   main();
 }

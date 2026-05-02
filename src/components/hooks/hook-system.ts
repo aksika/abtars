@@ -16,7 +16,7 @@ const DEFAULT_TIMEOUT = 5000;
 let config: HookConfig | null = null;
 
 export function loadHookConfig(): void {
-  const configPath = join(homedir(), ".agentbridge", "config", "hooks.json");
+  const configPath = join(homedir(), ".abtars", "config", "hooks.json");
   try {
     const raw = readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(raw) as HookConfig;
@@ -26,7 +26,7 @@ export function loadHookConfig(): void {
       return;
     }
     // Permission check on hooks dir
-    const hooksDir = join(homedir(), ".agentbridge", "hooks");
+    const hooksDir = join(homedir(), ".abtars", "hooks");
     try {
       const st = statSync(hooksDir);
       const mode = st.mode & 0o777;
@@ -81,7 +81,7 @@ function runOne(hook: HookEntry, input: HookInput): Promise<HookOutput | null> {
       stdio: ["pipe", "pipe", "pipe"],
       timeout,
       env: {
-        AGENT_BRIDGE_HOME: join(homedir(), ".agentbridge"),
+        ABTARS_HOME: join(homedir(), ".abtars"),
         ABMIND_HOME: join(homedir(), ".abmind"),
         PATH: process.env["PATH"] ?? "",
       },

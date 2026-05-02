@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { main } from './agentbridge.js';
+import { main } from './abtars.js';
 
-describe('agentbridge CLI dispatcher', () => {
+describe('abtars CLI dispatcher', () => {
   it('help exits 0', async () => {
     expect(await main(['help'])).toBe(0);
   });

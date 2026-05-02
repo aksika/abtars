@@ -1,26 +1,26 @@
 /**
- * `agentbridge status` — print manifest + lock state.
+ * `abtars status` — print manifest + lock state.
  * Read-only. Exit code 0 on healthy install, 1 otherwise.
  */
 
 import { inspectLock, packagePaths, readCurrent, readManifest, type PriorRelease } from '../deploy-lib-import.js';
 
 export async function status(): Promise<number> {
-  const paths = packagePaths('agentbridge');
+  const paths = packagePaths('abtars');
   const manifest = await readManifest(paths.manifest);
   const current = await readCurrent(paths.current);
   const lock = await inspectLock(paths.lock);
 
   if (!manifest) {
     process.stdout.write(
-      `agentbridge: not installed (no manifest at ${paths.manifest})\n` +
-        `Run 'agentbridge install' to set up.\n`,
+      `abtars: not installed (no manifest at ${paths.manifest})\n` +
+        `Run 'abtars install' to set up.\n`,
     );
     return 1;
   }
 
   const lines = [
-    `agentbridge status`,
+    `abtars status`,
     `  home:          ${paths.home}`,
     `  version:       ${manifest.version || '(unset — run update)'}`,
     `  commit:        ${manifest.commit ?? '(unknown)'}`,
@@ -45,7 +45,7 @@ export async function status(): Promise<number> {
   if (current !== null && manifest.version !== '' && current !== manifest.version) {
     process.stderr.write(
       `\nWarning: current symlink points at '${current}' but manifest says '${manifest.version}'.\n` +
-        `Re-run 'agentbridge update' or 'agentbridge rollback' to reconcile.\n`,
+        `Re-run 'abtars update' or 'abtars rollback' to reconcile.\n`,
     );
     return 1;
   }

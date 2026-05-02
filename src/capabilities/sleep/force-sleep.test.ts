@@ -15,7 +15,7 @@ const { HOME, BRIDGE_LOCK, SLEEP_DIR } = vi.hoisted(() => {
 });
 
 vi.mock("../../paths.js", () => ({
-  agentBridgeHome: () => HOME,
+  abtarsHome: () => HOME,
   reportsDir: (cat: string) => join(HOME, "reports", cat),
 }));
 

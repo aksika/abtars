@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manage the agentbridge-browser Docker container.
+# Manage the abtars-browser Docker container.
 # Usage:
 #   ./scripts/browser-patchright.sh          # build + start (headless)
 #   ./scripts/browser-patchright.sh start    # start only (no build, use existing image)
@@ -8,9 +8,9 @@
 #   ./scripts/browser-patchright.sh status   # check if running
 set -euo pipefail
 
-IMAGE="agentbridge-browser"
-CONTAINER="agentbridge-browser"
-AB_HOME="${HOME}/.agentbridge"
+IMAGE="abtars-browser"
+CONTAINER="abtars-browser"
+AB_HOME="${HOME}/.abtars"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SOCKET_DIR="$AB_HOME/browser-socket"
 HEADED=false

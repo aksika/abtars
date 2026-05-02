@@ -5,7 +5,7 @@ import { getEnv } from "./env-schema.js";
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import { logInfo, logWarn } from "./logger.js";
 
 const TAG = "user-registry";
@@ -42,7 +42,7 @@ export function loadUsers(): UserRegistry {
 }
 
 function loadFromDisk(): UserRegistry {
-  const configPath = join(agentBridgeHome(), "config", "users.json");
+  const configPath = join(abtarsHome(), "config", "users.json");
   const registry: UserRegistry = { users: [], byPlatformId: new Map(), byUserId: new Map() };
 
   if (existsSync(configPath)) {

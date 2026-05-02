@@ -250,7 +250,7 @@ export class BrowserTool {
 
     const tmpFile = path.join(
       os.tmpdir(),
-      `agentbridge-screenshot-${Date.now()}.png`,
+      `abtars-screenshot-${Date.now()}.png`,
     );
 
     console.log(

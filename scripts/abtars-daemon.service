@@ -1,5 +1,5 @@
 [Unit]
-Description=AgentBridge (supervised-daemon)
+Description=Abtars (supervised-daemon)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,17 +7,17 @@ Wants=network-online.target
 Type=simple
 User={{USER}}
 Group={{USER}}
-WorkingDirectory=/home/{{USER}}/.agentbridge
-ExecStart=/home/{{USER}}/.agentbridge/watchdog.sh --all --web --agent
+WorkingDirectory=/home/{{USER}}/.abtars
+ExecStart=/home/{{USER}}/.abtars/watchdog.sh --all --web --agent
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
-Environment=AGENT_BRIDGE_HOME=/home/{{USER}}/.agentbridge
+Environment=ABTARS_HOME=/home/{{USER}}/.abtars
 Environment=ABMIND_HOME=/home/{{USER}}/.abmind
 Environment=SUPERVISION=systemd
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=agentbridge
+SyslogIdentifier=abtars
 
 [Install]
 WantedBy=multi-user.target

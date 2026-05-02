@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * agentbridge-task — schedule time-based reminders and tasks.
+ * abtars-task — schedule time-based reminders and tasks.
  *
  * Usage:
- *   agentbridge-task add --at "2026-03-16T08:00" --message "Remind about cookies" --chat-id 7773842843 --type reminder
- *   agentbridge-task list
- *   agentbridge-task remove <id>
+ *   abtars-task add --at "2026-03-16T08:00" --message "Remind about cookies" --chat-id 7773842843 --type reminder
+ *   abtars-task list
+ *   abtars-task remove <id>
  *
- * File: ~/.agentbridge/memory/cron.json
+ * File: ~/.abtars/memory/cron.json
  */
 
 import { localISO } from "../utils/local-time.js";
@@ -180,16 +180,16 @@ function showHistory(id: string): void {
 
 export function main(argv: string[] = process.argv): void {
   if (argv.includes('--help')) {
-    console.log(`agentbridge-task — schedule time-based reminders and tasks.
+    console.log(`abtars-task — schedule time-based reminders and tasks.
 
 Usage:
-  agentbridge-task add --at "2026-03-16T08:00" --message "..." --chat-id ID --type reminder
-  agentbridge-task add --schedule "0 9 * * *" --message "..." --chat-id ID --type task
-  agentbridge-task list
-  agentbridge-task remove <id>
-  agentbridge-task pause <id>
-  agentbridge-task resume <id>
-  agentbridge-task history <id>`);
+  abtars-task add --at "2026-03-16T08:00" --message "..." --chat-id ID --type reminder
+  abtars-task add --schedule "0 9 * * *" --message "..." --chat-id ID --type task
+  abtars-task list
+  abtars-task remove <id>
+  abtars-task pause <id>
+  abtars-task resume <id>
+  abtars-task history <id>`);
     process.exit(0);
   }
 
@@ -205,34 +205,34 @@ Usage:
       break;
     case "remove": {
       const id = args[1];
-      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task remove <id>" })); process.exit(1); }
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task remove <id>" })); process.exit(1); }
       remove(id);
       break;
     }
     case "pause": {
       const id = args[1];
-      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task pause <id>" })); process.exit(1); }
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task pause <id>" })); process.exit(1); }
       pause(id);
       break;
     }
     case "resume": {
       const id = args[1];
-      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task resume <id>" })); process.exit(1); }
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task resume <id>" })); process.exit(1); }
       resume(id);
       break;
     }
     case "history": {
       const id = args[1];
-      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task history <id>" })); process.exit(1); }
+      if (!id) { console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task history <id>" })); process.exit(1); }
       showHistory(id);
       break;
     }
     default:
-      console.log(JSON.stringify({ ok: false, error: "Usage: agentbridge-task <add|list|remove|pause|resume|history> [args]" }));
+      console.log(JSON.stringify({ ok: false, error: "Usage: abtars-task <add|list|remove|pause|resume|history> [args]" }));
       process.exit(1);
   }
 }
 
-const isDirectRun = process.argv[1]?.endsWith("agentbridge-task.ts") ||
-  process.argv[1]?.endsWith("agentbridge-task.js");
+const isDirectRun = process.argv[1]?.endsWith("abtars-task.ts") ||
+  process.argv[1]?.endsWith("abtars-task.js");
 if (isDirectRun) main();

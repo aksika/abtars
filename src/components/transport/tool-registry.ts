@@ -29,7 +29,7 @@ const CLI_TIMEOUT_MS = 60_000;
  */
 const BLOCKED_PATTERNS: readonly RegExp[] = [
   /\bmain\.js\b/,                                  // node .../current/dist/main.js ...
-  /\bagentbridge\.sh\b/,                           // the launcher
+  /\babtars\.sh\b/,                           // the launcher
   /\bwatchdog\.sh\b/,                              // the watchdog
   /\blaunchctl\s+(load|bootstrap|kickstart|start)\b/, // launchd bridge start
 ];
@@ -69,7 +69,7 @@ export function setMemoryBackend(backend: MemoryBackend | null): void {
 
 const bashTool: ToolDefinition = {
   name: "execute_bash",
-  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, agentbridge.sh, watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised.",
+  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, abtars.sh, watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised.",
   parameters: {
     type: "object",
     properties: { command: { type: "string", description: "The bash command to execute" } },
@@ -210,7 +210,7 @@ const webBrowseTool: ToolDefinition = {
     required: ["task", "chat_id"],
   },
   execute: (args) => {
-    let cmd = `agentbridge-browse --task ${JSON.stringify(args["task"] ?? "")} --chat-id ${args["chat_id"] ?? "0"}`;
+    let cmd = `abtars-browse --task ${JSON.stringify(args["task"] ?? "")} --chat-id ${args["chat_id"] ?? "0"}`;
     if (args["engine"]) cmd += ` --engine ${args["engine"]}`;
     return runBash(cmd, CLI_TIMEOUT_MS);
   },
@@ -230,10 +230,10 @@ const todoTool: ToolDefinition = {
   },
   execute: (args) => {
     const action = args["action"] ?? "list";
-    if (action === "add") return runBash(`agentbridge-todo add ${JSON.stringify(args["text"] ?? "")}`, CLI_TIMEOUT_MS);
-    if (action === "done") return runBash(`agentbridge-todo done ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`agentbridge-todo remove ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    return runBash("agentbridge-todo list", CLI_TIMEOUT_MS);
+    if (action === "add") return runBash(`abtars-todo add ${JSON.stringify(args["text"] ?? "")}`, CLI_TIMEOUT_MS);
+    if (action === "done") return runBash(`abtars-todo done ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    if (action === "remove") return runBash(`abtars-todo remove ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    return runBash("abtars-todo list", CLI_TIMEOUT_MS);
   },
 };
 
@@ -291,16 +291,16 @@ const taskTool: ToolDefinition = {
   },
   execute: (args) => {
     const action = args["action"] ?? "list";
-    if (action === "list") return runBash("agentbridge-task list", CLI_TIMEOUT_MS);
-    if (action === "remove") return runBash(`agentbridge-task remove ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "pause") return runBash(`agentbridge-task pause ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
-    if (action === "resume") return runBash(`agentbridge-task resume ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    if (action === "list") return runBash("abtars-task list", CLI_TIMEOUT_MS);
+    if (action === "remove") return runBash(`abtars-task remove ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    if (action === "pause") return runBash(`abtars-task pause ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
+    if (action === "resume") return runBash(`abtars-task resume ${args["id"] ?? ""}`, CLI_TIMEOUT_MS);
     if (action === "run") {
       if (!_enqueueCron) return Promise.resolve(JSON.stringify({ error: "enqueueCron not available" }));
       const err = _enqueueCron(args["id"] ?? "", true);
       return Promise.resolve(JSON.stringify(err ? { error: err } : { ok: true, message: `Task ${args["id"]} enqueued for immediate execution` }));
     }
-    let cmd = `agentbridge-task add --message ${JSON.stringify(args["message"] ?? "")}`;
+    let cmd = `abtars-task add --message ${JSON.stringify(args["message"] ?? "")}`;
     if (args["schedule"]) cmd += ` --schedule ${JSON.stringify(args["schedule"])}`;
     if (args["type"]) cmd += ` --type ${args["type"]}`;
     if (args["chat_id"]) cmd += ` --chat-id ${args["chat_id"]}`;

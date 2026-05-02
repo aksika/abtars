@@ -1,5 +1,5 @@
 /**
- * esbuild.config.js — Bundle agentbridge into a single ESM output.
+ * esbuild.config.js — Bundle abtars into a single ESM output.
  *
  * Produces bundle/ with code-split chunks. Native addons (better-sqlite3)
  * and browser automation (patchright) are external.
@@ -58,11 +58,11 @@ const external = [
 
 const result = await esbuild.build({
   entryPoints: {
-    agentbridge: "src/main.ts",
-    "agentbridge-cli": "src/cli/agentbridge.ts",
-    "agentbridge-browser": "src/cli/agentbridge-browser.ts",
-    "agentbridge-restart": "src/cli/commands/restart.ts",
-    "agentbridge-tweet": "src/cli/agentbridge-tweet.ts",
+    abtars: "src/main.ts",
+    "abtars-cli": "src/cli/abtars.ts",
+    "abtars-browser": "src/cli/abtars-browser.ts",
+    "abtars-restart": "src/cli/commands/restart.ts",
+    "abtars-tweet": "src/cli/abtars-tweet.ts",
   },
   bundle: true,
   platform: "node",

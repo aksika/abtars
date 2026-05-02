@@ -7,7 +7,7 @@ import { getEnv } from "./env-schema.js";
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { agentBridgeHome } from "../paths.js";
+import { abtarsHome } from "../paths.js";
 import { readEnvWithDefault } from "./env.js";
 import { logInfo, logWarn, logError } from "./logger.js";
 
@@ -73,7 +73,7 @@ export type ResolvedAgent = {
 let cachedTransport: TransportConfig | null = null;
 
 function configDir(): string {
-  return join(agentBridgeHome(), "config");
+  return join(abtarsHome(), "config");
 }
 
 export function loadModels(): ModelCatalog {

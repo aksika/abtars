@@ -1,23 +1,23 @@
 #!/usr/bin/env node
 /**
- * agentbridge-tweet — CLI for fetching tweets via rettiwt-api + FxTwitter.
+ * abtars-tweet — CLI for fetching tweets via rettiwt-api + FxTwitter.
  *
  * Usage:
- *   agentbridge-tweet --fetch <tweet-url>              # single tweet via FxTwitter
- *   agentbridge-tweet --timeline <handle> [--count N]  # user timeline (guest auth)
- *   agentbridge-tweet --feed [--format md]             # all followed handles → ranked output
- *   agentbridge-tweet --feed --discover                # feed + reply analysis for new follows
- *   agentbridge-tweet --replies <tweet-id>             # replies on a tweet (user auth)
- *   agentbridge-tweet --search "query"                 # search X (user auth)
- *   agentbridge-tweet --user <handle>                  # user profile info
+ *   abtars-tweet --fetch <tweet-url>              # single tweet via FxTwitter
+ *   abtars-tweet --timeline <handle> [--count N]  # user timeline (guest auth)
+ *   abtars-tweet --feed [--format md]             # all followed handles → ranked output
+ *   abtars-tweet --feed --discover                # feed + reply analysis for new follows
+ *   abtars-tweet --replies <tweet-id>             # replies on a tweet (user auth)
+ *   abtars-tweet --search "query"                 # search X (user auth)
+ *   abtars-tweet --user <handle>                  # user profile info
  */
 import { logAndSwallow } from "../components/log-and-swallow.js";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
-import { agentBridgeHome, reportsDir } from "../paths.js";
+import { abtarsHome, reportsDir } from "../paths.js";
 import { localDate } from "../components/env-utils.js";
 
-const AB_HOME = agentBridgeHome();
+const AB_HOME = abtarsHome();
 const TWITTER_DIR = join(AB_HOME, "twitterX");
 const COOKIE_PATH = join(AB_HOME, "secret", "cookies", "x-cookies.json");
 const BASE_FOLLOWS = join(TWITTER_DIR, "base.follows.json");
@@ -122,7 +122,7 @@ function loadFollows(): string[] {
         raw.handles?.forEach((h) => handles.add(h.replace(/^@/, "").toLowerCase()));
         raw.entries?.forEach((e) => handles.add(e.handle.replace(/^@/, "").toLowerCase()));
       }
-    } catch (err) { logAndSwallow("agentbridge_tweet", "op", err); }
+    } catch (err) { logAndSwallow("abtars_tweet", "op", err); }
   }
   return [...handles];
 }
@@ -184,7 +184,7 @@ async function fetchTimeline(handle: string, count: number): Promise<RankedTweet
   if (auth) {
     try {
       return await fetchTimelineGql(user.id, user.fullName ?? clean, clean, count);
-    } catch (err) { logAndSwallow("agentbridge_tweet", "op", err); }
+    } catch (err) { logAndSwallow("abtars_tweet", "op", err); }
   }
 
   // Guest fallback (returns by engagement, not chronological)
@@ -229,7 +229,7 @@ async function fetchTimelineGql(userId: string, authorName: string, handle: stri
 async function runFeed(format: "json" | "md", count: number, topN: number, discover: boolean, outputPath?: string): Promise<void> {
   const handles = loadFollows();
   if (handles.length === 0) {
-    console.error("No follows found. Create ~/.agentbridge/twitterX/base.follows.json or molty.follows.json");
+    console.error("No follows found. Create ~/.abtars/twitterX/base.follows.json or molty.follows.json");
     process.exit(1);
   }
 
@@ -263,7 +263,7 @@ async function runFeed(format: "json" | "md", count: number, topN: number, disco
   const date = localDate();
   const outFile = outputPath ?? join(OUTPUT_DIR, `tweets-${date}.json`);
   mkdirSync(join(outFile, ".."), { recursive: true });
-  const payload = { date, source: "agentbridge-tweet", totalCollected: allTweets.length, tweets: top, discover: candidates };
+  const payload = { date, source: "abtars-tweet", totalCollected: allTweets.length, tweets: top, discover: candidates };
   writeFileSync(outFile, JSON.stringify(payload, null, 2), "utf8");
   console.error(`📄 ${top.length} tweets written to ${outFile}`);
 
@@ -323,7 +323,7 @@ function loadCookieHeader(): { cookie: string; csrf: string } | undefined {
 
 async function twitterGql(url: string, variables: Record<string, any>): Promise<any> {
   const auth = loadCookieHeader();
-  if (!auth) throw new Error("User auth required. Refresh cookies in ~/.agentbridge/secret/cookies/x-cookies.json");
+  if (!auth) throw new Error("User auth required. Refresh cookies in ~/.abtars/secret/cookies/x-cookies.json");
 
   const params = new URLSearchParams({
     variables: JSON.stringify(variables),
@@ -338,7 +338,7 @@ async function twitterGql(url: string, variables: Record<string, any>): Promise<
     },
   });
   if (!res.ok) {
-    if (res.status === 403) throw new Error("403 — cookies may be expired. Refresh in ~/.agentbridge/secret/cookies/x-cookies.json");
+    if (res.status === 403) throw new Error("403 — cookies may be expired. Refresh in ~/.abtars/secret/cookies/x-cookies.json");
     throw new Error(`Twitter API ${res.status}: ${await res.text().catch(() => "")}`);
   }
   return res.json();
@@ -417,7 +417,7 @@ async function searchTweets(_query: string, _count: number): Promise<void> {
   // X's GraphQL search endpoints require x-client-transaction-id (browser-only).
   // Adaptive search returns empty bodies. Fall back to guest timeline search.
   console.error("⚠ Direct X search is restricted. Use --timeline per handle or web search for discovery.");
-  console.error("  Tip: agentbridge-tweet --replies <tweet-id> works for finding interesting commenters.");
+  console.error("  Tip: abtars-tweet --replies <tweet-id> works for finding interesting commenters.");
   process.exit(1);
 }
 
@@ -480,7 +480,7 @@ async function runDiscover(topTweets: RankedTweet[], knownHandles: string[]): Pr
             replyLikes: reply.likes,
             replyText: reply.text.slice(0, 200),
           });
-        } catch (err) { logAndSwallow("agentbridge_tweet", "op", err); }
+        } catch (err) { logAndSwallow("abtars_tweet", "op", err); }
       }
     } catch (e: any) {
       console.error(`  ⚠ Replies failed for ${tweet.id}: ${e.message}`);
@@ -521,7 +521,7 @@ function renderNewsletter(tweets: RankedTweet[], candidates: DiscoverCandidate[]
 
   lines.push("## 📊 Signals & Trends\n");
   lines.push("_(To be filled by sleep cycle analysis)_\n");
-  lines.push(`---\n*Auto-generated via agentbridge-tweet. Sources: X (via rettiwt-api).*\n`);
+  lines.push(`---\n*Auto-generated via abtars-tweet. Sources: X (via rettiwt-api).*\n`);
   return lines.join("\n");
 }
 
@@ -559,16 +559,16 @@ function parseArgs() {
 
 async function main(): Promise<void> {
   if (process.argv.includes('--help')) {
-    console.log(`agentbridge-tweet — fetch tweets via rettiwt-api + FxTwitter.
+    console.log(`abtars-tweet — fetch tweets via rettiwt-api + FxTwitter.
 
 Usage:
-  agentbridge-tweet --fetch <tweet-url>              # single tweet via FxTwitter
-  agentbridge-tweet --timeline <handle> [--count N]  # user timeline
-  agentbridge-tweet --feed [--format md]             # all followed handles → ranked output
-  agentbridge-tweet --feed --discover                # feed + reply analysis for new follows
-  agentbridge-tweet --replies <tweet-id>             # replies on a tweet
-  agentbridge-tweet --search "query"                 # search X
-  agentbridge-tweet --user <handle>                  # user profile info`);
+  abtars-tweet --fetch <tweet-url>              # single tweet via FxTwitter
+  abtars-tweet --timeline <handle> [--count N]  # user timeline
+  abtars-tweet --feed [--format md]             # all followed handles → ranked output
+  abtars-tweet --feed --discover                # feed + reply analysis for new follows
+  abtars-tweet --replies <tweet-id>             # replies on a tweet
+  abtars-tweet --search "query"                 # search X
+  abtars-tweet --user <handle>                  # user profile info`);
     process.exit(0);
   }
 

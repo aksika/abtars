@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * agentbridge-autofix — manage self-healer auto-fix rules.
- * Usage: agentbridge-autofix list|add|remove|test [options]
+ * abtars-autofix — manage self-healer auto-fix rules.
+ * Usage: abtars-autofix list|add|remove|test [options]
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const AB_HOME = process.env["AGENT_BRIDGE_HOME"] || join(process.env["HOME"] || "~", ".agentbridge");
+const AB_HOME = process.env["ABTARS_HOME"] || join(process.env["HOME"] || "~", ".abtars");
 const RULES_PATH = join(AB_HOME, "config", "auto-fix.json");
 
 interface Rule { pattern: string; instruction: string; cooldownMin: number; enabled: boolean }
@@ -38,7 +38,7 @@ if (cmd === "list") {
   const pattern = getArg("pattern");
   const instruction = getArg("instruction");
   const cooldown = parseInt(getArg("cooldown") ?? "30", 10);
-  if (!pattern || !instruction) { console.error("Usage: agentbridge-autofix add --pattern <p> --instruction <i> [--cooldown <min>]"); process.exit(1); }
+  if (!pattern || !instruction) { console.error("Usage: abtars-autofix add --pattern <p> --instruction <i> [--cooldown <min>]"); process.exit(1); }
   if (pattern.length > 200) { console.error("Pattern too long (max 200 chars)"); process.exit(1); }
   if (instruction.length > 500) { console.error("Instruction too long (max 500 chars)"); process.exit(1); }
   if (cooldown < 5) { console.error("Cooldown must be >= 5 minutes"); process.exit(1); }
@@ -49,7 +49,7 @@ if (cmd === "list") {
   console.log(`Added: "${pattern}"`);
 } else if (cmd === "remove") {
   const pattern = getArg("pattern");
-  if (!pattern) { console.error("Usage: agentbridge-autofix remove --pattern <p>"); process.exit(1); }
+  if (!pattern) { console.error("Usage: abtars-autofix remove --pattern <p>"); process.exit(1); }
   const rules = load();
   const filtered = rules.filter(r => r.pattern !== pattern);
   if (filtered.length === rules.length) { console.error(`Pattern not found: "${pattern}"`); process.exit(1); }
@@ -57,7 +57,7 @@ if (cmd === "list") {
   console.log(`Removed: "${pattern}"`);
 } else if (cmd === "test") {
   const pattern = getArg("pattern");
-  if (!pattern) { console.error("Usage: agentbridge-autofix test --pattern <p>"); process.exit(1); }
+  if (!pattern) { console.error("Usage: abtars-autofix test --pattern <p>"); process.exit(1); }
   const logDir = join(AB_HOME, "logs");
   const today = new Date().toISOString().slice(0, 10);
   try {
@@ -71,7 +71,7 @@ if (cmd === "list") {
     }
   } catch { console.log("No log file for today."); }
 } else {
-  console.log("Usage: agentbridge-autofix <list|add|remove|test> [options]");
+  console.log("Usage: abtars-autofix <list|add|remove|test> [options]");
   console.log("  list                          Show all rules");
   console.log("  add --pattern <p> --instruction <i> [--cooldown <min>]");
   console.log("  remove --pattern <p>");

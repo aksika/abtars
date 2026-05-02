@@ -1,12 +1,12 @@
 /**
- * agentbridge stop — kill watchdog (if running) then bridge (#372).
+ * abtars stop — kill watchdog (if running) then bridge (#372).
  *
  * Ordering matters: watchdog dies first so it doesn't respawn the bridge
  * we're about to kill. Each process gets SIGTERM → 5s grace → SIGKILL.
  *
  * Lock files (verified against live install):
- *   ~/.agentbridge/watchdog.lock = {"pid": number, "lastCheck": epoch-ms}
- *   ~/.agentbridge/bridge.lock   = {"pid": number, "lastHeartbeat": ..., ...}
+ *   ~/.abtars/watchdog.lock = {"pid": number, "lastCheck": epoch-ms}
+ *   ~/.abtars/bridge.lock   = {"pid": number, "lastHeartbeat": ..., ...}
  * Both are separate files; no watchdog PID is embedded in bridge.lock.
  *
  * Supervised-daemon mode: refuses without --force (systemd/launchd would
@@ -17,8 +17,8 @@ import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-function agentBridgeHome(): string {
-  return process.env["AGENT_BRIDGE_HOME"] ?? join(process.env["HOME"] ?? "", ".agentbridge");
+function abtarsHome(): string {
+  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
 }
 
 function readJsonField(file: string, field: string): unknown {
@@ -66,7 +66,7 @@ function removeLock(path: string): void {
 }
 
 export async function stop(opts: { force?: boolean }): Promise<number> {
-  const home = agentBridgeHome();
+  const home = abtarsHome();
   const manifestPath = join(home, "manifest.json");
   const watchdogLock = join(home, "watchdog.lock");
   const bridgeLock = join(home, "bridge.lock");
@@ -77,11 +77,11 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
   if (installMode === "supervised-daemon" && !force) {
     process.stderr.write(`Bridge runs under supervised-daemon — use supervisor stop (supervisor will respawn if you kill the process directly).\n`);
     if (process.platform === "darwin") {
-      process.stderr.write(`  sudo -k launchctl bootout system/com.agentbridge.daemon\n`);
+      process.stderr.write(`  sudo -k launchctl bootout system/com.abtars.daemon\n`);
     } else {
-      process.stderr.write(`  sudo -k systemctl stop agentbridge\n`);
+      process.stderr.write(`  sudo -k systemctl stop abtars\n`);
     }
-    process.stderr.write(`\nUse 'agentbridge stop --force' to kill the process anyway (supervisor will respawn).\n`);
+    process.stderr.write(`\nUse 'abtars stop --force' to kill the process anyway (supervisor will respawn).\n`);
     return 1;
   }
 
@@ -106,11 +106,11 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
   let brPidActual: number | undefined;
   if (brPid && brPid > 0) {
     brPidActual = brPid;
-    brResult = await killGracefully(brPid, ["agentbridge", "main.js", "bundle"]);
+    brResult = await killGracefully(brPid, ["abtars", "main.js", "bundle"]);
     if (brResult === "killed" || brResult === "forced") {
       removeLock(bridgeLock);
     } else if (brResult === "stale") {
-      process.stdout.write(`⚠️ bridge.lock PID ${brPid} is not agentbridge — stale lock, removing\n`);
+      process.stdout.write(`⚠️ bridge.lock PID ${brPid} is not abtars — stale lock, removing\n`);
       removeLock(bridgeLock);
     }
   }

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# AgentBridge External Watchdog
+# Abtars External Watchdog
 # Spawns node directly, monitors bridge.lock heartbeat, kills+restarts on stale.
 # Usage: watchdog.sh [bridge flags, e.g. --all --web --agent]
 set -uo pipefail
 
-AB="${AGENT_BRIDGE_HOME:-$HOME/.agentbridge}"
+AB="${ABTARS_HOME:-$HOME/.abtars}"
 LOCK="$AB/bridge.lock"
 WD_LOCK="$AB/watchdog.lock"
 LOG="$AB/logs/watchdog.log"
@@ -134,7 +134,7 @@ spawn_bridge() {
   rm -f "${ABMIND_HOME:-$HOME/.abmind}/memory.sock" 2>/dev/null || true
 
   # Note: bridge loads its own .env via src/boot/env.ts — no shell source needed.
-  # Stable entry point: main.js symlink created by agentbridge update.
+  # Stable entry point: main.js symlink created by abtars update.
   log "Starting bridge: node current/main.js $*"
   cd "$AB"
   NODE_PATH="current/node_modules:${NODE_PATH:-}" node current/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
