@@ -15,6 +15,8 @@ vi.mock("./discord-api.js", () => ({
       sendMessage: vi.fn().mockResolvedValue(undefined),
       onMessage: vi.fn(),
       onReaction: vi.fn((handler: Function) => { capturedReactionHandler = handler; }),
+      onInteraction: vi.fn(),
+      registerCommands: vi.fn().mockResolvedValue(undefined),
       botUserId: null,
     };
   }),

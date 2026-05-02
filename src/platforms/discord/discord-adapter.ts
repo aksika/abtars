@@ -8,6 +8,7 @@ import { DiscordApi } from "./discord-api.js";
 import { DiscordPoller } from "./discord-poller.js";
 import { SecurityGate } from "../../components/security-gate.js";
 import { loadUsers } from "../../components/user-registry.js";
+import { BOT_COMMANDS } from "../../components/command-registry.js";
 import { ResponseFormatter } from "../../components/response-formatter.js";
 import { A2ARouter } from "../../components/a2a-router.js";
 import { interceptLargeMessage } from "../../components/message-interceptor.js";
@@ -76,7 +77,79 @@ export class DiscordAdapter implements PlatformAdapter {
 
     this.poller = new DiscordPoller(this.api, this.config.appId, (m) => this.handleMessage(m));
     this.api.onReaction((reaction, user) => this.handleReaction(reaction, user));
+    this.api.onInteraction((interaction) => this.handleInteraction(interaction));
     await this.poller.start();
+
+    // Register slash commands (idempotent)
+    await this.api.registerCommands([...BOT_COMMANDS]).catch(err =>
+      logWarn(TAG, `Slash command registration failed: ${err instanceof Error ? err.message : String(err)}`),
+    );
+  }
+
+  /** Handle Discord slash command interactions. */
+  private async handleInteraction(interaction: any): Promise<void> {
+    await interaction.deferReply();
+
+    const registry = loadUsers();
+    const userEntry = registry.byPlatformId.get(`discord:${interaction.user.id}`);
+    if (!this.securityGate.authorizeById(interaction.user.id, interaction.channelId)) {
+      await interaction.editReply("⛔ Unauthorized.");
+      return;
+    }
+
+    const commandText = `/${interaction.commandName}`;
+    const userId = userEntry?.userId ?? "unknown";
+    const channelId = interaction.channelId;
+
+    // Build reply binding that routes through the interaction
+    const messageKind = new Map<string, "initial" | "followup">();
+    let initialSent = false;
+
+    const reply = async (text: string): Promise<string | undefined> => {
+      if (!text?.trim()) return undefined;
+      // Discord max 2000 chars per message
+      const chunks = text.length <= 2000 ? [text] : text.match(/.{1,2000}/gs) ?? [text];
+      let lastId: string | undefined;
+      for (const chunk of chunks) {
+        let msg;
+        if (!initialSent) {
+          initialSent = true;
+          msg = await interaction.editReply(chunk);
+          messageKind.set(msg.id, "initial");
+        } else {
+          msg = await interaction.followUp(chunk);
+          messageKind.set(msg.id, "followup");
+        }
+        lastId = msg.id;
+      }
+      return lastId;
+    };
+
+    const editReply = async (messageId: string | number, text: string): Promise<void> => {
+      const id = String(messageId);
+      const kind = messageKind.get(id);
+      if (kind === "initial") await interaction.editReply(text);
+      else if (kind === "followup") await interaction.webhook.editMessage(id, text);
+    };
+
+    // Route through the message pipeline as a command
+    const msg: InboundMessage = {
+      text: commandText,
+      channelId,
+      sessionKey: `${userId}:discord`,
+      senderId: interaction.user.id,
+      senderName: interaction.user.username ?? "unknown",
+      platform: "discord",
+      timestamp: Date.now(),
+      isGroup: !!interaction.guildId,
+      isVoice: false,
+    };
+
+    await handleInboundMessage(msg, this as any, {
+      ...this.deps.pipeline,
+      replyOverride: reply,
+      editReplyOverride: editReply,
+    } as any);
   }
 
   stop(): void {

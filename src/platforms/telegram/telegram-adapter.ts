@@ -1,4 +1,5 @@
 import { getEnv } from "../../components/env-schema.js";
+import { BOT_COMMANDS } from "../../components/command-registry.js";
 import { agentBridgeHome } from "../../paths.js";
 /**
  * Telegram platform adapter — wraps TelegramApi, TelegramPoller, SecurityGate.
@@ -85,30 +86,8 @@ export class TelegramAdapter implements PlatformAdapter {
     this.botUsername = botInfo.username?.toLowerCase() ?? "";
     logInfo(TAG, `🤖 Bot: @${botInfo.username}`);
 
-    await this.api.setMyCommands([
-      { command: "new", description: "Fresh session (keeps mode)" },
-      { command: "reset", description: "Fresh session + exit coding" },
-      { command: "compact", description: "Compact context window" },
-      { command: "status", description: "Bridge status" },
-      { command: "doctor", description: "Deep healthcheck (probes all subsystems)" },
-      { command: "mcp", description: "MCP server status" },
-      { command: "hooks", description: "List configured hooks" },
-      { command: "stop", description: "Stop current response" },
-      { command: "models", description: "Model, transport & agents" },
-      { command: "emergency", description: "🚨 Activate paid hailMary model" },
-      { command: "heartbeat", description: "Heartbeat diagnostics" },
-      { command: "memory", description: "Memory stats" },
-      { command: "skills", description: "List skills" },
-      { command: "tasks", description: "Scheduled tasks" },
-      { command: "facts", description: "Core knowledge" },
-      { command: "coding", description: "Switch to coding agent" },
-      { command: "default", description: "Switch to default agent" },
-      { command: "nlm", description: "Knowledge base" },
-      { command: "restart", description: "Restart bridge" },
-      { command: "wakeup", description: "Wake Mac from sleep" },
-      { command: "sleep", description: "Sleep status / resume / now" },
-      { command: "help", description: "Show all commands" },
-    ]).catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
+    await this.api.setMyCommands(BOT_COMMANDS.map(c => ({ command: c.name, description: c.description })))
+      .catch((err) => logWarn(TAG, `setMyCommands failed: ${err instanceof Error ? err.message : String(err)}`));
 
     const home = agentBridgeHome();
     const offsetStore = createFileOffsetStore(`${home}/state/telegram-offset`);

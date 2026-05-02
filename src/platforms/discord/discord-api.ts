@@ -8,7 +8,7 @@ import {
   type User,
   type TextChannel,
 } from "discord.js";
-import { logInfo, logError, logDebug } from "../../components/logger.js";
+import { logInfo, logError, logDebug, logWarn } from "../../components/logger.js";
 
 const TAG = "DiscordApi";
 
@@ -92,7 +92,6 @@ export class DiscordApi {
   onReaction(handler: (reaction: MessageReaction, user: User) => void | Promise<void>): void {
     this.client.on("messageReactionAdd", async (reaction, user) => {
       if (user.bot) return;
-      // Fetch partial reaction/user if needed
       try {
         if (reaction.partial) await reaction.fetch();
         if (user.partial) await (user as any).fetch();
@@ -102,6 +101,27 @@ export class DiscordApi {
         if (result instanceof Promise) result.catch((err: unknown) => logError(TAG, "Reaction handler error", err));
       } catch (err) { logError(TAG, "Reaction handler error", err); }
     });
+  }
+
+  /** Register a handler for slash command interactions. */
+  onInteraction(handler: (interaction: any) => void | Promise<void>): void {
+    this.client.on("interactionCreate", async (interaction) => {
+      if (!interaction.isChatInputCommand()) return;
+      try {
+        const result = handler(interaction);
+        if (result instanceof Promise) result.catch((err: unknown) => logError(TAG, "Interaction handler error", err));
+      } catch (err) { logError(TAG, "Interaction handler error", err); }
+    });
+  }
+
+  /** Register global application commands. Idempotent — Discord diffs and updates. */
+  async registerCommands(commands: Array<{ name: string; description: string }>): Promise<void> {
+    if (!this.client.application) {
+      logWarn(TAG, "Cannot register commands — application not available");
+      return;
+    }
+    await this.client.application.commands.set(commands.map(c => ({ name: c.name, description: c.description, type: 1 })) as any);
+    logInfo(TAG, `Registered ${commands.length} slash commands`);
   }
 
   /** Send a text message to a channel. Returns the sent message ID. */
