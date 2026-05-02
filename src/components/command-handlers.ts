@@ -852,6 +852,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",
     "/facts — Core knowledge (user profile + agent notes)",
+    "/skills — List loaded skills",
     "/coding — Switch to coding agent",
     "/default — Switch back to default agent",
     "/nlm — Knowledge base (list/create/sources/query)",
