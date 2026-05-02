@@ -42,21 +42,19 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
 /**
  * Construct professor transport from current transport.json + env and attach to ctx.transport.
  * Idempotent: destroys any existing ctx.transport first.
+ *
+ * #367 — Validates the resolved provider BEFORE destroying the old transport.
+ * If validation fails:
+ *   - During `/reset` (old transport exists): logs ERROR, keeps the old transport up
+ *   - At boot (no old transport): falls back to .env config if possible, or throws
+ *   - In either case: bridge stays alive in degraded mode rather than crash-looping
  */
 export async function buildTransport(ctx: BootCtx): Promise<void> {
   const { config, memoryConfig } = ctx;
 
-  // Destroy old (if any)
-  if (ctx.transport) {
-    try { await ctx.transport.destroy(); } catch (err) {
-      logWarn("main", `Old transport destroy failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    ctx.transport = null;
-  }
-
   let transport: IKiroTransport;
 
-  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache } = await import("../components/transport-config.js");
+  const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache, validateProviderReady } = await import("../components/transport-config.js");
   clearTransportCache();  // always re-read (picks up /models change writes)
   const tc = loadTransport();
   const prof = tc ? resolveAgent("professor", tc) : null;
@@ -73,11 +71,47 @@ export async function buildTransport(ctx: BootCtx): Promise<void> {
     ctx.hailMary = null;
   }
 
-  const resolved = prof ?? (() => {
+  let resolved = prof ?? (() => {
     const fb = getEnvFallback();
     logWarn("main", `⚠️ Using .env fallback: ${fb.model} via ${fb.providerName}`);
     return { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
   })();
+
+  // #367 — validate the resolved provider BEFORE destroying the existing transport.
+  // If validation fails and an old transport is up, keep it; surface the error.
+  // If no old transport (boot time), try .env fallback.
+  const validation = validateProviderReady(resolved.providerName, resolved.provider, getEnv());
+  if (!validation.ok) {
+    const errMsg = `transport.json configures '${resolved.providerName}' but ${validation.reason}. Fix: ${validation.fix}`;
+    if (ctx.transport) {
+      // Existing transport still good — keep it. Don't destroy.
+      logError("main", `${errMsg} — keeping existing transport up (skipping rebuild)`);
+      return;
+    }
+    // Boot-time: try falling back to .env if we weren't already using it
+    if (prof) {
+      const fb = getEnvFallback();
+      logError("main", `${errMsg} — falling back to .env config (${fb.model} via ${fb.providerName})`);
+      resolved = { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
+      // Validate fallback too — if even .env is broken, let the original error bubble
+      const fbValidation = validateProviderReady(resolved.providerName, resolved.provider, getEnv());
+      if (!fbValidation.ok) {
+        logError("main", `.env fallback '${resolved.providerName}' also invalid: ${fbValidation.reason}`);
+        throw new Error(`${errMsg} (and .env fallback is also invalid: ${fbValidation.reason})`);
+      }
+    } else {
+      // Already on .env fallback path and it's invalid — hard error
+      throw new Error(errMsg);
+    }
+  }
+
+  // Destroy old (if any) — now that we know the new config is valid
+  if (ctx.transport) {
+    try { await ctx.transport.destroy(); } catch (err) {
+      logWarn("main", `Old transport destroy failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    ctx.transport = null;
+  }
 
   if (resolved.provider.transport === "tmux") {
     const defaults = tc?.transportDefaults?.tmux;

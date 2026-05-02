@@ -147,3 +147,129 @@ describe("validateAndRepair", () => {
     expect(tc.agents["professor"]!.fallbacks![0]!.model).toBe("m3");
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// #367 — Provider readiness validation
+// ────────────────────────────────────────────────────────────────────────────
+
+import { validateProviderReady, formatValidationError } from "./transport-config.js";
+import type { ProviderConfig } from "./transport-config.js";
+
+type MockEnv = { getApiKey: (name: string) => string | undefined };
+
+describe("#367 — validateProviderReady", () => {
+  // ── api transport ──────────────────────────────────────────────────────
+
+  describe("api transport", () => {
+    it("returns ok when apiKeyEnv is unset (no auth required — ollama-style)", () => {
+      const provider: ProviderConfig = { transport: "api", endpoint: "http://localhost:11434/v1" };
+      const env: MockEnv = { getApiKey: () => undefined };
+      expect(validateProviderReady("ollama", provider, env)).toEqual({ ok: true });
+    });
+
+    it("returns ok when apiKeyEnv is set to a non-empty value", () => {
+      const provider: ProviderConfig = { transport: "api", apiKeyEnv: "OPENROUTER_API_KEY" };
+      const env: MockEnv = { getApiKey: (n) => n === "OPENROUTER_API_KEY" ? "sk-real-key" : undefined };
+      expect(validateProviderReady("openrouter", provider, env)).toEqual({ ok: true });
+    });
+
+    it("returns failure naming the env var when key is missing", () => {
+      const provider: ProviderConfig = { transport: "api", apiKeyEnv: "OPENROUTER_API_KEY" };
+      const env: MockEnv = { getApiKey: () => undefined };
+      const result = validateProviderReady("openrouter", provider, env);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toContain("OPENROUTER_API_KEY");
+      expect(result.reason).toContain("openrouter");
+      expect(result.fix).toContain("OPENROUTER_API_KEY");
+      expect(result.fix).toContain(".env");
+    });
+
+    it("treats empty string as missing", () => {
+      const provider: ProviderConfig = { transport: "api", apiKeyEnv: "X_KEY" };
+      const env: MockEnv = { getApiKey: () => "" };
+      const result = validateProviderReady("x", provider, env);
+      expect(result.ok).toBe(false);
+    });
+  });
+
+  // ── acp transport ──────────────────────────────────────────────────────
+
+  describe("acp transport", () => {
+    it("returns failure when provider.cli is missing", () => {
+      const provider: ProviderConfig = { transport: "acp" };
+      const env: MockEnv = { getApiKey: () => undefined };
+      const result = validateProviderReady("kiro-free", provider, env);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toContain("cli");
+    });
+
+    it("returns ok when the CLI --version succeeds (using node as a reliable binary)", () => {
+      const provider: ProviderConfig = { transport: "acp", cli: "node" };
+      const env: MockEnv = { getApiKey: () => undefined };
+      expect(validateProviderReady("fake-node-acp", provider, env)).toEqual({ ok: true });
+    });
+
+    it("returns failure when the CLI doesn't exist", () => {
+      const provider: ProviderConfig = { transport: "acp", cli: "nonexistent-cli-abc123xyz" };
+      const env: MockEnv = { getApiKey: () => undefined };
+      const result = validateProviderReady("broken-provider", provider, env);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toContain("nonexistent-cli-abc123xyz");
+      expect(result.reason).toContain("broken-provider");
+      expect(result.fix).toContain("nonexistent-cli-abc123xyz");
+    });
+
+    it("returns failure when the CLI exits non-zero", () => {
+      const provider: ProviderConfig = { transport: "acp", cli: "false" };
+      const env: MockEnv = { getApiKey: () => undefined };
+      const result = validateProviderReady("always-fails", provider, env);
+      expect(result.ok).toBe(false);
+    });
+  });
+
+  // ── tmux transport ─────────────────────────────────────────────────────
+
+  describe("tmux transport", () => {
+    it("always returns ok (out of scope)", () => {
+      const provider: ProviderConfig = { transport: "tmux" };
+      const env: MockEnv = { getApiKey: () => undefined };
+      expect(validateProviderReady("tmux-provider", provider, env)).toEqual({ ok: true });
+    });
+  });
+
+  // ── unknown transport (fail closed) ────────────────────────────────────
+
+  describe("unknown transport", () => {
+    it("fails with a clear message naming the transport value", () => {
+      const provider = { transport: "weird-thing" } as unknown as ProviderConfig;
+      const env: MockEnv = { getApiKey: () => undefined };
+      const result = validateProviderReady("weirdo", provider, env);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toContain("weird-thing");
+    });
+  });
+
+  // ── formatValidationError ──────────────────────────────────────────────
+
+  describe("formatValidationError", () => {
+    it("returns empty string on ok", () => {
+      expect(formatValidationError("x", { ok: true })).toBe("");
+    });
+
+    it("includes provider name, reason, and fix", () => {
+      const msg = formatValidationError("openrouter", {
+        ok: false,
+        reason: "API key missing",
+        fix: "set OPENROUTER_API_KEY",
+      });
+      expect(msg).toContain("openrouter");
+      expect(msg).toContain("API key missing");
+      expect(msg).toContain("set OPENROUTER_API_KEY");
+      expect(msg.startsWith("❌")).toBe(true);
+    });
+  });
+});

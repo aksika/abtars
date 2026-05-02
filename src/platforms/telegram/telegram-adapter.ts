@@ -239,11 +239,15 @@ export class TelegramAdapter implements PlatformAdapter {
       } else if (data.startsWith("mprovglobal:")) {
         // Global provider switch — apply defaults if available, cascade all agents
         const providerName = data.slice(12);
-        const { loadTransport, writeTransportConfig, resolveAgent, loadProviderDefaults } = await import("../../components/transport-config.js");
+        const { loadTransport, writeTransportConfig, resolveAgent, loadProviderDefaults, validateProviderReady, formatValidationError } = await import("../../components/transport-config.js");
         const tc = loadTransport();
         if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
         const newProvider = tc.providers[providerName];
         if (!newProvider) { await this.api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
+
+        // #367 — validate readiness BEFORE mutating transport.json or touching transport.
+        const validation = validateProviderReady(providerName, newProvider, getEnv());
+        if (!validation.ok) { await this.api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
 
         const prof = resolveAgent("professor", tc);
         const oldType = prof?.provider.transport ?? "api";
@@ -316,7 +320,7 @@ export class TelegramAdapter implements PlatformAdapter {
         const slot = parts[1]!;
         const providerName = parts[2]!;
         const model = parts.slice(3).join(":"); // model may contain colons
-        const { loadTransport, writeTransportConfig, resolveAgent, getModelsForProvider } = await import("../../components/transport-config.js");
+        const { loadTransport, writeTransportConfig, resolveAgent, getModelsForProvider, validateProviderReady, formatValidationError } = await import("../../components/transport-config.js");
         const tc = loadTransport();
         if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
@@ -326,6 +330,12 @@ export class TelegramAdapter implements PlatformAdapter {
           await this.api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`);
           return;
         }
+
+        // #367 — validate provider readiness BEFORE mutating transport.json.
+        const providerConfig = tc.providers[providerName];
+        if (!providerConfig) { await this.api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
+        const validation = validateProviderReady(providerName, providerConfig, getEnv());
+        if (!validation.ok) { await this.api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
 
         // Liveness check
         const provider = tc.providers[providerName];

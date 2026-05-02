@@ -499,6 +499,18 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     if (!ctx.hailMary) { await ctx.reply("❌ hailMary not configured in transport.json"); return true; }
     const t = ctx.transport as unknown as { setEmergencyMode?: (o: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null) => void };
     if (!t.setEmergencyMode) { await ctx.reply("❌ Transport does not support emergency mode"); return true; }
+
+    // #367 — validate hailMary's provider is ready before switching.
+    if (tc) {
+      const hmProvider = tc.hailMary ? tc.providers[tc.hailMary.provider] : undefined;
+      if (hmProvider) {
+        const { validateProviderReady, formatValidationError } = await import("./transport-config.js");
+        const { getEnv } = await import("./env-schema.js");
+        const result = validateProviderReady(tc.hailMary!.provider, hmProvider, getEnv());
+        if (!result.ok) { await ctx.reply(formatValidationError(tc.hailMary!.provider, result)); return true; }
+      }
+    }
+
     t.setEmergencyMode({ ...ctx.hailMary, maxContext: 1_000_000 });
     await ctx.reply(`🚨 EMERGENCY MODE: using ${ctx.hailMary.model} (paid). Clears on /model restore, /reset, or wake-up.`);
     return true;
@@ -538,6 +550,16 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     if (!match) {
       await ctx.reply(`❌ ${newModel} not available on ${prof.providerName}. Use /models change to switch provider.`);
       return true;
+    }
+
+    // #367 — validate the provider (same one we're on) is still ready.
+    // Belt-and-suspenders: catches the case where the operator rotated/removed
+    // the env var since the last switch.
+    {
+      const { validateProviderReady, formatValidationError } = await import("./transport-config.js");
+      const { getEnv } = await import("./env-schema.js");
+      const result = validateProviderReady(prof.providerName, prof.provider, getEnv());
+      if (!result.ok) { await ctx.reply(formatValidationError(prof.providerName, result)); return true; }
     }
 
     // Write + switch

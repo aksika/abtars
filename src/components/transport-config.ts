@@ -345,3 +345,89 @@ export function formatCost(cost: ModelCost): string {
   if (cost.input === 0 && cost.output === 0) return "free";
   return `$${cost.input}/M in`;
 }
+
+// ── Provider readiness validation (#367) ────────────────────────────────────
+
+export type ProviderValidationResult =
+  | { ok: true }
+  | { ok: false; reason: string; fix: string };
+
+/**
+ * Minimal env accessor — just the slice validateProviderReady needs.
+ * Matches the shape exposed by getEnv().
+ */
+export type EnvAccessor = {
+  getApiKey(envName: string): string | undefined;
+};
+
+/**
+ * Validate that a transport provider's prerequisites are in place BEFORE the
+ * bridge attempts to switch to it (#367).
+ *
+ * Contract:
+ * - `api` + `apiKeyEnv` declared → env var must be non-empty
+ * - `api` + no `apiKeyEnv` → always ok (local ollama-style)
+ * - `acp` → `provider.cli` must be runnable (`<cli> --version` within 3s)
+ * - `tmux` → always ok (out of scope)
+ *
+ * Pure aside from the ACP `execSync` probe. execSync is imported lazily so
+ * unit tests can stub it via dependency injection if needed.
+ */
+export function validateProviderReady(
+  providerName: string,
+  provider: ProviderConfig,
+  env: EnvAccessor,
+): ProviderValidationResult {
+  if (provider.transport === "tmux") return { ok: true };
+
+  if (provider.transport === "api") {
+    if (!provider.apiKeyEnv) return { ok: true };
+    const key = env.getApiKey(provider.apiKeyEnv);
+    if (!key) {
+      return {
+        ok: false,
+        reason: `${providerName} requires API key from env var '${provider.apiKeyEnv}' but it's not set`,
+        fix: `Add ${provider.apiKeyEnv}=... to .env and restart`,
+      };
+    }
+    return { ok: true };
+  }
+
+  if (provider.transport === "acp") {
+    const cli = provider.cli;
+    if (!cli) {
+      return {
+        ok: false,
+        reason: `ACP provider ${providerName} has no 'cli' field set in transport.json`,
+        fix: `Add \"cli\": \"<path-to-cli>\" to provider ${providerName} in transport.json`,
+      };
+    }
+    try {
+      // Inline require so mocks work in tests and production stays synchronous.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { execSync } = require("node:child_process") as typeof import("node:child_process");
+      execSync(`${cli} --version`, { timeout: 3000, stdio: "pipe" });
+      return { ok: true };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      return {
+        ok: false,
+        reason: `ACP provider ${providerName} CLI '${cli}' is not runnable (${errMsg})`,
+        fix: `Install ${cli} or update its path in transport.json`,
+      };
+    }
+  }
+
+  // Unknown transport — fail closed with a clear message.
+  return {
+    ok: false,
+    reason: `Unknown transport type '${(provider as ProviderConfig).transport}' for provider ${providerName}`,
+    fix: `Use 'api', 'acp', or 'tmux' for provider.transport`,
+  };
+}
+
+/** Format a validation failure for user-visible error messages. */
+export function formatValidationError(providerName: string, result: ProviderValidationResult): string {
+  if (result.ok) return "";
+  return `❌ Cannot switch to ${providerName}: ${result.reason}\n   Fix: ${result.fix}`;
+}
