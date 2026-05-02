@@ -69,7 +69,6 @@ export class MemorySearchController {
       const result = await this.deps.memory.recallSearch(
         { translated, original, userId: userId ?? "master", limit: 10, timeStart, timeEnd, stages },
       );
-      this.deps.memory.bumpRecallCount(result.extractedIds);
 
       const webResults = result.results.map(hitToWebResult);
       const stageStatuses: Record<string, { status: string; hits: number; ms: number }> = {};

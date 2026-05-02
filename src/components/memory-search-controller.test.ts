@@ -102,7 +102,7 @@ describe("MemorySearchController.handle — results", () => {
     const body = result.body as MemorySearchResponse;
     expect(body.results.length).toBe(1);
     expect(body.results[0]!.content).toBe("puppy info");
-    expect(deps.memory.bumpRecallCount).toHaveBeenCalledWith([1]);
+    // bumpRecallCount now handled inside recallSearch (#244) — no external call
   });
 });
 
