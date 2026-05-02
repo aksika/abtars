@@ -14,7 +14,7 @@ export function loadAgentApiConfig(env: Record<string, string | undefined>): Age
     return null; // Missing config — caller skips agent-api gracefully
   }
   return {
-    port: parseInt(env["AGENT_API_PORT"] || "3001", 10),
+    port: parseInt(env["AGENT_API_PORT"] || "3100", 10),
     allowedIps,
     token: env["AGENT_API_TOKEN"] ?? "",
     sessionKey: env["AGENT_SESSION_KEY"] || "agent:molty",
