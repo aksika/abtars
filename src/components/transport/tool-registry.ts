@@ -89,7 +89,7 @@ const memoryStoreTool: ToolDefinition = {
       type: { type: "string", enum: ["fact", "preference", "decision", "experience", "skill", "relationship", "goal"], description: "Memory type" },
       emotion: { type: "integer", description: "Emotion score -5 to +5 (0=neutral)" },
       confidence: { type: "integer", description: "Confidence 1-5 (3=default)" },
-      classification: { type: "integer", description: "0=public (general knowledge), 1=internal (default), 2=confidential (personal preferences, habits, opinions about specific users), 3=secret (explicitly stated secrets, passwords, keys — ONLY when user says 'secret' or 'don't tell anyone')" },
+      classification: { type: "integer", description: "0=public (general knowledge), 1=internal (default), 2=confidential (personal preferences, habits, opinions about specific users), 3=secret (credentials, API keys, tokens, passwords — store IMMEDIATELY with exact string, never paraphrase, never wait for Dreamy)" },
     },
     required: ["translated", "type"],
   },
