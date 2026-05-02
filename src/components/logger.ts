@@ -37,6 +37,19 @@ function writeToFile(line: string): void {
 }
 
 // ── Credential redaction ────────────────────────────────────────────────────
+//
+// INTENTIONALLY DUPLICATED across agentbridge and abmind — they are
+// independent products that both need this utility. If you add or
+// modify a pattern here, also update the sibling file:
+//   agentbridge/src/components/logger.ts (SECRET_PATTERNS + redactSecrets)
+//   abmind/src/redact-secrets.ts          (SECRET_PATTERNS + redactSecrets)
+//
+// Do NOT create an import relationship between them. Each product stays
+// independent so the bridge can run against a different memory backend
+// and abmind can ship as a standalone npm package without pulling
+// agentbridge in for a utility function.
+//
+// See abproject/docs/plans/178-redact-secrets-move.md for the rationale.
 
 const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/sk-[A-Za-z0-9_-]{20,}/g, "sk-***REDACTED***"],
