@@ -13,7 +13,6 @@ import { SessionRegistry } from "./session-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
-import { writeRestartReason } from "./transport/bridge-lock-transport.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind";
 import type { CodingMode } from "./coding-mode.js";
@@ -63,7 +62,6 @@ export async function resetAndPrepare(opts: {
   // #254: clear emergency mode on reset — next session starts fresh
   const t = opts.transport as unknown as { setEmergencyMode?: (o: null) => void };
   t.setEmergencyMode?.(null);
-  writeRestartReason(opts.reason);
 }
 
 /** Transport + agent runtime deps. */
