@@ -346,6 +346,21 @@ export async function install(opts: InstallOptions): Promise<number> {
   }
   process.stdout.write(`✓ abmind skeleton at ${abmindHome}\n`);
 
+  // Deploy core templates to ~/.abmind/memory/core/ (never overwrite existing)
+  const coreTemplatesDir = join(repoRoot, 'core', 'core_templates');
+  const coreTargetDir = join(abmindHome, 'memory', 'core');
+  if (!opts.dryRun) {
+    await mkdir(coreTargetDir, { recursive: true });
+    const { readdirSync } = await import('node:fs');
+    for (const file of readdirSync(coreTemplatesDir)) {
+      const dst = join(coreTargetDir, file);
+      if (!(await exists(dst))) {
+        await writeFile(dst, await readFile(join(coreTemplatesDir, file), 'utf-8'));
+      }
+    }
+    process.stdout.write(`✓ core templates deployed to ${coreTargetDir}\n`);
+  }
+
   // Create kiro-cli agent config — ACP transport needs ~/.kiro/agents/professor.json
   const kiroAgentsDir = join(homedir(), '.kiro', 'agents');
   const professorJson = join(kiroAgentsDir, 'professor.json');
