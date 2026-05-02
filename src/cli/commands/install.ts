@@ -13,7 +13,7 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { hostname, homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
 
@@ -345,6 +345,26 @@ export async function install(opts: InstallOptions): Promise<number> {
     for (const d of abmindDirs) await mkdir(d.path, { recursive: true, mode: d.mode });
   }
   process.stdout.write(`✓ abmind skeleton at ${abmindHome}\n`);
+
+  // Create kiro-cli agent config — ACP transport needs ~/.kiro/agents/professor.json
+  const kiroAgentsDir = join(homedir(), '.kiro', 'agents');
+  const professorJson = join(kiroAgentsDir, 'professor.json');
+  if (!opts.dryRun) {
+    await mkdir(kiroAgentsDir, { recursive: true });
+    if (!(await exists(professorJson))) {
+      await writeFile(professorJson, JSON.stringify({
+        name: "professor",
+        description: "Abtars bridge agent",
+        tools: ["*"],
+        allowedTools: ["@builtin"],
+        toolsSettings: { shell: { autoAllowReadonly: true } },
+        includeMcpJson: true,
+      }, null, 2) + '\n');
+      process.stdout.write(`✓ kiro agent: ${professorJson}\n`);
+    }
+  } else {
+    process.stdout.write(`[dry-run] create ${professorJson}\n`);
+  }
 
   // Seed config from examples (only missing ones)
   const seeded = await seedConfig(repoRoot, paths.config, opts.dryRun, home);
