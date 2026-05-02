@@ -25,6 +25,8 @@ export type ModelEntry = {
   transports: string[];
   description?: string;
   addedAt?: string;
+  validatedAt?: string;
+  status?: "alive" | "dead" | "untested";
 };
 
 export type ModelCatalog = Record<string, ModelEntry>;

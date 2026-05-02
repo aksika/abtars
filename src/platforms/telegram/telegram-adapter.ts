@@ -299,12 +299,33 @@ export class TelegramAdapter implements PlatformAdapter {
         } else {
           await this.api.sendMessage(chatId, `✅ All agents → ${providerName}`);
         }
+
+        // Show model picker for professor so user can override the default
+        const { getModelsForProvider } = await import("../../components/transport-config.js");
+        let models = getModelsForProvider(providerName);
+        if (newProvider.transport === "api") {
+          models = models.filter(m => !m.entry.status || m.entry.status === "alive");
+        }
+        if (models.length > 1) {
+          const buttons = models.map(m => [{
+            text: m.id === profModel ? `✅ ${m.id}` : m.id,
+            callback_data: `mset:professor:${providerName}:${m.id}`,
+          }]);
+          await this.api.sendMessage(chatId, `📋 Override professor model? (current: ${profModel})`, { reply_markup: { inline_keyboard: buttons } });
+        }
+
       } else if (data.startsWith("mprov:")) {
         // Step 2 → Step 3: user picked provider, show models
         const [, slot, providerName] = data.split(":");
-        const { getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
-        const models = getModelsForProvider(providerName!);
-        if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No models for ${providerName}`); return; }
+        const { getModelsForProvider, formatRank, formatCost, loadTransport } = await import("../../components/transport-config.js");
+        const tc = loadTransport();
+        const providerTransport = tc?.providers[providerName!]?.transport ?? "api";
+        let models = getModelsForProvider(providerName!);
+        // For API providers, only show alive models (or those without status field)
+        if (providerTransport === "api") {
+          models = models.filter(m => !m.entry.status || m.entry.status === "alive");
+        }
+        if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
         const buttons = models.map(m => [{
           text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`,
           callback_data: `mset:${slot}:${providerName}:${m.id}`,
