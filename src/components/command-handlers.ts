@@ -913,11 +913,12 @@ async function handleHooks(_text: string, ctx: CommandContext): Promise<boolean>
 
 async function handleMcp(_text: string, ctx: CommandContext): Promise<boolean> {
   // Preflight: is mcporter installed? Fast check before placeholder.
-  const version = await execAsync("mcporter", ["--version"], 2000);
-  if (!version) {
+  let version = await execAsync("mcporter", ["--version"], 2000);
+  if (version === null) {
     await ctx.reply("📦 mcporter not installed");
     return true;
   }
+  if (!version) version = "unknown";
 
   const placeholderId = await ctx.reply("📦 Checking MCP servers...");
   const raw = await execAsync("mcporter", ["list", "--json"], 15_000);
@@ -956,10 +957,10 @@ async function handleMcp(_text: string, ctx: CommandContext): Promise<boolean> {
   return true;
 }
 
-function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string> {
+function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string | null> {
   return new Promise((resolve) => {
     const child = execFile(cmd, args, { timeout: timeoutMs, encoding: "utf-8" }, (err, stdout) => {
-      resolve(err ? "" : stdout.trim());
+      resolve(err ? null : stdout.trim());
     });
     child.stderr?.resume(); // drain stderr
   });
