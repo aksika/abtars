@@ -19,6 +19,7 @@ import { onboard } from './commands/onboard.js';
 import { rollback } from './commands/rollback.js';
 import { restart } from './commands/restart.js';
 import { status } from './commands/status.js';
+import { stop } from './commands/stop.js';
 import { update } from './commands/update.js';
 
 type Args = {
@@ -55,13 +56,14 @@ function printUsage(): void {
     `agentbridge — install/update CLI (#158)
 
 Usage:
-  agentbridge install [--force] [--mode=simple|supervised] [--restore <backup.zip>]
+  agentbridge install [--force] [--mode=simple|supervised|supervised-daemon] [--restore <backup.zip>]
   agentbridge update  [--source local|npm|github] [--from-local]
   agentbridge rollback [--to <version>]
   agentbridge backup
   agentbridge doctor [<args passed to doctor.sh>...]
   agentbridge onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   agentbridge restart [--cold]
+  agentbridge stop [--force]
   agentbridge status
 
 See abproject/docs/plans/158-deploy-rewrite.md for the full contract.
@@ -112,6 +114,8 @@ export async function main(argv: readonly string[]): Promise<number> {
         return await status();
       case 'restart':
         return await restart({ cold: flags.get('cold') === true });
+      case 'stop':
+        return await stop({ force: flags.get('force') === true });
       case '':
       case 'help':
       case '--help':
