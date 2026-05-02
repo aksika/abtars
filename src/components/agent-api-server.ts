@@ -13,6 +13,8 @@ import type { SubagentRuntime } from "./subagent-runtime.js";
 import type { AgentSession } from "./subagent-runtime.js";
 import { localDate } from "./env-utils.js";
 import { localIso } from "./logger.js";
+import { extractBearerToken, openaiError } from "./openai-compat-translate.js";
+import { handleModels as v1HandleModels, handleModel as v1HandleModel, handleEmbeddings as v1HandleEmbeddings, handleChatCompletions as v1HandleChatCompletions, writeResult } from "./openai-compat-routes.js";
 
 const TAG = "agent-api";
 const MAX_TRAFFIC_LOG = 50;
@@ -209,18 +211,148 @@ export class AgentApiServer {
     const url = req.url ?? "";
     const method = req.method ?? "";
 
+    // ── /v1/* routes (#373) ───────────────────────────────────────────────
+    if (url === "/v1/models" && method === "GET") {
+      if (!this.requireBearer(req, res)) return;
+      writeResult(res, v1HandleModels());
+      return;
+    }
+    if (url.startsWith("/v1/models/") && method === "GET") {
+      if (!this.requireBearer(req, res)) return;
+      const id = decodeURIComponent(url.slice("/v1/models/".length));
+      writeResult(res, v1HandleModel(id));
+      return;
+    }
+    if (url === "/v1/chat/completions" && method === "POST") {
+      if (!this.requireBearer(req, res)) return;
+      this.handleV1ChatCompletions(req, res).catch((err) => {
+        logWarn(TAG, `/v1/chat/completions error: ${err instanceof Error ? err.message : String(err)}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" })
+            .end(JSON.stringify(openaiError("Internal server error", "server_error")));
+        }
+      });
+      return;
+    }
+    if (url === "/v1/embeddings" && method === "POST") {
+      if (!this.requireBearer(req, res)) return;
+      this.handleV1Embeddings(req, res).catch((err) => {
+        logWarn(TAG, `/v1/embeddings error: ${err instanceof Error ? err.message : String(err)}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" })
+            .end(JSON.stringify(openaiError("Internal server error", "server_error")));
+        }
+      });
+      return;
+    }
+
+    // ── /api/agent/* (deprecated — still functional with Sunset header) ───
     if (method === "POST" && url === "/api/agent/prompt") {
+      this.addDeprecationHeaders(res);
       this.handleMessage(req, res).catch((err) => {
         logWarn(TAG, `Prompt error: ${err instanceof Error ? err.message : String(err)}`);
         res.writeHead(500).end(JSON.stringify({ error: "internal" }));
       });
     } else if (method === "POST" && url === "/api/agent/reset") {
+      this.addDeprecationHeaders(res);
       this.handleReset(res).catch(() => res.writeHead(500).end());
     } else if (method === "GET" && url === "/api/agent/status") {
+      this.addDeprecationHeaders(res);
       this.handleStatus(res);
     } else {
       res.writeHead(404).end();
     }
+  }
+
+  /**
+   * #373 — require bearer token on /v1/* routes. Also allowed as alternative
+   * auth on deprecated /api/agent/* routes, but that path keeps the HMAC flow
+   * too. Returns true if authorized, writes 401 + returns false otherwise.
+   */
+  private requireBearer(req: IncomingMessage, res: ServerResponse): boolean {
+    const token = extractBearerToken(req.headers as Record<string, string | string[] | undefined>);
+    if (!token || token !== this.config.token) {
+      const body = JSON.stringify(openaiError("Missing or invalid bearer token", "authentication_error", "invalid_api_key"));
+      res.writeHead(401, { "Content-Type": "application/json" }).end(body);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * #373 — add Deprecation + Sunset headers to /api/agent/* responses.
+   * Removal tracked by #374 after Molty migrates to /v1/*.
+   */
+  private addDeprecationHeaders(res: ServerResponse): void {
+    res.setHeader("Deprecation", "true");
+    // Sunset date: 30 days from now (kept as a header hint; actual deletion gated on #374)
+    const sunset = new Date(Date.now() + 30 * 86400000).toUTCString();
+    res.setHeader("Sunset", sunset);
+    res.setHeader("Link", '<https://github.com/aksika/abtars/blob/dev/docs/openai-compat.md>; rel="deprecation"');
+  }
+
+  /** #373 — /v1/chat/completions dispatch. */
+  private async handleV1ChatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const start = Date.now();
+    const ip = normalizeIp(req.socket.remoteAddress ?? "");
+    let body: unknown;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Invalid JSON body", "invalid_request_error", "invalid_body")));
+      return;
+    }
+
+    let session: AgentSession;
+    try {
+      session = await this.ensureAgentSession();
+    } catch {
+      res.writeHead(503, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Failed to spawn agent kiro-cli", "server_error", "spawn_failed")));
+      return;
+    }
+
+    const result = await v1HandleChatCompletions(body, req, {
+      session,
+      memory: this.memory,
+      agentRules: this.agentRules,
+      rulesAlreadyInjected: this.rulesInjected,
+      markRulesInjected: () => { this.rulesInjected = true; },
+      guestName: this.guestName,
+    });
+
+    // Reflect traffic log for observability
+    const reqBody = body as { messages?: unknown[] };
+    const promptPreview = Array.isArray(reqBody.messages) && reqBody.messages.length > 0
+      ? String((reqBody.messages[reqBody.messages.length - 1] as { content?: unknown })?.content ?? "").slice(0, 200)
+      : "";
+    this.pushTraffic({
+      ts: start,
+      ip,
+      endpoint: "v1/chat/completions",
+      prompt: promptPreview,
+      response: result.streaming ? "[streamed]" : result.body.slice(0, 200),
+      durationMs: Date.now() - start,
+      status: result.status,
+    });
+
+    res.writeHead(result.status, result.headers);
+    res.end(result.body);
+  }
+
+  /** #373 — /v1/embeddings dispatch. */
+  private async handleV1Embeddings(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: unknown;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Invalid JSON body", "invalid_request_error", "invalid_body")));
+      return;
+    }
+    const result = await v1HandleEmbeddings(body, this.memory);
+    writeResult(res, result);
   }
 
   private async handleMessage(req: IncomingMessage, res: ServerResponse): Promise<void> {

@@ -1,63 +1,74 @@
+/**
+ * openclaw-kiro-professor — Molty-side plugin that asks KP for answers (#373).
+ *
+ * Migrated from HMAC challenge-response (/api/agent/prompt) to OpenAI-compat
+ * (/v1/chat/completions) with bearer auth. Net -40 LOC; stateless plugin.
+ *
+ * Env:
+ *   KP_HOST           KP hostname/IP (default: localhost)
+ *   KP_PORT           KP agent-api port (default: 3100)
+ *   AGENT_API_TOKEN   Shared bearer token with KP (required)
+ */
+
 import { request as httpRequest } from "node:http";
-import { createHmac, randomBytes } from "node:crypto";
 
-const KP_HOST = "localhost";
-const KP_PORT = 3001;
-const SHARED_SECRET = process.env.AGENT_API_TOKEN ?? "";
-const AGENT_NAME = "Molty";
+const KP_HOST = process.env.KP_HOST ?? "localhost";
+const KP_PORT = parseInt(process.env.KP_PORT ?? "3100", 10);
+const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN ?? "";
+const SESSION_ID = "molty"; // isolates Molty's kiro-cli session from other X-Session-Id callers
 
-let authenticated = false;
-
-function hmac(data) {
-  return createHmac("sha256", SHARED_SECRET).update(data).digest("hex");
-}
-
-function kpFetch(path, opts = {}) {
-  const body = opts.body || null;
+function kpPost(path, body) {
   return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body);
     const req = httpRequest({
-      hostname: KP_HOST, port: KP_PORT, path, method: opts.method || "GET",
-      headers: { "Content-Type": "application/json" },
+      hostname: KP_HOST,
+      port: KP_PORT,
+      path,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+        "Authorization": `Bearer ${AGENT_API_TOKEN}`,
+        "X-Session-Id": SESSION_ID,
+      },
       timeout: 120_000,
     }, (res) => {
       let data = "";
       res.on("data", (c) => data += c);
       res.on("end", () => {
-        if (res.statusCode >= 400) return reject(new Error(`KP ${res.statusCode}: ${data}`));
-        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+        if (res.statusCode >= 400) return reject(new Error(`KP ${res.statusCode}: ${data.slice(0, 300)}`));
+        try { resolve(JSON.parse(data)); }
+        catch { reject(new Error(`KP returned non-JSON: ${data.slice(0, 200)}`)); }
       });
     });
     req.on("timeout", () => { req.destroy(); reject(new Error("KP request timed out (120s)")); });
-    req.on("error", (e) => reject(e));
-    if (body) req.write(body);
+    req.on("error", reject);
+    req.write(payload);
     req.end();
   });
 }
 
-async function ensureAuth() {
-  if (authenticated) return;
-  if (!SHARED_SECRET) throw new Error("AGENT_API_TOKEN not set");
-
-  // Step 1: Hello with our challenge
-  const ourChallenge = randomBytes(32).toString("hex");
-  const hello = await kpFetch("/api/agent/prompt", {
-    method: "POST",
-    body: JSON.stringify({ type: "hello", name: AGENT_NAME, challenge: ourChallenge }),
+function kpGet(path) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      hostname: KP_HOST,
+      port: KP_PORT,
+      path,
+      method: "GET",
+      headers: { "Authorization": `Bearer ${AGENT_API_TOKEN}` },
+      timeout: 10_000,
+    }, (res) => {
+      let data = "";
+      res.on("data", (c) => data += c);
+      res.on("end", () => {
+        if (res.statusCode >= 400) return reject(new Error(`KP ${res.statusCode}: ${data.slice(0, 300)}`));
+        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+      });
+    });
+    req.on("timeout", () => { req.destroy(); reject(new Error("KP request timed out")); });
+    req.on("error", reject);
+    req.end();
   });
-
-  // Verify KP's response to our challenge
-  if (hello.response !== hmac(ourChallenge)) {
-    throw new Error("KP failed challenge-response — not authenticated");
-  }
-
-  // Step 2: Hello-ack — prove we know the secret
-  const ack = await kpFetch("/api/agent/prompt", {
-    method: "POST",
-    body: JSON.stringify({ type: "hello-ack", response: hmac(hello.challenge) }),
-  });
-
-  if (!ack.ok) throw new Error("KP rejected hello-ack");
-  authenticated = true;
 }
 
 function txt(s) { return { content: [{ type: "text", text: s }] }; }
@@ -66,11 +77,19 @@ export default function (api) {
   api.registerTool({
     name: "kiro_professor_ask",
     description: "Ask Kiro Professor a question. Returns the full response. Use for coding questions, architecture advice, debugging help, or knowledge retrieval.",
-    parameters: { type: "object", properties: { prompt: { type: "string", description: "The question or request to send" } }, required: ["prompt"] },
+    parameters: {
+      type: "object",
+      properties: { prompt: { type: "string", description: "The question or request to send" } },
+      required: ["prompt"],
+    },
     async execute(_id, params) {
-      await ensureAuth();
-      const res = await kpFetch("/api/agent/prompt", { method: "POST", body: JSON.stringify({ prompt: params.prompt }) });
-      return txt(res.response || JSON.stringify(res));
+      if (!AGENT_API_TOKEN) throw new Error("AGENT_API_TOKEN not set");
+      const res = await kpPost("/v1/chat/completions", {
+        model: "kp/default",
+        messages: [{ role: "user", content: params.prompt }],
+      });
+      const content = res?.choices?.[0]?.message?.content ?? "";
+      return txt(content || JSON.stringify(res));
     },
   });
 
@@ -80,20 +99,23 @@ export default function (api) {
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
       try {
-        const res = await kpFetch("/api/agent/status");
-        return txt(res.ready ? `Kiro Professor online (session: ${res.sessionKey})` : "Kiro Professor not ready");
-      } catch (e) { return txt(`Kiro Professor offline: ${e.message}`); }
+        const res = await kpGet("/v1/models");
+        const ok = Array.isArray(res?.data) && res.data.length > 0;
+        return txt(ok ? `Kiro Professor online (${res.data.length} models)` : "Kiro Professor responded but no models listed");
+      } catch (e) {
+        return txt(`Kiro Professor offline: ${e.message}`);
+      }
     },
   });
 
+  // Session-reset kept as a no-op alias — KP manages session lifecycle via idle-timeout.
+  // Kept for backward compat with existing Molty agent prompts that reference it.
   api.registerTool({
     name: "kiro_professor_reset",
-    description: "Reset the Kiro Professor conversation session. Use when you want a fresh context.",
+    description: "No-op — KP manages session lifecycle automatically via idle timeout. Kept for compatibility.",
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
-      await kpFetch("/api/agent/prompt", { method: "POST", body: JSON.stringify({ type: "close" }) });
-      authenticated = false;
-      return txt("Kiro Professor session reset.");
+      return txt("Session management is automatic — KP will refresh after 10 minutes of inactivity.");
     },
   });
 }
