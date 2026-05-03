@@ -14,6 +14,7 @@
 
 import { doctor } from './commands/doctor.js';
 import { install } from './commands/install.js';
+import { uninstall } from './commands/uninstall.js';
 import { backup } from './commands/backup.js';
 import { onboard } from './commands/onboard.js';
 import { rollback } from './commands/rollback.js';
@@ -57,6 +58,7 @@ function printUsage(): void {
 
 Usage:
   abtars install [--force] [--mode=simple|supervised|supervised-daemon] [--restore <backup.zip>]
+  abtars uninstall [--yes]
   abtars update  [--source local|npm|github] [--from-local]
   abtars rollback [--to <version>]
   abtars backup
@@ -83,6 +85,8 @@ export async function main(argv: readonly string[]): Promise<number> {
           dryRun: flags.get('dry-run') === true,
           mode: flags.get('mode') === 'simple' ? 'simple' : flags.get('mode') === 'supervised' ? 'supervised' : flags.get('mode') === 'supervised-daemon' ? 'supervised-daemon' : undefined,
         });
+      case 'uninstall':
+        return await uninstall({ yes: flags.get('yes') === true });
       case 'update':
         return await update({
           source: (flags.get('source') as 'local' | 'npm' | 'github' | undefined) ?? 'local',
