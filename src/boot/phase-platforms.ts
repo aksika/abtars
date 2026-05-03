@@ -11,6 +11,7 @@
  */
 
 import { logInfo, logWarn, logError } from "../components/logger.js";
+import { getEnv } from "../components/env-schema.js";
 import type { BootCtx } from "./context.js";
 
 export async function phasePlatforms(ctx: BootCtx): Promise<void> {
@@ -68,6 +69,7 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
           botToken: config.discord.botToken!,
           appId: config.discord.appId!,
           allowedUserIds: config.discord.allowedUserIds!,
+          allowedChannels: new Set((getEnv().discordAllowedChannels ?? "").split(",").map(s => s.trim()).filter(Boolean)),
           a2aEnabled: config.discord.a2aEnabled,
           a2aChannelId: config.discord.a2aChannelId,
           a2aPeerBotId: config.discord.a2aPeerBotId,

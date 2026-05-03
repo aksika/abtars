@@ -65,6 +65,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "DISCORD_A2A_CHANNEL_ID", type: "string", description: "Discord A2A channel ID" },
   { env: "DISCORD_A2A_PEER_BOT_ID", type: "string", description: "Discord A2A peer bot ID" },
   { env: "DISCORD_A2A_RATE_LIMIT_MS", type: "int", default: "5000", description: "Discord A2A rate limit (ms)" },
+  { env: "DISCORD_ALLOWED_CHANNELS", type: "string", description: "Comma-separated channel IDs where bot responds to ALL messages (no mention required). Leave empty to require @mention / reply-to-bot everywhere." },
 
   // ── Context window ──
   { env: "CTX_WARN_PCT", type: "int", default: "70", description: "Context % to warn user" },
@@ -178,6 +179,7 @@ export interface EnvConfig {
   discordA2aChannelId: string | undefined;
   discordA2aPeerBotId: string | undefined;
   discordA2aRateLimitMs: number;
+  discordAllowedChannels: string | undefined;
 
   // Context window
   ctxWarnPct: number;
@@ -351,6 +353,7 @@ export function initEnv(): Readonly<EnvConfig> {
     discordA2aChannelId: read("DISCORD_A2A_CHANNEL_ID"),
     discordA2aPeerBotId: read("DISCORD_A2A_PEER_BOT_ID"),
     discordA2aRateLimitMs: parseIntSafe(readOr("DISCORD_A2A_RATE_LIMIT_MS", "5000"), "DISCORD_A2A_RATE_LIMIT_MS"),
+    discordAllowedChannels: read("DISCORD_ALLOWED_CHANNELS"),
 
     ctxWarnPct: parseIntSafe(readOr("CTX_WARN_PCT", "70"), "CTX_WARN_PCT"),
     ctxCompactPct: parseIntSafe(readOr("CTX_COMPACT_PCT", "80"), "CTX_COMPACT_PCT"),

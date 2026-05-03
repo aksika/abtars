@@ -77,7 +77,18 @@ function toDiscordInboundMessage(raw: Message, botId: string | null): DiscordInb
   const mentionsBotId = botId
     ? (raw.mentions.users.has(botId) || new RegExp(`<@!?${botId}>`).test(raw.content))
     : false;
-  logDebug(TAG, `mentionsBotId=${mentionsBotId} (appId=${botId}, mentions=${[...raw.mentions.users.keys()].join(",")}, content=${raw.content.slice(0, 60)})`);
+
+  // #388 — role-mention detection. Look up the bot's own guild member and check
+  // if any of its role IDs appear in raw.mentions.roles. If the bot's member isn't
+  // cached yet (cold start, first message in a guild), stay safe by returning false —
+  // a missed role-mention is better than an accidental always-respond.
+  const botMember = raw.guild?.members.me ?? null;
+  const botRoleIds = botMember ? new Set([...botMember.roles.cache.keys()]) : new Set<string>();
+  const mentionsBotRole = botMember
+    ? [...raw.mentions.roles.keys()].some(rid => botRoleIds.has(rid))
+    : false;
+
+  logDebug(TAG, `mentionsBotId=${mentionsBotId} mentionsBotRole=${mentionsBotRole} (appId=${botId}, mentions=${[...raw.mentions.users.keys()].join(",")}, content=${raw.content.slice(0, 60)})`);
   return {
     id: raw.id,
     channelId: raw.channelId,
@@ -89,8 +100,10 @@ function toDiscordInboundMessage(raw: Message, botId: string | null): DiscordInb
     content: raw.content,
     timestamp: raw.createdTimestamp,
     mentionsBotId,
+    mentionsBotRole,
     mentionsEveryone: raw.mentions.everyone,
     hasUserMentions: raw.mentions.users.size > 0,
+    replyReferenceMessageId: raw.reference?.messageId ?? null,
     attachments: raw.attachments.size > 0
       ? [...raw.attachments.values()].map(a => ({ url: a.url, filename: a.name ?? "file", contentType: a.contentType ?? undefined, size: a.size }))
       : undefined,

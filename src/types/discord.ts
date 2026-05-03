@@ -13,8 +13,11 @@ export type DiscordInboundMessage = {
   authorIsBot: boolean; // whether the author is a bot
   content: string; // message text content
   timestamp: number; // Unix ms
-  mentionsBotId: boolean; // whether the bot was @mentioned
+  mentionsBotId: boolean; // whether the bot was @user-mentioned
+  mentionsBotRole: boolean; // whether any role the bot holds was @role-mentioned (#388)
   mentionsEveryone: boolean; // whether @everyone or @here was used
   hasUserMentions: boolean; // whether any @user mentions exist in the message
+  /** raw.reference?.messageId — for reply-to-bot detection in the adapter (#388). */
+  replyReferenceMessageId: string | null;
   attachments?: { url: string; filename: string; contentType?: string; size: number }[];
 };

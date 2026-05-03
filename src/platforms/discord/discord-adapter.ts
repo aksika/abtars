@@ -30,6 +30,8 @@ export interface DiscordAdapterConfig {
   botToken: string;
   appId: string;
   allowedUserIds: Set<string>;
+  /** Channels where the bot responds to ALL messages (no mention required). #388 */
+  allowedChannels: Set<string>;
   a2aEnabled: boolean;
   a2aChannelId?: string;
   a2aPeerBotId?: string;
@@ -238,11 +240,31 @@ export class DiscordAdapter implements PlatformAdapter {
       return;
     }
 
-    // Mention filter: in non-DM channels, skip if another user/bot was @mentioned but not us
+    // Mention filter: in non-DM channels, require the bot to be addressed (#388).
+    //   - @user mention of the bot
+    //   - @role mention of a role the bot holds
+    //   - reply to a message the bot authored
+    //   - channel explicitly allowlisted via DISCORD_ALLOWED_CHANNELS
     const isDM = message.channelName === null && !message.parentChannelId;
-    if (!isDM && message.hasUserMentions && !message.mentionsBotId) {
-      logDebug(TAG, `Skipped — not mentioned (channel=${effectiveChannelId})`);
-      return;
+    if (!isDM) {
+      // Resolve reply-to-bot lazily — only if the filter actually needs it.
+      let isReplyToBot = false;
+      if (message.replyReferenceMessageId && this.config.appId) {
+        try {
+          const referenced = await this.api.fetchMessage(message.channelId, message.replyReferenceMessageId);
+          isReplyToBot = referenced?.authorId === this.config.appId;
+        } catch { /* deleted or inaccessible */ }
+      }
+
+      const addressed =
+        message.mentionsBotId ||
+        message.mentionsBotRole ||
+        isReplyToBot ||
+        this.config.allowedChannels.has(effectiveChannelId);
+      if (!addressed) {
+        logDebug(TAG, `Skipped — not addressed (channel=${effectiveChannelId})`);
+        return;
+      }
     }
 
     const channelLabel = message.parentChannelId ? message.channelName ?? "thread" : message.channelName ?? "DM";

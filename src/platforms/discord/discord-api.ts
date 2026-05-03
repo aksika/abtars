@@ -189,4 +189,14 @@ export class DiscordApi {
   get botUserId(): string | null {
     return this.client.user?.id ?? null;
   }
+
+  /** Fetch a specific message by channel + message ID. Returns null on failure. (#388) */
+  async fetchMessage(channelId: string, messageId: string): Promise<{ authorId: string } | null> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel?.isTextBased()) return null;
+      const msg = await (channel as any).messages.fetch(messageId);
+      return msg ? { authorId: msg.author.id } : null;
+    } catch { return null; }
+  }
 }
