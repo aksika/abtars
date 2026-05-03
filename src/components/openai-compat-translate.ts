@@ -36,6 +36,97 @@ export interface OpenAIChatRequest {
   tool_choice?: unknown;
 }
 
+// ── Untrusted-input parsing (pattern borrowed from openclaw http handlers) ──
+
+/**
+ * Raw shape as it arrives over the wire — every field `unknown` until
+ * narrowed. Never cast this directly to OpenAIChatRequest; use
+ * `validateChatRequest()` instead.
+ */
+export interface RawOpenAIChatRequest {
+  model?: unknown;
+  messages?: unknown;
+  temperature?: unknown;
+  max_tokens?: unknown;
+  top_p?: unknown;
+  stream?: unknown;
+  tools?: unknown;
+  tool_choice?: unknown;
+  // Allow any other fields (logged + dropped)
+  [key: string]: unknown;
+}
+
+export type ValidationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; message: string; code: string };
+
+/** Narrow a role value to one of the supported OpenAIRoles. */
+function asRole(v: unknown): OpenAIRole | null {
+  return v === "system" || v === "user" || v === "assistant" || v === "tool" ? v : null;
+}
+
+/** Normalize a content value to `string | null` — rejects non-string, non-null. */
+function asContent(v: unknown): string | null | undefined {
+  if (v === null) return null;
+  if (typeof v === "string") return v;
+  return undefined; // signals "invalid"
+}
+
+/** Validate a single `messages[]` entry. Returns error index-tagged. */
+function validateMessage(raw: unknown, index: number): ValidationResult<OpenAIMessage> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, message: `messages[${index}] must be an object`, code: "invalid_message" };
+  }
+  const m = raw as Record<string, unknown>;
+  const role = asRole(m["role"]);
+  if (!role) {
+    return { ok: false, message: `messages[${index}].role must be one of system/user/assistant/tool`, code: "invalid_role" };
+  }
+  const content = asContent(m["content"]);
+  if (content === undefined) {
+    return { ok: false, message: `messages[${index}].content must be a string or null`, code: "invalid_content" };
+  }
+  const msg: OpenAIMessage = { role, content };
+  if (typeof m["name"] === "string") msg.name = m["name"];
+  if (typeof m["tool_call_id"] === "string") msg.tool_call_id = m["tool_call_id"];
+  if (Array.isArray(m["tool_calls"])) msg.tool_calls = m["tool_calls"];
+  return { ok: true, value: msg };
+}
+
+/**
+ * Validate a raw OpenAI chat completions request body. Returns a narrowed
+ * OpenAIChatRequest or a shaped error. This is the ONLY place unknown →
+ * typed happens — downstream code trusts the returned shape.
+ */
+export function validateChatRequest(raw: unknown): ValidationResult<OpenAIChatRequest> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, message: "Request body must be a JSON object", code: "invalid_body" };
+  }
+  const r = raw as RawOpenAIChatRequest;
+  if (!Array.isArray(r.messages) || r.messages.length === 0) {
+    return { ok: false, message: "Missing or empty 'messages' array", code: "invalid_messages" };
+  }
+
+  const validated: OpenAIMessage[] = [];
+  for (let i = 0; i < r.messages.length; i++) {
+    const result = validateMessage(r.messages[i], i);
+    if (!result.ok) return result;
+    validated.push(result.value);
+  }
+
+  const out: OpenAIChatRequest = {
+    model: typeof r.model === "string" ? r.model : "kp/default",
+    messages: validated,
+  };
+  if (typeof r.temperature === "number") out.temperature = r.temperature;
+  if (typeof r.max_tokens === "number") out.max_tokens = r.max_tokens;
+  if (typeof r.top_p === "number") out.top_p = r.top_p;
+  if (typeof r.stream === "boolean") out.stream = r.stream;
+  if (Array.isArray(r.tools)) out.tools = r.tools;
+  if (r.tool_choice !== undefined) out.tool_choice = r.tool_choice;
+  return { ok: true, value: out };
+}
+
 // ── OpenAI response shape ───────────────────────────────────────────────────
 
 export interface OpenAIChatChoice {

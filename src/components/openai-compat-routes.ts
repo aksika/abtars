@@ -20,8 +20,7 @@ import {
   buildModelsList,
   extractSessionKey,
   openaiError,
-  type OpenAIChatRequest,
-  type OpenAIMessage,
+  validateChatRequest,
 } from "./openai-compat-translate.js";
 import { bufferedStreamBody } from "./openai-compat-sse.js";
 import { logInfo, logWarn, logDebug } from "./logger.js";
@@ -156,15 +155,18 @@ export async function handleChatCompletions(
   req: IncomingMessage,
   deps: ChatCompletionsDeps,
 ): Promise<ChatCompletionsResult> {
-  // Validate shape
-  const body = rawBody as Partial<OpenAIChatRequest>;
-  if (!body || !Array.isArray(body.messages) || body.messages.length === 0) {
-    return errorResponse(400, "Missing or empty 'messages' array", "invalid_request_error", "invalid_messages");
+  // Validate untrusted JSON — narrows unknown → OpenAIChatRequest.
+  // Pattern borrowed from openclaw's http handlers: don't trust the shape,
+  // narrow field-by-field. Downstream code relies on the returned shape.
+  const validation = validateChatRequest(rawBody);
+  if (!validation.ok) {
+    return errorResponse(400, validation.message, "invalid_request_error", validation.code);
   }
+  const body = validation.value;
 
-  const messages = body.messages as OpenAIMessage[];
+  const messages = body.messages;
   const stream = body.stream === true;
-  const model = body.model ?? "kp/default";
+  const model = body.model; // already defaulted to 'kp/default' in validator
 
   // Log ignored OpenAI fields at DEBUG so operators know what's getting dropped
   if (body.tools || body.tool_choice) {

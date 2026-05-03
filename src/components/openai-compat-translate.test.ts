@@ -11,6 +11,7 @@ import {
   extractSessionKey,
   extractBearerToken,
   openaiError,
+  validateChatRequest,
   type OpenAIMessage,
 } from "./openai-compat-translate.js";
 import {
@@ -248,6 +249,106 @@ describe("#373 — SSE streamError", () => {
 describe("#373 — SSE DONE_MARKER", () => {
   it("matches the OpenAI spec exactly", () => {
     expect(DONE_MARKER).toBe("data: [DONE]\n\n");
+  });
+});
+
+describe("#373 — validateChatRequest (openclaw-style untrusted-input narrowing)", () => {
+  it("accepts well-formed request", () => {
+    const result = validateChatRequest({
+      model: "gpt-4",
+      messages: [{ role: "user", content: "hi" }],
+      stream: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.model).toBe("gpt-4");
+    expect(result.value.messages).toHaveLength(1);
+    expect(result.value.stream).toBe(true);
+  });
+
+  it("defaults model to 'kp/default' when missing", () => {
+    const result = validateChatRequest({ messages: [{ role: "user", content: "hi" }] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.model).toBe("kp/default");
+  });
+
+  it("rejects non-object body", () => {
+    const r1 = validateChatRequest(null);
+    const r2 = validateChatRequest("a string");
+    const r3 = validateChatRequest([]);
+    expect(r1.ok).toBe(false);
+    expect(r2.ok).toBe(false);
+    expect(r3.ok).toBe(false);
+  });
+
+  it("rejects missing messages array", () => {
+    const result = validateChatRequest({ model: "x" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("invalid_messages");
+  });
+
+  it("rejects empty messages array", () => {
+    const result = validateChatRequest({ messages: [] });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("invalid_messages");
+  });
+
+  it("rejects message with invalid role", () => {
+    const result = validateChatRequest({ messages: [{ role: 42, content: "hi" }] });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("invalid_role");
+    expect(result.message).toContain("[0]");
+  });
+
+  it("rejects message with object content (e.g. multimodal array not yet supported)", () => {
+    const result = validateChatRequest({ messages: [{ role: "user", content: { type: "image" } }] });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("invalid_content");
+  });
+
+  it("allows null content (common for tool messages)", () => {
+    const result = validateChatRequest({ messages: [{ role: "assistant", content: null, tool_calls: [{}] }] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.messages[0]!.content).toBeNull();
+    expect(result.value.messages[0]!.tool_calls).toEqual([{}]);
+  });
+
+  it("silently drops unknown fields (forward-compat)", () => {
+    const result = validateChatRequest({
+      messages: [{ role: "user", content: "hi" }],
+      future_openai_field: "value",
+      random_other: 123,
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("ignores non-boolean stream field", () => {
+    const result = validateChatRequest({
+      messages: [{ role: "user", content: "hi" }],
+      stream: "true", // string, not boolean
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.stream).toBeUndefined(); // dropped
+  });
+
+  it("rejects at first bad message, reports index", () => {
+    const result = validateChatRequest({
+      messages: [
+        { role: "user", content: "ok" },
+        { role: "user", content: "also ok" },
+        { role: 123, content: "bad role" }, // index 2
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("[2]");
   });
 });
 
