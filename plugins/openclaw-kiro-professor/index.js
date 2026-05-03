@@ -108,14 +108,4 @@ export default function (api) {
     },
   });
 
-  // Session-reset kept as a no-op alias — KP manages session lifecycle via idle-timeout.
-  // Kept for backward compat with existing Molty agent prompts that reference it.
-  api.registerTool({
-    name: "kiro_professor_reset",
-    description: "No-op — KP manages session lifecycle automatically via idle timeout. Kept for compatibility.",
-    parameters: { type: "object", properties: {}, required: [] },
-    async execute() {
-      return txt("Session management is automatic — KP will refresh after 10 minutes of inactivity.");
-    },
-  });
 }

@@ -29,7 +29,6 @@ export async function status(): Promise<number> {
     `  activated:     ${manifest.activatedAt}`,
     `  current ->:    ${current ?? '(missing)'}`,
     `  host:          ${manifest.host}`,
-    `  migrations:    ${manifest.migrationsApplied.length > 0 ? manifest.migrationsApplied.join(', ') : '(none)'}`,
     `  prior:         ${manifest.priorReleases.length > 0 ? manifest.priorReleases.map((r: PriorRelease) => r.version).join(', ') : '(none)'}`,
   ];
   if (lock.held) {

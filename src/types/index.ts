@@ -40,7 +40,7 @@ export type {
   InstantStoreResult,
   EditMemoryParams,
   EditMemoryResult,
-} from "./memory.js";
+} from "abmind";
 
 export type {
   DiscordInboundMessage,

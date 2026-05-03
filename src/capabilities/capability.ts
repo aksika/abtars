@@ -8,7 +8,7 @@ import { logError } from "../components/logger.js";
  * The bridge wires registered items into the appropriate subsystems.
  */
 
-import type { HeartbeatTask } from "../types/memory.js";
+import type { HeartbeatTask } from "abmind";
 import type { Config } from "../types/config.js";
 import type { IMemorySystem } from "abmind";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";

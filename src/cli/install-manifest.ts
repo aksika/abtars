@@ -40,11 +40,6 @@ export interface ManifestServices {
   };
 }
 
-export interface ManifestPostInstall {
-  id: string;
-  run: "migration";
-  when: "update" | "install-upgrade";
-}
 
 export interface InstallManifest {
   manifestVersion: number;
@@ -55,7 +50,6 @@ export interface InstallManifest {
   scripts: ManifestScripts;
   services: ManifestServices;
   cliWrappers: string[];
-  postInstall: ManifestPostInstall[];
 }
 
 // ── Loader ──────────────────────────────────────────────────────────────────

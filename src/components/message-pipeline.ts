@@ -144,7 +144,7 @@ export async function handleInboundMessage(
     transport, codingMode, memory, memoryConfig,
     idleSave, conversationBuffer,
     ttsConfig,
-    sessions, updateCtxStart,
+    sessions,
   } = deps;
 
   const { sessionKey, channelId, isVoice } = msg;
@@ -414,11 +414,6 @@ export async function handleInboundMessage(
         chatId: String(chatId), text: text,
         response: userResponse, model: ("currentModel" in transport ? String((transport as Record<string, unknown>).currentModel) : "unknown"), success: true,
       }).catch(() => {});
-    }
-    // --- Context window management ---
-    {
-      const { runCompactionGuard } = await import("./pipeline/compaction-guard.js");
-      await runCompactionGuard(msg, adapter, { transport, sessions, memory, memoryConfig, updateCtxStart });
     }
   } catch (err) {
     // #287: model not found — surface actionable message to user

@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { logInfo, logWarn } from "./logger.js";
 import { getLogFile } from "./logger.js";
 import { abtarsHome } from "../paths.js";
-import type { HeartbeatTask } from "../types/memory.js";
+import type { HeartbeatTask } from "abmind";
 import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
 
 /** Errors to completely ignore (not actionable). */

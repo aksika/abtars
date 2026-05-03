@@ -10,4 +10,3 @@ export { voiceMiddleware } from "./voice.js";
 export { commandMiddleware } from "./commands.js";
 export { busyGuardMiddleware } from "./busy-guard.js";
 export { buildPrompt, type BuildPromptDeps, type BuildPromptResult } from "./prompt-builder.js";
-export { runCompactionGuard, type CompactionGuardDeps } from "./compaction-guard.js";

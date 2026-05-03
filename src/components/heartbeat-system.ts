@@ -1,7 +1,7 @@
 import { logAndSwallow } from "./log-and-swallow.js";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { writeFileSync, readFileSync } from "node:fs";
-import type { HeartbeatTask } from "../types/memory.js";
+import type { HeartbeatTask } from "abmind";
 
 export type HeartbeatConfig = {
   enabled: boolean;

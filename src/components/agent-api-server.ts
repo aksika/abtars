@@ -3,11 +3,9 @@ import { createServer, IncomingMessage, ServerResponse } from "http";
 import { readFileSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { createHmac, randomBytes } from "crypto";
 import { abtarsHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import type { IMemorySystem } from "abmind";
-import { scanForInjection } from "abmind";
 import { logInfo, logWarn } from "./logger.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
 import type { AgentSession } from "./subagent-runtime.js";
@@ -72,8 +70,6 @@ export class AgentApiServer {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private runtime: SubagentRuntime;
   private guestName = "GUEST";
-  private authenticated = false;
-  private pendingChallenge: string | null = null;
 
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
@@ -171,8 +167,6 @@ export class AgentApiServer {
     this.agentSession = null;
     this.rulesInjected = false;
     this.guestName = "GUEST";
-    this.authenticated = false;
-    this.pendingChallenge = null;
     this.logFile = this.newLogFile();
   }
 
@@ -194,10 +188,6 @@ export class AgentApiServer {
   private log(role: string, content: string): void {
     const ts = localIso();
     appendFileSync(this.logFile, `[${ts}] ${role}: ${content}\n`);
-  }
-
-  private hmac(data: string): string {
-    return createHmac("sha256", this.config.token).update(data).digest("hex");
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
@@ -246,28 +236,12 @@ export class AgentApiServer {
       return;
     }
 
-    // ── /api/agent/* (deprecated — still functional with Sunset header) ───
-    if (method === "POST" && url === "/api/agent/prompt") {
-      this.addDeprecationHeaders(res);
-      this.handleMessage(req, res).catch((err) => {
-        logWarn(TAG, `Prompt error: ${err instanceof Error ? err.message : String(err)}`);
-        res.writeHead(500).end(JSON.stringify({ error: "internal" }));
-      });
-    } else if (method === "POST" && url === "/api/agent/reset") {
-      this.addDeprecationHeaders(res);
-      this.handleReset(res).catch(() => res.writeHead(500).end());
-    } else if (method === "GET" && url === "/api/agent/status") {
-      this.addDeprecationHeaders(res);
-      this.handleStatus(res);
-    } else {
-      res.writeHead(404).end();
-    }
+    res.writeHead(404).end();
   }
 
   /**
-   * #373 — require bearer token on /v1/* routes. Also allowed as alternative
-   * auth on deprecated /api/agent/* routes, but that path keeps the HMAC flow
-   * too. Returns true if authorized, writes 401 + returns false otherwise.
+   * #373 — require bearer token on /v1/* routes.
+   * Returns true if authorized, writes 401 + returns false otherwise.
    */
   private requireBearer(req: IncomingMessage, res: ServerResponse): boolean {
     const token = extractBearerToken(req.headers as Record<string, string | string[] | undefined>);
@@ -277,18 +251,6 @@ export class AgentApiServer {
       return false;
     }
     return true;
-  }
-
-  /**
-   * #373 — add Deprecation + Sunset headers to /api/agent/* responses.
-   * Removal tracked by #374 after Molty migrates to /v1/*.
-   */
-  private addDeprecationHeaders(res: ServerResponse): void {
-    res.setHeader("Deprecation", "true");
-    // Sunset date: 30 days from now (kept as a header hint; actual deletion gated on #374)
-    const sunset = new Date(Date.now() + 30 * 86400000).toUTCString();
-    res.setHeader("Sunset", sunset);
-    res.setHeader("Link", '<https://github.com/aksika/abtars/blob/dev/docs/openai-compat.md>; rel="deprecation"');
   }
 
   /** #373 — /v1/chat/completions dispatch. */
@@ -355,148 +317,4 @@ export class AgentApiServer {
     writeResult(res, result);
   }
 
-  private async handleMessage(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const body = JSON.parse(await readBody(req));
-    const type = body.type as string | undefined;
-
-    if (type === "hello") return this.handleHello(body, res);
-    if (type === "hello-ack") return this.handleHelloAck(body, res);
-    if (type === "close") return this.handleClose(res);
-
-    // Normal prompt — auth required if token is configured
-    if (this.config.token && !this.authenticated) {
-      // Rude guest: respond with KP's hello + challenge, don't process yet
-      const challenge = randomBytes(32).toString("hex");
-      this.pendingChallenge = challenge;
-      logWarn(TAG, `Prompt without hello from unauthenticated guest — sending challenge`);
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-        hello: { name: "KP", challenge },
-        error: "hello_required",
-        message: "Hello, I'm KP. Who are you? Please authenticate.",
-      }));
-      return;
-    }
-    return this.handlePrompt(body, req, res);
-  }
-
-  private handleHello(body: Record<string, unknown>, res: ServerResponse): void {
-    const name = typeof body.name === "string" ? body.name.slice(0, 15) : "GUEST";
-    const guestChallenge = typeof body.challenge === "string" ? body.challenge : null;
-    this.guestName = name;
-
-    if (!this.config.token) {
-      // No auth configured — just exchange names
-      this.authenticated = true;
-      logInfo(TAG, `Hello from [${name}] (no auth required)`);
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-        type: "hello", name: "KP",
-      }));
-      return;
-    }
-
-    // Challenge-response: respond to guest's challenge, send our own
-    const kpChallenge = randomBytes(32).toString("hex");
-    this.pendingChallenge = kpChallenge;
-    const responseHmac = guestChallenge ? this.hmac(guestChallenge) : undefined;
-    logInfo(TAG, `Hello from [${name}] — challenge exchange`);
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-      type: "hello", name: "KP",
-      ...(responseHmac ? { response: responseHmac } : {}),
-      challenge: kpChallenge,
-    }));
-  }
-
-  private handleHelloAck(body: Record<string, unknown>, res: ServerResponse): void {
-    const response = typeof body.response === "string" ? body.response : "";
-    if (!this.pendingChallenge || response !== this.hmac(this.pendingChallenge)) {
-      logWarn(TAG, `Hello-ack failed from [${this.guestName}] — bad HMAC`);
-      res.writeHead(401, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "auth_failed" }));
-      return;
-    }
-    this.authenticated = true;
-    this.pendingChallenge = null;
-    logInfo(TAG, `Authenticated: [${this.guestName}]`);
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
-  }
-
-  private async handleClose(res: ServerResponse): Promise<void> {
-    logInfo(TAG, `Session closed by [${this.guestName}]`);
-    await this.killAgentSession();
-    this.guestName = "GUEST";
-    this.authenticated = false;
-    this.pendingChallenge = null;
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
-  }
-
-  private async handlePrompt(body: Record<string, unknown>, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const start = Date.now();
-    const ip = normalizeIp(req.socket.remoteAddress ?? "");
-    const prompt = body.prompt;
-    if (!prompt || typeof prompt !== "string") {
-      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt: "", response: "400: prompt required", durationMs: Date.now() - start, status: 400 });
-      res.writeHead(400).end(JSON.stringify({ error: "prompt required" }));
-      return;
-    }
-
-    // Scan for prompt injection before touching kiro-cli
-    const scan = scanForInjection(prompt);
-    if (!scan.safe) {
-      const top = scan.flags[0]!;
-      const refusal = `I can't process this request as phrased — it triggered a security filter (${top.category}). Please rephrase your request without instructions that could be interpreted as prompt injection or system access commands.`;
-      logWarn(TAG, `BLOCKED ${ip}: ${top.category} — "${top.pattern}"`);
-      this.log("BLOCKED", `${top.category}: ${top.pattern}`);
-      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt, response: `blocked: ${top.category}`, durationMs: Date.now() - start, status: 200 });
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ response: refusal, sessionKey: this.config.sessionKey }));
-      return;
-    }
-
-    let t: AgentSession;
-    try {
-      t = await this.ensureAgentSession();
-    } catch (err) {
-      this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt, response: "503: spawn failed", durationMs: Date.now() - start, status: 503 });
-      res.writeHead(503).end(JSON.stringify({ error: "failed to spawn agent kiro-cli" }));
-      return;
-    }
-
-    const { sessionKey } = this.config;
-
-    // Record user message
-    this.memory?.recordMessage({ role: "user", content: prompt, timestamp: Date.now(), userId: "master", sessionId: sessionKey });
-
-    const fullPrompt = this.agentRules && !this.rulesInjected
-      ? `[AGENT RULES]\n${this.agentRules}\n[END AGENT RULES]\n\n${prompt}`
-      : prompt;
-    if (this.agentRules && !this.rulesInjected) this.rulesInjected = true;
-    this.log(`[${this.guestName}]`, prompt);
-    const response = await t.sendPrompt(sessionKey, fullPrompt);
-
-    // Record assistant message
-    this.memory?.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), userId: "master", sessionId: sessionKey });
-
-    this.log("[KP]", response);
-
-    this.pushTraffic({ ts: start, ip, endpoint: "prompt", prompt: prompt, response: response, durationMs: Date.now() - start, status: 200 });
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ response, sessionKey }));
-  }
-
-  private async handleReset(res: ServerResponse): Promise<void> {
-    const start = Date.now();
-    this.killAgentSession();
-    this.log("SYSTEM", "Session reset");
-    this.pushTraffic({ ts: start, ip: "", endpoint: "reset", prompt: "", response: "ok", durationMs: Date.now() - start, status: 200 });
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
-  }
-
-  private handleStatus(res: ServerResponse): void {
-    const start = Date.now();
-    const ready = this.agentSession?.isReady ?? false;
-    this.pushTraffic({ ts: start, ip: "", endpoint: "status", prompt: "", response: `ready=${ready}`, durationMs: Date.now() - start, status: 200 });
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-      ready,
-      sessionKey: this.config.sessionKey,
-      chatId: this.config.chatId,
-      hasProcess: this.agentSession !== null,
-    }));
-  }
 }

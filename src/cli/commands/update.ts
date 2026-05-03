@@ -13,7 +13,6 @@ import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/pr
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import type { SourceName } from '../update-sources/types.js';
 import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION, type PriorRelease } from '../deploy-lib-import.js';
-import { runMigrations } from '../migrations/index.js';
 
 function readJsonField(file: string, field: string): unknown {
   try { return JSON.parse(readFileSync(file, 'utf-8'))[field]; } catch { return undefined; }
@@ -177,20 +176,6 @@ export async function update(opts: UpdateOptions): Promise<number> {
       }
     }
 
-    // Run pending migrations — manifest-driven
-    const updateMigrations = installManifest.postInstall
-      .filter(p => p.when === "update" && p.run === "migration")
-      .map(p => p.id);
-    const migrationResults = await runMigrations({
-      home: paths.home,
-      dryRun: false,
-      only: updateMigrations,
-    });
-    const applied = migrationResults.filter((r) => r.applied);
-    if (applied.length > 0) {
-      process.stdout.write(`\nMigrations applied:\n`);
-      for (const r of applied) process.stdout.write(`  ✓ ${r.name}: ${r.message}\n`);
-    }
 
     // hashFile is unused here but imported to validate the re-export surface;
     // leaving this no-op call removed — the re-export is exercised by tests.
