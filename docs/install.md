@@ -666,3 +666,34 @@ If heartbeat is stale but bridge is responsive via Telegram, the heartbeat task 
 - `abproject/docs/plans/158-deploy-rewrite.md` — design doc for this lifecycle
 - `abproject/docs/asbuilts/system.asbuilt.md` — bridge architecture overview
 - `abproject/docs/asbuilts/config-agentbridge.asbuilt.md` — full `.env` reference
+
+
+---
+
+## Post-install checklist (manual restore after clean install)
+
+After `abtars install` + `abtars update` complete, these items need manual setup or restore from backup (`abproject/backups/molty/`):
+
+### Required
+
+- [ ] **`.env`** — copy secrets from `abproject/config/molty/secrets.env` to `~/.abtars/config/.env` (Telegram token, Discord token, API keys)
+- [ ] **`transport.json`** — restore from `abproject/secret/molty/transport.json` to `~/.abtars/config/transport.json` (providers, agents, models)
+- [ ] **`models.json`** — restore from `abproject/secret/molty/models.json` to `~/.abtars/config/models.json` (model catalog with status)
+- [ ] **`users.json`** — restore user registry to `~/.abtars/config/users.json`
+- [ ] **abmind** — install abmind separately (`cd ~/abmind && abmind install && abmind update`), restore `~/.abmind/memory/memory.db` from backup if needed
+- [ ] **Watchdog plist** — copy `scripts/com.abtars.watchdog.plist` to `~/Library/LaunchAgents/` and `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist`
+
+### Recommended
+
+- [ ] **`cron.json`** — restore scheduled tasks from `abproject/backups/molty/cron.json` to `~/.abtars/state/cron.json`
+- [ ] **SOUL.md** — restore persona from `~/.abmind/memory/core/SOUL.md` (backed up in abmind's memory dir)
+- [ ] **Skills** — copy skill scripts to `~/.abtars/skills/core/` (scout-ollama.py, scout-openrouter.py, scout-add-model.py)
+- [ ] **Hooks** — restore `~/.abtars/config/hooks.json` if custom hooks were configured
+
+### Verify
+
+- [ ] `abtars status` — shows version + lock state
+- [ ] Send a Telegram message — bot responds
+- [ ] `/doctor` — all probes pass
+- [ ] `/tasks` — shows restored cron entries
+- [ ] `abmind memory-stats` — DB accessible, memory count > 0
