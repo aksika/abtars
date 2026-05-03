@@ -1,0 +1,14 @@
+[
+  {
+    "message": "Good morning",
+    "schedule": "0 9 * * *",
+    "type": "task",
+    "executor": "agent"
+  },
+  {
+    "message": "bash ~/.abtars/scripts/daily-backup.sh",
+    "schedule": "0 0 * * *",
+    "type": "task",
+    "executor": "script"
+  }
+]

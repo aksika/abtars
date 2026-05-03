@@ -581,6 +581,11 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     }
   }
 
+  // Seed default tasks (#383) — morning greeting + midnight backup
+  if (answers.telegramChatId) {
+    await seedDefaultTasks(answers.telegramChatId, paths.home);
+  }
+
   process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://github.com/aksika/abtars/blob/main/docs/install.md\n`);
 
   // Skip the build+start automation in non-interactive mode (scripts expect to do it themselves)
@@ -652,4 +657,78 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
   process.stdout.write(`\n✓ Onboarding complete.\n`);
   return 0;
+}
+
+// ── Default task seeding (#383) ─────────────────────────────────────────────
+
+interface TaskTemplateEntry {
+  readonly message: string;
+  readonly schedule: string;
+  readonly type: "task" | "reminder";
+  readonly executor: "agent" | "script";
+}
+
+/**
+ * Seed default tasks (#383) via `abtars-task add` — skipped if tasks.json
+ * already exists. Called from onboard after .env is persisted so chatId
+ * is available.
+ */
+async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<void> {
+  const { existsSync } = await import('node:fs');
+  const tasksJson = join(abtarsHome, 'state', 'tasks.json');
+  if (existsSync(tasksJson)) {
+    process.stdout.write(`• tasks.json exists — skipping default-task seed\n`);
+    return;
+  }
+
+  const { fileURLToPath } = await import('node:url');
+  const here = dirname(fileURLToPath(import.meta.url));
+  // onboard.ts is at src/cli/commands/onboard.ts or dist/cli/commands/onboard.js
+  // tasks.default.json lives at repo root — three levels up.
+  const candidates = [
+    join(here, '..', '..', '..', 'tasks.default.json'),
+    join(here, '..', '..', 'tasks.default.json'),
+  ];
+  let templatePath: string | null = null;
+  for (const p of candidates) {
+    if (existsSync(p)) { templatePath = p; break; }
+  }
+  if (!templatePath) {
+    process.stdout.write(`• tasks.default.json not found — skipping default-task seed\n`);
+    return;
+  }
+
+  let template: TaskTemplateEntry[];
+  try {
+    const raw = await readFile(templatePath, 'utf-8');
+    template = JSON.parse(raw) as TaskTemplateEntry[];
+  } catch (err) {
+    process.stdout.write(`• Failed to read tasks.default.json: ${err instanceof Error ? err.message : String(err)}\n`);
+    return;
+  }
+
+  const { spawnSync } = await import('node:child_process');
+  let seeded = 0;
+  for (const entry of template) {
+    const result = spawnSync('abtars-task', [
+      'add',
+      '--schedule', entry.schedule,
+      '--message', entry.message,
+      '--chat-id', chatId,
+      '--type', entry.type,
+      '--executor', entry.executor,
+    ], {
+      encoding: 'utf-8',
+      env: { ...process.env, ABTARS_HOME: abtarsHome },
+    });
+    if (result.status === 0) {
+      seeded++;
+    } else {
+      const err = result.error?.message ?? result.stderr?.trim() ?? result.stdout?.trim() ?? `exit ${result.status}`;
+      process.stdout.write(`  ⚠️ failed to seed task "${entry.message.slice(0, 40)}": ${err}\n`);
+    }
+  }
+  if (seeded > 0) {
+    process.stdout.write(`✓ seeded ${seeded} default task${seeded === 1 ? '' : 's'}\n`);
+  }
 }
