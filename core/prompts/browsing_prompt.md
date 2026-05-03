@@ -10,22 +10,22 @@ ${TASK}
 
 ## Browser CLI
 
-`agentbridge-browser` is a locally installed CLI that controls a Chromium instance in Docker.
+`abtars-browser` is a locally installed CLI that controls a Chromium instance in Docker.
 
 ```bash
-agentbridge-browser --action navigate --url "https://example.com" --session-id browse
-agentbridge-browser --action click --selector "text=Sign In" --session-id browse
-agentbridge-browser --action fill --selector "#email" --value "user@example.com" --session-id browse
-agentbridge-browser --action extract_text --session-id browse
-agentbridge-browser --action screenshot --session-id browse
-agentbridge-browser --action get_page_info --session-id browse
-agentbridge-browser --action set_cookie --cookie-file /run/browser/cookies/x-cookies.json --url "https://x.com" --session-id browse
-agentbridge-browser --action close_session --session-id browse
+abtars-browser --action navigate --url "https://example.com" --session-id browse
+abtars-browser --action click --selector "text=Sign In" --session-id browse
+abtars-browser --action fill --selector "#email" --value "user@example.com" --session-id browse
+abtars-browser --action extract_text --session-id browse
+abtars-browser --action screenshot --session-id browse
+abtars-browser --action get_page_info --session-id browse
+abtars-browser --action set_cookie --cookie-file /run/browser/cookies/x-cookies.json --url "https://x.com" --session-id browse
+abtars-browser --action close_session --session-id browse
 ```
 
 Always use `--session-id browse` to keep state across calls.
 
-If the container is not running: `~/.agentbridge/browser-docker.sh start`
+If the container is not running: `~/.abtars/browser-docker.sh start`
 
 ### Login state
 
@@ -33,7 +33,7 @@ Navigate to the target site first. If you are not logged in, load the site's coo
 
 ## Output
 
-Write your findings to `~/.agentbridge/subagents/${REPORT_FILE}`, then output:
+Write your findings to `~/.abtars/subagents/${REPORT_FILE}`, then output:
 ```
-REPORT_SAVED: ~/.agentbridge/subagents/${REPORT_FILE}
+REPORT_SAVED: ~/.abtars/subagents/${REPORT_FILE}
 ```

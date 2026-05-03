@@ -11,14 +11,14 @@ Fetch Twitter/X content without API keys using the free FXTwitter API. No timeli
 ## Follow list
 
 AI influencers and researchers we track:
-- **Base list:** `~/.agentbridge/twitterX/base.follows.json` — curated, manually maintained
-- **Molty list:** `~/.agentbridge/twitterX/molty.follows.json` — from Molty's X following list
+- **Base list:** `~/.abtars/twitterX/base.follows.json` — curated, manually maintained
+- **Molty list:** `~/.abtars/twitterX/molty.follows.json` — from Molty's X following list
 
 Read the follow list before searching to target the right accounts.
 
 ## Pipeline
 
-1. Read follow list: `cat ~/.agentbridge/twitterX/base.follows.json`
+1. Read follow list: `cat ~/.abtars/twitterX/base.follows.json`
 2. Search for recent tweets: `web_search("site:x.com from:handle 2026")`
 3. Extract tweet ID from URL: `https://x.com/{user}/status/{id}`
 4. Fetch structured data: `curl -s "https://api.fxtwitter.com/{user}/status/{id}"` → JSON with text, author, likes, retweets, views, media, createdAt
@@ -50,4 +50,4 @@ Read the follow list before searching to target the right accounts.
 
 ## Full integration plan
 
-See `docs/specs/twitter-integration.plan.md` for the `agentbridge-tweet` CLI roadmap (rettiwt-api, daily newsletter, discovery).
+See `docs/specs/twitter-integration.plan.md` for the `abtars-tweet` CLI roadmap (rettiwt-api, daily newsletter, discovery).

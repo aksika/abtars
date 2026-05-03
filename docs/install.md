@@ -4,7 +4,7 @@
 
 AgentBridge ships a full lifecycle CLI: `install`, `update`, `rollback`, `reset`, `onboard`, `doctor`, `migrate`, `status`.
 
-Runtime lives at `~/.agentbridge/` (override via `$AGENT_BRIDGE_HOME`). Code is versioned under `releases/<version>/` with a `current` symlink for instant rollback.
+Runtime lives at `~/.abtars/` (override via `$AGENT_BRIDGE_HOME`). Code is versioned under `releases/<version>/` with a `current` symlink for instant rollback.
 
 The bridge depends on **abmind** as a memory backend — install that first (see `abmind/docs/install.md`).
 
@@ -16,7 +16,7 @@ The bridge depends on **abmind** as a memory backend — install that first (see
 # 1. Clone both repos side by side
 cd ~/workspace
 git clone git@github.com:aksika/abmind.git
-git clone git@github.com:aksika/agentbridge.git
+git clone git@github.com:aksika/abtars.git
 
 # 2. Build + install abmind first (bridge depends on it)
 cd abmind
@@ -24,24 +24,24 @@ npm install && npm run build
 node dist/cli/abmind.js install
 abmind update
 
-# 3. Build + install agentbridge
-cd ../agentbridge
+# 3. Build + install abtars
+cd ../abtars
 npm install && npm run build                  # npm install picks up the file:../abmind dep
-node dist/cli/agentbridge.js install
-agentbridge update
+node dist/cli/abtars.js install
+abtars update
 
 # 4. Configure (interactive wizard) — Telegram token, chat ID, transport, etc.
-agentbridge onboard
+abtars onboard
 
 # 5. Start the watchdog → bridge auto-starts
-~/.agentbridge/watchdog.sh --all --web --agent &
+~/.abtars/watchdog.sh --all --web --agent &
 ```
 
 Verify:
 ```bash
-agentbridge status      # manifest + lock state
+abtars status      # manifest + lock state
 abmind status           # same for abmind
-agentbridge doctor      # filesystem + process health check
+abtars doctor      # filesystem + process health check
 ```
 
 If `~/.local/bin` isn't on `$PATH`, `install` prints the shell config line.
@@ -52,25 +52,25 @@ If `~/.local/bin` isn't on `$PATH`, `install` prints the shell config line.
 
 | Command | Purpose |
 |---|---|
-| `agentbridge install [--upgrade] [--force]` | First-time setup. Creates dirs, seeds `config/.env` + `config/.env.skills` from examples, writes CLI wrappers, creates PATH symlinks. `--upgrade` runs the one-time flat→releases migration on pre-#158 hosts. `--force` re-seeds missing config. |
-| `agentbridge update [--source local\|npm\|github] [--from-local]` | Build current checkout → stage → flip `current` → prune old. Reads `~/.abmind/manifest.json` for version compat (errors with actionable hint if abmind is outdated, unless `--allow-abmind-mismatch`). Runs 001/002 env-path migrations at end. Warns and exits if local branch behind `origin/<branch>` (use `--from-local` to override). |
-| `agentbridge rollback [--to <version>]` | Flip `current` back. Validates target exists in `releases/`. Refuses if `package-lock.json` hash differs (requires full rebuild instead). |
-| `agentbridge reset --scope <config\|config+data\|full> [--yes] [--dry-run] [--non-interactive] [--no-backup] [--force]` | Scoped destructive reset. `config` wipes `config/` only. `config+data` adds `memory/`, `logs/`, `reports/`, `received/`. `full` removes `~/.agentbridge/` + PATH symlinks (automatic backup unless `--no-backup`). Non-interactive requires `--yes`. |
-| `agentbridge onboard` | Interactive first-time config wizard. Prompts for Telegram bot token, primary chat ID, default transport provider, default model, optional Discord A2A channel. Writes `config/.env`. Re-run requires `--force` to overwrite owned keys. Non-interactive: `--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ... --default-provider ...` |
-| `agentbridge doctor [args]` | Thin wrapper around `scripts/doctor.sh`. Runs pgrep/filesystem/lock inspection, reports issues. `--fix` attempts automated recovery. |
-| `agentbridge migrate [--only <name>] [--dry-run]` | Standalone migration runner. Migrations also run at the end of `update` (001/002). 003-flat-to-releases only runs via `install --upgrade`. |
-| `agentbridge status` | Print manifest + lock state. Exit 1 if not installed or layout mismatched. |
+| `abtars install [--upgrade] [--force]` | First-time setup. Creates dirs, seeds `config/.env` + `config/.env.skills` from examples, writes CLI wrappers, creates PATH symlinks. `--upgrade` runs the one-time flat→releases migration on pre-#158 hosts. `--force` re-seeds missing config. |
+| `abtars update [--source local\|npm\|github] [--from-local]` | Build current checkout → stage → flip `current` → prune old. Reads `~/.abmind/manifest.json` for version compat (errors with actionable hint if abmind is outdated, unless `--allow-abmind-mismatch`). Runs 001/002 env-path migrations at end. Warns and exits if local branch behind `origin/<branch>` (use `--from-local` to override). |
+| `abtars rollback [--to <version>]` | Flip `current` back. Validates target exists in `releases/`. Refuses if `package-lock.json` hash differs (requires full rebuild instead). |
+| `abtars reset --scope <config\|config+data\|full> [--yes] [--dry-run] [--non-interactive] [--no-backup] [--force]` | Scoped destructive reset. `config` wipes `config/` only. `config+data` adds `memory/`, `logs/`, `reports/`, `received/`. `full` removes `~/.abtars/` + PATH symlinks (automatic backup unless `--no-backup`). Non-interactive requires `--yes`. |
+| `abtars onboard` | Interactive first-time config wizard. Prompts for Telegram bot token, primary chat ID, default transport provider, default model, optional Discord A2A channel. Writes `config/.env`. Re-run requires `--force` to overwrite owned keys. Non-interactive: `--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ... --default-provider ...` |
+| `abtars doctor [args]` | Thin wrapper around `scripts/doctor.sh`. Runs pgrep/filesystem/lock inspection, reports issues. `--fix` attempts automated recovery. |
+| `abtars migrate [--only <name>] [--dry-run]` | Standalone migration runner. Migrations also run at the end of `update` (001/002). 003-flat-to-releases only runs via `install --upgrade`. |
+| `abtars status` | Print manifest + lock state. Exit 1 if not installed or layout mismatched. |
 
-Plus utility CLIs: `agentbridge-browser`, `agentbridge-restart`, `agentbridge-tweet`.
+Plus utility CLIs: `abtars-browser`, `abtars-restart`, `abtars-tweet`.
 
-Run `agentbridge <cmd> --help` for per-command usage.
+Run `abtars <cmd> --help` for per-command usage.
 
 ---
 
 ## Runtime layout (post-#158)
 
 ```
-~/.agentbridge/
+~/.abtars/
 ├── releases/
 │   ├── 0.1.0-<sha>/dist/        # versioned; ~5 MB per release
 │   └── 0.1.0-<prev-sha>/dist/   # kept for instant rollback
@@ -92,12 +92,12 @@ Run `agentbridge <cmd> --help` for per-command usage.
 │   └── downloaded/                # skill catalog installs
 ├── agents/ tasks/ prompts/ core/   # operator-editable overlays
 ├── bin/                           # thin wrappers
-│   ├── agentbridge
-│   ├── agentbridge-browser
-│   ├── agentbridge-restart
-│   └── agentbridge-tweet
-├── scripts/                       # agentbridge.sh, watchdog.sh, browser-patchright.sh, doctor.sh, ...
-├── agentbridge.sh                 # launcher (invoked by watchdog)
+│   ├── abtars
+│   ├── abtars-browser
+│   ├── abtars-restart
+│   └── abtars-tweet
+├── scripts/                       # abtars.sh, watchdog.sh, browser-patchright.sh, doctor.sh, ...
+├── abtars.sh                 # launcher (invoked by watchdog)
 ├── watchdog.sh                    # process supervisor
 ├── browser-patchright.sh          # docker browser lifecycle
 ├── manifest.json                  # {version, commit, branch, source, migrations, abmind_version, ...}
@@ -117,7 +117,7 @@ Run `agentbridge <cmd> --help` for per-command usage.
 
 ### `config/.env` (operator-owned)
 
-Seeded from `.env.example` on first install. Managed by `agentbridge onboard` for the core keys; operator can add custom keys freely (preserved across `onboard` re-runs).
+Seeded from `.env.example` on first install. Managed by `abtars onboard` for the core keys; operator can add custom keys freely (preserved across `onboard` re-runs).
 
 Keys written by `onboard`:
 - `TELEGRAM_BOT_TOKEN` — from @BotFather
@@ -131,7 +131,7 @@ Operator-managed (edit by hand):
 - `AGENT_CLI_PATH` — path to `kiro-cli` binary
 - `AGENT_TRANSPORT` — `acp` | `direct-api` | `openai-compat`
 - `SELFHEAL_ENABLED`, `DISABLED_CAPABILITIES` — feature toggles
-- Many more — see `abproject/docs/asbuilts/config-agentbridge.asbuilt.md` for the full reference
+- Many more — see `abproject/docs/asbuilts/config-abtars.asbuilt.md` for the full reference
 
 ### `config/.env.skills` (operator-owned)
 
@@ -157,12 +157,12 @@ User allowlist. No default — you write this yourself or let `onboard` derive i
 
 ## Three deploy modes
 
-### (a) agentbridge-only update
+### (a) abtars-only update
 
 ```bash
-cd ~/workspace/ab/agentbridge
+cd ~/workspace/ab/abtars
 git pull
-agentbridge update
+abtars update
 ```
 
 Requires abmind already installed at a compatible version (verified via `~/.abmind/manifest.json` read).
@@ -183,7 +183,7 @@ Bridge keeps running on its current abmind version. Next bridge `update` will ve
 # abmind first (bridge depends on it)
 cd ~/workspace/ab/abmind && git pull && abmind update
 # Then bridge
-cd ~/workspace/ab/agentbridge && git pull && agentbridge update
+cd ~/workspace/ab/abtars && git pull && abtars update
 ```
 
 Deliberately NOT wrapped in a single subcommand — hidden cross-package side effects were the failure mode of the old `deploy.sh` (silent `require.resolve` skip). Explicit wins.
@@ -194,7 +194,7 @@ Deliberately NOT wrapped in a single subcommand — hidden cross-package side ef
 
 - **Node.js** 22+
 - **SQLite** — bundled via better-sqlite3
-- **rsync** — required by `agentbridge update` to dereference `file:../abmind` dep
+- **rsync** — required by `abtars update` to dereference `file:../abmind` dep
 - **Git** — `update` reads HEAD SHA + branch for version tag
 - **Docker** (optional) — for `browser-patchright.sh` (patchright-based browsing)
 - **Ollama** (recommended) — for abmind's embedding-based recall; see `abmind/docs/install.md`
@@ -206,7 +206,7 @@ Deliberately NOT wrapped in a single subcommand — hidden cross-package side ef
 For CI, automation, or scripted installs:
 
 ```bash
-agentbridge onboard \
+abtars onboard \
   --non-interactive \
   --accept-risk \
   --telegram-token "123:ABC..." \
@@ -224,17 +224,17 @@ Optional: `--default-provider` (default `openrouter`), `--default-model` (provid
 ## Updating
 
 ```bash
-cd ~/workspace/ab/agentbridge
+cd ~/workspace/ab/abtars
 git pull
-agentbridge update
+abtars update
 ```
 
 What happens:
 1. Check `git fetch` — refuse if local HEAD behind origin (override: `--from-local`)
 2. `npm install` in the checkout (if package-lock.json changed)
 3. `npm run build` (typescript compile)
-4. Stage `dist/` → `~/.agentbridge/releases/<version>/dist/`
-5. `rsync -aL` node_modules → `~/.agentbridge/node_modules/` (dereferences abmind symlink)
+4. Stage `dist/` → `~/.abtars/releases/<version>/dist/`
+5. `rsync -aL` node_modules → `~/.abtars/node_modules/` (dereferences abmind symlink)
 6. Flip `current` symlink (atomic)
 7. Update `manifest.json`
 8. Prune oldest release if retention (3) exceeded
@@ -248,8 +248,8 @@ What happens:
 ## Rolling back
 
 ```bash
-agentbridge rollback                              # previous release, instant
-agentbridge rollback --to 0.1.0-28f71ef           # specific version
+abtars rollback                              # previous release, instant
+abtars rollback --to 0.1.0-28f71ef           # specific version
 ```
 
 Restart the bridge (kill + watchdog respawn) to pick up the flipped symlink.
@@ -259,7 +259,7 @@ Restart the bridge (kill + watchdog respawn) to pick up the flipped symlink.
 v0.1.0-abc pinned different deps than v0.1.0-xyz (package-lock hashes differ).
 Rollback via symlink is unsafe. Instead:
   git checkout <commit>
-  agentbridge update --from-local
+  abtars update --from-local
 ```
 Because `node_modules/` is shared and the old release's deps aren't present. Full rebuild is the correct recovery.
 
@@ -267,7 +267,7 @@ Because `node_modules/` is shared and the old release's deps aren't present. Ful
 
 ## Migration from pre-#158 flat layout
 
-If you had an older `~/.agentbridge/` with `dist/` at the root (no `releases/`), first time only:
+If you had an older `~/.abtars/` with `dist/` at the root (no `releases/`), first time only:
 
 1. **Stop the bridge + watchdog:**
    ```bash
@@ -276,51 +276,51 @@ If you had an older `~/.agentbridge/` with `dist/` at the root (no `releases/`),
    pkill -TERM -f 'node.*dist/main\.js'
 
    # macOS / Molty:
-   launchctl unload ~/Library/LaunchAgents/com.agentbridge.watchdog.plist
+   launchctl unload ~/Library/LaunchAgents/com.abtars.watchdog.plist
    ```
-   Verify with `pgrep -f 'node.*agentbridge.*dist/main\.js'` → empty.
+   Verify with `pgrep -f 'node.*abtars.*dist/main\.js'` → empty.
 
 2. **Run the upgrade migration:**
    ```bash
-   cd ~/workspace/ab/agentbridge
-   agentbridge install --upgrade
+   cd ~/workspace/ab/abtars
+   abtars install --upgrade
    ```
 
    The migration:
    - Refuses if any bridge process is still running
-   - Backs up `~/.agentbridge/` → `~/.agentbridge.pre-158.bak/` (automated, ~several hundred MB)
+   - Backs up `~/.abtars/` → `~/.abtars.pre-158.bak/` (automated, ~several hundred MB)
    - Moves `dist/` → `releases/<derived-version>/dist/`
    - Creates `current -> releases/<derived-version>`
    - Preserves any custom files in `bin/` under `bin.pre-158.bak/` inside the backup
-   - Regenerates launcher scripts (`agentbridge.sh`, `watchdog.sh`, `browser-patchright.sh`) to use `current/dist/main.js`
+   - Regenerates launcher scripts (`abtars.sh`, `watchdog.sh`, `browser-patchright.sh`) to use `current/dist/main.js`
    - Writes initial manifest with migration record
 
 3. **First real update:**
    ```bash
-   agentbridge update
+   abtars update
    ```
    Builds the current checkout into a proper versioned release.
 
 4. **Restart:**
    ```bash
    # Linux / KP:
-   ~/.agentbridge/watchdog.sh --all --web --agent &
+   ~/.abtars/watchdog.sh --all --web --agent &
 
    # macOS / Molty:
-   launchctl load ~/Library/LaunchAgents/com.agentbridge.watchdog.plist
+   launchctl load ~/Library/LaunchAgents/com.abtars.watchdog.plist
    ```
 
 5. **Verify:**
    ```bash
-   agentbridge status
-   tail -f ~/.agentbridge/logs/bridge-$(date +%F).log
+   abtars status
+   tail -f ~/.abtars/logs/bridge-$(date +%F).log
    ```
 
 **Rollback of the migration itself:**
 ```bash
 pkill -f watchdog && pkill -TERM -f 'node.*main\.js'
-rm -rf ~/.agentbridge
-mv ~/.agentbridge.pre-158.bak ~/.agentbridge
+rm -rf ~/.abtars
+mv ~/.abtars.pre-158.bak ~/.abtars
 # Restart via your platform's service manager
 ```
 
@@ -330,30 +330,30 @@ mv ~/.agentbridge.pre-158.bak ~/.agentbridge
 
 ```bash
 # Wipe only operator config (re-run onboard to restore)
-agentbridge reset --scope config --yes
+abtars reset --scope config --yes
 
 # Wipe config + memory + logs + reports + received. Keeps code (releases/).
-agentbridge reset --scope config+data --yes
+abtars reset --scope config+data --yes
 
-# Full uninstall. Removes ~/.agentbridge/ + PATH symlinks.
-# Automatic backup to ~/.agentbridge.reset-<ts>.bak/ unless --no-backup.
-agentbridge reset --scope full --yes
+# Full uninstall. Removes ~/.abtars/ + PATH symlinks.
+# Automatic backup to ~/.abtars.reset-<ts>.bak/ unless --no-backup.
+abtars reset --scope full --yes
 ```
 
 All destructive ops:
 - Support `--dry-run` for preview
 - Refuse unsafe targets (`/`, `$HOME`, outside-home paths)
 - Require `--yes` in non-interactive mode
-- `full` scope only touches PATH symlinks that point into our own `~/.agentbridge/bin/` (exact-match check; never clobbers symlinks owned by other installs)
+- `full` scope only touches PATH symlinks that point into our own `~/.abtars/bin/` (exact-match check; never clobbers symlinks owned by other installs)
 
 ---
 
 ## Launching + supervision
 
-`install` creates `~/.agentbridge/watchdog.sh` — the process supervisor. Start it:
+`install` creates `~/.abtars/watchdog.sh` — the process supervisor. Start it:
 
 ```bash
-~/.agentbridge/watchdog.sh --all --web --agent &
+~/.abtars/watchdog.sh --all --web --agent &
 ```
 
 Flags:
@@ -364,36 +364,36 @@ Flags:
 The watchdog:
 - Spawns `node current/dist/main.js` with the same flags
 - Monitors `bridge.lock` heartbeat; kills + respawns on stale
-- Logs to `~/.agentbridge/logs/bridge-<date>.log`
+- Logs to `~/.abtars/logs/bridge-<date>.log`
 
 For persistent service supervision:
 
 ### macOS (launchd — Molty)
-`~/Library/LaunchAgents/com.agentbridge.watchdog.plist` — the file is shipped in the repo's `scripts/` and installed by `install`. Load:
+`~/Library/LaunchAgents/com.abtars.watchdog.plist` — the file is shipped in the repo's `scripts/` and installed by `install`. Load:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.agentbridge.watchdog.plist
+launchctl load ~/Library/LaunchAgents/com.abtars.watchdog.plist
 ```
 
 ### Linux (systemd — optional)
-A systemd unit template (`scripts/agentbridge@.service`) ships in the repo but is **not auto-installed**. Manual setup if you want systemd supervision:
+A systemd unit template (`scripts/abtars@.service`) ships in the repo but is **not auto-installed**. Manual setup if you want systemd supervision:
 ```bash
-sudo cp ~/workspace/ab/agentbridge/scripts/agentbridge@.service /etc/systemd/system/
-sudo systemctl enable --now agentbridge@$USER
+sudo cp ~/workspace/ab/abtars/scripts/abtars@.service /etc/systemd/system/
+sudo systemctl enable --now abtars@$USER
 ```
 
-For KP dev: just background the watchdog (`~/.agentbridge/watchdog.sh --all --web --agent &`). Restart manually on reboot.
+For KP dev: just background the watchdog (`~/.abtars/watchdog.sh --all --web --agent &`). Restart manually on reboot.
 
 ---
 
 ## Doctor (health check)
 
 ```bash
-agentbridge doctor
-agentbridge doctor --fix
+abtars doctor
+abtars doctor --fix
 ```
 
 Runs `scripts/doctor.sh`. Checks:
-- `~/.agentbridge/` layout (releases, current, manifest, config)
+- `~/.abtars/` layout (releases, current, manifest, config)
 - Bridge process state via `pgrep`
 - Watchdog process state
 - Lock file freshness
@@ -406,19 +406,19 @@ Runs `scripts/doctor.sh`. Checks:
 
 ## Troubleshooting
 
-### `agentbridge: command not found`
+### `abtars: command not found`
 
 `~/.local/bin` isn't on `$PATH`. Add to shell config:
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
-Or re-run `agentbridge install` — it prints the exact line.
+Or re-run `abtars install` — it prints the exact line.
 
 ### `error: Lock held by pid N`
 
-Another `agentbridge update`/`install` is running. Check:
+Another `abtars update`/`install` is running. Check:
 ```bash
-agentbridge status    # shows lock state
+abtars status    # shows lock state
 ```
 Stale locks (PID dead or >1h old) are auto-stolen on next attempt.
 
@@ -435,13 +435,13 @@ Then retry.
 
 Happens during `update` if the destination `node_modules/abmind` is a real directory but source has it as a symlink (`file:../abmind`). The command now deletes destination before copy; if you still hit this on an old release, run:
 ```bash
-rm -rf ~/.agentbridge/node_modules
-agentbridge update
+rm -rf ~/.abtars/node_modules
+abtars update
 ```
 
 ### Bridge starts but responds with "disk I/O error" in logs
 
-The running bridge's abmind deps point at a symlink into the dev workspace instead of a materialized copy. Run `agentbridge update` again — the rsync-L fix dereferences the symlink.
+The running bridge's abmind deps point at a symlink into the dev workspace instead of a materialized copy. Run `abtars update` again — the rsync-L fix dereferences the symlink.
 
 ### `memory_entities` table or entity errors
 
@@ -470,18 +470,18 @@ pkill -f watchdog
 pkill -TERM -f 'node.*dist/main\.js'
 
 # Remove runtime
-rm -rf ~/.agentbridge
+rm -rf ~/.abtars
 
 # Remove PATH symlinks
-rm -f ~/.local/bin/agentbridge ~/.local/bin/agentbridge-browser \
-      ~/.local/bin/agentbridge-restart ~/.local/bin/agentbridge-tweet
+rm -f ~/.local/bin/abtars ~/.local/bin/abtars-browser \
+      ~/.local/bin/abtars-restart ~/.local/bin/abtars-tweet
 
 # Remove launchd service (macOS only)
-launchctl unload ~/Library/LaunchAgents/com.agentbridge.watchdog.plist
-rm ~/Library/LaunchAgents/com.agentbridge.watchdog.plist
+launchctl unload ~/Library/LaunchAgents/com.abtars.watchdog.plist
+rm ~/Library/LaunchAgents/com.abtars.watchdog.plist
 
 # Optionally remove the git checkout
-rm -rf ~/workspace/ab/agentbridge
+rm -rf ~/workspace/ab/abtars
 ```
 
 abmind is independent — uninstall separately per `abmind/docs/install.md`.
@@ -492,31 +492,31 @@ abmind is independent — uninstall separately per `abmind/docs/install.md`.
 
 ### Bridge won't start after reboot (macOS)
 
-**Symptom:** `launchctl list | grep agentbridge` shows the watchdog with a non-zero exit status or PID `-`. Bridge process not running.
+**Symptom:** `launchctl list | grep abtars` shows the watchdog with a non-zero exit status or PID `-`. Bridge process not running.
 
 **Check watchdog log:**
 ```bash
-tail -30 ~/.agentbridge/logs/watchdog-launchd.log
+tail -30 ~/.abtars/logs/watchdog-launchd.log
 ```
 
 | Log pattern | Cause | Fix |
 |---|---|---|
-| Repeated "Watchdog starting" every 10s, no "Starting bridge" | Watchdog self-destruct loop (doctor.sh or other startup crash) | Check `~/.agentbridge/logs/launchd.log` for errors. If doctor.sh is the cause, verify it's not called from watchdog startup. |
-| "Bridge spawned (PID=N)" then "Bridge process gone (PID=N)" in <60s | Bridge crashes on startup | Check `~/.agentbridge/logs/launchd.log` for the crash. Common: missing `better-sqlite3`, port conflict, bad `.env`. |
+| Repeated "Watchdog starting" every 10s, no "Starting bridge" | Watchdog self-destruct loop (doctor.sh or other startup crash) | Check `~/.abtars/logs/launchd.log` for errors. If doctor.sh is the cause, verify it's not called from watchdog startup. |
+| "Bridge spawned (PID=N)" then "Bridge process gone (PID=N)" in <60s | Bridge crashes on startup | Check `~/.abtars/logs/launchd.log` for the crash. Common: missing `better-sqlite3`, port conflict, bad `.env`. |
 | "Port 3000 is already in use" | Another bridge instance or stale process holds the port | `lsof -i :3000` to find it. Kill the stale process. If two launchd plists are loaded, remove the legacy one (see below). |
-| No log at all | Watchdog not loaded or plist missing | `ls ~/Library/LaunchAgents/com.agentbridge.watchdog.plist` — if missing, run `agentbridge update` (copies plist). Then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist`. |
+| No log at all | Watchdog not loaded or plist missing | `ls ~/Library/LaunchAgents/com.abtars.watchdog.plist` — if missing, run `abtars update` (copies plist). Then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist`. |
 
 ### Bridge won't start after reboot (Linux)
 
 ```bash
-systemctl --user status agentbridge-watchdog
-journalctl --user -u agentbridge-watchdog -n 50
+systemctl --user status abtars-watchdog
+journalctl --user -u abtars-watchdog -n 50
 ```
 
-If the service file is missing: `agentbridge update` installs it to `~/.config/systemd/user/`. Then:
+If the service file is missing: `abtars update` installs it to `~/.config/systemd/user/`. Then:
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now agentbridge-watchdog
+systemctl --user enable --now abtars-watchdog
 ```
 
 ### Two bridge instances fighting (Telegram 409 Conflict)
@@ -526,59 +526,59 @@ systemctl --user enable --now agentbridge-watchdog
 **Diagnose:**
 ```bash
 ps aux | grep "node.*main.js" | grep -v grep
-launchctl list | grep agentbridge   # macOS
+launchctl list | grep abtars   # macOS
 ```
 
-If two launchd jobs are loaded (e.g. `com.agentbridge.watchdog` AND `com.agentbridge.molty`):
+If two launchd jobs are loaded (e.g. `com.abtars.watchdog` AND `com.abtars.molty`):
 ```bash
 # Keep only the watchdog plist
-launchctl unload ~/Library/LaunchAgents/com.agentbridge.molty.plist
-rm ~/Library/LaunchAgents/com.agentbridge.molty.plist
+launchctl unload ~/Library/LaunchAgents/com.abtars.molty.plist
+rm ~/Library/LaunchAgents/com.abtars.molty.plist
 ```
 
 If two node processes from the same plist: the watchdog spawns one, something else (cron agent, manual start) spawned another. Kill the rogue:
 ```bash
 # Find the watchdog's bridge PID
-cat ~/.agentbridge/bridge.lock | python3 -c "import json,sys;print(json.load(sys.stdin)['pid'])"
+cat ~/.abtars/bridge.lock | python3 -c "import json,sys;print(json.load(sys.stdin)['pid'])"
 # Kill any OTHER node main.js process
 ```
 
 ### `abmind recall` / CLI tools not found from bridge
 
-**Symptom:** Model says "can't find abmind" or execute_bash returns "command not found" for `abmind`, `agentbridge-tweet`, etc.
+**Symptom:** Model says "can't find abmind" or execute_bash returns "command not found" for `abmind`, `abtars-tweet`, etc.
 
 **Cause:** The bridge inherits PATH from the watchdog's launchd plist (macOS) or systemd service (Linux). If PATH doesn't include user-local bin dirs, CLI tools are invisible.
 
 **Check:**
 ```bash
 # See what PATH the bridge actually has (macOS)
-ps -p $(cat ~/.agentbridge/bridge.lock | python3 -c "import json,sys;print(json.load(sys.stdin)['pid'])") -E | grep PATH
+ps -p $(cat ~/.abtars/bridge.lock | python3 -c "import json,sys;print(json.load(sys.stdin)['pid'])") -E | grep PATH
 ```
 
-**Fix:** `agentbridge update` templates the plist with `$HOME`-relative paths. If you see hardcoded `/Users/akos/...` in the plist, run `agentbridge update` to regenerate it. Then reload:
+**Fix:** `abtars update` templates the plist with `$HOME`-relative paths. If you see hardcoded `/Users/akos/...` in the plist, run `abtars update` to regenerate it. Then reload:
 ```bash
 # macOS
-launchctl bootout gui/$(id -u)/com.agentbridge.watchdog
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist
+launchctl bootout gui/$(id -u)/com.abtars.watchdog
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist
 # Linux
-systemctl --user daemon-reload && systemctl --user restart agentbridge-watchdog
+systemctl --user daemon-reload && systemctl --user restart abtars-watchdog
 ```
 
 ### `better-sqlite3` not found (ERR_MODULE_NOT_FOUND)
 
-**Symptom:** Bridge crashes with `Cannot find package 'better-sqlite3' imported from .agentbridge/node_modules/abmind/dist/src/memory-db.js`.
+**Symptom:** Bridge crashes with `Cannot find package 'better-sqlite3' imported from .abtars/node_modules/abmind/dist/src/memory-db.js`.
 
-**Cause:** `better-sqlite3` is an abmind dependency. It lives at `~/.agentbridge/node_modules/abmind/node_modules/better-sqlite3/`. If this directory is missing, the deploy's rsync didn't include it.
+**Cause:** `better-sqlite3` is an abmind dependency. It lives at `~/.abtars/node_modules/abmind/node_modules/better-sqlite3/`. If this directory is missing, the deploy's rsync didn't include it.
 
 **Fix:**
 ```bash
 # Ensure abmind's source checkout has it installed
 cd ~/abmind && npm install   # (or wherever abmind checkout lives)
 # Re-deploy bridge (rsync picks up abmind's node_modules)
-cd ~/agentbridge && agentbridge update
+cd ~/abtars && abtars update
 ```
 
-If the problem persists, check that `agentbridge update` is NOT deleting `~/.agentbridge/node_modules/abmind/node_modules/`. This was a known bug fixed in commit `ae65108`.
+If the problem persists, check that `abtars update` is NOT deleting `~/.abtars/node_modules/abmind/node_modules/`. This was a known bug fixed in commit `ae65108`.
 
 ### Plist changes not taking effect
 
@@ -587,11 +587,11 @@ If the problem persists, check that `agentbridge update` is NOT deleting `~/.age
 **Cause:** launchd caches the plist at load time. `launchctl kickstart -k` restarts the process but reuses the cached config. You need a full unload/reload.
 
 ```bash
-launchctl bootout gui/$(id -u)/com.agentbridge.watchdog
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agentbridge.watchdog.plist
+launchctl bootout gui/$(id -u)/com.abtars.watchdog
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist
 ```
 
-Or reboot. `agentbridge update` prints a hint when plist content changes.
+Or reboot. `abtars update` prints a hint when plist content changes.
 
 ### Sleep cycle fails / Mac stays awake
 
@@ -599,12 +599,12 @@ Or reboot. `agentbridge update` prints a hint when plist content changes.
 
 **Check:**
 ```bash
-grep -E "sleep|dreamy|BUDGET|🏁" ~/.agentbridge/logs/bridge-$(date +%F).log | tail -20
+grep -E "sleep|dreamy|BUDGET|🏁" ~/.abtars/logs/bridge-$(date +%F).log | tail -20
 ```
 
 | Pattern | Cause | Fix |
 |---|---|---|
-| "All models exhausted" on multiple steps | LLM provider rate-limited or down | Wait for provider recovery. Sleep retries up to 3 times (5min apart). Check model config: `cat ~/.agentbridge/config/transport.json`. |
+| "All models exhausted" on multiple steps | LLM provider rate-limited or down | Wait for provider recovery. Sleep retries up to 3 times (5min apart). Check model config: `cat ~/.abtars/config/transport.json`. |
 | "LLM call limit (N) reached — suspending" | Sleep budget exhausted | Normal if many steps failed (each retry burns budget). The `suspended` status now allows retry (fixed in abmind `c87847a`). |
 | "Sleep already done today — skip" after a failed attempt | Retry blocked by daily flag | Update abmind — fix `c87847a` treats `suspended` as retryable. |
 | Sleep succeeded but no "Putting hardware to sleep" | Quiet-tick countdown not reached (user messaged during wait) | Normal — bridge waits for N quiet ticks (no messages) after Dreamy finishes before calling `pmset sleepnow`. |
@@ -623,8 +623,8 @@ grep -E "sleep|dreamy|BUDGET|🏁" ~/.agentbridge/logs/bridge-$(date +%F).log | 
 
 **Check:**
 ```bash
-cat ~/.agentbridge/bridge.lock   # lastHeartbeat timestamp
-tail -50 ~/.agentbridge/logs/bridge-$(date +%F).log   # last activity
+cat ~/.abtars/bridge.lock   # lastHeartbeat timestamp
+tail -50 ~/.abtars/logs/bridge-$(date +%F).log   # last activity
 ```
 
 If heartbeat is stale but bridge is responsive via Telegram, the heartbeat task may have thrown. Check for `[heartbeat]` errors in the log.
@@ -633,9 +633,9 @@ If heartbeat is stale but bridge is responsive via Telegram, the heartbeat task 
 
 **Symptom:** User sent messages while bridge was down, but they never arrived after recovery.
 
-**Cause (pre-fix):** The Telegram poller advanced its offset before processing handlers. If the bridge crashed mid-processing, messages were acked to Telegram but never handled. Fixed in commit `7e4623c` — offset now advances only after handler success, persisted to `~/.agentbridge/state/telegram-offset`.
+**Cause (pre-fix):** The Telegram poller advanced its offset before processing handlers. If the bridge crashed mid-processing, messages were acked to Telegram but never handled. Fixed in commit `7e4623c` — offset now advances only after handler success, persisted to `~/.abtars/state/telegram-offset`.
 
-**If still happening post-fix:** Check `~/.agentbridge/state/telegram-offset` — it should contain the last successfully-processed update_id. On restart, the poller resumes from this offset. If the file is missing or corrupt, the poller starts from 0 (Telegram replays retained updates, up to 24h).
+**If still happening post-fix:** Check `~/.abtars/state/telegram-offset` — it should contain the last successfully-processed update_id. On restart, the poller resumes from this offset. If the file is missing or corrupt, the poller starts from 0 (Telegram replays retained updates, up to 24h).
 
 ### Model returns empty response (🤷 fallback)
 
@@ -648,13 +648,13 @@ If heartbeat is stale but bridge is responsive via Telegram, the heartbeat task 
 - Model context window full (returns empty when prompt exceeds limit)
 - Model bug (specific prompt triggers empty response)
 
-**Check:** `grep "Empty response" ~/.agentbridge/logs/bridge-$(date +%F).log` — if frequent, check model health: `/models` command in Telegram, or `cat ~/.agentbridge/config/transport.json`.
+**Check:** `grep "Empty response" ~/.abtars/logs/bridge-$(date +%F).log` — if frequent, check model health: `/models` command in Telegram, or `cat ~/.abtars/config/transport.json`.
 
 ### execute_bash blocked ("Command blocked: this would spawn/restart a bridge")
 
 **Symptom:** Model's bash command returns `Command blocked: this would spawn/restart a bridge or watchdog process`.
 
-**Cause:** Safety guardrail in `tool-registry.ts` blocks commands matching `main.js`, `agentbridge.sh`, `watchdog.sh`, or `launchctl load/bootstrap/kickstart/start`. Prevents LLMs from accidentally spawning duplicate bridge instances (observed in the 2026-04-22 outage).
+**Cause:** Safety guardrail in `tool-registry.ts` blocks commands matching `main.js`, `abtars.sh`, `watchdog.sh`, or `launchctl load/bootstrap/kickstart/start`. Prevents LLMs from accidentally spawning duplicate bridge instances (observed in the 2026-04-22 outage).
 
 **If legitimate:** The guardrail is intentionally broad. If you need to run a blocked command, do it from a terminal, not through the bot.
 
@@ -665,7 +665,7 @@ If heartbeat is stale but bridge is responsive via Telegram, the heartbeat task 
 - `abmind/docs/install.md` — memory backend install
 - `abproject/docs/plans/158-deploy-rewrite.md` — design doc for this lifecycle
 - `abproject/docs/asbuilts/system.asbuilt.md` — bridge architecture overview
-- `abproject/docs/asbuilts/config-agentbridge.asbuilt.md` — full `.env` reference
+- `abproject/docs/asbuilts/config-abtars.asbuilt.md` — full `.env` reference
 
 
 ---

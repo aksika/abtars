@@ -9,7 +9,7 @@ user-invocable: false
 Headless Chromium via shell. Use for auth flows, JS-rendered pages, form submissions, screenshots.
 
 ```bash
-agentbridge-browser --action <ACTION> [--url <URL>] [--selector <SEL>] [--value <VAL>] [--session-id <ID>] [--full-page]
+abtars-browser --action <ACTION> [--url <URL>] [--selector <SEL>] [--value <VAL>] [--session-id <ID>] [--full-page]
 ```
 
 ## Actions
@@ -26,8 +26,8 @@ Same `--session-id` = same browser tab across calls. Auto-close after 5 min idle
 
 ## Container
 ```bash
-docker ps --filter name=agentbridge-browser --format "{{.Status}}"  # check
-~/.agentbridge/browser-docker.sh                                     # start if needed
+docker ps --filter name=abtars-browser --format "{{.Status}}"  # check
+~/.abtars/browser-docker.sh                                     # start if needed
 ```
 
 ## When NOT to use

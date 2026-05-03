@@ -19,59 +19,59 @@ Parse this file first. Any item described here is **expected** and must NOT be r
 ## Step 1 — Doctor
 
 ```bash
-~/.agentbridge/scripts/doctor.sh
+~/.abtars/scripts/doctor.sh
 ```
 
 ## Step 2 — Heartbeat
 
 ```bash
-cat ~/.agentbridge/memory/.heartbeat  # epoch ms — if >10 min old, stalled
+cat ~/.abtars/memory/.heartbeat  # epoch ms — if >10 min old, stalled
 ```
 
 ## Step 3 — Cron / Tasks
 
 ```bash
 # Use /tasks command or:
-cat ~/.agentbridge/memory/cron-state.json
+cat ~/.abtars/memory/cron-state.json
 ```
 
 ## Step 4 — Sleep cycle
 
 ```bash
-ls -lt ~/.agentbridge/memory/sleep/ | head -5   # last audit — if >2 days, broken
-ls -la ~/.agentbridge/memory/sleep/*.lock 2>/dev/null  # stale locks
+ls -lt ~/.abtars/memory/sleep/ | head -5   # last audit — if >2 days, broken
+ls -la ~/.abtars/memory/sleep/*.lock 2>/dev/null  # stale locks
 ```
 
 ## Step 5 — Memory DB
 
 ```bash
-sqlite3 ~/.agentbridge/memory/memory.db "SELECT 'messages', COUNT(*) FROM messages UNION ALL SELECT 'extracted', COUNT(*) FROM extracted_memories;"
-sqlite3 ~/.agentbridge/memory/memory.db "SELECT datetime(timestamp/1000, 'unixepoch', 'localtime'), substr(content,1,60) FROM messages ORDER BY timestamp DESC LIMIT 3;"
+sqlite3 ~/.abtars/memory/memory.db "SELECT 'messages', COUNT(*) FROM messages UNION ALL SELECT 'extracted', COUNT(*) FROM extracted_memories;"
+sqlite3 ~/.abtars/memory/memory.db "SELECT datetime(timestamp/1000, 'unixepoch', 'localtime'), substr(content,1,60) FROM messages ORDER BY timestamp DESC LIMIT 3;"
 ```
 
 ## Step 6 — Consolidation
 
 ```bash
-ls -lt ~/.agentbridge/memory/daily/ 2>/dev/null | head -3    # if >3 days, broken
-ls -lt ~/.agentbridge/memory/weekly/ 2>/dev/null | head -3
+ls -lt ~/.abtars/memory/daily/ 2>/dev/null | head -3    # if >3 days, broken
+ls -lt ~/.abtars/memory/weekly/ 2>/dev/null | head -3
 ```
 
 ## Step 7 — Bridge logs
 
 ```bash
-grep -i "error\|fail\|crash\|WARN" ~/.agentbridge/logs/bridge.log 2>/dev/null | tail -20
+grep -i "error\|fail\|crash\|WARN" ~/.abtars/logs/bridge.log 2>/dev/null | tail -20
 ```
 
 ## Step 8 — Backup
 
 ```bash
-ls -lt ~/.backup-agentbridge/ 2>/dev/null | head -5  # should be <2 days old
+ls -lt ~/.backup-abtars/ 2>/dev/null | head -5  # should be <2 days old
 ```
 
 ## Step 9 — Processes
 
 ```bash
-ps aux | grep -E "agentbridge|kiro-cli|ollama" | grep -v grep
+ps aux | grep -E "abtars|kiro-cli|ollama" | grep -v grep
 ```
 
 ## Step 10 — System resources
@@ -86,7 +86,7 @@ uptime
 
 ```bash
 # Check configured models from transport.json
-python3 ~/.agentbridge/scripts/scout-ollama.py
+python3 ~/.abtars/scripts/scout-ollama.py
 ```
 
 ## Reporting

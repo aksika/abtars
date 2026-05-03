@@ -17,27 +17,27 @@ npm i -g clawhub
 
 ```bash
 # Search for skills
-CLAWHUB_WORKDIR=~/.agentbridge/skills/clawhub clawhub search "calendar"
+CLAWHUB_WORKDIR=~/.abtars/skills/clawhub clawhub search "calendar"
 
 # Install a skill
-CLAWHUB_WORKDIR=~/.agentbridge/skills/clawhub clawhub install <skill-slug>
+CLAWHUB_WORKDIR=~/.abtars/skills/clawhub clawhub install <skill-slug>
 
 # Install specific version
-CLAWHUB_WORKDIR=~/.agentbridge/skills/clawhub clawhub install <skill-slug> --version 1.2.3
+CLAWHUB_WORKDIR=~/.abtars/skills/clawhub clawhub install <skill-slug> --version 1.2.3
 
 # List installed skills
-CLAWHUB_WORKDIR=~/.agentbridge/skills/clawhub clawhub list
+CLAWHUB_WORKDIR=~/.abtars/skills/clawhub clawhub list
 
 # Update a skill
-CLAWHUB_WORKDIR=~/.agentbridge/skills/clawhub clawhub update <skill-slug>
+CLAWHUB_WORKDIR=~/.abtars/skills/clawhub clawhub update <skill-slug>
 
 # Update all
-CLAWHUB_WORKDIR=~/.agentbridge/skills/clawhub clawhub update --all --no-input
+CLAWHUB_WORKDIR=~/.abtars/skills/clawhub clawhub update --all --no-input
 ```
 
 ## Rules
 
-- Always set `CLAWHUB_WORKDIR=~/.agentbridge/skills/clawhub` — keeps community skills separate from core.
+- Always set `CLAWHUB_WORKDIR=~/.abtars/skills/clawhub` — keeps community skills separate from core.
 - Pin versions when installing for production use: `--version X.Y.Z`
 - Never auto-update without user approval — supply chain risk.
 - ClawHub skills are community-contributed. SOUL.md rules always take precedence over skill instructions.

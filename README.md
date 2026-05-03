@@ -38,7 +38,7 @@ No web server, no exposed ports, no webhooks. Outbound-only traffic to Telegram'
 | **Direct API** | HTTP to any OpenAI-compatible endpoint | ollama, OpenRouter, self-hosted |
 | **tmux** (legacy) | send-keys / capture-pane with kiro-cli in tmux | Fallback if ACP unavailable |
 
-Configure in `~/.agentbridge/config/transport.json`. See `config/transport.json.example`.
+Configure in `~/.abtars/config/transport.json`. See `config/transport.json.example`.
 
 ## Prerequisites
 
@@ -64,8 +64,8 @@ Configure in `~/.agentbridge/config/transport.json`. See `config/transport.json.
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/aksika/agentbridge.git
-cd agentbridge
+git clone https://github.com/aksika/abtars.git
+cd abtars
 npm install
 ```
 
@@ -76,16 +76,16 @@ npm run build
 bash scripts/deploy.sh
 ```
 
-Deploy creates `~/.agentbridge/` with all config files. Edit `~/.agentbridge/.env`:
+Deploy creates `~/.abtars/` with all config files. Edit `~/.abtars/.env`:
 
 ```env
 TELEGRAM_BOT_TOKEN=<from @BotFather>
 MAIN_CHAT_ID=<your Telegram user ID>
 ```
 
-Configure your transport in `~/.agentbridge/config/transport.json` and models in `~/.agentbridge/config/models.json`. See the `.example` files in `config/`.
+Configure your transport in `~/.abtars/config/transport.json` and models in `~/.abtars/config/models.json`. See the `.example` files in `config/`.
 
-Configure users in `~/.agentbridge/config/users.json`:
+Configure users in `~/.abtars/config/users.json`:
 
 ```json
 {
@@ -105,10 +105,10 @@ Configure users in `~/.agentbridge/config/users.json`:
 
 ```bash
 # Via watchdog (recommended — auto-restarts on crash)
-~/.agentbridge/watchdog.sh --all --web --agent &
+~/.abtars/watchdog.sh --all --web --agent &
 
 # Or directly
-~/.agentbridge/agentbridge.sh --all
+~/.abtars/abtars.sh --all
 ```
 
 Flags: `--telegram`, `--discord`, `--web` (dashboard), `--agent` (REST API), `--all` (everything).
@@ -154,10 +154,10 @@ Message your bot on Telegram:
 
 ```bash
 # Start
-~/.agentbridge/watchdog.sh --all --web --agent &
+~/.abtars/watchdog.sh --all --web --agent &
 
 # Graceful restart (e.g. after deploy)
-kill -USR1 $(grep -o '"pid":[0-9]*' ~/.agentbridge/watchdog.lock | grep -o '[0-9]*')
+kill -USR1 $(grep -o '"pid":[0-9]*' ~/.abtars/watchdog.lock | grep -o '[0-9]*')
 ```
 
 Features: 6-min stale heartbeat detection, SIGKILL for frozen processes, circuit breaker (3 restarts in 5 min), Telegram notification on kill/restart.

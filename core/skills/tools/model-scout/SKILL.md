@@ -7,8 +7,8 @@ User asks about model recommendations, best deals, or you need to evaluate if a 
 
 ## Config files
 
-- **models.json** — `~/.agentbridge/config/models.json` (hot-reloaded)
-- **transport.json** — `~/.agentbridge/config/transport.json` (lists providers, defaults, fallbackChain)
+- **models.json** — `~/.abtars/config/models.json` (hot-reloaded)
+- **transport.json** — `~/.abtars/config/transport.json` (lists providers, defaults, fallbackChain)
 
 ## transport.json provider fields (relevant to scouting)
 
@@ -46,24 +46,24 @@ When proposing new models, consider whether they should be added to a provider's
 
 ```bash
 # OpenRouter free tier
-python3 ~/.agentbridge/scripts/scout-openrouter.py
+python3 ~/.abtars/scripts/scout-openrouter.py
 
 # Ollama cloud models (no local, cloud only)
-python3 ~/.agentbridge/scripts/scout-ollama.py
+python3 ~/.abtars/scripts/scout-ollama.py
 ```
 
 ### 2. Research quality
 
 Browse leaderboards to get Intelligence Index scores:
 ```bash
-agentbridge-browser --action navigate --url "https://artificialanalysis.ai/leaderboards/models"
-agentbridge-browser --action extract_text --max-chars 5000
+abtars-browser --action navigate --url "https://artificialanalysis.ai/leaderboards/models"
+abtars-browser --action extract_text --max-chars 5000
 ```
 
 Search for new cloud models on Ollama:
 ```bash
-agentbridge-browser --action navigate --url "https://ollama.com/search?q=cloud"
-agentbridge-browser --action extract_text --max-chars 5000
+abtars-browser --action navigate --url "https://ollama.com/search?q=cloud"
+abtars-browser --action extract_text --max-chars 5000
 ```
 
 ### 3. Propose top 3
@@ -94,7 +94,7 @@ Format:
 After user approves, add with description explaining why:
 
 ```bash
-python3 ~/.agentbridge/scripts/scout-add-model.py \
+python3 ~/.abtars/scripts/scout-add-model.py \
   "model-id" contextWindow maxOutput rank input_cost output_cost \
   "Why this model: Intelligence XX, free, large context" \
   ollama openrouter

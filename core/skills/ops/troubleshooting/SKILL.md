@@ -9,7 +9,7 @@ user-invocable: false
 ## Bridge process
 ```bash
 ps aux | grep 'dist/main.js' | grep -v grep
-tail -c 20000 ~/.agentbridge/logs/bridge.log | sed 's/2026-/\n2026-/g' | grep -v 'memory-db.*Database initialized' | tail -50
+tail -c 20000 ~/.abtars/logs/bridge.log | sed 's/2026-/\n2026-/g' | grep -v 'memory-db.*Database initialized' | tail -50
 ```
 
 ## Orphaned processes
@@ -23,26 +23,26 @@ done
 
 ## Browser agent
 ```bash
-docker ps --filter name=agentbridge-browser --format "{{.ID}} {{.Status}}"
-docker logs agentbridge-browser --tail 30
-agentbridge-browser --action screenshot --session-id browse | jq -r '.screenshot' | base64 -d > /tmp/browser.png
+docker ps --filter name=abtars-browser --format "{{.ID}} {{.Status}}"
+docker logs abtars-browser --tail 30
+abtars-browser --action screenshot --session-id browse | jq -r '.screenshot' | base64 -d > /tmp/browser.png
 ```
 
 ## Memory DB
 ```bash
-sqlite3 ~/.agentbridge/memory/memory.db "SELECT 'messages', COUNT(*) FROM messages UNION ALL SELECT 'extracted', COUNT(*) FROM extracted_memories;"
-timeout 3 sqlite3 ~/.agentbridge/memory/memory.db "SELECT COUNT(*) FROM messages;" && echo "DB OK" || echo "DB LOCKED"
+sqlite3 ~/.abtars/memory/memory.db "SELECT 'messages', COUNT(*) FROM messages UNION ALL SELECT 'extracted', COUNT(*) FROM extracted_memories;"
+timeout 3 sqlite3 ~/.abtars/memory/memory.db "SELECT COUNT(*) FROM messages;" && echo "DB OK" || echo "DB LOCKED"
 ```
 
 ## Pending tasks
 ```bash
-cat ~/.agentbridge/memory/cron.json 2>/dev/null | jq '.[] | select(.fired == false)'
-cat ~/.agentbridge/memory/pending_browse.json 2>/dev/null
-cat ~/.agentbridge/memory/pending_reminders.json 2>/dev/null
+cat ~/.abtars/memory/cron.json 2>/dev/null | jq '.[] | select(.fired == false)'
+cat ~/.abtars/memory/pending_browse.json 2>/dev/null
+cat ~/.abtars/memory/pending_reminders.json 2>/dev/null
 ```
 
 ## Telegram connectivity
 ```bash
-TOKEN=$(grep TELEGRAM_BOT_TOKEN ~/.agentbridge/.env | cut -d= -f2)
+TOKEN=$(grep TELEGRAM_BOT_TOKEN ~/.abtars/.env | cut -d= -f2)
 curl -s "https://api.telegram.org/bot${TOKEN}/getMe" | jq .ok
 ```

@@ -9,7 +9,7 @@ user-invocable: false
 Fast, lightweight page fetching. Returns clean markdown. No browser session, no login.
 
 ```bash
-agentbridge-fetch "<url>"
+abtars-fetch "<url>"
 ```
 
 Returns markdown to stdout. Truncated at 50K chars.
@@ -26,4 +26,4 @@ Returns markdown to stdout. Truncated at 50K chars.
 - Anti-bot protection (Cloudflare, captcha)
 - Screenshots needed
 
-For Level 2: use `agentbridge-browse --task "description" --chat-id <CHAT_ID>`
+For Level 2: use `abtars-browse --task "description" --chat-id <CHAT_ID>`

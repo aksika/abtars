@@ -6,29 +6,29 @@ user-invocable: false
 
 # Cron
 
-Schedule reminders and tasks via `agentbridge-cron`. Never use host crontab.
+Schedule reminders and tasks via `abtars-cron`. Never use host crontab.
 
 ## One-shot
 ```bash
-agentbridge-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type reminder
-agentbridge-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type task --executor agent
+abtars-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type reminder
+abtars-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type task --executor agent
 ```
 
 ## Recurring
 ```bash
-agentbridge-cron add --schedule "30 7 * * *" --message "command or prompt" --chat-id <ID> --type task --executor script
-agentbridge-cron add --schedule "0 10 * * *" --message "Follow the research prompt..." --chat-id <ID> --type task --executor agent
+abtars-cron add --schedule "30 7 * * *" --message "command or prompt" --chat-id <ID> --type task --executor script
+abtars-cron add --schedule "0 10 * * *" --message "Follow the research prompt..." --chat-id <ID> --type task --executor agent
 ```
 
 Schedule format: `min hour dom month dow` (standard cron).
 
 ## Management
 ```bash
-agentbridge-cron list              # show pending/recurring
-agentbridge-cron remove <id>       # cancel by 6-char hex ID
-agentbridge-cron pause <id>        # temporarily disable
-agentbridge-cron resume <id>       # re-enable
-agentbridge-cron history <id>      # last 10 runs
+abtars-cron list              # show pending/recurring
+abtars-cron remove <id>       # cancel by 6-char hex ID
+abtars-cron pause <id>        # temporarily disable
+abtars-cron resume <id>       # re-enable
+abtars-cron history <id>      # last 10 runs
 ```
 
 ## How it fires
@@ -48,4 +48,4 @@ When the user asks to run a scheduled task (e.g. "run the finance report", "trig
 ## When to use
 - Specific time: `--at` + `--type reminder` or `--type task`
 - Recurring: `--schedule` + appropriate executor
-- No specific time ("remind me later"): use `agentbridge-todo` instead
+- No specific time ("remind me later"): use `abtars-todo` instead

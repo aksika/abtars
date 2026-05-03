@@ -10,10 +10,10 @@ Manage a persistent todo list via shell commands.
 
 ## Commands
 
-- `agentbridge-todo add "description"` — add new item
-- `agentbridge-todo list` — show all items
-- `agentbridge-todo done <N>` — mark item N as complete
-- `agentbridge-todo remove <N>` — delete item N
+- `abtars-todo add "description"` — add new item
+- `abtars-todo list` — show all items
+- `abtars-todo done <N>` — mark item N as complete
+- `abtars-todo remove <N>` — delete item N
 
 Item numbers are 1-based, in the order they appear in the file.
 
@@ -25,6 +25,6 @@ Item numbers are 1-based, in the order they appear in the file.
 
 ## When NOT to use
 
-- For time-specific reminders with a specific date/time (use agentbridge-cron instead)
+- For time-specific reminders with a specific date/time (use abtars-cron instead)
 - For facts/preferences (use abmind store instead)
 - For routine conversational messages
