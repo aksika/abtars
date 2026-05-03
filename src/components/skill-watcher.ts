@@ -9,7 +9,7 @@
 
 import { logAndSwallow } from "./log-and-swallow.js";
 import { readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import { logInfo, logWarn } from "./logger.js";
 import { scanForInjection } from "abmind";
@@ -48,7 +48,7 @@ export class SkillWatcher implements ISkillSlot {
     for (const filepath of files) {
       try {
         const mtime = statSync(filepath).mtimeMs;
-        const key = basename(filepath);
+        const key = basename(dirname(filepath));
         const prev = this.mtimes.get(key);
         this.mtimes.set(key, mtime);
 
@@ -118,7 +118,7 @@ export class SkillWatcher implements ISkillSlot {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
         if (entry.isDirectory()) results.push(...this.scanMdFiles(full));
-        else if (entry.name.endsWith(".md") && entry.name !== "TOOLS.md" && entry.name !== "skills_catalog.md") results.push(full);
+        else if (entry.name === "SKILL.md") results.push(full);
       }
     } catch (err) { logAndSwallow("skill_watcher", "op", err); }
     return results;
@@ -147,7 +147,7 @@ export class SkillWatcher implements ISkillSlot {
       const fm = this.parseFrontmatter(content);
       if (fm) {
         return {
-          name: fm.name ?? basename(filepath, ".md"),
+          name: fm.name ?? basename(dirname(filepath)),
           description: (fm.description ?? "").slice(0, 120),
           ...(fm.requires ? { requires: fm.requires } : {}),
         };
@@ -156,11 +156,11 @@ export class SkillWatcher implements ISkillSlot {
       // Fallback for skill files without frontmatter
       const lines = content.split("\n").filter(l => l.trim());
       const heading = lines.find(l => l.startsWith("#"));
-      const name = heading?.replace(/^#+\s*/, "").trim() ?? basename(filepath, ".md");
+      const name = heading?.replace(/^#+\s*/, "").trim() ?? basename(dirname(filepath));
       const desc = lines.find(l => !l.startsWith("#") && l.trim().length > 10)?.trim() ?? "";
       return { name, description: desc.slice(0, 120) };
     } catch {
-      return { name: basename(filepath, ".md"), description: "" };
+      return { name: basename(dirname(filepath)), description: "" };
     }
   }
 

@@ -21,8 +21,10 @@ describe("#369 — SkillWatcher frontmatter parsing + binary gate", () => {
   let catalogPath: string;
   let watcher: SkillWatcher;
 
-  function writeSkill(filename: string, content: string): string {
-    const p = join(skillsDir, filename);
+  function writeSkill(name: string, content: string, category = "tools"): string {
+    const dir = join(skillsDir, category, name);
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, "SKILL.md");
     writeFileSync(p, content, "utf-8");
     return p;
   }
@@ -48,7 +50,7 @@ describe("#369 — SkillWatcher frontmatter parsing + binary gate", () => {
 
   describe("frontmatter", () => {
     it("extracts name + description from YAML frontmatter", () => {
-      writeSkill("alpha.md", `---
+      writeSkill("alpha", `---
 name: alpha
 description: First test skill
 ---
@@ -64,7 +66,7 @@ Body paragraph.
     });
 
     it("is case-insensitive on frontmatter keys", () => {
-      writeSkill("beta.md", `---
+      writeSkill("beta", `---
 Name: beta
 Description: Mixed-case keys
 ---
@@ -76,7 +78,7 @@ Description: Mixed-case keys
     });
 
     it("trims whitespace around values", () => {
-      writeSkill("gamma.md", `---
+      writeSkill("gamma", `---
 name:    gamma
 description:     Padded description
 ---
@@ -87,7 +89,7 @@ description:     Padded description
 
     it("extracts 'requires' field when present", () => {
       // node is always available — skill should appear
-      writeSkill("runnable.md", `---
+      writeSkill("runnable", `---
 name: runnable
 description: Gated by node presence
 requires: node
@@ -98,7 +100,7 @@ requires: node
     });
 
     it("handles unclosed frontmatter (falls back to heading heuristic)", () => {
-      writeSkill("broken.md", `---
+      writeSkill("broken", `---
 name: broken
 description: Missing closing fence
 
@@ -112,7 +114,7 @@ Body.
     });
 
     it("handles no-frontmatter files via fallback heuristic", () => {
-      writeSkill("plain.md", `# Plain Heading
+      writeSkill("plain", `# Plain Heading
 
 This is a paragraph describing the skill, long enough to pass the > 10 char filter.
 `);
@@ -123,7 +125,7 @@ This is a paragraph describing the skill, long enough to pass the > 10 char filt
 
     it("truncates description at 120 chars", () => {
       const long = "x".repeat(200);
-      writeSkill("long.md", `---
+      writeSkill("long", `---
 name: long
 description: ${long}
 ---
@@ -137,7 +139,7 @@ description: ${long}
     });
 
     it("ignores leading empty lines before frontmatter fence", () => {
-      writeSkill("padded.md", `
+      writeSkill("padded", `
 
 ---
 name: padded
@@ -153,7 +155,7 @@ description: Leading blank lines
 
   describe("requires gate", () => {
     it("includes skill when required binary is present (node)", () => {
-      writeSkill("needs-node.md", `---
+      writeSkill("needs-node", `---
 name: needs-node
 description: Requires node runtime
 requires: node
@@ -164,7 +166,7 @@ requires: node
     });
 
     it("skips skill when required binary is missing", () => {
-      writeSkill("needs-missing.md", `---
+      writeSkill("needs-missing", `---
 name: needs-missing
 description: Requires a binary that does not exist
 requires: nonexistent-cli-abc123xyz
@@ -176,7 +178,7 @@ requires: nonexistent-cli-abc123xyz
     });
 
     it("includes skills without 'requires:' field regardless (backward compat)", () => {
-      writeSkill("no-req.md", `---
+      writeSkill("no-req", `---
 name: no-req
 description: No requires field
 ---
@@ -186,18 +188,18 @@ description: No requires field
     });
 
     it("catalog contains exactly the expected subset on mixed input", () => {
-      writeSkill("a.md", `---
+      writeSkill("a", `---
 name: a
 description: Always included
 ---
 `);
-      writeSkill("b.md", `---
+      writeSkill("b", `---
 name: b
 description: Gated by node
 requires: node
 ---
 `);
-      writeSkill("c.md", `---
+      writeSkill("c", `---
 name: c
 description: Gated by nonsense
 requires: nonexistent-zxy-999
@@ -216,7 +218,7 @@ requires: nonexistent-zxy-999
       // We can't easily spy on execFileSync without DI, so we verify observable
       // behavior: back-to-back calls both produce the same catalog correctly
       // and are fast (no 1s timeouts stacking up).
-      writeSkill("cached.md", `---
+      writeSkill("cached", `---
 name: cached
 description: Uses binary cache
 requires: node
