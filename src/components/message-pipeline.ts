@@ -284,6 +284,11 @@ export async function handleInboundMessage(
 
     // --- Empty response ---
     if (!userResponse) {
+      // Strip streaming cursor from partial message
+      if (streamMsgId && adapter.editMessage) {
+        const partial = streamBuffer.replace(/^\[lang:\w{2}\]\s*/i, "").replace(/ ▍$/, "").trim();
+        if (partial) await adapter.editMessage(channelId, streamMsgId, partial).catch(() => {});
+      }
       if (noReply) {
         logDebug(TAG, "LLM returned [NO-REPLY], dropping silently");
         return;
