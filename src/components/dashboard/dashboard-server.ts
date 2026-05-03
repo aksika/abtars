@@ -297,7 +297,7 @@ export class DashboardServer implements IDashboardSlot {
       if (method === "GET" && pathname === "/api/cron") {
         if (!this.deps.authGate.guard(req, res)) return;
         try {
-          const { readEntries } = await import("../cron/cron-store.js");
+          const { readEntries } = await import("../tasks/task-store.js");
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, entries: readEntries() }));
         } catch (err) {
@@ -399,7 +399,7 @@ function readLogLines(cutoffMs: number, levelFilter: string[], limit: number): s
 
 // ── Cron Control ────────────────────────────────────────────────────────────
 
-import { readEntry as cronReadEntry, writeEntry as cronWriteEntry } from "../cron/cron-store.js";
+import { readEntry as cronReadEntry, writeEntry as cronWriteEntry } from "../tasks/task-store.js";
 
 function handleCronAction(id: string, action: string): { ok: boolean; error?: string } {
   const entry = cronReadEntry(id);

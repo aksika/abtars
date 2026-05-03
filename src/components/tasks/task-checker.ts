@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logInfo } from "../logger.js";
 import { CronExpressionParser } from "cron-parser";
-import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./cron-store.js";
+import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry } from "./task-store.js";
 import type { CronEntry } from "../../cli/abtars-task.js";
 
 const TAG = "cron-checker";

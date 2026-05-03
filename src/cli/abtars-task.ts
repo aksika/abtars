@@ -12,7 +12,7 @@
 
 import { localISO } from "../utils/local-time.js";
 import { randomBytes } from "node:crypto";
-import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbRemoveEntry } from "../components/cron/cron-store.js";
+import { readEntries as dbReadEntries, readEntry, writeEntry, removeEntry as dbRemoveEntry } from "../components/tasks/task-store.js";
 
 
 export interface CronEntry {

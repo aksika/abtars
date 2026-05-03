@@ -183,7 +183,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
   };
 }
 
-import { readEntries as readCronEntries } from "../cron/cron-store.js";
+import { readEntries as readCronEntries } from "../tasks/task-store.js";
 
 function readCronStatus(): CronEntryStatus[] {
   try {

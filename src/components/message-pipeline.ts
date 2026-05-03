@@ -18,7 +18,7 @@ import type { MemoryManager } from "abmind";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
-import type { RunningJob } from "./cron/cron-queue.js";
+import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 

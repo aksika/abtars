@@ -17,14 +17,14 @@ describe("abtars-task", () => {
   afterEach(async () => {
     process.env.HOME = originalHome;
     // Close DB before cleanup
-    const { closeDb } = await import("../components/cron/cron-store.js");
+    const { closeDb } = await import("../components/tasks/task-store.js");
     closeDb();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
   async function run(args: string[]): Promise<string> {
     // Force re-import to pick up new HOME
-    const { closeDb } = await import("../components/cron/cron-store.js");
+    const { closeDb } = await import("../components/tasks/task-store.js");
     closeDb();
     const mod = await import("./abtars-task.js");
     const logs: string[] = [];

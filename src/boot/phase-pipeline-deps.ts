@@ -16,8 +16,8 @@
  * Populates ctx: cronQueue, codingMode, idleSave, pipelineDeps.
  */
 
-import { readEntry as cronReadEntry } from "../components/cron/cron-store.js";
-import { CronQueue } from "../components/cron/cron-queue.js";
+import { readEntry as cronReadEntry } from "../components/tasks/task-store.js";
+import { CronQueue } from "../components/tasks/task-queue.js";
 import { CodingMode } from "../components/coding-mode.js";
 import { IdleSave } from "../components/idle-save.js";
 import { logWarn } from "../components/logger.js";
@@ -25,7 +25,7 @@ import { updateCtxStart } from "./ctx-start.js";
 import { existsSync } from "node:fs";
 import type { BootCtx } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
-import type { TaskCompleteCallback } from "../components/cron/cron-queue.js";
+import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
   const { config, memoryConfig, transport } = ctx;

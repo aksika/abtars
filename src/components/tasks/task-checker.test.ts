@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CronEntry } from "../../cli/abtars-task.js";
-import { writeEntry, readEntries, closeDb } from "./cron-store.js";
+import { writeEntry, readEntries, closeDb } from "./task-store.js";
 
 const originalHome = process.env.HOME;
 
@@ -41,7 +41,7 @@ describe("cron-checker", () => {
   }
 
   it("fires due reminder to pending_reminders.json", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     writeCron([{
       id: "abc123", fireAt: Date.now() - 1000, message: "Test reminder",
       chatId: 1, type: "reminder", fired: false, createdAt: Date.now() - 5000,
@@ -59,7 +59,7 @@ describe("cron-checker", () => {
   });
 
   it("skips future entries", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     writeCron([{
       id: "fut001", fireAt: Date.now() + 3_600_000, message: "Future",
       chatId: 1, type: "reminder", fired: false, createdAt: Date.now(),
@@ -75,7 +75,7 @@ describe("cron-checker", () => {
   });
 
   it("skips already-fired entries", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     writeCron([{
       id: "old001", fireAt: Date.now() - 1000, message: "Already done",
       chatId: 1, type: "reminder", fired: true, createdAt: Date.now() - 5000,
@@ -88,7 +88,7 @@ describe("cron-checker", () => {
   });
 
   it("fires task entry and calls onTaskComplete", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     writeCron([{
       id: "tsk001", fireAt: Date.now() - 1000, message: "Run report",
       chatId: 99, type: "task", fired: false, createdAt: Date.now() - 5000,
@@ -106,12 +106,12 @@ describe("cron-checker", () => {
   });
 
   it("handles empty DB gracefully", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     expect(() => checkCron()).not.toThrow();
   });
 
   it("recurring entry reschedules instead of marking fired", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     writeCron([{
       id: "rec001", fireAt: Date.now() - 1000, message: "Recurring reminder",
       chatId: 1, type: "reminder", schedule: "0 10 * * *", fired: false, createdAt: Date.now() - 5000,
@@ -126,7 +126,7 @@ describe("cron-checker", () => {
   });
 
   it("skips paused entries", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     writeCron([{
       id: "pau001", fireAt: Date.now() - 1000, message: "Paused",
       chatId: 1, type: "reminder", fired: false, paused: true, createdAt: Date.now(),
@@ -141,7 +141,7 @@ describe("cron-checker", () => {
   });
 
   it("GCs fired one-shots older than 7 days", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
     writeCron([
       { id: "old001", fireAt: eightDaysAgo, message: "Ancient", chatId: 1, type: "reminder", fired: true, createdAt: eightDaysAgo },
@@ -156,7 +156,7 @@ describe("cron-checker", () => {
   });
 
   it("script task reverts fireAt on failure", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     const originalFireAt = Date.now() - 1000;
     writeCron([{
       id: "fail01", fireAt: originalFireAt, message: "exit 1",
@@ -174,7 +174,7 @@ describe("cron-checker", () => {
   });
 
   it("single checkCron fires all priorities", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     writeCron([
       { id: "lo001", fireAt: Date.now() - 1000, message: "Normal", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
       { id: "hi001", fireAt: Date.now() - 1000, message: "High prio", chatId: 1, type: "reminder", fired: false, createdAt: Date.now(), priority: "high" },
@@ -189,7 +189,7 @@ describe("cron-checker", () => {
   });
 
   it("returns due tasks for queue (scripts + agents), fires reminders directly", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     writeCron([
       { id: "rem01", fireAt: Date.now() - 1000, message: "Reminder 1", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
       { id: "rem02", fireAt: Date.now() - 1000, message: "Reminder 2", chatId: 1, type: "reminder", fired: false, createdAt: Date.now() },
@@ -210,7 +210,7 @@ describe("cron-checker", () => {
   });
 
   it("returns tasks for queue (CronQueue handles priority sorting)", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     const now = Date.now();
     writeCron([
       { id: "low01", fireAt: now - 3000, message: "low task", chatId: 1, type: "task", executor: "agent", fired: false, createdAt: now, priority: "low" },
@@ -226,7 +226,7 @@ describe("cron-checker", () => {
   });
 
   it("returns empty array when nothing is due", async () => {
-    const { checkCron } = await import("./cron-checker.js");
+    const { checkCron } = await import("./task-checker.js");
     writeCron([]);
     expect(checkCron()).toHaveLength(0);
 
@@ -236,7 +236,7 @@ describe("cron-checker", () => {
   });
 
   it("clearPendingReminders empties the file", async () => {
-    const { checkCron, readPendingReminders, clearPendingReminders } = await import("./cron-checker.js");
+    const { checkCron, readPendingReminders, clearPendingReminders } = await import("./task-checker.js");
     writeCron([{
       id: "clr001", fireAt: Date.now() - 1000, message: "Clear me",
       chatId: 1, type: "reminder", fired: false, createdAt: Date.now(),

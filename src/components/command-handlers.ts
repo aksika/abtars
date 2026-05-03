@@ -12,13 +12,13 @@ import { homedir, platform } from "node:os";
 import { logInfo, logError } from "./logger.js";
 import { writeSleepStatus, readBridgeLockField, writeForceSleep } from "./transport/bridge-lock-transport.js";
 
-import { readEntries as cronReadEntries } from "./cron/cron-store.js";
+import { readEntries as cronReadEntries } from "./tasks/task-store.js";
 import { handleNLMCommand } from "./nlm-command-handler.js";
 import { abtarsHome } from "../paths.js";
 // Legacy compaction removed — /compact now uses context orchestrator via transport
 import { resetAndPrepare } from "./message-pipeline.js";
 import type { PipelineDeps } from "./message-pipeline.js";
-import type { RunningJob } from "./cron/cron-queue.js";
+import type { RunningJob } from "./tasks/task-queue.js";
 
 import type { Platform } from "../types/platform.js";
 export type { Platform };
@@ -391,7 +391,7 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
   const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
   let listing: string;
   try {
-    const { readEntries } = await import("./cron/cron-store.js");
+    const { readEntries } = await import("./tasks/task-store.js");
     const entries = readEntries();
     const active = entries.filter((e: any) => !e.fired && !e.paused);
     active.sort((a: any, b: any) => {

@@ -102,7 +102,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
   // Tasks
   let tasks = { recurring: 0, pending: 0, paused: 0 };
   try {
-    const { readEntries } = await import("./cron/cron-store.js");
+    const { readEntries } = await import("./tasks/task-store.js");
     const entries = readEntries();
     tasks = {
       recurring: entries.filter((e: any) => e.schedule && !e.paused).length,

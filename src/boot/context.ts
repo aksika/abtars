@@ -13,7 +13,7 @@ import type { MemoryConfig, MemoryManager } from "abmind";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { HeartbeatSystem } from "../components/heartbeat-system.js";
 import type { ServiceRegistry } from "../components/service-registry.js";
-import type { CronQueue } from "../components/cron/cron-queue.js";
+import type { CronQueue } from "../components/tasks/task-queue.js";
 import type { ConversationBuffer } from "../components/conversation-buffer.js";
 import type { CodingMode } from "../components/coding-mode.js";
 import type { IdleSave } from "../components/idle-save.js";
