@@ -54,9 +54,9 @@ function recordRun(entry: CronEntry, exitCode?: number): void {
 
 
 /**
- * Scan cron.json for due entries. Fires reminders directly.
+ * Scan tasks.json for due entries. Fires reminders directly.
  * Returns due task entries (script + agent) for the CronQueue to process.
- * Advances fireAt and writes cron.json.
+ * Advances fireAt and writes tasks.json.
  */
 export function checkCron(): CronEntry[] {
   let entries = dbReadEntries();

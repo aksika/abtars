@@ -1,6 +1,6 @@
 /**
- * cron-store.ts — JSON-backed cron entry storage.
- * Replaces cron-db.ts (SQLite in memory.db) with ~/.abtars/state/cron.json.
+ * task-store.ts — JSON-backed task entry storage.
+ * Replaces cron-db.ts (SQLite in memory.db) with ~/.abtars/state/tasks.json.
  * Same API surface for callers.
  */
 
@@ -9,7 +9,7 @@ import { join, dirname } from "node:path";
 import type { CronEntry } from "../../cli/abtars-task.js";
 import { abtarsHome } from "../../paths.js";
 
-const storePath = (): string => join(abtarsHome(), "state", "cron.json");
+const storePath = (): string => join(abtarsHome(), "state", "tasks.json");
 
 function readAll(): CronEntry[] {
   const p = storePath();

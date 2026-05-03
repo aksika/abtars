@@ -7,7 +7,7 @@
  *   abtars-task list
  *   abtars-task remove <id>
  *
- * File: ~/.abtars/memory/cron.json
+ * File: ~/.abtars/state/tasks.json
  */
 
 import { localISO } from "../utils/local-time.js";

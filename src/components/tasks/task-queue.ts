@@ -23,7 +23,7 @@ const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const RETRY_DELAY_MS = 10 * 60 * 1000; // skip 1 cycle (2 × 5min)
 const PRIO_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
-const STATE_FILE = join(homedir(), ".abtars", "cron-queue-state.json");
+const STATE_FILE = join(homedir(), ".abtars", "task-queue-state.json");
 
 interface PersistedState {
   pid: number;
