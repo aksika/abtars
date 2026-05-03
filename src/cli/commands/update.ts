@@ -13,6 +13,7 @@ import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/pr
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import type { SourceName } from '../update-sources/types.js';
 import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION, type PriorRelease } from '../deploy-lib-import.js';
+import { showHintOnce } from '../../components/hints.js';
 
 function readJsonField(file: string, field: string): unknown {
   try { return JSON.parse(readFileSync(file, 'utf-8'))[field]; } catch { return undefined; }
@@ -37,6 +38,9 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
   try {
     const source = makeLocalBuildSource({ repoRoot: process.cwd(), allowStale: opts.fromLocal });
+    if (opts.fromLocal) {
+      showHintOnce("update-from-local", "Building from working copy (--from-local). To sync with remote first: git pull && abtars update");
+    }
     process.stdout.write(`Building from local checkout (${process.cwd()})...\n`);
     const staged = await source.prepare({
       releasesDir: paths.releases,

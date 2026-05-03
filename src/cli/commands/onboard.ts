@@ -24,6 +24,7 @@ import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { packagePaths, readManifest } from '../deploy-lib-import.js';
+import { showHintOnce } from '../../components/hints.js';
 
 export interface OnboardOptions {
   readonly nonInteractive: boolean;
@@ -470,6 +471,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   const envPath = join(paths.config, '.env');
   const existing = await readExisting(envPath);
   if (existing !== null && !opts.force) {
+    showHintOnce("onboard-reoffer", "Re-running onboard overwrites config. Use --force to confirm, or edit ~/.abtars/config/.env directly.");
     if (opts.nonInteractive) {
       process.stderr.write(`config/.env already configured. Re-run with --force to overwrite.\n`);
       return 3;

@@ -31,7 +31,7 @@
       "linux": { "units": ["abtars@.service", "abtars-watchdog.service"] }
     }
   },
-  "cliWrappers": ["abtars", "abtars-browser", "abtars-restart", "abtars-tweet"],
+  "cliWrappers": ["abtars", "abtars-browser", "abtars-restart", "abtars-task", "abtars-tweet"],
   "postInstall": [
     { "id": "001-env-memory-to-config", "run": "migration", "when": "update" },
     { "id": "002-env-skills-to-config", "run": "migration", "when": "update" },

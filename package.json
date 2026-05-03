@@ -45,6 +45,7 @@
   "bin": {
     "abtars": "dist/cli/abtars.js",
     "abtars-browser": "dist/cli/abtars-browser.js",
+    "abtars-task": "dist/cli/abtars-task.js",
     "abtars-tweet": "dist/cli/abtars-tweet.js"
   },
   "license": "Apache-2.0"
