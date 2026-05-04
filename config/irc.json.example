@@ -1,0 +1,18 @@
+{
+  "servers": [
+    {
+      "id": "kirocomms",
+      "host": "127.0.0.1",
+      "port": 6667,
+      "tls": false,
+      "nick": "kp-bot",
+      "nickservPassword": "$IRC_NICKSERV_PASSWORD",
+      "channels": {
+        "#kirocomms": {
+          "requireMention": true,
+          "allowFrom": ["molty-bot", "aksika"]
+        }
+      }
+    }
+  ]
+}

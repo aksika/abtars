@@ -104,4 +104,40 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
   } else {
     logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
   }
+
+  // ── IRC ──────────────────────────────────────────────────────────────────
+  registry.register("irc", {
+    configured: (() => {
+      try {
+        const { loadIrcConfig } = require("../platforms/irc/irc-config.js");
+        return loadIrcConfig() !== null;
+      } catch { return false; }
+    })(),
+    async create() {
+      const { loadIrcConfig } = await import("../platforms/irc/irc-config.js");
+      const { IrcAdapter } = await import("../platforms/irc/irc-adapter.js");
+      const { handleInboundMessage } = await import("../components/message-pipeline.js");
+      const ircConfig = loadIrcConfig();
+      if (!ircConfig) throw new Error("irc.json missing or empty");
+      const adapter = new IrcAdapter(ircConfig, {
+        onMessage: (msg) => handleInboundMessage(msg, adapter, pipelineDeps),
+      });
+      platformAdapters.set("irc", adapter);
+      return {
+        async start() { await adapter.start(); },
+        stop() { adapter.stop(); platformAdapters.delete("irc"); },
+      };
+    },
+  });
+
+  if (platforms.irc) {
+    const result = await registry.start("irc", { backgroundRetry: true });
+    if (result.ok) {
+      logInfo("main", "📡 IRC started");
+    } else if (result.error?.includes("not configured")) {
+      logWarn("main", "IRC flag set but irc.json missing — skipping");
+    } else {
+      logError("main", `IRC failed to start: ${result.error}`);
+    }
+  }
 }
