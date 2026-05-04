@@ -140,12 +140,15 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         const abmindNM = join(repoRoot, '..', 'abmind', 'node_modules');
         const nativeDir = join(stagedPath, 'node_modules');
         await mkdir(nativeDir, { recursive: true });
-        for (const dep of ['better-sqlite3', 'bindings', 'file-uri-to-path']) {
+        for (const dep of ['better-sqlite3', 'bindings', 'file-uri-to-path', 'sqlite-vec']) {
           const src = join(abmindNM, dep);
           const dst = join(nativeDir, dep);
           try { await cp(src, dst, { recursive: true, dereference: true }); }
           catch { /* dep may not exist on all platforms */ }
         }
+        // Install platform-specific native binaries (sqlite-vec needs arch-specific package)
+        try { runCmd('npm', ['install', '--omit=dev', 'better-sqlite3', 'sqlite-vec'], nativeDir); }
+        catch { /* non-fatal — falls back to brute-force search */ }
 
         const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));
         return { version, stagedPath, commit, branch, packageLockHash, source: 'local' };
