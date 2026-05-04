@@ -245,12 +245,21 @@ export class AgentApiServer {
    */
   private requireBearer(req: IncomingMessage, res: ServerResponse): boolean {
     const token = extractBearerToken(req.headers as Record<string, string | string[] | undefined>);
-    if (!token || token !== this.config.token) {
-      const body = JSON.stringify(openaiError("Missing or invalid bearer token", "authentication_error", "invalid_api_key"));
-      res.writeHead(401, { "Content-Type": "application/json" }).end(body);
+    if (!token) {
+      res.writeHead(401, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Missing bearer token", "authentication_error", "invalid_api_key")));
       return false;
     }
-    return true;
+    // Accept operator token (AGENT_API_TOKEN from .env) OR any peer's token from peers.json
+    if (this.config.token && token === this.config.token) return true;
+    const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+    const peers = loadPeerConfig().peers;
+    for (const peer of Object.values(peers)) {
+      if (token === peer.token) return true;
+    }
+    res.writeHead(401, { "Content-Type": "application/json" })
+      .end(JSON.stringify(openaiError("Invalid bearer token", "authentication_error", "invalid_api_key")));
+    return false;
   }
 
   /** #373 — /v1/chat/completions dispatch. */
