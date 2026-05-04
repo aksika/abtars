@@ -1,10 +1,12 @@
 import type { PlatformAdapter, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { IrcConfig, IrcServerConfig } from "./irc-config.js";
 import { createIrcClient, type IrcClient } from "./irc-client.js";
-import { logInfo, logDebug } from "../../components/logger.js";
+import { signMessage, verifyMessage } from "./irc-signature.js";
+import { logInfo, logDebug, logWarn } from "../../components/logger.js";
 
 const TAG = "irc";
-const MAX_LINE_BYTES = 450;
+const MAX_LINE_PLAIN = 450;
+const MAX_LINE_SECURE = 340; // leave room for [sig:ts:base64] suffix
 
 export interface IrcAdapterDeps {
   onMessage: (msg: InboundMessage) => void;
@@ -50,29 +52,41 @@ export class IrcAdapter implements PlatformAdapter {
   }
 
   async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<number | undefined> {
-    // channelId format: "serverId:#channel"
     const [serverId, channel] = channelId.split(":", 2);
     const client = this.clients.find((_, i) => this.config.servers[i]?.id === serverId);
     if (!client || !channel) return undefined;
 
-    const lines = this.chunkResponse(text);
+    const server = this.config.servers.find(s => s.id === serverId);
+    const channelConfig = server?.channels[channel];
+    const isSecure = channelConfig?.mode === "secure";
+    const maxLine = isSecure ? MAX_LINE_SECURE : MAX_LINE_PLAIN;
+
+    const lines = this.chunkText(text, maxLine);
     for (const line of lines) {
-      client.send(channel, line);
+      if (isSecure && this.config.identity?.privateKey) {
+        const { tag } = signMessage(this.config.identity.privateKey, server!.nick, channel, line);
+        client.send(channel, `${line} ${tag}`);
+      } else {
+        client.send(channel, line);
+      }
     }
     return undefined;
   }
 
   chunkResponse(text: string): string[] {
+    return this.chunkText(text, MAX_LINE_PLAIN);
+  }
+
+  private chunkText(text: string, maxLen: number): string[] {
     const result: string[] = [];
     for (const paragraph of text.split("\n")) {
-      if (paragraph.length <= MAX_LINE_BYTES) {
+      if (paragraph.length <= maxLen) {
         if (paragraph.trim()) result.push(paragraph);
       } else {
-        // Split long lines at word boundaries
         let remaining = paragraph;
-        while (remaining.length > MAX_LINE_BYTES) {
-          let cut = remaining.lastIndexOf(" ", MAX_LINE_BYTES);
-          if (cut <= 0) cut = MAX_LINE_BYTES;
+        while (remaining.length > maxLen) {
+          let cut = remaining.lastIndexOf(" ", maxLen);
+          if (cut <= 0) cut = maxLen;
           result.push(remaining.slice(0, cut));
           remaining = remaining.slice(cut).trimStart();
         }
@@ -86,7 +100,7 @@ export class IrcAdapter implements PlatformAdapter {
     // Self-echo filter
     if (sender === client.nick) return;
 
-    // Only handle channel messages (not DMs for now)
+    // Only handle channel messages
     if (!target.startsWith("#")) return;
 
     const channelConfig = server.channels[target];
@@ -95,17 +109,31 @@ export class IrcAdapter implements PlatformAdapter {
       return;
     }
 
-    // Sender allowlist
-    if (channelConfig.allowFrom.length > 0 && !channelConfig.allowFrom.includes(sender)) {
-      logDebug(TAG, `[${server.id}] Dropped message from ${sender} (not in allowFrom)`);
-      return;
+    if (channelConfig.mode === "secure") {
+      // Verify signature
+      const pubkey = channelConfig.trustedKeys[sender];
+      if (!pubkey) {
+        logDebug(TAG, `[${server.id}] Dropped from ${sender} — no trusted key`);
+        return;
+      }
+      const result = verifyMessage(pubkey, sender, target, text);
+      if (!result.valid) {
+        logWarn(TAG, `[${server.id}] Signature failed from ${sender}: ${result.reason}`);
+        return;
+      }
+      text = result.text;
+    } else {
+      // Plain mode: sender allowlist
+      if (channelConfig.allowFrom.length > 0 && !channelConfig.allowFrom.includes(sender)) {
+        logDebug(TAG, `[${server.id}] Dropped from ${sender} (not in allowFrom)`);
+        return;
+      }
     }
 
     // Mention gating
     if (channelConfig.requireMention) {
       const nickPattern = new RegExp(`\\b${escapeRegex(server.nick)}\\b[:,]?`, "i");
       if (!nickPattern.test(text)) return;
-      // Strip the mention from the text
       text = text.replace(nickPattern, "").trim();
     }
 

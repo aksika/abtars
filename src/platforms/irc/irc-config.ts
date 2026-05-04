@@ -4,8 +4,10 @@ import { abtarsHome } from "../../paths.js";
 import { logWarn } from "../../components/logger.js";
 
 export interface IrcChannelConfig {
+  mode: "plain" | "secure";
   requireMention: boolean;
-  allowFrom: string[];
+  allowFrom: string[];       // used in plain mode
+  trustedKeys: Record<string, string>; // used in secure mode: nick → base64 pubkey
 }
 
 export interface IrcServerConfig {
@@ -18,7 +20,13 @@ export interface IrcServerConfig {
   channels: Record<string, IrcChannelConfig>;
 }
 
+export interface IrcIdentity {
+  privateKey: string; // base64 DER Ed25519
+  publicKey: string;  // base64 DER Ed25519
+}
+
 export interface IrcConfig {
+  identity?: IrcIdentity;
   servers: IrcServerConfig[];
 }
 
@@ -29,6 +37,11 @@ export function loadIrcConfig(): IrcConfig | null {
   const parsed = JSON.parse(raw);
   if (!parsed?.servers?.length) return null;
 
+  const identity: IrcIdentity | undefined = parsed.identity ? {
+    privateKey: resolveSecret(parsed.identity.privateKey) ?? "",
+    publicKey: parsed.identity.publicKey ?? "",
+  } : undefined;
+
   const servers: IrcServerConfig[] = [];
   for (const s of parsed.servers) {
     if (!s.host || !s.nick || !s.channels) {
@@ -37,9 +50,12 @@ export function loadIrcConfig(): IrcConfig | null {
     }
     const channels: Record<string, IrcChannelConfig> = {};
     for (const [name, cfg] of Object.entries(s.channels as Record<string, any>)) {
+      const mode = cfg.mode === "secure" ? "secure" : "plain";
       channels[name] = {
+        mode,
         requireMention: cfg.requireMention !== false,
         allowFrom: Array.isArray(cfg.allowFrom) ? cfg.allowFrom : [],
+        trustedKeys: (mode === "secure" && cfg.trustedKeys && typeof cfg.trustedKeys === "object") ? cfg.trustedKeys : {},
       };
     }
     servers.push({
@@ -52,7 +68,7 @@ export function loadIrcConfig(): IrcConfig | null {
       channels,
     });
   }
-  return servers.length > 0 ? { servers } : null;
+  return servers.length > 0 ? { identity, servers } : null;
 }
 
 function resolveSecret(val: string | undefined): string | undefined {
