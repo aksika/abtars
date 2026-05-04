@@ -107,12 +107,7 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
 
   // ── IRC ──────────────────────────────────────────────────────────────────
   registry.register("irc", {
-    configured: (() => {
-      try {
-        const { loadIrcConfig } = require("../platforms/irc/irc-config.js");
-        return loadIrcConfig() !== null;
-      } catch { return false; }
-    })(),
+    configured: platforms.irc,
     async create() {
       const { loadIrcConfig } = await import("../platforms/irc/irc-config.js");
       const { IrcAdapter } = await import("../platforms/irc/irc-adapter.js");
