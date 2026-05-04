@@ -223,6 +223,9 @@ export async function update(opts: UpdateOptions): Promise<number> {
       });
     }
 
+    const { printHealthSummary } = await import('./health-check.js');
+    printHealthSummary(paths.home);
+
     return 0;
   } finally {
     await release();

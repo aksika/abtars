@@ -496,6 +496,9 @@ export async function install(opts: InstallOptions): Promise<number> {
     process.stdout.write(`  3. Start the bridge: 'abtars restart' or use the watchdog\n\n`);
   }
 
+  const { printHealthSummary } = await import('./health-check.js');
+  printHealthSummary(paths.home);
+
   // #334: Post-install healthcheck — validate operator channel exists (only on --restore)
   if (!opts.dryRun && opts.restore) {
     const { validateMinimumViability, formatValidationError } = await import('./install-validate.js');
