@@ -1,0 +1,100 @@
+/**
+ * peer-client.ts — HTTP client for peer_ask tool (#392).
+ * POST /v1/chat/completions with bearer + X-Peer-Hops.
+ */
+
+import { request as httpRequest } from "node:http";
+import { loadPeerConfig, type PeerEntry } from "./peer-config.js";
+import { logInfo } from "./logger.js";
+
+const TAG = "peer-client";
+
+export type PeerError = "timeout" | "unreachable" | "hop_exceeded" | "auth_failed" | "peer_error" | "unknown_peer";
+
+/**
+ * Module-level hop budget for the current request. Set by agent-api-server
+ * before dispatching a prompt that came with X-Peer-Hops. Read by peer_ask
+ * tool to know what hops value to forward. Safe in single-threaded Node
+ * because agent-api-server processes one prompt at a time per session.
+ */
+let _currentHops: number | null = null;
+export function setCurrentPeerHops(hops: number | null): void { _currentHops = hops; }
+export function getCurrentPeerHops(): number | null { return _currentHops; }
+
+export class PeerCallError extends Error {
+  constructor(public readonly code: PeerError, message: string) {
+    super(message);
+    this.name = "PeerCallError";
+  }
+}
+
+/**
+ * Call a peer's /v1/chat/completions endpoint.
+ * @param peerName — key in peers.json
+ * @param prompt — user message to send
+ * @param hops — remaining hop budget (decremented before sending)
+ */
+export async function callPeer(peerName: string, prompt: string, hops: number): Promise<string> {
+  const config = loadPeerConfig();
+  const peer = config.peers[peerName];
+  if (!peer) {
+    const available = Object.keys(config.peers).join(", ") || "(none)";
+    throw new PeerCallError("unknown_peer", `Unknown peer '${peerName}'. Available: ${available}`);
+  }
+
+  const start = Date.now();
+  const response = await postCompletion(peer, prompt, hops, config.timeoutMs);
+  logInfo(TAG, `PEER_CALL ${peerName} — ${prompt.length}ch → ${response.length}ch (${Date.now() - start}ms, hops=${hops})`);
+  return response;
+}
+
+function postCompletion(peer: PeerEntry, prompt: string, hops: number, timeoutMs: number): Promise<string> {
+  const body = JSON.stringify({
+    model: "default",
+    messages: [{ role: "user", content: prompt }],
+  });
+
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      hostname: peer.host,
+      port: peer.port,
+      path: "/v1/chat/completions",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+        "Authorization": `Bearer ${peer.token}`,
+        "X-Peer-Hops": String(hops),
+      },
+      timeout: timeoutMs,
+    }, (res) => {
+      let data = "";
+      res.on("data", (c) => data += c);
+      res.on("end", () => {
+        if (res.statusCode === 401 || res.statusCode === 403) {
+          reject(new PeerCallError("auth_failed", `Peer rejected auth (${res.statusCode})`));
+          return;
+        }
+        if (res.statusCode === 429 || res.statusCode === 508) {
+          reject(new PeerCallError("hop_exceeded", `Peer refused — hop limit reached`));
+          return;
+        }
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new PeerCallError("peer_error", `Peer returned ${res.statusCode}: ${data.slice(0, 200)}`));
+          return;
+        }
+        try {
+          const parsed = JSON.parse(data);
+          const content = parsed?.choices?.[0]?.message?.content ?? "";
+          resolve(content);
+        } catch {
+          reject(new PeerCallError("peer_error", `Peer returned non-JSON: ${data.slice(0, 100)}`));
+        }
+      });
+    });
+    req.on("timeout", () => { req.destroy(); reject(new PeerCallError("timeout", `Peer '${peer.host}:${peer.port}' timed out (${timeoutMs}ms)`)); });
+    req.on("error", (err) => reject(new PeerCallError("unreachable", `Peer unreachable: ${err.message}`)));
+    req.write(body);
+    req.end();
+  });
+}

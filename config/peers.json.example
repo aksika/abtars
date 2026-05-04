@@ -1,0 +1,5 @@
+{
+  "peers": {},
+  "maxHops": 12,
+  "timeoutMs": 60000
+}

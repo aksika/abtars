@@ -257,12 +257,27 @@ export class AgentApiServer {
   private async handleV1ChatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const start = Date.now();
     const ip = normalizeIp(req.socket.remoteAddress ?? "");
+
+    // #392 — hop check. If X-Peer-Hops header is present and value is 0, refuse.
+    // If absent, this is a direct call (not forwarded) — always allow.
+    const hopHeader = req.headers["x-peer-hops"];
+    const hopValue = typeof hopHeader === "string" ? parseInt(hopHeader, 10) : null;
+    if (hopValue !== null && hopValue <= 0) {
+      res.writeHead(429, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Peer hop limit reached", "loop_detected", "hop_exceeded")));
+      return;
+    }
+    // Set module-level hop state so peer_ask tool knows the budget for outbound calls
+    const { setCurrentPeerHops } = await import("./peer-client.js");
+    setCurrentPeerHops(hopValue);
+
     let body: unknown;
     try {
       body = JSON.parse(await readBody(req));
     } catch {
       res.writeHead(400, { "Content-Type": "application/json" })
         .end(JSON.stringify(openaiError("Invalid JSON body", "invalid_request_error", "invalid_body")));
+      setCurrentPeerHops(null);
       return;
     }
 
@@ -272,6 +287,7 @@ export class AgentApiServer {
     } catch {
       res.writeHead(503, { "Content-Type": "application/json" })
         .end(JSON.stringify(openaiError("Failed to spawn agent kiro-cli", "server_error", "spawn_failed")));
+      setCurrentPeerHops(null);
       return;
     }
 
@@ -301,6 +317,7 @@ export class AgentApiServer {
 
     res.writeHead(result.status, result.headers);
     res.end(result.body);
+    setCurrentPeerHops(null); // clear hop state after request completes
   }
 
   /** #373 — /v1/embeddings dispatch. */

@@ -308,7 +308,40 @@ const taskTool: ToolDefinition = {
   },
 };
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool];
+const peerAskTool: ToolDefinition = {
+  name: "peer_ask",
+  description: "Ask a peer abtars instance a question. Use for cross-instance delegation (e.g. ask Molty or KP). Returns the peer's full response.",
+  parameters: {
+    type: "object",
+    properties: {
+      peer_name: { type: "string", description: "Name of the peer (as configured in peers.json)" },
+      prompt: { type: "string", description: "The question or request to send to the peer" },
+    },
+    required: ["peer_name", "prompt"],
+  },
+  async execute(args) {
+    const { callPeer, PeerCallError, getCurrentPeerHops } = await import("../peer-client.js");
+    const { loadPeerConfig } = await import("../peer-config.js");
+    const peerName = args.peer_name?.trim();
+    const prompt = args.prompt?.trim();
+    if (!peerName || !prompt) return JSON.stringify({ error: "peer_name and prompt are required" });
+
+    const config = loadPeerConfig();
+    // Determine hops to send: decrement from current request's budget, or use maxHops for direct calls
+    const incomingHops = getCurrentPeerHops();
+    const hops = incomingHops !== null ? Math.min(incomingHops - 1, config.maxHops) : config.maxHops;
+    if (hops <= 0) return JSON.stringify({ error: "Hop limit reached — cannot forward to another peer from this depth" });
+
+    try {
+      return await callPeer(peerName, prompt, hops);
+    } catch (err) {
+      if (err instanceof PeerCallError) return JSON.stringify({ error: `peer_ask failed: ${err.message} (${err.code})` });
+      return JSON.stringify({ error: `peer_ask failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  },
+};
+
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 

@@ -58,6 +58,11 @@
     {
       "source": "tasks.default.json",
       "dest": "state/tasks.json"
+    },
+    {
+      "source": "config/peers.json.example",
+      "dest": "config/peers.json",
+      "mode": "0600"
     }
   ],
   "requiredConfigs": [
