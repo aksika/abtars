@@ -4,9 +4,12 @@
 
 AgentBridge ships a full lifecycle CLI: `install`, `update`, `rollback`, `reset`, `onboard`, `doctor`, `migrate`, `status`.
 
-Runtime lives at `~/.abtars/` (override via `$AGENT_BRIDGE_HOME`). Code is versioned under `releases/<version>/` with a `current` symlink for instant rollback.
+Runtime lives at `~/.abtars/` (override via `$ABTARS_HOME`). Code is versioned under `releases/<version>/` with a `current` symlink for instant rollback.
 
-The bridge depends on **abmind** as a memory backend — install that first (see `abmind/docs/install.md`).
+The bridge depends on **abmind** as a memory backend. Install options:
+- `brew tap aksika/tap && brew install abmind` (macOS)
+- `npm install -g abmind` (any platform)
+- From source (see `abmind/docs/install.md`)
 
 ---
 
