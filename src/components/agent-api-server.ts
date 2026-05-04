@@ -250,8 +250,7 @@ export class AgentApiServer {
         .end(JSON.stringify(openaiError("Missing bearer token", "authentication_error", "invalid_api_key")));
       return false;
     }
-    // Accept operator token (AGENT_API_TOKEN from .env) OR any peer's token from peers.json
-    if (this.config.token && token === this.config.token) return true;
+    // All auth via peers.json — each entry (peer or operator client) has its own token.
     const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
     const peers = loadPeerConfig().peers;
     for (const peer of Object.values(peers)) {
