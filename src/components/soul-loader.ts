@@ -59,6 +59,16 @@ export function loadSoulBundle(memory?: MemoryManager | null): string | null {
   const modelInstructions = buildModelInstructions();
   if (modelInstructions) parts.push(modelInstructions);
 
+  // [EMOTIONAL CONTEXT] — topic arcs for tone awareness
+  try {
+    const arcs = memory?.getEmotionalArcs() ?? [];
+    if (arcs.length > 0) {
+      const ARC_LABELS: Record<string, string> = { "↑": "user sentiment improving", "↓": "user sentiment worsening — be careful", "↕": "volatile — user feelings fluctuate", "→": "stable" };
+      const lines = arcs.map(a => `- ${a.topic}: ${a.arc} (${ARC_LABELS[a.arc] ?? "unknown"})`);
+      parts.push(`[EMOTIONAL CONTEXT]\n${lines.join("\n")}`);
+    }
+  } catch (err) { logAndSwallow("soul_loader", "op", err); }
+
   // [USERS] block
   try {
     const registry = loadUsers();
