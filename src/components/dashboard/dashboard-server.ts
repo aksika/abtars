@@ -33,7 +33,7 @@ export type DashboardServerDeps = {
   getStatus: () => StatusSnapshot;
   registry: ServiceRegistry;
   memorySearchController: MemorySearchController | null;
-  agentApiConfig?: { port: number; allowedIps: string[] } | null;
+  agentApiConfig?: { port: number } | null;
 };
 
 // ── DashboardServer ─────────────────────────────────────────────────────────

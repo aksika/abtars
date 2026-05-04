@@ -110,7 +110,7 @@ export async function phaseDashboard(ctx: BootCtx): Promise<void> {
       getStatus,
       registry,
       memorySearchController,
-      agentApiConfig: agentApiOpts ? { port: agentApiOpts.port, allowedIps: agentApiOpts.allowedIps } : null,
+      agentApiConfig: agentApiOpts ? { port: agentApiOpts.port } : null,
     });
   }
 

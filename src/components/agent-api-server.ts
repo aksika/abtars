@@ -191,12 +191,6 @@ export class AgentApiServer {
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
-    const ip = normalizeIp(req.socket.remoteAddress ?? "");
-    if (ip !== "127.0.0.1" && ip !== "::1" && !this.config.allowedIps.includes(ip)) {
-      logWarn(TAG, `Rejected connection from ${ip}`);
-      res.writeHead(403).end();
-      return;
-    }
 
     const url = req.url ?? "";
     const method = req.method ?? "";

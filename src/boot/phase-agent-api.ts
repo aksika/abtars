@@ -16,10 +16,6 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
   const { config, memory, runtime, platforms, registry } = ctx;
 
   const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
-  if (!agentConfig) {
-    logInfo("main", "Agent API: skipping (AGENT_API_ALLOWED_IPS not configured)");
-    return;
-  }
   let agentApiServer: AgentApiServer | null = null;
 
   registry.register("agent-api", {
@@ -43,8 +39,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
   if (platforms.agent) {
     const result = await registry.start("agent-api");
     if (result.ok) {
-      logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port} (allowed: ${agentConfig.allowedIps.join(", ")})`);
-    } else {
+      logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port}`);    } else {
       logError("main", `Agent API failed to start: ${result.error}`);
     }
   }
