@@ -489,6 +489,11 @@ export async function install(opts: InstallOptions): Promise<number> {
   process.stdout.write(`\nInstall complete.\n`);
   if (!manifestAfter || manifestAfter.version === '') {
     process.stdout.write(`Next: 'abtars update' to build and activate the first release.\n`);
+  } else {
+    process.stdout.write(`\n── Next steps ──\n`);
+    process.stdout.write(`  1. Run 'abtars onboard' to configure Telegram token + model provider\n`);
+    process.stdout.write(`  2. (Optional) Install Ollama for memory embeddings: curl -fsSL https://ollama.com/install.sh | sh\n`);
+    process.stdout.write(`  3. Start the bridge: 'abtars restart' or use the watchdog\n\n`);
   }
 
   // #334: Post-install healthcheck — validate operator channel exists (only on --restore)
