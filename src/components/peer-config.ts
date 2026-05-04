@@ -16,12 +16,13 @@ export interface PeerEntry {
 }
 
 export interface PeerConfig {
+  self: { name: string };
   peers: Record<string, PeerEntry>;
   maxHops: number;
   timeoutMs: number;
 }
 
-const DEFAULTS: Omit<PeerConfig, "peers"> = { maxHops: 12, timeoutMs: 60000 };
+const DEFAULTS: Omit<PeerConfig, "peers" | "self"> = { maxHops: 12, timeoutMs: 60000 };
 
 let _config: PeerConfig | null = null;
 
@@ -29,7 +30,7 @@ export function loadPeerConfig(): PeerConfig {
   if (_config) return _config;
   const p = join(abtarsHome(), "config", "peers.json");
   if (!existsSync(p)) {
-    _config = { peers: {}, ...DEFAULTS };
+    _config = { self: { name: "default" }, peers: {}, ...DEFAULTS };
     return _config;
   }
   try {
@@ -46,16 +47,17 @@ export function loadPeerConfig(): PeerConfig {
       }
     }
     _config = {
+      self: { name: typeof raw.self?.name === "string" ? raw.self.name : "default" },
       peers,
       maxHops: typeof raw.maxHops === "number" ? raw.maxHops : DEFAULTS.maxHops,
       timeoutMs: typeof raw.timeoutMs === "number" ? raw.timeoutMs : DEFAULTS.timeoutMs,
     };
     const names = Object.keys(peers);
-    if (names.length > 0) logInfo(TAG, `Loaded ${names.length} peer(s): ${names.join(", ")}`);
+    if (names.length > 0) logInfo(TAG, `Loaded ${names.length} peer(s): ${names.join(", ")} (self: ${_config.self.name})`);
     return _config;
   } catch (err) {
     logWarn(TAG, `Failed to parse peers.json: ${err instanceof Error ? err.message : String(err)}`);
-    _config = { peers: {}, ...DEFAULTS };
+    _config = { self: { name: "default" }, peers: {}, ...DEFAULTS };
     return _config;
   }
 }

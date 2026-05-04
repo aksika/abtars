@@ -43,12 +43,16 @@ export async function callPeer(peerName: string, prompt: string, hops: number): 
   }
 
   const start = Date.now();
-  const response = await postCompletion(peer, prompt, hops, config.timeoutMs);
+  const response = await postCompletion(peer, peerName, prompt, hops, config.timeoutMs, config.self.name);
   logInfo(TAG, `PEER_CALL ${peerName} — ${prompt.length}ch → ${response.length}ch (${Date.now() - start}ms, hops=${hops})`);
   return response;
 }
 
-function postCompletion(peer: PeerEntry, prompt: string, hops: number, timeoutMs: number): Promise<string> {
+function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops: number, timeoutMs: number, selfName: string): Promise<string> {
+  const { signJwt } = require("./peer-jwt.js") as typeof import("./peer-jwt.js");
+  const now = Math.floor(Date.now() / 1000);
+  const jwt = signJwt({ iss: selfName, aud: peerName, iat: now, exp: now + 60 }, peer.token);
+
   const body = JSON.stringify({
     model: "default",
     messages: [{ role: "user", content: prompt }],
@@ -63,7 +67,7 @@ function postCompletion(peer: PeerEntry, prompt: string, hops: number, timeoutMs
       headers: {
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(body),
-        "Authorization": `Bearer ${peer.token}`,
+        "Authorization": `Bearer ${jwt}`,
         "X-Peer-Hops": String(hops),
       },
       timeout: timeoutMs,

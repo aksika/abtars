@@ -197,18 +197,18 @@ export class AgentApiServer {
 
     // ── /v1/* routes (#373) ───────────────────────────────────────────────
     if (url === "/v1/models" && method === "GET") {
-      if (!this.requireBearer(req, res)) return;
+      if (this.requireBearer(req, res) === null) return;
       writeResult(res, v1HandleModels());
       return;
     }
     if (url.startsWith("/v1/models/") && method === "GET") {
-      if (!this.requireBearer(req, res)) return;
+      if (this.requireBearer(req, res) === null) return;
       const id = decodeURIComponent(url.slice("/v1/models/".length));
       writeResult(res, v1HandleModel(id));
       return;
     }
     if (url === "/v1/chat/completions" && method === "POST") {
-      if (!this.requireBearer(req, res)) return;
+      if (this.requireBearer(req, res) === null) return;
       this.handleV1ChatCompletions(req, res).catch((err) => {
         logWarn(TAG, `/v1/chat/completions error: ${err instanceof Error ? err.message : String(err)}`);
         if (!res.headersSent) {
@@ -219,7 +219,7 @@ export class AgentApiServer {
       return;
     }
     if (url === "/v1/embeddings" && method === "POST") {
-      if (!this.requireBearer(req, res)) return;
+      if (this.requireBearer(req, res) === null) return;
       this.handleV1Embeddings(req, res).catch((err) => {
         logWarn(TAG, `/v1/embeddings error: ${err instanceof Error ? err.message : String(err)}`);
         if (!res.headersSent) {
@@ -237,22 +237,38 @@ export class AgentApiServer {
    * #373 — require bearer token on /v1/* routes.
    * Returns true if authorized, writes 401 + returns false otherwise.
    */
-  private requireBearer(req: IncomingMessage, res: ServerResponse): boolean {
+  private requireBearer(req: IncomingMessage, res: ServerResponse): string | null {
     const token = extractBearerToken(req.headers as Record<string, string | string[] | undefined>);
     if (!token) {
       res.writeHead(401, { "Content-Type": "application/json" })
         .end(JSON.stringify(openaiError("Missing bearer token", "authentication_error", "invalid_api_key")));
-      return false;
+      return null;
     }
-    // All auth via peers.json — each entry (peer or operator client) has its own token.
+    // JWT auth via peers.json — verify signature, return caller identity.
     const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-    const peers = loadPeerConfig().peers;
-    for (const peer of Object.values(peers)) {
-      if (token === peer.token) return true;
+    const { verifyJwt } = require("./peer-jwt.js") as typeof import("./peer-jwt.js");
+    const config = loadPeerConfig();
+
+    // Try JWT verification against each peer's secret
+    for (const [name, peer] of Object.entries(config.peers)) {
+      const result = verifyJwt(token, peer.token, config.self.name);
+      if (result.ok && result.payload.iss === name) {
+        logInfo(TAG, `PEER_CALL iss=${result.payload.iss} aud=${result.payload.aud} verified`);
+        return result.payload.iss;
+      }
     }
+
+    // Fallback: raw token match (backward compat during migration)
+    for (const [name, peer] of Object.entries(config.peers)) {
+      if (token === peer.token) {
+        logInfo(TAG, `PEER_CALL caller=${name} (raw token, no JWT)`);
+        return name;
+      }
+    }
+
     res.writeHead(401, { "Content-Type": "application/json" })
       .end(JSON.stringify(openaiError("Invalid bearer token", "authentication_error", "invalid_api_key")));
-    return false;
+    return null;
   }
 
   /** #373 — /v1/chat/completions dispatch. */

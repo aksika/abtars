@@ -1,4 +1,5 @@
 {
+  "self": { "name": "my-agent" },
   "peers": {
     "example-peer": {
       "host": "100.x.x.x",
