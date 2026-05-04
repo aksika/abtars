@@ -1,6 +1,6 @@
 ---
-name: peer-ask
-description: Ask another abtars instance (peer agent) a question via peer_ask tool. Use for cross-instance delegation.
+name: a2a-communication
+description: Communicate with other abtars agents (Molty, KP) via peer_ask tool. Delegate tasks, ask questions, coordinate across instances.
 requires: abtars
 ---
 
