@@ -450,7 +450,7 @@ const SYSTEM_ENV_VARS = new Set([
   "SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND",
   // Agent API + Dashboard (read outside getEnv by dedicated config loaders)
   "AGENT_API_PORT",
-  "AGENT_CHAT_ID", "AGENT_CODENAME", "AGENT_SESSION_KEY",
+  "AGENT_CODENAME",
   "WEB_AUTH_TOKEN", "WEB_PORT", "WEB_HOST",
   // Sleep / capabilities
   "SUPERVISION", "SLEEP_TIMEOUT_MIN", "NOTEBOOKLM_CLI_PATH",
