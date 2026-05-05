@@ -18,7 +18,7 @@ import { abtarsHome, reportsDir } from "../paths.js";
 import { localDate } from "../components/env-utils.js";
 
 const AB_HOME = abtarsHome();
-const TWITTER_DIR = join(AB_HOME, "twitterX");
+const TWITTER_DIR = join(AB_HOME, "workspace", "twitterX");
 const COOKIE_PATH = join(AB_HOME, "secret", "cookies", "x-cookies.json");
 const BASE_FOLLOWS = join(TWITTER_DIR, "base.follows.json");
 const MOLTY_FOLLOWS = join(TWITTER_DIR, "molty.follows.json");
