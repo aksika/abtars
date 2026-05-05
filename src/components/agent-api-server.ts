@@ -34,6 +34,8 @@ interface AgentApiDeps {
   workingDir: string;
   memory: IMemorySystem | null;
   runtime: SubagentRuntime;
+  /** Optional callback for peer activity notifications (A2A). */
+  onPeerActivity?: (msg: string) => void;
 }
 
 function normalizeIp(raw: string): string {
@@ -70,12 +72,14 @@ export class AgentApiServer {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private runtime: SubagentRuntime;
   private guestName = "GUEST";
+  private onPeerActivity?: (msg: string) => void;
 
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
     this.workingDir = deps.workingDir;
     this.memory = deps.memory;
     this.runtime = deps.runtime;
+    this.onPeerActivity = deps.onPeerActivity;
     this.server = createServer((req, res) => this.handle(req, res));
     this.logDir = join(abtarsHome(), "logs", "agents");
     mkdirSync(this.logDir, { recursive: true });
@@ -208,7 +212,10 @@ export class AgentApiServer {
       return;
     }
     if (url === "/v1/chat/completions" && method === "POST") {
-      if (this.requireBearer(req, res) === null) return;
+      const caller = this.requireBearer(req, res);
+      if (caller === null) return;
+      this.guestName = caller;
+      this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} messaged.`);
       this.handleV1ChatCompletions(req, res).catch((err) => {
         logWarn(TAG, `/v1/chat/completions error: ${err instanceof Error ? err.message : String(err)}`);
         if (!res.headersSent) {

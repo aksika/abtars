@@ -85,6 +85,13 @@ export function setMemoryBackend(backend: MemoryBackend | null): void {
   memoryBackend = backend;
 }
 
+let _peerActivityCb: ((msg: string) => void) | null = null;
+
+/** Wire peer activity notification callback. */
+export function setPeerActivityCallback(cb: ((msg: string) => void) | null): void {
+  _peerActivityCb = cb;
+}
+
 // --- Tool definitions ---
 
 const bashTool: ToolDefinition = {
@@ -358,6 +365,7 @@ const peerAskTool: ToolDefinition = {
     if (hops <= 0) return JSON.stringify({ error: "Hop limit reached — cannot forward to another peer from this depth" });
 
     try {
+      _peerActivityCb?.(`🤖 Agents: ${config.self.name} → ${peerName} messaged.`);
       return await callPeer(peerName, prompt, hops);
     } catch (err) {
       if (err instanceof PeerCallError) return JSON.stringify({ error: `peer_ask failed: ${err.message} (${err.code})` });

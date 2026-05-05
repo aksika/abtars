@@ -10,6 +10,8 @@
 import { AgentApiServer } from "../components/agent-api-server.js";
 import { loadAgentApiConfig } from "../components/agent-api-config.js";
 import { logInfo, logError } from "../components/logger.js";
+import { sendNotification } from "../components/notification.js";
+import { setPeerActivityCallback } from "../components/transport/tool-registry.js";
 import type { BootCtx } from "./context.js";
 
 export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
@@ -17,6 +19,9 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
 
   const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
   let agentApiServer: AgentApiServer | null = null;
+
+  const notifyPeer = (msg: string): void => { sendNotification(ctx, msg); };
+  setPeerActivityCallback(notifyPeer);
 
   registry.register("agent-api", {
     configured: Boolean(agentConfig.port),
@@ -27,6 +32,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
         workingDir: config.transport.workingDir,
         memory,
         runtime,
+        onPeerActivity: notifyPeer,
       });
       ctx.agentApiServer = agentApiServer;
       return {
