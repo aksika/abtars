@@ -47,8 +47,5 @@
     "abtars-task": "dist/cli/abtars-task.js",
     "abtars-tweet": "dist/cli/abtars-tweet.js"
   },
-  "license": "Apache-2.0",
-  "optionalDependencies": {
-    "rettiwt-api": "^6.2.2"
-  }
+  "license": "Apache-2.0"
 }
