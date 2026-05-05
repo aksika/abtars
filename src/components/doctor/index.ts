@@ -114,9 +114,23 @@ const probeOllama: ProbeFn = async (_ctx) => {
   }
 };
 
+const probeCoreFiles: ProbeFn = async (_ctx) => {
+  const { existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { homedir } = await import("node:os");
+  const start = Date.now();
+  const memDir = process.env["ABMIND_MEMORY_DIR"] || join(homedir(), ".abmind", "memory");
+  const abmindCore = join(memDir, "core");
+  const required = ["SOUL.md", "user_profile.md", "agent_notes.md", "memory-tools.md", "core_facts.md"];
+  const missing = required.filter(f => !existsSync(join(abmindCore, f)));
+  if (missing.length === 0) return { name: "core-files", status: "ok", latencyMs: Date.now() - start };
+  return { name: "core-files", status: "failed", latencyMs: Date.now() - start, detail: `missing: ${missing.join(", ")}` };
+};
+
 // ── Collector ────────────────────────────────────────────────────────────────
 
 const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
+  { fn: probeCoreFiles, timeout: 1000 },
   { fn: probeMemory, timeout: 5000 },
   { fn: probeTelegram, timeout: 5000 },
   { fn: probeDiscord, timeout: 5000 },
