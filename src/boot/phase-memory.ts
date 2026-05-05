@@ -12,8 +12,8 @@
  * internal logger, not an abtars singleton).
  */
 
-import { MemoryManager, setLogger as setMemoryLogger } from "abmind";
-import { logInfo, logWarn, logError } from "../components/logger.js";
+import { MemoryManager } from "abmind";
+import { logInfo } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
 
 export async function phaseMemory(ctx: BootCtx): Promise<void> {
@@ -21,7 +21,6 @@ export async function phaseMemory(ctx: BootCtx): Promise<void> {
     logInfo("main", "🧠 Memory disabled");
     return;
   }
-  setMemoryLogger({ logInfo, logWarn, logError });
 
   const memory = new MemoryManager(ctx.memoryConfig);
   await memory.initialize();
