@@ -336,7 +336,17 @@ export class CronQueue {
 
     runtime.complete("cron", prompt)
       .then((response) => {
-        const summary = (response || "(no output)").slice(0, 500);
+        // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
+        // extract just the meaningful content. This happens when the model echoes its last
+        // tool result instead of synthesizing a human-readable response.
+        let cleaned = response || "(no output)";
+        try {
+          const parsed = JSON.parse(cleaned);
+          if (parsed && typeof parsed === "object" && "exit_code" in parsed) {
+            cleaned = parsed.stdout || parsed.stderr || "(task completed)";
+          }
+        } catch { /* not JSON — use as-is */ }
+        const summary = cleaned.slice(0, 500);
         let exitCode = 0;
         let dodResult = "";
         if (dodPaths.length > 0) {
@@ -349,7 +359,7 @@ export class CronQueue {
         }
 
         // Write result file
-        const resultPath = writeResultFile(entry.message, response || "(no output)");
+        const resultPath = writeResultFile(entry.message, cleaned);
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         recordRunToFile(entry.id, exitCode);
