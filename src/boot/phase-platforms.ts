@@ -129,6 +129,9 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
     const result = await registry.start("irc", { backgroundRetry: true });
     if (result.ok) {
       logInfo("main", "📡 IRC started");
+      const { setIrcSend } = await import("../components/transport/tool-registry.js");
+      const ircAdapter = platformAdapters.get("irc");
+      if (ircAdapter) setIrcSend((channel, message) => { ircAdapter.sendMessage(channel, message); });
     } else if (result.error?.includes("not configured")) {
       logWarn("main", "IRC flag set but irc.json missing — skipping");
     } else {

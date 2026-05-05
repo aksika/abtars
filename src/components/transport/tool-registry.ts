@@ -242,6 +242,11 @@ let _enqueueCron: ((id: string, manual?: boolean) => string | null) | null = nul
 /** Inject enqueueCron from bridge for task_manage --run. */
 export function setEnqueueCron(fn: (id: string, manual?: boolean) => string | null): void { _enqueueCron = fn; }
 
+let _ircSend: ((channel: string, message: string) => void) | null = null;
+
+/** Inject IRC send from bridge for irc_send tool. */
+export function setIrcSend(fn: (channel: string, message: string) => void): void { _ircSend = fn; }
+
 let _sendDocument: ((path: string, caption?: string) => Promise<number>) | null = null;
 
 /**
@@ -341,7 +346,24 @@ const peerAskTool: ToolDefinition = {
   },
 };
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool];
+const ircSendTool: ToolDefinition = {
+  name: "irc_send",
+  description: "Send a message to an IRC channel (e.g. #bridges)",
+  parameters: {
+    channel: { type: "string", description: "IRC channel (e.g. #bridges)" },
+    message: { type: "string", description: "Message text to send" },
+  },
+  execute: async (args) => {
+    if (!_ircSend) return JSON.stringify({ error: "IRC adapter not connected" });
+    const channel = args["channel"] ?? "";
+    const message = args["message"] ?? "";
+    if (!channel || !message) return JSON.stringify({ error: "channel and message are required" });
+    _ircSend(channel, message);
+    return JSON.stringify({ ok: true, channel, sent: message.length + " chars" });
+  },
+};
+
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, ircSendTool];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
