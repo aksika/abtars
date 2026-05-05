@@ -52,6 +52,7 @@ function capabilityRegistryPlugin() {
 // ── Build ───────────────────────────────────────────────────────────────────
 
 const external = [
+  "rettiwt-api",
   "better-sqlite3",
   "patchright",
 ];
