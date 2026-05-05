@@ -24,10 +24,11 @@ export async function phaseSleep(ctx: BootCtx): Promise<void> {
   // SleepRuntime adapter — wraps SubagentRuntime.complete("dreamy", ...) for the in-process orchestrator.
   // Lazy SubagentRuntime construction — only materialized on first sleep invocation.
   let subagent: SubagentRuntime | null = null;
+  const { getEnv } = await import("../components/env-schema.js");
   const runtime: SleepRuntime = {
     async complete(prompt: string): Promise<string> {
       if (!subagent) subagent = new SubagentRuntime();
-      return subagent.complete("dreamy", prompt, { session: "reuse" });
+      return subagent.complete("dreamy", prompt, { session: "reuse", timeoutMs: getEnv().modelApiTimeoutMs * 3 });
     },
   };
 

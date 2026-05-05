@@ -33,6 +33,7 @@ export class DirectApiTransport implements IKiroTransport {
   private systemPrompt = "";
   private _contextPercent = -1;
   private _lastAnswer = "";
+  private _timeoutOverrideMs: number | null = null;
   private _toolCallsSucceeded = 0;
   private _intermediateText = "";
   private _promptStartedAt: number | null = null;
@@ -299,7 +300,7 @@ export class DirectApiTransport implements IKiroTransport {
   ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
     // Compose pipeline signal (user /stop) with per-request timeout
     const timeoutCtrl = new AbortController();
-    const timer = setTimeout(() => timeoutCtrl.abort(new Error("model API timeout")), getEnv().modelApiTimeoutMs);
+    const timer = setTimeout(() => timeoutCtrl.abort(new Error("model API timeout")), this._timeoutOverrideMs ?? getEnv().modelApiTimeoutMs);
     const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
 
     try {
@@ -449,6 +450,8 @@ export class DirectApiTransport implements IKiroTransport {
 
   // Watchdog support
   get promptStartedAt(): number | null { return this._promptStartedAt; }
+  setTimeoutOverride(ms: number | null): void { this._timeoutOverrideMs = ms; }
+
   get lastActivityAt(): number | null { return this._lastActivityAt; }
 
   private readonly _stuckTimeout = getEnv().watchdogSilentSec * 1000;

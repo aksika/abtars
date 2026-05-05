@@ -20,6 +20,8 @@ export interface AgentOpts {
   session?: "fresh" | "reuse";
   /** Context passed to tool executor (userId, metadata). */
   context?: Record<string, unknown>;
+  /** Override model API timeout for this call (ms). */
+  timeoutMs?: number;
 }
 
 /** Persistent transport handle for multi-turn callers. */
@@ -75,6 +77,11 @@ export class SubagentRuntime {
 
     const { transport, model, sessionKey } = cached ?? await this.createAgent(agent);
 
+    // Per-call timeout override (e.g. dreamy sleep steps need longer than default)
+    if (opts?.timeoutMs && transport.setTimeoutOverride) {
+      transport.setTimeoutOverride(opts.timeoutMs);
+    }
+
     try {
       const response = await transport.sendPrompt(sessionKey, prompt);
       const elapsed = Date.now() - start;
@@ -84,6 +91,10 @@ export class SubagentRuntime {
       logWarn(TAG, `${agent} complete failed: ${err instanceof Error ? err.message : String(err)}`);
       this.cache.delete(agent);
       throw err;
+    } finally {
+      if (opts?.timeoutMs && transport.setTimeoutOverride) {
+        transport.setTimeoutOverride(null);
+      }
     }
   }
 
