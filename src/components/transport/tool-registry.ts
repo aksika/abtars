@@ -38,11 +38,31 @@ export function isBridgeSpawnCommand(cmd: string): boolean {
   return BLOCKED_PATTERNS.some(p => p.test(cmd));
 }
 
+/** Block kill/pkill/killall targeting the bridge's own PID or process patterns (#414). */
+function isBridgeKillCommand(cmd: string): boolean {
+  const pid = process.pid;
+  const ppid = process.ppid;
+  // Direct kill of own PID or parent
+  if (new RegExp(`\\bkill\\s+(-\\d+\\s+)?${pid}\\b`).test(cmd)) return true;
+  if (new RegExp(`\\bkill\\s+(-\\d+\\s+)?${ppid}\\b`).test(cmd)) return true;
+  // pkill/killall targeting bridge patterns
+  if (/\b(pkill|killall)\b.*\b(abtars|main\.js|watchdog)\b/.test(cmd)) return true;
+  if (/\bkill\b.*\$\(.*pgrep.*abtars/.test(cmd)) return true;
+  return false;
+}
+
 function runBash(cmd: string, timeout = BASH_TIMEOUT_MS): Promise<string> {
   if (isBridgeSpawnCommand(cmd)) {
     logWarn("tool-registry", `Blocked bridge-spawn command: ${cmd.slice(0, 200)}`);
     return Promise.resolve(JSON.stringify({
       stderr: "Command blocked: this would spawn/restart a bridge or watchdog process. The bridge is already running under launchd+watchdog supervision; use launchctl inspection commands (launchctl list, launchctl print) or signal the existing process instead.",
+      exit_code: 126,
+    }));
+  }
+  if (isBridgeKillCommand(cmd)) {
+    logWarn("tool-registry", `Blocked bridge-kill command: ${cmd.slice(0, 200)}`);
+    return Promise.resolve(JSON.stringify({
+      stderr: "Command blocked: this would kill the bridge process (yourself). Ask the user to send /restart for a session reset or restart the bridge manually.",
       exit_code: 126,
     }));
   }
