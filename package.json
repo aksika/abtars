@@ -28,7 +28,6 @@
     "file-type": "^22.0.1",
     "patchright": "^1.59.4",
     "pdf-parse": "^2.4.5",
-    "rettiwt-api": "^6.2.2",
     "ws": "^8.20.0",
     "youtube-transcript": "^1.3.0"
   },
@@ -48,5 +47,8 @@
     "abtars-task": "dist/cli/abtars-task.js",
     "abtars-tweet": "dist/cli/abtars-tweet.js"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "optionalDependencies": {
+    "rettiwt-api": "^6.2.2"
+  }
 }

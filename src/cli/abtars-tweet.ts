@@ -157,10 +157,21 @@ async function fetchTweet(url: string): Promise<void> {
   }, null, 2));
 }
 
+// ── rettiwt-api (optional dep) ─────────────────────────────────────────────
+
+async function loadRettiwt(): Promise<{ Rettiwt: new () => unknown }> {
+  try {
+    return await import("rettiwt-api");
+  } catch {
+    console.error("rettiwt-api not installed. Run: npm install rettiwt-api");
+    process.exit(1);
+  }
+}
+
 // ── User profile ───────────────────────────────────────────────────────────
 
 async function fetchUser(handle: string): Promise<void> {
-  const { Rettiwt } = await import("rettiwt-api");
+  const { Rettiwt } = await loadRettiwt() as any;
   const r = new Rettiwt();
   const d = await r.user.details(handle.replace(/^@/, ""));
   if (!d) { console.error("User not found"); process.exit(1); }
@@ -172,7 +183,7 @@ async function fetchUser(handle: string): Promise<void> {
 const GQL_USER_TWEETS = "https://x.com/i/api/graphql/E3opETHurmVJflFsUBVuUQ/UserTweets";
 
 async function fetchTimeline(handle: string, count: number): Promise<RankedTweet[]> {
-  const { Rettiwt } = await import("rettiwt-api");
+  const { Rettiwt } = await loadRettiwt() as any;
   const r = new Rettiwt();
   const clean = handle.replace(/^@/, "");
 
@@ -430,7 +441,7 @@ async function runDiscover(topTweets: RankedTweet[], knownHandles: string[]): Pr
     return [];
   }
 
-  const { Rettiwt } = await import("rettiwt-api");
+  const { Rettiwt } = await loadRettiwt() as any;
   const guestRettiwt = new Rettiwt(); // guest for profile lookups
   const known = new Set(knownHandles.map((h) => h.toLowerCase()));
   const candidates: DiscoverCandidate[] = [];
