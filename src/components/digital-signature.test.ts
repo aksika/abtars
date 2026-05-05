@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
-import { signMessage, verifyMessage, stripSigTag } from "./irc-signature.js";
+import { signMessage, verifyMessage, stripSigTag } from "./digital-signature.js";
 
 function generateTestKeypair(): { privateKey: string; publicKey: string } {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");

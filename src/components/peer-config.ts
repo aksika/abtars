@@ -13,10 +13,12 @@ export interface PeerEntry {
   host: string;
   port: number;
   token: string;
+  mode?: "plain" | "signed";
+  verifyKey?: string;
 }
 
 export interface PeerConfig {
-  self: { name: string };
+  self: { name: string; signingKey?: string };
   peers: Record<string, PeerEntry>;
   maxHops: number;
   timeoutMs: number;
@@ -40,14 +42,21 @@ export function loadPeerConfig(): PeerConfig {
       for (const [name, entry] of Object.entries(raw.peers)) {
         const e = entry as Record<string, unknown>;
         if (typeof e.host === "string" && typeof e.port === "number" && typeof e.token === "string") {
-          peers[name] = { host: e.host, port: e.port, token: e.token };
+          peers[name] = {
+            host: e.host, port: e.port, token: e.token,
+            ...(e.mode === "signed" ? { mode: "signed" as const } : {}),
+            ...(typeof e.verifyKey === "string" ? { verifyKey: e.verifyKey } : {}),
+          };
         } else {
           logWarn(TAG, `Skipped peer '${name}' — missing host/port/token`);
         }
       }
     }
     _config = {
-      self: { name: typeof raw.self?.name === "string" ? raw.self.name : "default" },
+      self: {
+        name: typeof raw.self?.name === "string" ? raw.self.name : "default",
+        ...(typeof raw.self?.signingKey === "string" ? { signingKey: raw.self.signingKey } : {}),
+      },
       peers,
       maxHops: typeof raw.maxHops === "number" ? raw.maxHops : DEFAULTS.maxHops,
       timeoutMs: typeof raw.timeoutMs === "number" ? raw.timeoutMs : DEFAULTS.timeoutMs,

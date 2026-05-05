@@ -215,8 +215,7 @@ export class AgentApiServer {
       const caller = this.requireBearer(req, res);
       if (caller === null) return;
       this.guestName = caller;
-      this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} messaged.`);
-      this.handleV1ChatCompletions(req, res).catch((err) => {
+      this.handleV1ChatCompletions(req, res, caller).catch((err) => {
         logWarn(TAG, `/v1/chat/completions error: ${err instanceof Error ? err.message : String(err)}`);
         if (!res.headersSent) {
           res.writeHead(500, { "Content-Type": "application/json" })
@@ -279,7 +278,7 @@ export class AgentApiServer {
   }
 
   /** #373 — /v1/chat/completions dispatch. */
-  private async handleV1ChatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleV1ChatCompletions(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
     const start = Date.now();
     const ip = normalizeIp(req.socket.remoteAddress ?? "");
 
@@ -305,6 +304,41 @@ export class AgentApiServer {
       setCurrentPeerHops(null);
       return;
     }
+
+    // #416 — Verify digital signature on incoming peer message
+    let commsType: "signed" | "plain" | "sig-invalid" = "plain";
+    const reqMessages = (body as { messages?: Array<{ content?: string }> }).messages;
+    const lastMsg = reqMessages?.[reqMessages.length - 1];
+    if (lastMsg?.content) {
+      const { verifyMessage } = await import("./digital-signature.js");
+      const { loadPeerConfig } = await import("./peer-config.js");
+      const peerConfig = loadPeerConfig();
+      const peerEntry = peerConfig.peers[caller];
+      const hasSigTag = /\[sig:\d+:[A-Za-z0-9+/=]+\]$/.test(lastMsg.content);
+
+      if (hasSigTag && peerEntry?.verifyKey) {
+        const result = verifyMessage(peerEntry.verifyKey, caller, peerConfig.self.name, lastMsg.content);
+        commsType = result.valid ? "signed" : "sig-invalid";
+        if (result.valid) lastMsg.content = result.text; // strip sig tag from content
+      } else if (peerEntry?.mode === "signed" && !hasSigTag) {
+        // Reject unsigned message when mode requires signing
+        logWarn(TAG, `Rejected unsigned message from ${caller} (mode=signed)`);
+        res.writeHead(403, { "Content-Type": "application/json" })
+          .end(JSON.stringify(openaiError("Signature required", "authentication_error", "signature_missing")));
+        setCurrentPeerHops(null);
+        this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} [rejected ⚠️ no signature]`);
+        return;
+      }
+      if (commsType === "sig-invalid" && peerEntry?.mode === "signed") {
+        logWarn(TAG, `Rejected invalid signature from ${caller}`);
+        res.writeHead(403, { "Content-Type": "application/json" })
+          .end(JSON.stringify(openaiError("Invalid signature", "authentication_error", "signature_invalid")));
+        setCurrentPeerHops(null);
+        this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} [rejected ⚠️ invalid sig]`);
+        return;
+      }
+    }
+    this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} messaged. [${commsType}]`);
 
     let session: AgentSession;
     try {

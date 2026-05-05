@@ -1,7 +1,7 @@
 import type { PlatformAdapter, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { IrcConfig, IrcServerConfig } from "./irc-config.js";
 import { createIrcClient, type IrcClient } from "./irc-client.js";
-import { signMessage, verifyMessage } from "./irc-signature.js";
+import { signMessage, verifyMessage } from "../../components/digital-signature.js";
 import { logInfo, logDebug, logWarn } from "../../components/logger.js";
 
 const TAG = "irc";
@@ -58,12 +58,12 @@ export class IrcAdapter implements PlatformAdapter {
 
     const server = this.config.servers.find(s => s.id === serverId);
     const channelConfig = server?.channels[channel];
-    const isSecure = channelConfig?.mode === "secure";
-    const maxLine = isSecure ? MAX_LINE_SECURE : MAX_LINE_PLAIN;
+    const isSigned = channelConfig?.mode === "signed";
+    const maxLine = isSigned ? MAX_LINE_SECURE : MAX_LINE_PLAIN;
 
     const lines = this.chunkText(text, maxLine);
     for (const line of lines) {
-      if (isSecure && this.config.identity?.privateKey) {
+      if (isSigned && this.config.identity?.privateKey) {
         const { tag } = signMessage(this.config.identity.privateKey, server!.nick, channel, line);
         client.send(channel, `${line} ${tag}`);
       } else {
@@ -109,7 +109,7 @@ export class IrcAdapter implements PlatformAdapter {
       return;
     }
 
-    if (channelConfig.mode === "secure") {
+    if (channelConfig.mode === "signed") {
       // Verify signature
       const pubkey = channelConfig.trustedKeys[sender];
       if (!pubkey) {

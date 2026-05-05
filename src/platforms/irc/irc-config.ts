@@ -4,10 +4,10 @@ import { abtarsHome } from "../../paths.js";
 import { logWarn } from "../../components/logger.js";
 
 export interface IrcChannelConfig {
-  mode: "plain" | "secure";
+  mode: "plain" | "signed";
   requireMention: boolean;
   allowFrom: string[];       // used in plain mode
-  trustedKeys: Record<string, string>; // used in secure mode: nick → base64 pubkey
+  trustedKeys: Record<string, string>; // used in signed mode: nick → base64 pubkey
 }
 
 export interface IrcServerConfig {
@@ -50,12 +50,12 @@ export function loadIrcConfig(): IrcConfig | null {
     }
     const channels: Record<string, IrcChannelConfig> = {};
     for (const [name, cfg] of Object.entries(s.channels as Record<string, any>)) {
-      const mode = cfg.mode === "secure" ? "secure" : "plain";
+      const mode = cfg.mode === "signed" ? "signed" : "plain";
       channels[name] = {
         mode,
         requireMention: cfg.requireMention !== false,
         allowFrom: Array.isArray(cfg.allowFrom) ? cfg.allowFrom : [],
-        trustedKeys: (mode === "secure" && cfg.trustedKeys && typeof cfg.trustedKeys === "object") ? cfg.trustedKeys : {},
+        trustedKeys: (mode === "signed" && cfg.trustedKeys && typeof cfg.trustedKeys === "object") ? cfg.trustedKeys : {},
       };
     }
     servers.push({

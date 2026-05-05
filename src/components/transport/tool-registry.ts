@@ -365,7 +365,8 @@ const peerAskTool: ToolDefinition = {
     if (hops <= 0) return JSON.stringify({ error: "Hop limit reached — cannot forward to another peer from this depth" });
 
     try {
-      _peerActivityCb?.(`🤖 Agents: ${config.self.name} → ${peerName} messaged.`);
+      const commsType = config.self.signingKey ? "signed" : "plain";
+      _peerActivityCb?.(`🤖 Agents: ${config.self.name} → ${peerName} messaged. [${commsType}]`);
       return await callPeer(peerName, prompt, hops);
     } catch (err) {
       if (err instanceof PeerCallError) return JSON.stringify({ error: `peer_ask failed: ${err.message} (${err.code})` });

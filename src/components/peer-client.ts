@@ -42,8 +42,16 @@ export async function callPeer(peerName: string, prompt: string, hops: number): 
     throw new PeerCallError("unknown_peer", `Unknown peer '${peerName}'. Available: ${available}`);
   }
 
+  // Sign outgoing message if we have a signing key (#416)
+  let signedPrompt = prompt;
+  if (config.self.signingKey) {
+    const { signMessage } = await import("./digital-signature.js");
+    const { tag } = signMessage(config.self.signingKey, config.self.name, peerName, prompt);
+    signedPrompt = `${prompt} ${tag}`;
+  }
+
   const start = Date.now();
-  const response = await postCompletion(peer, peerName, prompt, hops, config.timeoutMs, config.self.name);
+  const response = await postCompletion(peer, peerName, signedPrompt, hops, config.timeoutMs, config.self.name);
   logInfo(TAG, `PEER_CALL ${peerName} — ${prompt.length}ch → ${response.length}ch (${Date.now() - start}ms, hops=${hops})`);
   return response;
 }

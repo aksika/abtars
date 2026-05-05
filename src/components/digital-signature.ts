@@ -7,9 +7,9 @@ export interface SignResult {
   tag: string; // [sig:timestamp:base64signature]
 }
 
-export function signMessage(privateKeyBase64: string, nick: string, channel: string, text: string): SignResult {
+export function signMessage(privateKeyBase64: string, sender: string, context: string, text: string): SignResult {
   const ts = Math.floor(Date.now() / 1000);
-  const payload = `${nick}${DELIMITER}${channel}${DELIMITER}${ts}${DELIMITER}${text}`;
+  const payload = `${sender}${DELIMITER}${context}${DELIMITER}${ts}${DELIMITER}${text}`;
   const key = createPrivateKey({ key: Buffer.from(privateKeyBase64, "base64"), format: "der", type: "pkcs8" });
   const sig = sign(null, Buffer.from(payload, "utf-8"), key);
   return { tag: `[sig:${ts}:${sig.toString("base64")}]` };
@@ -21,7 +21,7 @@ export interface VerifyResult {
   text: string; // text with sig tag stripped
 }
 
-export function verifyMessage(publicKeyBase64: string, nick: string, channel: string, rawText: string): VerifyResult {
+export function verifyMessage(publicKeyBase64: string, sender: string, context: string, rawText: string): VerifyResult {
   const match = rawText.match(/\[sig:(\d+):([A-Za-z0-9+/=]+)\]$/);
   if (!match) return { valid: false, reason: "no-signature", text: rawText };
 
@@ -35,7 +35,7 @@ export function verifyMessage(publicKeyBase64: string, nick: string, channel: st
     return { valid: false, reason: "expired", text };
   }
 
-  const payload = `${nick}${DELIMITER}${channel}${DELIMITER}${ts}${DELIMITER}${text}`;
+  const payload = `${sender}${DELIMITER}${context}${DELIMITER}${ts}${DELIMITER}${text}`;
   const key = createPublicKey({ key: Buffer.from(publicKeyBase64, "base64"), format: "der", type: "spki" });
   const ok = verify(null, Buffer.from(payload, "utf-8"), key, sigBytes);
   if (!ok) return { valid: false, reason: "bad-signature", text };
