@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { copyFile, cp, mkdir, readFile, rm } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hashFile } from 'abmind/deploy-lib';
 import type { PrepareContext, StagedRelease, UpdateSource } from './types.js';
@@ -132,6 +132,9 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         await rm(stagedPath, { recursive: true, force: true });
         await mkdir(stagedPath, { recursive: true });
         await cp(join(repoRoot, 'bundle'), join(stagedPath, 'bundle'), { recursive: true });
+
+        // Ensure ESM works without warnings (MODULE_TYPELESS_PACKAGE_JSON)
+        await writeFile(join(stagedPath, 'package.json'), JSON.stringify({ type: "module", name: "abtars", version }, null, 2) + "\n");
 
         // Copy install-manifest.json for doctor reconciliation
         await copyFile(join(repoRoot, 'install-manifest.json'), join(stagedPath, 'install-manifest.json'));
