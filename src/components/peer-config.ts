@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 import { logInfo, logWarn } from "./logger.js";
+import { validateShape, PEERS_SCHEMA } from "./config-validator.js";
 
 const TAG = "peer-config";
 
@@ -39,6 +40,7 @@ export function loadPeerConfig(): PeerConfig {
   }
   try {
     const raw = JSON.parse(readFileSync(p, "utf-8"));
+    validateShape(raw, PEERS_SCHEMA, "peers.json");
     const peers: Record<string, PeerEntry> = {};
     if (raw.peers && typeof raw.peers === "object") {
       for (const [name, entry] of Object.entries(raw.peers)) {

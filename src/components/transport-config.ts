@@ -1,5 +1,6 @@
 import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
+import { validateShape, TRANSPORT_SCHEMA } from "./config-validator.js";
 /**
  * transport-config.ts — Load and validate transport.json + models.json.
  * Falls back to .env defaults if JSON is broken.
@@ -92,6 +93,7 @@ export function loadTransport(): TransportConfig | null {
   const p = join(dir, getEnv().transportConfig);
   try {
     cachedTransport = JSON.parse(readFileSync(p, "utf-8")) as TransportConfig;
+    validateShape(cachedTransport, TRANSPORT_SCHEMA, "transport.json");
     logInfo(TAG, `Loaded transport config (${Object.keys(cachedTransport.agents).length} agents, ${Object.keys(cachedTransport.providers).length} providers)`);
     const repairs = validateAndRepair(cachedTransport);
     if (repairs.length > 0) {

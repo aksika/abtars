@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logWarn } from "../../components/logger.js";
+import { validateShape, IRC_SCHEMA } from "../../components/config-validator.js";
 
 export interface IrcChannelConfig {
   mode: "plain" | "signed";
@@ -41,6 +42,7 @@ export function loadIrcConfig(): IrcConfig | null {
     return null;
   }
   if (!parsed?.servers?.length) return null;
+  validateShape(parsed, IRC_SCHEMA, "irc.json");
 
   const identity: IrcIdentity | undefined = parsed.identity ? {
     privateKey: resolveSecret(parsed.identity.privateKey) ?? "",
