@@ -35,7 +35,11 @@ export function loadIrcConfig(): IrcConfig | null {
   const path = join(abtarsHome(), "config", "irc.json");
   let raw: string;
   try { raw = readFileSync(path, "utf-8"); } catch { return null; }
-  const parsed = JSON.parse(raw);
+  let parsed: any;
+  try { parsed = JSON.parse(raw); } catch (err) {
+    logWarn("irc-config", `Invalid JSON in irc.json: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
   if (!parsed?.servers?.length) return null;
 
   const identity: IrcIdentity | undefined = parsed.identity ? {
