@@ -359,6 +359,12 @@ const peerAskTool: ToolDefinition = {
     if (!peerName || !prompt) return JSON.stringify({ error: "peer_name and prompt are required" });
 
     const config = loadPeerConfig();
+
+    // Self-call guard — prevent agent from calling itself via A2A
+    if (peerName.toLowerCase() === config.self.name.toLowerCase()) {
+      return JSON.stringify({ error: `You ARE '${config.self.name}'. You cannot call yourself via peer_ask. Answer the user directly.` });
+    }
+
     // Determine hops to send: decrement from current request's budget, or use maxHops for direct calls
     const incomingHops = getCurrentPeerHops();
     const hops = incomingHops !== null ? Math.min(incomingHops - 1, config.maxHops) : config.maxHops;
