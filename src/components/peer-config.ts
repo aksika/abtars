@@ -15,10 +15,11 @@ export interface PeerEntry {
   token: string;
   mode?: "plain" | "signed";
   verifyKey?: string;
+  udpPort?: number;
 }
 
 export interface PeerConfig {
-  self: { name: string; signingKey?: string };
+  self: { name: string; signingKey?: string; udpPort?: number };
   peers: Record<string, PeerEntry>;
   maxHops: number;
   timeoutMs: number;
@@ -46,6 +47,7 @@ export function loadPeerConfig(): PeerConfig {
             host: e.host, port: e.port, token: e.token,
             ...(e.mode === "signed" ? { mode: "signed" as const } : {}),
             ...(typeof e.verifyKey === "string" ? { verifyKey: e.verifyKey } : {}),
+            ...(typeof e.udpPort === "number" ? { udpPort: e.udpPort } : {}),
           };
         } else {
           logWarn(TAG, `Skipped peer '${name}' — missing host/port/token`);
@@ -56,6 +58,7 @@ export function loadPeerConfig(): PeerConfig {
       self: {
         name: typeof raw.self?.name === "string" ? raw.self.name : "default",
         ...(typeof raw.self?.signingKey === "string" ? { signingKey: raw.self.signingKey } : {}),
+        ...(typeof raw.self?.udpPort === "number" ? { udpPort: raw.self.udpPort } : {}),
       },
       peers,
       maxHops: typeof raw.maxHops === "number" ? raw.maxHops : DEFAULTS.maxHops,

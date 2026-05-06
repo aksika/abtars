@@ -48,5 +48,22 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
       logInfo("main", `🤖 Agent API enabled on 0.0.0.0:${agentConfig.port}`);    } else {
       logError("main", `Agent API failed to start: ${result.error}`);
     }
+
+    // Start mDNS wake-up listener (#425)
+    const { loadPeerConfig } = await import("../components/peer-config.js");
+    const { startDnsWakeup } = await import("../components/dns-wakeup.js");
+    const { callPeer } = await import("../components/peer-client.js");
+    const peerConfig = loadPeerConfig();
+    const udpPort = peerConfig.self.udpPort ?? 5353;
+    if (Object.keys(peerConfig.peers).length > 0) {
+      startDnsWakeup(udpPort, peerConfig, async (peerName) => {
+        try {
+          notifyPeer(`🤖 Agents: ${peerName} rang doorbell — calling back`);
+          await callPeer(peerName, "callback: you requested a call-back via wake-up signal", peerConfig.maxHops);
+        } catch (err) {
+          logError("dns-wakeup", `Callback to ${peerName} failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      });
+    }
   }
 }

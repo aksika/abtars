@@ -375,6 +375,30 @@ const peerAskTool: ToolDefinition = {
   },
 };
 
+const peerWakeupTool: ToolDefinition = {
+  name: "peer_wakeup",
+  description: "Send a wake-up signal to a peer that cannot reach us directly (firewall). The peer's bridge will call us back via A2A within seconds.",
+  parameters: {
+    type: "object",
+    properties: {
+      peer_name: { type: "string", description: "Name of the peer to wake up (as in peers.json)" },
+    },
+    required: ["peer_name"],
+  },
+  async execute(args) {
+    const { sendWakeup } = await import("../dns-wakeup.js");
+    const { loadPeerConfig } = await import("../peer-config.js");
+    const peerName = args.peer_name?.trim();
+    if (!peerName) return JSON.stringify({ error: "peer_name required" });
+    const config = loadPeerConfig();
+    const peer = config.peers[peerName];
+    if (!peer) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
+    const udpPort = peer.udpPort ?? 5353;
+    sendWakeup(config.self.name, peer.host, udpPort, peer.token);
+    return JSON.stringify({ ok: true, message: `Wake-up sent to ${peerName}. Expect callback within seconds.` });
+  },
+};
+
 const ircSendTool: ToolDefinition = {
   name: "irc_send",
   description: "Send a message to an IRC channel (e.g. #bridges)",
@@ -392,7 +416,7 @@ const ircSendTool: ToolDefinition = {
   },
 };
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, ircSendTool];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerWakeupTool, ircSendTool];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
