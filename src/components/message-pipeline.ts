@@ -227,7 +227,9 @@ export async function handleInboundMessage(
     let streamBuffer = "";
     let streamTimer: ReturnType<typeof setInterval> | undefined;
 
-    if (adapter.editMessage) {
+    if (adapter.supportsStreaming === false) {
+      // No streaming — wait for full response (IRC, etc.)
+    } else if (adapter.editMessage) {
       // Edit-in-place streaming (ACP + platforms that support editMessage)
       const FLUSH_INTERVAL = getEnv().streamFlushSec === 0 ? 0 : Math.max(2, Math.min(180, getEnv().streamFlushSec)) * 1000;
       let lastFlushed = "";

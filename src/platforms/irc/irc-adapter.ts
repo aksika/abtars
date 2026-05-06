@@ -15,6 +15,7 @@ export interface IrcAdapterDeps {
 export class IrcAdapter implements PlatformAdapter {
   readonly name = "irc" as const;
   readonly capabilities = { voice: false, reactions: false, edit: false, typing: false, threads: false };
+  readonly supportsStreaming = false;
 
   private clients: IrcClient[] = [];
   private config: IrcConfig;
