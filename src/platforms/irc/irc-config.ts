@@ -7,6 +7,7 @@ export interface IrcChannelConfig {
   mode: "plain" | "signed";
   requireMention: boolean;
   allowFrom: string[];       // used in plain mode
+  allowUnsigned: string[];   // nicks that bypass signature in signed mode (humans)
   trustedKeys: Record<string, string>; // used in signed mode: nick → base64 pubkey
 }
 
@@ -55,6 +56,7 @@ export function loadIrcConfig(): IrcConfig | null {
         mode,
         requireMention: cfg.requireMention !== false,
         allowFrom: Array.isArray(cfg.allowFrom) ? cfg.allowFrom : [],
+        allowUnsigned: Array.isArray(cfg.allowUnsigned) ? cfg.allowUnsigned : [],
         trustedKeys: (mode === "signed" && cfg.trustedKeys && typeof cfg.trustedKeys === "object") ? cfg.trustedKeys : {},
       };
     }

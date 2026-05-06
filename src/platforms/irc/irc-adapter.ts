@@ -123,18 +123,22 @@ export class IrcAdapter implements PlatformAdapter {
     }
 
     if (channelConfig.mode === "signed") {
-      // Verify signature
-      const pubkey = channelConfig.trustedKeys[sender];
-      if (!pubkey) {
-        logDebug(TAG, `[${server.id}] Dropped from ${sender} — no trusted key`);
-        return;
+      // Allow specific nicks to bypass signature (humans on irssi)
+      if (channelConfig.allowUnsigned?.includes(sender)) {
+        // pass through without verification
+      } else {
+        const pubkey = channelConfig.trustedKeys[sender];
+        if (!pubkey) {
+          logDebug(TAG, `[${server.id}] Dropped from ${sender} — no trusted key`);
+          return;
+        }
+        const result = verifyMessage(pubkey, sender, target, text);
+        if (!result.valid) {
+          logWarn(TAG, `[${server.id}] Signature failed from ${sender}: ${result.reason}`);
+          return;
+        }
+        text = result.text;
       }
-      const result = verifyMessage(pubkey, sender, target, text);
-      if (!result.valid) {
-        logWarn(TAG, `[${server.id}] Signature failed from ${sender}: ${result.reason}`);
-        return;
-      }
-      text = result.text;
     } else {
       // Plain mode: sender allowlist
       if (channelConfig.allowFrom.length > 0 && !channelConfig.allowFrom.includes(sender)) {
