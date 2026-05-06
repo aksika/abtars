@@ -60,7 +60,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 export class AgentApiServer {
-  private server;
+  private server!: ReturnType<typeof import("node:http").createServer>;
   private config: AgentApiConfig;
   private workingDir: string;
   private memory: IMemorySystem | null;

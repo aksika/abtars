@@ -185,6 +185,13 @@ export async function update(opts: UpdateOptions): Promise<number> {
     // leaving this no-op call removed — the re-export is exercised by tests.
     void hashFile;
 
+    // #426 — Seed missing config + run config migrations
+    const { ensureInstallInvariants } = await import("../ensure-invariants.js");
+    const invariantResults = await ensureInstallInvariants(process.cwd(), home);
+    if (invariantResults.length > 0) {
+      process.stdout.write(`✓ invariants: ${invariantResults.join(", ")}\n`);
+    }
+
     // Auto-restart bridge on new code
     const manifestForRestart = await readManifest(paths.manifest);
     const restartMode = manifestForRestart?.installMode ?? "supervised";
