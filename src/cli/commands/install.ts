@@ -381,6 +381,19 @@ export async function install(opts: InstallOptions): Promise<number> {
     process.stdout.write(`[dry-run] create ${professorJson}\n`);
   }
 
+  // Generate Ed25519 identity keypair (skip if already exists)
+  const identityKey = join(paths.config, 'identity.key');
+  const identityPub = join(paths.config, 'identity.pub');
+  if (!opts.dryRun && !(await exists(identityKey))) {
+    const { generateKeyPairSync } = await import('node:crypto');
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    await writeFile(identityKey, privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'));
+    await writeFile(identityPub, publicKey.export({ format: 'der', type: 'spki' }).toString('base64'));
+    const { chmodSync } = await import('node:fs');
+    chmodSync(identityKey, 0o600);
+    process.stdout.write(`✓ identity keypair generated\n`);
+  }
+
   // Seed config from examples (only missing ones)
   const seeded = await seedConfig(repoRoot, paths.config, opts.dryRun, home);
   if (seeded.length > 0) {

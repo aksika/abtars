@@ -3,7 +3,7 @@
  * POST /v1/chat/completions with bearer + X-Peer-Hops.
  */
 
-import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { loadPeerConfig, type PeerEntry } from "./peer-config.js";
 import { logInfo } from "./logger.js";
 
@@ -67,7 +67,10 @@ function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops:
   });
 
   return new Promise((resolve, reject) => {
-    const req = httpRequest({
+    if (!peer.pskSecret) {
+      throw new PeerCallError("auth_failed", `Peer '${peerName}' has no pskSecret — TLS-PSK required for all peers`);
+    }
+    const req = httpsRequest({
       hostname: peer.host,
       port: peer.port,
       path: "/v1/chat/completions",
@@ -79,7 +82,11 @@ function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops:
         "X-Peer-Hops": String(hops),
       },
       timeout: timeoutMs,
-    }, (res) => {
+      minVersion: "TLSv1.3",
+      pskCallback: () => ({ psk: Buffer.from(peer.pskSecret!, "utf-8"), identity: selfName }),
+      checkServerIdentity: () => undefined,
+      rejectUnauthorized: false,
+    } as any, (res) => {
       let data = "";
       res.on("data", (c) => data += c);
       res.on("end", () => {

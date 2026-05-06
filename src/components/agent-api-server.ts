@@ -1,5 +1,6 @@
 import { logAndSwallow } from "./log-and-swallow.js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
+import { createServer as createHttpsServer } from "https";
 import { readFileSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -80,7 +81,31 @@ export class AgentApiServer {
     this.memory = deps.memory;
     this.runtime = deps.runtime;
     this.onPeerActivity = deps.onPeerActivity;
-    this.server = createServer((req, res) => this.handle(req, res));
+
+    // Use HTTPS with TLS-PSK if any peer has pskSecret configured
+    let hasPsk = false;
+    try {
+      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+      const peerConfig = loadPeerConfig();
+      hasPsk = Object.values(peerConfig.peers).some(p => p.pskSecret);
+      if (hasPsk) {
+        this.server = createHttpsServer({
+          minVersion: "TLSv1.3",
+          ciphers: "TLS_AES_256_GCM_SHA384",
+          pskCallback: (_socket: unknown, identity: string | null) => {
+            if (!identity) return null;
+            const peer = Object.entries(peerConfig.peers).find(([name]) => name === identity);
+            if (!peer?.[1].pskSecret) return null;
+            return { psk: Buffer.from(peer[1].pskSecret, "utf-8"), identity };
+          },
+        } as any, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
+        logInfo(TAG, "TLS-PSK enabled for agent-api");
+      }
+    } catch {}
+    if (!hasPsk) {
+      this.server = createServer((req, res) => this.handle(req, res));
+    }
+
     this.logDir = join(abtarsHome(), "logs", "agents");
     mkdirSync(this.logDir, { recursive: true });
     this.logFile = this.newLogFile();

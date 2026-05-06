@@ -13,6 +13,7 @@ export interface PeerEntry {
   host: string;
   port: number;
   token: string;
+  pskSecret?: string;
   mode?: "plain" | "signed";
   verifyKey?: string;
   udpPort?: number;
@@ -45,6 +46,7 @@ export function loadPeerConfig(): PeerConfig {
         if (typeof e.host === "string" && typeof e.port === "number" && typeof e.token === "string") {
           peers[name] = {
             host: e.host, port: e.port, token: e.token,
+            ...(typeof e.pskSecret === "string" ? { pskSecret: e.pskSecret } : {}),
             ...(e.mode === "signed" ? { mode: "signed" as const } : {}),
             ...(typeof e.verifyKey === "string" ? { verifyKey: e.verifyKey } : {}),
             ...(typeof e.udpPort === "number" ? { udpPort: e.udpPort } : {}),
