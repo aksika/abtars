@@ -1,7 +1,7 @@
 /**
  * esbuild.config.js — Bundle abtars into a single ESM output.
  *
- * Produces bundle/ with code-split chunks. Native addons (better-sqlite3)
+ * Produces bundle/ with code-split chunks. Native addons
  * and browser automation (patchright) are external.
  *
  * Usage: node esbuild.config.js
@@ -53,7 +53,6 @@ function capabilityRegistryPlugin() {
 
 const external = [
   "rettiwt-api",
-  "better-sqlite3",
   "patchright",
 ];
 
