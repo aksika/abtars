@@ -60,7 +60,9 @@ export function loadManifest(repoRoot?: string): InstallManifest {
   if (cached) return cached;
   const root = repoRoot ?? process.cwd();
   const p = join(root, "install-manifest.json");
-  const raw = JSON.parse(readFileSync(p, "utf-8")) as InstallManifest;
+  let raw: InstallManifest;
+  try { raw = JSON.parse(readFileSync(p, "utf-8")) as InstallManifest; }
+  catch (err) { throw new Error(`Invalid JSON in install-manifest.json: ${err instanceof Error ? err.message : String(err)}`); }
   if (raw.manifestVersion > SUPPORTED_VERSION) {
     logWarn(TAG, `manifest version ${raw.manifestVersion} > supported ${SUPPORTED_VERSION} — some features may not be applied`);
   }
