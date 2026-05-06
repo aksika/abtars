@@ -11,7 +11,7 @@ export interface IrcClientOptions {
   nick: string;
   nickservPassword?: string;
   channels: string[];
-  onPrivmsg: (sender: string, target: string, text: string) => void;
+  onPrivmsg: (sender: string, target: string, text: string, hostmask: string) => void;
   onReady?: () => void;
   onDisconnect?: () => void;
 }
@@ -113,7 +113,7 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
       const target = parts[2]!;
       const textStart = line.indexOf(":", line.indexOf("PRIVMSG") + 8);
       const text = textStart >= 0 ? line.slice(textStart + 1) : "";
-      opts.onPrivmsg(sender, target, text);
+      opts.onPrivmsg(sender, target, text, prefix);
       return;
     }
   }

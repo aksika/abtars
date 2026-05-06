@@ -36,7 +36,7 @@ export class IrcAdapter implements PlatformAdapter {
         nick: server.nick,
         nickservPassword: server.nickservPassword,
         channels,
-        onPrivmsg: (sender, target, text) => this.handlePrivmsg(server, client, sender, target, text),
+        onPrivmsg: (sender, target, text, hostmask) => this.handlePrivmsg(server, client, sender, target, text, hostmask),
         onReady: () => logInfo(TAG, `[${server.id}] ready`),
       });
       this.clients.push(client);
@@ -103,7 +103,7 @@ export class IrcAdapter implements PlatformAdapter {
 
   private recentOutgoing = new Set<string>();
 
-  private handlePrivmsg(server: IrcServerConfig, _client: IrcClient, sender: string, target: string, text: string): void {
+  private handlePrivmsg(server: IrcServerConfig, _client: IrcClient, sender: string, target: string, text: string, hostmask: string): void {
     // Self-echo filter — case-insensitive (#420)
     if (sender.toLowerCase() === server.nick.toLowerCase()) return;
 
@@ -123,9 +123,12 @@ export class IrcAdapter implements PlatformAdapter {
     }
 
     if (channelConfig.mode === "signed") {
-      // Allow specific nicks to bypass signature (humans on irssi)
-      if (channelConfig.allowUnsigned?.includes(sender)) {
-        // pass through without verification
+      // Allow specific hostmasks/nicks to bypass signature (humans)
+      const allowed = channelConfig.allowUnsigned?.some(pattern =>
+        hostmask.startsWith(pattern) || sender === pattern
+      );
+      if (allowed) {
+        logDebug(TAG, `[${server.id}] Unsigned pass for ${hostmask}`);
       } else {
         const pubkey = channelConfig.trustedKeys[sender];
         if (!pubkey) {
