@@ -338,6 +338,16 @@ export class AgentApiServer {
         return;
       }
     }
+
+    // [NO-REPLY] filter — peer signaled no response needed (#421)
+    if (lastMsg?.content && /\[NO-REPLY\]/i.test(lastMsg.content)) {
+      logInfo(TAG, `Peer ${caller} sent [NO-REPLY] — returning empty completion`);
+      res.writeHead(200, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ id: "no-reply", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }] }));
+      setCurrentPeerHops(null);
+      return;
+    }
+
     this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} messaged. [${commsType}]`);
 
     let session: AgentSession;

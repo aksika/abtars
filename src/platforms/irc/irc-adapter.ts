@@ -101,6 +101,9 @@ export class IrcAdapter implements PlatformAdapter {
     // Self-echo filter
     if (sender === client.nick) return;
 
+    // [NO-REPLY] filter — other agent signaled no response needed (#421)
+    if (/\[NO-REPLY\]/i.test(text)) return;
+
     // Only handle channel messages
     if (!target.startsWith("#")) return;
 
