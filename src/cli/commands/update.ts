@@ -187,7 +187,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
     // #426 — Seed missing config + run config migrations
     const { ensureInstallInvariants } = await import("../ensure-invariants.js");
-    const invariantResults = await ensureInstallInvariants(process.cwd(), home);
+    const invariantResults = await ensureInstallInvariants(process.cwd(), paths.home);
     if (invariantResults.length > 0) {
       process.stdout.write(`✓ invariants: ${invariantResults.join(", ")}\n`);
     }
