@@ -64,6 +64,10 @@ export class IrcAdapter implements PlatformAdapter {
 
     const lines = this.chunkText(text, maxLine);
     for (const line of lines) {
+      // Track outgoing for dedup (#420)
+      this.recentOutgoing.add(line);
+      setTimeout(() => this.recentOutgoing.delete(line), 30_000);
+
       if (isSigned && this.config.identity?.privateKey) {
         const { tag } = signMessage(this.config.identity.privateKey, server!.nick, channel, line);
         client.send(channel, `${line} ${tag}`);
@@ -97,9 +101,14 @@ export class IrcAdapter implements PlatformAdapter {
     return result;
   }
 
-  private handlePrivmsg(server: IrcServerConfig, client: IrcClient, sender: string, target: string, text: string): void {
-    // Self-echo filter
-    if (sender === client.nick) return;
+  private recentOutgoing = new Set<string>();
+
+  private handlePrivmsg(server: IrcServerConfig, _client: IrcClient, sender: string, target: string, text: string): void {
+    // Self-echo filter — case-insensitive (#420)
+    if (sender.toLowerCase() === server.nick.toLowerCase()) return;
+
+    // Content dedup — catch echoed messages regardless of sender nick (#420)
+    if (this.recentOutgoing.has(text)) return;
 
     // [NO-REPLY] filter — other agent signaled no response needed (#421)
     if (/\[NO-REPLY\]/i.test(text)) return;
