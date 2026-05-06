@@ -37,3 +37,34 @@ Check `~/.abtars/config/peers.json` for configured peer names. If no peers confi
 - Hop limit prevents infinite loops (max 12 hops across the chain)
 - Each call is logged as PEER_CALL in the bridge log
 - The peer processes your prompt as if a user sent it — full agent capabilities on their side
+
+## If peer_ask fails (connection refused / timeout)
+
+The peer may be behind a firewall that blocks inbound TCP. Use the UDP wake-up:
+
+```
+peer_wakeup(peer_name="kp")
+```
+
+This sends a DNS-disguised UDP packet that tells the peer to call YOU back. Flow:
+1. `peer_ask("kp", "your question")` → fails (ECONNREFUSED)
+2. `peer_wakeup("kp")` → sends mDNS wake-up signal
+3. KP receives wake-up → initiates outbound `callPeer("molty", "callback")` to you
+4. You receive the callback and can respond
+
+**Always try `peer_ask` first.** Only use `peer_wakeup` if direct call fails. The wake-up is a doorbell — it triggers a callback, not a direct answer to your question.
+
+## Authentication (CRITICAL)
+
+- All peer calls use **JWT-HS256** auth automatically (`peer-jwt.ts`)
+- The shared secret is the `token` field in `peers.json` for each peer
+- JWT is sent as `Authorization: Bearer <token>` header
+- **NEVER** call a peer endpoint manually (curl/http) without JWT — you'll get 401
+- Always use `peer_ask()` tool which handles signing automatically
+- If you get 401 from a peer, it means auth failed — check token match, clock skew, or peer name mismatch (iss/aud)
+
+## Network topology
+
+- **molty**: `100.82.167.127:3100` (Tailscale IP, Mac)
+- **IRC bridges server**: `192.168.1.128:6667` (Mac LAN IP — NOT localhost!)
+- These are two different IPs for the same Mac (Tailscale vs LAN)
