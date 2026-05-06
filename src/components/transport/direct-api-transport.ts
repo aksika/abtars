@@ -53,7 +53,7 @@ export class DirectApiTransport implements IKiroTransport {
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
 
   /** Context orchestrator — when set, messages are built from DB instead of in-memory session. */
-  contextOrchestrator?: import("../context/context-orchestrator.js").ContextOrchestrator;
+  contextOrchestrator?: import("abmind").ContextOrchestrator;
 
   private policy: FallbackPolicy | null;
   private emergencyOverride: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null = null;

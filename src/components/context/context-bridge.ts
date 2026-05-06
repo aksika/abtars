@@ -5,7 +5,7 @@
  */
 
 import type { ContextEngine } from "abmind";
-import { ContextOrchestrator, type SummarizeFn } from "./context-orchestrator.js";
+import { ContextOrchestrator, type SummarizeFn } from "abmind";
 
 const SUMMARIZER_SYSTEM = `You are a summarization agent creating a context checkpoint.
 Your output will be injected as reference material for a DIFFERENT assistant that continues the conversation.
