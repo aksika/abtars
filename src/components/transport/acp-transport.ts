@@ -36,6 +36,7 @@ import {
 import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn, logError } from "../logger.js";
 import { writeRestartReason } from "../transport/bridge-lock-transport.js";
+import { TransportStateMachine } from "./transport-state.js";
 
 /**
  * ACP transport using @agentclientprotocol/sdk.
@@ -76,14 +77,18 @@ export class AcpTransport implements IKiroTransport {
   promptStartedAt = 0;
   /** Timestamp of last ACP activity (chunk, tool call, thinking). */
   lastActivityAt = 0;
-  /** Currently in-flight tool call (null if none). */
-  toolInFlight: { title: string; startedAt: number } | null = null;
-  private _promptActive = false;
+  /** Currently in-flight tool call metadata (null if none). */
+  private toolMeta: { title: string; startedAt: number } | null = null;
+  /** @deprecated Use sm.isActive instead. Kept for external health check compat. */
+  get toolInFlight(): { title: string; startedAt: number } | null { return this.toolMeta; }
   private _modelNotFound = false;
   /** Last prompt sent (for watchdog re-send). */
   lastPromptText = "";
   /** Last session key used (for watchdog re-send). */
   lastSessionKey = "";
+
+  /** State machine — replaces _promptActive + toolInFlight flags (#188). */
+  private readonly sm: import("./transport-state.js").TransportStateMachine;
 
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
@@ -97,6 +102,10 @@ export class AcpTransport implements IKiroTransport {
     this.extraCliArgs = opts?.cliArgs;
     this.autoReinit = opts?.autoReinit ?? true;
     this.tag = opts?.tag ?? "acp";
+    this.sm = new TransportStateMachine({
+      maxReinitFailures: 3,
+      onTransition: (from, to) => logDebug(this.tag, `state: ${from} → ${to}`),
+    });
   }
 
   private readonly skipAgent: boolean;
@@ -135,8 +144,7 @@ export class AcpTransport implements IKiroTransport {
       if (this.agent === thisProcess) {
         this.agent = null;
         this.client = null;
-        // #160: reject all in-flight operations immediately so callers surface
-        // the failure in one tick instead of waiting for the prompt timeout.
+        // #160: reject all in-flight operations immediately
         if (this.inFlight.size > 0) {
           const err = new AcpExitError(code, signal);
           const count = this.inFlight.size;
@@ -144,10 +152,16 @@ export class AcpTransport implements IKiroTransport {
           this.inFlight.clear();
           logWarn(this.tag, `rejected ${count} in-flight ACP op(s) due to child exit`);
         }
-        // Auto-reinitialize on unexpected exit
-        if ((code !== 0 || signal) && this.autoReinit) {
+        // #188: state machine handles reinit
+        this.sm.childExited();
+        this.toolMeta = null;
+        if (this.sm.state === "reinitializing" && this.autoReinit) {
           logWarn(this.tag, "Unexpected kiro-cli exit — auto-reinitializing in 5s");
-          setTimeout(() => this.initialize().catch(e => logError(this.tag, "Auto-reinit failed", e)), 5000);
+          setTimeout(() => {
+            this.initialize()
+              .then(() => this.sm.reinitSucceeded())
+              .catch(e => { logError(this.tag, "Auto-reinit failed", e); this.sm.reinitFailed(); });
+          }, 5000);
         }
       }
     });
@@ -219,10 +233,10 @@ export class AcpTransport implements IKiroTransport {
 
     this.promptStartedAt = Date.now();
     this.lastActivityAt = Date.now();
-    this.toolInFlight = null;
+    this.toolMeta = null;
     this.lastPromptText = message;
     this.lastSessionKey = sessionKey;
-    this._promptActive = true;
+    this.sm.startPrompt();
 
     // client.prompt() blocks until the full turn completes.
     // While running, sessionUpdate fires for each agent_message_chunk.
@@ -256,7 +270,7 @@ export class AcpTransport implements IKiroTransport {
           inputTokens: null, outputTokens: null,
         }).catch(() => {});
       }).catch(() => {});
-      this._promptActive = false;
+      this.sm.promptCompleted();
     }
   }
 
@@ -414,7 +428,7 @@ export class AcpTransport implements IKiroTransport {
           const chunks = this.responseChunks.get(sessionId);
           if (chunks) chunks.push(text);
           this.lastActivityAt = Date.now();
-          this.toolInFlight = null; // model responding = tool done
+          this.toolMeta = null; if (this.sm.state === "tool-active") this.sm.toolCompleted(); // model responding = tool done
           if (this.onIntermediateResponse && text.trim()) {
             this.onIntermediateResponse(text);
           }
@@ -429,7 +443,7 @@ export class AcpTransport implements IKiroTransport {
       case "tool_call": {
         logDebug(this.tag, `[tool] ${update.title} (${update.status})`);
         this.lastActivityAt = Date.now();
-        this.toolInFlight = { title: update.title ?? "unknown", startedAt: Date.now() };
+        this.toolMeta = { title: update.title ?? "unknown", startedAt: Date.now() }; this.sm.toolStarted();
         break;
       }
       case "tool_call_update": {
@@ -437,7 +451,7 @@ export class AcpTransport implements IKiroTransport {
           logDebug(this.tag, `[tool update] ${update.toolCallId}: ${update.status}`);
           this.lastActivityAt = Date.now();
           if (update.status === "completed" || update.status === "failed") {
-            this.toolInFlight = null;
+            this.toolMeta = null;
           }
         }
         break;
@@ -507,13 +521,13 @@ export class AcpTransport implements IKiroTransport {
     }
 
     // Tool hung
-    if (this.toolInFlight && now - this.toolInFlight.startedAt > this._toolTimeout) {
-      const { title } = this.toolInFlight;
-      const dur = Math.round((now - this.toolInFlight.startedAt) / 1000);
+    if (this.toolMeta && now - this.toolMeta!.startedAt > this._toolTimeout) {
+      const { title } = this.toolMeta!;
+      const dur = Math.round((now - this.toolMeta!.startedAt) / 1000);
       logWarn(this.tag, `[transport-health] Tool "${title}" hung ${dur}s — interrupting`);
       this._watchdogLastActionAt = now;
       await this.sendInterrupt();
-      this.toolInFlight = null;
+      this.toolMeta = null;
       if (!this._watchdogL1Done) {
         await this.sendPrompt(this.lastSessionKey, `[SYSTEM] Your tool call "${title}" was interrupted after ${dur} seconds. Try a different approach.`);
         this._watchdogL1Done = true;
@@ -534,7 +548,7 @@ export class AcpTransport implements IKiroTransport {
     }
 
     // Silent (>5min, no tool) — but only if no prompt is actively awaiting
-    if (silentMs > this._silentTimeout && !this.toolInFlight && !this._promptActive) {
+    if (silentMs > this._silentTimeout && !this.sm.isActive) {
       if (!this._watchdogL1Done) {
         logWarn(this.tag, `[transport-health] Silent ${Math.round(silentMs / 1000)}s — re-sending`);
         this._watchdogL1Done = true;
