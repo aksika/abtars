@@ -52,25 +52,7 @@ export async function callPeer(peerName: string, prompt: string, hops: number): 
   }
 
   const start = Date.now();
-  let response: string;
-  try {
-    response = await postCompletion(peer, peerName, signedPrompt, hops, config.timeoutMs, config.self.name);
-  } catch (err) {
-    if (err instanceof PeerCallError && (err.code === "unreachable" || err.code === "timeout") && peer.udpPort) {
-      logInfo(TAG, `Direct call failed (${err.code}) — sending UDP wakeup to ${peerKey}`);
-      const { sendWakeup } = await import("./dns-wakeup.js");
-      sendWakeup(peerKey!, peer.host, peer.udpPort, peer.token);
-      await new Promise(r => setTimeout(r, 5000));
-      // Retry once after wakeup
-      try {
-        response = await postCompletion(peer, peerName, signedPrompt, hops, config.timeoutMs, config.self.name);
-      } catch {
-        throw err; // retry failed — throw original error
-      }
-    } else {
-      throw err;
-    }
-  }
+  const response = await postCompletion(peer, peerName, signedPrompt, hops, config.timeoutMs, config.self.name);
   logInfo(TAG, `PEER_CALL ${peerName} — ${prompt.length}ch → ${response.length}ch (${Date.now() - start}ms, hops=${hops})`);
   return response;
 }
