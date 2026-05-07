@@ -568,6 +568,7 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }
+    await ctx.reply(`⏳ Switching to ${newModel}…`);
     await triggerNewSession(ctx, "model-switch");
     await ctx.reply(`✅ Switched to ${newModel}`);
     return true;
