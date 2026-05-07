@@ -386,6 +386,59 @@ const peerAskTool: ToolDefinition = {
   },
 };
 
+const peerChatTool: ToolDefinition = {
+  name: "peer_chat",
+  description: "Multi-turn conversation with a peer agent. Call repeatedly with the same session_id to continue. Ends on [NO-REPLY], [END], timeout, or 10-turn cap. Returns session_id for continuation.",
+  parameters: {
+    type: "object",
+    properties: {
+      peer_name: { type: "string", description: "Name of the peer (as in peers.json)" },
+      message: { type: "string", description: "Your message to the peer" },
+      session_id: { type: "string", description: "Session ID from previous call (omit for new conversation)" },
+    },
+    required: ["peer_name", "message"],
+  },
+  async execute(args) {
+    const { callPeer } = await import("../peer-client.js");
+    const { loadPeerConfig } = await import("../peer-config.js");
+    const { getOrCreateSession, addTurn, isEnded, destroySession } = await import("../peer-sessions.js");
+
+    const peerName = args.peer_name?.trim();
+    const message = args.message?.trim();
+    if (!peerName || !message) return JSON.stringify({ error: "peer_name and message required" });
+
+    const config = loadPeerConfig();
+    if (peerName === config.self.name) return JSON.stringify({ error: "Cannot chat with yourself" });
+    if (!config.peers[peerName]) return JSON.stringify({ error: `Unknown peer: ${peerName}` });
+
+    const session = getOrCreateSession(args.session_id?.trim() || undefined, peerName);
+
+    // Check turn cap before sending
+    if (session.messages.length >= 20) {
+      destroySession(session.id);
+      return JSON.stringify({ session_id: session.id, response: "[SESSION_END] Turn limit reached.", ended: true, reason: "max-turns" });
+    }
+
+    addTurn(session, "user", message);
+
+    // Build full conversation for peer (OpenAI messages format)
+    const prompt = session.messages.map(m => `${m.role === "user" ? "You" : "Peer"}: ${m.content}`).join("\n") + "\n\nRespond to the latest message.";
+
+    try {
+      const response = await callPeer(peerName, prompt, config.maxHops);
+      addTurn(session, "assistant", response);
+
+      const { ended, reason } = isEnded(session, response);
+      if (ended) destroySession(session.id);
+
+      return JSON.stringify({ session_id: session.id, response, ended, reason });
+    } catch (err) {
+      destroySession(session.id);
+      return JSON.stringify({ error: `peer_chat failed: ${err instanceof Error ? err.message : String(err)}`, session_id: session.id, ended: true });
+    }
+  },
+};
+
 const peerWakeupTool: ToolDefinition = {
   name: "peer_wakeup",
   description: "Send a wake-up signal to a peer that cannot reach us directly (firewall). The peer's bridge will call us back via A2A within seconds.",
@@ -457,7 +510,7 @@ const secretGetTool: ToolDefinition = {
   },
 };
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerWakeupTool, ircSendTool, secretGetTool];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerChatTool, peerWakeupTool, ircSendTool, secretGetTool];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
