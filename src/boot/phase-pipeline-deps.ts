@@ -65,7 +65,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
   };
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
-  const { setEnqueueCron } = await import("../components/transport/tool-registry.js");
+  const { setEnqueueCron, setSecretGetDb } = await import("../components/transport/tool-registry.js");
   setEnqueueCron((id, manual) => {
     try {
       const entry = cronReadEntry(id);
@@ -75,6 +75,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
       return `❌ ${err instanceof Error ? err.message : String(err)}`;
     }
   });
+
+  // Wire secret_get tool to memory DB
+  const db = ctx.memory?.getDb();
+  if (db) setSecretGetDb(db as any);
 
   // Build pipelineDeps. References ctx fields; later phases mutate ctx.sleepHandle /
   // pipelineDeps.loadedCapabilities / pipelineDeps.selfHealerTask in place.

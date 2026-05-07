@@ -274,6 +274,11 @@ let _ircSend: ((channel: string, message: string) => void) | null = null;
 /** Inject IRC send from bridge for irc_send tool. */
 export function setIrcSend(fn: (channel: string, message: string) => void): void { _ircSend = fn; }
 
+let _secretGetDb: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } | null = null;
+
+/** Inject DB handle for secret_get tool. */
+export function setSecretGetDb(db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } }): void { _secretGetDb = db; }
+
 let _sendDocument: ((path: string, caption?: string) => Promise<number>) | null = null;
 
 /**
@@ -422,7 +427,37 @@ const ircSendTool: ToolDefinition = {
   },
 };
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerWakeupTool, ircSendTool];
+const secretGetTool: ToolDefinition = {
+  name: "secret_get",
+  description: "Retrieve a stored secret (class=3) and inject as env var. Returns the $VAR_NAME to use in commands. NEVER echoes the value to the user.",
+  parameters: {
+    properties: {
+      name: { type: "string", description: "Keyword to search for (e.g. 'openrouter', 'github token')" },
+    },
+    required: ["name"],
+  },
+  execute: async (args) => {
+    const keyword = args.name?.trim();
+    if (!keyword) return JSON.stringify({ error: "name is required" });
+    if (!_secretGetDb) return JSON.stringify({ error: "memory not available" });
+    try {
+      const { decrypt, hasKey } = await import("abmind");
+      if (!hasKey()) return JSON.stringify({ error: "no encryption key" });
+      const row = _secretGetDb.prepare(
+        "SELECT content_en, encrypted FROM extracted_memories WHERE classification = 3 AND (content_en LIKE ? OR content_original LIKE ?) LIMIT 1"
+      ).get(`%${keyword}%`, `%${keyword}%`) as { content_en: string; encrypted: number } | undefined;
+      if (!row) return JSON.stringify({ error: `no secret found matching '${keyword}'` });
+      const value = row.encrypted ? decrypt(row.content_en) : row.content_en;
+      const varName = `SECRET_${keyword.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+      process.env[varName] = value;
+      return JSON.stringify({ ok: true, env_var: `$${varName}`, hint: `Use $${varName} in commands. NEVER print or echo the value.` });
+    } catch (err) {
+      return JSON.stringify({ error: `secret_get failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  },
+};
+
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerWakeupTool, ircSendTool, secretGetTool];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
