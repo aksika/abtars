@@ -16,17 +16,16 @@
  * use a boot-time fatal check instead — missing them should exit(1), not log.
  */
 
-import { logWarn } from "./logger.js";
+import { logTrace } from "./logger.js";
 
 const warned = new Set<string>();
 
-/** Read an env var. If missing, warn once per process, then silent. Returns undefined if unset. */
 export function readEnv(key: string, impact: string): string | undefined {
   const v = process.env[key];
   if (v !== undefined && v.trim() !== "") return v;
   if (!warned.has(key)) {
     warned.add(key);
-    logWarn("env", `${key} not set — ${impact}`);
+    logTrace("env", `${key} not set — ${impact}`);
   }
   return undefined;
 }
