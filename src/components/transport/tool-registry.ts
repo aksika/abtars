@@ -385,8 +385,9 @@ const peerAskTool: ToolDefinition = {
 
     try {
       const commsType = config.self.signingKey ? "signed" : "plain";
+      const result = await callPeer(peerName, prompt, hops);
       _peerActivityCb?.(`🤖 Agents: ${config.self.name} → ${peerName} messaged. [${commsType}]`);
-      return await callPeer(peerName, prompt, hops);
+      return result;
     } catch (err) {
       if (err instanceof PeerCallError) return JSON.stringify({ error: `peer_ask failed: ${err.message} (${err.code})` });
       return JSON.stringify({ error: `peer_ask failed: ${err instanceof Error ? err.message : String(err)}` });
