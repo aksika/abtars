@@ -134,6 +134,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "NOTEBOOKLM_DEFAULT_NOTEBOOK", type: "string", default: "", description: "Default NotebookLM notebook" },
   { env: "PERMISSION_TIMEOUT_MS", type: "int", default: "60000", description: "Permission prompt timeout (ms)" },
   { env: "TRUST_MODE", type: "bool", default: "false", description: "Skip permission prompts" },
+  { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | sandbox" },
 ] as const;
 
 // ── Parsed config type ──────────────────────────────────────────────────────
@@ -238,6 +239,7 @@ export interface EnvConfig {
   notebooklmDefaultNotebook: string;
   permissionTimeoutMs: number;
   trustMode: boolean;
+  securityMode: string;
 
   /** Dynamic API key lookup — for provider.apiKeyEnv pattern. */
   getApiKey(envName: string): string | undefined;
@@ -404,6 +406,7 @@ export function initEnv(): Readonly<EnvConfig> {
     notebooklmDefaultNotebook: readOr("NOTEBOOKLM_DEFAULT_NOTEBOOK", ""),
     permissionTimeoutMs: parseIntSafe(readOr("PERMISSION_TIMEOUT_MS", "60000"), "PERMISSION_TIMEOUT_MS"),
     trustMode: parseBool(readOr("TRUST_MODE", "false")),
+    securityMode: readOr("SECURITY_MODE", "off"),
 
     getApiKey(envName: string): string | undefined {
       return process.env[envName]?.trim() || undefined;

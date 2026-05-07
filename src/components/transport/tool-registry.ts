@@ -52,6 +52,14 @@ function isBridgeKillCommand(cmd: string): boolean {
 }
 
 function runBash(cmd: string, timeout = BASH_TIMEOUT_MS): Promise<string> {
+  // Guardrails: command check
+  const { checkCommand } = require("../guardrails.js") as typeof import("../guardrails.js");
+  const cmdBlock = checkCommand(cmd);
+  if (cmdBlock) {
+    logWarn("tool-registry", `Guardrails blocked: ${cmd.slice(0, 200)}`);
+    return Promise.resolve(JSON.stringify({ stderr: cmdBlock, exit_code: 126 }));
+  }
+
   if (isBridgeSpawnCommand(cmd)) {
     logWarn("tool-registry", `Blocked bridge-spawn command: ${cmd.slice(0, 200)}`);
     return Promise.resolve(JSON.stringify({
