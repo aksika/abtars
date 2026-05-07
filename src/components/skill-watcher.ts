@@ -99,7 +99,7 @@ export class SkillWatcher implements ISkillSlot {
       }
       entries.push(`- [${this.getSourceDir(filepath)}] ${header.name}: ${header.description}`);
     }
-    const content = `# Skills Catalog\n\n${entries.join("\n")}\n`;
+    const content = `# Skills Catalog\n\nWhen a user request matches a skill below, read its SKILL.md at ~/.abtars/skills/<dir>/SKILL.md for detailed instructions before acting.\n\n${entries.join("\n")}\n`;
     try {
       writeFileSync(this.catalogPath, content, "utf-8");
       const skippedStr = skipped.length > 0 ? `, ${skipped.length} skipped — ${skipped.join(", ")}` : "";
