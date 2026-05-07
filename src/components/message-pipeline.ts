@@ -284,6 +284,14 @@ export async function handleInboundMessage(
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
+    // --- Secret redaction (belt-and-suspenders for #436) ---
+    for (const [key, val] of Object.entries(process.env)) {
+      if (key.startsWith("SECRET_") && val && userResponse.includes(val)) {
+        userResponse = userResponse.replaceAll(val, `[REDACTED:$${key}]`);
+        logWarn(TAG, `Redacted leaked secret $${key} from response`);
+      }
+    }
+
     // --- Empty response ---
     if (!userResponse) {
       // Strip streaming cursor from partial message
