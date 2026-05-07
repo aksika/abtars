@@ -8,7 +8,7 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import type { SourceName } from '../update-sources/types.js';
@@ -171,6 +171,22 @@ export async function update(opts: UpdateOptions): Promise<number> {
       await writeWrapper(paths.bin, name, paths.current, false);
     }
     process.stdout.write(`✓ wrappers refreshed (${installManifest.cliWrappers.length} files)\n`);
+
+    // Sync core skills from release to runtime (#438)
+    const { rmSync, cpSync, readdirSync } = await import("node:fs");
+    const skillsCoreSrc = join(staged.stagedPath, "core", "skills");
+    const skillsCoreDst = join(paths.home, "skills", "core");
+    if (existsSync(skillsCoreSrc)) {
+      rmSync(skillsCoreDst, { recursive: true, force: true });
+      cpSync(skillsCoreSrc, skillsCoreDst, { recursive: true });
+      const files = readdirSync(skillsCoreDst, { recursive: true }) as string[];
+      const count = files.filter(f => f.endsWith("SKILL.md")).length;
+      process.stdout.write(`✓ skills/core synced (${count} skills)\n`);
+    }
+    // Ensure other skill dirs exist
+    for (const d of ["custom", "downloaded", "self"]) {
+      await mkdir(join(paths.home, "skills", d), { recursive: true });
+    }
 
     if (serviceChanged) {
       if (process.platform === 'darwin') {

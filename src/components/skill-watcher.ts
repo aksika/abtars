@@ -97,7 +97,7 @@ export class SkillWatcher implements ISkillSlot {
           continue;
         }
       }
-      entries.push(`- ${header.name}: ${header.description}`);
+      entries.push(`- [${this.getSourceDir(filepath)}] ${header.name}: ${header.description}`);
     }
     const content = `# Skills Catalog\n\n${entries.join("\n")}\n`;
     try {
@@ -150,6 +150,13 @@ export class SkillWatcher implements ISkillSlot {
       }
     }
     return this.binaryCache.get(bin)!;
+  }
+
+  private getSourceDir(filepath: string): string {
+    const rel = filepath.slice(this.skillsDir.length + 1);
+    const first = rel.split("/")[0] ?? "core";
+    if (["core", "custom", "downloaded", "self"].includes(first)) return first;
+    return "core";
   }
 
   private scanMdFiles(dir: string): string[] {

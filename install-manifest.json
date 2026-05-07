@@ -16,6 +16,18 @@
     },
     {
       "path": "releases"
+    },
+    {
+      "path": "skills/core"
+    },
+    {
+      "path": "skills/custom"
+    },
+    {
+      "path": "skills/downloaded"
+    },
+    {
+      "path": "skills/self"
     }
   ],
   "lazyRoots": [

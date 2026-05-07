@@ -61,7 +61,7 @@ Body paragraph.
 `);
       watcher.generateCatalog();
       const catalog = readCatalog();
-      expect(catalog).toContain("- alpha: First test skill");
+      expect(catalog).toContain("- [core] alpha: First test skill");
       expect(catalog).not.toContain("Heading that should NOT");
     });
 
@@ -74,7 +74,7 @@ Description: Mixed-case keys
 # body
 `);
       watcher.generateCatalog();
-      expect(readCatalog()).toContain("- beta: Mixed-case keys");
+      expect(readCatalog()).toContain("- [core] beta: Mixed-case keys");
     });
 
     it("trims whitespace around values", () => {
@@ -84,7 +84,7 @@ description:     Padded description
 ---
 `);
       watcher.generateCatalog();
-      expect(readCatalog()).toContain("- gamma: Padded description");
+      expect(readCatalog()).toContain("- [core] gamma: Padded description");
     });
 
     it("extracts 'requires' field when present", () => {
@@ -96,7 +96,7 @@ requires: node
 ---
 `);
       watcher.generateCatalog();
-      expect(readCatalog()).toContain("- runnable: Gated by node presence");
+      expect(readCatalog()).toContain("- [core] runnable: Gated by node presence");
     });
 
     it("handles unclosed frontmatter (falls back to heading heuristic)", () => {
@@ -110,7 +110,7 @@ Body.
       watcher.generateCatalog();
       const catalog = readCatalog();
       // Falls back to heading/paragraph heuristic — name from `# Heading`
-      expect(catalog).toContain("- Heading:");
+      expect(catalog).toContain("- [core] Heading:");
     });
 
     it("handles no-frontmatter files via fallback heuristic", () => {
@@ -119,7 +119,7 @@ Body.
 This is a paragraph describing the skill, long enough to pass the > 10 char filter.
 `);
       watcher.generateCatalog();
-      expect(readCatalog()).toContain("- Plain Heading:");
+      expect(readCatalog()).toContain("- [core] Plain Heading:");
       expect(readCatalog()).toContain("This is a paragraph");
     });
 
@@ -133,7 +133,7 @@ description: ${long}
       watcher.generateCatalog();
       const catalog = readCatalog();
       // Should contain exactly 120 x's, not 200
-      const match = catalog.match(/- long: (x+)/);
+      const match = catalog.match(/- \[core\] long: (x+)/);
       expect(match).not.toBeNull();
       expect(match![1]!.length).toBe(120);
     });
@@ -147,7 +147,7 @@ description: Leading blank lines
 ---
 `);
       watcher.generateCatalog();
-      expect(readCatalog()).toContain("- padded: Leading blank lines");
+      expect(readCatalog()).toContain("- [core] padded: Leading blank lines");
     });
   });
 
@@ -162,7 +162,7 @@ requires: node
 ---
 `);
       watcher.generateCatalog();
-      expect(readCatalog()).toContain("- needs-node:");
+      expect(readCatalog()).toContain("- [core] needs-node:");
     });
 
     it("skips skill when required binary is missing", () => {
@@ -184,7 +184,7 @@ description: No requires field
 ---
 `);
       watcher.generateCatalog();
-      expect(readCatalog()).toContain("- no-req: No requires field");
+      expect(readCatalog()).toContain("- [core] no-req: No requires field");
     });
 
     it("catalog contains exactly the expected subset on mixed input", () => {
@@ -207,9 +207,9 @@ requires: nonexistent-zxy-999
 `);
       watcher.generateCatalog();
       const catalog = readCatalog();
-      expect(catalog).toContain("- a: Always included");
-      expect(catalog).toContain("- b: Gated by node");
-      expect(catalog).not.toContain("- c:");
+      expect(catalog).toContain("- [core] a: Always included");
+      expect(catalog).toContain("- [core] b: Gated by node");
+      expect(catalog).not.toContain("- [core] c:");
       expect(catalog).not.toContain("c: Gated");
     });
 
@@ -229,7 +229,7 @@ requires: node
       watcher.generateCatalog();
       watcher.generateCatalog();
       const elapsed = Date.now() - start;
-      expect(readCatalog()).toContain("- cached:");
+      expect(readCatalog()).toContain("- [core] cached:");
       // 3 calls with caching should complete fast. Without caching, 3 × execFileSync = ~60ms+.
       // We assert a generous bound that still catches "cache is broken".
       expect(elapsed).toBeLessThan(500);
