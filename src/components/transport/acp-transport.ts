@@ -401,9 +401,8 @@ export class AcpTransport implements IKiroTransport {
 
   async setModel(model: string): Promise<void> {
     this.modelId = model;
-    this.destroy();
-    await this.initialize();
-    logInfo(this.tag, `Model switched to: ${model} (session reset)`);
+    // Don't restart here — caller (triggerNewSession → resetSession) handles it.
+    logInfo(this.tag, `Model set to: ${model} (pending session reset)`);
   }
 
   async restartSession(): Promise<void> {
