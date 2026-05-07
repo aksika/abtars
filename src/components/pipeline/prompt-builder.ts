@@ -160,7 +160,8 @@ export function buildSessionStartPrompt(
       const user = registry.byUserId.get(userId);
       if (user) {
         const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
-        contextParts.push(`[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).`);
+        const lang = user.languages?.length ? `\nTheir languages: ${user.languages.join(", ")}. Respond ONLY in these languages.` : "";
+        contextParts.push(`[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).${lang}`);
       }
     } catch (err) { logAndSwallow("prompt_builder", "op", err); }
   }
