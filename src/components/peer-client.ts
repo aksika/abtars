@@ -36,7 +36,8 @@ export class PeerCallError extends Error {
  */
 export async function callPeer(peerName: string, prompt: string, hops: number): Promise<string> {
   const config = loadPeerConfig();
-  const peer = config.peers[peerName];
+  const peerKey = Object.keys(config.peers).find(k => k.toLowerCase() === peerName.toLowerCase());
+  const peer = peerKey ? config.peers[peerKey] : undefined;
   if (!peer) {
     const available = Object.keys(config.peers).join(", ") || "(none)";
     throw new PeerCallError("unknown_peer", `Unknown peer '${peerName}'. Available: ${available}`);
