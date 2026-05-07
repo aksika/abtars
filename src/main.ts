@@ -12,6 +12,7 @@
  */
 
 import "./boot/env.js";
+process.umask(0o077); // #441: all runtime files 600, dirs 700
 import { initEnv, _resetEnv } from "./components/env-schema.js";
 import { startBridge } from "./bridge-app.js";
 import { logInfo } from "./components/logger.js";

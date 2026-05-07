@@ -28,6 +28,10 @@
     },
     {
       "path": "skills/self"
+    },
+    {
+      "path": "secret",
+      "mode": "0700"
     }
   ],
   "lazyRoots": [

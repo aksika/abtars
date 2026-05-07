@@ -467,6 +467,38 @@ if [ -d "$AB/logs" ]; then
   done < <(find "$AB/logs" -name '*.jsonl' -size +100M 2>/dev/null)
 fi
 
+# 17. Filesystem permissions (#441)
+check_perm() {
+  local path="$1" expected="$2" label="$3"
+  if [ ! -e "$path" ]; then return; fi
+  actual=$(stat -c "%a" "$path" 2>/dev/null || stat -f "%Lp" "$path" 2>/dev/null)
+  if [ "$actual" != "$expected" ]; then
+    warn "$label is $actual — should be $expected"
+    if $FIX || $FIX_FULL; then
+      chmod "$expected" "$path" && fix "$label → $expected"
+    fi
+  fi
+}
+
+check_perm "$AB" "700" "~/.abtars/"
+check_perm "$AB/config" "700" "config/"
+check_perm "$AB/secret" "700" "secret/"
+
+# Check all files in config/ and secret/ are 600
+for dir in "$AB/config" "$AB/secret"; do
+  [ -d "$dir" ] || continue
+  for f in "$dir"/*; do
+    [ -f "$f" ] || continue
+    actual=$(stat -c "%a" "$f" 2>/dev/null || stat -f "%Lp" "$f" 2>/dev/null)
+    if [ "$actual" != "600" ]; then
+      warn "$(basename "$f") in $(basename "$dir")/ is $actual — should be 600"
+      if $FIX || $FIX_FULL; then
+        chmod 600 "$f" && fix "$(basename "$f") → 600"
+      fi
+    fi
+  done
+done
+
 # Summary
 if $FIX_FULL && [ -f "$AB/logs/watchdog.log" ]; then
   echo ""

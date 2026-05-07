@@ -12,6 +12,7 @@
  * config/ from examples only; interactive onboard is Phase 3.
  */
 
+process.umask(0o077); // #441: all runtime files 600, dirs 700
 import { doctor } from './commands/doctor.js';
 import { install } from './commands/install.js';
 import { uninstall } from './commands/uninstall.js';
