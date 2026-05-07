@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "abtars users.json",
+  "type": "object",
+  "required": ["users"],
+  "properties": {
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "role"],
+        "properties": {
+          "name": { "type": "string" },
+          "role": { "type": "string", "enum": ["owner", "admin", "user", "guest"] },
+          "telegramId": { "type": "number" },
+          "discordId": { "type": "string" },
+          "ircNick": { "type": "string" }
+        }
+      }
+    }
+  }
+}

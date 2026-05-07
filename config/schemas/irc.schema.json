@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "abtars irc.json",
+  "type": "object",
+  "properties": {
+    "identity": {
+      "type": "object",
+      "properties": {
+        "privateKey": { "type": "string", "description": "Base64 Ed25519 private key (DER)" },
+        "publicKey": { "type": "string", "description": "Base64 Ed25519 public key (DER)" }
+      }
+    },
+    "servers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "host", "port", "nick", "channels"],
+        "properties": {
+          "id": { "type": "string" },
+          "host": { "type": "string" },
+          "port": { "type": "number" },
+          "tls": { "type": "boolean" },
+          "nick": { "type": "string" },
+          "nickservPassword": { "type": "string" },
+          "channels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "mode": { "type": "string", "enum": ["plain", "signed"] },
+                "requireMention": { "type": "boolean" },
+                "allowFrom": { "type": "array", "items": { "type": "string" } },
+                "allowUnsigned": { "type": "array", "items": { "type": "string" }, "description": "Nicks/hostmasks that bypass signature in signed mode" },
+                "trustedKeys": { "type": "object", "additionalProperties": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

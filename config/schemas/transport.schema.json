@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "abtars transport.json",
+  "type": "object",
+  "required": ["agents", "providers"],
+  "properties": {
+    "agents": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["provider"],
+        "properties": {
+          "provider": { "type": "string" },
+          "model": { "type": "string" }
+        }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["transport"],
+        "properties": {
+          "transport": { "type": "string", "enum": ["api", "acp"] },
+          "endpoint": { "type": "string" },
+          "apiKeyEnv": { "type": "string" },
+          "contextWindow": { "type": "number" },
+          "maxOutput": { "type": "number" },
+          "fallbackChain": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "maxTurns": { "type": "number" }
+  }
+}
