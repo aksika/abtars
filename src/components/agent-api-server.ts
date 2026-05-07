@@ -373,6 +373,32 @@ export class AgentApiServer {
       return;
     }
 
+    // Callback mechanism (#451) — peer called back after our callback request
+    if (lastMsg?.content?.startsWith("callback")) {
+      const { hasPending, popPendingPrompt } = await import("./pending-callback.js");
+      if (hasPending(caller)) {
+        const pendingPrompt = popPendingPrompt(caller);
+        logInfo(TAG, `Callback from ${caller} — returning pending prompt (${pendingPrompt?.length ?? 0} chars)`);
+        res.writeHead(200, { "Content-Type": "application/json" })
+          .end(JSON.stringify({ id: "cb", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: pendingPrompt ?? "" }, finish_reason: "stop" }] }));
+        setCurrentPeerHops(null);
+        return;
+      }
+    }
+
+    // CB-RESPONSE — peer delivering answer to our pending callback (#451)
+    if (lastMsg?.content?.startsWith("[CB-RESPONSE]")) {
+      const { resolvePending } = await import("./pending-callback.js");
+      const answer = lastMsg.content.slice("[CB-RESPONSE]".length).trim();
+      if (resolvePending(caller, answer)) {
+        logInfo(TAG, `CB-RESPONSE from ${caller} — resolved pending (${answer.length} chars)`);
+      }
+      res.writeHead(200, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ id: "cb-ack", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }] }));
+      setCurrentPeerHops(null);
+      return;
+    }
+
     logInfo(TAG, `Peer call: ${caller} → ${this.config.agentCodename} [${commsType}]`);
 
     let session: AgentSession;

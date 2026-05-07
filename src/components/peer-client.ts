@@ -52,9 +52,31 @@ export async function callPeer(peerName: string, prompt: string, hops: number): 
   }
 
   const start = Date.now();
-  const response = await postCompletion(peer, peerName, signedPrompt, hops, config.timeoutMs, config.self.name);
-  logInfo(TAG, `PEER_CALL ${peerName} — ${prompt.length}ch → ${response.length}ch (${Date.now() - start}ms, hops=${hops})`);
-  return response;
+  try {
+    const response = await postCompletion(peer, peerName, signedPrompt, hops, config.timeoutMs, config.self.name);
+    logInfo(TAG, `PEER_CALL ${peerName} — ${prompt.length}ch → ${response.length}ch (${Date.now() - start}ms, hops=${hops})`);
+    return response;
+  } catch (err) {
+    if (err instanceof PeerCallError && (err.code === "unreachable" || err.code === "timeout") && peer.udpPort) {
+      logInfo(TAG, `Direct call failed (${err.code}) — requesting callback from ${peerKey}`);
+      const { registerPending, rejectPending } = await import("./pending-callback.js");
+      const { sendWakeup } = await import("./dns-wakeup.js");
+      const resultPromise = registerPending(peerKey!, signedPrompt);
+      sendWakeup(peerKey!, peer.host, peer.udpPort, peer.token);
+      // Wait up to 60s for the peer to call back with the answer
+      const timeout = setTimeout(() => rejectPending(peerKey!, "callback timeout (60s)"), 60000);
+      try {
+        const answer = await resultPromise;
+        clearTimeout(timeout);
+        logInfo(TAG, `PEER_CALL ${peerName} (via callback) — ${prompt.length}ch → ${answer.length}ch (${Date.now() - start}ms)`);
+        return answer;
+      } catch (cbErr) {
+        clearTimeout(timeout);
+        throw new PeerCallError("timeout", `Callback failed: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`);
+      }
+    }
+    throw err;
+  }
 }
 
 function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops: number, timeoutMs: number, selfName: string): Promise<string> {

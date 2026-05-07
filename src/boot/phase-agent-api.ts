@@ -59,7 +59,21 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
       startDnsWakeup(udpPort, peerConfig, async (peerName) => {
         try {
           notifyPeer(`🤖 Agents: ${peerName} rang doorbell — calling back`);
-          await callPeer(peerName, "callback: you requested a call-back via wake-up signal", peerConfig.maxHops);
+          // Call peer to get their pending prompt
+          const prompt = await callPeer(peerName, "callback: you requested a call-back via wake-up signal", peerConfig.maxHops);
+          if (!prompt || prompt.trim() === "") return;
+          // Process the prompt via local agent-api (self-call localhost)
+          const http = await import("node:http");
+          const answer = await new Promise<string>((resolve, reject) => {
+            const body = JSON.stringify({ model: "default", messages: [{ role: "user", content: prompt }] });
+            const req = http.request({ hostname: "127.0.0.1", port: agentConfig.port, path: "/v1/chat/completions", method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "Authorization": `Bearer ${process.env["AGENT_API_TOKEN"] ?? ""}`  }, timeout: 55000 }, (res) => {
+              let data = ""; res.on("data", c => data += c); res.on("end", () => { try { resolve(JSON.parse(data)?.choices?.[0]?.message?.content ?? ""); } catch { resolve(""); } });
+            });
+            req.on("error", reject); req.on("timeout", () => { req.destroy(); reject(new Error("self-call timeout")); });
+            req.write(body); req.end();
+          });
+          // Deliver answer back to the requesting peer
+          await callPeer(peerName, `[CB-RESPONSE] ${answer}`, peerConfig.maxHops);
         } catch (err) {
           logError("dns-wakeup", `Callback to ${peerName} failed: ${err instanceof Error ? err.message : String(err)}`);
         }
