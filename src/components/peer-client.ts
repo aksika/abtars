@@ -58,7 +58,7 @@ export async function callPeer(peerName: string, prompt: string, hops: number): 
     return response;
   } catch (err) {
     if (err instanceof PeerCallError && (err.code === "unreachable" || err.code === "timeout") && peer.udpPort) {
-      logInfo(TAG, `Direct call failed (${err.code}) — requesting callback from ${peerKey}`);
+      logInfo(TAG, `Direct call failed (${err.code}) — UDP callback request → ${peerKey}`);
       const { registerPending, rejectPending } = await import("./pending-callback.js");
       const { sendWakeup } = await import("./dns-wakeup.js");
       const resultPromise = registerPending(peerKey!, signedPrompt);

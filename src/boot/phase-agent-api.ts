@@ -58,7 +58,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
     if (Object.keys(peerConfig.peers).length > 0) {
       startDnsWakeup(udpPort, peerConfig, async (peerName) => {
         try {
-          notifyPeer(`🤖 Agents: ${peerName} rang doorbell — calling back`);
+          notifyPeer(`🤖 Agents: ${peerName} → UDP callback request received`);
           // Call peer to get their pending prompt
           const prompt = await callPeer(peerName, "callback: you requested a call-back via wake-up signal", peerConfig.maxHops);
           if (!prompt || prompt.trim() === "") return;
@@ -73,6 +73,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
             req.write(body); req.end();
           });
           // Deliver answer back to the requesting peer
+          notifyPeer(`🤖 Agents: ${peerConfig.self.name} → ${peerName} messaged. [callback]`);
           await callPeer(peerName, `[CB-RESPONSE] ${answer}`, peerConfig.maxHops);
         } catch (err) {
           logError("dns-wakeup", `Callback to ${peerName} failed: ${err instanceof Error ? err.message : String(err)}`);
