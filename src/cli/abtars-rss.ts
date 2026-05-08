@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * agentbridge-rss — fetch RSS/Atom feeds, output JSON
+ * abtars-rss — fetch RSS/Atom feeds, output JSON
  *
  * Usage:
- *   agentbridge-rss                          # fetch all feeds, output today's JSON
- *   agentbridge-rss --hours 48               # look back 48h instead of 24
+ *   abtars-rss                          # fetch all feeds, output today's JSON
+ *   abtars-rss --hours 48               # look back 48h instead of 24
  *
  * Reads:
  *   ~/.abtars/finance/feeds.json        # feed URLs + optional keyword filters
