@@ -1,0 +1,13 @@
+{
+  "entries": {
+    "web-search": {
+      "apiKey": "<YOUR_BRAVE_API_KEY>",
+      "env": {
+        "BRAVE_SEARCH_COUNT": "10"
+      }
+    },
+    "linear": {
+      "apiKey": "<YOUR_LINEAR_API_KEY>"
+    }
+  }
+}
