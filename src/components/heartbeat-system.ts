@@ -1,6 +1,5 @@
-import { logAndSwallow } from "./log-and-swallow.js";
 import { logInfo, logWarn, logDebug } from "./logger.js";
-import { writeFileSync, readFileSync } from "node:fs";
+import { updateLastHeartbeat } from "./transport/bridge-lock-transport.js";
 import type { HeartbeatTask } from "abmind";
 
 export type HeartbeatConfig = {
@@ -107,11 +106,7 @@ export class HeartbeatSystem implements ITaskSlot {
       const gapMin = Math.round(gap / 60000);
       logInfo(TAG, `Standby resume detected — suspended ${gapMin}min`);
       // Immediately update lastHeartbeat so external watchdog doesn't kill us
-      try {
-        const lock = JSON.parse(readFileSync(this.config.bridgeLockPath, "utf-8"));
-        lock.lastHeartbeat = Date.now();
-        writeFileSync(this.config.bridgeLockPath, JSON.stringify(lock), "utf-8");
-      } catch (err) { logAndSwallow("heartbeat_system", "op", err); }
+      updateLastHeartbeat();
       if (this.config.onStandbyResume) {
         this.config.onStandbyResume(gap);
         return; // skip all tasks this tick
@@ -140,11 +135,7 @@ export class HeartbeatSystem implements ITaskSlot {
     }
 
     // Update bridge.lock with lastHeartbeat
-    try {
-      const lock = JSON.parse(readFileSync(this.config.bridgeLockPath, "utf-8"));
-      lock.lastHeartbeat = Date.now();
-      writeFileSync(this.config.bridgeLockPath, JSON.stringify(lock), "utf-8");
-    } catch (err) { logAndSwallow("heartbeat_system", "op", err); }
+    updateLastHeartbeat();
 
     // Kick the watchdog
     this.config.onTick?.();

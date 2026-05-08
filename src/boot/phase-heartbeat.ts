@@ -1,4 +1,3 @@
-import { logAndSwallow } from "../components/log-and-swallow.js";
 import { getEnv } from "../components/env-schema.js";
 /**
  * phase-heartbeat — boot phase 9: HeartbeatSystem + all periodic tasks + watchdog.
@@ -23,12 +22,11 @@ import { getEnv } from "../components/env-schema.js";
  *   message-pipeline.resetIdleCompactFlag is set indirectly via createIdleCompactTask.
  */
 
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HeartbeatSystem } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
 import {
-  writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus,
+  writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus, initBridgeLock,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "../components/heartbeat-tasks.js";
@@ -51,9 +49,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   const cronCallback = createCronCallback(ctx);
 
   // bridge.lock — track bridge lifecycle
-  try {
-    writeFileSync(ctx.bridgeLockPath, JSON.stringify({ pid: process.pid, startedAt: ctx.startedAt, version: `${ctx.version}-${ctx.commit}`, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
-  } catch (err) { logAndSwallow("phase_heartbeat", "op", err); }
+  initBridgeLock({ pid: process.pid, startedAt: ctx.startedAt, version: `${ctx.version}-${ctx.commit}`, argv: process.argv.slice(2) });
 
   const hbIntervalMs = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10) * 1000;
 

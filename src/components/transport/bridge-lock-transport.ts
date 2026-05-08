@@ -93,3 +93,19 @@ export function readAndClearForceSleep(): string | null {
   if (v) updateBridgeLockField("forceSleep", null);
   return v;
 }
+
+/** Initialize bridge.lock with full boot state. Single writer for initial creation. */
+export function initBridgeLock(opts: { pid: number; startedAt: number; version: string; argv: string[] }): void {
+  const p = join(abtarsHome(), "bridge.lock");
+  try {
+    writeFileSync(p, JSON.stringify({
+      pid: opts.pid, startedAt: opts.startedAt, version: opts.version,
+      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(),
+    }), "utf-8");
+  } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
+}
+
+/** Update lastHeartbeat timestamp in bridge.lock (called every tick). */
+export function updateLastHeartbeat(): void {
+  updateBridgeLockField("lastHeartbeat", Date.now());
+}

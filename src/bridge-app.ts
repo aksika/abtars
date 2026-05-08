@@ -1,6 +1,6 @@
-import { logAndSwallow } from "./components/log-and-swallow.js";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, readlinkSync } from "node:fs";
+import { readlinkSync } from "node:fs";
+import { initBridgeLock } from "./components/transport/bridge-lock-transport.js";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 
@@ -129,11 +129,7 @@ export async function startBridge(): Promise<number> {
   } catch (err) { /* dev mode — no release symlink */ }
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
-  try {
-    const lockPath = ctx.bridgeLockPath || join(homedir(), ".abtars", "bridge.lock");
-    writeFileSync(lockPath,
-      JSON.stringify({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}-${ctx.commit}`, sleepStatus: "awake", argv: process.argv.slice(2), lastHeartbeat: Date.now() }), "utf-8");
-  } catch (err) { logAndSwallow("bridge_app", "op", err); }
+  initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}-${ctx.commit}`, argv: process.argv.slice(2) });
 
   const bridge = new Bridge(ctx);
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;
