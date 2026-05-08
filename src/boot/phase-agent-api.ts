@@ -60,7 +60,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
         try {
           notifyPeer(`🤖 Agents: ${peerName} → UDP callback request received`);
           // Call peer to get their pending prompt
-          const prompt = await callPeer(peerName, "callback: you requested a call-back via wake-up signal", peerConfig.maxHops);
+          const prompt = await callPeer(peerName, "callback: you requested a call-back via wake-up signal", peerConfig.maxHops, { skipWakeup: true });
           if (!prompt || prompt.trim() === "") return;
           // Process the prompt via local agent-api (self-call localhost)
           const http = await import("node:http");
@@ -74,7 +74,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
           });
           // Deliver answer back to the requesting peer
           notifyPeer(`🤖 Agents: ${peerConfig.self.name} → ${peerName} messaged. [callback]`);
-          await callPeer(peerName, `[CB-RESPONSE] ${answer}`, peerConfig.maxHops);
+          await callPeer(peerName, `[CB-RESPONSE] ${answer}`, peerConfig.maxHops, { skipWakeup: true });
         } catch (err) {
           logError("dns-wakeup", `Callback to ${peerName} failed: ${err instanceof Error ? err.message : String(err)}`);
         }

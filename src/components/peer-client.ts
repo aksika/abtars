@@ -34,7 +34,7 @@ export class PeerCallError extends Error {
  * @param prompt — user message to send
  * @param hops — remaining hop budget (decremented before sending)
  */
-export async function callPeer(peerName: string, prompt: string, hops: number): Promise<string> {
+export async function callPeer(peerName: string, prompt: string, hops: number, opts?: { skipWakeup?: boolean }): Promise<string> {
   const config = loadPeerConfig();
   const peerKey = Object.keys(config.peers).find(k => k.toLowerCase() === peerName.toLowerCase());
   const peer = peerKey ? config.peers[peerKey] : undefined;
@@ -57,7 +57,7 @@ export async function callPeer(peerName: string, prompt: string, hops: number): 
     logInfo(TAG, `PEER_CALL ${peerName} — ${prompt.length}ch → ${response.length}ch (${Date.now() - start}ms, hops=${hops})`);
     return response;
   } catch (err) {
-    if (err instanceof PeerCallError && (err.code === "unreachable" || err.code === "timeout") && peer.udpPort) {
+    if (err instanceof PeerCallError && (err.code === "unreachable" || err.code === "timeout") && peer.udpPort && !opts?.skipWakeup) {
       logInfo(TAG, `Direct call failed (${err.code}) — UDP callback request → ${peerKey}`);
       const { registerPending, rejectPending } = await import("./pending-callback.js");
       const { sendWakeup } = await import("./dns-wakeup.js");
