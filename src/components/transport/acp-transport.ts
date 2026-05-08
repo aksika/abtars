@@ -54,6 +54,7 @@ export class AcpTransport implements IKiroTransport {
 
   /** Optional callback for streaming intermediate responses. */
   onIntermediateResponse?: (text: string) => void;
+  onToolCallStart?: (toolName: string) => void;
 
   /** Context window usage percentage from Kiro metadata. */
   get contextPercent(): number {
@@ -443,6 +444,7 @@ export class AcpTransport implements IKiroTransport {
         logDebug(this.tag, `[tool] ${update.title} (${update.status})`);
         this.lastActivityAt = Date.now();
         this.toolMeta = { title: update.title ?? "unknown", startedAt: Date.now() }; this.sm.toolStarted();
+        this.onToolCallStart?.(update.title ?? "tool");
         break;
       }
       case "tool_call_update": {

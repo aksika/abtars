@@ -216,9 +216,29 @@ export async function handleInboundMessage(
     }, 10_000);
 
     // Per-tool-call typing pulse — transport fires this on each tool execution
-    transport.onToolCallStart = () => {
+    let lastToolNotifyAt = 0;
+    let toolBatch: string[] = [];
+    let toolBatchTimer: ReturnType<typeof setTimeout> | undefined;
+
+    transport.onToolCallStart = (toolName: string) => {
       lastVisibleOutputAt = Date.now();
       adapter.sendTyping?.(channelId, msg.threadId).catch(() => {});
+
+      // Batch tool names within 500ms, emit once
+      toolBatch.push(toolName);
+      if (!toolBatchTimer) {
+        toolBatchTimer = setTimeout(() => {
+          const now = Date.now();
+          if (now - lastToolNotifyAt >= 5000 && streamMsgId && adapter.editMessage) {
+            const names = toolBatch.join(", ");
+            const status = `${streamBuffer.replace(/ ▍$/, "")}\n🔧 ${names}...`.trim();
+            adapter.editMessage(channelId, streamMsgId, status + " ▍").catch(() => {});
+            lastToolNotifyAt = now;
+          }
+          toolBatch = [];
+          toolBatchTimer = undefined;
+        }, 500);
+      }
     };
 
     // --- Intermediate streaming ---
