@@ -21,6 +21,9 @@ import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
+import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
+import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
+import { buildPrompt, buildSessionStartPrompt } from "./pipeline/prompt-builder.js";
 
 import { getEnv } from "./env-schema.js";
 
@@ -119,13 +122,11 @@ export async function handleInboundMessage(
   deps: PipelineDeps,
 ): Promise<void> {
   // Run early middleware (voice → commands → busy guard)
-  const { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, busyGuardMiddleware } = await import("./pipeline/index.js");
   const ctx = createMessageContext(msg, adapter, deps);
   await runPipeline(ctx, [voiceMiddleware, commandMiddleware, busyGuardMiddleware]);
   if (ctx.handled) return;
 
   // --- BeforeMessage hook ---
-  const { hasHooks, fire: fireHook } = await import("./hooks/hook-system.js");
   if (hasHooks("BeforeMessage")) {
     const userId = msg.sessionKey.includes(":") ? msg.sessionKey.split(":")[0]! : "master";
     const result = await fireHook("BeforeMessage", {
@@ -168,7 +169,6 @@ export async function handleInboundMessage(
     // No queueing needed
 
     // --- Build prompt ---
-    const { buildPrompt } = await import("./pipeline/prompt-builder.js");
     const { prompt: builtPrompt } = await buildPrompt(msg, text, {
       memory, memoryConfig, sessions, conversationBuffer, contextPercent: ctxPct,
     }, registry);
@@ -539,7 +539,6 @@ export async function startSession(
   greeting: string,
   sendResponse: (text: string) => Promise<unknown>,
 ): Promise<void> {
-  const { buildSessionStartPrompt } = await import("./pipeline/prompt-builder.js");
   const prompt = buildSessionStartPrompt(greeting, memory, userId, sessionKey);
   logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
   const response = await transport.sendPrompt(sessionKey, prompt);
