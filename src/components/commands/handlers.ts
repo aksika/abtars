@@ -498,18 +498,6 @@ export async function handleNlm(text: string, ctx: CommandContext): Promise<bool
   return true;
 }
 
-export async function handleA2aReset(_text: string, ctx: CommandContext): Promise<boolean> {
-  if (ctx.platform !== "discord") return false;
-  if (ctx.config.discordA2aEnabled) {
-    const a2aSessionKey = `a2a:${ctx.config.discordA2aChannelId}`;
-    await ctx.transport.resetSession(a2aSessionKey);
-    await ctx.reply("🔄 A2A session reset.");
-    logInfo(TAG, `A2A session reset`);
-  } else {
-    await ctx.reply("A2A is not enabled.");
-  }
-  return true;
-}
 
 export async function handleWakeup(_text: string, ctx: CommandContext): Promise<boolean> {
   if (readBridgeLockField("sleepStatus") !== "hw_sleep") {
@@ -660,9 +648,6 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");
-  }
-  if (ctx.platform === "discord" && ctx.config.discordA2aEnabled) {
-    cmds.push("/a2a-reset — Reset A2A session");
   }
   cmds.push("/help — Show this help");
   cmds.push("/skills — List available skills");

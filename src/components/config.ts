@@ -212,44 +212,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
     }
   }
 
-  // --- DISCORD_A2A_CHANNEL_ID (optional) ---
-  const rawA2aChannelId = getEnv().discordA2aChannelId;
-  let discordA2aChannelId: string | undefined;
-  if (rawA2aChannelId) {
-    if (!isValidSnowflake(rawA2aChannelId)) {
-      throw new Error(
-        `DISCORD_A2A_CHANNEL_ID "${rawA2aChannelId}" is not a valid Discord snowflake ID — expected 17–20 digits`,
-      );
-    }
-    discordA2aChannelId = rawA2aChannelId;
-  }
-
-  // --- DISCORD_A2A_PEER_BOT_ID (required when A2A channel is set) ---
-  const rawPeerBotId = getEnv().discordA2aPeerBotId;
-  let discordA2aPeerBotId: string | undefined;
-  if (rawPeerBotId) {
-    if (!isValidSnowflake(rawPeerBotId)) {
-      throw new Error(
-        `DISCORD_A2A_PEER_BOT_ID "${rawPeerBotId}" is not a valid Discord snowflake ID — expected 17–20 digits`,
-      );
-    }
-    discordA2aPeerBotId = rawPeerBotId;
-  }
-
-  if (discordA2aChannelId && !discordA2aPeerBotId) {
-    throw new Error(
-      "DISCORD_A2A_PEER_BOT_ID is required when DISCORD_A2A_CHANNEL_ID is set",
-    );
-  }
-
-  const discordA2aEnabled = !!discordA2aChannelId;
-
-  // --- DISCORD_A2A_RATE_LIMIT_MS (optional, default 5000) ---
-  const discordA2aRateLimitMs = parseNumberEnv(
-    "DISCORD_A2A_RATE_LIMIT_MS",
-    CONFIG_DEFAULTS.discord.a2aRateLimitMs,
-  );
-
   const resolvedMainChatId = mainChatId ?? String([...allowedUserIds][0] ?? "");
 
   return {
@@ -264,10 +226,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
       botToken: discordBotToken,
       appId: discordAppId,
       allowedUserIds: discordAllowedUserIds,
-      a2aEnabled: discordA2aEnabled,
-      a2aChannelId: discordA2aChannelId,
-      a2aPeerBotId: discordA2aPeerBotId,
-      a2aRateLimitMs: discordA2aRateLimitMs,
     },
     transport: {
       agentTransport,

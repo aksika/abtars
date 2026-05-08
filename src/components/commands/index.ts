@@ -12,7 +12,7 @@ import {
   handleFull, handleShort, handleHealing, handleFacts,
   handleTasksList, handleTasksTrigger, handleTasksLog,
   handleEmergencyAlias, handleModels, handleHeartbeat,
-  handleMemory, handleNlm, handleA2aReset, handleWakeup,
+  handleMemory, handleNlm, handleWakeup,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
   handleHooks, handleMcp, handleUsers,
 } from "./handlers.js";
@@ -40,7 +40,6 @@ registerExact("/heartbeat", handleHeartbeat);
 registerExact("/models", handleModels);
 registerExact("/model", handleModels);
 registerExact("/emergency", handleEmergencyAlias);
-registerExact("/a2a-reset", handleA2aReset);
 registerExact("/help", handleHelp);
 registerExact("/users", handleUsers);
 registerExact("/skills", handleSkills);

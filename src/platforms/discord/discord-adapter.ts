@@ -10,8 +10,6 @@ import { SecurityGate } from "../../components/security-gate.js";
 import { loadUsers } from "../../components/user-registry.js";
 import { BOT_COMMANDS } from "../../components/command-registry.js";
 import { ResponseFormatter } from "../../components/response-formatter.js";
-import { A2ARouter } from "../../components/a2a-router.js";
-import { interceptLargeMessage } from "../../components/message-interceptor.js";
 import { formatReactionSignal } from "../../components/reactions.js";
 
 export const DISCORD_CAPABILITIES: PlatformCapabilities = { voice: false, reactions: true, typing: true, threads: true };
@@ -32,10 +30,6 @@ export interface DiscordAdapterConfig {
   allowedUserIds: Set<string>;
   /** Channels where the bot responds to ALL messages (no mention required). #388 */
   allowedChannels: Set<string>;
-  a2aEnabled: boolean;
-  a2aChannelId?: string;
-  a2aPeerBotId?: string;
-  a2aRateLimitMs: number;
 }
 
 export interface DiscordAdapterDeps {
@@ -55,7 +49,6 @@ export class DiscordAdapter implements PlatformAdapter {
   private readonly config: DiscordAdapterConfig;
   private readonly deps: DiscordAdapterDeps;
   private poller: DiscordPoller | null = null;
-  private a2aRouter: A2ARouter | null = null;
 
   constructor(config: DiscordAdapterConfig, deps: DiscordAdapterDeps) {
     this.api = new DiscordApi(config.botToken);
@@ -65,18 +58,6 @@ export class DiscordAdapter implements PlatformAdapter {
   }
 
   async start(): Promise<void> {
-    if (this.config.a2aEnabled && this.config.a2aChannelId && this.config.a2aPeerBotId) {
-      this.a2aRouter = new A2ARouter({
-        discordApi: this.api,
-        a2aChannelId: this.config.a2aChannelId,
-        peerBotId: this.config.a2aPeerBotId,
-        rateLimitMs: this.config.a2aRateLimitMs,
-        onPrompt: (sessionKey, text) =>
-          this.deps.transport.sendPrompt(sessionKey, interceptLargeMessage(text).text),
-      });
-      logInfo(TAG, `🤝 A2A router enabled (channel=${this.config.a2aChannelId})`);
-    }
-
     this.poller = new DiscordPoller(this.api, this.config.appId, (m) => this.handleMessage(m));
     this.api.onReaction((reaction, user) => this.handleReaction(reaction, user));
     this.api.onInteraction((interaction) => this.handleInteraction(interaction));
@@ -223,12 +204,6 @@ export class DiscordAdapter implements PlatformAdapter {
     }
 
     if (!text) return;
-
-    // A2A routing
-    if (this.a2aRouter && message.authorIsBot && effectiveChannelId === this.config.a2aChannelId) {
-      await this.a2aRouter.handleMessage({ ...message, content: text });
-      return;
-    }
 
     // Mention filter: in non-DM channels, require the bot to be addressed (#388).
     //   - @user mention of the bot

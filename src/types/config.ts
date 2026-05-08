@@ -14,10 +14,6 @@ export type DiscordConfig = {
   botToken?: string;
   appId?: string;
   allowedUserIds?: Set<string>;
-  a2aEnabled: boolean;
-  a2aChannelId?: string;
-  a2aPeerBotId?: string;
-  a2aRateLimitMs: number;
 };
 
 export type TransportConfig = {
@@ -69,8 +65,6 @@ export const CONFIG_DEFAULTS = {
   },
   discord: {
     enabled: false,
-    a2aEnabled: false,
-    a2aRateLimitMs: 5000,
   },
   voice: {
     sttEnabled: false,

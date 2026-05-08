@@ -70,10 +70,6 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
           appId: config.discord.appId!,
           allowedUserIds: config.discord.allowedUserIds!,
           allowedChannels: new Set((getEnv().discordAllowedChannels ?? "").split(",").map(s => s.trim()).filter(Boolean)),
-          a2aEnabled: config.discord.a2aEnabled,
-          a2aChannelId: config.discord.a2aChannelId,
-          a2aPeerBotId: config.discord.a2aPeerBotId,
-          a2aRateLimitMs: config.discord.a2aRateLimitMs,
         },
         { pipeline: pipelineDeps, transport, memory, conversationBuffer },
       );

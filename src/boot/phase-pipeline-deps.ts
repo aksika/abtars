@@ -93,8 +93,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
     config: {
       agentTransport: config.transport.agentTransport,
       workingDir: config.transport.workingDir,
-      discordA2aEnabled: config.discord.a2aEnabled,
-      discordA2aChannelId: config.discord.a2aChannelId,
     },
     startedAt: ctx.startedAt,
     sttConfig: ctx.sttConfig,

@@ -71,7 +71,7 @@ export async function resetAndPrepare(opts: {
 export interface TransportDeps {
   transport: IKiroTransport;
   codingMode: CodingMode;
-  config: { agentTransport: string; workingDir: string; discordA2aEnabled?: boolean; discordA2aChannelId?: string };
+  config: { agentTransport: string; workingDir: string };
   startedAt: number;
 }
 
