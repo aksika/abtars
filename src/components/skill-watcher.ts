@@ -38,6 +38,12 @@ interface SkillHeader {
   name: string;
   description: string;
   requires?: SkillRequires;
+  primaryEnv?: string;
+}
+
+/** Per-skill config from ~/.abtars/config/skills.json */
+interface SkillsConfig {
+  entries?: Record<string, { apiKey?: string; env?: Record<string, string> }>;
 }
 
 export class SkillWatcher implements ISkillSlot {
@@ -87,9 +93,21 @@ export class SkillWatcher implements ISkillSlot {
     const files = this.scanMdFiles(this.skillsDir);
     const entries: string[] = [];
     const skipped: string[] = [];
+    const skillsCfg = this.loadSkillsConfig();
     for (const filepath of files) {
       const header = this.parseSkillHeader(filepath);
       if (!header.name) continue;
+      // Inject per-skill env from skills.json before eligibility check
+      if (header.primaryEnv && !process.env[header.primaryEnv]) {
+        const entry = skillsCfg.entries?.[header.name];
+        if (entry?.apiKey) process.env[header.primaryEnv] = entry.apiKey;
+      }
+      const entry = skillsCfg.entries?.[header.name];
+      if (entry?.env) {
+        for (const [k, v] of Object.entries(entry.env)) {
+          if (!process.env[k]) process.env[k] = v;
+        }
+      }
       if (header.requires) {
         const { eligible, missing } = this.checkEligibility(header.requires);
         if (!eligible) {
@@ -197,6 +215,7 @@ export class SkillWatcher implements ISkillSlot {
           name: String(fm["name"] ?? "") || basename(dirname(filepath)),
           description: String(fm["description"] ?? "").slice(0, 120),
           ...(fm["requires"] ? { requires: this.parseRequires(fm["requires"]) } : {}),
+          ...(fm["primaryEnv"] ? { primaryEnv: String(fm["primaryEnv"]) } : {}),
         };
       }
 
@@ -208,6 +227,18 @@ export class SkillWatcher implements ISkillSlot {
       return { name, description: desc.slice(0, 120) };
     } catch {
       return { name: basename(dirname(filepath)), description: "" };
+    }
+  }
+
+  /** Load ~/.abtars/config/skills.json (per-skill secrets). */
+  private loadSkillsConfig(): SkillsConfig {
+    try {
+      const p = join(homedir(), ".abtars", "config", "skills.json");
+      if (!existsSync(p)) return {};
+      return JSON.parse(readFileSync(p, "utf-8")) as SkillsConfig;
+    } catch (err) {
+      logAndSwallow("skill_watcher", "op", err);
+      return {};
     }
   }
 
