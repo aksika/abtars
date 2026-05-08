@@ -400,6 +400,7 @@ export class AgentApiServer {
     }
 
     logInfo(TAG, `Peer call: ${caller} → ${this.config.agentCodename} [${commsType}]`);
+    this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} [${commsType}]`);
 
     let session: AgentSession;
     try {
