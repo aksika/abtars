@@ -20,8 +20,8 @@ import { localDate } from "../utils/date.js";
 const AB_HOME = abtarsHome();
 const TWITTER_DIR = join(AB_HOME, "workspace", "twitterX");
 const COOKIE_PATH = join(AB_HOME, "secret", "cookies", "x-cookies.json");
-const BASE_FOLLOWS = join(TWITTER_DIR, "base.follows.json");
-const AGENT_FOLLOWS = join(TWITTER_DIR, "agent.follows.json");
+const BASE_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_BASE_FOLLOWS_FILE"] ?? "base.follows.json");
+const AGENT_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_FOLLOWS_FILE"] ?? "agent.follows.json");
 const REPORTS_DIR = reportsDir("x");
 const OUTPUT_DIR = join(TWITTER_DIR, "output");
 

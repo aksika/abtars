@@ -458,7 +458,7 @@ The `/setMyCommands` call happens at bridge boot (see `src/boot/phase-platforms.
 
 Check `config/.env`:
 ```
-AGENT_API_ALLOWED_IPS=100.82.167.127,192.168.1.128
+AGENT_API_ALLOWED_IPS=<TAILSCALE_IP>,<LAN_IP>
 ```
 Update + restart bridge.
 
@@ -532,11 +532,11 @@ ps aux | grep "node.*main.js" | grep -v grep
 launchctl list | grep abtars   # macOS
 ```
 
-If two launchd jobs are loaded (e.g. `com.abtars.watchdog` AND `com.abtars.molty`):
+If two launchd jobs are loaded (e.g. `com.abtars.watchdog` AND `com.abtars.<agent>`):
 ```bash
 # Keep only the watchdog plist
-launchctl unload ~/Library/LaunchAgents/com.abtars.molty.plist
-rm ~/Library/LaunchAgents/com.abtars.molty.plist
+launchctl unload ~/Library/LaunchAgents/com.abtars.<agent>.plist
+rm ~/Library/LaunchAgents/com.abtars.<agent>.plist
 ```
 
 If two node processes from the same plist: the watchdog spawns one, something else (cron agent, manual start) spawned another. Kill the rogue:
@@ -675,20 +675,20 @@ If heartbeat is stale but bridge is responsive via Telegram, the heartbeat task 
 
 ## Post-install checklist (manual restore after clean install)
 
-After `abtars install` + `abtars update` complete, these items need manual setup or restore from backup (`abproject/backups/molty/`):
+After `abtars install` + `abtars update` complete, these items need manual setup or restore from backup (`abproject/backups/<agent>/`):
 
 ### Required
 
-- [ ] **`.env`** — copy secrets from `abproject/config/molty/secrets.env` to `~/.abtars/config/.env` (Telegram token, Discord token, API keys)
-- [ ] **`transport.json`** — restore from `abproject/secret/molty/transport.json` to `~/.abtars/config/transport.json` (providers, agents, models)
-- [ ] **`models.json`** — restore from `abproject/secret/molty/models.json` to `~/.abtars/config/models.json` (model catalog with status)
+- [ ] **`.env`** — copy secrets from `abproject/config/<agent>/secrets.env` to `~/.abtars/config/.env` (Telegram token, Discord token, API keys)
+- [ ] **`transport.json`** — restore from `abproject/secret/<agent>/transport.json` to `~/.abtars/config/transport.json` (providers, agents, models)
+- [ ] **`models.json`** — restore from `abproject/secret/<agent>/models.json` to `~/.abtars/config/models.json` (model catalog with status)
 - [ ] **`users.json`** — restore user registry to `~/.abtars/config/users.json`
 - [ ] **abmind** — install abmind separately (`cd ~/abmind && abmind install && abmind update`), restore `~/.abmind/memory/memory.db` from backup if needed
 - [ ] **Watchdog plist** — copy `scripts/com.abtars.watchdog.plist` to `~/Library/LaunchAgents/` and `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist`
 
 ### Recommended
 
-- [ ] **`cron.json`** — restore scheduled tasks from `abproject/backups/molty/cron.json` to `~/.abtars/state/cron.json`
+- [ ] **`cron.json`** — restore scheduled tasks from `abproject/backups/<agent>/cron.json` to `~/.abtars/state/cron.json`
 - [ ] **SOUL.md** — restore persona from `~/.abmind/memory/core/SOUL.md` (backed up in abmind's memory dir)
 - [ ] **Skills** — copy skill scripts to `~/.abtars/skills/core/` (scout-ollama.py, scout-openrouter.py, scout-add-model.py)
 - [ ] **Hooks** — restore `~/.abtars/config/hooks.json` if custom hooks were configured
