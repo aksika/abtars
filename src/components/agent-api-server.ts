@@ -10,7 +10,7 @@ import type { IMemorySystem } from "abmind";
 import { logInfo, logWarn } from "./logger.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
 import type { AgentSession } from "./subagent-runtime.js";
-import { localDate } from "./env-utils.js";
+import { localDate } from "../utils/date.js";
 import { localIso } from "./logger.js";
 import { extractBearerToken, openaiError } from "./openai-compat-translate.js";
 import { handleModels as v1HandleModels, handleModel as v1HandleModel, handleEmbeddings as v1HandleEmbeddings, handleChatCompletions as v1HandleChatCompletions, writeResult } from "./openai-compat-routes.js";

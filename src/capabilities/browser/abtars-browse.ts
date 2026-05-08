@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
-import { localDate } from "../../components/env-utils.js";
+import { localDate } from "../../utils/date.js";
 
 // --- Types ---
 

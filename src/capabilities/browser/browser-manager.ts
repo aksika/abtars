@@ -4,10 +4,16 @@ import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
 import { execFileSync } from "node:child_process";
 import type { BrowserSession } from "../../types/browser.js";
-import { parsePositiveIntEnv, parseStringEnv } from "../../components/env-utils.js";
 
 // ---------------------------------------------------------------------------
 // Environment variable parsing
+
+function readPositiveInt(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && Number.isInteger(n) && n > 0 ? n : fallback;
+}
 // ---------------------------------------------------------------------------
 
 const LOG_PREFIX = "[browser-manager]";
@@ -33,18 +39,15 @@ export interface BrowserConfig {
  * Exported for testability (Property 16).
  */
 export function parseBrowserConfig(): BrowserConfig {
-  const sessionTimeoutMs = parsePositiveIntEnv(
+  const sessionTimeoutMs = readPositiveInt(
     "BROWSER_SESSION_TIMEOUT_MS",
     DEFAULTS.BROWSER_SESSION_TIMEOUT_MS,
   );
-  const maxSessions = parsePositiveIntEnv(
+  const maxSessions = readPositiveInt(
     "BROWSER_MAX_SESSIONS",
     DEFAULTS.BROWSER_MAX_SESSIONS,
   );
-  const userAgent = parseStringEnv(
-    "WEB_SCRAPE_USER_AGENT",
-    DEFAULTS.WEB_SCRAPE_USER_AGENT,
-  );
+  const userAgent = process.env["WEB_SCRAPE_USER_AGENT"]?.trim() || DEFAULTS.WEB_SCRAPE_USER_AGENT;
 
   const engine = "patchright" as BrowserEngine;
 

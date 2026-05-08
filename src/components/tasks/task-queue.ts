@@ -17,7 +17,7 @@ import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt, readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./task-store.js";
 import type { CronEntry } from "../../cli/abtars-task.js";
-import { localDate } from "../env-utils.js";
+import { localDate } from "../../utils/date.js";
 
 const TAG = "cron-queue";
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;

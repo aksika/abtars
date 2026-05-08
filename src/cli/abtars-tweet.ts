@@ -15,13 +15,13 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import { abtarsHome, reportsDir } from "../paths.js";
-import { localDate } from "../components/env-utils.js";
+import { localDate } from "../utils/date.js";
 
 const AB_HOME = abtarsHome();
 const TWITTER_DIR = join(AB_HOME, "workspace", "twitterX");
 const COOKIE_PATH = join(AB_HOME, "secret", "cookies", "x-cookies.json");
 const BASE_FOLLOWS = join(TWITTER_DIR, "base.follows.json");
-const MOLTY_FOLLOWS = join(TWITTER_DIR, "molty.follows.json");
+const AGENT_FOLLOWS = join(TWITTER_DIR, "agent.follows.json");
 const REPORTS_DIR = reportsDir("x");
 const OUTPUT_DIR = join(TWITTER_DIR, "output");
 
@@ -112,7 +112,7 @@ export function loadApiKey(): string | undefined {
 function loadFollows(): string[] {
   const handles = new Set<string>();
 
-  for (const path of [BASE_FOLLOWS, MOLTY_FOLLOWS]) {
+  for (const path of [BASE_FOLLOWS, AGENT_FOLLOWS]) {
     if (!existsSync(path)) continue;
     try {
       const raw = JSON.parse(readFileSync(path, "utf8")) as FollowsFile | FollowEntry[];
@@ -240,7 +240,7 @@ async function fetchTimelineGql(userId: string, authorName: string, handle: stri
 async function runFeed(format: "json" | "md", count: number, topN: number, discover: boolean, outputPath?: string): Promise<void> {
   const handles = loadFollows();
   if (handles.length === 0) {
-    console.error("No follows found. Create ~/.abtars/twitterX/base.follows.json or molty.follows.json");
+    console.error("No follows found. Create ~/.abtars/twitterX/base.follows.json or agent.follows.json");
     process.exit(1);
   }
 

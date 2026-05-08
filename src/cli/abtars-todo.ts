@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
-import { localDate } from "../components/env-utils.js";
+import { localDate } from "../utils/date.js";
 
 const todoPath = (): string => join(abtarsHome(), "memory", "todo.md");
 const HEADER = "# Todo List\n";
