@@ -13,7 +13,7 @@ import type { Config } from "../types/config.js";
 import type { IMemorySystem } from "abmind";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 import type { SubagentRuntime } from "../components/subagent-runtime.js";
-import type { CommandContext } from "../components/command-handlers.js";
+import type { CommandContext } from "../components/commands/types.js";
 
 /** Handler for a slash command registered by a capability. */
 export type CapabilityCommandHandler = (text: string, ctx: CommandContext) => Promise<boolean>;

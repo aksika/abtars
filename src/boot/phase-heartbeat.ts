@@ -192,7 +192,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   pipelineDeps.selfHealerTask = selfHealerTask;
 
   // Wire capability-registered commands + tasks
-  const { registerCommand } = await import("../components/command-handlers.js");
+  const { registerCommand } = await import("../components/commands/index.js");
   for (const [name, handler] of capabilities.commands) {
     registerCommand(name, handler);
   }

@@ -8,7 +8,7 @@
 
 import type { PlatformAdapter, InboundMessage } from "../../types/platform.js";
 import type { PipelineDeps } from "../message-pipeline.js";
-import type { Reply } from "../command-handlers.js";
+import type { Reply } from "../commands/types.js";
 
 /** Mutable context flowing through the middleware pipeline. */
 export interface MessageContext {

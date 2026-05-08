@@ -7,8 +7,8 @@
  */
 
 import type { Middleware } from "./middleware.js";
-import { handleCommand } from "../command-handlers.js";
-import type { CommandContext } from "../command-handlers.js";
+import { handleCommand } from "../commands/index.js";
+import type { CommandContext } from "../commands/types.js";
 import { logInfo } from "../logger.js";
 import { loadUsers } from "../user-registry.js";
 

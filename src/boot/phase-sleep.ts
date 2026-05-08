@@ -18,7 +18,7 @@ export async function phaseSleep(ctx: BootCtx): Promise<void> {
   if (!sendSystemMessage) { ctx.phaseHealth.set(phaseSleep.name, { status: "skipped", error: "no sendSystemMessage" }); logWarn("boot", `${phaseSleep.name}: skipping — heartbeat not available`); return; }
 
   const { createSleepHandle } = await import("../capabilities/sleep/index.js");
-  const { killWakeInhibit } = await import("../components/command-handlers.js");
+  const { killWakeInhibit } = await import("../components/commands/index.js");
   const SLEEP_HOUR = parseInt(readEnvWithDefault("BED_TIME", "2", "bedtime hour").split(":")[0] ?? "2", 10);
 
   // SleepRuntime adapter — wraps SubagentRuntime.complete("dreamy", ...) for the in-process orchestrator.

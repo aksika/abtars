@@ -1,0 +1,59 @@
+/**
+ * Unified command handlers for all platforms (Telegram, Discord).
+ * Split from the original monolithic command-handlers.ts.
+ */
+
+export type { Reply, CommandContext, CommandHandler, Platform } from "./types.js";
+export { registerCommand, handleCommand, triggerNewSession, triggerResetSession, killWakeInhibit } from "./registry.js";
+import { registerExact, registerPrefix } from "./registry.js";
+import {
+  handleNewReset, handleCompact, handleCoding, handleDefault,
+  handleStatus, handleDoctor, handleStop, handleRestart,
+  handleFull, handleShort, handleHealing, handleFacts,
+  handleTasksList, handleTasksTrigger, handleTasksLog,
+  handleEmergencyAlias, handleModels, handleHeartbeat,
+  handleMemory, handleNlm, handleA2aReset, handleWakeup,
+  handleSleep, handleSleepSub, handleHelp, handleSkills,
+  handleHooks, handleMcp, handleUsers,
+} from "./handlers.js";
+
+// ── Exact-match commands ────────────────────────────────────────────────────
+registerExact("/new", handleNewReset);
+registerExact("/reset", handleNewReset);
+registerExact("/compact", handleCompact);
+registerExact("/coding", handleCoding);
+registerExact("/default", handleDefault);
+registerExact("/status", handleStatus);
+registerExact("/doctor", handleDoctor);
+registerExact("/stop", handleStop);
+registerExact("/ctrlc", handleStop);
+registerExact("/restart", handleRestart);
+registerExact("/full", handleFull);
+registerExact("/short", handleShort);
+registerExact("/healing", handleHealing);
+registerExact("/facts", handleFacts);
+registerExact("/tasks", handleTasksList);
+registerExact("/task", handleTasksList);
+registerExact("/cron", handleTasksList);
+registerExact("/memory", handleMemory);
+registerExact("/heartbeat", handleHeartbeat);
+registerExact("/models", handleModels);
+registerExact("/model", handleModels);
+registerExact("/emergency", handleEmergencyAlias);
+registerExact("/a2a-reset", handleA2aReset);
+registerExact("/help", handleHelp);
+registerExact("/users", handleUsers);
+registerExact("/skills", handleSkills);
+registerExact("/skill", handleSkills);
+registerExact("/wakeup", handleWakeup);
+registerExact("/sleep", handleSleep);
+registerExact("/mcp", handleMcp);
+registerExact("/hooks", handleHooks);
+
+// ── Prefix-match commands ───────────────────────────────────────────────────
+registerPrefix("/tasks trigger ", handleTasksTrigger);
+registerPrefix("/cron trigger ", handleTasksTrigger);
+registerPrefix("/tasks log ", handleTasksLog);
+registerPrefix("/cron log ", handleTasksLog);
+registerPrefix("/nlm", handleNlm);
+registerPrefix("/sleep ", handleSleepSub);

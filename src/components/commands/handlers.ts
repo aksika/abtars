@@ -1,209 +1,20 @@
-import { logAndSwallow } from "./log-and-swallow.js";
-import { getEnv } from "./env-schema.js";
-/**
- * Unified command handlers for all platforms (Telegram, Discord).
- * Platform-specific commands check ctx.platform internally.
- */
-
 import { execFile, spawn } from "node:child_process";
 import { readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, platform } from "node:os";
-import { logInfo, logError } from "./logger.js";
-import { writeSleepStatus, readBridgeLockField, writeForceSleep } from "./transport/bridge-lock-transport.js";
-
-import { readEntries as cronReadEntries } from "./tasks/task-store.js";
-import { handleNLMCommand } from "./nlm-command-handler.js";
-import { abtarsHome } from "../paths.js";
-// Legacy compaction removed — /compact now uses context orchestrator via transport
-import { resetAndPrepare } from "./message-pipeline.js";
-import type { PipelineDeps } from "./message-pipeline.js";
-import type { RunningJob } from "./tasks/task-queue.js";
-
-import type { Platform } from "../types/platform.js";
-export type { Platform };
-export type Reply = (text: string, opts?: { parseMode?: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }) => Promise<number | string | undefined>;
-
-export interface CommandContext {
-  sessionKey: string;
-  chatId: number;
-  userId: string;
-  platform: Platform;
-  reply: Reply;
-  /** Edit a previously-sent message by id (for placeholder → result pattern). Undefined if platform lacks editMessage. */
-  editReply?: (messageId: number | string, text: string) => Promise<void>;
-  // From PipelineDeps
-  transport: PipelineDeps["transport"];
-  config: PipelineDeps["config"];
-  startedAt: PipelineDeps["startedAt"];
-  memory: PipelineDeps["memory"];
-  memoryConfig: PipelineDeps["memoryConfig"];
-  nlmConfig: PipelineDeps["nlmConfig"];
-  codingMode: PipelineDeps["codingMode"];
-  idleSave: PipelineDeps["idleSave"];
-  sessions: PipelineDeps["sessions"];
-  updateCtxStart: PipelineDeps["updateCtxStart"];
-  cronCurrentJob?: RunningJob | null;
-  enqueueCron?: PipelineDeps["enqueueCron"];
-  requestShutdown?: PipelineDeps["requestShutdown"];
-  sleepProgress?: PipelineDeps["sleepProgress"];
-  loadedCapabilities?: PipelineDeps["loadedCapabilities"];
-  selfHealerTask?: { enabled: boolean } | null;
-  hailMary?: PipelineDeps["hailMary"];
-  rebuildTransport?: PipelineDeps["rebuildTransport"];
-  phaseHealth?: PipelineDeps["phaseHealth"];
-  registry?: PipelineDeps["registry"];
-  bridgeLockPath?: PipelineDeps["bridgeLockPath"];
-  // Per-message (optional)
-  conversationBuffer?: { clear: (key: string) => void };
-  bufKey?: string;
-}
-
-type CommandHandler = (text: string, ctx: CommandContext) => Promise<boolean>;
+import { logInfo, logError } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
+import { getEnv } from "../env-schema.js";
+import { writeSleepStatus, readBridgeLockField, writeForceSleep } from "../transport/bridge-lock-transport.js";
+import { readEntries as cronReadEntries } from "../tasks/task-store.js";
+import { handleNLMCommand } from "../nlm-command-handler.js";
+import { abtarsHome } from "../../paths.js";
+import type { CommandContext } from "./types.js";
+import { triggerNewSession, triggerResetSession, setWakeInhibitPid } from "./registry.js";
 
 const TAG = "cmd";
 
-// ── Exact-match commands ────────────────────────────────────────────────────
-
-const exactCommands: Record<string, CommandHandler> = {
-  "/new": handleNewReset,
-  "/reset": handleNewReset,
-  "/compact": handleCompact,
-  "/coding": handleCoding,
-  "/default": handleDefault,
-  "/status": handleStatus,
-  "/doctor": handleDoctor,
-  "/stop": handleStop,
-  "/ctrlc": handleStop,
-  "/restart": handleRestart,
-  "/full": handleFull,
-  "/short": handleShort,
-  "/healing": handleHealing,
-  "/facts": handleFacts,
-  "/tasks": handleTasksList,
-  "/task": handleTasksList,
-  "/cron": handleTasksList,
-  "/memory": handleMemory,
-  "/heartbeat": handleHeartbeat,
-  "/models": handleModels,
-  "/model": handleModels,
-  "/emergency": handleEmergencyAlias,
-  "/a2a-reset": handleA2aReset,
-  "/help": handleHelp,
-  "/users": handleUsers,
-  "/skills": handleSkills,
-  "/skill": handleSkills,
-  "/wakeup": handleWakeup,
-  "/sleep": handleSleep,
-  "/mcp": handleMcp,
-  "/hooks": handleHooks,
-};
-
-// ── Prefix-match commands ───────────────────────────────────────────────────
-
-const prefixCommands: ReadonlyArray<{ prefix: string; handler: CommandHandler }> = [
-  { prefix: "/tasks trigger ", handler: handleTasksTrigger },
-  { prefix: "/cron trigger ", handler: handleTasksTrigger },
-  { prefix: "/tasks log ", handler: handleTasksLog },
-  { prefix: "/cron log ", handler: handleTasksLog },
-  { prefix: "/nlm", handler: handleNlm },
-  { prefix: "/sleep ", handler: handleSleepSub },
-];
-
-const KNOWN_COMMANDS = new Set([...Object.keys(exactCommands), ...prefixCommands.map(p => p.prefix.split(" ")[0]!)]);
-
-/** Register an additional exact-match command (used by capability system). */
-export function registerCommand(name: string, handler: CommandHandler): void {
-  exactCommands[name] = handler;
-  KNOWN_COMMANDS.add(name);
-}
-
-/** Returns true if command was handled. */
-/** Commands allowed for non-master users. Everything else is master-only. */
-const NON_MASTER_COMMANDS = new Set(["/new", "/reset", "/stop", "/ctrlc", "/status", "/help"]);
-
-export async function handleCommand(text: string, ctx: CommandContext): Promise<boolean> {
-  // Role-based command gating
-  const isMaster = !ctx.userId || ctx.userId === "master" ||
-    (await import("./user-registry.js")).loadUsers().byUserId.get(ctx.userId)?.role === "master";
-
-  if (!isMaster) {
-    const cmd = text.split(/\s/)[0]!;
-    if (cmd.startsWith("/") && !NON_MASTER_COMMANDS.has(cmd)) {
-      await ctx.reply("⛔ Owner-only command.");
-      return true;
-    }
-  }
-
-  const exact = exactCommands[text];
-  if (exact) return exact(text, ctx);
-
-  for (const { prefix, handler } of prefixCommands) {
-    if (text.startsWith(prefix)) return handler(text, ctx);
-  }
-
-  // Fallback: match by first word for commands that accept subcommands (e.g. "/transport change")
-  const firstWord = text.split(/\s/)[0]!;
-  if (text !== firstWord) {
-    const byFirstWord = exactCommands[firstWord];
-    // Only if no prefix command matched (prefix commands take priority)
-    if (byFirstWord) return byFirstWord(text, ctx);
-  }
-
-  // Unknown command guard
-  if (text.startsWith("/") && /^\/\w+/.test(text) && !text.startsWith("//")) {
-    const cmd = text.split(/\s/)[0]!;
-    if (!KNOWN_COMMANDS.has(cmd)) {
-      await ctx.reply(`❓ Unknown command: ${cmd}\nType /help for available commands.`);
-      return true;
-    }
-  }
-
-  return false;
-}
-
-// ── Handler implementations ─────────────────────────────────────────────────
-
-/** Core new-session logic — reusable from model-switch paths. */
-export async function triggerNewSession(ctx: CommandContext, reason = "new-session"): Promise<void> {
-  // SessionEnd hook before teardown
-  const { hasHooks, fire: fireHook } = await import("./hooks/hook-system.js");
-  if (hasHooks("SessionEnd")) {
-    await fireHook("SessionEnd", { event: "SessionEnd", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason }).catch(() => {});
-  }
-  await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
-  await resetAndPrepare({
-    transport: ctx.transport, sessionKey: ctx.sessionKey,
-    reason, sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
-  });
-  if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
-  // SessionStart hook after reset
-  if (hasHooks("SessionStart")) {
-    await fireHook("SessionStart", { event: "SessionStart", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason }).catch(() => {});
-  }
-}
-
-/** Core reset-session logic — clears cache, rebuilds transport, resets session. */
-export async function triggerResetSession(ctx: CommandContext): Promise<void> {
-  const { hasHooks, fire: fireHook } = await import("./hooks/hook-system.js");
-  if (hasHooks("SessionEnd")) {
-    await fireHook("SessionEnd", { event: "SessionEnd", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason: "reset-transport" }).catch(() => {});
-  }
-  await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
-  const { clearTransportCache } = await import("./transport-config.js");
-  clearTransportCache();
-  if (ctx.rebuildTransport) await ctx.rebuildTransport();
-  await resetAndPrepare({
-    transport: ctx.transport, sessionKey: ctx.sessionKey,
-    reason: "reset-transport", sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
-  });
-  if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
-  if (hasHooks("SessionStart")) {
-    await fireHook("SessionStart", { event: "SessionStart", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason: "reset-transport" }).catch(() => {});
-  }
-}
-
-async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
   const isReset = text.startsWith("/reset");
   const isResetDefault = text.trim().toLowerCase() === "/reset default";
 
@@ -212,7 +23,7 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
   }
 
   if (isResetDefault) {
-    const { resetToDefaults } = await import("./transport-config.js");
+    const { resetToDefaults } = await import("../transport-config.js");
     resetToDefaults();
     await triggerNewSession(ctx, "reset-to-defaults");
   } else if (isReset) {
@@ -231,7 +42,7 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
 
   // Send greeting for /new (not /reset — reset is a technical operation)
   if (!isReset && ctx.memory) {
-    const { startSession } = await import("./message-pipeline.js");
+    const { startSession } = await import("../message-pipeline.js");
     startSession(ctx.transport, ctx.memory, ctx.userId, ctx.sessionKey, "Greet the user briefly. You just started a fresh session.", (text) => ctx.reply(text)).catch(() => {});
   }
 
@@ -239,7 +50,7 @@ async function handleNewReset(text: string, ctx: CommandContext): Promise<boolea
   return true;
 }
 
-async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleCompact(_text: string, ctx: CommandContext): Promise<boolean> {
   try {
     // Context engine compaction — force compact via transport's orchestrator
     const transport = ctx.transport as { contextOrchestrator?: { forceCompact(chatId: string, budget: number): Promise<boolean> }; config?: { maxContext: number } };
@@ -257,7 +68,7 @@ async function handleCompact(_text: string, ctx: CommandContext): Promise<boolea
   return true;
 }
 
-async function handleCoding(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleCoding(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.codingMode.has(ctx.sessionKey)) {
     await ctx.reply("Already in coding mode. Use /default to switch back.");
     return true;
@@ -273,7 +84,7 @@ async function handleCoding(_text: string, ctx: CommandContext): Promise<boolean
   return true;
 }
 
-async function handleDefault(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleDefault(_text: string, ctx: CommandContext): Promise<boolean> {
   if (!ctx.codingMode.has(ctx.sessionKey)) {
     await ctx.reply("Already in default mode (KP).");
     return true;
@@ -285,7 +96,7 @@ async function handleDefault(_text: string, ctx: CommandContext): Promise<boolea
   return true;
 }
 
-async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
   const arg = _text.replace(/^\/doctor\s*/i, "").trim().toLowerCase();
 
   // /doctor fix → run doctor.sh --fix
@@ -300,7 +111,7 @@ async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean
     return true;
   }
 
-  const { getDoctorReport, renderDoctorText } = await import("./doctor/index.js");
+  const { getDoctorReport, renderDoctorText } = await import("../doctor/index.js");
   const force = arg === "force";
   const svcStates = ctx.registry?.getStates() ?? {};
   const report = await getDoctorReport({
@@ -314,9 +125,9 @@ async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean
   return true;
 }
 
-async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.phaseHealth && ctx.registry) {
-    const { getSystemStatus, renderStatusText } = await import("./system-status.js");
+    const { getSystemStatus, renderStatusText } = await import("../system-status.js");
     const status = await getSystemStatus({
       phaseHealth: ctx.phaseHealth,
       registry: ctx.registry,
@@ -328,7 +139,7 @@ async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean
     let text = renderStatusText(status);
     // #255: append sanitized env dump on /status full
     if (_text.trim().toLowerCase() === "full") {
-      const { envDump } = await import("./env-schema.js");
+      const { envDump } = await import("../env-schema.js");
       const dump = envDump();
       const envLines = Object.entries(dump).slice(0, 30).map(([k, v]) => `  ${k}: ${v}`);
       text += "\n\n📋 Config (top 30):\n" + envLines.join("\n");
@@ -341,7 +152,7 @@ async function handleStatus(_text: string, ctx: CommandContext): Promise<boolean
   return true;
 }
 
-async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.transport.sendInterrupt();
   ctx.sessions.getOrCreate(ctx.sessionKey).busy = false;
   await ctx.reply("🛑 Ctrl+C sent to Kiro.");
@@ -349,27 +160,27 @@ async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> 
   return true;
 }
 
-async function handleRestart(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleRestart(_text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.reply("♻️ Restarting bridge...");
   setTimeout(() => ctx.requestShutdown?.(0), 500);
   return true;
 }
 
-async function handleFull(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleFull(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.platform !== "telegram") { await ctx.reply("📺 Full mode is only available on Telegram."); return true; }
   ctx.sessions.getOrCreate(ctx.sessionKey).fullMode = true;
   await ctx.reply("📺 Full mode — sending raw output, TTS disabled.");
   return true;
 }
 
-async function handleShort(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleShort(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.platform !== "telegram") { await ctx.reply("✂️ Short mode is only available on Telegram."); return true; }
   ctx.sessions.getOrCreate(ctx.sessionKey).fullMode = false;
   await ctx.reply("✂️ Short mode — clean responses, TTS enabled.");
   return true;
 }
 
-async function handleHealing(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleHealing(_text: string, ctx: CommandContext): Promise<boolean> {
   if (!ctx.selfHealerTask) { await ctx.reply("🩺 Self-healer not available."); return true; }
   ctx.selfHealerTask.enabled = !ctx.selfHealerTask.enabled;
   await ctx.reply(ctx.selfHealerTask.enabled ? "🩺 Self-healing ON" : "🩺 Self-healing OFF");
@@ -377,7 +188,7 @@ async function handleHealing(_text: string, ctx: CommandContext): Promise<boolea
   return true;
 }
 
-async function handleFacts(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleFacts(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.memory) {
     const facts = ctx.memory.readCoreKnowledge();
     await ctx.reply(facts ? `📋 Core knowledge:\n\n${facts}` : "📋 No core knowledge yet.");
@@ -387,11 +198,11 @@ async function handleFacts(_text: string, ctx: CommandContext): Promise<boolean>
   return true;
 }
 
-async function handleTasksList(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleTasksList(_text: string, ctx: CommandContext): Promise<boolean> {
   const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
   let listing: string;
   try {
-    const { readEntries } = await import("./tasks/task-store.js");
+    const { readEntries } = await import("../tasks/task-store.js");
     const entries = readEntries();
     const active = entries.filter((e: any) => !e.fired && !e.paused);
     active.sort((a: any, b: any) => {
@@ -445,7 +256,7 @@ async function handleTasksList(_text: string, ctx: CommandContext): Promise<bool
   return true;
 }
 
-async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<boolean> {
   const id = text.replace(/^\/(tasks|cron) trigger /, "").trim();
   if (!id) { await ctx.reply("Usage: /tasks trigger <cron-id>"); return true; }
   const err = ctx.enqueueCron?.(id, true);
@@ -453,7 +264,7 @@ async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<bo
   return true;
 }
 
-async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolean> {
   const id = text.replace(/^\/(tasks|cron) log /, "").trim();
   const placeholderId = await ctx.reply("📋 Loading task log...");
   try {
@@ -479,13 +290,12 @@ async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolea
   return true;
 }
 
-
-async function handleEmergencyAlias(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleEmergencyAlias(_text: string, ctx: CommandContext): Promise<boolean> {
   return handleModels("/model emergency", ctx);
 }
 
-async function handleModels(text: string, ctx: CommandContext): Promise<boolean> {
-  const { loadTransport, resolveAgent, getModelsForProvider, writeTransportConfig } = await import("./transport-config.js");
+export async function handleModels(text: string, ctx: CommandContext): Promise<boolean> {
+  const { loadTransport, resolveAgent, getModelsForProvider, writeTransportConfig } = await import("../transport-config.js");
   const tc = loadTransport();
   const prof = tc ? resolveAgent("professor", tc) : null;
   const currentModel = ("currentModel" in ctx.transport
@@ -504,8 +314,8 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     if (tc) {
       const hmProvider = tc.hailMary ? tc.providers[tc.hailMary.provider] : undefined;
       if (hmProvider) {
-        const { validateProviderReady, formatValidationError } = await import("./transport-config.js");
-        const { getEnv } = await import("./env-schema.js");
+        const { validateProviderReady, formatValidationError } = await import("../transport-config.js");
+        const { getEnv } = await import("../env-schema.js");
         const result = validateProviderReady(tc.hailMary!.provider, hmProvider, getEnv());
         if (!result.ok) { await ctx.reply(formatValidationError(tc.hailMary!.provider, result)); return true; }
       }
@@ -536,8 +346,6 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     return true;
   }
 
-  // /models status — removed, bare /model shows everything now
-
   // /models quick <model> — instant switch
   if (arg.startsWith("quick ") || arg.startsWith("switch ")) {
     const newModel = arg.split(" ").slice(1).join(" ").trim();
@@ -553,11 +361,9 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
     }
 
     // #367 — validate the provider (same one we're on) is still ready.
-    // Belt-and-suspenders: catches the case where the operator rotated/removed
-    // the env var since the last switch.
     {
-      const { validateProviderReady, formatValidationError } = await import("./transport-config.js");
-      const { getEnv } = await import("./env-schema.js");
+      const { validateProviderReady, formatValidationError } = await import("../transport-config.js");
+      const { getEnv } = await import("../env-schema.js");
       const result = validateProviderReady(prof.providerName, prof.provider, getEnv());
       if (!result.ok) { await ctx.reply(formatValidationError(prof.providerName, result)); return true; }
     }
@@ -630,7 +436,7 @@ async function handleModels(text: string, ctx: CommandContext): Promise<boolean>
   return true;
 }
 
-async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<boolean> {
   const cronInfo = ctx.memory?.getCronInfo();
   if (!cronInfo) { await ctx.reply("💓 Heartbeat not available."); return true; }
 
@@ -661,7 +467,7 @@ async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<bool
   return true;
 }
 
-async function handleMemory(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleMemory(_text: string, ctx: CommandContext): Promise<boolean> {
   if (!ctx.memory) { await ctx.reply("🧠 Memory is disabled."); return true; }
   const stats = ctx.memory.getStats(ctx.userId);
   if (!stats) { await ctx.reply("⚠️ Could not retrieve memory stats."); return true; }
@@ -685,14 +491,14 @@ async function handleMemory(_text: string, ctx: CommandContext): Promise<boolean
   return true;
 }
 
-async function handleNlm(text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleNlm(text: string, ctx: CommandContext): Promise<boolean> {
   const args = text.slice("/nlm".length).trim();
   const result = await handleNLMCommand(args, ctx.nlmConfig as any);
   await ctx.reply(result.text);
   return true;
 }
 
-async function handleA2aReset(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleA2aReset(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.platform !== "discord") return false;
   if (ctx.config.discordA2aEnabled) {
     const a2aSessionKey = `a2a:${ctx.config.discordA2aChannelId}`;
@@ -705,18 +511,7 @@ async function handleA2aReset(_text: string, ctx: CommandContext): Promise<boole
   return true;
 }
 
-let _wakeInhibitPid: number | null = null;
-
-/** Kill the wake inhibitor process (called before hw sleep). */
-export function killWakeInhibit(): void {
-  if (_wakeInhibitPid) {
-    try { process.kill(_wakeInhibitPid); } catch (err) { logAndSwallow("command_handlers", "op", err); }
-    logInfo("wakeup", `Killed wake inhibitor pid=${_wakeInhibitPid}`);
-    _wakeInhibitPid = null;
-  }
-}
-
-async function handleWakeup(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleWakeup(_text: string, ctx: CommandContext): Promise<boolean> {
   if (readBridgeLockField("sleepStatus") !== "hw_sleep") {
     await ctx.reply("Already awake.");
     return true;
@@ -730,7 +525,7 @@ async function handleWakeup(_text: string, ctx: CommandContext): Promise<boolean
   }
   if (child?.pid) {
     child.unref();
-    _wakeInhibitPid = child.pid;
+    setWakeInhibitPid(child.pid);
     writeSleepStatus("awake");
     const bedTime = getEnv().bedTime.raw;
     await ctx.reply(`☀️ Awake! Will sleep again at ${bedTime} or when requested.`);
@@ -762,7 +557,7 @@ function todayLockPath(auditDir: string): string {
   return join(auditDir, `sleep_${ds}.lock`);
 }
 
-async function handleSleep(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleSleep(_text: string, ctx: CommandContext): Promise<boolean> {
   const sleepStatus = readBridgeLockField<string>("sleepStatus") ?? "awake";
   const progress = ctx.sleepProgress?.();
   const force = readBridgeLockField<string>("forceSleep");
@@ -790,7 +585,7 @@ async function handleSleep(_text: string, ctx: CommandContext): Promise<boolean>
   return true;
 }
 
-async function handleSleepSub(text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleSleepSub(text: string, ctx: CommandContext): Promise<boolean> {
   const sub = text.replace(/^\/sleep\s+/i, "").trim().toLowerCase();
   const sleepStatus = readBridgeLockField<string>("sleepStatus") ?? "awake";
 
@@ -828,7 +623,7 @@ async function handleSleepSub(text: string, ctx: CommandContext): Promise<boolea
   return true;
 }
 
-async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> {
   const cmds = [
     "/new — Fresh session (keeps current mode)",
     "/reset — Reload transport + fresh session",
@@ -875,7 +670,7 @@ async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> 
   return true;
 }
 
-async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
   const base = join(abtarsHome(), "skills");
   const groups = ["core", "personal", "auto", "downloaded"] as const;
   const sections: string[] = [];
@@ -897,8 +692,8 @@ async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean
   return true;
 }
 
-async function handleHooks(_text: string, ctx: CommandContext): Promise<boolean> {
-  const { getHookSummary } = await import("./hooks/hook-system.js");
+export async function handleHooks(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { getHookSummary } = await import("../hooks/hook-system.js");
   const summary = getHookSummary();
   const lines = ["🪝 Hooks:"];
   for (const { event, hooks } of summary) {
@@ -912,7 +707,7 @@ async function handleHooks(_text: string, ctx: CommandContext): Promise<boolean>
   return true;
 }
 
-async function handleMcp(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleMcp(_text: string, ctx: CommandContext): Promise<boolean> {
   // Preflight: is mcporter installed? Fast check before placeholder.
   let version = await execAsync("mcporter", ["--version"], 2000);
   if (version === null) {
@@ -958,6 +753,8 @@ async function handleMcp(_text: string, ctx: CommandContext): Promise<boolean> {
   return true;
 }
 
+// ── Local helpers (not exported) ────────────────────────────────────────────
+
 function execAsync(cmd: string, args: string[], timeoutMs: number): Promise<string | null> {
   return new Promise((resolve) => {
     const child = execFile(cmd, args, { timeout: timeoutMs, encoding: "utf-8" }, (err, stdout) => {
@@ -971,11 +768,11 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   let version = "?";
   let buildInfo = "";
   try {
-    const pkgPath = join(import.meta.dirname, "..", "..", "package.json");
+    const pkgPath = join(import.meta.dirname, "..", "..", "..", "package.json");
     version = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
   } catch (err) { logAndSwallow("command_handlers", "op", err); }
   try {
-    const biPath = join(import.meta.dirname, "..", "build-info.json");
+    const biPath = join(import.meta.dirname, "..", "..", "build-info.json");
     const bi = JSON.parse(readFileSync(biPath, "utf-8")) as { hash: string; date: string };
     buildInfo = ` (${bi.hash} ${bi.date.slice(0, 10)})`;
   } catch (err) { logAndSwallow("command_handlers", "op", err); }
@@ -984,7 +781,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   if ("currentModel" in ctx.transport) {
     model = (ctx.transport as unknown as { currentModel: string }).currentModel;
   } else {
-    const { loadTransport, resolveAgent } = await import("./transport-config.js");
+    const { loadTransport, resolveAgent } = await import("../transport-config.js");
     const tc = loadTransport();
     const prof = tc ? resolveAgent("professor", tc) : null;
     model = prof?.model ?? "unknown";
@@ -998,7 +795,7 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   const cronInfo = ctx.memory?.getCronInfo();
 
   // Transport details from transport.json
-  const { loadTransport: lt, resolveAgent: ra } = await import("./transport-config.js");
+  const { loadTransport: lt, resolveAgent: ra } = await import("../transport-config.js");
   const tc = lt();
   const prof = tc ? ra("professor", tc) : null;
   const provider = prof?.providerName ?? "unknown";
@@ -1061,8 +858,8 @@ function formatUptime(ms: number): string {
 
 // ── /users command ──────────────────────────────────────────────────────────
 
-async function handleUsers(text: string, ctx: CommandContext): Promise<boolean> {
-  const { loadUsers } = await import("./user-registry.js");
+export async function handleUsers(text: string, ctx: CommandContext): Promise<boolean> {
+  const { loadUsers } = await import("../user-registry.js");
   const parts = text.trim().split(/\s+/);
   const sub = parts[1];
 
@@ -1070,7 +867,7 @@ async function handleUsers(text: string, ctx: CommandContext): Promise<boolean> 
     const platformId = parts[2];
     const { writeFileSync, readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const { abtarsHome } = await import("../paths.js");
+    const { abtarsHome } = await import("../../paths.js");
     const configPath = join(abtarsHome(), "config", "users.json");
     try {
       const raw = JSON.parse(readFileSync(configPath, "utf-8"));
@@ -1093,7 +890,7 @@ async function handleUsers(text: string, ctx: CommandContext): Promise<boolean> 
     const targetUserId = parts[2];
     const { writeFileSync, readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const { abtarsHome } = await import("../paths.js");
+    const { abtarsHome } = await import("../../paths.js");
     const configPath = join(abtarsHome(), "config", "users.json");
     try {
       const raw = JSON.parse(readFileSync(configPath, "utf-8"));

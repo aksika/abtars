@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { handleCommand, type CommandContext } from "./command-handlers.js";
+import { handleCommand, type CommandContext } from "./commands/index.js";
 import { SessionRegistry } from "./session-registry.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
