@@ -65,3 +65,18 @@ export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTa
     },
   };
 }
+
+/** #440: Check for updates on npm, notify if newer version available. */
+export function createUpdateCheckTask(notify: (msg: string) => void): HeartbeatTask {
+  return {
+    name: "update-check",
+    async execute() {
+      if (process.env["UPDATES_CHECK_ENABLED"] === "false") return;
+      const { checkForUpdates } = await import("./update-checker.js");
+      const result = checkForUpdates();
+      if (result?.shouldNotify) {
+        notify(`⚡ Update available: ${result.localVersion} → ${result.latestVersion}. Run: abtars update`);
+      }
+    },
+  };
+}

@@ -29,7 +29,7 @@ import {
   writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus, initBridgeLock,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
-import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "../components/heartbeat-tasks.js";
+import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
@@ -159,6 +159,11 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
+
+  // #440: update check (npm registry, notify if newer version)
+  heartbeat.registerTask(createUpdateCheckTask((msg) => {
+    import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(() => {});
+  }));
 
   if (transport.healthCheck) {
     heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });
