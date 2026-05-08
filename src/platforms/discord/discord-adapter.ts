@@ -103,6 +103,32 @@ export class DiscordAdapter implements PlatformAdapter {
     const userId = userEntry?.userId ?? "unknown";
     const channelId = interaction.channelId;
 
+    // Wrap adapter so pipeline responses route through the interaction reply
+    let initialReplied = false;
+    const interactionAdapter: PlatformAdapter = {
+      ...this,
+      sendMessage: async (_ch: string, text: string): Promise<string | undefined> => {
+        if (!text?.trim()) return undefined;
+        const chunks = text.length <= 2000 ? [text] : text.match(/.{1,2000}/gs) ?? [text];
+        let lastId: string | undefined;
+        for (const chunk of chunks) {
+          if (!initialReplied) {
+            initialReplied = true;
+            const sent = await interaction.editReply(chunk);
+            lastId = sent.id;
+          } else {
+            const sent = await interaction.followUp(chunk);
+            lastId = sent.id;
+          }
+        }
+        return lastId;
+      },
+      editMessage: async (_ch: string, _messageId: number | string, text: string): Promise<void> => {
+        // For interaction replies, editReply edits the initial deferred response
+        await interaction.editReply(text);
+      },
+    };
+
     const msg: InboundMessage = {
       text: commandText,
       channelId,
@@ -115,7 +141,7 @@ export class DiscordAdapter implements PlatformAdapter {
       isVoice: false,
     };
 
-    await handleInboundMessage(msg, this, this.deps.pipeline);
+    await handleInboundMessage(msg, interactionAdapter, this.deps.pipeline);
   }
 
   stop(): void {
