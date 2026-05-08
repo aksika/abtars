@@ -55,7 +55,7 @@ export function formatReactionSignal(senderName: string, emojis: string[]): stri
 export async function tryReaction(
   adapter: PlatformAdapter,
   channelId: string,
-  messageId: number | undefined,
+  messageId: number | string | undefined,
   emoji: string,
   threadId?: string,
   platform?: Platform,

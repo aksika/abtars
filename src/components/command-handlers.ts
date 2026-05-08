@@ -22,7 +22,7 @@ import type { RunningJob } from "./tasks/task-queue.js";
 
 import type { Platform } from "../types/platform.js";
 export type { Platform };
-export type Reply = (text: string, opts?: { parseMode?: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }) => Promise<number | undefined>;
+export type Reply = (text: string, opts?: { parseMode?: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } }) => Promise<number | string | undefined>;
 
 export interface CommandContext {
   sessionKey: string;
@@ -31,7 +31,7 @@ export interface CommandContext {
   platform: Platform;
   reply: Reply;
   /** Edit a previously-sent message by id (for placeholder → result pattern). Undefined if platform lacks editMessage. */
-  editReply?: (messageId: number, text: string) => Promise<void>;
+  editReply?: (messageId: number | string, text: string) => Promise<void>;
   // From PipelineDeps
   transport: PipelineDeps["transport"];
   config: PipelineDeps["config"];

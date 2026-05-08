@@ -89,7 +89,7 @@ export class DiscordAdapter implements PlatformAdapter {
   }
 
   /** Handle Discord slash command interactions. */
-  private async handleInteraction(interaction: any): Promise<void> {
+  private async handleInteraction(interaction: import("discord.js").ChatInputCommandInteraction): Promise<void> {
     await interaction.deferReply();
 
     const registry = loadUsers();
@@ -103,38 +103,6 @@ export class DiscordAdapter implements PlatformAdapter {
     const userId = userEntry?.userId ?? "unknown";
     const channelId = interaction.channelId;
 
-    // Build reply binding that routes through the interaction
-    const messageKind = new Map<string, "initial" | "followup">();
-    let initialSent = false;
-
-    const reply = async (text: string): Promise<string | undefined> => {
-      if (!text?.trim()) return undefined;
-      // Discord max 2000 chars per message
-      const chunks = text.length <= 2000 ? [text] : text.match(/.{1,2000}/gs) ?? [text];
-      let lastId: string | undefined;
-      for (const chunk of chunks) {
-        let msg;
-        if (!initialSent) {
-          initialSent = true;
-          msg = await interaction.editReply(chunk);
-          messageKind.set(msg.id, "initial");
-        } else {
-          msg = await interaction.followUp(chunk);
-          messageKind.set(msg.id, "followup");
-        }
-        lastId = msg.id;
-      }
-      return lastId;
-    };
-
-    const editReply = async (messageId: string | number, text: string): Promise<void> => {
-      const id = String(messageId);
-      const kind = messageKind.get(id);
-      if (kind === "initial") await interaction.editReply(text);
-      else if (kind === "followup") await interaction.webhook.editMessage(id, text);
-    };
-
-    // Route through the message pipeline as a command
     const msg: InboundMessage = {
       text: commandText,
       channelId,
@@ -147,11 +115,7 @@ export class DiscordAdapter implements PlatformAdapter {
       isVoice: false,
     };
 
-    await handleInboundMessage(msg, this as any, {
-      ...this.deps.pipeline,
-      replyOverride: reply,
-      editReplyOverride: editReply,
-    } as any);
+    await handleInboundMessage(msg, this, this.deps.pipeline);
   }
 
   stop(): void {
@@ -164,20 +128,20 @@ export class DiscordAdapter implements PlatformAdapter {
     return this.securityGate.authorizeById(msg.senderId, msg.channelId);
   }
 
-  async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<number | undefined> {
+  async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<string | undefined> {
     const id = await this.api.sendMessage(channelId, text);
-    return id ? Number(id) : undefined;
+    return id || undefined;
   }
 
   async sendTyping(channelId: string): Promise<void> {
     await this.api.sendTyping(channelId);
   }
 
-  async setReaction(channelId: string, messageId: number, emoji: string): Promise<void> {
+  async setReaction(channelId: string, messageId: number | string, emoji: string): Promise<void> {
     await this.api.setReaction(channelId, String(messageId), emoji);
   }
 
-  async editMessage(channelId: string, messageId: number, text: string): Promise<void> {
+  async editMessage(channelId: string, messageId: number | string, text: string): Promise<void> {
     await this.api.editMessage(channelId, String(messageId), text);
   }
 

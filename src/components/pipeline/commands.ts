@@ -67,7 +67,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
 
   const { adapter } = ctx;
   const editReply = adapter.editMessage
-    ? async (messageId: number, text: string): Promise<void> => { await adapter.editMessage!(msg.channelId, messageId, text); }
+    ? async (messageId: number | string, text: string): Promise<void> => { await adapter.editMessage!(msg.channelId, messageId, text); }
     : undefined;
 
   const cmdCtx: CommandContext = {

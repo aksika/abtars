@@ -73,7 +73,8 @@ export async function buildPrompt(
   // Record user message to memory
   const userRole = registry.byUserId.get(userId)?.role;
   if (memory && userRole !== "guest") {
-    memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId: msg.messageId });
+    const numericMsgId = typeof msg.messageId === "number" ? msg.messageId : undefined;
+    memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId: numericMsgId });
   }
 
   // --- Active recall ---

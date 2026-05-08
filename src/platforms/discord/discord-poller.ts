@@ -71,8 +71,8 @@ export class DiscordPoller {
 
 /** Convert a raw discord.js Message to a DiscordInboundMessage. */
 function toDiscordInboundMessage(raw: Message, botId: string | null): DiscordInboundMessage {
-  const parentId = (raw.channel as any).parentId ?? null;
-  const channelName: string | null = (raw.channel as any).name ?? null;
+  const parentId = "parentId" in raw.channel ? (raw.channel.parentId ?? null) : null;
+  const channelName = "name" in raw.channel ? (raw.channel.name ?? null) : null;
   // Check both discord.js parsed mentions AND raw content for the bot's mention tag
   const mentionsBotId = botId
     ? (raw.mentions.users.has(botId) || new RegExp(`<@!?${botId}>`).test(raw.content))

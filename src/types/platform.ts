@@ -18,7 +18,7 @@ export interface InboundMessage {
   text: string;
   timestamp: number;
   threadId?: string;
-  messageId?: number;
+  messageId?: number | string;
   isGroup: boolean;
   isVoice: boolean;
   voiceFileId?: string;      // platform file ID for voice download
@@ -51,15 +51,15 @@ export interface PlatformAdapter {
   authorize(msg: InboundMessage): boolean;
 
   // Messaging
-  sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<number | undefined>;
+  sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<number | string | undefined>;
   chunkResponse(text: string): string[];
 
   // Optional capabilities
   /** Set to false to disable intermediate streaming (IRC — no edit-in-place, no per-chunk delivery). */
   supportsStreaming?: boolean;
   sendTyping?(channelId: string, threadId?: string): Promise<void>;
-  editMessage?(channelId: string, messageId: number, text: string): Promise<void>;
-  setReaction?(channelId: string, messageId: number, emoji: string): Promise<void>;
+  editMessage?(channelId: string, messageId: number | string, text: string): Promise<void>;
+  setReaction?(channelId: string, messageId: number | string, emoji: string): Promise<void>;
   downloadVoice?(fileId: string): Promise<Buffer>;
   sendVoice?(channelId: string, audio: Buffer, opts?: SendOpts): Promise<void>;
 

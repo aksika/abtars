@@ -265,7 +265,7 @@ export async function handleInboundMessage(
 
     // --- Intermediate streaming ---
     let intermediateDelivered = false;
-    let streamMsgId: number | undefined;
+    let streamMsgId: number | string | undefined;
     let streamBuffer = "";
     let streamTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -383,7 +383,7 @@ export async function handleInboundMessage(
     }
 
     // --- Deliver response ---
-    let lastSentMsgId: number | undefined;
+    let lastSentMsgId: number | string | undefined;
     if (streamMsgId && adapter.editMessage) {
       // ACP edit-in-place: final edit removes cursor ▍
       try {
@@ -437,7 +437,7 @@ export async function handleInboundMessage(
       memory.recordMessage({
         role: "assistant", content: cleanAnswer || response,
         timestamp: Date.now(), userId, sessionId: sessionKey,
-        platformMessageId: lastSentMsgId,
+        platformMessageId: typeof lastSentMsgId === "number" ? lastSentMsgId : undefined,
       });
     }
 

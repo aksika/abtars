@@ -94,7 +94,7 @@ export class DiscordApi {
       if (user.bot) return;
       try {
         if (reaction.partial) await reaction.fetch();
-        if (user.partial) await (user as any).fetch();
+        if (user.partial) await user.fetch();
       } catch { return; }
       try {
         const result = handler(reaction as MessageReaction, user as User);
@@ -104,7 +104,7 @@ export class DiscordApi {
   }
 
   /** Register a handler for slash command interactions. */
-  onInteraction(handler: (interaction: any) => void | Promise<void>): void {
+  onInteraction(handler: (interaction: import("discord.js").ChatInputCommandInteraction) => void | Promise<void>): void {
     this.client.on("interactionCreate", async (interaction) => {
       if (!interaction.isChatInputCommand()) return;
       try {
@@ -120,7 +120,7 @@ export class DiscordApi {
       logWarn(TAG, "Cannot register commands — application not available");
       return;
     }
-    await this.client.application.commands.set(commands.map(c => ({ name: c.name, description: c.description, type: 1 })) as any);
+    await this.client.application.commands.set(commands.map(c => ({ name: c.name, description: c.description, type: 1 as const })));
     logInfo(TAG, `Registered ${commands.length} slash commands`);
   }
 
@@ -195,7 +195,7 @@ export class DiscordApi {
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isTextBased()) return null;
-      const msg = await (channel as any).messages.fetch(messageId);
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
       return msg ? { authorId: msg.author.id } : null;
     } catch { return null; }
   }
