@@ -1,3 +1,4 @@
+import { logDebug } from "../../components/logger.js";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -60,7 +61,7 @@ export class BrowserIpcServer {
 
       server.listen(this._socketPath, () => {
         this._server = server;
-        console.log(`${LOG_PREFIX} Listening on ${this._socketPath}`);
+        logDebug("browser", `${LOG_PREFIX} Listening on ${this._socketPath}`);
         resolve();
       });
     });
@@ -78,7 +79,7 @@ export class BrowserIpcServer {
       this._server.close(() => {
         this._server = null;
         this._removeSocketFile();
-        console.log(`${LOG_PREFIX} Shut down`);
+        logDebug("browser", `${LOG_PREFIX} Shut down`);
         resolve();
       });
     });

@@ -1,3 +1,4 @@
+import { logDebug } from "../../components/logger.js";
 import { getEnv } from "../../components/env-schema.js";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -107,7 +108,7 @@ export class BrowserTool {
     const session = await this._browserManager.getSession(action.sessionId);
     const timeout = getNavigationTimeout();
 
-    console.log(`${LOG_PREFIX} navigate session="${action.sessionId}" url="${url}"`);
+    logDebug("browser", `${LOG_PREFIX} navigate session="${action.sessionId}" url="${url}"`);
 
     try {
       const response = await session.page.goto(url, {
@@ -138,7 +139,7 @@ export class BrowserTool {
 
     const session = await this._browserManager.getSession(action.sessionId);
 
-    console.log(`${LOG_PREFIX} click session="${action.sessionId}" selector="${selector}"`);
+    logDebug("browser", `${LOG_PREFIX} click session="${action.sessionId}" selector="${selector}"`);
 
     try {
       // Use Promise.race to detect if click triggers navigation
@@ -194,7 +195,7 @@ export class BrowserTool {
     }
 
     const logValue = isPassword ? "***" : value;
-    console.log(
+    logDebug("browser",
       `${LOG_PREFIX} fill session="${action.sessionId}" selector="${selector}" value="${logValue}"`,
     );
 
@@ -217,7 +218,7 @@ export class BrowserTool {
   private async _handleExtractText(action: BrowserAction): Promise<BrowserToolResult> {
     const session = await this._browserManager.getSession(action.sessionId);
 
-    console.log(
+    logDebug("browser",
       `${LOG_PREFIX} extract_text session="${action.sessionId}" selector="${action.selector ?? "(full page)"}"`,
     );
 
@@ -253,7 +254,7 @@ export class BrowserTool {
       `abtars-screenshot-${Date.now()}.png`,
     );
 
-    console.log(
+    logDebug("browser",
       `${LOG_PREFIX} screenshot session="${action.sessionId}" fullPage=${action.fullPage ?? false} path="${tmpFile}"`,
     );
 
@@ -272,7 +273,7 @@ export class BrowserTool {
   private async _handleGetPageInfo(action: BrowserAction): Promise<BrowserToolResult> {
     const session = await this._browserManager.getSession(action.sessionId);
 
-    console.log(`${LOG_PREFIX} get_page_info session="${action.sessionId}"`);
+    logDebug("browser", `${LOG_PREFIX} get_page_info session="${action.sessionId}"`);
 
     const title = await session.page.title();
     const url = session.page.url();
@@ -340,7 +341,7 @@ export class BrowserTool {
   // -------------------------------------------------------------------------
 
   private async _handleCloseSession(action: BrowserAction): Promise<BrowserToolResult> {
-    console.log(`${LOG_PREFIX} close_session session="${action.sessionId}"`);
+    logDebug("browser", `${LOG_PREFIX} close_session session="${action.sessionId}"`);
     await this._browserManager.closeSession(action.sessionId);
     return { success: true };
   }
@@ -373,6 +374,6 @@ export class BrowserTool {
     }));
 
     await session.context.addCookies(cookies);
-    console.log(`${LOG_PREFIX} set_cookie session="${action.sessionId}" loaded ${cookies.length} cookies for ${domain}`);
+    logDebug("browser", `${LOG_PREFIX} set_cookie session="${action.sessionId}" loaded ${cookies.length} cookies for ${domain}`);
     return { success: true, text: `Loaded ${cookies.length} cookies for ${domain}` };
   }}
