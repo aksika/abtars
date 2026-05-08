@@ -29,7 +29,6 @@ import { HeartbeatSystem } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
 import {
   writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus,
-  appendRestartTimestamp, readRestartTimestamps,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask } from "../components/heartbeat-tasks.js";
@@ -40,6 +39,8 @@ import { abtarsHome } from "../paths.js";
 import { createCronCallback } from "./phase-pipeline-deps.js";
 import type { BootCtx } from "./context.js";
 import { readEnvWithDefault } from "../components/env.js";
+import { startInProcWatchdog } from "./heartbeat-watchdog.js";
+import { createModelHealthTask } from "./heartbeat-model-health.js";
 
 export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   const { config, memoryConfig, memory, transport, cronQueue, pipelineDeps, capabilities } = ctx;
@@ -56,18 +57,16 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
 
   const hbIntervalMs = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10) * 1000;
 
-  // Watchdog: wall-clock comparison (immune to setInterval batching after sleep)
+  // In-proc watchdog (#263: extracted to heartbeat-watchdog.ts)
   const WD_THRESHOLD_MS = hbIntervalMs * 3;
-  let lastKickAt = Date.now();
-  let lastCheckAt = Date.now();
-  const kickWatchdog = (): void => { lastKickAt = Date.now(); };
+  const watchdog = startInProcWatchdog({ thresholdMs: WD_THRESHOLD_MS });
 
   const heartbeat = new HeartbeatSystem({
     enabled: true,
     intervalMs: hbIntervalMs,
     bridgeLockPath: ctx.bridgeLockPath,
     sleepActive: ctx.isSleepActive,
-    onTick: kickWatchdog,
+    onTick: watchdog.kick,
     onStandbyResume: (gapMs) => {
       const resumeKind = classifyResume();
       if (resumeKind === "dark") {
@@ -75,7 +74,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
         return;
       }
       logInfo("main", `⏸️ Standby resume (${Math.round(gapMs / 60000)}min, ${resumeKind}) — continuing`);
-      // Morning restart: first full wake after hardware sleep → fresh process
       if (resumeKind === "full" && readBridgeLockField("sleepStatus") === "hw_sleep") {
         writeSleepStatus("awake");
         writeRestartReason("morning restart after hw_sleep");
@@ -171,45 +169,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   }
 
   // In-proc watchdog: wall-clock comparison every 60s
-  const WD_CHECK_INTERVAL = 60_000;
-  const WD_UNKNOWN_SUPPRESS_MS = 60 * 60_000;
-  const CIRCUIT_BREAKER_MAX = 3;
-  const CIRCUIT_BREAKER_WINDOW_MS = 5 * 60_000;
-
-  // Check if we're in a restart loop — suppress if so
-  const recentTimestamps = readRestartTimestamps();
-  const recentCount = recentTimestamps.filter(t => Date.now() - t < CIRCUIT_BREAKER_WINDOW_MS).length;
-  const watchdogSuppressed = recentCount >= CIRCUIT_BREAKER_MAX;
-  if (watchdogSuppressed) {
-    logWarn("watchdog", `⚡ Circuit breaker: ${recentCount} restarts in last 5min — in-process watchdog suppressed this session`);
-  }
-
-  setInterval(() => {
-    const now = Date.now();
-    const checkGap = now - lastCheckAt;
-    lastCheckAt = now;
-    // Suspend detection: if timer fired much later than expected, process was suspended
-    if (checkGap > WD_CHECK_INTERVAL * 3) {
-      lastKickAt = now;
-      return;
-    }
-    const elapsed = now - lastKickAt;
-    if (elapsed <= WD_THRESHOLD_MS) return;
-    const kind = classifyResume();
-    if (kind === "dark" || (kind === "unknown" && elapsed < WD_UNKNOWN_SUPPRESS_MS)) {
-      lastKickAt = Date.now();
-      return;
-    }
-    if (watchdogSuppressed) {
-      lastKickAt = Date.now();
-      return;
-    }
-    logWarn("watchdog", `No heartbeat kick for ${Math.round(elapsed / 60000)}min (${kind}) — forcing restart`);
-    appendRestartTimestamp();
-    writeRestartReason("watchdog: no heartbeat kick");
-    process.exit(1);
-  }, WD_CHECK_INTERVAL);
-
   // Restart flag check
   heartbeat.registerTask({
     name: "restart-check",
@@ -241,82 +200,9 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
   }
 
   // Model health check — runs once on first tick
-  let modelHealthDone = false;
-  const runModelHealth = async (): Promise<void> => {
-      if (modelHealthDone) return;
-      modelHealthDone = true;
-      const { loadTransport, resolveAgent, consumeRepairs } = await import("../components/transport-config.js");
-      const tc = loadTransport();
-      if (!tc) return;
-
-      // Consume any invariant auto-repairs from boot
-      const repairs = consumeRepairs();
-      const warnings: string[] = [];
-      if (repairs.length > 0) {
-        for (const r of repairs) warnings.push(`🔧 ${r.agent} auto-repaired: was ${r.oldProvider} — ${r.reason}`);
-      }
-
-      const prof = resolveAgent("professor", tc);
-      if (!prof) return;
-      const profType = prof.provider.transport ?? "api";
-
-      if (profType === "api") {
-        // Per-model HTTP probe — collect all agents per model for reporting
-        const agents = ["professor", "dreamy", "browsie", "coding"] as const;
-        const modelToAgents = new Map<string, string[]>();
-        const modelToResolved = new Map<string, { endpoint: string; apiKey: string }>();
-        for (const a of agents) {
-          const r = resolveAgent(a, tc);
-          if (!r) continue;
-          if (!modelToAgents.has(r.model)) {
-            modelToAgents.set(r.model, []);
-            modelToResolved.set(r.model, { endpoint: r.provider.endpoint ?? "http://localhost:11434/v1", apiKey: getEnv().getApiKey(r.provider.apiKeyEnv ?? "API_KEY") ?? "" });
-          }
-          modelToAgents.get(r.model)!.push(a);
-        }
-        for (const [model, agentNames] of modelToAgents) {
-          const { endpoint, apiKey } = modelToResolved.get(model)!;
-          try {
-            const res = await fetch(`${endpoint}/chat/completions`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-              body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-              signal: AbortSignal.timeout(10_000),
-            });
-            if (!res.ok) {
-              warnings.push(`⚠️ ${model} — ${res.status} ${res.statusText} (affects ${agentNames.join(", ")})`);
-              logWarn("model-health", `${model} failed: ${res.status} (${agentNames.join(", ")})`);
-            } else {
-              logInfo("model-health", `✓ ${agentNames[0]}=${model}`);
-            }
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            warnings.push(`⚠️ ${model} — ${msg} (affects ${agentNames.join(", ")})`);
-            logWarn("model-health", `${model} unreachable: ${msg} (${agentNames.join(", ")})`);
-          }
-        }
-      } else if (profType === "acp" || profType === "tmux") {
-        // Lightweight: check if transport is connected
-        const transport = ctx.transport;
-        if (transport && "isConnected" in transport && typeof (transport as { isConnected?: () => boolean }).isConnected === "function") {
-          const connected = (transport as { isConnected: () => boolean }).isConnected();
-          if (connected) {
-            logInfo("model-health", `✓ ${profType} transport connected`);
-          } else {
-            warnings.push(`⚠️ ${profType} transport not connected`);
-            logWarn("model-health", `${profType} transport not connected`);
-          }
-        } else {
-          logInfo("model-health", `✓ ${profType} transport (no isConnected check available)`);
-        }
-      }
-
-      if (warnings.length > 0) {
-        const { sendNotification } = await import("../components/notification.js");
-        sendNotification(ctx, `🏥 Model health check:\n${warnings.join("\n")}\nSubagents will fall back to main model.`);
-      }
-  };
-  heartbeat.registerTask({ name: "model-health", execute: runModelHealth });
+  // Model health check (#263: extracted to heartbeat-model-health.ts)
+  const { task: modelHealthTask, runNow: runModelHealth } = createModelHealthTask(ctx);
+  heartbeat.registerTask(modelHealthTask);
 
   // #318: fire model-health immediately at boot (don't wait for first tick)
   queueMicrotask(() => { runModelHealth().catch(() => {}); });
