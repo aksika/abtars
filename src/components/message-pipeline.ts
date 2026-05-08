@@ -227,18 +227,40 @@ export async function handleInboundMessage(
       // Batch tool names within 500ms, emit once
       toolBatch.push(toolName);
       if (!toolBatchTimer) {
-        toolBatchTimer = setTimeout(() => {
+        toolBatchTimer = setTimeout(async () => {
           const now = Date.now();
-          if (now - lastToolNotifyAt >= 5000 && streamMsgId && adapter.editMessage) {
+          if (now - lastToolNotifyAt >= 5000) {
             const names = toolBatch.join(", ");
-            const status = `${streamBuffer.replace(/ ▍$/, "")}\n🔧 ${names}...`.trim();
-            adapter.editMessage(channelId, streamMsgId, status + " ▍").catch(() => {});
+            if (streamMsgId && adapter.editMessage) {
+              const status = `${streamBuffer.replace(/ ▍$/, "")}\n🔧 ${names}...`.trim();
+              adapter.editMessage(channelId, streamMsgId, status + " ▍").catch(() => {});
+            } else {
+              // No stream message yet (model went straight to tools) — send standalone
+              const id = await adapter.sendMessage(channelId, `🔧 ${names}...`, { threadId: msg.threadId }).catch(() => undefined);
+              if (id && adapter.editMessage) streamMsgId = id;
+            }
             lastToolNotifyAt = now;
           }
           toolBatch = [];
           toolBatchTimer = undefined;
         }, 500);
       }
+    };
+
+    // --- Segment break: deliver pre-tool text immediately ---
+    let fullResponseSegments: string[] = [];
+    transport.onSegmentBreak = (text: string) => {
+      fullResponseSegments.push(text);
+      if (streamMsgId && adapter.editMessage) {
+        // Finalize current stream message with the segment text (no cursor)
+        adapter.editMessage(channelId, streamMsgId, text).catch(() => {});
+      } else if (text) {
+        // No stream message yet — send as standalone
+        adapter.sendMessage(channelId, text, { threadId: msg.threadId }).catch(() => {});
+      }
+      // Reset stream state for next segment
+      streamMsgId = undefined;
+      streamBuffer = "";
     };
 
     // --- Intermediate streaming ---
@@ -295,6 +317,7 @@ export async function handleInboundMessage(
     const response = await responsePromise;
 
     clearInterval(streamTimer);
+    clearTimeout(toolBatchTimer);
     transport.onIntermediateResponse = undefined;
     logDebug(TAG, `Response (${response.length} chars): "${response.trim().slice(0, 120)}"`);
 
@@ -493,6 +516,7 @@ export async function handleInboundMessage(
     clearTimeout(typingTtlTimer);
     clearInterval(silentCheckTimer);
     transport.onToolCallStart = undefined;
+    transport.onSegmentBreak = undefined;
     busyEntry.busy = false;
     idleSave.reset(sessionKey, chatId);
 

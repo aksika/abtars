@@ -49,6 +49,7 @@ export class DirectApiTransport implements IKiroTransport {
 
   onIntermediateResponse?: (text: string) => void;
   onToolCallStart?: (toolName: string) => void;
+  onSegmentBreak?: (text: string) => void;
   /** Called when fallback model is selected — send notification before response. */
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
 
@@ -245,6 +246,11 @@ export class DirectApiTransport implements IKiroTransport {
       if (toolCalls.length > 0) {
         session.addAssistant(content, toolCalls);
         logDebug(TAG, `Tool calls: ${toolCalls.map(tc => tc.function.name).join(", ")}`);
+
+        // Deliver pre-tool text immediately (segment break)
+        if (content?.trim()) {
+          this.onSegmentBreak?.(content.trim());
+        }
 
         for (const tc of toolCalls) {
           if (signal.aborted) throw new Error("Aborted");

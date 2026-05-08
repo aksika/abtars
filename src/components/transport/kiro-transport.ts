@@ -43,6 +43,9 @@ export interface IKiroTransport {
   /** Optional callback fired at the start of each tool call. Passes tool name. Set by pipeline per-message. */
   onToolCallStart?: (toolName: string) => void;
 
+  /** Optional callback fired when pre-tool text should be delivered before tool execution. */
+  onSegmentBreak?: (text: string) => void;
+
   /** Transport-specific slash commands (e.g. /usage for kiro, /stats for gemini). */
   readonly transportCommands: string[];
 
