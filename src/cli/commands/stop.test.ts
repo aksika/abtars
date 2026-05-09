@@ -208,7 +208,7 @@ describe("#372 — abtars stop", () => {
     // Strategy: spawn + kill immediately
     const tmp = spawn("node", ["-e", "process.exit(0)"], { stdio: "ignore" });
     const deadPid = tmp.pid!;
-    await new Promise(r => setTimeout(r, 100)); // let it exit
+    await new Promise(r => tmp.on("close", r));
 
     writeFileSync(join(tmpHome, "bridge.lock"), JSON.stringify({ pid: deadPid }));
 
