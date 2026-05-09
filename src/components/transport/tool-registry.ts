@@ -519,7 +519,9 @@ const secretGetTool: ToolDefinition = {
   },
 };
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerChatTool, peerWakeupTool, ircSendTool, secretGetTool];
+import { skillCreateTool } from "./skill-authoring.js";
+
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerChatTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
