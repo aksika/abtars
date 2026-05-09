@@ -14,10 +14,10 @@ import { createAgentTransport } from "../components/agent-registry.js";
 import { logInfo, logWarn, logError } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 
-export async function phaseTransport(ctx: BootCtx): Promise<void> {
+export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig } = ctx;
 
   // Pre-flight: tmux session
@@ -37,6 +37,7 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
     const reg = loadUsers();
     for (const user of reg.users) updateCtxStart(memoryConfig.memoryDir, user.userId, ctx.startedAt);
   }
+  return "ran";
 }
 
 /**
@@ -49,7 +50,7 @@ export async function phaseTransport(ctx: BootCtx): Promise<void> {
  *   - At boot (no old transport): falls back to .env config if possible, or throws
  *   - In either case: bridge stays alive in degraded mode rather than crash-looping
  */
-export async function buildTransport(ctx: BootCtx): Promise<void> {
+export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig } = ctx;
 
   let transport: IKiroTransport;
@@ -86,7 +87,7 @@ export async function buildTransport(ctx: BootCtx): Promise<void> {
     if (ctx.transport) {
       // Existing transport still good — keep it. Don't destroy.
       logError("main", `${errMsg} — keeping existing transport up (skipping rebuild)`);
-      return;
+      return "ran";
     }
     // Boot-time: try falling back to .env if we weren't already using it
     if (prof) {
@@ -233,13 +234,14 @@ export async function buildTransport(ctx: BootCtx): Promise<void> {
       import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(() => {});
     };
   }
+  return "ran";
 }
 
 /**
  * Rebuild professor transport in place (picks up transport.json changes).
  * Patches downstream references that captured the old transport (pipelineDeps, idleSave).
  */
-export async function rebuildTransport(ctx: BootCtx): Promise<void> {
+export async function rebuildTransport(ctx: BootCtx): Promise<PhaseResult> {
   logInfo("main", "🔄 Rebuilding transport...");
   await buildTransport(ctx);
   if (ctx.pipelineDeps && ctx.transport) {
@@ -249,4 +251,5 @@ export async function rebuildTransport(ctx: BootCtx): Promise<void> {
     (ctx.idleSave as unknown as { transport: IKiroTransport }).transport = ctx.transport;
   }
   logInfo("main", "✅ Transport rebuilt");
+  return "ran";
 }

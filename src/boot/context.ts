@@ -8,6 +8,8 @@
  * See abproject/docs/plans/164-boot-phases.md for the phase ordering invariant.
  */
 
+export type PhaseResult = "ran" | "skipped";
+
 import type { Config } from "../types/index.js";
 import type { MemoryConfig, MemoryManager } from "abmind";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";

@@ -35,15 +35,15 @@ import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
 import { createCronCallback } from "./phase-pipeline-deps.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 import { readEnvWithDefault } from "../components/env.js";
 import { startInProcWatchdog } from "./heartbeat-watchdog.js";
 import { createModelHealthTask } from "./heartbeat-model-health.js";
 
-export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
+export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, memory, transport, cronQueue, pipelineDeps, capabilities } = ctx;
   if (!transport || !cronQueue || !pipelineDeps) {
-    ctx.phaseHealth.set(phaseHeartbeat.name, { status: "skipped", error: "no transport/cronQueue/pipelineDeps" }); logWarn("boot", `${phaseHeartbeat.name}: skipping — deps not available`); return;
+    ctx.phaseHealth.set(phaseHeartbeat.name, { status: "skipped", error: "no transport/cronQueue/pipelineDeps" }); logWarn("boot", `${phaseHeartbeat.name}: skipping — deps not available`); return "skipped";
   }
 
   const cronCallback = createCronCallback(ctx);
@@ -217,4 +217,5 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<void> {
 
   // Expose sendSystemMessage for phase-sleep
   ctx.sendSystemMessage = sendSystemMessage;
+  return "ran";
 }

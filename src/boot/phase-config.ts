@@ -20,11 +20,11 @@ import { parsePlatformFlags } from "../components/cli-flags.js";
 import { setLogLevel, logInfo } from "../components/logger.js";
 import { loadNLMConfig } from "../components/nlm-command-handler.js";
 import { abtarsHome } from "../paths.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
 
-export async function phaseConfig(ctx: BootCtx): Promise<void> {
+export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   // Ensure ~/.abtars/bin is in PATH for child processes (kiro-cli, gemini-cli)
   const binDir = join(abtarsHome(), "bin");
   if (!process.env["PATH"]?.includes(binDir)) {
@@ -65,4 +65,5 @@ export async function phaseConfig(ctx: BootCtx): Promise<void> {
   // Load hooks config
   const { loadHookConfig } = await import("../components/hooks/hook-system.js");
   loadHookConfig();
+  return "ran";
 }

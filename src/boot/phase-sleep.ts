@@ -8,14 +8,14 @@
 
 import { resetAllCtxStarts } from "./ctx-start.js";
 import { logWarn } from "../components/logger.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 import { SubagentRuntime } from "../components/subagent-runtime.js";
 import type { SleepRuntime } from "abmind";
 import { readEnvWithDefault } from "../components/env.js";
 
-export async function phaseSleep(ctx: BootCtx): Promise<void> {
+export async function phaseSleep(ctx: BootCtx): Promise<PhaseResult> {
   const { memoryConfig, memory, sendSystemMessage } = ctx;
-  if (!sendSystemMessage) { ctx.phaseHealth.set(phaseSleep.name, { status: "skipped", error: "no sendSystemMessage" }); logWarn("boot", `${phaseSleep.name}: skipping — heartbeat not available`); return; }
+  if (!sendSystemMessage) { ctx.phaseHealth.set(phaseSleep.name, { status: "skipped", error: "no sendSystemMessage" }); logWarn("boot", `${phaseSleep.name}: skipping — heartbeat not available`); return "skipped"; }
 
   const { createSleepHandle } = await import("../capabilities/sleep/index.js");
   const { killWakeInhibit } = await import("../components/commands/index.js");
@@ -42,4 +42,5 @@ export async function phaseSleep(ctx: BootCtx): Promise<void> {
     sendSystemMessage,
     killWakeInhibit,
   });
+  return "ran";
 }

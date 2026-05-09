@@ -23,12 +23,12 @@ import { MemorySearchController } from "../components/memory-search-controller.j
 import { DashboardServer } from "../components/dashboard/dashboard-server.js";
 import { loadAgentApiConfig } from "../components/agent-api-config.js";
 import type { IDashboardSlot, DashboardSlotOpts } from "../components/skeleton.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 
-export async function phaseDashboard(ctx: BootCtx): Promise<void> {
+export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
   const { platforms, config, memory, transport, registry, heartbeat, nlmConfig } = ctx;
-  if (!platforms.web) return;
-  if (!transport || !heartbeat) { ctx.phaseHealth.set(phaseDashboard.name, { status: "skipped", error: "no transport/heartbeat" }); logWarn("boot", `${phaseDashboard.name}: skipping — deps not available`); return; }
+  if (!platforms.web) return "skipped";
+  if (!transport || !heartbeat) { ctx.phaseHealth.set(phaseDashboard.name, { status: "skipped", error: "no transport/heartbeat" }); logWarn("boot", `${phaseDashboard.name}: skipping — deps not available`); return "skipped"; }
 
   const dashConfig = loadDashboardConfig(process.env);
   // Auto-generate WEB_AUTH_TOKEN if missing — persist to .env so it survives restart
@@ -117,4 +117,5 @@ export async function phaseDashboard(ctx: BootCtx): Promise<void> {
   await dashboardServer.start();
   ctx.dashboardServer = dashboardServer;
   logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort}${customModule ? ` (custom: ${customModule})` : ""}`);
+  return "ran";
 }

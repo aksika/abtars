@@ -12,9 +12,9 @@ import { loadAgentApiConfig } from "../components/agent-api-config.js";
 import { logInfo, logError } from "../components/logger.js";
 import { sendNotification } from "../components/notification.js";
 import { setPeerActivityCallback } from "../components/transport/tool-registry.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 
-export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
+export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memory, runtime, platforms, registry } = ctx;
 
   const agentConfig = loadAgentApiConfig(process.env as Record<string, string | undefined>);
@@ -81,4 +81,5 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<void> {
       });
     }
   }
+  return "ran";
 }

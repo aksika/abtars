@@ -11,10 +11,10 @@
  */
 
 import { logInfo } from "../components/logger.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 
-export async function phaseMemoryIpc(ctx: BootCtx): Promise<void> {
-  if (!ctx.memory) return;
+export async function phaseMemoryIpc(ctx: BootCtx): Promise<PhaseResult> {
+  if (!ctx.memory) return "skipped";
   ctx.memory.setLlmCall(async (prompt: string, content: string) => {
     return ctx.transport!.sendPrompt("system:memory", `${prompt}\n\n${content}`);
   });
@@ -26,4 +26,5 @@ export async function phaseMemoryIpc(ctx: BootCtx): Promise<void> {
   await ipcBackend.initialize();
   const memoryIpc = new MemoryIpcServer(ipcBackend);
   await memoryIpc.start();
+  return "ran";
 }

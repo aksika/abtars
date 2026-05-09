@@ -14,12 +14,12 @@
 
 import { MemoryManager } from "abmind";
 import { logInfo } from "../components/logger.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 
-export async function phaseMemory(ctx: BootCtx): Promise<void> {
+export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
   if (!ctx.memoryConfig.memoryEnabled) {
     logInfo("main", "🧠 Memory disabled");
-    return;
+    return "skipped";
   }
 
   const memory = new MemoryManager(ctx.memoryConfig);
@@ -27,4 +27,5 @@ export async function phaseMemory(ctx: BootCtx): Promise<void> {
 
   ctx.memory = memory;
   logInfo("main", `🧠 Memory enabled (dir=${ctx.memoryConfig.memoryDir})`);
+  return "ran";
 }

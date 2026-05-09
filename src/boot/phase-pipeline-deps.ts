@@ -23,13 +23,13 @@ import { IdleSave } from "../components/idle-save.js";
 import { logWarn } from "../components/logger.js";
 import { updateCtxStart } from "./ctx-start.js";
 import { existsSync } from "node:fs";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
 
-export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
+export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
-  if (!transport) { ctx.phaseHealth.set(phasePipelineDeps.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePipelineDeps.name}: skipping — transport not available`); return; }
+  if (!transport) { ctx.phaseHealth.set(phasePipelineDeps.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePipelineDeps.name}: skipping — transport not available`); return "skipped"; }
 
   ctx.codingMode = new CodingMode(ctx.runtime);
   ctx.idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
@@ -123,6 +123,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<void> {
     bridgeLockPath: ctx.bridgeLockPath,
   };
   ctx.pipelineDeps = pipelineDeps;
+  return "ran";
 }
 
 /** Export cronCallback factory for phase-heartbeat's age-check task re-enqueue. */

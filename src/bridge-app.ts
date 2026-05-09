@@ -112,9 +112,9 @@ export async function startBridge(): Promise<number> {
   {
     const t = Date.now();
     try {
-      await phaseConfig(ctx);
-      ctx.phaseHealth.set(phaseConfig.name, { status: "ok" });
-      logInfo("boot", `✓ ${phaseConfig.name} (${Date.now() - t}ms)`);
+      const result = await phaseConfig(ctx);
+      ctx.phaseHealth.set(phaseConfig.name, { status: result === "skipped" ? "skipped" : "ok" });
+      logInfo("boot", result === "skipped" ? `⊘ ${phaseConfig.name} (skipped)` : `✓ ${phaseConfig.name} (${Date.now() - t}ms)`);
     } catch (err) {
       ctx.phaseHealth.set(phaseConfig.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
       logError("boot", `✗ ${phaseConfig.name} failed — continuing with empty defaults`, err);
@@ -139,15 +139,20 @@ export async function startBridge(): Promise<number> {
   for (const phase of BOOT_PHASES.slice(1)) {
     const t = Date.now();
     try {
+      let result: import("./boot/context.js").PhaseResult;
       if (phase === phaseShutdown) {
-        await phaseShutdown(ctx, bridge);
+        result = await phaseShutdown(ctx, bridge);
       } else {
-        await (phase as (ctx: BootCtx) => Promise<void>)(ctx);
+        result = await (phase as (ctx: BootCtx) => Promise<import("./boot/context.js").PhaseResult>)(ctx);
       }
       if (!ctx.phaseHealth.has(phase.name)) {
-        ctx.phaseHealth.set(phase.name, { status: "ok" });
+        ctx.phaseHealth.set(phase.name, { status: result === "skipped" ? "skipped" : "ok" });
       }
-      logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
+      if (result === "skipped") {
+        logInfo("boot", `⊘ ${phase.name} (skipped)`);
+      } else {
+        logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
+      }
     } catch (err) {
       ctx.phaseHealth.set(phase.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
       logError("boot", `✗ ${phase.name} failed — continuing without it`, err);

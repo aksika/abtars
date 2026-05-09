@@ -15,7 +15,7 @@ import { loadUsers } from "../components/user-registry.js";
 import { startSession } from "../components/message-pipeline.js";
 import { cleanResponse } from "../components/clean-response.js";
 import { sendToMainChat } from "../components/main-chat.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 
 async function sendBackOnline(ctx: BootCtx): Promise<void> {
   await sendToMainChat(
@@ -25,9 +25,9 @@ async function sendBackOnline(ctx: BootCtx): Promise<void> {
   logInfo("main", "Startup: Back online notification sent");
 }
 
-export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
+export async function phaseStartupNotification(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, memory, transport, telegramAdapter } = ctx;
-  if (!memoryConfig.memoryEnabled) return;
+  if (!memoryConfig.memoryEnabled) return "skipped";
 
   // #324: Small delay to let platforms finish connecting
   setTimeout(() => {
@@ -84,4 +84,5 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<void> {
       });
     }
   }
+  return "ran";
 }

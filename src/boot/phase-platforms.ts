@@ -12,11 +12,11 @@
 
 import { logInfo, logWarn, logError } from "../components/logger.js";
 import { getEnv } from "../components/env-schema.js";
-import type { BootCtx } from "./context.js";
+import type { BootCtx, PhaseResult } from "./context.js";
 
-export async function phasePlatforms(ctx: BootCtx): Promise<void> {
+export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
   const { config, platforms, transport, memory, conversationBuffer, pipelineDeps, registry, platformAdapters } = ctx;
-  if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phasePlatforms.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePlatforms.name}: skipping — transport not available`); return; }
+  if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phasePlatforms.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePlatforms.name}: skipping — transport not available`); return "skipped"; }
 
   // --- Telegram service ---
   registry.register("telegram", {
@@ -134,4 +134,5 @@ export async function phasePlatforms(ctx: BootCtx): Promise<void> {
       logError("main", `IRC failed to start: ${result.error}`);
     }
   }
+  return "ran";
 }
