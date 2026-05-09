@@ -36,7 +36,7 @@ export interface OpenAIChatRequest {
   tool_choice?: unknown;
 }
 
-// ── Untrusted-input parsing (pattern borrowed from openclaw http handlers) ──
+// ── Untrusted-input parsing ──
 
 /**
  * Raw shape as it arrives over the wire — every field `unknown` until

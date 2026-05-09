@@ -5,7 +5,7 @@ import { localISO } from "../../utils/local-time.js";
  * Routes requests to controllers, serves the inline HTML dashboard,
  * and manages WebSocket connections for real-time status push.
  *
- * Uses `ws` with noServer mode (same pattern as openclaw canvas-host).
+ * Uses ws with noServer mode.
  */
 
 import * as http from "node:http";
@@ -346,7 +346,7 @@ export class DashboardServer implements IDashboardSlot {
 
     logInfo(TAG, `WebSocket client authenticated from ${req.socket.remoteAddress}`);
 
-    // Delegate handshake to ws library (same pattern as openclaw canvas-host)
+    // Delegate handshake to ws library
     this.wss.handleUpgrade(req, socket, head, (ws) => {
       this.wss.emit("connection", ws, req);
       this._broadcaster.addClient(ws);

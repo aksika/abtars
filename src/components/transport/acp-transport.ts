@@ -41,7 +41,7 @@ import { TransportStateMachine } from "./transport-state.js";
 /**
  * ACP transport using @agentclientprotocol/sdk.
  * Spawns kiro-cli acp as a child process and communicates via JSON-RPC over stdio.
- * Based on OpenClaw's client.ts pattern.
+   * ACP streaming client.
  */
 export class AcpTransport implements IKiroTransport {
   private readonly cliPath: string;

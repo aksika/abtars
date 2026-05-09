@@ -156,7 +156,7 @@ export async function handleChatCompletions(
   deps: ChatCompletionsDeps,
 ): Promise<ChatCompletionsResult> {
   // Validate untrusted JSON — narrows unknown → OpenAIChatRequest.
-  // Pattern borrowed from openclaw's http handlers: don't trust the shape,
+  // Defensive parsing: don't trust the shape,
   // narrow field-by-field. Downstream code relies on the returned shape.
   const validation = validateChatRequest(rawBody);
   if (!validation.ok) {
