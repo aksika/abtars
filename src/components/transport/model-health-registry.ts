@@ -57,15 +57,19 @@ export class ModelHealthRegistry {
       b.level = 1.0;
       b.authFailed = true;
     } else if (kind === "weak") {
-      b.level = Math.min(1.0, b.level + 0.35);
+      b.level = Math.min(1.0, b.level + 0.05);
+    } else if (kind === "rate_limit") {
+      b.level = Math.min(1.0, b.level + 0.5);
+      if (retryAfterMs && retryAfterMs > 0) b.cooldownUntil = now + retryAfterMs;
     } else {
+      // transient — progressive fill + max cooldown 300s after 4+ errors
       const idx = Math.min(b.consecutiveErrors, PROGRESSIVE_FILL.length - 1);
       b.level = Math.min(1.0, b.level + PROGRESSIVE_FILL[idx]!);
+      if (b.consecutiveErrors >= 3) b.cooldownUntil = now + Math.min((b.consecutiveErrors + 1) * 60_000, 300_000);
     }
 
     b.consecutiveErrors++;
     b.lastUpdate = now;
-    if (retryAfterMs && retryAfterMs > 0) b.cooldownUntil = now + retryAfterMs;
     this.buckets.set(key, b);
   }
 
