@@ -52,12 +52,15 @@ export type TransportDefaults = {
   acp?: { permissionTimeoutMs?: number };
 };
 
+import type { HealthPolicyConfig } from "./transport/model-health-registry.js";
+
 export type TransportConfig = {
   agents: Record<string, AgentAssignment>;
   providers: Record<string, ProviderConfig>;
   transportDefaults?: TransportDefaults;
   maxTurns?: number;
   hailMary?: { model: string; provider: string };
+  healthPolicy?: HealthPolicyConfig;
 };
 
 export type ResolvedAgent = {

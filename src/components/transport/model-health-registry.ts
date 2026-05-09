@@ -2,10 +2,34 @@
  * ModelHealthRegistry — shared per-model error tracking.
  * Leaky-bucket algorithm: fills on errors, drains over time. Full = skip.
  * One instance per bridge process, shared across all FallbackPolicy instances.
+ *
+ * All tuning constants configurable via transport.json `healthPolicy` key.
+ * Missing fields fall back to hardcoded defaults.
  */
 
 export type ErrorKind = "rate_limit" | "auth" | "transient" | "weak";
 export type ModelStatus = "healthy" | "degraded" | "exhausted" | "auth_failed";
+
+export interface HealthPolicyConfig {
+  /** Bucket level (0-1) above which model is skipped. Default: 0.7 */
+  skipThreshold?: number;
+  /** Drain rate per minute (0-1). Default: 0.03 */
+  leakPerMinute?: number;
+  /** Auth error: fill amount (0-1). Default: 1.0 (instant full) */
+  authFill?: number;
+  /** Auth errors are sticky (never auto-drain). Default: true */
+  authSticky?: boolean;
+  /** Rate-limit fill per hit. Default: 0.5 */
+  rateLimitFill?: number;
+  /** Weak-model fill per hit. Default: 0.05 */
+  weakFill?: number;
+  /** Transient progressive fill array. Default: [0.1, 0.2, 0.4, 0.8] */
+  transientProgressive?: number[];
+  /** Consecutive errors before cooldown kicks in. Default: 3 */
+  transientCooldownAfter?: number;
+  /** Max cooldown seconds for transient errors. Default: 300 */
+  transientMaxCooldownSec?: number;
+}
 
 interface Bucket {
   level: number;
@@ -15,17 +39,45 @@ interface Bucket {
   authFailed?: boolean;
 }
 
-const LEAK_RATE_PER_MS = 0.03 / 60000; // 3% per minute
-const SKIP_THRESHOLD = 0.7;
-const PROGRESSIVE_FILL = [0.1, 0.2, 0.4, 0.8];
+// Defaults (unchanged from pre-config behavior)
+const D_SKIP_THRESHOLD = 0.7;
+const D_LEAK_PER_MIN = 0.03;
+const D_AUTH_FILL = 1.0;
+const D_AUTH_STICKY = true;
+const D_RATE_LIMIT_FILL = 0.5;
+const D_WEAK_FILL = 0.05;
+const D_TRANSIENT_PROGRESSIVE = [0.1, 0.2, 0.4, 0.8];
+const D_TRANSIENT_COOLDOWN_AFTER = 3;
+const D_TRANSIENT_MAX_COOLDOWN_SEC = 300;
 
 export class ModelHealthRegistry {
   private readonly buckets = new Map<string, Bucket>();
+  private readonly skipThreshold: number;
+  private readonly leakPerMs: number;
+  private readonly authFill: number;
+  private readonly authSticky: boolean;
+  private readonly rateLimitFill: number;
+  private readonly weakFill: number;
+  private readonly transientProgressive: number[];
+  private readonly transientCooldownAfter: number;
+  private readonly transientMaxCooldownMs: number;
+
+  constructor(config?: HealthPolicyConfig) {
+    this.skipThreshold = config?.skipThreshold ?? D_SKIP_THRESHOLD;
+    this.leakPerMs = (config?.leakPerMinute ?? D_LEAK_PER_MIN) / 60000;
+    this.authFill = config?.authFill ?? D_AUTH_FILL;
+    this.authSticky = config?.authSticky ?? D_AUTH_STICKY;
+    this.rateLimitFill = config?.rateLimitFill ?? D_RATE_LIMIT_FILL;
+    this.weakFill = config?.weakFill ?? D_WEAK_FILL;
+    this.transientProgressive = config?.transientProgressive ?? D_TRANSIENT_PROGRESSIVE;
+    this.transientCooldownAfter = config?.transientCooldownAfter ?? D_TRANSIENT_COOLDOWN_AFTER;
+    this.transientMaxCooldownMs = (config?.transientMaxCooldownSec ?? D_TRANSIENT_MAX_COOLDOWN_SEC) * 1000;
+  }
 
   private drain(b: Bucket, now: number): void {
-    if (b.authFailed) return;
+    if (this.authSticky && b.authFailed) return;
     const elapsed = now - b.lastUpdate;
-    b.level = Math.max(0, b.level - elapsed * LEAK_RATE_PER_MS);
+    b.level = Math.max(0, b.level - elapsed * this.leakPerMs);
     b.lastUpdate = now;
   }
 
@@ -36,7 +88,7 @@ export class ModelHealthRegistry {
     if (b.cooldownUntil && now < b.cooldownUntil) return true;
     if (b.cooldownUntil && now >= b.cooldownUntil) b.cooldownUntil = undefined;
     this.drain(b, now);
-    return b.level > SKIP_THRESHOLD;
+    return b.level > this.skipThreshold;
   }
 
   recordSuccess(model: string, endpoint: string): void {
@@ -54,18 +106,20 @@ export class ModelHealthRegistry {
     this.drain(b, now);
 
     if (kind === "auth") {
-      b.level = 1.0;
+      b.level = Math.min(1.0, b.level + this.authFill);
       b.authFailed = true;
     } else if (kind === "weak") {
-      b.level = Math.min(1.0, b.level + 0.05);
+      b.level = Math.min(1.0, b.level + this.weakFill);
     } else if (kind === "rate_limit") {
-      b.level = Math.min(1.0, b.level + 0.5);
+      b.level = Math.min(1.0, b.level + this.rateLimitFill);
       if (retryAfterMs && retryAfterMs > 0) b.cooldownUntil = now + retryAfterMs;
     } else {
-      // transient — progressive fill + max cooldown 300s after 4+ errors
-      const idx = Math.min(b.consecutiveErrors, PROGRESSIVE_FILL.length - 1);
-      b.level = Math.min(1.0, b.level + PROGRESSIVE_FILL[idx]!);
-      if (b.consecutiveErrors >= 3) b.cooldownUntil = now + Math.min((b.consecutiveErrors + 1) * 60_000, 300_000);
+      // transient — progressive fill + cooldown after N errors
+      const idx = Math.min(b.consecutiveErrors, this.transientProgressive.length - 1);
+      b.level = Math.min(1.0, b.level + this.transientProgressive[idx]!);
+      if (b.consecutiveErrors >= this.transientCooldownAfter) {
+        b.cooldownUntil = now + Math.min((b.consecutiveErrors + 1) * 60_000, this.transientMaxCooldownMs);
+      }
     }
 
     b.consecutiveErrors++;
@@ -80,7 +134,7 @@ export class ModelHealthRegistry {
       this.drain(b, now);
       let status: ModelStatus = "healthy";
       if (b.authFailed) status = "auth_failed";
-      else if (b.level > SKIP_THRESHOLD) status = "exhausted";
+      else if (b.level > this.skipThreshold) status = "exhausted";
       else if (b.level > 0.3) status = "degraded";
       result.set(key, { level: Math.round(b.level * 100), consecutiveErrors: b.consecutiveErrors, cooldownUntil: b.cooldownUntil, status });
     }

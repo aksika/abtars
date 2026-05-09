@@ -142,7 +142,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     }
 
     if (!ctx.modelHealthRegistry) {
-      ctx.modelHealthRegistry = new ModelHealthRegistry();
+      ctx.modelHealthRegistry = new ModelHealthRegistry(tc?.healthPolicy);
     }
     const policy = new FallbackPolicy(candidates, ctx.modelHealthRegistry);
 
