@@ -507,7 +507,7 @@ export async function handleWakeup(_text: string, ctx: CommandContext): Promise<
   const os = platform();
   let child: ReturnType<typeof spawn> | null = null;
   if (os === "darwin") {
-    child = spawn("caffeinate", ["-d"], { stdio: "ignore", detached: true });
+    child = spawn("caffeinate", ["-su"], { stdio: "ignore", detached: true });
   } else if (os === "linux") {
     child = spawn("systemd-inhibit", ["--what=idle:sleep", "sleep", "infinity"], { stdio: "ignore", detached: true });
   }
