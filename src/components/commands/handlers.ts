@@ -554,7 +554,8 @@ export async function handleSleep(_text: string, ctx: CommandContext): Promise<b
   const lock = auditDir ? readLatestSleepLock(auditDir) : null;
 
   const lines: string[] = ["😴 Sleep status"];
-  lines.push(`  State: ${sleepStatus}${progress ? ` (${progress.step} ${progress.percent}%)` : ""}`);
+  const stateLabel = progress ? `🧠 Sleep cycle running (${progress.step}, ${progress.percent}%)` : sleepStatus === "sleeping" ? "😴 Asleep (idle)" : sleepStatus === "hw_sleep" ? "😴 Hardware sleep" : "👋 Awake";
+  lines.push(`  State: ${stateLabel}`);
   if (lock) {
     const counts = Object.values(lock.steps);
     const ok = counts.filter(s => s.status === "ok").length;
