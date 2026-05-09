@@ -17,5 +17,16 @@
     "tmux": { "session": "kiro-bridge", "captureDelaySec": 3, "maxWaitSec": 300 },
     "acp":  { "permissionTimeoutMs": 60000 }
   },
-  "maxTurns": 50
+  "maxTurns": 50,
+  "healthPolicy": {
+    "skipThreshold": 0.7,
+    "leakPerMinute": 0.03,
+    "authFill": 1.0,
+    "authSticky": true,
+    "rateLimitFill": 0.5,
+    "weakFill": 0.05,
+    "transientProgressive": [0.1, 0.2, 0.4, 0.8],
+    "transientCooldownAfter": 3,
+    "transientMaxCooldownSec": 300
+  }
 }
