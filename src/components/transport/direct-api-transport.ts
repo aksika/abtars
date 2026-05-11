@@ -343,7 +343,7 @@ export class DirectApiTransport implements IKiroTransport {
     if (this.config.apiFormat === "anthropic") {
       const { toAnthropicRequest, buildAnthropicHeaders } = await import("./anthropic-adapter.js");
       const { parseAnthropicSSE } = await import("./sse-parser-anthropic.js");
-      const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" }));
+      const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "", tool_call_id: m.tool_call_id }));
       const reqBody = { ...toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput, getToolSchemas()), stream: true };
       const hdrs = buildAnthropicHeaders(this.activeApiKey ?? "");
       const res = await fetch(`${this.activeEndpoint}/messages`, {
