@@ -312,49 +312,51 @@ export class DirectApiTransport implements IKiroTransport {
     const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
 
     try {
-    // Responses API format (#465)
+    // Responses API format (#465, streaming #472)
     if (this.config.apiFormat === "responses") {
-      const { toResponsesRequest, fromResponsesResponse } = await import("./responses-adapter.js");
+      const { toResponsesRequest } = await import("./responses-adapter.js");
+      const { parseResponsesSSE } = await import("./sse-parser-responses.js");
       const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" }));
-      const reqBody = toResponsesRequest(this.activeModel, msgs, getToolSchemas(), this.config.maxOutput);
+      const reqBody = { ...toResponsesRequest(this.activeModel, msgs, getToolSchemas(), this.config.maxOutput), stream: true };
       const hdrs: Record<string, string> = { "Content-Type": "application/json" };
       if (this.activeApiKey) hdrs["Authorization"] = `Bearer ${this.activeApiKey}`;
       const res = await fetch(`${this.activeEndpoint}/responses`, {
-        method: "POST",
-        headers: hdrs,
-        body: JSON.stringify(reqBody),
-        signal: composed,
+        method: "POST", headers: hdrs, body: JSON.stringify(reqBody), signal: composed,
       });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`);
+      if (!res.ok) { const text = await res.text().catch(() => ""); throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`); }
+
+      let content = "";
+      let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
+      for await (const event of parseResponsesSSE(res, composed)) {
+        this._lastActivityAt = Date.now();
+        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); }
+        else if (event.type === "done") { usage = event.usage; }
       }
-      const json = await res.json() as import("./responses-adapter.js").ResponsesResponse;
-      const content = fromResponsesResponse(json);
       clearTimeout(timer);
-      return { content: content || null, toolCalls: [], usage: null };
+      return { content: content || null, toolCalls: [], usage };
     }
 
-    // Anthropic Messages API format (#467)
+    // Anthropic Messages API format (#467, streaming #472)
     if (this.config.apiFormat === "anthropic") {
-      const { toAnthropicRequest, buildAnthropicHeaders, fromAnthropicResponse } = await import("./anthropic-adapter.js");
+      const { toAnthropicRequest, buildAnthropicHeaders } = await import("./anthropic-adapter.js");
+      const { parseAnthropicSSE } = await import("./sse-parser-anthropic.js");
       const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" }));
-      const reqBody = toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput);
+      const reqBody = { ...toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput), stream: true };
       const hdrs = buildAnthropicHeaders(this.activeApiKey ?? "");
       const res = await fetch(`${this.activeEndpoint}/messages`, {
-        method: "POST",
-        headers: hdrs,
-        body: JSON.stringify(reqBody),
-        signal: composed,
+        method: "POST", headers: hdrs, body: JSON.stringify(reqBody), signal: composed,
       });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`);
+      if (!res.ok) { const text = await res.text().catch(() => ""); throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`); }
+
+      let content = "";
+      let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
+      for await (const event of parseAnthropicSSE(res, composed)) {
+        this._lastActivityAt = Date.now();
+        if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); }
+        else if (event.type === "done") { usage = event.usage; }
       }
-      const json = await res.json() as import("./anthropic-adapter.js").AnthropicResponse;
-      const content = fromAnthropicResponse(json);
       clearTimeout(timer);
-      return { content: content || null, toolCalls: [], usage: json.usage ? { prompt_tokens: json.usage.input_tokens, completion_tokens: json.usage.output_tokens } : null };
+      return { content: content || null, toolCalls: [], usage };
     }
 
     const body: Record<string, unknown> = {
