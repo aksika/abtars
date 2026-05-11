@@ -132,6 +132,8 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "PERMISSION_TIMEOUT_MS", type: "int", default: "60000", description: "Permission prompt timeout (ms)" },
   { env: "TRUST_MODE", type: "bool", default: "false", description: "Skip permission prompts" },
   { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | sandbox" },
+  { env: "ENABLE_DASHBOARD", type: "bool", default: "false", description: "Enable web dashboard (exposes port)" },
+  { env: "ENABLE_AGENT_API", type: "bool", default: "false", description: "Enable A2A agent API (exposes port)" },
 ] as const;
 
 // ── Parsed config type ──────────────────────────────────────────────────────
@@ -234,6 +236,8 @@ export interface EnvConfig {
   permissionTimeoutMs: number;
   trustMode: boolean;
   securityMode: string;
+  enableDashboard: boolean;
+  enableAgentApi: boolean;
 
   /** Dynamic API key lookup — for provider.apiKeyEnv pattern. */
   getApiKey(envName: string): string | undefined;
@@ -398,6 +402,8 @@ export function initEnv(): Readonly<EnvConfig> {
     permissionTimeoutMs: parseIntSafe(readOr("PERMISSION_TIMEOUT_MS", "60000"), "PERMISSION_TIMEOUT_MS"),
     trustMode: parseBool(readOr("TRUST_MODE", "false")),
     securityMode: readOr("SECURITY_MODE", "off"),
+    enableDashboard: parseBool(readOr("ENABLE_DASHBOARD", "false")),
+    enableAgentApi: parseBool(readOr("ENABLE_AGENT_API", "false")),
 
     getApiKey(envName: string): string | undefined {
       return process.env[envName]?.trim() || undefined;
