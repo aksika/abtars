@@ -195,21 +195,30 @@ export class TelegramAdapter implements PlatformAdapter {
           const buttons = providers.map(p => [{ text: p.name, callback_data: `mprovglobal:${p.name}` }]);
           await this.api.sendMessage(chatId, "🔌 Pick provider:", { reply_markup: { inline_keyboard: buttons } });
         } else {
-          // Agent slot — show provider picker filtered by current transport kind, current provider marked ✅
-          const { loadTransport, resolveAgent, getAvailableProviders } = await import("../../components/transport-config.js");
+          // Agent slot — show provider picker
+          const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
           const tc = loadTransport();
           if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
           const effectiveSlot = slot.startsWith("professor_fb") ? "professor" : slot;
           const resolved = resolveAgent(effectiveSlot, tc);
           if (!resolved) { await this.api.sendMessage(chatId, `❌ No config for ${slot}`); return; }
-          const currentTransport = resolved.provider.transport;
           const currentProvider = resolved.providerName;
-          const providers = getAvailableProviders(tc).filter(p => p.config.transport === currentTransport);
-          if (providers.length === 0) { await this.api.sendMessage(chatId, `❌ No ${currentTransport} providers`); return; }
-          const buttons = providers.map(p => [{
-            text: p.name === currentProvider ? `✅ ${p.name} (current)` : p.name,
-            callback_data: `mprov:${slot}:${p.name}`,
-          }]);
+          // Professor + fallbacks: filter by same transport + same CLI binary
+          // Co-agents: show all providers (independent)
+          const isFallbackSlot = slot.startsWith("professor_fb");
+          const isProfessor = slot === "professor" || isFallbackSlot;
+          let providers = getAvailableProviders(tc);
+          if (isProfessor) {
+            const currentTransport = resolved.provider.transport;
+            const currentCli = resolved.provider.cli;
+            providers = providers.filter(p => p.config.transport === currentTransport && (!currentCli || p.config.cli === currentCli));
+          }
+          if (providers.length === 0) { await this.api.sendMessage(chatId, `❌ No compatible providers`); return; }
+          const buttons = providers.map(p => {
+            const count = getModelsForProvider(p.name).length;
+            const label = p.name === currentProvider ? `✅ ${p.name} (${count} models)` : `${p.name} (${count} models)`;
+            return [{ text: label, callback_data: `mprov:${slot}:${p.name}` }];
+          });
           await this.api.sendMessage(chatId, `🔌 Pick provider for ${slot}:`, { reply_markup: { inline_keyboard: buttons } });
         }
       } else if (data.startsWith("mprovglobal:")) {

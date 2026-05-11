@@ -326,8 +326,27 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /models restore — reset all model health buckets + clear emergency mode
-  if (arg === "primary" || arg === "restore") {
+  // /models restore — swap transport.json ↔ transport.json.old (undo last switch)
+  if (arg === "restore") {
+    const { restorePrevious } = await import("../transport-config.js");
+    const result = restorePrevious();
+    if (!result.ok) { await ctx.reply(`❌ ${result.error}`); return true; }
+    await ctx.reply("🔄 Restored previous config.");
+    await triggerNewSession(ctx, "model-restore");
+    return true;
+  }
+
+  // /models default — factory reset from transport.default.json
+  if (arg === "default") {
+    const { resetToDefaults } = await import("../transport-config.js");
+    if (!resetToDefaults()) { await ctx.reply("❌ Factory config not found — run abtars install to restore."); return true; }
+    await ctx.reply("🔄 Factory config restored.");
+    await triggerNewSession(ctx, "model-default");
+    return true;
+  }
+
+  // /models health reset — reset model health buckets + clear emergency mode
+  if (arg === "health reset" || arg === "primary") {
     const t = ctx.transport as unknown as {
       policy?: { registry: { resetAll: () => void } };
       setEmergencyMode?: (o: null) => void;
@@ -380,22 +399,55 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
+  // /models list [provider] — text-based discovery for all platforms
+  if (arg === "list" || arg.startsWith("list ")) {
+    const providerArg = arg.slice(5).trim();
+    const { getAvailableProviders, getModelsForProvider: getModels } = await import("../transport-config.js");
+    if (!tc) { await ctx.reply("❌ transport.json not loaded"); return true; }
+
+    if (!providerArg) {
+      // List all providers
+      const providers = getAvailableProviders(tc);
+      const lines = ["🔌 Providers:"];
+      for (const p of providers) {
+        const count = getModels(p.name).length;
+        lines.push(`  • ${p.name} (${p.config.transport})${count > 0 ? ` — ${count} models` : ""}`);
+      }
+      lines.push("\nUse /model list <provider> to see models.");
+      await ctx.reply(lines.join("\n"));
+    } else {
+      // List models for a specific provider
+      const models = getModels(providerArg);
+      if (models.length === 0) { await ctx.reply(`❌ No models found for provider "${providerArg}"`); return true; }
+      const lines = [`📋 Models on ${providerArg}:`];
+      for (const m of models) {
+        const current = m.id === currentModel ? " ✅" : "";
+        lines.push(`  • ${m.id}${current}`);
+      }
+      lines.push(`\nUse /model quick <name> to switch.`);
+      await ctx.reply(lines.join("\n"));
+    }
+    return true;
+  }
+
   // /models change — 3-step picker
   if (arg === "change") {
     if (ctx.platform !== "telegram") {
-      await ctx.reply("🤖 Use /models quick <model> to switch on this platform.\nExample: /models quick claude-sonnet-4");
+      await ctx.reply("🤖 Use /model list to discover, /model quick <model> to switch.");
       return true;
     }
-    const AGENT_LABELS: Array<{ key: string; label: string }> = [
+    const AGENT_LABELS: Array<{ key: string; label: string; slot?: string }> = [
       { key: "_provider", label: "🔌 Provider" },
       { key: "professor", label: "Professor (main)" },
       { key: "professor_fb1", label: "Professor fallback 1" },
       { key: "professor_fb2", label: "Professor fallback 2" },
-      { key: "dreamy", label: "Dreamy (sleep)" },
-      { key: "browsie", label: "Browsie (browse)" },
-      { key: "coding", label: "Cody (coding)" },
+      { key: "dreamy", label: "Dreamy (sleep)", slot: "dreamy" },
+      { key: "browsie", label: "Browsie (browse)", slot: "browsie" },
+      { key: "coding", label: "Cody (coding)", slot: "coding" },
     ];
-    const buttons = AGENT_LABELS.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
+    // Hide unconfigured co-agent slots
+    const visible = AGENT_LABELS.filter(a => !a.slot || tc!.agents[a.slot]);
+    const buttons = visible.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
     await ctx.reply("🤖 Which agent to change?", { reply_markup: { inline_keyboard: buttons } });
     return true;
   }
@@ -630,9 +682,12 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/models — Model, transport & agent status",
     "/models change — Switch model/provider (any agent)",
     "/models quick <model> — Instant switch on same provider",
+    "/models list [provider] — List providers or models on a provider",
+    "/models restore — Undo last model/provider switch",
+    "/models default — Factory reset (transport.default.json)",
     "/models emergency — 🚨 Activate paid hailMary model (manual)",
     "/emergency — Shortcut for /models emergency",
-    "/models restore — Reset buckets + clear emergency mode",
+    "/models health reset — Reset model health buckets",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/tasks trigger <id> — Manually fire a task",

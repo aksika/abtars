@@ -6,7 +6,7 @@ import { validateShape, TRANSPORT_SCHEMA } from "./config-validator.js";
  * Falls back to .env defaults if JSON is broken.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 import { readEnvWithDefault } from "./env.js";
@@ -286,10 +286,30 @@ export function validateAtStartup(): void {
 
 export function writeTransportConfig(tc: TransportConfig, reason?: string): void {
   const p = join(configDir(), getEnv().transportConfig);
+  // Save current as .old before overwriting (enables /model restore)
+  try { writeFileSync(p.replace(".json", ".old.json"), readFileSync(p, "utf-8"), "utf-8"); } catch { /* first write or missing — no .old to save */ }
   writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
   cachedTransport = tc;
-  
-  logInfo(TAG, reason ? `transport.json updated — ${reason} (buckets cleared)` : "transport.json updated (buckets cleared)");
+  logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
+}
+
+/** Swap transport.json ↔ transport.json.old (undo last switch). */
+export function restorePrevious(): { ok: boolean; error?: string } {
+  const dir = configDir();
+  const activePath = join(dir, getEnv().transportConfig);
+  const oldPath = activePath.replace(".json", ".old.json");
+  if (!existsSync(oldPath)) return { ok: false, error: "Nothing to restore — no previous config saved." };
+  try {
+    const current = readFileSync(activePath, "utf-8");
+    const old = readFileSync(oldPath, "utf-8");
+    writeFileSync(activePath, old, "utf-8");
+    writeFileSync(oldPath, current, "utf-8");
+    cachedTransport = null;
+    logInfo(TAG, "transport.json swapped with .old (restore)");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `Restore failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 /** Copy transport.default.json → transport.json, clear cache. Returns true if successful. */
