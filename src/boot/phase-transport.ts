@@ -153,6 +153,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       maxContext: resolved.contextWindow,
       maxOutput: resolved.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
+      apiFormat: resolved.provider.apiFormat,
     }, policy);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {

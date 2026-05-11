@@ -23,6 +23,7 @@ export interface DirectApiConfig {
   maxContext: number;      // token budget
   maxOutput: number;       // max output tokens per response
   maxTurns: number;        // max tool-calling iterations per prompt
+  apiFormat?: "chat" | "responses";
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
 
@@ -310,6 +311,29 @@ export class DirectApiTransport implements IKiroTransport {
     const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
 
     try {
+    // Responses API format (#465)
+    if (this.config.apiFormat === "responses") {
+      const { toResponsesRequest, fromResponsesResponse } = await import("./responses-adapter.js");
+      const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" }));
+      const reqBody = toResponsesRequest(this.activeModel, msgs, getToolSchemas(), this.config.maxOutput);
+      const hdrs: Record<string, string> = { "Content-Type": "application/json" };
+      if (this.activeApiKey) hdrs["Authorization"] = `Bearer ${this.activeApiKey}`;
+      const res = await fetch(`${this.activeEndpoint}/responses`, {
+        method: "POST",
+        headers: hdrs,
+        body: JSON.stringify(reqBody),
+        signal: composed,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`);
+      }
+      const json = await res.json() as import("./responses-adapter.js").ResponsesResponse;
+      const content = fromResponsesResponse(json);
+      clearTimeout(timer);
+      return { content: content || null, toolCalls: [], usage: null };
+    }
+
     const body = {
       model: this.activeModel,
       messages: session.messages,
