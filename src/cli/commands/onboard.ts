@@ -47,8 +47,8 @@ const PROVIDER_TRANSPORT_NAME: Record<ProviderChoice, string> = {
   anthropic: 'anthropic',
   openai: 'openai',
   ollama: 'ollama',
-  kiro: 'kiro-free',
-  gemini: 'gemini-free',
+  kiro: 'kiro',
+  gemini: 'gemini',
 };
 const DEFAULT_MODELS: Record<ProviderChoice, string> = {
   openrouter: 'google/gemini-2.5-flash',
@@ -522,7 +522,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     // Seed providers and agents if not already present
     if (!tc["providers"]) {
       tc["providers"] = {
-        "kiro-free": { "transport": "acp", "cli": "kiro-cli" },
+        "kiro": { "transport": "acp", "cli": "kiro-cli" },
         "ollama": { "transport": "api", "endpoint": "http://localhost:11434/v1" },
         "openrouter": { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" },
       };
