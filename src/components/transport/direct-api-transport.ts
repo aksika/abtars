@@ -17,13 +17,14 @@ const TAG = "direct-api";
 
 
 export interface DirectApiConfig {
-  endpoint: string;       // e.g. http://localhost:20128/v1
+  endpoint: string;
   apiKey?: string;
   model: string;
-  maxContext: number;      // token budget
-  maxOutput: number;       // max output tokens per response
-  maxTurns: number;        // max tool-calling iterations per prompt
-  apiFormat?: "chat" | "responses";
+  maxContext: number;
+  maxOutput: number;
+  maxTurns: number;
+  apiFormat?: "chat" | "responses" | "anthropic";
+  thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
 
@@ -334,7 +335,29 @@ export class DirectApiTransport implements IKiroTransport {
       return { content: content || null, toolCalls: [], usage: null };
     }
 
-    const body = {
+    // Anthropic Messages API format (#467)
+    if (this.config.apiFormat === "anthropic") {
+      const { toAnthropicRequest, buildAnthropicHeaders, fromAnthropicResponse } = await import("./anthropic-adapter.js");
+      const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" }));
+      const reqBody = toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput);
+      const hdrs = buildAnthropicHeaders(this.activeApiKey ?? "");
+      const res = await fetch(`${this.activeEndpoint}/messages`, {
+        method: "POST",
+        headers: hdrs,
+        body: JSON.stringify(reqBody),
+        signal: composed,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`);
+      }
+      const json = await res.json() as import("./anthropic-adapter.js").AnthropicResponse;
+      const content = fromAnthropicResponse(json);
+      clearTimeout(timer);
+      return { content: content || null, toolCalls: [], usage: json.usage ? { prompt_tokens: json.usage.input_tokens, completion_tokens: json.usage.output_tokens } : null };
+    }
+
+    const body: Record<string, unknown> = {
       model: this.activeModel,
       messages: session.messages,
       tools: getToolSchemas(),
@@ -342,6 +365,15 @@ export class DirectApiTransport implements IKiroTransport {
       stream: true,
       stream_options: { include_usage: true },
     };
+
+    // #466: inject thinking/reasoning parameters
+    if (this.config.thinking) {
+      if (this.config.thinking.style === "effort") {
+        body.reasoning_effort = this.config.thinking.default;
+      } else if (this.config.thinking.style === "extended") {
+        body.thinking = { type: "enabled", budget_tokens: this.config.thinking.default };
+      }
+    }
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.activeApiKey) headers["Authorization"] = `Bearer ${this.activeApiKey}`;

@@ -43,7 +43,8 @@ export type ProviderConfig = {
   cli?: string;
   endpoint?: string;
   apiKeyEnv?: string;
-  apiFormat?: "chat" | "responses";
+  apiFormat?: "chat" | "responses" | "anthropic";
+  thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
   defaults?: Record<string, { model: string; fallbacks?: string[] }>;
   fallbackChain?: string[];
 };
