@@ -38,6 +38,10 @@ export async function* parseResponsesSSE(
           if (eventType === "response.output_text.delta") {
             const delta = parsed["delta"] as string | undefined;
             if (delta) yield { type: "chunk", content: delta };
+          } else if (eventType === "response.function_call_arguments.delta") {
+            yield { type: "tool_call_delta", index: 0, id: (parsed["call_id"] as string) ?? undefined, name: undefined, arguments: (parsed["delta"] as string) ?? "" };
+          } else if (eventType === "response.function_call_arguments.done") {
+            yield { type: "tool_call_delta", index: 0, id: (parsed["call_id"] as string) ?? undefined, name: (parsed["name"] as string) ?? undefined, arguments: undefined };
           } else if (eventType === "response.completed" || eventType === "response.done") {
             yield { type: "done", usage: null };
             return;

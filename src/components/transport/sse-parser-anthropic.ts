@@ -40,6 +40,13 @@ export async function* parseAnthropicSSE(
             const delta = parsed["delta"] as Record<string, unknown> | undefined;
             if (delta?.["type"] === "text_delta" && typeof delta["text"] === "string") {
               yield { type: "chunk", content: delta["text"] as string };
+            } else if (delta?.["type"] === "input_json_delta" && typeof delta["partial_json"] === "string") {
+              yield { type: "tool_call_delta", index: (parsed["index"] as number) ?? 0, id: undefined, name: undefined, arguments: delta["partial_json"] as string };
+            }
+          } else if (eventType === "content_block_start") {
+            const block = parsed["content_block"] as Record<string, unknown> | undefined;
+            if (block?.["type"] === "tool_use") {
+              yield { type: "tool_call_delta", index: (parsed["index"] as number) ?? 0, id: block["id"] as string, name: block["name"] as string, arguments: undefined };
             }
           } else if (eventType === "message_delta") {
             const u = parsed["usage"] as Record<string, number> | undefined;

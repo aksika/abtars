@@ -327,13 +327,16 @@ export class DirectApiTransport implements IKiroTransport {
 
       let content = "";
       let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
+      const toolCallAcc = new Map<string, { id: string; name: string; arguments: string }>();
       for await (const event of parseResponsesSSE(res, composed)) {
         this._lastActivityAt = Date.now();
         if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); }
+        else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
       clearTimeout(timer);
-      return { content: content || null, toolCalls: [], usage };
+      const toolCalls: ToolCall[] = [...toolCallAcc.values()].map(tc => ({ id: tc.id, type: "function" as const, function: { name: tc.name, arguments: tc.arguments } }));
+      return { content: content || null, toolCalls, usage };
     }
 
     // Anthropic Messages API format (#467, streaming #472)
@@ -341,7 +344,7 @@ export class DirectApiTransport implements IKiroTransport {
       const { toAnthropicRequest, buildAnthropicHeaders } = await import("./anthropic-adapter.js");
       const { parseAnthropicSSE } = await import("./sse-parser-anthropic.js");
       const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" }));
-      const reqBody = { ...toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput), stream: true };
+      const reqBody = { ...toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput, getToolSchemas()), stream: true };
       const hdrs = buildAnthropicHeaders(this.activeApiKey ?? "");
       const res = await fetch(`${this.activeEndpoint}/messages`, {
         method: "POST", headers: hdrs, body: JSON.stringify(reqBody), signal: composed,
@@ -350,13 +353,16 @@ export class DirectApiTransport implements IKiroTransport {
 
       let content = "";
       let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
+      const toolCallAcc = new Map<string, { id: string; name: string; arguments: string }>();
       for await (const event of parseAnthropicSSE(res, composed)) {
         this._lastActivityAt = Date.now();
         if (event.type === "chunk") { content += event.content; this._intermediateText += event.content; this.onIntermediateResponse?.(event.content); }
+        else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
       clearTimeout(timer);
-      return { content: content || null, toolCalls: [], usage };
+      const toolCalls: ToolCall[] = [...toolCallAcc.values()].map(tc => ({ id: tc.id, type: "function" as const, function: { name: tc.name, arguments: tc.arguments } }));
+      return { content: content || null, toolCalls, usage };
     }
 
     const body: Record<string, unknown> = {
