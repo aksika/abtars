@@ -62,7 +62,6 @@ const result = await esbuild.build({
     "abtars-cli": "src/cli/abtars.ts",
     "abtars-browser": "src/cli/abtars-browser.ts",
     "abtars-restart": "src/cli/commands/restart.ts",
-    "abtars-tweet": "src/cli/abtars-tweet.ts",
     "abtars-rss": "src/cli/abtars-rss.ts",
   },
   bundle: true,
