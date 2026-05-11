@@ -46,10 +46,10 @@ When proposing new models, consider whether they should be added to a provider's
 
 ```bash
 # OpenRouter free tier
-python3 ~/.abtars/scripts/scout-openrouter.py
+python3 {baseDir}/scout-openrouter.py
 
 # Ollama cloud models (no local, cloud only)
-python3 ~/.abtars/scripts/scout-ollama.py
+python3 {baseDir}/scout-ollama.py
 ```
 
 ### 2. Research quality
@@ -94,7 +94,7 @@ Format:
 After user approves, add with description explaining why:
 
 ```bash
-python3 ~/.abtars/scripts/scout-add-model.py \
+python3 {baseDir}/scout-add-model.py \
   "model-id" contextWindow maxOutput rank input_cost output_cost \
   "Why this model: Intelligence XX, free, large context" \
   ollama openrouter
