@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { makeLocalBuildSource } from '../update-sources/local.js';
+import { makeNpmSource } from '../update-sources/npm.js';
 import type { SourceName } from '../update-sources/types.js';
 import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION, type PriorRelease } from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
@@ -26,10 +27,8 @@ export interface UpdateOptions {
 }
 
 export async function update(opts: UpdateOptions): Promise<number> {
-  if (opts.source !== 'local') {
-    process.stderr.write(
-      `--source ${opts.source} is not yet supported (reserved for post-#155 npm publish).\nUse --source local (the default) for now.\n`,
-    );
+  if (opts.source !== 'local' && opts.source !== 'npm') {
+    process.stderr.write(`--source ${opts.source} is not yet supported.\nUse --source local (default) or --source npm.\n`);
     return 2;
   }
 
@@ -37,7 +36,9 @@ export async function update(opts: UpdateOptions): Promise<number> {
   const release = await acquireLock(paths.lock, `update --source ${opts.source}`);
 
   try {
-    const source = makeLocalBuildSource({ repoRoot: process.cwd(), allowStale: opts.fromLocal });
+    const source = opts.source === 'npm'
+      ? makeNpmSource('abtars')
+      : makeLocalBuildSource({ repoRoot: process.cwd(), allowStale: opts.fromLocal });
     if (opts.fromLocal) {
       showHintOnce("update-from-local", "Building from working copy (--from-local). To sync with remote first: git pull && abtars update");
     }
