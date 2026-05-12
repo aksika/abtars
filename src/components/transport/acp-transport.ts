@@ -78,6 +78,8 @@ export class AcpTransport implements IKiroTransport {
   promptStartedAt = 0;
   /** Timestamp of last ACP activity (chunk, tool call, thinking). */
   lastActivityAt = 0;
+  /** Timestamp of last content-producing event (text chunk, tool completion). For timeout only. */
+  private lastContentAt = 0;
   /** Currently in-flight tool call metadata (null if none). */
   private toolMeta: { title: string; startedAt: number } | null = null;
   /** @deprecated Use sm.isActive instead. Kept for external health check compat. */
@@ -234,6 +236,7 @@ export class AcpTransport implements IKiroTransport {
 
     this.promptStartedAt = Date.now();
     this.lastActivityAt = Date.now();
+    this.lastContentAt = Date.now();
     this.toolMeta = null;
     this.lastPromptText = message;
     this.lastSessionKey = sessionKey;
@@ -323,7 +326,7 @@ export class AcpTransport implements IKiroTransport {
         let timeoutTimer: ReturnType<typeof setInterval> | undefined;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutTimer = setInterval(() => {
-            if (Date.now() - this.lastActivityAt > this._promptTimeoutMs) {
+            if (Date.now() - this.lastContentAt > this._promptTimeoutMs) {
               clearInterval(timeoutTimer);
               reject(new Error("Bridge prompt timeout — model unresponsive"));
             }
@@ -428,6 +431,7 @@ export class AcpTransport implements IKiroTransport {
           const chunks = this.responseChunks.get(sessionId);
           if (chunks) chunks.push(text);
           this.lastActivityAt = Date.now();
+          this.lastContentAt = Date.now();
           this.toolMeta = null; if (this.sm.state === "tool-active") this.sm.toolCompleted(); // model responding = tool done
           if (this.onIntermediateResponse && text.trim()) {
             this.onIntermediateResponse(text);
@@ -437,12 +441,14 @@ export class AcpTransport implements IKiroTransport {
           const chunks = this.responseChunks.get(sessionId);
           if (chunks) chunks.push(`\n[thinking] ${text}\n`);
           this.lastActivityAt = Date.now();
+          // NOT updating lastContentAt — thinking is keepalive, not content
         }
         break;
       }
       case "tool_call": {
         logDebug(this.tag, `[tool] ${update.title} (${update.status})`);
         this.lastActivityAt = Date.now();
+        this.lastContentAt = Date.now();
         this.toolMeta = { title: update.title ?? "unknown", startedAt: Date.now() }; this.sm.toolStarted();
         this.onToolCallStart?.(update.title ?? "tool");
         break;
