@@ -11,7 +11,6 @@
  */
 
 import { logInfo, logWarn, logError } from "../components/logger.js";
-import { getEnv } from "../components/env-schema.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
 export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
@@ -69,7 +68,6 @@ export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
           botToken: config.discord.botToken!,
           appId: config.discord.appId!,
           allowedUserIds: config.discord.allowedUserIds!,
-          allowedChannels: new Set((getEnv().discordAllowedChannels ?? "").split(",").map(s => s.trim()).filter(Boolean)),
         },
         { pipeline: pipelineDeps, transport, memory, conversationBuffer },
       );

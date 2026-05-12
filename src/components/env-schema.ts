@@ -62,7 +62,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   // ── Discord ──
   { env: "DISCORD_BOT_TOKEN", type: "string", description: "Discord bot token" },
   { env: "DISCORD_APP_ID", type: "string", description: "Discord application ID" },
-  { env: "DISCORD_ALLOWED_CHANNELS", type: "string", description: "Comma-separated channel IDs where bot responds to ALL messages (no mention required). Leave empty to require @mention / reply-to-bot everywhere." },
+  { env: "DISCORD_GROUP_MENTIONS", type: "string", default: "required", description: "Group mention mode: required (need @mention) | optional (bot listens to all, decides itself)" },
 
   // ── Context window ──
   { env: "CTX_WARN_PCT", type: "int", default: "70", description: "Context % to warn user" },
@@ -176,7 +176,7 @@ export interface EnvConfig {
   // Discord
   discordBotToken: string | undefined;
   discordAppId: string | undefined;
-  discordAllowedChannels: string | undefined;
+  discordGroupMentions: string;
 
   // Context window
   ctxWarnPct: number;
@@ -350,7 +350,7 @@ export function initEnv(): Readonly<EnvConfig> {
 
     discordBotToken: read("DISCORD_BOT_TOKEN"),
     discordAppId: read("DISCORD_APP_ID"),
-    discordAllowedChannels: read("DISCORD_ALLOWED_CHANNELS"),
+    discordGroupMentions: readOr("DISCORD_GROUP_MENTIONS", "required"),
 
     ctxWarnPct: parseIntSafe(readOr("CTX_WARN_PCT", "70"), "CTX_WARN_PCT"),
     ctxCompactPct: parseIntSafe(readOr("CTX_COMPACT_PCT", "80"), "CTX_COMPACT_PCT"),

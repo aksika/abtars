@@ -15,6 +15,7 @@ import { formatReactionSignal } from "../../components/reactions.js";
 export const DISCORD_CAPABILITIES: PlatformCapabilities = { voice: false, reactions: true, typing: true, threads: true };
 import { emojiToScore } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
+import { getEnv } from "../../components/env-schema.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { DiscordInboundMessage } from "../../types/index.js";
@@ -28,8 +29,6 @@ export interface DiscordAdapterConfig {
   botToken: string;
   appId: string;
   allowedUserIds: Set<string>;
-  /** Channels where the bot responds to ALL messages (no mention required). #388 */
-  allowedChannels: Set<string>;
 }
 
 export interface DiscordAdapterDeps {
@@ -205,30 +204,32 @@ export class DiscordAdapter implements PlatformAdapter {
 
     if (!text) return;
 
-    // Mention filter: in non-DM channels, require the bot to be addressed (#388).
-    //   - @user mention of the bot
-    //   - @role mention of a role the bot holds
-    //   - reply to a message the bot authored
-    //   - channel explicitly allowlisted via DISCORD_ALLOWED_CHANNELS
+    // Mention filter: in non-DM channels, check DISCORD_GROUP_MENTIONS mode.
     const isDM = message.isDM;
     if (!isDM) {
-      // Resolve reply-to-bot lazily — only if the filter actually needs it.
-      let isReplyToBot = false;
-      if (message.replyReferenceMessageId && this.config.appId) {
-        try {
-          const referenced = await this.api.fetchMessage(message.channelId, message.replyReferenceMessageId);
-          isReplyToBot = referenced?.authorId === this.config.appId;
-        } catch { /* deleted or inaccessible */ }
-      }
+      const mentionMode = getEnv().discordGroupMentions; // "required" | "optional"
 
-      const addressed =
-        message.mentionsBotId ||
-        message.mentionsBotRole ||
-        isReplyToBot ||
-        this.config.allowedChannels.has(effectiveChannelId);
-      if (!addressed) {
-        logDebug(TAG, `Skipped — not addressed (channel=${effectiveChannelId})`);
-        return;
+      if (mentionMode === "optional") {
+        // Skip messages that mention someone else (not us, not @everyone)
+        if (message.hasUserMentions && !message.mentionsBotId && !message.mentionsBotRole && !message.mentionsEveryone) {
+          logDebug(TAG, `Skipped — mentions another user (optional mode, channel=${effectiveChannelId})`);
+          return;
+        }
+      } else {
+        // Required mode: must be explicitly addressed
+        let isReplyToBot = false;
+        if (message.replyReferenceMessageId && this.config.appId) {
+          try {
+            const referenced = await this.api.fetchMessage(message.channelId, message.replyReferenceMessageId);
+            isReplyToBot = referenced?.authorId === this.config.appId;
+          } catch { /* deleted or inaccessible */ }
+        }
+
+        const addressed = message.mentionsBotId || message.mentionsBotRole || isReplyToBot;
+        if (!addressed) {
+          logDebug(TAG, `Skipped — not addressed (channel=${effectiveChannelId})`);
+          return;
+        }
       }
     }
 
