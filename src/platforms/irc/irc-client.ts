@@ -1,6 +1,6 @@
 import net from "node:net";
 import tls from "node:tls";
-import { logInfo, logWarn, logError } from "../../components/logger.js";
+import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 
 const TAG = "irc-client";
 
@@ -53,10 +53,11 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
     socket.setEncoding("utf-8");
     socket.on("data", onData);
     socket.on("error", (err) => {
-      logError(TAG, `Socket error: ${err.message}`);
+      if (reconnectDelay <= 5000) logWarn(TAG, `Socket error: ${err.message}`);
+      else logDebug(TAG, `Socket error (reconnecting): ${err.message}`);
     });
     socket.on("close", () => {
-      logWarn(TAG, `Disconnected from ${opts.host}`);
+      if (reconnectDelay <= 5000) logWarn(TAG, `Disconnected from ${opts.host}`);
       opts.onDisconnect?.();
       scheduleReconnect();
     });
@@ -65,7 +66,8 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
   function scheduleReconnect(): void {
     if (stopped) return;
     reconnectTimer = setTimeout(() => {
-      logInfo(TAG, `Reconnecting to ${opts.host}:${opts.port}...`);
+      if (reconnectDelay <= 10000) logInfo(TAG, `Reconnecting to ${opts.host}:${opts.port}...`);
+      else logDebug(TAG, `Reconnecting to ${opts.host}:${opts.port} (delay=${Math.round(reconnectDelay/1000)}s)...`);
       connect();
     }, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 300000);
