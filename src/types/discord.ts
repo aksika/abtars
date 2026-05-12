@@ -8,6 +8,7 @@ export type DiscordInboundMessage = {
   channelId: string; // Discord channel snowflake ID (thread ID if in a thread)
   parentChannelId: string | null; // Parent channel ID if message is in a thread
   channelName: string | null; // Channel name (e.g. "general"), null if unavailable
+  isDM: boolean; // True if no guildId (DM or group DM)
   authorId: string; // Discord user snowflake ID
   authorUsername: string; // Discord username
   authorIsBot: boolean; // whether the author is a bot

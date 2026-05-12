@@ -210,7 +210,7 @@ export class DiscordAdapter implements PlatformAdapter {
     //   - @role mention of a role the bot holds
     //   - reply to a message the bot authored
     //   - channel explicitly allowlisted via DISCORD_ALLOWED_CHANNELS
-    const isDM = message.channelName === null && !message.parentChannelId;
+    const isDM = message.isDM;
     if (!isDM) {
       // Resolve reply-to-bot lazily — only if the filter actually needs it.
       let isReplyToBot = false;

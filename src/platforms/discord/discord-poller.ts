@@ -94,6 +94,7 @@ function toDiscordInboundMessage(raw: Message, botId: string | null): DiscordInb
     channelId: raw.channelId,
     parentChannelId: parentId,
     channelName,
+    isDM: !raw.guildId,
     authorId: raw.author.id,
     authorUsername: raw.author.username,
     authorIsBot: raw.author.bot ?? false,
