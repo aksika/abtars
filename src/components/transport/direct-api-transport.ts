@@ -4,7 +4,7 @@ import { getEnv } from "../env-schema.js";
  * Implements IKiroTransport with its own agent loop (send → stream → tools → loop).
  */
 
-import { logInfo, logWarn, logDebug } from "../logger.js";
+import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 import { withRetry, isFatal } from "../retry.js";
 import { ConversationSession, type ToolCall } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
@@ -241,8 +241,8 @@ export class DirectApiTransport implements IKiroTransport {
         session.updateTokens(usage.prompt_tokens);
         this._contextPercent = session.contextPercent;
         this._lastPromptTokens = usage.prompt_tokens;
-        // Reactive feedback: if over threshold, flag for next buildContext
         this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
+        logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
       }
 
       if (toolCalls.length > 0) {
