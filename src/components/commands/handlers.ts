@@ -765,7 +765,7 @@ export async function handleMcp(_text: string, ctx: CommandContext): Promise<boo
     body = `📦 MCP: mcporter installed (${version.split("\n")[0]}) but list failed`;
   } else {
     try {
-      const data = JSON.parse(raw) as { servers?: Array<{ name?: string; status?: string; tools?: number; prompts?: number; error?: string }> };
+      const data = JSON.parse(raw) as { servers?: Array<{ name?: string; status?: string; tools?: unknown; prompts?: number; error?: string }> };
       const servers = data.servers ?? [];
       const ok = servers.filter(s => s.status === "ok").length;
       const lines = [
@@ -775,8 +775,9 @@ export async function handleMcp(_text: string, ctx: CommandContext): Promise<boo
       ];
       for (const s of servers) {
         const mark = s.status === "ok" ? "✓" : "✗";
+        const toolCount = Array.isArray(s.tools) ? s.tools.length : (s.tools ?? 0);
         const detail = s.status === "ok"
-          ? `tools: ${s.tools ?? 0}${s.prompts ? `, prompts: ${s.prompts}` : ""}`
+          ? `tools: ${toolCount}${s.prompts ? `, prompts: ${s.prompts}` : ""}`
           : (s.error ?? s.status ?? "error");
         lines.push(`    ${mark} ${s.name ?? "?"} (${detail})`);
       }
