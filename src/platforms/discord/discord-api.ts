@@ -106,12 +106,22 @@ export class DiscordApi {
   /** Register a handler for slash command interactions. */
   onInteraction(handler: (interaction: import("discord.js").ChatInputCommandInteraction) => void | Promise<void>): void {
     this.client.on("interactionCreate", async (interaction) => {
-      if (!interaction.isChatInputCommand()) return;
-      try {
-        const result = handler(interaction);
-        if (result instanceof Promise) result.catch((err: unknown) => logError(TAG, "Interaction handler error", err));
-      } catch (err) { logError(TAG, "Interaction handler error", err); }
+      if (interaction.isChatInputCommand()) {
+        try {
+          const result = handler(interaction);
+          if (result instanceof Promise) result.catch((err: unknown) => logError(TAG, "Interaction handler error", err));
+        } catch (err) { logError(TAG, "Interaction handler error", err); }
+      }
+      if (interaction.isStringSelectMenu()) {
+        this.selectMenuHandlers.get(interaction.customId)?.(interaction);
+      }
     });
+  }
+
+  private selectMenuHandlers = new Map<string, (i: import("discord.js").StringSelectMenuInteraction) => void | Promise<void>>();
+
+  onSelectMenu(customId: string, handler: (interaction: import("discord.js").StringSelectMenuInteraction) => void | Promise<void>): void {
+    this.selectMenuHandlers.set(customId, handler);
   }
 
   /** Register global application commands. Idempotent — Discord diffs and updates. */

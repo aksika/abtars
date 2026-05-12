@@ -70,6 +70,12 @@ export class DiscordAdapter implements PlatformAdapter {
 
   /** Handle Discord slash command interactions. */
   private async handleInteraction(interaction: import("discord.js").ChatInputCommandInteraction): Promise<void> {
+    // Interactive model picker for /model and /models
+    if (interaction.commandName === "model" || interaction.commandName === "models") {
+      await this.handleModelPicker(interaction);
+      return;
+    }
+
     await interaction.deferReply();
 
     const registry = loadUsers();
@@ -122,6 +128,68 @@ export class DiscordAdapter implements PlatformAdapter {
     };
 
     await handleInboundMessage(msg, interactionAdapter, this.deps.pipeline);
+  }
+
+  /** Interactive model picker — ephemeral select menus. */
+  private async handleModelPicker(interaction: import("discord.js").ChatInputCommandInteraction): Promise<void> {
+    const { ActionRowBuilder, StringSelectMenuBuilder } = await import("discord.js");
+    const { loadTransport } = await import("../../components/transport-config.js");
+    const tc = loadTransport();
+    if (!tc) { await interaction.reply({ content: "No transport config.", ephemeral: true }); return; }
+
+    const providers = Object.entries(tc.providers).map(([id, p]) => ({ id, name: (p as any).name ?? id }));
+    if (providers.length === 0) {
+      await interaction.reply({ content: "No providers configured.", ephemeral: true });
+      return;
+    }
+
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId("model_picker_provider")
+      .setPlaceholder("Select provider")
+      .addOptions(providers.slice(0, 25).map(p => ({ label: p.name, value: p.id })));
+
+    const row = new ActionRowBuilder<import("discord.js").StringSelectMenuBuilder>().addComponents(menu);
+    await interaction.reply({ content: "🔧 Select provider:", components: [row], ephemeral: true });
+
+    // Handle provider selection → show models
+    this.api.onSelectMenu("model_picker_provider", async (selectInteraction) => {
+      const providerId = selectInteraction.values[0]!;
+      const provider = tc.providers[providerId];
+      if (!provider) { await selectInteraction.update({ content: "Provider not found.", components: [] }); return; }
+
+      const { getModelsForProvider } = await import("../../components/transport-config.js");
+      const models = getModelsForProvider(providerId).filter((m) => m.entry.status === "alive" || !m.entry.status).slice(0, 25);
+      if (models.length === 0) { await selectInteraction.update({ content: `No models for ${providerId}.`, components: [] }); return; }
+
+      const modelMenu = new StringSelectMenuBuilder()
+        .setCustomId("model_picker_model")
+        .setPlaceholder("Select model")
+        .addOptions(models.map((m) => ({ label: m.id, value: m.id })));
+
+      const modelRow = new ActionRowBuilder<import("discord.js").StringSelectMenuBuilder>().addComponents(modelMenu);
+      await selectInteraction.update({ content: `Provider: **${providerId}**\nSelect model:`, components: [modelRow] });
+
+      // Handle model selection → apply
+      this.api.onSelectMenu("model_picker_model", async (modelInteraction) => {
+        const modelId = modelInteraction.values[0]!;
+        // Route through command handler as /model <provider> <model>
+        await modelInteraction.update({ content: `✅ Switching to **${providerId}/${modelId}**...`, components: [] });
+
+        // Trigger the actual switch via the command pipeline
+        const msg: InboundMessage = {
+          text: `/model ${providerId} ${modelId}`,
+          channelId: modelInteraction.channelId,
+          sessionKey: `${interaction.user.id}:discord`,
+          senderId: interaction.user.id,
+          senderName: interaction.user.username ?? "unknown",
+          platform: "discord",
+          timestamp: Date.now(),
+          isGroup: !!interaction.guildId,
+          isVoice: false,
+        };
+        await handleInboundMessage(msg, this, this.deps.pipeline);
+      });
+    });
   }
 
   stop(): void {
