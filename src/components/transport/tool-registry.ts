@@ -520,8 +520,9 @@ const secretGetTool: ToolDefinition = {
 };
 
 import { skillCreateTool } from "./skill-authoring.js";
+import { mcpTool } from "./mcp-tool.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerChatTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerChatTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, mcpTool];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 

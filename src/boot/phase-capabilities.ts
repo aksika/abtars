@@ -9,7 +9,6 @@
  * Mutates pipelineDeps.loadedCapabilities in place (closure seen by message-pipeline).
  */
 
-import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { logInfo, logWarn } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -46,15 +45,6 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
     pipelineDeps.loadedCapabilities = ["sleep", ...loaded];
   }
 
-  // MCP daemon
-  if (config.mcpDaemon) {
-    try {
-      execFileSync("mcporter", ["daemon", "start"], { stdio: "pipe" });
-      ctx.mcpDaemonStarted = true;
-      logInfo("main", "🔌 mcporter daemon started");
-    } catch {
-      logWarn("main", "mcporter not found or daemon start failed — skipping");
-    }
-  }
+  // MCP daemon — starts on-demand via mcp tool or /mcp start (#471 v2)
   return "ran";
 }

@@ -749,6 +749,19 @@ export async function handleHooks(_text: string, ctx: CommandContext): Promise<b
 }
 
 export async function handleMcp(_text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = _text.replace(/^\/mcp\s*/i, "").trim().toLowerCase();
+
+  // /mcp start — master only, start daemon manually
+  if (arg === "start") {
+    const { loadUsers } = await import("../user-registry.js");
+    const registry = loadUsers();
+    const user = registry.byUserId.get(ctx.userId);
+    if (user?.role !== "master") { await ctx.reply("❌ /mcp start is master-only."); return true; }
+    const result = await execAsync("mcporter", ["daemon", "start"], 10_000);
+    await ctx.reply(result ? `📦 mcporter daemon started.\n${result}` : "📦 mcporter daemon start failed.");
+    return true;
+  }
+
   // Preflight: is mcporter installed? Fast check before placeholder.
   let version = await execAsync("mcporter", ["--version"], 2000);
   if (version === null) {
