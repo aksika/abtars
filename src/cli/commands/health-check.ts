@@ -3,6 +3,9 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 
 interface HealthItem {
   ok: boolean;
@@ -32,13 +35,12 @@ function checkEmbeddingModel(): HealthItem {
 }
 
 function checkSqliteVec(home: string): HealthItem {
-  try {
-    const nmPath = require("node:path").join(home, "current", "node_modules", "sqlite-vec");
-    require("node:fs").accessSync(nmPath);
+  const abmindLib = join(process.env["ABMIND_HOME"] ?? join(homedir(), ".abmind"), "lib", "node_modules", "sqlite-vec");
+  const bundleNm = join(home, "current", "node_modules", "sqlite-vec");
+  if (existsSync(abmindLib) || existsSync(bundleNm)) {
     return { ok: true, label: "sqlite-vec (vector search)" };
-  } catch {
-    return { ok: false, label: "sqlite-vec (falling back to brute-force search)", hint: "Run: cd ~/.abtars/current/node_modules && npm install sqlite-vec" };
   }
+  return { ok: false, label: "sqlite-vec (falling back to brute-force search)", hint: "Run: abmind install or cd ~/.abmind/lib && npm install sqlite-vec" };
 }
 
 export function printHealthSummary(home: string): void {
