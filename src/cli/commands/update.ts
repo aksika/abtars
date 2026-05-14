@@ -209,6 +209,14 @@ export async function update(opts: UpdateOptions): Promise<number> {
       process.stdout.write(`✓ invariants: ${invariantResults.join(", ")}\n`);
     }
 
+    // #494 — Ensure native deps (sqlite-vec) are installed at ~/.abmind/lib/
+    try {
+      const { ensureNativeDeps } = await import("../ensure-native-deps.js");
+      await ensureNativeDeps();
+    } catch (err) {
+      process.stdout.write(`⚠ native deps check failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+
     // Auto-restart bridge on new code
     const manifestForRestart = await readManifest(paths.manifest);
     const restartMode = manifestForRestart?.installMode ?? "supervised";
