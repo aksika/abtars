@@ -11,7 +11,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { join } from "node:path";
 import { TmuxClient } from "../components/transport/tmux-client.js";
 import { createAgentTransport } from "../components/agent-registry.js";
-import { logInfo, logWarn, logError } from "../components/logger.js";
+import { logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -230,11 +230,15 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   }
 
   if ("onFallback" in transport) {
+    let lastNotifiedModel: string | null = null;
     (transport as unknown as { onFallback: (model: string, ctxPct: number, reason?: string) => void }).onFallback = (model, ctxPct, reason) => {
       const reasonTag = reason ? ` (${reason})` : "";
       const msg = `⚡ Fallback${reasonTag}: ${model}${ctxPct >= 0 ? ` (ctx: ~${ctxPct}%)` : ""}`;
       logInfo("main", msg);
-      import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(() => {});
+      if (model !== lastNotifiedModel || isLogLevel("debug")) {
+        lastNotifiedModel = model;
+        import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(() => {});
+      }
     };
   }
   return "ran";

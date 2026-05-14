@@ -26,6 +26,10 @@ function shouldLog(minLevel: LogLevel): boolean {
   return LEVEL_ORDER[currentLevel] >= LEVEL_ORDER[minLevel];
 }
 
+export function isLogLevel(minLevel: LogLevel): boolean {
+  return LEVEL_ORDER[currentLevel] >= LEVEL_ORDER[minLevel];
+}
+
 function writeToFile(line: string): void {
   if (!fileLogging) return;
   try {
