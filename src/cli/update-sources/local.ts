@@ -146,19 +146,9 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         // Copy install-manifest.json for doctor reconciliation
         await copyFile(join(repoRoot, 'install-manifest.json'), join(stagedPath, 'install-manifest.json'));
 
-        // Copy pruned native deps (better-sqlite3 + transitive)
-        const abmindNM = join(repoRoot, '..', 'abmind', 'node_modules');
-        const nativeDir = join(stagedPath, 'node_modules');
-        await mkdir(nativeDir, { recursive: true });
-        for (const dep of ['better-sqlite3', 'bindings', 'file-uri-to-path', 'sqlite-vec']) {
-          const src = join(abmindNM, dep);
-          const dst = join(nativeDir, dep);
-          try { await cp(src, dst, { recursive: true, dereference: true }); }
-          catch { /* dep may not exist on all platforms */ }
-        }
-        // Install platform-specific native binaries (sqlite-vec needs arch-specific package)
-        try { runCmd('npm', ['install', '--omit=dev', 'better-sqlite3', 'sqlite-vec'], nativeDir); }
-        catch { /* non-fatal — falls back to brute-force search */ }
+        // Native addons (better-sqlite3, sqlite-vec) live at ~/.abmind/lib/node_modules/
+        // and are loaded via native-loader.ts from there. No need to copy into release.
+        // See #431 (persistent install) + native-loader.ts.
 
         const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));
         return { version, stagedPath, commit, branch, packageLockHash, source: 'local' };
