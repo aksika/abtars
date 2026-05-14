@@ -80,7 +80,7 @@ const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */
 /** @internal Used only by SubagentRuntime. Do not call directly. */
-export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry): Promise<{ transport: IKiroTransport; model: string }> {
+export async function createSubagentTransport(role: SubagentRole, registry?: import("./transport/model-health-registry.js").ModelHealthRegistry, currentModel?: string): Promise<{ transport: IKiroTransport; model: string }> {
   const { resolveAgent, getEnvFallback, loadTransport } = await import("./transport-config.js");
   const tc = loadTransport();
   const agentName = SUBAGENT_TO_AGENT[role];
@@ -98,20 +98,37 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const { FallbackPolicy } = await import("./transport/fallback-policy.js");
     const apiKey = getEnv().getApiKey(agent.provider.apiKeyEnv ?? "API_KEY");
 
+    // Use main transport's active model if available, else static config
+    const startModel = currentModel ?? agent.model;
+
     // Build per-agent candidate list
     const candidates: Array<{ model: string; endpoint: string; apiKey?: string; maxContext: number }> = [
-      { endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: agent.model, maxContext: agent.contextWindow },
+      { endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: startModel, maxContext: agent.contextWindow },
     ];
+
+    // Add static config model if different from startModel
+    if (agent.model !== startModel && !candidates.some(c => c.model === agent.model)) {
+      candidates.push({ endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: agent.model, maxContext: agent.contextWindow });
+    }
 
     // Add professor's model as fallback if different
     const profAgent = tc ? resolveAgent("professor", tc) : null;
-    if (profAgent && profAgent.model !== agent.model) {
+    if (profAgent && profAgent.model !== startModel && !candidates.some(c => c.model === profAgent.model)) {
       candidates.push({
         endpoint: profAgent.provider.endpoint ?? agent.provider.endpoint!,
         apiKey: profAgent.provider.apiKeyEnv ? getEnv().getApiKey(profAgent.provider.apiKeyEnv) : apiKey,
         model: profAgent.model,
         maxContext: profAgent.contextWindow,
       });
+    }
+
+    // Append agent-level cross-provider fallbacks
+    for (const fb of agent.fallbacks) {
+      if (candidates.some(c => c.model === fb.model)) continue;
+      const fbProvider = tc?.providers[fb.provider];
+      const fbEndpoint = fbProvider?.endpoint ?? agent.provider.endpoint ?? "http://localhost:11434/v1";
+      const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
+      candidates.push({ endpoint: fbEndpoint, apiKey: fbApiKey, model: fb.model, maxContext: agent.contextWindow });
     }
 
     // Append fallbackChain entries as last-resort candidates
@@ -131,12 +148,12 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
 
     const transport = new DirectApiTransport({
       endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1",
-      apiKey, model: agent.model,
+      apiKey, model: startModel,
       maxContext: agent.contextWindow, maxOutput: agent.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
     }, policy);
     await transport.initialize();
-    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${agent.model}, ${candidates.length} candidates, shared registry: ${!!registry})`);
+    logInfo("subagent", `${role} transport: DirectAPI ${agent.providerName} (model=${startModel}, ${candidates.length} candidates, shared registry: ${!!registry})`);
     return { transport, model: agent.model };
   }
 

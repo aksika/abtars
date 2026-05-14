@@ -61,9 +61,13 @@ export class SubagentRuntime {
   private readonly cache = new Map<AgentName, CachedAgent>();
   private readonly activeSpawns = new Map<string, { abort: AbortController }>();
   private _registry: ModelHealthRegistry | null = null;
+  private _mainTransport: IKiroTransport | null = null;
 
   /** Set shared model health registry (from boot ctx). */
   setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
+
+  /** Set main transport reference for currentModel reads. */
+  setMainTransport(transport: IKiroTransport): void { this._mainTransport = transport; }
 
   /** Send a prompt to a named agent and get the response. */
   async complete(agent: AgentName, prompt: string, opts?: AgentOpts): Promise<string> {
@@ -156,7 +160,10 @@ export class SubagentRuntime {
   private async createAgent(agent: AgentName): Promise<CachedAgent> {
     const { createSubagentTransport } = await import("./agent-registry.js");
     const role = AGENT_TO_ROLE[agent];
-    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined);
+    const mainModel = this._mainTransport && "currentModel" in this._mainTransport
+      ? (this._mainTransport as unknown as { currentModel: string }).currentModel
+      : undefined;
+    const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, mainModel);
     const sessionKey = `system:${agent}`;
     const entry: CachedAgent = { transport, model, sessionKey };
     this.cache.set(agent, entry);

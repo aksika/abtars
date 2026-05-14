@@ -188,6 +188,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   if (ctx.modelHealthRegistry) {
     ctx.runtime.setRegistry(ctx.modelHealthRegistry);
   }
+  ctx.runtime.setMainTransport(transport);
 
   logInfo("main", "✅ Transport ready");
 
