@@ -17,7 +17,7 @@ abtars-browse --task "description" --chat-id <CHAT_ID> [--thread-id <THREAD_ID>]
 Returns immediately. Browsie agent runs in background. Results delivered to chat when done.
 
 ## When report arrives
-1. Read report from `~/.abtars/subagents/browse_<taskId>_<date>.md`
+1. Read report from `~/.abtars/workspace/browse/browse_<taskId>_<date>.md`
 2. Summarize and send to user
 3. Move to `~/.abtars/reports/` (research) or delete (quick checks)
 

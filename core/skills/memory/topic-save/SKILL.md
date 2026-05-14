@@ -6,15 +6,15 @@ user-invocable: true
 
 # Topic Save
 
-Save topic-specific knowledge from conversations into persistent markdown files at `~/.abtars/topics/`.
+Save topic-specific knowledge from conversations into persistent markdown files at `~/.abtars/workspace/topics/`.
 
 ## How to invoke
 
 Use native file tools (read/write/list directory). No CLI commands.
 
 1. **Sanitize name:** spaces→hyphens, remove non-alphanumeric (keep `-_`), collapse consecutive hyphens, preserve casing. Reject if empty or contains `..` or starts with `/`.
-2. **Check existing:** list `~/.abtars/topics/`, case-insensitive match on `{Name}-*.md`. If found, update that file. If multiple, use most recent date.
-3. **Create new:** write to `~/.abtars/topics/{Name}-{YYYY-MM-DD}.md`
+2. **Check existing:** list `~/.abtars/workspace/topics/`, case-insensitive match on `{Name}-*.md`. If found, update that file. If multiple, use most recent date.
+3. **Create new:** write to `~/.abtars/workspace/topics/{Name}-{YYYY-MM-DD}.md`
 4. **Update existing:** read file, append/merge new content into relevant sections, write back. Keep original filename/date.
 
 ## File format
