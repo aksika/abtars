@@ -214,11 +214,12 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     }
   }
 
-  // 11. Ultimate fallback (hailMary)
+  // 11. Ultimate fallback (hailMary) — required
   const hailMary = await text({
-    message: `Ultimate fallback model — hailMary (${noteEmpty}; uses same provider + key as above)`,
+    message: `Ultimate fallback model — hailMary (required; last resort when all models fail)`,
     placeholder: 'google/gemini-2.5-flash',
     initialValue: existing?.hailMaryModel ?? 'google/gemini-2.5-flash',
+    validate: (v) => (v ?? '').trim() ? undefined : 'hailMary is required — enter a model ID',
   });
   if (isCancel(hailMary)) { cancel('Cancelled.'); return null; }
   const hailMaryModel = String(hailMary ?? '').trim();
