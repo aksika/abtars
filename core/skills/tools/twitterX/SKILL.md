@@ -13,28 +13,28 @@ Fetch and analyze Twitter/X content via rettiwt-api + FxTwitter.
 
 ```bash
 # Feed (all follows, ranked)
-tsx {baseDir}/scripts/abtars-tweet.ts --feed
+node {baseDir}/scripts/abtars-tweet.js --feed
 
 # Feed as markdown
-tsx {baseDir}/scripts/abtars-tweet.ts --feed --format md
+node {baseDir}/scripts/abtars-tweet.js --feed --format md
 
 # Feed + discover new follows
-tsx {baseDir}/scripts/abtars-tweet.ts --feed --discover
+node {baseDir}/scripts/abtars-tweet.js --feed --discover
 
 # Single tweet
-tsx {baseDir}/scripts/abtars-tweet.ts --fetch <tweet-url>
+node {baseDir}/scripts/abtars-tweet.js --fetch <tweet-url>
 
 # User timeline
-tsx {baseDir}/scripts/abtars-tweet.ts --timeline <handle> --count 10
+node {baseDir}/scripts/abtars-tweet.js --timeline <handle> --count 10
 
 # Replies on a tweet
-tsx {baseDir}/scripts/abtars-tweet.ts --replies <tweet-id>
+node {baseDir}/scripts/abtars-tweet.js --replies <tweet-id>
 
 # Search
-tsx {baseDir}/scripts/abtars-tweet.ts --search "query"
+node {baseDir}/scripts/abtars-tweet.js --search "query"
 
 # User profile
-tsx {baseDir}/scripts/abtars-tweet.ts --user <handle>
+node {baseDir}/scripts/abtars-tweet.js --user <handle>
 ```
 
 ## Config
@@ -48,5 +48,5 @@ tsx {baseDir}/scripts/abtars-tweet.ts --user <handle>
 Scheduled via `/task add`:
 ```
 executor: script
-command: tsx ~/.abtars/skills/tools/twitterX/scripts/abtars-tweet.ts --feed
+command: node ~/.abtars/skills/tools/twitterX/scripts/abtars-tweet.js --feed
 ```
