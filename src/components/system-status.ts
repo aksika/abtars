@@ -149,11 +149,23 @@ export function renderStatusText(status: SystemStatus): string {
   const uptime = formatUptime(status.uptimeMs);
   const lines: string[] = [
     `Abtars v${status.version} (${status.commit})`,
+  ];
+
+  // Update check (#440)
+  try {
+    const { checkForUpdate } = require("./update-check.js") as typeof import("./update-check.js");
+    const result = checkForUpdate("abtars", status.version);
+    if (result?.updateAvailable) {
+      lines.push(`📦 Update available: ${result.current} → ${result.latest}`);
+    }
+  } catch { /* non-critical */ }
+
+  lines.push(
     `🤖 Model: ${status.model}`,
     `⏱️ Uptime: ${uptime}`,
     "",
     "🏥 Subsystems:",
-  ];
+  );
 
   for (const s of status.subsystems) {
     const icon = s.status === "ok" ? "✓" : s.status === "skipped" ? "○" : "✗";
