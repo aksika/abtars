@@ -138,7 +138,7 @@ const memoryStoreTool: ToolDefinition = {
           memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
           emotionScore: parseInt(args["emotion"] ?? "0", 10),
           confidence: parseInt(args["confidence"] ?? "3", 10),
-          classification: parseInt(args["classification"] ?? "0", 10),
+          classification: parseInt(args["classification"] ?? "1", 10),
         };
         const result = await memoryBackend.instantStore(params);
         return JSON.stringify(result);
