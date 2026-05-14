@@ -93,7 +93,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   // ── Sleep ──
   { env: "BED_TIME", type: "time", default: "0:30", description: "Daily sleep trigger time (H:MM or HH:MM)" },
   { env: "WAKE_TIME", type: "time", default: "7:00", description: "Wake time for platform detection" },
-  { env: "BED_QUIET_TICKS", type: "int", default: "2", description: "Quiet heartbeat ticks before sleep (×5min)" },
+  { env: "BED_QUIET_MIN", type: "int", default: "7", description: "Quiet minutes before sleep (rounds up to nearest heartbeat cycle)" },
   { env: "HARDWARE_SLEEP_AFTER_DREAMY", type: "bool", default: "false", description: "Enable hardware sleep after Dreamy completes" },
   { env: "SLEEP_MODEL", type: "string", description: "Model override for Dreamy sleep agent" },
   { env: "SLEEP_QUALITY", type: "string", description: "Sleep quality override" },
@@ -197,7 +197,7 @@ export interface EnvConfig {
   // Sleep
   bedTime: TimeValue;
   wakeTime: TimeValue;
-  bedQuietTicks: number;
+  bedQuietMin: number;
   hardwareSleepAfterDreamy: boolean;
   sleepModel: string | undefined;
   sleepQuality: string | undefined;
@@ -367,7 +367,7 @@ export function initEnv(): Readonly<EnvConfig> {
 
     bedTime: parseTime(readOr("BED_TIME", "0:30"), "BED_TIME"),
     wakeTime: parseTime(readOr("WAKE_TIME", "7:00"), "WAKE_TIME"),
-    bedQuietTicks: parseIntSafe(readOr("BED_QUIET_TICKS", "2"), "BED_QUIET_TICKS"),
+    bedQuietMin: parseIntSafe(readOr("BED_QUIET_MIN", "7"), "BED_QUIET_MIN"),
     hardwareSleepAfterDreamy: parseBool(readOr("HARDWARE_SLEEP_AFTER_DREAMY", "false")),
     sleepModel: read("SLEEP_MODEL"),
     sleepQuality: read("SLEEP_QUALITY"),

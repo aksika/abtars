@@ -136,7 +136,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
 
         // Force-sleep runs are explicit test/verify triggers — skip hw-sleep even if env enabled.
         const hwEnabled = !forced && readEnv("HARDWARE_SLEEP_AFTER_DREAMY", "hardware sleep after Dreamy disabled") === "true";
-        const quietTicks = getEnv().bedQuietTicks;
+        const quietTicks = Math.ceil(getEnv().bedQuietMin * 60 / parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "hb"), 10));
         const hbInterval = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10);
         const hwSleepMin = Math.round(quietTicks * hbInterval / 60);
 
@@ -199,7 +199,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     }
 
     // Quiet tick — increment
-    const requiredTicks = getEnv().bedQuietTicks;
+    const requiredTicks = Math.ceil(getEnv().bedQuietMin * 60 / parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "300", 10));
     postSleepQuietTicks++;
     if (postSleepQuietTicks < requiredTicks) return;
 
