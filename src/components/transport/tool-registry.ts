@@ -354,51 +354,9 @@ const taskTool: ToolDefinition = {
   },
 };
 
-const peerAskTool: ToolDefinition = {
-  name: "peer_ask",
-  description: "Ask a peer abtars instance a question. Use for cross-instance delegation (e.g. ask Molty or KP). Returns the peer's full response.",
-  parameters: {
-    type: "object",
-    properties: {
-      peer_name: { type: "string", description: "Name of the peer (as configured in peers.json)" },
-      prompt: { type: "string", description: "The question or request to send to the peer" },
-    },
-    required: ["peer_name", "prompt"],
-  },
-  async execute(args) {
-    const { callPeer, PeerCallError, getCurrentPeerHops } = await import("../peer-client.js");
-    const { loadPeerConfig } = await import("../peer-config.js");
-    const peerName = args.peer_name?.trim();
-    const prompt = args.prompt?.trim();
-    if (!peerName || !prompt) return JSON.stringify({ error: "peer_name and prompt are required" });
-
-    const config = loadPeerConfig();
-
-    // Self-call guard — prevent agent from calling itself via A2A
-    if (peerName.toLowerCase() === config.self.name.toLowerCase()) {
-      return JSON.stringify({ error: `You ARE '${config.self.name}'. You cannot call yourself via peer_ask. Answer the user directly.` });
-    }
-
-    // Determine hops to send: decrement from current request's budget, or use maxHops for direct calls
-    const incomingHops = getCurrentPeerHops();
-    const hops = incomingHops !== null ? Math.min(incomingHops - 1, config.maxHops) : config.maxHops;
-    if (hops <= 0) return JSON.stringify({ error: "Hop limit reached — cannot forward to another peer from this depth" });
-
-    try {
-      const commsType = config.self.signingKey ? "signed" : "plain";
-      const result = await callPeer(peerName, prompt, hops);
-      _peerActivityCb?.(`🤖 Agents: ${config.self.name} → ${peerName} messaged. [${commsType}]`);
-      return result;
-    } catch (err) {
-      if (err instanceof PeerCallError) return JSON.stringify({ error: `peer_ask failed: ${err.message} (${err.code})` });
-      return JSON.stringify({ error: `peer_ask failed: ${err instanceof Error ? err.message : String(err)}` });
-    }
-  },
-};
-
-const peerChatTool: ToolDefinition = {
-  name: "peer_chat",
-  description: "Multi-turn conversation with a peer agent. Call repeatedly with the same session_id to continue. Ends on [NO-REPLY], [END], timeout, or 10-turn cap. Returns session_id for continuation.",
+const peerSessionTool: ToolDefinition = {
+  name: "peer_session",
+  description: "Open or continue a peer-to-peer session with another agent. Messages persist across turns. Use only when the user explicitly asks to contact another agent.",
   parameters: {
     type: "object",
     properties: {
@@ -437,6 +395,7 @@ const peerChatTool: ToolDefinition = {
     try {
       const response = await callPeer(peerName, prompt, config.maxHops);
       addTurn(session, "assistant", response);
+      _peerActivityCb?.(`🤖 Agents: ${config.self.name} ↔ ${peerName} session. [turn ${session.messages.length}]`);
 
       const { ended, reason } = isEnded(session, response);
       if (ended) destroySession(session.id);
@@ -444,7 +403,7 @@ const peerChatTool: ToolDefinition = {
       return JSON.stringify({ session_id: session.id, response, ended, reason });
     } catch (err) {
       destroySession(session.id);
-      return JSON.stringify({ error: `peer_chat failed: ${err instanceof Error ? err.message : String(err)}`, session_id: session.id, ended: true });
+      return JSON.stringify({ error: `peer_session failed: ${err instanceof Error ? err.message : String(err)}`, session_id: session.id, ended: true });
     }
   },
 };
@@ -523,7 +482,7 @@ const secretGetTool: ToolDefinition = {
 import { skillCreateTool } from "./skill-authoring.js";
 import { mcpTool } from "./mcp-tool.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerAskTool, peerChatTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, mcpTool];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, mcpTool];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 

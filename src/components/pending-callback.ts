@@ -1,6 +1,6 @@
 /**
  * pending-callback.ts — Store pending prompts for callback-based A2A (#451).
- * When direct peer_ask fails, the prompt is stored here. When the peer calls back,
+ * When direct peer_session fails, the prompt is stored here. When the peer calls back,
  * agent-api-server returns the pending prompt instead of LLM-processing.
  */
 

@@ -1,5 +1,5 @@
 /**
- * peer-client.ts — HTTP client for peer_ask tool (#392).
+ * peer-client.ts — HTTP client for peer_session tool (#392).
  * POST /v1/chat/completions with bearer + X-Peer-Hops.
  */
 
@@ -13,7 +13,7 @@ export type PeerError = "timeout" | "unreachable" | "hop_exceeded" | "auth_faile
 
 /**
  * Module-level hop budget for the current request. Set by agent-api-server
- * before dispatching a prompt that came with X-Peer-Hops. Read by peer_ask
+ * before dispatching a prompt that came with X-Peer-Hops. Read by peer_session
  * tool to know what hops value to forward. Safe in single-threaded Node
  * because agent-api-server processes one prompt at a time per session.
  */

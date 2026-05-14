@@ -316,7 +316,7 @@ export class AgentApiServer {
         .end(JSON.stringify(openaiError("Peer hop limit reached", "loop_detected", "hop_exceeded")));
       return;
     }
-    // Set module-level hop state so peer_ask tool knows the budget for outbound calls
+    // Set module-level hop state so peer_session tool knows the budget for outbound calls
     const { setCurrentPeerHops } = await import("./peer-client.js");
     setCurrentPeerHops(hopValue);
 
