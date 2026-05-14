@@ -140,7 +140,7 @@ const memoryStoreTool: ToolDefinition = {
           confidence: parseInt(args["confidence"] ?? "3", 10),
           classification: parseInt(args["classification"] ?? "1", 10),
         };
-        const result = await memoryBackend.instantStore(params);
+        const result = await memoryBackend.instantStore({ ...params, createdBy: "tool:memory_store" });
         return JSON.stringify(result);
       } catch (err) {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
