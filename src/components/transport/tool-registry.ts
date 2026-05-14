@@ -171,6 +171,7 @@ const memoryRecallTool: ToolDefinition = {
       try {
         const result = await memoryBackend.recall({
           translated: [args["query"] ?? ""],
+          original: args["query"] ?? "",
           userId: context?.userId ?? "master",
           limit: parseInt(args["limit"] ?? "10", 10),
         });
