@@ -211,7 +211,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
     // #494 — Ensure native deps (sqlite-vec) are installed at ~/.abmind/lib/
     try {
-      const { ensureNativeDeps } = await import("../ensure-native-deps.js");
+      const { ensureNativeDeps, recordToolchain } = await import("../ensure-native-deps.js");
+      recordToolchain();
       await ensureNativeDeps();
     } catch (err) {
       process.stdout.write(`⚠ native deps check failed: ${err instanceof Error ? err.message : String(err)}\n`);
