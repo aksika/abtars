@@ -12,7 +12,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
-import { reportsDir } from "../../paths.js";
+import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt, readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./task-store.js";
@@ -61,9 +61,9 @@ function recordRunToFile(entryId: string, exitCode?: number): void {
 
 function writeResultFile(message: string, content: string): string | null {
   try {
-    const dir = reportsDir("tasks");
+    const slug = message.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+    const dir = join(abtarsHome(), "workspace", slug);
     mkdirSync(dir, { recursive: true });
-    const slug = message.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "");
     const file = join(dir, `${slug}-${localDate()}.md`);
     writeFileSync(file, content, "utf-8");
     return file;
