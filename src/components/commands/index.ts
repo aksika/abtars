@@ -19,7 +19,6 @@ import {
 import { handleSession } from "./session-handler.js";
 
 // ── Exact-match commands ────────────────────────────────────────────────────
-registerExact("/new", handleNewReset);
 registerExact("/reset", handleNewReset);
 registerExact("/compact", handleCompact);
 registerExact("/default", handleDefault);

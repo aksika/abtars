@@ -723,7 +723,6 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
 
 export async function handleHelp(_text: string, ctx: CommandContext): Promise<boolean> {
   const cmds = [
-    "/new — Fresh session (keeps current mode)",
     "/reset — Reload transport + fresh session",
     "/reset default — Restore transport.default.json + fresh session",
     "/compact — Compact context window (summarize + fresh session)",

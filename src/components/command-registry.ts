@@ -10,7 +10,6 @@ export interface BotCommand {
 
 /** All registered bot commands. Discord requires: name ≤32 chars lowercase, description ≤100 chars. */
 export const BOT_COMMANDS: readonly BotCommand[] = [
-  { name: "new", description: "Fresh session (keeps mode)" },
   { name: "reset", description: "Fresh session + exit coding" },
   { name: "session", description: "Session management" },
   { name: "compact", description: "Compact context window" },
