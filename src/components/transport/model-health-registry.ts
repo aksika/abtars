@@ -157,6 +157,6 @@ export class ModelHealthRegistry {
 /** Classify HTTP status to error kind. */
 export function classifyError(status: number): ErrorKind {
   if (status === 429 || status === 402) return "rate_limit";
-  if (status === 401 || status === 403) return "auth";
+  if (status === 401 || status === 403 || status === 404) return "auth";
   return "transient";
 }
