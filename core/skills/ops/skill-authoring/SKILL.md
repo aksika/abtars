@@ -9,14 +9,13 @@ description: When to use skill_create vs memory_store. Use skill_create for repe
 
 **All skill output MUST go to `~/.abtars/workspace/<skill-name>/`.**
 
-Never write to `~/.abtars/<random>/` or `~/.abtars/reports/` directly. The workspace directory is the skill's sandbox — keeps outputs organized, discoverable, and isolated.
+All skill/task output goes to `~/.abtars/workspace/<skill-or-task-name>/`. No exceptions. The workspace directory is the skill's sandbox — keeps outputs organized, discoverable, and isolated.
 
 Examples:
 - twitterX → `~/.abtars/workspace/twitterX/output/`
 - browse → `~/.abtars/workspace/browse/`
 - topics → `~/.abtars/workspace/topics/`
 
-Reports that get sent to the user go to `~/.abtars/reports/<category>/` (separate from workspace — reports are delivery artifacts, workspace is working state).
 
 ## When to use `skill_create`
 

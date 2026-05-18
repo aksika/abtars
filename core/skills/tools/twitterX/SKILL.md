@@ -41,7 +41,7 @@ node {baseDir}/scripts/abtars-tweet.js --user <handle>
 
 - Follows files: `~/.abtars/workspace/twitterX/base.follows.json` and env `TWEET_FOLLOWS_FILE` (default: `agent.follows.json`)
 - Cookies: `~/.abtars/secret/cookies/x-cookies.json` (required for authenticated endpoints)
-- Output: `~/.abtars/reports/x/` (daily JSON reports)
+- Output: `~/.abtars/workspace/twitterX/output/ (daily JSON reports)
 
 ## Cron usage
 
