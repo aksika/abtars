@@ -68,6 +68,7 @@ export class Bridge {
     await step("runtime", () => this.ctx.runtime.shutdown());
     await step("memory", () => this.ctx.memory?.close());
     await step("transport", () => this.ctx.transport?.destroy());
+    this.ctx.sessionManager.clearAll();
     if (this.ctx.mcpDaemonStarted) {
       await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
     }
