@@ -94,7 +94,16 @@ export async function buildPrompt(
           stages: ["Sf", "S1"],
           currentContext: { hour: now.getHours(), dayOfWeek: now.getDay() },
         });
-        const hits = recall.results.filter(h => h.score > 0);
+        const TRIVIAL_TTL_MS = 36 * 60 * 60_000;
+        const nowMs = Date.now();
+        const hits = recall.results.filter(h => {
+          if (h.score <= 0.70) return false;
+          // Stale trivial fact: old + no signal + weak match → filter
+          if (h.memoryType === "fact" && h.score < 1.0 && h.createdAt && nowMs - h.createdAt > TRIVIAL_TTL_MS) {
+            if (!h.emotionTags && !h.importanceFlags) return false;
+          }
+          return true;
+        });
         if (hits.length > 0) {
           const lines = hits.map(h => renderMemory({
             content_en: h.content,
