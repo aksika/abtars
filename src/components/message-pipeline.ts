@@ -185,6 +185,7 @@ export async function handleInboundMessage(
     // --- Send to transport ---
     const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
     const agentSession = activeSession.agentSession;
+    logDebug(TAG, `Route: session=${activeSessionId} type=${activeSession.type} agentSession=${agentSession ? "yes" : "no"}`);
     const responsePromise = agentSession
       ? agentSession.sendPrompt(activeSessionId, prompt)
       : transport.sendPrompt(activeSessionId, prompt);
