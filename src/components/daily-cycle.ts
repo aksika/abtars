@@ -89,5 +89,9 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   const threshold = Math.ceil(getEnv().bedQuietMin * 60 / hbSec);
   logInfo("bedtime", `Quiet tick ${quietTickCount}/${threshold} (BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")})`);
 
-  return quietTickCount >= threshold;
+  if (quietTickCount >= threshold) {
+    quietTickCount = 0; // reset after triggering — prevents re-spawn on next tick
+    return true;
+  }
+  return false;
 }
