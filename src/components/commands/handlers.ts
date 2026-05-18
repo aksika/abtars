@@ -15,38 +15,33 @@ import { triggerNewSession, triggerResetSession, setWakeInhibitPid } from "./reg
 const TAG = "cmd";
 
 export async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
-  const isReset = text.startsWith("/reset");
   const isResetDefault = text.trim().toLowerCase() === "/reset default";
 
-  if (isReset && ctx.codingMode.has(ctx.sessionKey)) {
+  if (ctx.codingMode.has(ctx.sessionKey)) {
     await ctx.codingMode.stop(ctx.sessionKey);
   }
 
   if (isResetDefault) {
     const { resetToDefaults } = await import("../transport-config.js");
     resetToDefaults();
-    await triggerNewSession(ctx, "reset-to-defaults");
-  } else if (isReset) {
+  } else {
     try {
       await triggerResetSession(ctx);
     } catch (err) {
       await ctx.reply(`⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
       return true;
     }
-  } else {
-    await triggerNewSession(ctx);
   }
 
-  const label = isResetDefault ? "🔄 Reset to defaults." : isReset ? "🔄 Transport reloaded." : ctx.codingMode.has(ctx.sessionKey) ? "🔄 New coding session." : "🔄 New session started.";
+  // End active session via session manager → fresh Main
+  ctx.sessionManager.endSession(ctx.userId, ctx.platform);
+  const activeId = ctx.sessionManager.getActiveSessionId(ctx.userId, ctx.platform);
+  await ctx.transport.resetSession(activeId);
+
+  const label = isResetDefault ? "🔄 Reset to defaults." : "🔄 Transport reloaded.";
   await ctx.reply(label);
 
-  // Send greeting for /new (not /reset — reset is a technical operation)
-  if (!isReset && ctx.memory) {
-    const { startSession } = await import("../message-pipeline.js");
-    startSession(ctx.transport, ctx.memory, ctx.userId, ctx.sessionKey, "Greet the user briefly. You just started a fresh session.", (text) => ctx.reply(text)).catch(() => {});
-  }
-
-  logInfo(TAG, `Session ${text} (${ctx.platform}, mode=${ctx.codingMode.has(ctx.sessionKey) ? "coding" : "default"})`);
+  logInfo(TAG, `Reset session → ${activeId} (${ctx.platform})`);
   return true;
 }
 
