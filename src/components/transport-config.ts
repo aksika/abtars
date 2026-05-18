@@ -287,6 +287,13 @@ export function validateAtStartup(): void {
 // ── Write ───────────────────────────────────────────────────────────────────
 
 export function writeTransportConfig(tc: TransportConfig, reason?: string): void {
+  // Guard: reject empty model strings before persisting
+  for (const [role, agent] of Object.entries(tc.agents)) {
+    if (!agent.model?.trim()) {
+      logWarn(TAG, `Refusing to write transport.json — agent "${role}" has empty model`);
+      return;
+    }
+  }
   const p = join(configDir(), getEnv().transportConfig);
   // Save current as .old before overwriting (enables /model restore)
   try { writeFileSync(p.replace(".json", ".old.json"), readFileSync(p, "utf-8"), "utf-8"); } catch { /* first write or missing — no .old to save */ }
