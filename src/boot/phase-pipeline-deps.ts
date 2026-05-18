@@ -13,12 +13,11 @@
  *
  * Owns singleton: tool-registry._enqueueCron (via setEnqueueCron).
  *
- * Populates ctx: cronQueue, codingMode, idleSave, pipelineDeps.
+ * Populates ctx: cronQueue, idleSave, pipelineDeps.
  */
 
 import { readEntry as cronReadEntry } from "../components/tasks/task-store.js";
 import { CronQueue } from "../components/tasks/task-queue.js";
-import { CodingMode } from "../components/coding-mode.js";
 import { IdleSave } from "../components/idle-save.js";
 import { logWarn } from "../components/logger.js";
 import { updateCtxStart } from "./ctx-start.js";
@@ -31,7 +30,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
   if (!transport) { ctx.phaseHealth.set(phasePipelineDeps.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phasePipelineDeps.name}: skipping — transport not available`); return "skipped"; }
 
-  ctx.codingMode = new CodingMode(ctx.runtime);
   ctx.idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
 
   // CronQueue first — pipelineDeps references it
@@ -80,11 +78,13 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const db = ctx.memory?.getDb();
   if (db) setSecretGetDb(db as any);
 
+  // Wire session manager to runtime for agent session creation (#521)
+  ctx.sessionManager.setRuntime(ctx.runtime);
+
   // Build pipelineDeps. References ctx fields; later phases mutate ctx.sleepHandle /
   // pipelineDeps.loadedCapabilities / pipelineDeps.selfHealerTask in place.
   const pipelineDeps: PipelineDeps = {
     transport,
-    codingMode: ctx.codingMode,
     memory: ctx.memory,
     memoryConfig,
     nlmConfig: ctx.nlmConfig,

@@ -7,6 +7,7 @@
  */
 
 import type { Platform } from "../types/platform.js";
+import type { SubagentRuntime, AgentSession, AgentName } from "./subagent-runtime.js";
 
 export type SessionType = "A" | "B" | "C" | "T";
 
@@ -17,6 +18,7 @@ export interface ManagedSession {
   createdAt: number;    // epoch ms
   isTransport: boolean; // true = has own ConversationSession, false = storage tag only
   ended: boolean;       // gracefully ended (messages kept)
+  agentSession?: import("./subagent-runtime.js").AgentSession; // sub-transport for C/B/T
 }
 
 interface PlatformState {
@@ -26,6 +28,7 @@ interface PlatformState {
 }
 
 const TYPE_LABELS: Record<SessionType, string> = { A: "Main", B: "Browse", C: "Code", T: "Task" };
+const TYPE_AGENT: Partial<Record<SessionType, AgentName>> = { C: "coding", B: "browsie" };
 
 export function typeLabel(t: SessionType): string { return TYPE_LABELS[t]; }
 
@@ -41,9 +44,15 @@ export function parseSessionType(input: string): SessionType | null {
 export class SessionManager {
   private readonly states = new Map<string, PlatformState>(); // key = "userId:platform"
   private readonly maxSessions: number;
+  private runtime: SubagentRuntime | null = null;
 
   constructor(maxSessions = 10) {
     this.maxSessions = maxSessions;
+  }
+
+  /** Set runtime (called after boot phase creates it). */
+  setRuntime(runtime: SubagentRuntime): void {
+    this.runtime = runtime;
   }
 
   private stateKey(userId: string, platform: Platform): string {
@@ -89,6 +98,15 @@ export class SessionManager {
   getActiveSession(userId: string, platform: Platform): ManagedSession {
     const state = this.getOrCreateState(userId, platform);
     return state.sessions.find(s => s.shortIndex === state.activeIndex && !s.ended) ?? state.sessions[0]!;
+  }
+
+  /** Initialize agent session for non-Main types. Returns the AgentSession or null. */
+  async initAgentSession(session: ManagedSession): Promise<AgentSession | null> {
+    const agentName = TYPE_AGENT[session.type];
+    if (!agentName || !this.runtime) return null;
+    if (session.agentSession) return session.agentSession;
+    session.agentSession = await this.runtime.session(agentName);
+    return session.agentSession;
   }
 
   /** Create a new transport session. Returns the session or error string. */

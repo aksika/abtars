@@ -17,10 +17,6 @@ const TAG = "cmd";
 export async function handleNewReset(text: string, ctx: CommandContext): Promise<boolean> {
   const isResetDefault = text.trim().toLowerCase() === "/reset default";
 
-  if (ctx.codingMode.has(ctx.sessionKey)) {
-    await ctx.codingMode.stop(ctx.sessionKey);
-  }
-
   if (isResetDefault) {
     const { resetToDefaults } = await import("../transport-config.js");
     resetToDefaults();
@@ -60,34 +56,6 @@ export async function handleCompact(_text: string, ctx: CommandContext): Promise
     logError(TAG, "Manual compaction failed", err);
     await ctx.reply("❌ Compaction failed.");
   }
-  return true;
-}
-
-export async function handleCoding(_text: string, ctx: CommandContext): Promise<boolean> {
-  if (ctx.codingMode.has(ctx.sessionKey)) {
-    await ctx.reply("Already in coding mode. Use /default to switch back.");
-    return true;
-  }
-  await ctx.reply("🔧 Switching to coding agent (Opus)...");
-  try {
-    await ctx.codingMode.start(ctx.sessionKey);
-    await ctx.reply("🔧 Coding agent ready. All messages now go to Opus.\nUse /default to switch back to KP.");
-    logInfo(TAG, `Coding mode activated for ${ctx.sessionKey}`);
-  } catch (err) {
-    await ctx.reply(`❌ Failed to start coding agent: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return true;
-}
-
-export async function handleDefault(_text: string, ctx: CommandContext): Promise<boolean> {
-  if (!ctx.codingMode.has(ctx.sessionKey)) {
-    await ctx.reply("Already in default mode (KP).");
-    return true;
-  }
-  await ctx.reply("🔄 Switching back to KP...");
-  await ctx.codingMode.stop(ctx.sessionKey);
-  await ctx.reply("🔄 Back to KP.");
-  logInfo(TAG, `Default mode restored for ${ctx.sessionKey}`);
   return true;
 }
 

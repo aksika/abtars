@@ -15,7 +15,6 @@ import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind";
-import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 import type { ConversationBuffer } from "./conversation-buffer.js";
 import type { RunningJob } from "./tasks/task-queue.js";
@@ -70,7 +69,6 @@ export async function resetAndPrepare(opts: {
 /** Transport + agent runtime deps. */
 export interface TransportDeps {
   transport: IKiroTransport;
-  codingMode: CodingMode;
   config: { agentTransport: string; workingDir: string };
   startedAt: number;
 }
@@ -143,7 +141,7 @@ export async function handleInboundMessage(
 
   // --- Core transport/response handling (will become middleware incrementally) ---
   const {
-    transport, codingMode, memory, memoryConfig,
+    transport, memory, memoryConfig,
     idleSave, conversationBuffer,
     ttsConfig,
     sessions,
@@ -185,9 +183,10 @@ export async function handleInboundMessage(
     let prompt = builtPrompt;
 
     // --- Send to transport ---
-    const codingSession = codingMode.has(activeSessionId) ? codingMode.getSession() : null;
-    const responsePromise = codingSession
-      ? codingSession.sendPrompt(activeSessionId, prompt)
+    const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
+    const agentSession = activeSession.agentSession;
+    const responsePromise = agentSession
+      ? agentSession.sendPrompt(activeSessionId, prompt)
       : transport.sendPrompt(activeSessionId, prompt);
 
     // --- Typing + reaction ---

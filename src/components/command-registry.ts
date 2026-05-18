@@ -25,7 +25,6 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "skills", description: "List skills" },
   { name: "tasks", description: "Scheduled tasks" },
   { name: "facts", description: "Core knowledge" },
-  { name: "default", description: "Switch to default agent" },
   { name: "nlm", description: "Knowledge base" },
   { name: "restart", description: "Restart bridge" },
   { name: "wakeup", description: "Wake Mac from sleep" },

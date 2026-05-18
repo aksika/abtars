@@ -17,7 +17,6 @@ import type { HeartbeatSystem } from "../components/heartbeat-system.js";
 import type { ServiceRegistry } from "../components/service-registry.js";
 import type { CronQueue } from "../components/tasks/task-queue.js";
 import type { ConversationBuffer } from "../components/conversation-buffer.js";
-import type { CodingMode } from "../components/coding-mode.js";
 import type { IdleSave } from "../components/idle-save.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { SubagentRuntime } from "../components/subagent-runtime.js";
@@ -78,7 +77,6 @@ export interface BootCtx {
 
   // ── Shared utilities (set by phase-pipeline-deps) ─────────────────────
   conversationBuffer: ConversationBuffer;
-  codingMode: CodingMode | null;
   idleSave: IdleSave | null;
   pipelineDeps: PipelineDeps | null;
 
@@ -149,7 +147,6 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
 
     // Utilities
     conversationBuffer: new ConversationBufferClass(50),
-    codingMode: null,
     idleSave: null,
     pipelineDeps: null,
 

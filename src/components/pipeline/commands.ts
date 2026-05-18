@@ -20,7 +20,7 @@ const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/res
 export const commandMiddleware: Middleware = async (ctx, next) => {
   const { msg, deps } = ctx;
   const { transport, config, startedAt, memory, memoryConfig, nlmConfig,
-    codingMode, idleSave, sessions,
+    idleSave, sessions,
     updateCtxStart, conversationBuffer } = deps;
 
   // #157: strip leading bangs for non-master (kiro-cli executes ! as shell)
@@ -75,7 +75,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     editReply,
     transport, config, startedAt,
     memory, memoryConfig, nlmConfig,
-    codingMode, idleSave,
+    idleSave,
     sessions,
     sessionManager: deps.sessionManager,
     updateCtxStart,

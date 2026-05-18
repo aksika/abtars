@@ -7,7 +7,7 @@ export type { Reply, CommandContext, CommandHandler, Platform } from "./types.js
 export { registerCommand, handleCommand, triggerNewSession, triggerResetSession, killWakeInhibit } from "./registry.js";
 import { registerExact, registerPrefix } from "./registry.js";
 import {
-  handleNewReset, handleCompact, handleDefault,
+  handleNewReset, handleCompact,
   handleStatus, handleDoctor, handleStop, handleRestart,
   handleFull, handleShort, handleHealing, handleFacts,
   handleTasksList, handleTasksTrigger, handleTasksLog,
@@ -21,7 +21,6 @@ import { handleSession } from "./session-handler.js";
 // ── Exact-match commands ────────────────────────────────────────────────────
 registerExact("/reset", handleNewReset);
 registerExact("/compact", handleCompact);
-registerExact("/default", handleDefault);
 registerExact("/status", handleStatus);
 registerExact("/doctor", handleDoctor);
 registerExact("/stop", handleStop);

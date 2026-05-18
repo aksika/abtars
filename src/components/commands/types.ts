@@ -17,7 +17,6 @@ export interface CommandContext {
   memory: PipelineDeps["memory"];
   memoryConfig: PipelineDeps["memoryConfig"];
   nlmConfig: PipelineDeps["nlmConfig"];
-  codingMode: PipelineDeps["codingMode"];
   idleSave: PipelineDeps["idleSave"];
   sessions: PipelineDeps["sessions"];
   sessionManager: PipelineDeps["sessionManager"];
