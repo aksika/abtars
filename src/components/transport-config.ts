@@ -78,7 +78,7 @@ export type ResolvedAgent = {
 
 let cachedTransport: TransportConfig | null = null;
 
-function configDir(): string {
+export function configDir(): string {
   return join(abtarsHome(), "config");
 }
 

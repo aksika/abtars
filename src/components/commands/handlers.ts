@@ -365,6 +365,63 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
+  // /model doctor — probe all models under current transport
+  if (arg === "doctor") {
+    if (!prof) { await ctx.reply("❌ No transport configured."); return true; }
+    const endpoint = prof.provider.endpoint ?? "http://localhost:11434/v1";
+    const apiKey = prof.provider.apiKeyEnv ? (await import("../env-schema.js")).getEnv().getApiKey(prof.provider.apiKeyEnv) : undefined;
+
+    // Collect all models under this provider
+    const models = new Set<string>();
+    for (const [, agent] of Object.entries(tc!.agents)) {
+      if (agent.provider === prof.providerName) models.add(agent.model);
+      for (const fb of agent.fallbacks ?? []) {
+        if (fb.provider === prof.providerName) models.add(fb.model);
+      }
+    }
+    if (tc!.hailMary?.provider === prof.providerName) models.add(tc!.hailMary.model);
+
+    await ctx.reply(`🩺 Checking ${models.size} models on ${prof.providerName}...`);
+    const results: string[] = [];
+    const { loadModels } = await import("../transport-config.js");
+    const catalog = loadModels();
+
+    for (const model of models) {
+      try {
+        const res = await fetch(`${endpoint}/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+          body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (res.ok) {
+          results.push(`✅ ${model} — alive`);
+          if (catalog[model]) catalog[model]!.status = "alive";
+        } else {
+          const body = await res.text().catch(() => "");
+          const short = body.slice(0, 80).replace(/\n/g, " ");
+          const status = res.status === 404 ? "dead" : res.status === 403 ? "subscription" : res.status === 429 ? "rate_limited" : "error";
+          results.push(`❌ ${model} — ${status} (${res.status}: ${short})`);
+          if (catalog[model]) { catalog[model]!.status = status as any; (catalog[model] as any).error = `${res.status}: ${short}`; }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        results.push(`⚠️ ${model} — timeout/error (${msg.slice(0, 60)})`);
+        if (catalog[model]) { catalog[model]!.status = "dead" as any; (catalog[model] as any).error = msg.slice(0, 80); }
+      }
+      if (catalog[model]) (catalog[model] as any).lastChecked = new Date().toISOString();
+    }
+
+    // Write updated catalog
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { configDir } = await import("../transport-config.js");
+    writeFileSync(join(configDir(), "models.json"), JSON.stringify(catalog, null, 2) + "\n");
+
+    await ctx.reply(`🩺 Model Health:\n${results.join("\n")}`);
+    return true;
+  }
+
   // /models quick <model> — instant switch
   if (arg.startsWith("quick ") || arg.startsWith("switch ")) {
     const newModel = arg.split(" ").slice(1).join(" ").trim();
