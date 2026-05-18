@@ -69,6 +69,7 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   if (!lockData.lastHeartbeat) return false; // no successful tick yet — dark wake guard
 
   // Check for new messages since last tick
+  // TODO(#510): filter to Main (A) sessions only — auto-spawn/cron shouldn't reset counter
   let currentMsgTs = 0;
   try {
     const row = deps.memory?.getLastMessageTimestamp(true);

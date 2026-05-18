@@ -20,6 +20,7 @@ export interface CommandContext {
   codingMode: PipelineDeps["codingMode"];
   idleSave: PipelineDeps["idleSave"];
   sessions: PipelineDeps["sessions"];
+  sessionManager: PipelineDeps["sessionManager"];
   updateCtxStart: PipelineDeps["updateCtxStart"];
   cronCurrentJob?: RunningJob | null;
   enqueueCron?: PipelineDeps["enqueueCron"];

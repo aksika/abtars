@@ -12,6 +12,7 @@ export interface BotCommand {
 export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "new", description: "Fresh session (keeps mode)" },
   { name: "reset", description: "Fresh session + exit coding" },
+  { name: "session", description: "Session management" },
   { name: "compact", description: "Compact context window" },
   { name: "status", description: "Bridge status" },
   { name: "doctor", description: "Deep healthcheck (probes all subsystems)" },
@@ -25,7 +26,6 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "skills", description: "List skills" },
   { name: "tasks", description: "Scheduled tasks" },
   { name: "facts", description: "Core knowledge" },
-  { name: "coding", description: "Switch to coding agent" },
   { name: "default", description: "Switch to default agent" },
   { name: "nlm", description: "Knowledge base" },
   { name: "restart", description: "Restart bridge" },

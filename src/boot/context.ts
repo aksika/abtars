@@ -27,6 +27,7 @@ import type { AgentApiServer } from "../components/agent-api-server.js";
 import type { PlatformAdapter } from "../types/platform.js";
 import { SessionRegistry as SessionRegistryClass } from "../components/session-registry.js";
 import type { SessionRegistry } from "../components/session-registry.js";
+import { SessionManager as SessionManagerClass } from "../components/session-manager.js";
 import type { ModelHealthRegistry } from "../components/transport/model-health-registry.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
@@ -83,6 +84,7 @@ export interface BootCtx {
 
   // ── Session state ──
   sessions: SessionRegistry;
+  sessionManager: import("../components/session-manager.js").SessionManager;
 
   // ── Subsystems ────────────────────────────────────────────────────────
   capabilities: CapabilityRegistry;
@@ -153,6 +155,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
 
     // Session state
     sessions: new SessionRegistryClass(),
+    sessionManager: new SessionManagerClass(parseInt(process.env["MAX_SESSIONS"] ?? "10", 10)),
 
     // Subsystems
     capabilities: createCapabilityRegistry(),

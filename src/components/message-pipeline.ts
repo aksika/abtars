@@ -94,6 +94,7 @@ export interface VoiceDeps {
 /** Pipeline dependencies — composed from focused interfaces. */
 export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   sessions: SessionRegistry;
+  sessionManager: import("./session-manager.js").SessionManager;
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
   requestShutdown?: (code?: number) => void;
@@ -156,7 +157,10 @@ export async function handleInboundMessage(
   const registry = loadUsers();
   const userId = sessionKey.includes(":") ? sessionKey.split(":")[0]! : "master";
 
-  const busyEntry = sessions.getOrCreate(sessionKey);
+  // Resolve active transport session via session manager (#510)
+  const activeSessionId = deps.sessionManager.getActiveSessionId(userId, msg.platform);
+
+  const busyEntry = sessions.getOrCreate(activeSessionId);
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
   let silentCheckTimer: ReturnType<typeof setInterval> | undefined;
@@ -181,10 +185,10 @@ export async function handleInboundMessage(
     let prompt = builtPrompt;
 
     // --- Send to transport ---
-    const codingSession = codingMode.has(sessionKey) ? codingMode.getSession() : null;
+    const codingSession = codingMode.has(activeSessionId) ? codingMode.getSession() : null;
     const responsePromise = codingSession
-      ? codingSession.sendPrompt(sessionKey, prompt)
-      : transport.sendPrompt(sessionKey, prompt);
+      ? codingSession.sendPrompt(activeSessionId, prompt)
+      : transport.sendPrompt(activeSessionId, prompt);
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {
@@ -323,7 +327,7 @@ export async function handleInboundMessage(
 
     // --- Extract clean answer ---
     const cleanAnswer = transport.answerOnly;
-    const rawResponse = sessions.get(sessionKey)?.fullMode ? response : (cleanAnswer || response);
+    const rawResponse = sessions.get(activeSessionId)?.fullMode ? response : (cleanAnswer || response);
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
@@ -427,8 +431,8 @@ export async function handleInboundMessage(
     if (getEnv().activeMemory) {
       const modelTopics = getEnv().primingModelTopics && topics ? topics : [];
       const regexKw = extractKeywords(text);
-      const existing = sessions.get(sessionKey)?.primingTerms ?? [];
-      sessions.getOrCreate(sessionKey).primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
+      const existing = sessions.get(activeSessionId)?.primingTerms ?? [];
+      sessions.getOrCreate(activeSessionId).primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
     }
 
     // --- Record to memory (skip for guests) ---
@@ -436,13 +440,13 @@ export async function handleInboundMessage(
     if (memory && !isGuest) {
       memory.recordMessage({
         role: "assistant", content: cleanAnswer || response,
-        timestamp: Date.now(), userId, sessionId: sessionKey,
+        timestamp: Date.now(), userId, sessionId: activeSessionId,
         platformMessageId: typeof lastSentMsgId === "number" ? lastSentMsgId : undefined,
       });
     }
 
     // --- TTS for voice notes ---
-    if (isVoice && ttsConfig && !sessions.get(sessionKey)?.fullMode && adapter.sendVoice) {
+    if (isVoice && ttsConfig && !sessions.get(activeSessionId)?.fullMode && adapter.sendVoice) {
       try {
         await adapter.sendTyping?.(channelId, msg.threadId);
         const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
@@ -503,7 +507,7 @@ export async function handleInboundMessage(
 
     if (isContextOverflow) {
       logWarn(TAG, `Context overflow detected — auto-resetting session`);
-      await resetAndPrepare({ transport, sessionKey, reason: `ctx-overflow: ${errStr.slice(0, 100)}`, sessions });
+      await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}`, sessions });
       await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(() => {});
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);

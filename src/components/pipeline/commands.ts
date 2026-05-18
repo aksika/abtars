@@ -77,6 +77,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     memory, memoryConfig, nlmConfig,
     codingMode, idleSave,
     sessions,
+    sessionManager: deps.sessionManager,
     updateCtxStart,
     cronCurrentJob: deps.cronCurrentJob?.() ?? null,
     enqueueCron: deps.enqueueCron,

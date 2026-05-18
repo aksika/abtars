@@ -7,7 +7,7 @@ export type { Reply, CommandContext, CommandHandler, Platform } from "./types.js
 export { registerCommand, handleCommand, triggerNewSession, triggerResetSession, killWakeInhibit } from "./registry.js";
 import { registerExact, registerPrefix } from "./registry.js";
 import {
-  handleNewReset, handleCompact, handleCoding, handleDefault,
+  handleNewReset, handleCompact, handleDefault,
   handleStatus, handleDoctor, handleStop, handleRestart,
   handleFull, handleShort, handleHealing, handleFacts,
   handleTasksList, handleTasksTrigger, handleTasksLog,
@@ -16,12 +16,12 @@ import {
   handleSleep, handleSleepSub, handleHelp, handleSkills,
   handleHooks, handleMcp, handleUsers,
 } from "./handlers.js";
+import { handleSession } from "./session-handler.js";
 
 // ── Exact-match commands ────────────────────────────────────────────────────
 registerExact("/new", handleNewReset);
 registerExact("/reset", handleNewReset);
 registerExact("/compact", handleCompact);
-registerExact("/coding", handleCoding);
 registerExact("/default", handleDefault);
 registerExact("/status", handleStatus);
 registerExact("/doctor", handleDoctor);
@@ -48,8 +48,10 @@ registerExact("/wakeup", handleWakeup);
 registerExact("/sleep", handleSleep);
 registerExact("/mcp", handleMcp);
 registerExact("/hooks", handleHooks);
+registerExact("/session", handleSession);
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
+registerPrefix("/session ", handleSession);
 registerPrefix("/tasks trigger ", handleTasksTrigger);
 registerPrefix("/cron trigger ", handleTasksTrigger);
 registerPrefix("/tasks log ", handleTasksLog);

@@ -98,6 +98,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     sttConfig: ctx.sttConfig,
     ttsConfig: ctx.ttsConfig,
     sessions: ctx.sessions,
+    sessionManager: ctx.sessionManager,
     updateCtxStart,
     cronCurrentJob: () => cronQueue.currentJob,
     enqueueCron: (entryId, manual) => {
