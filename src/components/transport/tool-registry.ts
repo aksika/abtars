@@ -113,6 +113,12 @@ const bashTool: ToolDefinition = {
   execute: (args) => runBash(args["command"] ?? ""),
 };
 
+let _storeCount = 0;
+const STORE_CAP = 20;
+
+/** Reset store counter (called on new subagent session). */
+export function resetStoreCounter(): void { _storeCount = 0; }
+
 const memoryStoreTool: ToolDefinition = {
   name: "memory_store",
   description: "Store a memory. Use after learning something about the user, their preferences, decisions, or facts worth remembering.",
@@ -129,6 +135,9 @@ const memoryStoreTool: ToolDefinition = {
     required: ["translated", "type"],
   },
   async execute(args, context): Promise<string> {
+    if (++_storeCount > STORE_CAP) {
+      return JSON.stringify({ stored: false, error: "Store limit reached for this session. Move to next task." });
+    }
     if (memoryBackend) {
       try {
         const params: InstantStoreParams = {

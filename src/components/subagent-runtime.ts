@@ -77,6 +77,7 @@ export class SubagentRuntime {
     const cached = this.cache.get(agent);
     if (cached && sessionStrategy === "fresh") {
       await cached.transport.resetSession?.(cached.sessionKey);
+      (await import("./transport/tool-registry.js")).resetStoreCounter();
     }
 
     const { transport, model, sessionKey } = cached ?? await this.createAgent(agent);
@@ -167,6 +168,7 @@ export class SubagentRuntime {
     const sessionKey = `system:${agent}`;
     const entry: CachedAgent = { transport, model, sessionKey };
     this.cache.set(agent, entry);
+    (await import("./transport/tool-registry.js")).resetStoreCounter();
     return entry;
   }
 }
