@@ -318,6 +318,12 @@ export class DiscordAdapter implements PlatformAdapter {
       rawPlatformData: message,
     };
 
+    // #512: commands bypass sequential await
+    if (text.startsWith("/") && !text.startsWith("//")) {
+      handleInboundMessage(inbound, this, this.deps.pipeline).catch(() => {});
+      return;
+    }
+
     await handleInboundMessage(inbound, this, this.deps.pipeline);
   }
 

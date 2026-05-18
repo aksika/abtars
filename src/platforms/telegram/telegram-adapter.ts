@@ -624,6 +624,12 @@ export class TelegramAdapter implements PlatformAdapter {
 
     // /stop, /ctrlc, /restart now handled in commandMiddleware (platform-agnostic)
 
+    // #512: commands bypass the sequential await — execute immediately even if agent is mid-stream
+    if (text.startsWith("/") && !text.startsWith("//")) {
+      handleInboundMessage(inbound, this, this.deps.pipeline).catch(() => {});
+      return;
+    }
+
     await handleInboundMessage(inbound, this, this.deps.pipeline);
   }
 
