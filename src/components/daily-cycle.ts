@@ -68,11 +68,10 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   if (!lockData.startedAt) return false; // fail-closed on missing/corrupt lock
   if (!lockData.lastHeartbeat) return false; // no successful tick yet — dark wake guard
 
-  // Check for new messages since last tick
-  // TODO(#510): filter to Main (A) sessions only — auto-spawn/cron shouldn't reset counter
+  // Check for new messages since last tick — only Main (A) sessions count (#510)
   let currentMsgTs = 0;
   try {
-    const row = deps.memory?.getLastMessageTimestamp(true);
+    const row = deps.memory?.getLastMessageTimestamp(true, "A");
     currentMsgTs = row ?? 0;
   } catch { return false; }
 

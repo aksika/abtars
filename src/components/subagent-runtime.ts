@@ -62,12 +62,16 @@ export class SubagentRuntime {
   private readonly activeSpawns = new Map<string, { abort: AbortController }>();
   private _registry: ModelHealthRegistry | null = null;
   private _mainTransport: IKiroTransport | null = null;
+  private _sessionManager: import("./session-manager.js").SessionManager | null = null;
 
   /** Set shared model health registry (from boot ctx). */
   setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
 
   /** Set main transport reference for currentModel reads. */
   setMainTransport(transport: IKiroTransport): void { this._mainTransport = transport; }
+
+  /** Set session manager for auto-spawn sub-session creation (#510). */
+  setSessionManager(mgr: import("./session-manager.js").SessionManager): void { this._sessionManager = mgr; }
 
   /** Send a prompt to a named agent and get the response. */
   async complete(agent: AgentName, prompt: string, opts?: AgentOpts): Promise<string> {
@@ -122,6 +126,13 @@ export class SubagentRuntime {
     const taskId = randomBytes(4).toString("hex");
     const abort = new AbortController();
     this.activeSpawns.set(taskId, { abort });
+
+    // Create sub-session for visibility in /session list (#510)
+    if (this._sessionManager) {
+      const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", cron: "T" };
+      const sessionType = typeMap[agent];
+      if (sessionType) this._sessionManager.createSubSession("master", "telegram", sessionType);
+    }
 
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
     const timer = setTimeout(() => abort.abort(), timeoutMs);
