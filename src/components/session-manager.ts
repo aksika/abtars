@@ -153,17 +153,28 @@ export class SessionManager {
     const target = state.sessions.find(s => s.shortIndex === index && !s.ended);
     if (!target) return `Session #${index} not found.`;
 
-    // Cannot kill the last remaining Main session
-    const aliveMains = state.sessions.filter(s => s.type === "A" && !s.ended);
-    if (target.type === "A" && aliveMains.length <= 1) {
-      return `Cannot kill the last Main session. Use /session end to reset it.`;
-    }
-
     // If killing active, switch to main first
     if (state.activeIndex === index) {
-      const main = state.sessions.find(s => s.type === "A" && !s.ended);
-      state.activeIndex = main?.shortIndex ?? 1;
+      const otherMain = state.sessions.find(s => s.type === "A" && !s.ended && s.shortIndex !== index);
+      if (otherMain) {
+        state.activeIndex = otherMain.shortIndex;
+      } else {
+        // Last Main — kill it but auto-spawn replacement
+        target.ended = true;
+        const newMain = this.allocateSession(state, "A", true);
+        state.activeIndex = newMain.shortIndex;
+        return target;
+      }
+    } else {
+      // Killing non-active last Main — still auto-spawn replacement
+      const aliveMains = state.sessions.filter(s => s.type === "A" && !s.ended);
+      if (target.type === "A" && aliveMains.length <= 1) {
+        target.ended = true;
+        this.allocateSession(state, "A", true);
+        return target;
+      }
     }
+
     target.ended = true;
     return target;
   }
