@@ -4,7 +4,8 @@
  *         sleepStatus, restartReason, restartRequested, forceSleep.
  */
 import { logAndSwallow } from "../log-and-swallow.js";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { atomicWriteSync } from "../atomic-write.js";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { localISO } from "../../utils/local-time.js";
@@ -25,7 +26,7 @@ export function updateBridgeLockField(key: string, value: unknown): void {
   try {
     const lock = JSON.parse(readFileSync(p, "utf-8"));
     lock[key] = value;
-    writeFileSync(p, JSON.stringify(lock), "utf-8");
+    atomicWriteSync(p, JSON.stringify(lock));
   } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
 }
 
@@ -98,10 +99,10 @@ export function readAndClearForceSleep(): string | null {
 export function initBridgeLock(opts: { pid: number; startedAt: number; version: string; argv: string[] }): void {
   const p = join(abtarsHome(), "bridge.lock");
   try {
-    writeFileSync(p, JSON.stringify({
+    atomicWriteSync(p, JSON.stringify({
       pid: opts.pid, startedAt: opts.startedAt, version: opts.version,
       sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(),
-    }), "utf-8");
+    }));
   } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
 }
 
