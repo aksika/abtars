@@ -92,7 +92,7 @@ export async function buildPrompt(
           userId,
           limit: ACTIVE_MEMORY_LIMIT,
           maxClassification: userEntry?.maxClass ?? 0,
-          stages: ["Sf", "S1"],
+          stages: ["Sf", "Ss"],
           currentContext: { hour: now.getHours(), dayOfWeek: now.getDay() },
         });
         const TRIVIAL_TTL_MS = 36 * 60 * 60_000;
