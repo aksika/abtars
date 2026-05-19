@@ -21,9 +21,9 @@ export interface AgentRoleConfig {
 
 const AGENT_ROLES: Record<AgentRole, AgentRoleConfig> = {
   professor: { agent: "professor", model: null, persona: "persona/core/SOUL.md", autoReinit: true, tag: "acp-main", trust: 3 },
-  dreamy: { agent: null, model: null, persona: "persona/prompts/sleep/00-identity.md", autoReinit: false, tag: "acp-sleep", trust: 2 },
+  dreamy: { agent: "dreamy", model: null, persona: "persona/prompts/sleep/00-identity.md", autoReinit: false, tag: "acp-sleep", trust: 2 },
   coding: { agent: "coding-agent", model: null, persona: null, autoReinit: true, tag: "acp-coding", trust: 2 },
-  browsie: { agent: null, model: null, persona: null, autoReinit: false, tag: "acp-browsie", trust: 1 },
+  browsie: { agent: "browsie", model: null, persona: null, autoReinit: false, tag: "acp-browsie", trust: 1 },
   cron: { agent: "professor", model: null, persona: null, autoReinit: false, tag: "acp-cron", trust: 2 },
 };
 
@@ -54,7 +54,6 @@ export function createAgentTransport(
 
   return new AcpTransport(tc.cliPath, tc.workingDir, {
     agent: cfg.agent ?? undefined,
-    skipAgent: cfg.agent === null,
     model,
     autoReinit: cfg.autoReinit,
     tag: cfg.tag,

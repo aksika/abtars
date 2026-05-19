@@ -2,6 +2,27 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { getEnv } from "../env-schema.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
+/** Write model into ~/.kiro/agents/{name}.json if it differs or is missing. */
+function ensureAgentConfig(agentName: string, model: string): void {
+  const dir = join(homedir(), ".kiro", "agents");
+  const file = join(dir, `${agentName}.json`);
+  try {
+    if (existsSync(file)) {
+      const existing = JSON.parse(readFileSync(file, "utf8"));
+      if (existing.model === model) return; // already correct
+      existing.model = model;
+      writeFileSync(file, JSON.stringify(existing, null, 2) + "\n");
+    } else {
+      mkdirSync(dir, { recursive: true });
+      const config = { name: agentName, model, tools: ["*"], allowedTools: ["@builtin"], includeMcpJson: true };
+      writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+    }
+  } catch { /* non-fatal — kiro-cli will use its default */ }
+}
 
 export class ModelNotFoundError extends Error {
   constructor(message: string) { super(message); this.name = "ModelNotFoundError"; }
@@ -96,10 +117,9 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for permission requests. Returns selected optionId or undefined to cancel. */
   onPermissionRequest?: (params: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
 
-  constructor(cliPath: string, workingDir: string, opts?: { skipAgent?: boolean; agent?: string; model?: string; cliArgs?: string[]; autoReinit?: boolean; tag?: string }) {
+  constructor(cliPath: string, workingDir: string, opts?: { agent?: string; model?: string; cliArgs?: string[]; autoReinit?: boolean; tag?: string }) {
     this.cliPath = cliPath;
     this.workingDir = workingDir;
-    this.skipAgent = opts?.skipAgent ?? false;
     this.agentName = opts?.agent ?? "professor";
     this.modelId = opts?.model;
     this.extraCliArgs = opts?.cliArgs;
@@ -111,7 +131,6 @@ export class AcpTransport implements IKiroTransport {
     });
   }
 
-  private readonly skipAgent: boolean;
   private readonly agentName: string;
   private modelId?: string;
   private readonly extraCliArgs?: string[];
@@ -119,14 +138,16 @@ export class AcpTransport implements IKiroTransport {
   private readonly tag: string;
 
   async initialize(): Promise<void> {
+    // Ensure kiro agent config has the correct model from transport.json
+    if (this.modelId) {
+      ensureAgentConfig(this.agentName, this.modelId);
+    }
+
     let args: string[];
     if (this.extraCliArgs) {
-      // Custom CLI args (e.g. gemini --experimental-acp)
       args = [...this.extraCliArgs];
-      if (this.modelId) args.push("--model", this.modelId);
     } else {
-      args = this.skipAgent ? ["acp"] : ["acp", "--agent", this.agentName];
-      if (this.modelId) args.push("--model", this.modelId);
+      args = ["acp", "--agent", this.agentName];
     }
     this.agent = spawn(this.cliPath, args, {
       cwd: this.workingDir,
