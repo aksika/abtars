@@ -37,7 +37,7 @@ abtars update
 abtars onboard
 
 # 5. Start the watchdog → bridge auto-starts
-~/.abtars/watchdog.sh --all --web --agent &
+~/.abtars/watchdog.sh &  # reads platform config from .env
 ```
 
 Verify:
@@ -121,6 +121,19 @@ Run `abtars <cmd> --help` for per-command usage.
 ### `config/.env` (operator-owned)
 
 Seeded from `.env.example` on first install. Managed by `abtars onboard` for the core keys; operator can add custom keys freely (preserved across `onboard` re-runs).
+
+**Platform enablement (top of file):**
+```bash
+# Which components to start — .env is the single source of truth.
+# If not set, falls back to token/config presence detection.
+TELEGRAM_ENABLED=true
+DISCORD_ENABLED=false
+IRC_ENABLED=false
+ENABLE_DASHBOARD=true
+ENABLE_AGENT_API=true
+```
+
+No CLI flags needed. `watchdog.sh` and `abtars restart --cold` both read these vars. CLI flags (`--telegram`, `--discord`, etc.) are one-off overrides for testing only.
 
 Keys written by `onboard`:
 - `TELEGRAM_BOT_TOKEN` — from @BotFather
@@ -307,7 +320,7 @@ If you had an older `~/.abtars/` with `dist/` at the root (no `releases/`), firs
 4. **Restart:**
    ```bash
    # Linux / KP:
-   ~/.abtars/watchdog.sh --all --web --agent &
+   ~/.abtars/watchdog.sh &  # reads platform config from .env
 
    # macOS / Molty:
    launchctl load ~/Library/LaunchAgents/com.abtars.watchdog.plist
@@ -356,7 +369,7 @@ All destructive ops:
 `install` creates `~/.abtars/watchdog.sh` — the process supervisor. Start it:
 
 ```bash
-~/.abtars/watchdog.sh --all --web --agent &
+~/.abtars/watchdog.sh &  # reads platform config from .env
 ```
 
 Flags:
@@ -384,7 +397,7 @@ sudo cp ~/workspace/ab/abtars/scripts/abtars@.service /etc/systemd/system/
 sudo systemctl enable --now abtars@$USER
 ```
 
-For KP dev: just background the watchdog (`~/.abtars/watchdog.sh --all --web --agent &`). Restart manually on reboot.
+For KP dev: just background the watchdog (`~/.abtars/watchdog.sh &  # reads platform config from .env`). Restart manually on reboot.
 
 ---
 
