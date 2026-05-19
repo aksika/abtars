@@ -5,7 +5,7 @@
  */
 
 import { logAndSwallow } from "../log-and-swallow.js";
-import { logInfo, logDebug } from "../logger.js";
+import { logInfo, logDebug, logTrace } from "../logger.js";
 import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { loadSoulBundle } from "../soul-loader.js";
@@ -64,6 +64,7 @@ export async function buildPrompt(
   // --- Session-start injection ---
   const entry = sessions.getOrCreate(sessionKey);
   const isSessionStart = entry.pendingStart || !entry.seen;
+  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry.seen} pendingStart=${entry.pendingStart} isSessionStart=${isSessionStart}`);
   if (isSessionStart && memory) {
     prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey);
   }
