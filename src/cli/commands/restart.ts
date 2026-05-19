@@ -80,7 +80,7 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
     }
 
     if (bridgeAlive) await killBridge(bridgePid!);
-    const argv = (readJsonField(lockFile, "argv") as string[] | undefined) ?? [];
+    const argv: string[] = []; // #534: env is SSoT — no CLI args needed
     return spawnLauncher(home, argv);
   }
 
