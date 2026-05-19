@@ -123,6 +123,7 @@ export class AcpTransport implements IKiroTransport {
     this.agentName = opts?.agent ?? "professor";
     this.modelId = opts?.model;
     this.extraCliArgs = opts?.cliArgs;
+    this.isGemini = !!opts?.cliArgs;
     this.autoReinit = opts?.autoReinit ?? true;
     this.tag = opts?.tag ?? "acp";
     this.sm = new TransportStateMachine({
@@ -134,6 +135,7 @@ export class AcpTransport implements IKiroTransport {
   private readonly agentName: string;
   private modelId?: string;
   private readonly extraCliArgs?: string[];
+  private readonly isGemini: boolean;
   private readonly autoReinit: boolean;
   private readonly tag: string;
 
@@ -515,6 +517,12 @@ export class AcpTransport implements IKiroTransport {
       cwd: this.workingDir,
       mcpServers: [],
     });
+
+    if (this.isGemini && this.modelId) {
+      try { await this.client.unstable_setSessionModel({ sessionId: session.sessionId, modelId: this.modelId }); }
+      catch { logWarn(this.tag, `unstable_setSessionModel not supported — using default model`); }
+    }
+
     this.sessions.set(sessionKey, session.sessionId);
     logInfo(this.tag, `Created session ${session.sessionId} for ${sessionKey}`);
     return session.sessionId;
