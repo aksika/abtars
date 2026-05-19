@@ -8,7 +8,7 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import { makeNpmSource } from '../update-sources/npm.js';
@@ -33,6 +33,12 @@ export async function update(opts: UpdateOptions): Promise<number> {
   }
 
   const paths = packagePaths('abtars');
+
+  // Auto-migrate old flat layout (current/main.js without releases/) → create releases dir
+  if (!existsSync(paths.releases) && existsSync(join(paths.home, 'current'))) {
+    process.stdout.write('Migrating old layout → releases/...\n');
+    mkdirSync(paths.releases, { recursive: true });
+  }
   const release = await acquireLock(paths.lock, `update --source ${opts.source}`);
 
   try {
