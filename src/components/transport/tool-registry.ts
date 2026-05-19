@@ -4,9 +4,20 @@
  */
 
 import { execFile } from "node:child_process";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type { MemoryBackend } from "abmind";
 import type { InstantStoreParams } from "../../types/index.js";
-import { logWarn } from "../logger.js";
+import { logWarn, redactSecrets } from "../logger.js";
+
+// #449: append-only audit log
+const AUDIT_DIR = join(process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars"), "logs");
+const AUDIT_PATH = join(AUDIT_DIR, "audit.jsonl");
+try { mkdirSync(AUDIT_DIR, { recursive: true }); } catch {}
+function audit(entry: Record<string, unknown>): void {
+  try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch {}
+}
 
 export type ToolDefinition = {
   readonly name: string;
@@ -505,5 +516,14 @@ export function getToolSchemas(): Array<{ type: "function"; function: { name: st
 export async function executeToolCall(name: string, args: Record<string, string>, context?: { userId: string }): Promise<string> {
   const tool = ALL_TOOLS.find(t => t.name === name);
   if (!tool) return JSON.stringify({ error: `Unknown tool: ${name}` });
-  return tool.execute(args, context);
+  const ts = Date.now();
+  audit({ ts, tool: name, args: redactSecrets(JSON.stringify(args)), userId: context?.userId });
+  try {
+    const result = await tool.execute(args, context);
+    audit({ ts, tool: name, status: "ok", chars: result.length });
+    return result;
+  } catch (err) {
+    audit({ ts, tool: name, status: "error", error: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }
 }
