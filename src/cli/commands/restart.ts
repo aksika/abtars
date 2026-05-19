@@ -80,7 +80,7 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
     }
 
     if (bridgeAlive) await killBridge(bridgePid!);
-    const argv = (readJsonField(lockFile, "argv") as string[] | undefined) ?? ["--telegram"];
+    const argv = (readJsonField(lockFile, "argv") as string[] | undefined) ?? [];
     return spawnLauncher(home, argv);
   }
 
