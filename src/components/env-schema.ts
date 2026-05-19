@@ -132,6 +132,9 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "PERMISSION_TIMEOUT_MS", type: "int", default: "60000", description: "Permission prompt timeout (ms)" },
   { env: "TRUST_MODE", type: "bool", default: "false", description: "Skip permission prompts" },
   { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | sandbox" },
+  { env: "TELEGRAM_ENABLED", type: "bool", default: "", description: "Enable Telegram platform (fallback: token presence)" },
+  { env: "DISCORD_ENABLED", type: "bool", default: "", description: "Enable Discord platform (fallback: token presence)" },
+  { env: "IRC_ENABLED", type: "bool", default: "", description: "Enable IRC platform (fallback: irc.json presence)" },
   { env: "ENABLE_DASHBOARD", type: "bool", default: "false", description: "Enable web dashboard (exposes port)" },
   { env: "ENABLE_AGENT_API", type: "bool", default: "false", description: "Enable A2A agent API (exposes port)" },
 ] as const;
