@@ -45,3 +45,16 @@ fi
 
 # Prune >7 days
 find "$DEST" -name "abtars-*.zip" -mtime +7 -delete
+
+# DoD: verify zip contains memory DB and is reasonable size
+ZIP="$DEST/abtars-$DATE.zip"
+if ! unzip -l "$ZIP" 2>/dev/null | grep -q "memory.*\.db"; then
+  echo "ERROR: backup zip missing memory.db" >&2
+  exit 1
+fi
+MIN_SIZE=100000  # 100KB minimum
+ACTUAL=$(stat -f%z "$ZIP" 2>/dev/null || stat -c%s "$ZIP" 2>/dev/null || echo 0)
+if [ "$ACTUAL" -lt "$MIN_SIZE" ]; then
+  echo "ERROR: backup zip too small (${ACTUAL} bytes)" >&2
+  exit 1
+fi
