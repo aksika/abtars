@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=%i
 WorkingDirectory=%h/.abtars
-ExecStart=%h/.abtars/abtars.sh --all
+ExecStart=%h/.abtars/abtars.sh
 Restart=always
 RestartSec=60
 Environment=NODE_ENV=production
