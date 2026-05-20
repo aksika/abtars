@@ -14,7 +14,7 @@ set -euo pipefail
 
 AB_HOME="${HOME}/.abtars"
 PROJECT_DIR="$HOME/.abtars"
-ARGS=("${@:---telegram}")
+ARGS=("$@")
 PIDFILE="$AB_HOME/bridge.pid"
 
 # Load env from config/.env (single source of truth)
