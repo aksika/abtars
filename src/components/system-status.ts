@@ -4,7 +4,7 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import { readFileSync, readlinkSync } from "node:fs";
+import { readFileSync, readlinkSync, existsSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import type { ServiceState } from "./service-registry.js";
@@ -148,8 +148,17 @@ function phaseToService(phaseName: string): string | null {
 export function renderStatusText(status: SystemStatus): string {
   const uptime = formatUptime(status.uptimeMs);
   const lines: string[] = [
-    `Abtars v${status.version} (${status.commit})`,
+    `abTARS v${status.version} (${status.commit})`,
   ];
+
+  // abmind version
+  try {
+    const abmindManifest = join(homedir(), ".abmind", "manifest.json");
+    if (existsSync(abmindManifest)) {
+      const m = JSON.parse(readFileSync(abmindManifest, "utf-8"));
+      lines.push(`abmind v${m.version ?? "?"} (${m.commit?.slice(0, 7) ?? "?"})`);
+    }
+  } catch { /* non-critical */ }
 
   // Update check (#440)
   try {
