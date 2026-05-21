@@ -26,7 +26,7 @@ export interface CommandContext {
   requestShutdown?: PipelineDeps["requestShutdown"];
   sleepProgress?: PipelineDeps["sleepProgress"];
   loadedCapabilities?: PipelineDeps["loadedCapabilities"];
-  selfHealerTask?: { enabled: boolean } | null;
+  selfHealerTask?: { enabled: boolean; resetCircuitBreaker?: () => void; pausedRules?: () => number } | null;
   hailMary?: PipelineDeps["hailMary"];
   rebuildTransport?: PipelineDeps["rebuildTransport"];
   phaseHealth?: PipelineDeps["phaseHealth"];

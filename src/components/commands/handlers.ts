@@ -143,11 +143,23 @@ export async function handleShort(_text: string, ctx: CommandContext): Promise<b
   return true;
 }
 
-export async function handleHealing(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleHealing(text: string, ctx: CommandContext): Promise<boolean> {
   if (!ctx.selfHealerTask) { await ctx.reply("🩺 Self-healer not available."); return true; }
-  ctx.selfHealerTask.enabled = !ctx.selfHealerTask.enabled;
-  await ctx.reply(ctx.selfHealerTask.enabled ? "🩺 Self-healing ON" : "🩺 Self-healing OFF");
-  logInfo(TAG, `Self-healer ${ctx.selfHealerTask.enabled ? "enabled" : "disabled"} by user`);
+  const arg = text.replace(/^\/healing\s*/, "").trim().toLowerCase();
+  if (arg === "on") {
+    ctx.selfHealerTask.enabled = true;
+  } else if (arg === "off") {
+    ctx.selfHealerTask.enabled = false;
+  } else if (arg === "reset") {
+    ctx.selfHealerTask.resetCircuitBreaker?.();
+    await ctx.reply("🩺 Circuit breaker reset — all paused rules re-enabled.");
+    return true;
+  }
+  const status = ctx.selfHealerTask.enabled ? "ON" : "OFF";
+  const paused = ctx.selfHealerTask.pausedRules?.() ?? 0;
+  const pausedText = paused > 0 ? ` (${paused} rule${paused > 1 ? "s" : ""} paused)` : "";
+  await ctx.reply(`🩺 Self-healing: ${status}${pausedText}`);
+  if (arg === "on" || arg === "off") logInfo(TAG, `Self-healer ${status} by user`);
   return true;
 }
 

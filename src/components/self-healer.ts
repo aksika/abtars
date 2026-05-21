@@ -44,7 +44,12 @@ const NOTIFY_COOLDOWN_MS = 60 * 60 * 1000; // 60min
 interface ErrorState {
   lastNotifiedAt: number;
   count: number;
+  failCount: number;
+  lastFailAt: number;
 }
+
+const CIRCUIT_BREAKER_MAX = 3;
+const CIRCUIT_BREAKER_RESET_MS = 24 * 60 * 60 * 1000; // 24h
 
 function logAutoFix(message: string): void {
   const dir = join(abtarsHome(), "logs");
@@ -56,17 +61,28 @@ function logAutoFix(message: string): void {
 export function createSelfHealerTask(
   getTelegramAdapter: () => TelegramAdapter | null,
   allowedUserIds: Set<number>,
-): HeartbeatTask & { enabled: boolean } {
+): HeartbeatTask & { enabled: boolean; resetCircuitBreaker?: () => void; pausedRules?: () => number } {
   let lastTs = localISO();
   let bridgeStartTs = "";
   const errorStates = new Map<string, ErrorState>();
   let enabled = getEnv().selfhealEnabled;
   let autoFixRunning = false;
 
-  const task: HeartbeatTask & { enabled: boolean } = {
+  const task: HeartbeatTask & { enabled: boolean; resetCircuitBreaker?: () => void; pausedRules?: () => number } = {
     name: "self-healer",
     get enabled() { return enabled; },
     set enabled(v: boolean) { enabled = v; },
+    resetCircuitBreaker() {
+      for (const s of errorStates.values()) { s.failCount = 0; }
+    },
+    pausedRules() {
+      const now = Date.now();
+      let count = 0;
+      for (const s of errorStates.values()) {
+        if (s.failCount >= CIRCUIT_BREAKER_MAX && now - s.lastFailAt < CIRCUIT_BREAKER_RESET_MS) count++;
+      }
+      return count;
+    },
     execute: async () => {
       if (!enabled) return;
       const logFile = getLogFile();
@@ -103,7 +119,7 @@ export function createSelfHealerTask(
           if (!match) continue;
           const errorKey = `${match[1]}:${match[2]!.slice(0, 80)}`;
 
-          const state = errorStates.get(errorKey) ?? { lastNotifiedAt: 0, count: 0 };
+          const state = errorStates.get(errorKey) ?? { lastNotifiedAt: 0, count: 0, failCount: 0, lastFailAt: 0 };
           state.count++;
           errorStates.set(errorKey, state);
 
@@ -112,6 +128,8 @@ export function createSelfHealerTask(
           if (rule && !autoFixRunning) {
             const cooldownMs = rule.cooldownMin * 60 * 1000;
             if (now - state.lastNotifiedAt < cooldownMs) continue;
+            // Circuit breaker: skip if too many consecutive failures
+            if (state.failCount >= CIRCUIT_BREAKER_MAX && now - state.lastFailAt < CIRCUIT_BREAKER_RESET_MS) continue;
             state.lastNotifiedAt = now;
 
             // Spawn coding subagent in background
@@ -130,12 +148,18 @@ export function createSelfHealerTask(
                 logAutoFix(`DONE: ${rule.pattern} → ${summary}`);
                 adapter.sendNotification(String(chatId), `🔧 Auto-fix: ${rule.pattern}\n${summary}`);
                 logInfo("self-healer", `Auto-fix done: ${rule.pattern}`);
+                state.failCount = 0; // success resets circuit breaker
               } catch (err) {
-                // Transport failed — fall back to notify
                 const msg = err instanceof Error ? err.message : String(err);
-                logWarn("self-healer", `Auto-fix transport failed, notifying user: ${msg}`);
+                state.failCount++;
+                state.lastFailAt = Date.now();
+                logWarn("self-healer", `Auto-fix failed (${state.failCount}/${CIRCUIT_BREAKER_MAX}): ${msg}`);
                 logAutoFix(`FAILED: ${rule.pattern} → ${msg}`);
-                adapter.sendNotification(String(chatId), `⚠️ Auto-fix failed for "${rule.pattern}": ${msg.slice(0, 100)}`);
+                if (state.failCount >= CIRCUIT_BREAKER_MAX) {
+                  adapter.sendNotification(String(chatId), `⚠️ Auto-fix paused for "${rule.pattern}" (${CIRCUIT_BREAKER_MAX} failures). /healing reset to re-enable.`);
+                } else {
+                  adapter.sendNotification(String(chatId), `⚠️ Auto-fix failed for "${rule.pattern}": ${msg.slice(0, 100)}`);
+                }
               } finally {
                 clearTimeout(timeout);
                 autoFixRunning = false;
