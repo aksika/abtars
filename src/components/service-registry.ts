@@ -188,6 +188,15 @@ export class ServiceRegistry {
       if (state.aborted) return;
       if (this.instances.has(name)) { this.pending.delete(name); return; } // started externally
 
+      // Heal port if last error was EADDRINUSE
+      if (state.lastError?.includes("EADDRINUSE")) {
+        const portMatch = state.lastError.match(/:(\d+)/);
+        if (portMatch) {
+          const { healPort } = await import("./self-healer-utils.js");
+          healPort(parseInt(portMatch[1]!, 10));
+        }
+      }
+
       try {
         const instance = await factory.create();
         if (state.aborted) return; // aborted during create()

@@ -74,28 +74,6 @@ export class DashboardServer implements IDashboardSlot {
       });
 
       this.server.on("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EADDRINUSE") {
-          logError(TAG, `Port ${config.webPort} already in use — attempting self-heal`);
-          import("node:child_process").then(({ execSync }) => {
-            try {
-              const pid = execSync(`lsof -i :${config.webPort} -t`, { encoding: "utf-8", timeout: 3000 }).trim();
-              if (pid && pid !== String(process.pid)) {
-                process.kill(parseInt(pid, 10), "SIGTERM");
-                logInfo(TAG, `Killed zombie PID ${pid} holding port ${config.webPort}`);
-                setTimeout(() => {
-                  this.server!.listen(config.webPort, config.webHost, () => {
-                    logInfo(TAG, `Dashboard listening on ${config.webHost}:${config.webPort} (after self-heal)`);
-                    resolve();
-                  });
-                }, 1000);
-                return;
-              }
-            } catch { /* lsof/kill failed */ }
-            reject(err);
-          }).catch(() => reject(err));
-          return;
-        }
-        logError(TAG, "Server error", err);
         reject(err);
       });
 

@@ -127,30 +127,7 @@ export class AgentApiServer {
 
   async start(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.server.on("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EADDRINUSE") {
-          logWarn(TAG, `Port ${this.config.port} already in use — attempting self-heal`);
-          import("node:child_process").then(({ execSync }) => {
-            try {
-              const pid = execSync(`lsof -i :${this.config.port} -t`, { encoding: "utf-8", timeout: 3000 }).trim();
-              if (pid && pid !== String(process.pid)) {
-                process.kill(parseInt(pid, 10), "SIGTERM");
-                logInfo(TAG, `Killed zombie PID ${pid} holding port ${this.config.port}`);
-                setTimeout(() => {
-                  this.server.listen(this.config.port, () => {
-                    logInfo(TAG, `Agent API listening on port ${this.config.port} (after self-heal)`);
-                    resolve();
-                  });
-                }, 1000);
-                return;
-              }
-            } catch { /* lsof/kill failed */ }
-            reject(err);
-          }).catch(() => reject(err));
-          return;
-        }
-        reject(err);
-      });
+      this.server.on("error", (err: NodeJS.ErrnoException) => reject(err));
       this.server.listen(this.config.port, () => resolve());
     });
   }
