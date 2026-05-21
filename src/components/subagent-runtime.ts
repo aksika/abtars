@@ -176,6 +176,12 @@ export class SubagentRuntime {
       ? (this._mainTransport as unknown as { currentModel: string }).currentModel
       : undefined;
     const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, mainModel);
+
+    // #524: inject system prompt for browse sessions
+    if (agent === "browsie" && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
+      (transport as any).setSystemPrompt(BROWSE_SYSTEM_PROMPT);
+    }
+
     const sessionKey = `system:${agent}`;
     const entry: CachedAgent = { transport, model, sessionKey };
     this.cache.set(agent, entry);
@@ -183,6 +189,13 @@ export class SubagentRuntime {
     return entry;
   }
 }
+
+const BROWSE_SYSTEM_PROMPT = `You are a web browsing assistant. You have two tools for web access:
+
+1. **browser tool** (navigate, click, fill, extract_text, screenshot) — use for JS-heavy pages, rendered content, page interaction, login flows, or anything that needs a real browser.
+2. **curl / execute_bash** — use for simple API calls, raw downloads, fetching headers, or static pages.
+
+Prefer the browser tool when the page likely uses JavaScript rendering or requires interaction. Use curl when a simple HTTP request suffices.`;
 
 const AGENT_TO_ROLE: Record<AgentName, import("./agent-registry.js").SubagentRole> = {
   professor: "cron",
