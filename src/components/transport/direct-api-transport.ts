@@ -65,7 +65,7 @@ export class DirectApiTransport implements IKiroTransport {
   setEmergencyMode(override: { endpoint: string; apiKey?: string; model: string; maxContext: number } | null): void {
     this.emergencyOverride = override;
     if (override) logWarn(TAG, `🚨 EMERGENCY MODE: using ${override.model} (paid) — bypassing fallback chain`);
-    else logInfo(TAG, "Emergency mode cleared — fallback chain active");
+    else { this.activeModel = this.config.model; logInfo(TAG, `Emergency mode cleared — restored ${this.config.model}`); }
   }
 
   /** True if emergency (hailMary) mode is active. */
