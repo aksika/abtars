@@ -172,9 +172,15 @@ export function buildSessionStartPrompt(
       if (user) {
         const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
         const lang = user.languages?.length ? `\nTheir languages: ${user.languages.join(", ")}. Respond ONLY in these languages.` : "";
-        contextParts.push(`[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).${lang}`);
+        const userBlock = `[CURRENT USER]\nYou are now talking to ${user.userId} (${user.role}, ${CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`} clearance).${lang}`;
+        contextParts.push(userBlock);
+        logInfo(TAG, `Injected [CURRENT USER] for ${user.userId} (${user.role})`);
+      } else {
+        logInfo(TAG, `[CURRENT USER] skipped — userId "${userId}" not found in registry (${registry.byUserId.size} users loaded)`);
       }
     } catch (err) { logAndSwallow("prompt_builder", "op", err); }
+  } else {
+    logInfo(TAG, `[CURRENT USER] skipped — no sessionKey`);
   }
 
   const compSummary = null; // Legacy compaction removed — context engine handles summaries
