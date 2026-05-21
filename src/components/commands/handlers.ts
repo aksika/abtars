@@ -721,7 +721,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/models health reset — Reset model health buckets",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
-    "/tasks trigger <id> — Manually fire a task",
+    "/task run <id> — Manually fire a task",
     "/facts — Core knowledge (user profile + agent notes)",
     "/skills — List loaded skills",
     "/session — List sessions",
