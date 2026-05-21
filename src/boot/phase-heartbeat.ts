@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { HeartbeatSystem } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
 import {
-  writeRestartReason, readAndClearRestartRequested, readBridgeLockField, writeSleepStatus, initBridgeLock,
+  writeRestartReason, readAndClearRestartRequested, readBridgeLockField, updateBridgeLockField, writeSleepStatus,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
 import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask } from "../components/heartbeat-tasks.js";
@@ -48,8 +48,8 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
 
   const cronCallback = createCronCallback(ctx);
 
-  // bridge.lock — track bridge lifecycle
-  initBridgeLock({ pid: process.pid, startedAt: ctx.startedAt, version: `${ctx.version}-${ctx.commit}`, argv: process.argv.slice(2) });
+  // bridge.lock already written at process start (bridge-app.ts) — just update startedAt from ctx
+  updateBridgeLockField("startedAt", ctx.startedAt);
 
   const hbIntervalMs = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10) * 1000;
 

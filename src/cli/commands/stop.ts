@@ -15,7 +15,9 @@
 
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 function abtarsHome(): string {
   return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
@@ -85,7 +87,12 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
     return 1;
   }
 
-  // 1) Watchdog first
+  // 1) Unload supervisor service (prevent respawn) then kill watchdog
+  if (force && process.platform === "darwin") {
+    try { execFileSync("launchctl", ["bootout", `gui/${process.getuid!()}`, join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist")], { timeout: 5000 }); }
+    catch { /* already unloaded or not present */ }
+  }
+
   const wdPid = readJsonField(watchdogLock, "pid") as number | undefined;
   let wdResult: KillResult = "not-running";
   let wdPidActual: number | undefined;
@@ -125,6 +132,10 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
   }
 
   process.stdout.write(`🛑 ${wdMsg}\n   ${brMsg}\n`);
+
+  if (force && process.platform === "darwin") {
+    process.stdout.write(`   LaunchAgent unloaded. To restart: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist\n`);
+  }
 
   // Return 0 if nothing's still alive; 1 if we left something running
   const allDown =
