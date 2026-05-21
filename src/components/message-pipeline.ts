@@ -233,7 +233,7 @@ export async function handleInboundMessage(
       if (!toolBatchTimer) {
         toolBatchTimer = setTimeout(async () => {
           const now = Date.now();
-          if (now - lastToolNotifyAt >= 5000) {
+          if (now - lastToolNotifyAt >= 10000) {
             const names = toolBatch.join(", ");
             if (streamMsgId && adapter.editMessage) {
               const status = `${streamBuffer.replace(/ ▍$/, "")}\n🔧 ${names}...`.trim();
