@@ -232,7 +232,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
 }
 
 export async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<boolean> {
-  const id = text.replace(/^\/(tasks|cron) trigger /, "").trim();
+  const id = text.replace(/^\/(tasks?|cron) trigger /, "").trim();
   if (!id) { await ctx.reply("Usage: /tasks trigger <cron-id>"); return true; }
   const err = ctx.enqueueCron?.(id, true);
   await ctx.reply(err ?? `⏳ Running: ${id}`);
@@ -240,7 +240,7 @@ export async function handleTasksTrigger(text: string, ctx: CommandContext): Pro
 }
 
 export async function handleTasksLog(text: string, ctx: CommandContext): Promise<boolean> {
-  const id = text.replace(/^\/(tasks|cron) log /, "").trim();
+  const id = text.replace(/^\/(tasks?|cron) log /, "").trim();
   const placeholderId = await ctx.reply("📋 Loading task log...");
   try {
     const raw = await execAsync("abtars-task", ["history", id], 5000);
