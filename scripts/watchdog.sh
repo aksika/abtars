@@ -133,7 +133,8 @@ spawn_bridge() {
   # Clean stale socket
   rm -f "${ABMIND_HOME:-$HOME/.abmind}/memory.sock" 2>/dev/null || true
 
-  # Note: bridge loads its own .env via src/boot/env.ts — no shell source needed.
+  # Source .env so platform ENABLED vars reach the node process
+  if [ -f "$AB/config/.env" ]; then set -a; source "$AB/config/.env"; set +a; fi
   # Stable entry point: main.js symlink created by abtars update.
   log "Starting bridge: node current/main.js $*"
   cd "$AB"
