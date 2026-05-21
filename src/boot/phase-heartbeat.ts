@@ -64,18 +64,20 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     sleepActive: ctx.isSleepActive,
     onTick: watchdog.kick,
     onStandbyResume: (gapMs) => {
+      const gapMin = Math.round(gapMs / 60000);
       const resumeKind = classifyResume();
       if (resumeKind === "dark") {
-        logDebug("main", `⏸️ Darkwake resume (${Math.round(gapMs / 60000)}min) — skipping tick`);
+        logDebug("main", `⏸️ Darkwake resume (${gapMin}min) — skipping tick`);
         return;
       }
-      logInfo("main", `⏸️ Standby resume (${Math.round(gapMs / 60000)}min, ${resumeKind}) — continuing`);
-      if (resumeKind === "full" && readBridgeLockField("sleepStatus") === "hw_sleep") {
+      // #548: any non-dark resume → restart for clean state
+      // In-flight prompts are dead, sessions stuck busy, connections dropped.
+      if (readBridgeLockField("sleepStatus") === "hw_sleep") {
         writeSleepStatus("awake");
-        writeRestartReason("morning restart after hw_sleep");
-        logInfo("main", "🌅 Morning wake detected — restarting for fresh process");
-        process.exit(0);
       }
+      writeRestartReason(`resume after ${gapMin}min suspend`);
+      logInfo("main", `⏸️ Resume (${gapMin}min, ${resumeKind}) — restarting for clean state`);
+      process.exit(0);
     },
   });
   ctx.heartbeat = heartbeat;
