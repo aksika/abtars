@@ -6,7 +6,24 @@ Skills are NOT code — they're markdown instructions the agent reads at runtime
 
 ---
 
-## Skill Groups
+## Skill Types
+
+| Type | Directory | Source | Updated by |
+|------|-----------|--------|------------|
+| **Core** | `~/.abtars/skills/core/` | Ships with abtars repo (`core/skills/`) | `abtars update` (overwritten every deploy) |
+| **Auto-created** | `~/.abtars/skills/auto/` | Agent self-authors during sleep or conversation | `skill_create` tool / Dreamy step 11 |
+| **Operator** | `~/.abtars/skills/ops/` | Manually created by the operator | Human (never touched by agent or update) |
+| **Downloaded** | `~/.abtars/skills/downloaded/` | Community skills from ClawHub | `clawhub install` (future) |
+
+**Core** skills are the only ones overwritten by `abtars update`. All other types persist across deploys.
+
+**Auto-created** skills are born when the agent recognizes a repeatable procedure during conversation or sleep. Security-scanned on every write (`prompt-scanner.ts`). Reviewed by Dreamy in step 11 (skill review) for staleness.
+
+**Downloaded** skills come from ClawHub (clawhub.ai) — a community skill marketplace. Not yet implemented; directory reserved.
+
+---
+
+## Skill Groups (Core)
 
 | Group | Purpose | Audience |
 |-------|---------|----------|
@@ -91,11 +108,40 @@ Skills may also contain:
 
 ## Skill Lifecycle
 
-1. **Ship:** Skills in `core/skills/` are committed to the abtars repo
-2. **Sync:** `abtars update` copies them to `~/.abtars/skills/core/`
-3. **Catalog:** `SkillWatcher` builds `skills_catalog.md` from all SKILL.md frontmatter
-4. **Inject:** Catalog is included in the session-start soul bundle — agent knows what's available
-5. **Use:** Agent reads the full SKILL.md when it needs the detailed instructions
+1. **Ship:** Core skills in `core/skills/` are committed to the abtars repo
+2. **Sync:** `abtars update` copies them to `~/.abtars/skills/core/` (overwrites)
+3. **Catalog:** `SkillWatcher` scans ALL skill directories (core + auto + ops + downloaded), builds `skills_catalog.md` from frontmatter
+4. **Eligibility:** Skills with `requires:` frontmatter are checked — missing deps = excluded from catalog with a log warning
+5. **Inject:** Catalog is included in the session-start soul bundle — agent knows what's available
+6. **Use:** Agent reads the full SKILL.md when it needs the detailed instructions
+7. **Refresh:** SkillWatcher re-scans on every heartbeat tick — new/changed skills picked up without restart
+
+---
+
+## Skill Dependencies
+
+Skills declare their own dependencies in YAML frontmatter:
+
+```yaml
+---
+name: twitterx
+description: Fetch tweets via rettiwt-api + FxTwitter.
+requires:
+  bins: [abtars-tweet]
+  npm: [rettiwt-api]
+  env: [X_COOKIES_PATH]
+  files: [~/.abtars/secret/cookies/x-cookies.json]
+---
+```
+
+| Field | Check | Failure = |
+|---|---|---|
+| `bins` | Binary on PATH (`which`) | Skill excluded from catalog |
+| `npm` | Package importable (`require.resolve`) | Skill excluded |
+| `env` | Env var set and non-empty | Skill excluded |
+| `files` | File exists on disk | Skill excluded |
+
+No installer — just the eligibility gate. Missing deps are logged at boot for operator visibility.
 
 ---
 
