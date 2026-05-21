@@ -55,7 +55,7 @@ export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
       logError("main", `Telegram failed to start: ${result.error}`);
     }
   } else {
-    logInfo("main", "📡 Telegram disabled (no --telegram flag)");
+    logInfo("main", "📡 Telegram disabled (TELEGRAM_ENABLED=false)");
   }
 
   // --- Discord service ---
@@ -96,7 +96,7 @@ export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
       logError("main", `Discord failed to start: ${result.error}`);
     }
   } else {
-    logInfo("main", "📡 Discord disabled (no --discord/--all flag)");
+    logInfo("main", "📡 Discord disabled (DISCORD_ENABLED=false)");
   }
 
   // ── IRC ──────────────────────────────────────────────────────────────────
