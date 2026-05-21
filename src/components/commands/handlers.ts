@@ -10,7 +10,7 @@ import { readEntries as cronReadEntries } from "../tasks/task-store.js";
 import { handleNLMCommand } from "../nlm-command-handler.js";
 import { abtarsHome } from "../../paths.js";
 import type { CommandContext } from "./types.js";
-import { triggerNewSession, triggerResetSession, setWakeInhibitPid } from "./registry.js";
+import { triggerResetSession, setWakeInhibitPid } from "./registry.js";
 
 const TAG = "cmd";
 
@@ -306,8 +306,9 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const { restorePrevious } = await import("../transport-config.js");
     const result = restorePrevious();
     if (!result.ok) { await ctx.reply(`❌ ${result.error}`); return true; }
+    const t = ctx.transport as unknown as { setEmergencyMode?: (o: null) => void };
+    t.setEmergencyMode?.(null);
     await ctx.reply("🔄 Restored previous config.");
-    await triggerNewSession(ctx, "model-restore");
     return true;
   }
 
@@ -316,7 +317,6 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     const { resetToDefaults } = await import("../transport-config.js");
     if (!resetToDefaults()) { await ctx.reply("❌ Factory config not found — run abtars install to restore."); return true; }
     await ctx.reply("🔄 Factory config restored.");
-    await triggerNewSession(ctx, "model-default");
     return true;
   }
 
@@ -425,8 +425,6 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }
-    await ctx.reply(`⏳ Switching to ${newModel}…`);
-    await triggerNewSession(ctx, "model-switch");
     await ctx.reply(`✅ Switched to ${newModel}`);
     return true;
   }
