@@ -46,20 +46,13 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   ctx.cronQueue = cronQueue;
 
   // cronCallback closes over ctx — reads telegramAdapter lazily (set in phase-platforms)
-  const cronCallback: TaskCompleteCallback = (chatId, message, result, resultPath) => {
+  const cronCallback: TaskCompleteCallback = (chatId, message, result, _resultPath) => {
     if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
     const adapter = ctx.telegramAdapter;
 
     adapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
       logWarn("main", `Cron task TG report failed: ${err}`);
     });
-
-    if (resultPath && existsSync(resultPath)) {
-      adapter.sendDocument(String(chatId), resultPath, message.slice(0, 1024)).catch(err => {
-        logWarn("main", `Cron task TG sendDocument failed: ${err}`);
-      });
-    }
-    // Removed: [SYSTEM] 'cat <path>' hint. File is now in the chat; user doesn't need to cat it.
   };
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
