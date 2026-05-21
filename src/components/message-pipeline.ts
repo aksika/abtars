@@ -236,7 +236,7 @@ export async function handleInboundMessage(
             const names = toolBatch.join(", ");
             const status = `🔧 ${names}...`;
             if (streamMsgId && adapter.editMessage) {
-              adapter.editMessage(channelId, streamMsgId, status + " ▍").catch(() => {});
+              adapter.editMessage(channelId, streamMsgId, status + "...").catch(() => {});
             } else {
               const id = await adapter.sendMessage(channelId, status, { threadId: msg.threadId }).catch(() => undefined);
               if (id && adapter.editMessage) streamMsgId = id;
@@ -254,7 +254,7 @@ export async function handleInboundMessage(
         const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
         const status = `🔧 ${currentToolName} (${elapsedStr})...`;
         if (streamMsgId && adapter.editMessage) {
-          adapter.editMessage(channelId, streamMsgId, status + " ▍").catch(() => {});
+          adapter.editMessage(channelId, streamMsgId, status + "...").catch(() => {});
         }
       }, 10_000);
     };
@@ -311,10 +311,10 @@ export async function handleInboundMessage(
           flushing = true;
           try {
             if (!streamMsgId) {
-              streamMsgId = await adapter.sendMessage(channelId, text + " ▍", { threadId: msg.threadId });
+              streamMsgId = await adapter.sendMessage(channelId, text + "...", { threadId: msg.threadId });
               intermediateDelivered = true;
             } else {
-              await adapter.editMessage!(channelId, streamMsgId, text + " ▍");
+              await adapter.editMessage!(channelId, streamMsgId, text + "...");
             }
             lastFlushed = text;
           } catch (err) { logAndSwallow("message_pipeline", "op", err); }
@@ -360,7 +360,7 @@ export async function handleInboundMessage(
     if (!userResponse) {
       // Strip streaming cursor from partial message
       if (streamMsgId && adapter.editMessage) {
-        const partial = streamBuffer.replace(/^\[lang:\w{2}\]\s*/i, "").replace(/ ▍$/, "").trim();
+        const partial = streamBuffer.replace(/^\[lang:\w{2}\]\s*/i, "").replace(/...$/, "").trim();
         if (partial) await adapter.editMessage(channelId, streamMsgId, partial).catch(() => {});
       }
       if (noReply) {
@@ -406,7 +406,7 @@ export async function handleInboundMessage(
     // --- Deliver response ---
     let lastSentMsgId: number | string | undefined;
     if (streamMsgId && adapter.editMessage) {
-      // ACP edit-in-place: final edit removes cursor ▍
+      // ACP edit-in-place: final edit removes cursor...
       try {
         await adapter.editMessage(channelId, streamMsgId, userResponse);
         lastSentMsgId = streamMsgId;
