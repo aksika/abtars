@@ -161,7 +161,7 @@ export async function handleInboundMessage(
   const busyEntry = sessions.getOrCreate(activeSessionId);
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
-  let silentCheckTimer: ReturnType<typeof setInterval> | undefined;
+  let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
   try {
     busyEntry.busy = true;
     resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
@@ -201,32 +201,31 @@ export async function handleInboundMessage(
       }, 8000);
     }
 
-    // --- Typing TTL + still-working ---
+    // --- Typing TTL ---
     const TYPING_TTL_MS = getEnv().typingTtlMs;
-    const SILENT_THRESHOLD_MS = getEnv().typingSilentThresholdMs;
-    let stillWorkingSent = false;
-    let lastVisibleOutputAt = Date.now();
 
     typingTtlTimer = setTimeout(() => {
       if (typingInterval) { clearInterval(typingInterval); typingInterval = undefined; }
     }, TYPING_TTL_MS);
 
-    silentCheckTimer = setInterval(() => {
-      if (stillWorkingSent) return;
-      if (Date.now() - lastVisibleOutputAt > SILENT_THRESHOLD_MS) {
-        stillWorkingSent = true;
-        adapter.sendMessage(channelId, "⏱️ Still working...", { threadId: msg.threadId }).catch(() => {});
-      }
-    }, 10_000);
-
-    // Per-tool-call typing pulse — transport fires this on each tool execution
+    // Per-tool-call progress — show tool name + elapsed time
     let lastToolNotifyAt = 0;
     let toolBatch: string[] = [];
     let toolBatchTimer: ReturnType<typeof setTimeout> | undefined;
+    let currentToolName = "";
+    let toolStartAt = 0;
+    let toolCallCount = 0;
+    let totalToolStartAt = 0;
 
     transport.onToolCallStart = (toolName: string) => {
-      lastVisibleOutputAt = Date.now();
+      toolCallCount++;
+      if (!totalToolStartAt) totalToolStartAt = Date.now();
+      currentToolName = toolName;
+      toolStartAt = Date.now();
       adapter.sendTyping?.(channelId, msg.threadId).catch(() => {});
+
+      // Clear previous elapsed timer
+      if (toolElapsedTimer) { clearInterval(toolElapsedTimer); toolElapsedTimer = undefined; }
 
       // Batch tool names within 500ms, emit once
       toolBatch.push(toolName);
@@ -235,12 +234,11 @@ export async function handleInboundMessage(
           const now = Date.now();
           if (now - lastToolNotifyAt >= 10000) {
             const names = toolBatch.join(", ");
+            const status = `🔧 ${names}...`;
             if (streamMsgId && adapter.editMessage) {
-              const status = `${streamBuffer.replace(/ ▍$/, "")}\n🔧 ${names}...`.trim();
               adapter.editMessage(channelId, streamMsgId, status + " ▍").catch(() => {});
             } else {
-              // No stream message yet (model went straight to tools) — send standalone
-              const id = await adapter.sendMessage(channelId, `🔧 ${names}...`, { threadId: msg.threadId }).catch(() => undefined);
+              const id = await adapter.sendMessage(channelId, status, { threadId: msg.threadId }).catch(() => undefined);
               if (id && adapter.editMessage) streamMsgId = id;
             }
             lastToolNotifyAt = now;
@@ -249,7 +247,27 @@ export async function handleInboundMessage(
           toolBatchTimer = undefined;
         }, 500);
       }
+
+      // Start elapsed timer — update every 10s during long tool execution
+      toolElapsedTimer = setInterval(() => {
+        const elapsed = Math.round((Date.now() - toolStartAt) / 1000);
+        const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
+        const status = `🔧 ${currentToolName} (${elapsedStr})...`;
+        if (streamMsgId && adapter.editMessage) {
+          adapter.editMessage(channelId, streamMsgId, status + " ▍").catch(() => {});
+        }
+      }, 10_000);
     };
+
+    // --- Fallback notification inline ---
+    if ("onFallback" in transport) {
+      const prev = (transport as any).onFallback;
+      (transport as any).onFallback = (model: string, _ctxPct: number, reason?: string) => {
+        prev?.(model, _ctxPct, reason);
+        const short = model.split("/").pop() ?? model;
+        adapter.sendMessage(channelId, `⚠️ Switched to ${short}${reason ? ` (${reason})` : ""}`, { threadId: msg.threadId }).catch(() => {});
+      };
+    }
 
     // --- Segment break: deliver pre-tool text immediately ---
     let fullResponseSegments: string[] = [];
@@ -282,7 +300,6 @@ export async function handleInboundMessage(
 
       transport.onIntermediateResponse = (chunk: string) => {
         streamBuffer += chunk;
-        lastVisibleOutputAt = Date.now();
       };
 
       let flushing = false;
@@ -511,14 +528,19 @@ export async function handleInboundMessage(
       await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(() => {});
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
-      await adapter.sendMessage(channelId, "⏱️ Request timed out. Try again or /reset if stuck.", { threadId: msg.threadId }).catch(() => {});
+      await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(() => {});
     } else {
-      await adapter.sendMessage(channelId, "❌ Something went wrong. Try /reset to start fresh.", { threadId: msg.threadId }).catch(() => {});
+      const reason = errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
+        : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."
+        : errStr.includes("connect") || errStr.includes("ECONNREFUSED") ? "Connection lost."
+        : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
+        : "Something went wrong.";
+      await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(() => {});
     }
   } finally {
     clearInterval(typingInterval);
     clearTimeout(typingTtlTimer);
-    clearInterval(silentCheckTimer);
+    if (toolElapsedTimer) clearInterval(toolElapsedTimer);
     transport.onToolCallStart = undefined;
     transport.onSegmentBreak = undefined;
     busyEntry.busy = false;
