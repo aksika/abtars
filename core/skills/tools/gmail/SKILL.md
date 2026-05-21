@@ -39,4 +39,4 @@ Standard Gmail operators: `from:`, `to:`, `subject:`, `is:unread`, `newer_than:1
 ## Rules
 - Never delete or trash emails without explicit user request
 - The `gws-cli` output includes a `Using keyring backend:` line on stderr — ignore it
-- If no unread emails, just say "No new emails."
+- If no unread emails, do not send any message — stay silent
