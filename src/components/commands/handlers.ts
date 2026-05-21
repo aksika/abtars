@@ -232,8 +232,8 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
 }
 
 export async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<boolean> {
-  const id = text.replace(/^\/(tasks?|cron) trigger /, "").trim();
-  if (!id) { await ctx.reply("Usage: /tasks trigger <cron-id>"); return true; }
+  const id = text.replace(/^\/(tasks?|cron) run /, "").trim();
+  if (!id) { await ctx.reply("Usage: /task run <cron-id>"); return true; }
   const err = ctx.enqueueCron?.(id, true);
   await ctx.reply(err ?? `⏳ Running: ${id}`);
   return true;

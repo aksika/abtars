@@ -50,9 +50,9 @@ registerExact("/session", handleSession);
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
 registerPrefix("/session ", handleSession);
-registerPrefix("/tasks trigger ", handleTasksTrigger);
-registerPrefix("/task trigger ", handleTasksTrigger);
-registerPrefix("/cron trigger ", handleTasksTrigger);
+registerPrefix("/tasks run ", handleTasksTrigger);
+registerPrefix("/task run ", handleTasksTrigger);
+registerPrefix("/cron run ", handleTasksTrigger);
 registerPrefix("/tasks log ", handleTasksLog);
 registerPrefix("/task log ", handleTasksLog);
 registerPrefix("/cron log ", handleTasksLog);
