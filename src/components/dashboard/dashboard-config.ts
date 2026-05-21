@@ -175,7 +175,7 @@ export function buildStatusSnapshot(refs: SubsystemRefs): StatusSnapshot {
     heartbeat,
     cron: readCronStatus(),
     notebooklm: refs.notebooklm ? { enabled: true } : null,
-    gwsAuth: existsSync(resolve(homedir(), ".config", "gws", "credentials.enc")),
+    gwsAuth: existsSync(resolve(homedir(), ".config", "gws-cli", "token.json.enc")),
     xAuth: existsSync(resolve(abtarsHome(), "secret", "cookies", "x-cookies.json")),
     agentApi: refs.agentApi ? { traffic: refs.agentApi.getTrafficLog() } : null,
     model: refs.model ?? { name: "unknown", provider: "unknown", fallbackChain: [] },
