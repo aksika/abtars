@@ -14,10 +14,7 @@ describe('abtars CLI dispatcher', () => {
     expect(await main(['wat'])).toBe(2);
   });
 
-  it('update --source npm reports not-yet-supported and exits 2', async () => {
-    // Note: this depends on update command short-circuiting before touching disk.
-    // Since we're not on a real install, even --source local would fail in weird
-    // ways — but --source npm returns 2 before any I/O.
-    expect(await main(['update', '--source', 'npm'])).toBe(2);
+  it('update --source unknown reports not-yet-supported and exits 2', async () => {
+    expect(await main(['update', '--source', 'git'])).toBe(2);
   });
 });

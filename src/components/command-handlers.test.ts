@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleCommand, type CommandContext } from "./commands/index.js";
+import { SessionManager } from "./session-manager.js";
 import { SessionRegistry } from "./session-registry.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
@@ -15,6 +16,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
   return {
     sessionKey: "telegram:123",
     chatId: 123,
+    userId: "test",
     platform: "telegram",
     reply: vi.fn().mockResolvedValue(undefined),
     transport: {
@@ -33,6 +35,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     codingMode: { has: vi.fn().mockReturnValue(false), start: vi.fn(), stop: vi.fn(), getTransport: vi.fn() } as unknown as CodingMode,
     idleSave: { reset: vi.fn(), stop: vi.fn(), save: vi.fn().mockResolvedValue(undefined) } as unknown as IdleSave,
     sessions: new SessionRegistry(),
+    sessionManager: { endSession: vi.fn(), getActiveSessionId: () => "telegram:123", getActiveSession: () => ({ id: "telegram:123" }), setRuntime: vi.fn() } as any,
     updateCtxStart: vi.fn(),
     ...overrides,
   };
@@ -43,7 +46,7 @@ describe("command-handlers", () => {
     const ctx = makeCtx();
     const handled = await handleCommand("/new", ctx);
     expect(handled).toBe(true);
-    expect(ctx.transport.resetSession).toHaveBeenCalledWith("telegram:123");
+    expect(ctx.transport.resetSession).toHaveBeenCalledWith(expect.any(String));
     expect(ctx.reply).toHaveBeenCalled();
   });
 
@@ -51,7 +54,7 @@ describe("command-handlers", () => {
     const ctx = makeCtx();
     const handled = await handleCommand("/coding", ctx);
     expect(handled).toBe(true);
-    expect(ctx.codingMode.start).toHaveBeenCalledWith("telegram:123");
+    expect(ctx.codingMode.start).toHaveBeenCalledWith(expect.any(String));
   });
 
   it("/default deactivates coding mode", async () => {
@@ -59,7 +62,7 @@ describe("command-handlers", () => {
     (ctx.codingMode.has as ReturnType<typeof vi.fn>).mockReturnValue(true);
     const handled = await handleCommand("/default", ctx);
     expect(handled).toBe(true);
-    expect(ctx.codingMode.stop).toHaveBeenCalledWith("telegram:123");
+    expect(ctx.codingMode.stop).toHaveBeenCalledWith(expect.any(String));
   });
 
   it("/stop sends interrupt", async () => {

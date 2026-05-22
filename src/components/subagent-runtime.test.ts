@@ -148,6 +148,6 @@ describe("SubagentRuntime shared registry", () => {
     await runtime.complete("dreamy", "test");
 
     const { createSubagentTransport } = await import("./agent-registry.js");
-    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry);
+    expect(createSubagentTransport).toHaveBeenCalledWith("sleep", registry, undefined);
   });
 });

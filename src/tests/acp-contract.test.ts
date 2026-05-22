@@ -62,12 +62,19 @@ describe("Contract: ACP permission handling", () => {
 });
 
 describe("Contract: ACP session update handling", () => {
-  it("collects text chunks into response", () => {
+  function makeTransport(): any {
     const transport = Object.create(AcpTransport.prototype) as any;
     transport.responseChunks = new Map([["sess1", []]]);
     transport.tag = "test";
     transport.lastActivityAt = 0;
-    transport.toolInFlight = null;
+    transport.lastContentAt = 0;
+    transport.toolMeta = null;
+    transport.sm = { state: "idle", toolStarted: vi.fn(), toolCompleted: vi.fn() };
+    return transport;
+  }
+
+  it("collects text chunks into response", () => {
+    const transport = makeTransport();
 
     transport["handleSessionUpdate"]({
       sessionId: "sess1",
@@ -89,11 +96,8 @@ describe("Contract: ACP session update handling", () => {
   });
 
   it("tracks tool calls in flight", () => {
-    const transport = Object.create(AcpTransport.prototype) as any;
-    transport.responseChunks = new Map();
-    transport.tag = "test";
-    transport.lastActivityAt = 0;
-    transport.toolInFlight = null;
+    const transport = makeTransport();
+    transport.sm.state = "prompting";
 
     transport["handleSessionUpdate"]({
       sessionId: "sess1",

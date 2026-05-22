@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SessionRegistry } from "./session-registry.js";
+import { SessionManager } from "./session-manager.js";
 
 vi.mock("node:child_process", () => ({
   execFile: vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
@@ -25,8 +26,8 @@ const fsMock = vi.hoisted(() => ({
 }));
 vi.mock("node:fs", () => fsMock);
 
-import { handleCommand } from "./command-handlers.js";
-import type { CommandContext } from "./command-handlers.js";
+import { handleCommand } from "./commands/index.js";
+import type { CommandContext } from "./commands/types.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 
@@ -53,6 +54,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     codingMode: { has: vi.fn().mockReturnValue(false), start: vi.fn(), stop: vi.fn(), getTransport: vi.fn() } as unknown as CodingMode,
     idleSave: { reset: vi.fn(), stop: vi.fn(), save: vi.fn().mockResolvedValue(undefined) } as unknown as IdleSave,
     sessions: new SessionRegistry(),
+    sessionManager: new SessionManager(),
     updateCtxStart: vi.fn(),
     ...overrides,
   };

@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SessionRegistry } from "../components/session-registry.js";
+import { SessionManager } from "../components/session-manager.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -81,6 +82,7 @@ function makeDeps(transport: IKiroTransport, memory: MemoryManager | null, overr
     startedAt: Date.now(),
     sttConfig: null, ttsConfig: null,
     sessions: new SessionRegistry(),
+    sessionManager: new SessionManager(),
     updateCtxStart: vi.fn(),
     ...overrides,
   };
