@@ -54,6 +54,8 @@ export class DirectApiTransport implements IKiroTransport {
   onSegmentBreak?: (text: string) => void;
   /** Called when fallback model is selected — send notification before response. */
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
+  /** Cooperative pause check — if returns true, agent loop breaks between tool calls. */
+  isPaused?: () => boolean;
 
   /** Context orchestrator — when set, messages are built from DB instead of in-memory session. */
   contextOrchestrator?: import("abmind").ContextOrchestrator;
@@ -234,6 +236,7 @@ export class DirectApiTransport implements IKiroTransport {
   private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
       if (signal.aborted) throw new Error("Aborted");
+      if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
 
       const { content, toolCalls, usage } = await this.streamCompletion(session, signal);
 

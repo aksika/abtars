@@ -68,6 +68,30 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     return true;
   }
 
+  // /session pause [#]
+  if (args.startsWith("pause")) {
+    const indexStr = args.slice(5).trim();
+    const index = indexStr ? parseInt(indexStr, 10) : undefined;
+    if (indexStr && isNaN(index!)) { await ctx.reply("Usage: /session pause [#]"); return true; }
+    const result = ctx.sessionManager.pauseSession(ctx.userId, ctx.platform, index);
+    if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
+    await ctx.reply(`⏸ Session #${result.shortIndex} (${typeLabel(result.type)}) paused.`);
+    logInfo(TAG, `Paused session ${result.id}`);
+    return true;
+  }
+
+  // /session resume [#]
+  if (args.startsWith("resume")) {
+    const indexStr = args.slice(6).trim();
+    const index = indexStr ? parseInt(indexStr, 10) : undefined;
+    if (indexStr && isNaN(index!)) { await ctx.reply("Usage: /session resume [#]"); return true; }
+    const result = ctx.sessionManager.resumeSession(ctx.userId, ctx.platform, index);
+    if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
+    await ctx.reply(`▶️ Session #${result.shortIndex} (${typeLabel(result.type)}) resumed.`);
+    logInfo(TAG, `Resumed session ${result.id}`);
+    return true;
+  }
+
   // /session <#> → switch
   const index = parseInt(args, 10);
   if (!isNaN(index)) {
@@ -78,6 +102,6 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     return true;
   }
 
-  await ctx.reply("Usage: /session [new [browse|code|task] | end [#] | kill <#> | <#>]");
+  await ctx.reply("Usage: /session [new [browse|code|task] | end [#] | kill <#> | pause [#] | resume [#] | <#>]");
   return true;
 }

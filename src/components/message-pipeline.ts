@@ -186,6 +186,12 @@ export async function handleInboundMessage(
     const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
     const agentSession = activeSession.agentSession;
     logDebug(TAG, `Route: session=${activeSessionId} type=${activeSession.type} agentSession=${agentSession ? "yes" : "no"}`);
+
+    // Wire cooperative pause check (#539) — agent loop checks this between tool calls
+    if ("isPaused" in transport) {
+      (transport as any).isPaused = () => activeSession.paused;
+    }
+
     const responsePromise = agentSession
       ? agentSession.sendPrompt(activeSessionId, prompt)
       : transport.sendPrompt(activeSessionId, prompt);

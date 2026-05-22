@@ -18,6 +18,8 @@ export interface ManagedSession {
   createdAt: number;    // epoch ms
   isTransport: boolean; // true = has own ConversationSession, false = storage tag only
   ended: boolean;       // gracefully ended (messages kept)
+  paused: boolean;      // cooperative interrupt — agent loop stops between tool calls
+  motherId?: string;    // session ID of the session that spawned this one (lineage)
   agentSession?: import("./subagent-runtime.js").AgentSession; // sub-transport for C/B/T
 }
 
@@ -72,7 +74,7 @@ export class SessionManager {
     return state;
   }
 
-  private allocateSession(state: PlatformState, type: SessionType, isTransport: boolean): ManagedSession {
+  private allocateSession(state: PlatformState, type: SessionType, isTransport: boolean, motherId?: string): ManagedSession {
     const idx = state.nextIndex++;
     const ts = Math.floor(Date.now() / 1000);
     const session: ManagedSession = {
@@ -82,6 +84,8 @@ export class SessionManager {
       createdAt: Date.now(),
       isTransport,
       ended: false,
+      paused: false,
+      motherId,
     };
     state.sessions.push(session);
     return session;
@@ -116,7 +120,8 @@ export class SessionManager {
     if (alive.length >= this.maxSessions) {
       return `Max sessions reached (${this.maxSessions}). End or kill a session first.`;
     }
-    const session = this.allocateSession(state, type, true);
+    const active = state.sessions.find(s => s.shortIndex === state.activeIndex && !s.ended);
+    const session = this.allocateSession(state, type, true, active?.id);
     state.activeIndex = session.shortIndex;
     return session;
   }
@@ -128,7 +133,8 @@ export class SessionManager {
     if (alive.length >= this.maxSessions) {
       return `Max sessions reached — auto-spawn skipped.`;
     }
-    return this.allocateSession(state, type, false);
+    const active = state.sessions.find(s => s.shortIndex === state.activeIndex && !s.ended);
+    return this.allocateSession(state, type, false, active?.id);
   }
 
   /** Switch active transport session. Returns session or error. */
@@ -203,6 +209,37 @@ export class SessionManager {
     return { sessions: state.sessions.filter(s => !s.ended), activeIndex: state.activeIndex };
   }
 
+  /** Find a session by ID across all platforms. */
+  getSessionById(sessionId: string): ManagedSession | undefined {
+    for (const state of this.states.values()) {
+      const found = state.sessions.find(s => s.id === sessionId);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  /** Pause a session (cooperative interrupt — agent loop stops between tool calls). */
+  pauseSession(userId: string, platform: Platform, index?: number): ManagedSession | string {
+    const state = this.getOrCreateState(userId, platform);
+    const targetIdx = index ?? state.activeIndex;
+    const target = state.sessions.find(s => s.shortIndex === targetIdx && !s.ended);
+    if (!target) return `Session #${targetIdx} not found.`;
+    if (target.paused) return `Session #${targetIdx} is already paused.`;
+    target.paused = true;
+    return target;
+  }
+
+  /** Resume a paused session. */
+  resumeSession(userId: string, platform: Platform, index?: number): ManagedSession | string {
+    const state = this.getOrCreateState(userId, platform);
+    const targetIdx = index ?? state.activeIndex;
+    const target = state.sessions.find(s => s.shortIndex === targetIdx && !s.ended);
+    if (!target) return `Session #${targetIdx} not found.`;
+    if (!target.paused) return `Session #${targetIdx} is not paused.`;
+    target.paused = false;
+    return target;
+  }
+
   /** End auto-spawn sessions that have been inactive. */
   expireAutoSessions(timeoutMs: number): ManagedSession[] {
     const expired: ManagedSession[] = [];
@@ -235,8 +272,10 @@ export class SessionManager {
     const lines = sessions.map(s => {
       const marker = s.shortIndex === activeIndex ? " *" : "";
       const transport = s.isTransport ? "" : " (sub)";
+      const paused = s.paused ? " ⏸" : "";
+      const mother = s.motherId ? ` ← #${this.getSessionById(s.motherId)?.shortIndex ?? "?"}` : "";
       const time = new Date(s.createdAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-      return `#${s.shortIndex} ${typeLabel(s.type)}${transport} — ${time}${marker}`;
+      return `#${s.shortIndex} ${typeLabel(s.type)}${transport}${mother} — ${time}${paused}${marker}`;
     });
     return lines.join("\n");
   }

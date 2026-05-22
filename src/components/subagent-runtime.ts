@@ -59,7 +59,7 @@ const DEFAULT_SPAWN_TIMEOUT_MS = 600_000; // 10 min
 
 export class SubagentRuntime {
   private readonly cache = new Map<AgentName, CachedAgent>();
-  private readonly activeSpawns = new Map<string, { abort: AbortController }>();
+  private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
   private _registry: ModelHealthRegistry | null = null;
   private _mainTransport: IKiroTransport | null = null;
   private _sessionManager: import("./session-manager.js").SessionManager | null = null;
@@ -125,7 +125,7 @@ export class SubagentRuntime {
   async spawn(agent: AgentName, prompt: string, opts?: SpawnOpts): Promise<SpawnResult> {
     const taskId = randomBytes(4).toString("hex");
     const abort = new AbortController();
-    this.activeSpawns.set(taskId, { abort });
+    this.activeSpawns.set(taskId, { abort, startedAt: Date.now() });
 
     // Create sub-session for visibility in /session list (#510)
     if (this._sessionManager) {
@@ -167,6 +167,24 @@ export class SubagentRuntime {
       logInfo(TAG, `${name} transport closed`);
     }
     this.cache.clear();
+  }
+
+  /** Active registry: list running background spawns. */
+  listActive(): Array<{ taskId: string; startedAt: number }> {
+    return [...this.activeSpawns.entries()].map(([taskId, entry]) => ({
+      taskId,
+      startedAt: (entry as any).startedAt ?? 0,
+    }));
+  }
+
+  /** Interrupt a specific spawn by taskId. Returns true if found. */
+  interruptSpawn(taskId: string): boolean {
+    const entry = this.activeSpawns.get(taskId);
+    if (!entry) return false;
+    entry.abort.abort();
+    this.activeSpawns.delete(taskId);
+    logInfo(TAG, `spawn ${taskId} interrupted`);
+    return true;
   }
 
   private async createAgent(agent: AgentName): Promise<CachedAgent> {
