@@ -1,6 +1,6 @@
 ---
 name: a2a-communication
-description: Communicate with other abtars agents (Molty, KP) via peer_ask tool. Delegate tasks, ask questions, coordinate across instances.
+description: Communicate with other abtars agents via peer_ask tool. Delegate tasks, ask questions, coordinate across instances.
 requires: abtars
 ---
 
@@ -10,8 +10,8 @@ Talk to other abtars instances configured in `~/.abtars/config/peers.json`.
 
 ## When to use
 
-- You need information or action from another agent (e.g. ask Molty to check something on the Mac, ask KP to run a command on WSL)
-- The user explicitly asks you to delegate to a peer ("ask molty...", "tell kp to...")
+- You need information or action from another agent
+- The user explicitly asks you to delegate to a peer ("ask <peer>...", "tell <peer> to...")
 - A task requires capabilities only available on the other host
 
 ## When NOT to use
@@ -23,8 +23,8 @@ Talk to other abtars instances configured in `~/.abtars/config/peers.json`.
 ## Usage
 
 ```
-peer_ask(peer_name="molty", prompt="What's the current disk usage on the Mac?")
-peer_ask(peer_name="kp", prompt="Run 'abtars status' and report back")
+peer_ask(peer_name="<peer>", prompt="What's the current disk usage?")
+peer_ask(peer_name="<peer>", prompt="Run 'abtars status' and report back")
 ```
 
 ## Available peers
@@ -43,13 +43,13 @@ Check `~/.abtars/config/peers.json` for configured peer names. If no peers confi
 The peer may be behind a firewall that blocks inbound TCP. Use the UDP wake-up:
 
 ```
-peer_wakeup(peer_name="kp")
+peer_wakeup(peer_name="<peer>")
 ```
 
 This sends a DNS-disguised UDP packet that tells the peer to call YOU back. Flow:
-1. `peer_ask("kp", "your question")` → fails (ECONNREFUSED)
-2. `peer_wakeup("kp")` → sends mDNS wake-up signal
-3. KP receives wake-up → initiates outbound `callPeer("molty", "callback")` to you
+1. `peer_ask("<peer>", "your question")` → fails (ECONNREFUSED)
+2. `peer_wakeup("<peer>")` → sends mDNS wake-up signal
+3. Peer receives wake-up → initiates outbound callback to you
 4. You receive the callback and can respond
 
 **Always try `peer_ask` first.** Only use `peer_wakeup` if direct call fails. The wake-up is a doorbell — it triggers a callback, not a direct answer to your question.
@@ -65,6 +65,4 @@ This sends a DNS-disguised UDP packet that tells the peer to call YOU back. Flow
 
 ## Network topology
 
-- **molty**: `100.82.167.127:3100` (Tailscale IP, Mac)
-- **IRC bridges server**: `192.168.1.128:6667` (Mac LAN IP — NOT localhost!)
-- These are two different IPs for the same Mac (Tailscale vs LAN)
+Peer IPs are configured in `~/.abtars/config/peers.json`. Each entry has a `url` field with the peer's address and port.

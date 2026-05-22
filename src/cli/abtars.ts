@@ -68,8 +68,6 @@ Usage:
   abtars restart [--cold]
   abtars stop [--force]
   abtars status
-
-See abproject/docs/plans/158-deploy-rewrite.md for the full contract.
 `,
   );
 }

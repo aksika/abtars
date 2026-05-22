@@ -6,7 +6,7 @@ user-invocable: false
 
 # Memory Anomaly Definitions
 
-Reference for Dreamy's daily audit and KP's review of flagged items.
+Reference for Dreamy's daily audit and review of flagged items.
 
 ## Auto-fix rules (Dreamy handles alone)
 
@@ -14,7 +14,7 @@ Reference for Dreamy's daily audit and KP's review of flagged items.
 |---------|-----------|-----|
 | Default attributes (never tagged) | trust=0 AND credibility=6 AND integrity=2 | trust=2, credibility=3 |
 | Decisions at classification=0 | memory_type='decision' AND classification=0 | classification=1 |
-| KP decisions at trust<2 | memory_type='decision' AND trust<2 | trust=2 |
+| Self decisions at trust<2 | memory_type='decision' AND trust<2 | trust=2 |
 | Stale credibility=6 (>7 days) | credibility=6 AND age>7d AND trust≥2 | credibility=3 |
 | NULL embeddings | embedding IS NULL | run abmind embed |
 
@@ -33,7 +33,7 @@ Escalation comes from **user context**, not agent inference. Do NOT flag: operat
 0=UNCLASSIFIED, 1=RESTRICTED, 2=CONFIDENTIAL, 3=SECRET
 
 ## Trust scale
-0=untrusted (web), 1=peer (A2A), 2=self (KP), 3=owner (aksika)
+0=untrusted (web), 1=peer (A2A), 2=self, 3=owner (aksika)
 
 ## Credibility scale
 1=confirmed, 2=probably true, 3=possibly true, 4=doubtful, 5=improbable, 6=unknown

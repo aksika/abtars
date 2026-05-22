@@ -174,7 +174,8 @@ export async function handleFacts(_text: string, ctx: CommandContext): Promise<b
 }
 
 export async function handleTasksList(_text: string, ctx: CommandContext): Promise<boolean> {
-  const now = new Date().toLocaleString("en-GB", { timeZone: "Europe/Budapest", dateStyle: "medium", timeStyle: "medium" });
+  const tz = process.env["TZ"] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const now = new Date().toLocaleString("en-GB", { timeZone: tz, dateStyle: "medium", timeStyle: "medium" });
   let listing: string;
   try {
     const { readEntries } = await import("../tasks/task-store.js");

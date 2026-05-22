@@ -1,6 +1,6 @@
 /**
  * Dashboard configuration, data models, and utility functions for the
- * Kiro Professor Web UI.
+ * abTARS Web UI.
  */
 
 // ── Dashboard Config ────────────────────────────────────────────────────────

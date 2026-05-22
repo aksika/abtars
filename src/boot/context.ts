@@ -4,8 +4,6 @@
  * Populated by boot phases in src/boot/phase-*.ts, consumed by later phases
  * and by the Bridge class (for shutdown). Each mutable field is set in
  * exactly one phase.
- *
- * See abproject/docs/plans/164-boot-phases.md for the phase ordering invariant.
  */
 
 export type PhaseResult = "ran" | "skipped";

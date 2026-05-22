@@ -7,7 +7,7 @@ describe("isBridgeSpawnCommand", () => {
     "node /Users/akos/.abtars/current/dist/main.js",
     "nohup node dist/main.js &",
     "~/.abtars/abtars.sh --all --web",
-    "bash /Users/akos/.abtars/watchdog.sh --all",
+    "bash /Users/user/.abtars/watchdog.sh --all",
     "./watchdog.sh",
     "launchctl load ~/Library/LaunchAgents/com.abtars.molty.plist",
     "launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.abtars.watchdog.plist",

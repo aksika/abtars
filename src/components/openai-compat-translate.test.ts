@@ -252,7 +252,7 @@ describe("#373 — SSE DONE_MARKER", () => {
   });
 });
 
-describe("#373 — validateChatRequest (openclaw-style untrusted-input narrowing)", () => {
+describe("#373 — validateChatRequest (untrusted-input narrowing)", () => {
   it("accepts well-formed request", () => {
     const result = validateChatRequest({
       model: "gpt-4",

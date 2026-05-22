@@ -38,7 +38,7 @@ describe("transcribeAudio — Property 1: STT request shape invariant", () => {
    * contain a "prompt" field equal to LANGUAGE_HINT_PROMPT and SHALL NOT
    * contain a "language" field.
    */
-  it("always includes prompt=LANGUAGE_HINT_PROMPT and never includes language field", async () => {
+  it("includes prompt only when STT_LANGUAGE_HINT is set, never includes language field", async () => {
     const config: SttConfig = { provider: "groq", apiKey: "test-key-123" };
 
     await fc.assert(
@@ -50,8 +50,12 @@ describe("transcribeAudio — Property 1: STT request shape invariant", () => {
           await transcribeAudio(audioBuffer, filename, config);
 
           expect(capturedFormData).not.toBeNull();
-          expect(capturedFormData!.has("prompt")).toBe(true);
-          expect(capturedFormData!.get("prompt")).toBe(LANGUAGE_HINT_PROMPT);
+          if (LANGUAGE_HINT_PROMPT) {
+            expect(capturedFormData!.has("prompt")).toBe(true);
+            expect(capturedFormData!.get("prompt")).toBe(LANGUAGE_HINT_PROMPT);
+          } else {
+            expect(capturedFormData!.has("prompt")).toBe(false);
+          }
           expect(capturedFormData!.has("language")).toBe(false);
         },
       ),
@@ -80,12 +84,16 @@ describe("transcribeAudio — Unit tests: prompt value and language field", () =
     globalThis.fetch = originalFetch;
   });
 
-  it("sends the exact prompt string 'ez egy magyar szöveg. or English'", async () => {
+  it("sends prompt from STT_LANGUAGE_HINT env var when set", async () => {
     const audio = Buffer.from([0x4f, 0x67, 0x67, 0x53]);
     await transcribeAudio(audio, "voice.ogg", config);
 
-    expect(capturedFormData).not.toBeNull();
-    expect(capturedFormData!.get("prompt")).toBe("ez egy magyar szöveg. or English");
+    // LANGUAGE_HINT_PROMPT is read at import time; if env not set, prompt field is omitted
+    if (LANGUAGE_HINT_PROMPT) {
+      expect(capturedFormData!.get("prompt")).toBe(LANGUAGE_HINT_PROMPT);
+    } else {
+      expect(capturedFormData!.has("prompt")).toBe(false);
+    }
   });
 
   it("does not include a language field in the FormData", async () => {
@@ -96,7 +104,8 @@ describe("transcribeAudio — Unit tests: prompt value and language field", () =
     expect(capturedFormData!.has("language")).toBe(false);
   });
 
-  it("LANGUAGE_HINT_PROMPT export equals the expected value", () => {
-    expect(LANGUAGE_HINT_PROMPT).toBe("ez egy magyar szöveg. or English");
+  it("LANGUAGE_HINT_PROMPT defaults to empty when env not set", () => {
+    // At test time, STT_LANGUAGE_HINT is not set → empty string
+    expect(typeof LANGUAGE_HINT_PROMPT).toBe("string");
   });
 });

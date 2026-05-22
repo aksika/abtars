@@ -52,8 +52,6 @@ function writeToFile(line: string): void {
 // independent so the bridge can run against a different memory backend
 // and abmind can ship as a standalone npm package without pulling
 // abtars in for a utility function.
-//
-// See abproject/docs/plans/178-redact-secrets-move.md for the rationale.
 
 const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/sk-[A-Za-z0-9_-]{20,}/g, "sk-***REDACTED***"],

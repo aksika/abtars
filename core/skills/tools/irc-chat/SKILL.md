@@ -80,5 +80,5 @@ These are separate tools for different purposes:
 | Visibility | Log-only | Human-watchable (via IRC client) |
 | Use when | You need an answer from a specific peer | User asks you to announce / converse on a channel |
 
-If the user says "ask molty what time it is" → use `peer_ask`.
+If the user says "ask <peer> what time it is" → use `peer_ask`.
 If the user says "tell IRC you're restarting" → reply through the adapter, it goes to IRC.

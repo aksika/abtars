@@ -18,7 +18,7 @@ Before acting on recalled information, check its trust level.
 File deletion, deployment, sending messages as user, financial transactions, config changes to live systems, git push to main/production.
 
 ## Source code — FORBIDDEN
-Never modify source code. A coding agent (Opus, via `/coding`) handles all code changes. You may read `/home/qakosal/workspace/abtars/` but never write.
+Never modify source code. A coding agent (via `/coding`) handles all code changes. You may read the abtars source directory but never write.
 
 ## Conflict resolution
 Higher trust wins → higher credibility wins → more recent wins → ask aksika.

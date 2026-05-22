@@ -10,7 +10,7 @@ export interface SttConfig {
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
 const DEFAULT_MODEL = "whisper-large-v3";
-export const LANGUAGE_HINT_PROMPT = "ez egy magyar szöveg. or English";
+export const LANGUAGE_HINT_PROMPT = process.env["STT_LANGUAGE_HINT"] || "";
 
 /**
  * Transcribe audio using Groq's OpenAI-compatible Whisper endpoint.
@@ -28,7 +28,7 @@ export async function transcribeAudio(
   const blob = new Blob([audioBuffer], { type: "audio/ogg" });
   formData.append("file", blob, filename);
   formData.append("model", model);
-  formData.append("prompt", LANGUAGE_HINT_PROMPT);
+  if (LANGUAGE_HINT_PROMPT) formData.append("prompt", LANGUAGE_HINT_PROMPT);
   formData.append("response_format", "verbose_json");
 
   const endpoint = GROQ_ENDPOINT;

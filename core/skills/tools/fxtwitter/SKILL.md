@@ -11,8 +11,7 @@ Fetch Twitter/X content without API keys using the free FXTwitter API. No timeli
 ## Follow list
 
 AI influencers and researchers we track:
-- **Base list:** `~/.abtars/workspace/twitterX/base.follows.json` — curated, manually maintained
-- **Molty list:** `~/.abtars/workspace/twitterX/molty.follows.json` — from Molty's X following list
+- **Follow list:** `~/.abtars/workspace/twitterX/follows.json` — curated, manually maintained
 
 Read the follow list before searching to target the right accounts.
 

@@ -153,7 +153,7 @@ describe("DashboardServer", () => {
 
       expect(res.status).toBe(200);
       expect(res.headers["content-type"]).toContain("text/html");
-      expect(res.body).toContain("Kiro Professor Dashboard");
+      expect(res.body).toContain("abTARS Dashboard");
     });
   });
 

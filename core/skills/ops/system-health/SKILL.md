@@ -1,6 +1,6 @@
 ---
 name: system-health
-description: Run a system health check on Molty. Reads system-notes.md for known acceptable deviations before reporting.
+description: Run a system health check. Reads system-notes.md for known acceptable deviations before reporting.
 user-invocable: true
 ---
 

@@ -15,10 +15,10 @@ abmind recall --translated "kw1,kw2" --chat-id 7773842843 [--original "szó"] [-
 ## Parameter rules
 - `--translated`: ALWAYS English keywords. Translate the user's words to English.
 - `--original`: If the user spoke in a non-English language, pass the original keyword here. Omit if the conversation is in English.
-  Example: user says "kiskutya" → `--translated "puppy" --original "kiskutya"`
+  Example: user says "chien" → `--translated "dog" --original "chien"`
 - `--stages`: Optional. Run only specific stages (S1-S7, Se). Omit to run all.
 - `--entity`: Optional. Filter results to memories linked to a specific entity (person, agent, project).
-  Example: "what do you know about Molty?" → `--entity "Molty"`
+  Example: "what do you know about Alice?" → `--entity "Alice"`
 - Legacy: `--keywords` is accepted as alias for `--translated`.
 
 ## Keyword rules
