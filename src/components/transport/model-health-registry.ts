@@ -37,6 +37,7 @@ interface Bucket {
   consecutiveErrors: number;
   cooldownUntil?: number;
   authFailed?: boolean;
+  demoted?: boolean;
 }
 
 // Defaults (unchanged from pre-config behavior)
@@ -61,6 +62,9 @@ export class ModelHealthRegistry {
   private readonly transientProgressive: number[];
   private readonly transientCooldownAfter: number;
   private readonly transientMaxCooldownMs: number;
+
+  /** Fired when a model crosses the demotion threshold. Wired at boot. */
+  onDemote?: (model: string, endpoint: string, reason: "auth" | "timeout") => void;
 
   constructor(config?: HealthPolicyConfig) {
     this.skipThreshold = config?.skipThreshold ?? D_SKIP_THRESHOLD;
@@ -125,6 +129,17 @@ export class ModelHealthRegistry {
     b.consecutiveErrors++;
     b.lastUpdate = now;
     this.buckets.set(key, b);
+
+    // Demotion trigger
+    if (this.onDemote && !b.demoted) {
+      if (kind === "auth" && b.consecutiveErrors >= 3) {
+        b.demoted = true;
+        this.onDemote(model, endpoint, "auth");
+      } else if (kind === "transient" && b.consecutiveErrors >= 5) {
+        b.demoted = true;
+        this.onDemote(model, endpoint, "timeout");
+      }
+    }
   }
 
   getHealth(): Map<string, { level: number; consecutiveErrors: number; cooldownUntil?: number; status: ModelStatus }> {

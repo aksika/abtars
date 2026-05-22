@@ -216,25 +216,39 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
     return null;
   }
 
-  const provider = tc.providers[assignment.provider];
-  if (!provider) {
-    logWarn(TAG, `Provider "${assignment.provider}" not found for role "${role}"`);
+  const providers = tc.providers;
+  // If primary is demoted, promote first non-demoted fallback
+  let effectiveModel = assignment.model;
+  let effectiveProvider = assignment.provider;
+  if ((assignment as any).demoted) {
+    const firstHealthy = (assignment.fallbacks ?? []).find((fb: any) => !fb.demoted);
+    if (firstHealthy) {
+      effectiveModel = firstHealthy.model;
+      effectiveProvider = firstHealthy.provider;
+    } else {
+      logWarn(TAG, `All models demoted for role "${role}" — using primary anyway`);
+    }
+  }
+
+  const resolvedProvider = providers[effectiveProvider];
+  if (!resolvedProvider) {
+    logWarn(TAG, `Provider "${effectiveProvider}" not found for role "${role}"`);
     return null;
   }
 
   const mc = models ?? loadModels();
-  const modelEntry = mc[assignment.model];
+  const modelEntry = mc[effectiveModel];
   if (!modelEntry) {
-    logWarn(TAG, `Model "${assignment.model}" not in models.json — using defaults`);
+    logWarn(TAG, `Model "${effectiveModel}" not in models.json — using defaults`);
   }
 
   return {
-    model: assignment.model,
-    provider,
-    providerName: assignment.provider,
+    model: effectiveModel,
+    provider: resolvedProvider,
+    providerName: effectiveProvider,
     contextWindow: modelEntry?.contextWindow ?? 128000,
     maxOutput: modelEntry?.maxOutput ?? 8192,
-    fallbacks: assignment.fallbacks ?? [],
+    fallbacks: (assignment.fallbacks ?? []).filter((fb: any) => !fb.demoted && fb.model !== effectiveModel),
   };
 }
 
@@ -300,6 +314,20 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): void
   writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
   cachedTransport = tc;
   logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
+}
+
+/** Mark a model as demoted in transport.json. Skipped by candidate loading. */
+export function demoteModel(model: string, reason: "auth" | "timeout"): void {
+  const tc = loadTransport();
+  if (!tc) return;
+  let found = false;
+  for (const agent of Object.values(tc.agents)) {
+    if (agent.model === model) { (agent as any).demoted = new Date().toISOString(); (agent as any).demotedReason = reason; found = true; }
+    for (const fb of agent.fallbacks ?? []) {
+      if (fb.model === model) { (fb as any).demoted = new Date().toISOString(); (fb as any).demotedReason = reason; found = true; }
+    }
+  }
+  if (found) writeTransportConfig(tc, `auto-demote ${model} (${reason})`);
 }
 
 /** Swap transport.json ↔ transport.json.old (undo last switch). */

@@ -144,6 +144,14 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     if (!ctx.modelHealthRegistry) {
       ctx.modelHealthRegistry = new ModelHealthRegistry(tc?.healthPolicy);
     }
+    // Wire auto-demotion
+    if (!ctx.modelHealthRegistry.onDemote) {
+      ctx.modelHealthRegistry.onDemote = (model, _endpoint, reason) => {
+        import("../components/transport-config.js").then(({ demoteModel }) => demoteModel(model, reason));
+        import("../components/notification.js").then(({ sendNotification }) =>
+          sendNotification(ctx, `⚠️ ${model} demoted (${reason}). Next healthy model promoted.`)).catch(() => {});
+      };
+    }
     const policy = new FallbackPolicy(candidates, ctx.modelHealthRegistry);
 
     transport = new DirectApiTransport({
