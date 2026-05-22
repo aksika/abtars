@@ -316,6 +316,22 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): void
   logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
 }
 
+/** Remove demoted models from config. Called on user-initiated model switch.
+ *  Models the user just chose are resurrected (demotion cleared). All other demoted entries are deleted. */
+export function cleanDemotedModels(tc: TransportConfig, chosenModel?: string): void {
+  for (const agent of Object.values(tc.agents)) {
+    if ((agent as any).demoted) {
+      if (agent.model === chosenModel) { delete (agent as any).demoted; delete (agent as any).demotedReason; }
+    }
+    if (agent.fallbacks) {
+      agent.fallbacks = agent.fallbacks.filter((fb: any) => !fb.demoted || fb.model === chosenModel);
+      for (const fb of agent.fallbacks) {
+        if ((fb as any).demoted && fb.model === chosenModel) { delete (fb as any).demoted; delete (fb as any).demotedReason; }
+      }
+    }
+  }
+}
+
 /** Mark a model as demoted in transport.json. Skipped by candidate loading. */
 export function demoteModel(model: string, reason: "auth" | "timeout"): void {
   const tc = loadTransport();

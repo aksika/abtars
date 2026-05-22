@@ -422,6 +422,8 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
 
     // Write + switch
     tc.agents["professor"]!.model = newModel;
+    const { cleanDemotedModels } = await import("../transport-config.js");
+    cleanDemotedModels(tc, newModel);
     writeTransportConfig(tc, `professor model → ${newModel}`);
     if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
