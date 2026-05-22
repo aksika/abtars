@@ -136,7 +136,7 @@ function scheduleRetry(entry: CronEntry, isRetry: boolean): void {
   }
 }
 
-export type TaskCompleteCallback = (chatId: number, message: string, result: string, resultPath?: string) => void;
+export type TaskCompleteCallback = (chatId: number, message: string, result: string, dodFiles?: string[]) => void;
 export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
 
 interface QueuedJob {
@@ -368,7 +368,8 @@ export class CronQueue {
           scheduleRetry(entry, !!entry._retrying);
           this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
         }
-        onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`, resultPath ?? undefined);
+        const producedFiles = dodPaths.filter(p => existsSync(p));
+        onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`, producedFiles.length > 0 ? producedFiles : undefined);
       })
       .catch((err) => {
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
