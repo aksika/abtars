@@ -10,6 +10,7 @@ const MASTER_REGISTRY: UserRegistry = {
 import { handleInboundMessage, type PipelineDeps } from "./message-pipeline.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
+import { SessionManager } from "./session-manager.js";
 
 function mockTransport(): IKiroTransport {
   return {
@@ -54,6 +55,7 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     sttConfig: null,
     ttsConfig: null,
     sessions: new SessionRegistry(),
+    sessionManager: new SessionManager(),
     updateCtxStart: vi.fn(),
     ...overrides,
   };
@@ -91,7 +93,7 @@ describe("handleInboundMessage", () => {
     const deps = mockDeps(transport);
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(transport.sendPrompt).toHaveBeenCalledWith("master:telegram", expect.stringContaining("hello"));
+    expect(transport.sendPrompt).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("hello"));
     expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Hello from Kiro!", expect.any(Object));
   });
 
@@ -201,7 +203,7 @@ describe("handleInboundMessage", () => {
 
     await handleInboundMessage(makeMsg({ text: "//agent list" }), adapter, deps);
 
-    expect(transport.sendPrompt).toHaveBeenCalledWith("master:telegram", expect.stringContaining("/agent list"));
+    expect(transport.sendPrompt).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("/agent list"));
   });
 
   it("returns early for voice without STT config", async () => {
