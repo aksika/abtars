@@ -42,7 +42,7 @@ describe("TelegramPoller offset safety", () => {
     expect(store.value).toBe(102);
   });
 
-  it("does not advance offset past a failed handler", async () => {
+  it("advances offset past failed handlers (fire-and-forget)", async () => {
     const store = createMemoryOffsetStore(0);
     const api = mockApi([
       [{ update_id: 200 }, { update_id: 201 }, { update_id: 202 }],
@@ -61,8 +61,8 @@ describe("TelegramPoller offset safety", () => {
     poller.stop();
     await sleep(100);
 
-    // Offset should stop at 201 (the failed one), not advance to 203.
-    expect(store.value).toBe(201);
+    // Offset advances to end of batch immediately — handlers are fire-and-forget.
+    expect(store.value).toBe(203);
   });
 
   it("resumes from persisted offset on startup", async () => {
@@ -78,7 +78,7 @@ describe("TelegramPoller offset safety", () => {
     expect(api.getUpdates).toHaveBeenCalledWith(500, expect.anything(), expect.anything());
   });
 
-  it("handles out-of-order handler completion correctly", async () => {
+  it("advances offset immediately regardless of handler completion order", async () => {
     const store = createMemoryOffsetStore(0);
     let resolve301!: () => void;
     const gate = new Promise<void>(r => { resolve301 = r; });
@@ -91,25 +91,19 @@ describe("TelegramPoller offset safety", () => {
     const poller = new TelegramPoller(
       api, 0,
       async (u) => {
-        if (u.update_id === 300) await gate; // 300 blocks until 301+302 finish
+        if (u.update_id === 300) await gate; // 300 blocks
       },
       store,
     );
     await poller.start();
     await sleep(100);
 
-    // 301 and 302 may have finished but 300 is still pending.
-    // Offset must NOT advance past 300.
-    expect(store.value).toBe(0);
+    // Offset advances immediately — doesn't wait for handler 300 to finish.
+    expect(store.value).toBe(303);
 
-    // Now unblock 300.
     resolve301();
-    await sleep(200);
     poller.stop();
     await sleep(100);
-
-    // All settled — offset should be 303.
-    expect(store.value).toBe(303);
   });
 });
 

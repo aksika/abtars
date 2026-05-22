@@ -422,12 +422,18 @@ export async function handleInboundMessage(
 
     // --- Deliver response ---
     let lastSentMsgId: number | string | undefined;
-    if (streamMsgId && adapter.editMessage) {
-      // ACP edit-in-place: final edit removes cursor...
+    if (streamMsgId && adapter.editMessage && !transport.toolCallsSucceeded) {
+      // Pure streaming (no tools) — edit in place
       try {
         await adapter.editMessage(channelId, streamMsgId, userResponse);
         lastSentMsgId = streamMsgId;
       } catch (err) { logAndSwallow("message_pipeline", "op", err); }
+    } else if (streamMsgId && transport.toolCallsSucceeded) {
+      // After tool calls — send as new message (tool indicator stays as context)
+      const chunks = adapter.chunkResponse(userResponse);
+      for (const chunk of chunks) {
+        if (chunk.trim()) lastSentMsgId = await adapter.sendMessage(channelId, chunk, { threadId: msg.threadId });
+      }
     } else if (!intermediateDelivered) {
       const chunks = adapter.chunkResponse(userResponse);
       logDebug(TAG, `Sending ${chunks.length} chunk(s)`);

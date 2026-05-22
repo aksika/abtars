@@ -78,50 +78,22 @@ export class TelegramPoller {
         // prefix of successfully-handled updates.
         if (updates.length > 0) {
           const sorted = [...updates].sort((a, b) => a.update_id - b.update_id);
-          const settlements = new Map<number, boolean>();
-
-          const settle = async (id: number, ok: boolean): Promise<void> => {
-            settlements.set(id, ok);
-            // Advance offset to highest contiguous success from the batch start.
-            let newOffset = this.offset;
-            for (const u of sorted) {
-              const s = settlements.get(u.update_id);
-              if (s === true) {
-                newOffset = u.update_id + 1;
-              } else {
-                break; // gap — either pending or failed
-              }
-            }
-            if (newOffset > this.offset) {
-              this.offset = newOffset;
-              await this.offsetStore.write(newOffset);
-            }
-          };
 
           for (const update of sorted) {
             try {
               const result = this.onUpdate(update);
               if (result instanceof Promise) {
-                // Fire-and-forget: settle when done, don't block the loop.
-                result
-                  .then(() => settle(update.update_id, true))
-                  .catch((err: unknown) => {
-                    logError("poller", "Error in update handler", err);
-                    settle(update.update_id, false);
-                  });
-              } else {
-                // Synchronous handler — settled immediately.
-                await settle(update.update_id, true);
+                result.catch((err: unknown) => logError("poller", "Error in update handler", err));
               }
             } catch (err) {
-              logError("poller", "Error in update handler", err);
-              await settle(update.update_id, false);
+              logError("poller", "Error in update handler (sync)", err);
             }
           }
 
-          // Wait for all handlers to settle before next getUpdates,
-          // so we don't re-fetch updates that are still in-flight.
-          await waitForAll(sorted, settlements);
+          // Advance offset immediately — don't wait for handlers to settle.
+          // Next getUpdates will fetch new messages without blocking on in-flight handlers.
+          this.offset = sorted[sorted.length - 1]!.update_id + 1;
+          await this.offsetStore.write(this.offset);
         }
       } catch (err) {
         if (!this.running) break;
@@ -135,13 +107,6 @@ export class TelegramPoller {
         await sleep(delay);
       }
     }
-  }
-}
-
-/** Wait until all updates in the batch have settled (success or failure). */
-async function waitForAll(sorted: TelegramUpdate[], settlements: Map<number, boolean>): Promise<void> {
-  while (settlements.size < sorted.length) {
-    await sleep(50);
   }
 }
 
