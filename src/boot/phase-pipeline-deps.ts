@@ -21,6 +21,7 @@ import { CronQueue } from "../components/tasks/task-queue.js";
 import { IdleSave } from "../components/idle-save.js";
 import { logWarn } from "../components/logger.js";
 import { updateCtxStart } from "./ctx-start.js";
+import { existsSync } from "node:fs";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
@@ -121,12 +122,18 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
 /** Export cronCallback factory for phase-heartbeat's age-check task re-enqueue. */
 export function createCronCallback(ctx: BootCtx): TaskCompleteCallback {
-  return (chatId, message, result, _resultPath) => {
+  return (chatId, message, result, resultPath) => {
     if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
     const adapter = ctx.telegramAdapter;
 
     adapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
       logWarn("main", `Cron task TG report failed: ${err}`);
     });
+
+    if (resultPath && existsSync(resultPath)) {
+      adapter.sendDocument(String(chatId), resultPath, message.slice(0, 1024)).catch(err => {
+        logWarn("main", `Cron task TG sendDocument failed: ${err}`);
+      });
+    }
   };
 }
