@@ -182,6 +182,17 @@ export async function handleInboundMessage(
 
     let prompt = builtPrompt;
 
+    // --- Auto-notify: inject background session completions (#570) ---
+    const { drainCompletions } = await import("./completion-buffer.js");
+    const completions = drainCompletions(activeSessionId);
+    if (completions.length > 0) {
+      const notes = completions.map(c => {
+        const cost = c.inputTokens + c.outputTokens > 0 ? ` [${((c.inputTokens + c.outputTokens) / 1000).toFixed(1)}k tokens]` : "";
+        return `[Background session ${c.sessionId} ${c.status}]\nGoal: ${c.goal}\nResult: ${c.result}${cost}`;
+      }).join("\n\n");
+      prompt = `${notes}\n\n---\n\n${prompt}`;
+    }
+
     // --- Send to transport ---
     const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
     const agentSession = activeSession.agentSession;
