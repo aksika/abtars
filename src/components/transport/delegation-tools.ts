@@ -30,6 +30,7 @@ interface BackgroundEntry {
   result?: string;
   inputTokens: number;
   outputTokens: number;
+  pendingInstruction?: string;
 }
 
 const activeBackgrounds = new Map<string, BackgroundEntry>();
@@ -198,7 +199,37 @@ export const terminateSessionTool: ToolDefinition = {
   },
 };
 
+export const sendToSessionTool: ToolDefinition = {
+  name: "send_to_session",
+  description: "Send a follow-up instruction to a running background session. The child receives it on its next turn.",
+  parameters: {
+    type: "object",
+    properties: {
+      task_id: { type: "string", description: "Task ID of the running session" },
+      message: { type: "string", description: "Instruction to send" },
+    },
+    required: ["task_id", "message"],
+  },
+  async execute(args) {
+    const entry = activeBackgrounds.get(args.task_id ?? "");
+    if (!entry) return JSON.stringify({ error: `No background session found with task_id: ${args.task_id}` });
+    if (entry.status !== "running") return JSON.stringify({ error: `Session is ${entry.status}, cannot send instruction` });
+    entry.pendingInstruction = args.message;
+    logInfo(TAG, `Instruction queued for ${entry.taskId}: "${(args.message ?? "").slice(0, 60)}"`);
+    return JSON.stringify({ delivered: true, task_id: entry.taskId });
+  },
+};
+
+/** Check and consume pending instruction for a task. Used by agent loop. */
+export function consumePendingInstruction(taskId: string): string | undefined {
+  const entry = activeBackgrounds.get(taskId);
+  if (!entry?.pendingInstruction) return undefined;
+  const msg = entry.pendingInstruction;
+  entry.pendingInstruction = undefined;
+  return msg;
+}
+
 export function getDelegationTools(): ToolDefinition[] {
   if (!process.env["ENABLE_ASYNC_DELEGATION"]) return [];
-  return [spawnSessionTool, checkSessionTool, terminateSessionTool];
+  return [spawnSessionTool, checkSessionTool, terminateSessionTool, sendToSessionTool];
 }

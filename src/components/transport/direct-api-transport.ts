@@ -56,6 +56,8 @@ export class DirectApiTransport implements IKiroTransport {
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
   /** Cooperative pause check — if returns true, agent loop breaks between tool calls. */
   isPaused?: () => boolean;
+  /** Returns a pending instruction from parent, if any. Consumed once. */
+  getPendingInstruction?: () => string | undefined;
 
   /** Context orchestrator — when set, messages are built from DB instead of in-memory session. */
   contextOrchestrator?: import("abmind").ContextOrchestrator;
@@ -237,6 +239,9 @@ export class DirectApiTransport implements IKiroTransport {
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
       if (signal.aborted) throw new Error("Aborted");
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
+
+      const pendingInstruction = this.getPendingInstruction?.();
+      if (pendingInstruction) session.addUser(pendingInstruction);
 
       const { content, toolCalls, usage } = await this.streamCompletion(session, signal);
 
