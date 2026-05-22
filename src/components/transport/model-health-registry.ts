@@ -43,10 +43,9 @@ interface Bucket {
 // Defaults (unchanged from pre-config behavior)
 const D_SKIP_THRESHOLD = 0.7;
 const D_LEAK_PER_MIN = 0.03;
-const D_AUTH_FILL = 1.0;
 const D_AUTH_STICKY = true;
 const D_RATE_LIMIT_FILL = 0.5;
-const D_WEAK_FILL = 0.05;
+const D_WEAK_FILL = 0.35;
 const D_TRANSIENT_PROGRESSIVE = [0.1, 0.2, 0.4, 0.8];
 const D_TRANSIENT_COOLDOWN_AFTER = 3;
 const D_TRANSIENT_MAX_COOLDOWN_SEC = 300;
@@ -55,7 +54,6 @@ export class ModelHealthRegistry {
   private readonly buckets = new Map<string, Bucket>();
   private readonly skipThreshold: number;
   private readonly leakPerMs: number;
-  private readonly authFill: number;
   private readonly authSticky: boolean;
   private readonly rateLimitFill: number;
   private readonly weakFill: number;
@@ -69,7 +67,6 @@ export class ModelHealthRegistry {
   constructor(config?: HealthPolicyConfig) {
     this.skipThreshold = config?.skipThreshold ?? D_SKIP_THRESHOLD;
     this.leakPerMs = (config?.leakPerMinute ?? D_LEAK_PER_MIN) / 60000;
-    this.authFill = config?.authFill ?? D_AUTH_FILL;
     this.authSticky = config?.authSticky ?? D_AUTH_STICKY;
     this.rateLimitFill = config?.rateLimitFill ?? D_RATE_LIMIT_FILL;
     this.weakFill = config?.weakFill ?? D_WEAK_FILL;
@@ -109,37 +106,35 @@ export class ModelHealthRegistry {
     const b = this.buckets.get(key) ?? { level: 0, lastUpdate: now, consecutiveErrors: 0 };
     this.drain(b, now);
 
-    if (kind === "auth") {
-      b.level = Math.min(1.0, b.level + this.authFill);
-      b.authFailed = true;
-    } else if (kind === "weak") {
-      b.level = Math.min(1.0, b.level + this.weakFill);
-    } else if (kind === "rate_limit") {
-      b.level = Math.min(1.0, b.level + this.rateLimitFill);
-      if (retryAfterMs && retryAfterMs > 0) b.cooldownUntil = now + retryAfterMs;
-    } else {
-      // transient — progressive fill + cooldown after N errors
-      const idx = Math.min(b.consecutiveErrors, this.transientProgressive.length - 1);
-      b.level = Math.min(1.0, b.level + this.transientProgressive[idx]!);
-      if (b.consecutiveErrors >= this.transientCooldownAfter) {
-        b.cooldownUntil = now + Math.min((b.consecutiveErrors + 1) * 60_000, this.transientMaxCooldownMs);
+    switch (kind) {
+      case "auth":
+        b.level = 1.0;
+        b.authFailed = true;
+        if (this.onDemote && !b.demoted) {
+          b.demoted = true;
+          this.onDemote(model, endpoint, "auth");
+        }
+        break;
+      case "transient": {
+        const idx = Math.min(b.consecutiveErrors, this.transientProgressive.length - 1);
+        b.level = Math.min(1.0, b.level + this.transientProgressive[idx]!);
+        if (b.consecutiveErrors >= this.transientCooldownAfter) {
+          b.cooldownUntil = now + Math.min((b.consecutiveErrors + 1) * 60_000, this.transientMaxCooldownMs);
+        }
+        break;
       }
+      case "rate_limit":
+        b.level = Math.min(1.0, b.level + this.rateLimitFill);
+        if (retryAfterMs && retryAfterMs > 0) b.cooldownUntil = now + retryAfterMs;
+        break;
+      case "weak":
+        b.level = Math.min(1.0, b.level + this.weakFill);
+        break;
     }
 
     b.consecutiveErrors++;
     b.lastUpdate = now;
     this.buckets.set(key, b);
-
-    // Demotion trigger
-    if (this.onDemote && !b.demoted) {
-      if (kind === "auth" && b.consecutiveErrors >= 3) {
-        b.demoted = true;
-        this.onDemote(model, endpoint, "auth");
-      } else if (kind === "transient" && b.consecutiveErrors >= 5) {
-        b.demoted = true;
-        this.onDemote(model, endpoint, "timeout");
-      }
-    }
   }
 
   getHealth(): Map<string, { level: number; consecutiveErrors: number; cooldownUntil?: number; status: ModelStatus }> {
