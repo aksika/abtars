@@ -101,3 +101,47 @@ describe("classifyError", () => {
   it("403 → auth", () => { expect(classifyError(403)).toBe("auth"); });
   it("500 → transient", () => { expect(classifyError(500)).toBe("transient"); });
 });
+
+describe("ModelHealthRegistry demotion (#567)", () => {
+  it("auth error fires onDemote immediately", () => {
+    const reg = new ModelHealthRegistry();
+    const demoted: Array<{ model: string; reason: string }> = [];
+    reg.onDemote = (model, _ep, reason) => { demoted.push({ model, reason }); };
+
+    reg.recordError("kimi", "ep1", "auth");
+
+    expect(demoted).toEqual([{ model: "kimi", reason: "auth" }]);
+  });
+
+  it("transient errors do NOT fire onDemote", () => {
+    const reg = new ModelHealthRegistry();
+    const demoted: Array<{ model: string; reason: string }> = [];
+    reg.onDemote = (model, _ep, reason) => { demoted.push({ model, reason }); };
+
+    for (let i = 0; i < 10; i++) reg.recordError("kimi", "ep1", "transient");
+
+    expect(demoted).toEqual([]);
+  });
+
+  it("auth demotion fires only once per model", () => {
+    const reg = new ModelHealthRegistry();
+    const demoted: Array<{ model: string; reason: string }> = [];
+    reg.onDemote = (model, _ep, reason) => { demoted.push({ model, reason }); };
+
+    reg.recordError("kimi", "ep1", "auth");
+    reg.recordError("kimi", "ep1", "auth");
+    reg.recordError("kimi", "ep1", "auth");
+
+    expect(demoted).toHaveLength(1);
+  });
+
+  it("rate_limit does NOT fire onDemote", () => {
+    const reg = new ModelHealthRegistry();
+    const demoted: Array<{ model: string; reason: string }> = [];
+    reg.onDemote = (model, _ep, reason) => { demoted.push({ model, reason }); };
+
+    for (let i = 0; i < 10; i++) reg.recordError("kimi", "ep1", "rate_limit");
+
+    expect(demoted).toEqual([]);
+  });
+});

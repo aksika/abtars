@@ -273,3 +273,101 @@ describe("#367 — validateProviderReady", () => {
     });
   });
 });
+
+// ── Demotion tests (#567) ───────────────────────────────────────────────────
+
+import { cleanDemotedModels } from "./transport-config.js";
+
+describe("resolveAgent with demotion", () => {
+  it("skips demoted primary and promotes first healthy fallback", () => {
+    const tc: TransportConfig = {
+      ...TRANSPORT,
+      agents: {
+        ...TRANSPORT.agents,
+        professor: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth", fallbacks: [{ model: "minimax-m2.5:cloud", provider: "ollama" }] } as any,
+      },
+    };
+    const r = resolveAgent("professor", tc, MODELS)!;
+    expect(r.model).toBe("minimax-m2.5:cloud");
+    expect(r.providerName).toBe("ollama");
+  });
+
+  it("filters demoted fallbacks from returned list", () => {
+    const tc: TransportConfig = {
+      ...TRANSPORT,
+      agents: {
+        ...TRANSPORT.agents,
+        professor: { model: "claude-sonnet-4.6", provider: "kiro-free", fallbacks: [
+          { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
+        ] },
+      },
+    };
+    const r = resolveAgent("professor", tc, MODELS)!;
+    expect(r.model).toBe("claude-sonnet-4.6");
+    expect(r.fallbacks).toEqual([]);
+  });
+
+  it("uses primary anyway when all models demoted", () => {
+    const tc: TransportConfig = {
+      ...TRANSPORT,
+      agents: {
+        ...TRANSPORT.agents,
+        professor: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", fallbacks: [
+          { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
+        ] } as any,
+      },
+    };
+    const r = resolveAgent("professor", tc, MODELS)!;
+    expect(r.model).toBe("claude-sonnet-4.6"); // falls back to primary
+  });
+});
+
+describe("cleanDemotedModels", () => {
+  it("removes demoted fallbacks", () => {
+    const tc: TransportConfig = {
+      ...TRANSPORT,
+      agents: {
+        professor: { model: "claude-sonnet-4.6", provider: "kiro-free", fallbacks: [
+          { model: "minimax-m2.5:cloud", provider: "ollama", demoted: "2026-05-22" } as any,
+        ] },
+        dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
+      },
+      providers: TRANSPORT.providers,
+      maxTurns: 50,
+    };
+    cleanDemotedModels(tc);
+    expect(tc.agents["professor"]!.fallbacks).toEqual([]);
+  });
+
+  it("resurrects chosen model (clears demotion)", () => {
+    const tc: TransportConfig = {
+      ...TRANSPORT,
+      agents: {
+        professor: { model: "claude-sonnet-4.6", provider: "kiro-free", demoted: "2026-05-22", demotedReason: "auth", fallbacks: [] } as any,
+        dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
+      },
+      providers: TRANSPORT.providers,
+      maxTurns: 50,
+    };
+    cleanDemotedModels(tc, "claude-sonnet-4.6");
+    expect((tc.agents["professor"] as any).demoted).toBeUndefined();
+    expect((tc.agents["professor"] as any).demotedReason).toBeUndefined();
+  });
+
+  it("keeps non-demoted fallbacks intact", () => {
+    const tc: TransportConfig = {
+      ...TRANSPORT,
+      agents: {
+        professor: { model: "claude-sonnet-4.6", provider: "kiro-free", fallbacks: [
+          { model: "minimax-m2.5:cloud", provider: "ollama" },
+          { model: "dead-model", provider: "ollama", demoted: "2026-05-22" } as any,
+        ] },
+        dreamy: { model: "minimax-m2.5:cloud", provider: "ollama" },
+      },
+      providers: TRANSPORT.providers,
+      maxTurns: 50,
+    };
+    cleanDemotedModels(tc);
+    expect(tc.agents["professor"]!.fallbacks).toEqual([{ model: "minimax-m2.5:cloud", provider: "ollama" }]);
+  });
+});

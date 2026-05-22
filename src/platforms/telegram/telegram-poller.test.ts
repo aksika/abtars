@@ -110,3 +110,45 @@ describe("TelegramPoller offset safety", () => {
 function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
+
+describe("TelegramPoller concurrency", () => {
+  it("fetches next batch while previous handler is still running", async () => {
+    let handlerResolve!: () => void;
+    const handlerGate = new Promise<void>(r => { handlerResolve = r; });
+    let pollCount = 0;
+
+    const api = {
+      getUpdates: vi.fn(async (_offset: number, _timeout: number, signal?: AbortSignal) => {
+        pollCount++;
+        if (pollCount === 1) return [{ update_id: 400 }];
+        if (pollCount === 2) return [{ update_id: 401 }];
+        // Third+ poll: block until stopped
+        return new Promise<never[]>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      }),
+    } as unknown as TelegramApi;
+
+    const store = createMemoryOffsetStore(0);
+    const handled: number[] = [];
+
+    const poller = new TelegramPoller(
+      api, 0,
+      async (u) => {
+        handled.push(u.update_id);
+        if (u.update_id === 400) await handlerGate; // first handler blocks
+      },
+      store,
+    );
+    await poller.start();
+    await sleep(300);
+
+    // Second batch should have been fetched even though handler 400 is still running
+    expect(pollCount).toBeGreaterThanOrEqual(2);
+    expect(handled).toContain(401);
+
+    handlerResolve();
+    poller.stop();
+    await sleep(100);
+  });
+});
