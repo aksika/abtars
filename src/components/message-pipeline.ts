@@ -13,6 +13,22 @@ import { SessionRegistry } from "./session-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
+
+/** Retry a send operation on transient network errors (fetch failed, timeout, 5xx). */
+async function retrySend<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let i = 0; i < attempts; i++) {
+    try { return await fn(); }
+    catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const transient = msg.includes("fetch failed") || msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET") || /^5\d\d/.test(msg);
+      if (!transient || i === attempts - 1) throw err;
+      const delay = 1000 * Math.pow(3, i);
+      logWarn("pipeline", `Delivery failed (attempt ${i + 1}/${attempts}), retrying in ${delay}ms: ${msg}`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw new Error("unreachable");
+}
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind";
 import type { IdleSave } from "./idle-save.js";
@@ -432,7 +448,7 @@ export async function handleInboundMessage(
       // After tool calls — send as new message (tool indicator stays as context)
       const chunks = adapter.chunkResponse(userResponse);
       for (const chunk of chunks) {
-        if (chunk.trim()) lastSentMsgId = await adapter.sendMessage(channelId, chunk, { threadId: msg.threadId });
+        if (chunk.trim()) lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
       }
     } else if (!intermediateDelivered) {
       const chunks = adapter.chunkResponse(userResponse);
@@ -440,7 +456,7 @@ export async function handleInboundMessage(
       for (const chunk of chunks) {
         if (chunk.trim()) {
           await adapter.sendTyping?.(channelId, msg.threadId);
-          lastSentMsgId = await adapter.sendMessage(channelId, chunk, { threadId: msg.threadId });
+          lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
         }
       }
     } else if (transport.intermediateDeliveredText) {
@@ -455,7 +471,7 @@ export async function handleInboundMessage(
           for (const chunk of tailChunks) {
             if (chunk.trim()) {
               await adapter.sendTyping?.(channelId, msg.threadId);
-              lastSentMsgId = await adapter.sendMessage(channelId, chunk, { threadId: msg.threadId });
+              lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
             }
           }
         }
