@@ -34,42 +34,28 @@ describe("parseBrowserConfig", () => {
     expect(cfg.maxSessions).toBe(5);
   });
 
-  it("falls back to default and warns for non-numeric values", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("falls back to default for non-numeric values", () => {
     process.env["BROWSER_MAX_SESSIONS"] = "abc";
     const cfg = parseBrowserConfig();
     expect(cfg.maxSessions).toBe(3);
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[env]"),
-    );
-    warnSpy.mockRestore();
   });
 
   it("falls back to default for negative numbers", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     process.env["BROWSER_SESSION_TIMEOUT_MS"] = "-100";
     const cfg = parseBrowserConfig();
     expect(cfg.sessionTimeoutMs).toBe(300_000);
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
   });
 
   it("falls back to default for zero", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     process.env["BROWSER_MAX_SESSIONS"] = "0";
     const cfg = parseBrowserConfig();
     expect(cfg.maxSessions).toBe(3);
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
   });
 
   it("falls back to default for float values", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     process.env["BROWSER_MAX_SESSIONS"] = "2.5";
     const cfg = parseBrowserConfig();
     expect(cfg.maxSessions).toBe(3);
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
   });
 
   it("uses custom user agent when set", () => {

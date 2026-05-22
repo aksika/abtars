@@ -43,6 +43,9 @@ describe('install: PATH symlink collision policy (regression #158 smoke)', () =>
     otherInstallBin = join(root, 'other-install', '.abtars', 'bin');
     await mkdir(fakeUserBin, { recursive: true });
     await mkdir(otherInstallBin, { recursive: true });
+    await mkdir(join(fakeHome, 'state'), { recursive: true });
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(join(fakeHome, 'state', 'tasks.json'), '[]');
 
     process.env['ABTARS_HOME'] = fakeHome;
     process.env['HOME'] = root;

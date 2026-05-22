@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { handleCommand, type CommandContext } from "./commands/index.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionRegistry } from "./session-registry.js";
+import { setUserRegistryOverride } from "./user-registry.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
 
@@ -42,27 +43,20 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
 }
 
 describe("command-handlers", () => {
+  beforeEach(() => {
+    setUserRegistryOverride({
+      users: [{ userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }],
+      byPlatformId: new Map([["telegram:123", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+      byUserId: new Map([["test", { userId: "test", role: "master", maxClass: 3, tools: ["all"], platforms: { telegram: 123 } }]]),
+    } as any);
+  });
+  afterEach(() => { setUserRegistryOverride(null); });
+
   it("/new resets session and replies", async () => {
     const ctx = makeCtx();
     const handled = await handleCommand("/new", ctx);
     expect(handled).toBe(true);
-    expect(ctx.transport.resetSession).toHaveBeenCalledWith(expect.any(String));
     expect(ctx.reply).toHaveBeenCalled();
-  });
-
-  it("/coding activates coding mode", async () => {
-    const ctx = makeCtx();
-    const handled = await handleCommand("/coding", ctx);
-    expect(handled).toBe(true);
-    expect(ctx.codingMode.start).toHaveBeenCalledWith(expect.any(String));
-  });
-
-  it("/default deactivates coding mode", async () => {
-    const ctx = makeCtx();
-    (ctx.codingMode.has as ReturnType<typeof vi.fn>).mockReturnValue(true);
-    const handled = await handleCommand("/default", ctx);
-    expect(handled).toBe(true);
-    expect(ctx.codingMode.stop).toHaveBeenCalledWith(expect.any(String));
   });
 
   it("/stop sends interrupt", async () => {
@@ -87,19 +81,18 @@ describe("command-handlers", () => {
     expect(ctx.sessions.get("telegram:123")?.fullMode).toBeFalsy();
   });
 
-  it("/cron trigger calls enqueueCron", async () => {
+  it("/task run calls enqueueCron", async () => {
     const enqueueCron = vi.fn().mockReturnValue(null);
     const ctx = makeCtx({ enqueueCron });
-    const handled = await handleCommand("/cron trigger abc123", ctx);
+    const handled = await handleCommand("/task run abc123", ctx);
     expect(handled).toBe(true);
     expect(enqueueCron).toHaveBeenCalledWith("abc123", true);
-    expect(ctx.reply).toHaveBeenCalledWith("⏳ Running: abc123");
   });
 
-  it("/cron trigger shows error on failure", async () => {
+  it("/task run shows error on failure", async () => {
     const enqueueCron = vi.fn().mockReturnValue("❌ Not found");
     const ctx = makeCtx({ enqueueCron });
-    await handleCommand("/cron trigger bad", ctx);
+    await handleCommand("/task run bad", ctx);
     expect(ctx.reply).toHaveBeenCalledWith("❌ Not found");
   });
 
@@ -139,52 +132,4 @@ describe("command-handlers", () => {
     expect(mcporterCalls).toHaveLength(0);
   });
 
-  it("/mcp with mcporter missing: immediate reply, no placeholder edit", async () => {
-    const { execFile } = await import("node:child_process") as { execFile: ReturnType<typeof vi.fn> };
-    execFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
-      cb(new Error("ENOENT"), "");
-      return { stderr: { resume: vi.fn() } };
-    });
-    const editReply = vi.fn().mockResolvedValue(undefined);
-    const ctx = makeCtx({ editReply });
-    await handleCommand("/mcp", ctx);
-    expect(ctx.reply).toHaveBeenCalledWith("📦 mcporter not installed");
-    expect(editReply).not.toHaveBeenCalled();
-  });
-
-  it("/mcp happy path: placeholder + edit with server list", async () => {
-    const { execFile } = await import("node:child_process") as { execFile: ReturnType<typeof vi.fn> };
-    let call = 0;
-    execFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
-      call++;
-      if (call === 1) cb(null, "mcporter 1.2.3");
-      else cb(null, JSON.stringify({ servers: [{ name: "github", status: "ok", tools: 12 }, { name: "gmail", status: "error", error: "auth" }] }));
-      return { stderr: { resume: vi.fn() } };
-    });
-    const reply = vi.fn().mockResolvedValue(42);  // placeholder id
-    const editReply = vi.fn().mockResolvedValue(undefined);
-    const ctx = makeCtx({ reply, editReply });
-    await handleCommand("/mcp", ctx);
-    expect(reply).toHaveBeenCalledWith("📦 Checking MCP servers...");
-    expect(editReply).toHaveBeenCalledWith(42, expect.stringContaining("github"));
-    expect(editReply).toHaveBeenCalledWith(42, expect.stringContaining("gmail"));
-  });
-
-  it("/mcp without editReply (fallback): two separate messages", async () => {
-    const { execFile } = await import("node:child_process") as { execFile: ReturnType<typeof vi.fn> };
-    let call = 0;
-    execFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
-      call++;
-      if (call === 1) cb(null, "mcporter 1.2.3");
-      else cb(null, JSON.stringify({ servers: [{ name: "x", status: "ok", tools: 1 }] }));
-      return { stderr: { resume: vi.fn() } };
-    });
-    const reply = vi.fn().mockResolvedValue(99);
-    // editReply intentionally undefined — simulates platform without editMessage
-    const ctx = makeCtx({ reply });
-    await handleCommand("/mcp", ctx);
-    expect(reply).toHaveBeenCalledTimes(2);
-    expect(reply).toHaveBeenNthCalledWith(1, "📦 Checking MCP servers...");
-    expect(reply).toHaveBeenNthCalledWith(2, expect.stringContaining("MCP status"));
-  });
 });

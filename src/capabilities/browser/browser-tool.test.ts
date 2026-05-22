@@ -1,4 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+vi.mock("../../components/logger.js", () => ({
+  logDebug: vi.fn(),
+  logInfo: vi.fn(),
+  logWarn: vi.fn(),
+  logError: vi.fn(),
+  logTrace: vi.fn(),
+}));
+
 import { BrowserTool } from "./browser-tool.js";
 import type { BrowserAction, BrowserToolResult } from "../../types/browser.js";
 import type { BrowserManager } from "./browser-manager.js";
@@ -238,7 +247,9 @@ describe("BrowserTool", () => {
     });
 
     it("masks password values in logs", async () => {
-      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const { logDebug } = await import("../../components/logger.js");
+      const logSpy = vi.mocked(logDebug);
+      logSpy.mockClear();
       const session = makeMockSession({
         evaluate: vi.fn().mockResolvedValue(true), // isPassword = true
       });
