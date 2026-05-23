@@ -217,10 +217,11 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
   }
 
   const providers = tc.providers;
-  // If primary is demoted, promote first non-demoted fallback
+  // If primary is demoted AND the demoted model matches current, promote first non-demoted fallback
   let effectiveModel = assignment.model;
   let effectiveProvider = assignment.provider;
-  if ((assignment as any).demoted) {
+  const demotedModel = (assignment as any).demotedModel ?? assignment.model;
+  if ((assignment as any).demoted && demotedModel === assignment.model) {
     const firstHealthy = (assignment.fallbacks ?? []).find((fb: any) => !fb.demoted);
     if (firstHealthy) {
       effectiveModel = firstHealthy.model;
@@ -338,9 +339,9 @@ export function demoteModel(model: string, reason: "auth" | "timeout"): void {
   if (!tc) return;
   let found = false;
   for (const agent of Object.values(tc.agents)) {
-    if (agent.model === model) { (agent as any).demoted = new Date().toISOString(); (agent as any).demotedReason = reason; found = true; }
+    if (agent.model === model) { (agent as any).demoted = new Date().toISOString(); (agent as any).demotedReason = reason; (agent as any).demotedModel = model; found = true; }
     for (const fb of agent.fallbacks ?? []) {
-      if (fb.model === model) { (fb as any).demoted = new Date().toISOString(); (fb as any).demotedReason = reason; found = true; }
+      if (fb.model === model) { (fb as any).demoted = new Date().toISOString(); (fb as any).demotedReason = reason; (fb as any).demotedModel = model; found = true; }
     }
   }
   if (found) writeTransportConfig(tc, `auto-demote ${model} (${reason})`);
