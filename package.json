@@ -6,7 +6,7 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc && rm -rf dist/components/dashboard/public && cp -r src/components/dashboard/public dist/components/dashboard/public && git log -1 --format='{\"hash\":\"%h\",\"date\":\"%ci\"}' > dist/build-info.json",
-    "bundle": "cd ../abmind && npm run build && cd ../abtars && node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public",
+    "bundle": "rm -rf bundle && cd ../abmind && npm run build && cd ../abtars && node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public",
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
