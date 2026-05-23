@@ -137,6 +137,8 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "IRC_ENABLED", type: "bool", default: "", description: "Enable IRC platform (fallback: irc.json presence)" },
   { env: "ENABLE_DASHBOARD", type: "bool", default: "false", description: "Enable web dashboard (exposes port)" },
   { env: "ENABLE_AGENT_API", type: "bool", default: "false", description: "Enable A2A agent API (exposes port)" },
+  { env: "ENABLE_ASYNC_DELEGATION", type: "bool", default: "false", description: "Enable async session delegation tools (spawn/check/terminate)" },
+  { env: "MAX_SESSIONS", type: "int", default: "10", description: "Max concurrent managed sessions per user" },
 ] as const;
 
 // ── Parsed config type ──────────────────────────────────────────────────────
@@ -241,6 +243,8 @@ export interface EnvConfig {
   securityMode: string;
   enableDashboard: boolean;
   enableAgentApi: boolean;
+  enableAsyncDelegation: boolean;
+  maxSessions: number;
 
   /** Dynamic API key lookup — for provider.apiKeyEnv pattern. */
   getApiKey(envName: string): string | undefined;
@@ -407,6 +411,8 @@ export function initEnv(): Readonly<EnvConfig> {
     securityMode: readOr("SECURITY_MODE", "off"),
     enableDashboard: parseBool(readOr("ENABLE_DASHBOARD", "false")),
     enableAgentApi: parseBool(readOr("ENABLE_AGENT_API", "false")),
+    enableAsyncDelegation: parseBool(readOr("ENABLE_ASYNC_DELEGATION", "false")),
+    maxSessions: parseIntSafe(readOr("MAX_SESSIONS", "10"), "MAX_SESSIONS"),
 
     getApiKey(envName: string): string | undefined {
       return process.env[envName]?.trim() || undefined;

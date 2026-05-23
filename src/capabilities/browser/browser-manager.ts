@@ -1,4 +1,5 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
+import { logInfo, logWarn } from "../../components/logger.js";
 import { getEnv } from "../../components/env-schema.js";
 import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
@@ -16,7 +17,6 @@ function readPositiveInt(key: string, fallback: number): number {
 }
 // ---------------------------------------------------------------------------
 
-const LOG_PREFIX = "[browser-manager]";
 
 const DEFAULTS = {
   BROWSER_SESSION_TIMEOUT_MS: 300_000,
@@ -47,7 +47,7 @@ export function parseBrowserConfig(): BrowserConfig {
     "BROWSER_MAX_SESSIONS",
     DEFAULTS.BROWSER_MAX_SESSIONS,
   );
-  const userAgent = process.env["WEB_SCRAPE_USER_AGENT"]?.trim() || DEFAULTS.WEB_SCRAPE_USER_AGENT;
+  const userAgent = getEnv().webScrapeUserAgent || DEFAULTS.WEB_SCRAPE_USER_AGENT;
 
   const engine = "patchright" as BrowserEngine;
 
@@ -265,13 +265,13 @@ export class BrowserManager {
     }
 
     for (const id of expired) {
-      console.warn(`${LOG_PREFIX} Closing idle session "${id}".`);
+      logWarn("browser", `Closing idle session "${id}".`);
       await this.closeSession(id);
     }
 
     // Stop container if no sessions and idle long enough
     if (this._sessions.size === 0 && this._browser && this._lastActivityAt > 0 && now - this._lastActivityAt > this._containerIdleStopMs) {
-      console.log(`${LOG_PREFIX} No sessions for ${Math.round((now - this._lastActivityAt) / 60_000)}min — stopping container.`);
+      logInfo("browser", `No sessions for ${Math.round((now - this._lastActivityAt) / 60_000)}min — stopping container.`);
       await this.shutdown();
       this._stopContainer();
     }

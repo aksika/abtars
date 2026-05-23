@@ -17,7 +17,8 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
   if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phaseCapabilities.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phaseCapabilities.name}: skipping — transport not available`); return "skipped"; }
 
   const { createCapabilityApi } = await import("../capabilities/capability.js");
-  const disabled = new Set((process.env["DISABLED_CAPABILITIES"] ?? "").split(",").map(s => s.trim()).filter(Boolean));
+  const { getEnv } = await import("../components/env-schema.js");
+  const disabled = new Set(getEnv().disabledCapabilities.split(",").map(s => s.trim()).filter(Boolean));
   let loaded: string[] = [];
 
   // Load capabilities individually — one failing must not kill others (#580)

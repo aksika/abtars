@@ -25,6 +25,7 @@ import type { PlatformAdapter } from "../types/platform.js";
 import { SessionRegistry as SessionRegistryClass } from "../components/session-registry.js";
 import type { SessionRegistry } from "../components/session-registry.js";
 import { SessionManager as SessionManagerClass } from "../components/session-manager.js";
+import { getEnv } from "../components/env-schema.js";
 import type { ModelHealthRegistry } from "../components/transport/model-health-registry.js";
 import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
@@ -150,7 +151,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
 
     // Session state
     sessions: new SessionRegistryClass(),
-    sessionManager: new SessionManagerClass(parseInt(process.env["MAX_SESSIONS"] ?? "10", 10)),
+    sessionManager: new SessionManagerClass(getEnv().maxSessions),
 
     // Subsystems
     capabilities: createCapabilityRegistry(),

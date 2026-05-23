@@ -25,7 +25,7 @@ import type { SttConfig } from "../components/stt.js";
 import type { TtsConfig } from "../components/tts.js";
 
 export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
-  // Ensure ~/.abtars/bin is in PATH for child processes (kiro-cli, gemini-cli)
+  // Intentional: raw process.env — mutates PATH for child processes (kiro-cli, gemini-cli)
   const binDir = join(abtarsHome(), "bin");
   if (!process.env["PATH"]?.includes(binDir)) {
     process.env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`;

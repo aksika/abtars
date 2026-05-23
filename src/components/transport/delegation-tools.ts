@@ -8,6 +8,7 @@ import type { SubagentRuntime, AgentName } from "../subagent-runtime.js";
 import type { SessionManager, SessionType } from "../session-manager.js";
 import { addCompletion } from "../completion-buffer.js";
 import { logInfo, logWarn } from "../logger.js";
+import { getEnv } from "../env-schema.js";
 
 const TAG = "delegation";
 const MAX_BACKGROUND = parseInt(process.env["MAX_BACKGROUND_SESSIONS"] ?? "3", 10);
@@ -230,6 +231,6 @@ export function consumePendingInstruction(taskId: string): string | undefined {
 }
 
 export function getDelegationTools(): ToolDefinition[] {
-  if (!process.env["ENABLE_ASYNC_DELEGATION"]) return [];
+  if (!getEnv().enableAsyncDelegation) return [];
   return [spawnSessionTool, checkSessionTool, terminateSessionTool, sendToSessionTool];
 }
