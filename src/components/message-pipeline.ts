@@ -443,7 +443,14 @@ export async function handleInboundMessage(
       try {
         await adapter.editMessage(channelId, streamMsgId, userResponse);
         lastSentMsgId = streamMsgId;
-      } catch (err) { logAndSwallow("message_pipeline", "op", err); }
+      } catch (err) {
+        // Edit failed — fallback to new message so response is never lost (#581)
+        logWarn(TAG, `Edit failed (${err instanceof Error ? err.message : String(err)}), sending as new message`);
+        const chunks = adapter.chunkResponse(userResponse);
+        for (const chunk of chunks) {
+          if (chunk.trim()) lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
+        }
+      }
     } else if (streamMsgId && transport.toolCallsSucceeded) {
       // After tool calls — send as new message (tool indicator stays as context)
       const chunks = adapter.chunkResponse(userResponse);

@@ -84,7 +84,8 @@ export class AcpTransport implements IKiroTransport {
 
   /** ACP returns full response — no separate "answer only" extraction. */
   get answerOnly(): string { return ""; }
-  get toolCallsSucceeded(): number { return 0; }
+  private _toolCallsSucceeded = 0;
+  get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
 
   /** ACP doesn't track intermediate delivered text (edit-in-place instead). */
   get intermediateDeliveredText(): string { return ""; }
@@ -252,6 +253,7 @@ export class AcpTransport implements IKiroTransport {
       await this.initialize();
     }
 
+    this._toolCallsSucceeded = 0;
     const sessionId = await this.getOrCreateSession(sessionKey);
     this.responseChunks.set(sessionId, []);
 
@@ -480,7 +482,10 @@ export class AcpTransport implements IKiroTransport {
         if (update.status) {
           logDebug(this.tag, `[tool update] ${update.toolCallId}: ${update.status}`);
           this.lastActivityAt = Date.now();
-          if (update.status === "completed" || update.status === "failed") {
+          if (update.status === "completed") {
+            this._toolCallsSucceeded++;
+            this.toolMeta = null;
+          } else if (update.status === "failed") {
             this.toolMeta = null;
           }
         }
