@@ -127,10 +127,30 @@ const probeCoreFiles: ProbeFn = async (_ctx) => {
   return { name: "core-files", status: "failed", latencyMs: Date.now() - start, detail: `missing: ${missing.join(", ")}` };
 };
 
+const probeSecretPerms: ProbeFn = async (_ctx) => {
+  const { readdirSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { abtarsHome } = await import("../../paths.js");
+  const start = Date.now();
+  const secretDir = join(abtarsHome(), "secret");
+  let files: string[];
+  try { files = readdirSync(secretDir); } catch { return { name: "secret-perms", status: "skipped", latencyMs: 0, detail: "no secret/ dir" }; }
+  const bad: string[] = [];
+  for (const f of files) {
+    const st = statSync(join(secretDir, f));
+    if (!st.isFile()) continue;
+    const mode = st.mode & 0o777;
+    if (mode !== 0o600) bad.push(`${f} (${mode.toString(8)})`);
+  }
+  if (bad.length === 0) return { name: "secret-perms", status: "ok", latencyMs: Date.now() - start, detail: `${files.filter(f => statSync(join(secretDir, f)).isFile()).length} files, all 600` };
+  return { name: "secret-perms", status: "failed", latencyMs: Date.now() - start, detail: `not 600: ${bad.join(", ")}` };
+};
+
 // ── Collector ────────────────────────────────────────────────────────────────
 
 const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   { fn: probeCoreFiles, timeout: 1000 },
+  { fn: probeSecretPerms, timeout: 1000 },
   { fn: probeMemory, timeout: 5000 },
   { fn: probeTelegram, timeout: 5000 },
   { fn: probeDiscord, timeout: 5000 },
