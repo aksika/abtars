@@ -57,6 +57,23 @@ export async function update(opts: UpdateOptions): Promise<number> {
     });
     process.stdout.write(`✓ staged ${staged.version} at ${staged.stagedPath}\n`);
 
+    // Install external runtime deps at the release dir (#582)
+    {
+      const pkgPath = join(staged.stagedPath, "package.json");
+      const { readFileSync, writeFileSync } = await import("node:fs");
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+        const externals: Record<string, string> = { patchright: "^1.59.4", "rettiwt-api": "^4.1.3" };
+        pkg.dependencies = { ...pkg.dependencies, ...externals };
+        writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+        const { execSync } = await import("node:child_process");
+        execSync("npm install --omit=dev --ignore-scripts 2>/dev/null", { cwd: staged.stagedPath, timeout: 60_000 });
+        process.stdout.write(`✓ external deps installed\n`);
+      } catch (err) {
+        process.stdout.write(`⚠ external deps install failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+
     // Create stable entry point symlink (main.js → bundle or dist)
     {
       const { existsSync, unlinkSync, symlinkSync } = await import("node:fs");
