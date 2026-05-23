@@ -4,6 +4,7 @@
  */
 
 import { request as httpsRequest } from "node:https";
+import { createHash } from "node:crypto";
 import { loadPeerConfig, type PeerEntry } from "./peer-config.js";
 import { logInfo } from "./logger.js";
 
@@ -106,7 +107,8 @@ function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops:
       },
       timeout: timeoutMs,
       minVersion: "TLSv1.3",
-      pskCallback: () => ({ psk: Buffer.from(peer.pskSecret!, "utf-8"), identity: selfName }),
+      ciphers: "TLS_AES_256_GCM_SHA384",
+      pskCallback: () => ({ psk: createHash("sha384").update(peer.pskSecret!).digest(), identity: selfName }),
       checkServerIdentity: () => undefined,
       rejectUnauthorized: false,
     } as any, (res) => {

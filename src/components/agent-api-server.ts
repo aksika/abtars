@@ -1,6 +1,7 @@
 import { logAndSwallow } from "./log-and-swallow.js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { createServer as createHttpsServer } from "https";
+import { createHash } from "crypto";
 import { readFileSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -96,7 +97,7 @@ export class AgentApiServer {
             if (!identity) return null;
             const peer = Object.entries(peerConfig.peers).find(([name]) => name === identity);
             if (!peer?.[1].pskSecret) return null;
-            return { psk: Buffer.from(peer[1].pskSecret, "utf-8"), identity };
+            return { psk: createHash("sha384").update(peer[1].pskSecret).digest(), identity };
           },
         } as any, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
         logInfo(TAG, "TLS-PSK enabled for agent-api");
