@@ -31,6 +31,8 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
   let sendQueue: string[] = [];
   let sendTimer: NodeJS.Timeout | null = null;
   let buffer = "";
+  let consecutiveFailures = 0;
+  const MAX_RETRIES = 5;
 
   function connect(): void {
     if (stopped) return;
@@ -40,6 +42,7 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
     const onConnect = (): void => {
       logInfo(TAG, `Connected to ${opts.host}:${opts.port}`);
       reconnectDelay = 5000;
+      consecutiveFailures = 0;
       raw(`NICK ${opts.nick}`);
       raw(`USER ${opts.nick} 0 * :abtars`);
     };
@@ -65,6 +68,12 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
 
   function scheduleReconnect(): void {
     if (stopped) return;
+    consecutiveFailures++;
+    if (consecutiveFailures >= MAX_RETRIES) {
+      logWarn(TAG, `IRC unavailable — giving up after ${MAX_RETRIES} attempts. Restart bridge to retry.`);
+      stopped = true;
+      return;
+    }
     reconnectTimer = setTimeout(() => {
       if (reconnectDelay <= 10000) logInfo(TAG, `Reconnecting to ${opts.host}:${opts.port}...`);
       else logDebug(TAG, `Reconnecting to ${opts.host}:${opts.port} (delay=${Math.round(reconnectDelay/1000)}s)...`);
