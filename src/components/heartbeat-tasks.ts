@@ -72,10 +72,18 @@ export function createUpdateCheckTask(notify: (msg: string) => void): HeartbeatT
     name: "update-check",
     async execute() {
       if (process.env["UPDATES_CHECK_ENABLED"] === "false") return;
-      const { checkForUpdates } = await import("./update-checker.js");
-      const result = checkForUpdates();
+      const { checkForUpdate } = await import("./update-check.js");
+      const { readFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { abtarsHome } = await import("../paths.js");
+      let version = "0.0.0";
+      try {
+        const m = JSON.parse(readFileSync(join(abtarsHome(), "manifest.json"), "utf-8"));
+        version = m.version ?? "0.0.0";
+      } catch { /* manifest missing */ }
+      const result = checkForUpdate("abtars", version);
       if (result?.shouldNotify) {
-        notify(`⚡ Update available: ${result.localVersion} → ${result.latestVersion}. Run: abtars update`);
+        notify(`⚡ Update available: ${result.current} → ${result.latest}. Run: abtars update`);
       }
     },
   };

@@ -1,31 +1,38 @@
 /**
- * update-check — check npm registry for newer versions (#440).
- * Cached 24h. Non-blocking. Returns null if offline/unavailable.
+ * update-check.ts — Check npm registry for newer abtars versions (#440, #588).
+ * Single module: configurable TTL, notify cooldown, logger integration.
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { abtarsHome } from "../paths.js";
 
-const CACHE_FILE = join(process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars"), "state", "update-check.json");
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h
+const NOTIFY_COOLDOWN_MS = 24 * 60 * 60_000; // 1 per day
 
-type CacheEntry = { checkedAt: number; latest: string };
+interface CacheData {
+  ts: number;
+  latest: string;
+  lastNotifiedAt?: number;
+}
 
-function readCache(): CacheEntry | null {
+function cachePath(): string {
+  const dir = join(abtarsHome(), "state");
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return join(dir, "update-check.json");
+}
+
+function readCache(ttlMs: number): CacheData | null {
   try {
-    const raw = JSON.parse(readFileSync(CACHE_FILE, "utf-8")) as CacheEntry;
-    if (Date.now() - raw.checkedAt < CACHE_TTL_MS) return raw;
+    const data = JSON.parse(readFileSync(cachePath(), "utf-8")) as CacheData;
+    if (Date.now() - data.ts < ttlMs) return data;
   } catch { /* missing or corrupt */ }
   return null;
 }
 
-function writeCache(latest: string): void {
-  try {
-    mkdirSync(join(CACHE_FILE, ".."), { recursive: true });
-    writeFileSync(CACHE_FILE, JSON.stringify({ checkedAt: Date.now(), latest }), "utf-8");
-  } catch { /* non-critical */ }
+function writeCache(data: CacheData): void {
+  try { writeFileSync(cachePath(), JSON.stringify(data), "utf-8"); } catch { /* non-critical */ }
 }
 
 function fetchLatest(pkg: string): string | null {
@@ -36,23 +43,7 @@ function fetchLatest(pkg: string): string | null {
   }
 }
 
-export type UpdateCheckResult = { current: string; latest: string; updateAvailable: boolean } | null;
-
-/**
- * Check if a newer version is available on npm.
- * Returns null if check is skipped (cached/offline/npm not found).
- */
-export function checkForUpdate(pkg: string, currentVersion: string): UpdateCheckResult {
-  const cached = readCache();
-  const latest = cached?.latest ?? fetchLatest(pkg);
-  if (!latest) return null;
-  if (!cached) writeCache(latest);
-
-  const updateAvailable = isNewer(latest, currentVersion);
-  return { current: currentVersion, latest, updateAvailable };
-}
-
-/** True if a is newer than b (simple semver major.minor.patch comparison). */
+/** True if a is newer than b (semver major.minor.patch). */
 function isNewer(a: string, b: string): boolean {
   const pa = a.split(".").map(Number);
   const pb = b.split(".").map(Number);
@@ -61,4 +52,32 @@ function isNewer(a: string, b: string): boolean {
     if ((pa[i] ?? 0) < (pb[i] ?? 0)) return false;
   }
   return false;
+}
+
+export interface UpdateCheckResult {
+  current: string;
+  latest: string;
+  updateAvailable: boolean;
+  shouldNotify: boolean;
+}
+
+/**
+ * Check if a newer version is available on npm.
+ * Returns null if check is skipped (cached fresh / offline / npm not found).
+ */
+export function checkForUpdate(pkg: string, currentVersion: string, opts?: { ttlMs?: number }): UpdateCheckResult | null {
+  const ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
+  const cache = readCache(ttlMs);
+  const latest = cache?.latest ?? fetchLatest(pkg);
+  if (!latest) return null;
+
+  const now = Date.now();
+  const updateAvailable = isNewer(latest, currentVersion);
+  const shouldNotify = updateAvailable && (!cache?.lastNotifiedAt || now - cache.lastNotifiedAt > NOTIFY_COOLDOWN_MS);
+
+  const newCache: CacheData = { ts: now, latest, lastNotifiedAt: shouldNotify ? now : cache?.lastNotifiedAt };
+  if (!cache) writeCache(newCache);
+  else if (shouldNotify) writeCache(newCache);
+
+  return { current: currentVersion, latest, updateAvailable, shouldNotify };
 }
