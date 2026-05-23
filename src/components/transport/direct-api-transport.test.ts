@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
-import { normalizeToolCalls, DirectApiTransport } from "./direct-api-transport.js";
+import { normalizeToolCalls } from "./transport-utils.js";
+import { DirectApiTransport } from "./direct-api-transport.js";
 
 // Test the policy-driven fallback logic through the policy itself,
 // since DirectApiTransport.sendWithPolicy is tightly coupled to HTTP streaming.

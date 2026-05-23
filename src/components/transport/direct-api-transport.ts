@@ -10,6 +10,7 @@ import { ConversationSession, type ToolCall } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
 import { classifyError } from "./model-health-registry.js";
+import { normalizeToolCalls, parseErrorStatus, parseRetryAfter } from "./transport-utils.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 
@@ -28,39 +29,7 @@ export interface DirectApiConfig {
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
 
-/**
- * Normalize tool calls from models that fragment a single call across multiple entries.
- * Pattern: [name="execute_bash" args="{}"], [name="" args=""], [name="" args='{"command":"..."}']
- * Fix: merge next unnamed entry's args into preceding named entry. Drop remaining unnamed.
- */
-export function normalizeToolCalls(raw: ToolCall[]): ToolCall[] {
-  if (raw.length <= 1) return raw;
-
-  const result: ToolCall[] = [];
-  for (let i = 0; i < raw.length; i++) {
-    const tc = raw[i]!;
-    if (tc.function.name) {
-      if (!tc.function.arguments || tc.function.arguments === "{}") {
-        // Look ahead for the next unnamed entry with real args
-        for (let j = i + 1; j < raw.length; j++) {
-          const next = raw[j]!;
-          if (next.function.name) break; // hit another named entry, stop
-          if (next.function.arguments && next.function.arguments !== "{}") {
-            tc.function.arguments = next.function.arguments;
-            i = j; // skip all entries up to and including the merged one
-            break;
-          }
-        }
-      }
-      result.push(tc);
-    }
-  }
-
-  if (result.length !== raw.length) {
-    logWarn(TAG, `Normalized ${raw.length} tool call entries → ${result.length} (model fragmentation): ${raw.map(tc => `${tc.function.name || "(unnamed)"}(${tc.function.arguments.slice(0, 60)})`).join(", ")}`);
-  }
-  return result;
-}
+export { normalizeToolCalls } from "./transport-utils.js";
 
 export class DirectApiTransport implements IKiroTransport {
   private readonly config: DirectApiConfig;
@@ -322,28 +291,10 @@ export class DirectApiTransport implements IKiroTransport {
     return session.messages.at(-1)?.content ?? "(max turns reached)";
   }
 
-  private parseErrorStatus(err: unknown): number {
-    const msg = err instanceof Error ? err.message : String(err);
-    const m = /API error (\d+)/.exec(msg);
-    return m ? parseInt(m[1]!, 10) : 0;
-  }
+  private parseErrorStatus(err: unknown): number { return parseErrorStatus(err); }
 
   /** Extract Retry-After from error (seconds or date). Returns ms or undefined. */
-  private parseRetryAfter(err: unknown): number | undefined {
-    const msg = err instanceof Error ? err.message : String(err);
-    // Look for retry_after in JSON body: "retry_after":30 or "retry-after":"30"
-    const jsonMatch = /retry[_-]after["\s:]+(\d+(?:\.\d+)?)/i.exec(msg);
-    if (jsonMatch) return Math.ceil(parseFloat(jsonMatch[1]!) * 1000);
-    // Look for x-ratelimit-reset (unix timestamp)
-    const resetMatch = /x-ratelimit-reset["\s:]+(\d{10,13})/i.exec(msg);
-    if (resetMatch) {
-      const ts = parseInt(resetMatch[1]!, 10);
-      const ms = ts < 1e12 ? ts * 1000 : ts; // seconds vs milliseconds
-      const delta = ms - Date.now();
-      return delta > 0 ? delta : undefined;
-    }
-    return undefined;
-  }
+  private parseRetryAfter(err: unknown): number | undefined { return parseRetryAfter(err); }
 
   private async streamCompletion(
     session: ConversationSession,
