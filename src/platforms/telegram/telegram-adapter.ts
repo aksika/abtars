@@ -192,7 +192,7 @@ export class TelegramAdapter implements PlatformAdapter {
         const tc = loadTransport();
         if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
-        // Filter providers by transport layer (exclude tmux — not user-selectable)
+        // Filter providers by transport layer
         let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
         if (agent === "professor") {
           const profResolved = resolveAgent("professor", tc);
@@ -210,7 +210,8 @@ export class TelegramAdapter implements PlatformAdapter {
             await this.api.sendMessage(chatId, `🎯 Which slot? (${providerName})`, { reply_markup: { inline_keyboard: buttons } });
             return;
           }
-          // Professor on API: show ALL providers (user can switch transport)
+          // API professor: show all API providers
+          providers = providers.filter(p => p.config.transport === "api");
         }
 
         if (providers.length === 0) { await this.api.sendMessage(chatId, "❌ No compatible providers"); return; }
