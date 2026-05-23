@@ -177,11 +177,12 @@ export class TelegramAdapter implements PlatformAdapter {
     logDebug(TAG, `Update: ${JSON.stringify(update).slice(0, 200)}`);
 
     if (update.callback_query) {
-      await this.api.answerCallbackQuery(update.callback_query.id);
       const data = update.callback_query.data ?? "";
       const chatId = update.callback_query.message?.chat?.id;
+      this.api.answerCallbackQuery(update.callback_query.id).catch(() => {});
       if (!chatId) return;
 
+      try {
       if (data.startsWith("mslot:")) {
         const slot = data.slice(6);
 
@@ -458,6 +459,10 @@ export class TelegramAdapter implements PlatformAdapter {
             if (chatId) await this.api.sendMessage(chatId, `❌ Model switch failed: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
+      }
+      } catch (err) {
+        logWarn(TAG, `Callback handler error: ${err instanceof Error ? err.message : String(err)}`);
+        this.api.sendMessage(chatId, `⚠️ Action failed — try again.`).catch(() => {});
       }
       return;
     }
