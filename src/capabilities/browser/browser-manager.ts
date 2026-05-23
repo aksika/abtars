@@ -47,7 +47,8 @@ export function parseBrowserConfig(): BrowserConfig {
     "BROWSER_MAX_SESSIONS",
     DEFAULTS.BROWSER_MAX_SESSIONS,
   );
-  const userAgent = getEnv().webScrapeUserAgent || DEFAULTS.WEB_SCRAPE_USER_AGENT;
+  // Intentional: raw process.env — tests mutate this at runtime, getEnv() cache won't reflect changes
+  const userAgent = process.env["WEB_SCRAPE_USER_AGENT"]?.trim() || DEFAULTS.WEB_SCRAPE_USER_AGENT;
 
   const engine = "patchright" as BrowserEngine;
 
