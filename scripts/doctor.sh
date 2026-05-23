@@ -187,10 +187,10 @@ fi
 fi # end supervised-only watchdog block
 fi # end supervised-only supervisor check
 
-# 1. Directory permissions (sensitive dirs should be 700) -- fix-full only
+# 1. Directory permissions (sensitive dirs should be 700)
 for d in "$AB/secret" "$AB/secret/cookies" "$ABMIND/memory"; do
   if [ -d "$d" ] && [ "$(file_mode "$d")" != "700" ]; then
-    if $FIX_FULL; then
+    if $FIX || $FIX_FULL; then
       chmod 700 "$d"; fix "$d permissions → 700"
     else
       warn "$d permissions not 700"
@@ -553,4 +553,4 @@ else
   fi
 fi
 
-exit $(( WARNS > 0 ? 1 : 0 ))
+exit $(( WARNS > 0 && ! $FIX ? 1 : 0 ))
