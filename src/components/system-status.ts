@@ -156,8 +156,9 @@ export function renderStatusText(status: SystemStatus): string {
     const abmindManifest = join(homedir(), ".abmind", "manifest.json");
     if (existsSync(abmindManifest)) {
       const m = JSON.parse(readFileSync(abmindManifest, "utf-8"));
-      lines.push(`abmind v${m.version ?? "?"} (${m.commit?.slice(0, 7) ?? "?"})`);
-    }
+      const ver = m.version?.replace(/-[a-f0-9]{7,}$/, "") ?? "?";
+      const commit = m.commit?.slice(0, 7) ?? "?";
+      lines.push(`abmind v${ver} (${commit})`);    }
   } catch { /* non-critical */ }
 
   // Update check (#440)
