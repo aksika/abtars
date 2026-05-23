@@ -52,6 +52,7 @@ export class TelegramAdapter implements PlatformAdapter {
   private readonly deps: TelegramAdapterDeps;
   private poller: TelegramPoller | null = null;
   private botUsername = "";
+  private _pendingSlot: string | undefined;
 
   constructor(config: TelegramAdapterConfig, deps: TelegramAdapterDeps) {
     this.api = new TelegramApi(config.botToken);
@@ -243,7 +244,8 @@ export class TelegramAdapter implements PlatformAdapter {
           const providerConfig = tc?.providers[providerName!];
           if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
           if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
-          const buttons = models.map(m => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${agent}:${providerName}:${m.id}` }]);
+          this._pendingSlot = agent;
+          const buttons = models.map(m => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${m.id}` }]);
           await this.api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
         }
 
@@ -260,11 +262,12 @@ export class TelegramAdapter implements PlatformAdapter {
         await this.api.sendMessage(chatId, `📋 Pick model for ${slot!.replace("professor_fb", "Fb").replace("professor", "Main")}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mset:")) {
-        // Step 3: user picked model — validate + write + switch
+        // Step 4: user picked model — validate + write + switch
         const parts = data.split(":");
-        const slot = parts[1]!;
-        const providerName = parts[2]!;
-        const model = parts.slice(3).join(":"); // model may contain colons
+        const providerName = parts[1]!;
+        const model = parts.slice(2).join(":"); // model may contain colons
+        const slot = this._pendingSlot ?? "professor";
+        this._pendingSlot = undefined;
         const { loadTransport, writeTransportConfig, resolveAgent, getModelsForProvider, validateProviderReady, formatValidationError } = await import("../../components/transport-config.js");
         const tc = loadTransport();
         if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }

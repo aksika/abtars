@@ -4,7 +4,6 @@
  * streaming → response delivery → memory → auto-compact.
  */
 
-import { logAndSwallow } from "./log-and-swallow.js";
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
 import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
@@ -178,6 +177,7 @@ export async function handleInboundMessage(
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
   let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
+  let streamMsgId: number | string | undefined; // tool indicator message (editable)
   try {
     busyEntry.busy = true;
     resetIdleCompactFlag?.(); // re-enable floating compaction on next idle
@@ -307,70 +307,18 @@ export async function handleInboundMessage(
     transport.onSegmentBreak = (text: string) => {
       fullResponseSegments.push(text);
       if (streamMsgId && adapter.editMessage) {
-        // Finalize current stream message with the segment text (no cursor)
         adapter.editMessage(channelId, streamMsgId, text).catch(() => {});
       } else if (text) {
-        // No stream message yet — send as standalone
         adapter.sendMessage(channelId, text, { threadId: msg.threadId }).catch(() => {});
       }
-      // Reset stream state for next segment
       streamMsgId = undefined;
-      streamBuffer = "";
     };
 
-    // --- Intermediate streaming ---
-    let intermediateDelivered = false;
-    let streamMsgId: number | string | undefined;
-    let streamBuffer = "";
-    let streamTimer: ReturnType<typeof setInterval> | undefined;
-
-    if (adapter.supportsStreaming === false) {
-      // No streaming — wait for full response (IRC, etc.)
-    } else if (adapter.editMessage) {
-      // Edit-in-place streaming (ACP + platforms that support editMessage)
-      const FLUSH_INTERVAL = getEnv().streamFlushSec === 0 ? 0 : Math.max(2, Math.min(180, getEnv().streamFlushSec)) * 1000;
-      let lastFlushed = "";
-
-      transport.onIntermediateResponse = (chunk: string) => {
-        streamBuffer += chunk;
-      };
-
-      let flushing = false;
-      if (FLUSH_INTERVAL > 0) {
-        streamTimer = setInterval(async () => {
-          if (flushing) return;
-          const text = streamBuffer.replace(/^\[lang:\w{2}\]\s*/i, "").trim();
-          if (!text || text === lastFlushed) return;
-          flushing = true;
-          try {
-            if (!streamMsgId) {
-              streamMsgId = await adapter.sendMessage(channelId, text + "...", { threadId: msg.threadId });
-              intermediateDelivered = true;
-            } else {
-              await adapter.editMessage!(channelId, streamMsgId, text + "...");
-            }
-            lastFlushed = text;
-          } catch (err) { logAndSwallow("message_pipeline", "op", err); }
-          flushing = false;
-        }, FLUSH_INTERVAL);
-      }
-    } else {
-      // Chunk-based streaming (tmux + platforms without editMessage)
-      transport.onIntermediateResponse = (chunk: string) => {
-        intermediateDelivered = true;
-        const chunks = adapter.chunkResponse(chunk);
-        for (const c of chunks) {
-          if (c.trim()) {
-            adapter.sendTyping?.(channelId, msg.threadId).catch(() => {});
-            adapter.sendMessage(channelId, c, { threadId: msg.threadId }).catch(() => {});
-          }
-        }
-      };
-    }
+    // --- Tool/segment state (used by tool indicators + segment breaks above) ---
+    // No edit-in-place streaming timer. Final response delivered as chunks after completion (#583).
 
     const response = await responsePromise;
 
-    clearInterval(streamTimer);
     clearTimeout(toolBatchTimer);
     transport.onIntermediateResponse = undefined;
     logDebug(TAG, `Response (${response.length} chars): "${response.trim().slice(0, 120)}"`);
@@ -391,34 +339,22 @@ export async function handleInboundMessage(
 
     // --- Empty response ---
     if (!userResponse) {
-      // Strip streaming cursor from partial message
-      if (streamMsgId && adapter.editMessage) {
-        const partial = streamBuffer.replace(/^\[lang:\w{2}\]\s*/i, "").replace(/...$/, "").trim();
-        if (partial) await adapter.editMessage(channelId, streamMsgId, partial).catch(() => {});
-      }
       if (noReply) {
         logDebug(TAG, "LLM returned [NO-REPLY], dropping silently");
         return;
       }
-      // Reaction-only: [REACT:emoji] with no text
       if (reactionEmoji) {
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
-        if (streamMsgId && adapter.editMessage) {
-          await adapter.editMessage(channelId, streamMsgId, reactionEmoji).catch(() => {});
-        } else {
-          await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
-        }
+        await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
         return;
       }
-      if (!intermediateDelivered) {
-        if (transport.toolCallsSucceeded > 0) {
-          logDebug(TAG, `Empty text but ${transport.toolCallsSucceeded} tool call(s) succeeded — suppressing fallback`);
-          if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
-        } else {
-          logWarn(TAG, "Empty response from transport");
-          if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "🤷");
-          await adapter.sendMessage(channelId, "🤷 Model returned an empty response. Try again or /reset.", { threadId: msg.threadId });
-        }
+      if (transport.toolCallsSucceeded > 0) {
+        logDebug(TAG, `Empty text but ${transport.toolCallsSucceeded} tool call(s) succeeded — suppressing fallback`);
+        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+      } else {
+        logWarn(TAG, "Empty response from transport");
+        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "🤷");
+        await adapter.sendMessage(channelId, "🤷 Model returned an empty response. Try again or /reset.", { threadId: msg.threadId });
       }
       return;
     }
@@ -436,52 +372,14 @@ export async function handleInboundMessage(
       return;
     }
 
-    // --- Deliver response ---
+    // --- Deliver response — always chunk and send (#583) ---
     let lastSentMsgId: number | string | undefined;
-    if (streamMsgId && adapter.editMessage && !transport.toolCallsSucceeded) {
-      // Pure streaming (no tools) — edit in place
-      try {
-        await adapter.editMessage(channelId, streamMsgId, userResponse);
-        lastSentMsgId = streamMsgId;
-      } catch (err) {
-        // Edit failed — fallback to new message so response is never lost (#581)
-        logWarn(TAG, `Edit failed (${err instanceof Error ? err.message : String(err)}), sending as new message`);
-        const chunks = adapter.chunkResponse(userResponse);
-        for (const chunk of chunks) {
-          if (chunk.trim()) lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
-        }
-      }
-    } else if (streamMsgId && transport.toolCallsSucceeded) {
-      // After tool calls — send as new message (tool indicator stays as context)
-      const chunks = adapter.chunkResponse(userResponse);
-      for (const chunk of chunks) {
-        if (chunk.trim()) lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
-      }
-    } else if (!intermediateDelivered) {
-      const chunks = adapter.chunkResponse(userResponse);
-      logDebug(TAG, `Sending ${chunks.length} chunk(s)`);
-      for (const chunk of chunks) {
-        if (chunk.trim()) {
-          await adapter.sendTyping?.(channelId, msg.threadId);
-          lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
-        }
-      }
-    } else if (transport.intermediateDeliveredText) {
-      // Send any tail not yet delivered by intermediate streaming
-      const delivered = transport.intermediateDeliveredText;
-      const finalAnswer = cleanAnswer || response;
-      if (delivered && finalAnswer.length > delivered.length && finalAnswer.startsWith(delivered)) {
-        const tail = finalAnswer.slice(delivered.length).trim();
-        if (tail) {
-          logDebug(TAG, `Sending streamed tail (${tail.length} chars)`);
-          const tailChunks = adapter.chunkResponse(tail);
-          for (const chunk of tailChunks) {
-            if (chunk.trim()) {
-              await adapter.sendTyping?.(channelId, msg.threadId);
-              lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
-            }
-          }
-        }
+    const chunks = adapter.chunkResponse(userResponse);
+    logDebug(TAG, `Sending ${chunks.length} chunk(s)`);
+    for (const chunk of chunks) {
+      if (chunk.trim()) {
+        await adapter.sendTyping?.(channelId, msg.threadId);
+        lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
       }
     }
 
@@ -528,7 +426,7 @@ export async function handleInboundMessage(
     }
 
     const ctxAfter = transport.contextPercent;
-    logInfo(TAG, `→ [${msg.platform}] Response delivered${intermediateDelivered ? " (streamed)" : ""}${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
+    logInfo(TAG, `→ [${msg.platform}] Response delivered${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
     updateBridgeLockField("lastPromptAt", Date.now());
 
     // --- AfterMessage hook ---
