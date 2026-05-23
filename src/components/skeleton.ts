@@ -22,10 +22,8 @@ export interface ITaskSlot {
 
 /** Skill loader slot — markdown files or MCP server. */
 export interface ISkillSlot {
-  /** Scan for new/changed skills since last check. */
-  checkForChanges(): Array<{ filename: string; name: string; description: string; path: string }>;
-  /** Append skill to tools manifest. */
-  generateCatalog(): void;
+  /** Regenerate skills catalog. Returns skill count. */
+  generateCatalog(): number;
 }
 
 /** Platform adapter slot — Telegram, Discord, etc. */

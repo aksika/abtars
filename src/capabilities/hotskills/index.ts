@@ -1,5 +1,5 @@
 /**
- * Skills capability — hot-reload skill files and inject into agent.
+ * Skills capability — on-demand skill catalog reload via /skill command.
  */
 
 import { join } from "node:path";
@@ -16,10 +16,9 @@ export function register(api: CapabilityApi): void {
   // Generate catalog on startup
   skillWatcher.generateCatalog();
 
-  api.registerHeartbeatTask({
-    name: "skill-reloader",
-    execute: async () => {
-      skillWatcher.checkForChanges();
-    },
+  api.registerCommand("skill", async (_text, ctx) => {
+    const count = skillWatcher.generateCatalog();
+    await ctx.reply(`Reloaded — ${count} skills available.`);
+    return true;
   });
 }

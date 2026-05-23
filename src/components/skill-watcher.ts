@@ -1,6 +1,5 @@
 /**
- * SkillWatcher — detects new/changed skill files for hot-reload via heartbeat.
- * Generates skills_catalog.md on startup + when skills change.
+ * SkillWatcher — generates skills_catalog.md on startup and on-demand via /skill reload.
  *
  * #369 — Parses YAML-style frontmatter to extract name/description/requires.
  * #412 — Structured requires: bins/npm/env/files (OpenClaw pattern).
@@ -8,23 +7,15 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import { readdirSync, statSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, basename, dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { logInfo, logWarn } from "./logger.js";
-import { scanForInjection } from "abmind";
 
 import type { ISkillSlot } from "./skeleton.js";
 
 const TAG = "skill-reloader";
-
-export interface NewSkill {
-  filename: string;
-  name: string;
-  description: string;
-  path: string;
-}
 
 /** Structured skill requirements (#412). */
 interface SkillRequires {
@@ -47,49 +38,13 @@ interface SkillsConfig {
 }
 
 export class SkillWatcher implements ISkillSlot {
-  private mtimes = new Map<string, number>();
-  private firstTick = true;
   /** Per-instance cache of `which <bin>` results. Avoids repeated execFileSync on heartbeat ticks (#369). */
   private binaryCache = new Map<string, boolean>();
 
   constructor(private skillsDir: string, private catalogPath: string) {}
 
-  /** Scan skills dir, return new/changed skills since last check. */
-  checkForChanges(): NewSkill[] {
-    const files = this.scanMdFiles(this.skillsDir);
-    const changed: NewSkill[] = [];
-
-    for (const filepath of files) {
-      try {
-        const mtime = statSync(filepath).mtimeMs;
-        const key = basename(dirname(filepath));
-        const prev = this.mtimes.get(key);
-        this.mtimes.set(key, mtime);
-
-        if (this.firstTick) continue; // skip first tick — already loaded by kiro-cli
-        if (prev !== undefined && mtime <= prev) continue; // unchanged
-
-        const { name, description } = this.parseSkillHeader(filepath);
-        if (name) {
-          const content = readFileSync(filepath, "utf-8");
-          const scan = scanForInjection(content);
-          if (!scan.safe) {
-            const top = scan.flags[0]!;
-            logWarn(TAG, `BLOCKED skill "${key}" — injection detected: ${top.category} (score=${scan.score})`);
-            continue;
-          }
-          changed.push({ filename: key, name, description, path: filepath });
-        }
-      } catch (err) { logAndSwallow("skill_watcher", "op", err); }
-    }
-
-    if (!this.firstTick && changed.length > 0) this.generateCatalog();
-    this.firstTick = false;
-    return changed;
-  }
-
   /** Generate skills_catalog.md from all skill files. Called on startup + when skills change. */
-  generateCatalog(): void {
+  generateCatalog(): number {
     const files = this.scanMdFiles(this.skillsDir);
     const entries: string[] = [];
     const skipped: string[] = [];
@@ -125,6 +80,7 @@ export class SkillWatcher implements ISkillSlot {
     } catch (err) {
       logWarn(TAG, `Failed to write skills_catalog.md: ${err instanceof Error ? err.message : String(err)}`);
     }
+    return entries.length;
   }
 
   /** Check all requirements. Returns eligible=true only if ALL pass. */

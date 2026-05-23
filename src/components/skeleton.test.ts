@@ -19,7 +19,6 @@ describe("Skeleton slot conformance", () => {
   it("SkillWatcher implements ISkillSlot", () => {
     const sw = new SkillWatcher("/tmp/skills", "/tmp/skills_catalog.md");
     const slot: ISkillSlot = sw;
-    expect(typeof slot.checkForChanges).toBe("function");
     expect(typeof slot.generateCatalog).toBe("function");
   });
 

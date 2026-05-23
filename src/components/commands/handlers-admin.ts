@@ -201,6 +201,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/sleep — Sleep status",
     "/sleep resume — Retry failed sleep steps",
     "/sleep now — Full fresh sleep cycle",
+    "/skill reload — Regenerate skills catalog",
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");
