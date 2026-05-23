@@ -23,6 +23,8 @@ const fsMock = vi.hoisted(() => ({
   unlinkSync: vi.fn(),
   existsSync: vi.fn().mockReturnValue(false),
   writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(),
+  statSync: vi.fn(),
 }));
 vi.mock("node:fs", () => fsMock);
 
