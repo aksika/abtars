@@ -501,6 +501,7 @@ export class DirectApiTransport implements IKiroTransport {
   /** Hot-swap the active model. Takes effect on next API call. */
   setModel(model: string): void {
     this.activeModel = model;
+    (this.config as { model: string }).model = model;
     logInfo(TAG, `Model switched (user): ${model}`);
   }
 
@@ -512,6 +513,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.activeEndpoint = opts.endpoint;
     this.activeApiKey = opts.apiKey;
     this.activeModel = opts.model;
+    (this.config as { model: string; maxContext: number }).model = opts.model;
     (this.config as { maxContext: number }).maxContext = opts.maxContext;
     this.policy = opts.policy;
     logInfo(TAG, `Provider switched: ${opts.model} @ ${opts.endpoint} (maxCtx=${opts.maxContext})`);
