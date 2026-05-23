@@ -12,7 +12,8 @@
  *   initEnv(); // call once at boot, before anything reads config
  */
 
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logError } from "./logger.js";
+import { readSecret } from "./secrets.js";
 
 // ── Schema definition ───────────────────────────────────────────────────────
 
@@ -415,7 +416,14 @@ export function initEnv(): Readonly<EnvConfig> {
     maxSessions: parseIntSafe(readOr("MAX_SESSIONS", "10"), "MAX_SESSIONS"),
 
     getApiKey(envName: string): string | undefined {
-      return process.env[envName]?.trim() || undefined;
+      const env = process.env[envName]?.trim();
+      if (!env) return undefined;
+      if (env === "<secret>") {
+        const value = readSecret(envName);
+        if (!value) logError("secrets", `${envName}=<secret> but ~/.abtars/secrets/${envName} is missing or empty`);
+        return value;
+      }
+      return env;
     },
   };
 
