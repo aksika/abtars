@@ -127,6 +127,14 @@ spawn_bridge() {
     exit 1
   fi
 
+  # Health check before every spawn
+  if [ -x "$AB/scripts/doctor.sh" ]; then
+    log "Running doctor --fix..."
+    if ! timeout 30 "$AB/scripts/doctor.sh" --fix >> "$AB/logs/launchd.log" 2>&1; then
+      log "⚠️ doctor --fix failed — spawning anyway (non-fatal)"
+    fi
+  fi
+
   RESTART_TIMES+=("$(date +%s)")
   rm -f "$LOCK"
 

@@ -26,10 +26,15 @@ fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 # Helper: read JSON field via python3
 json_field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],sys.argv[3]))" "$1" "$2" "${3:-0}" 2>/dev/null || echo "${3:-0}"; }
 
-# Read install mode from manifest (simple skips supervisor checks)
-INSTALL_MODE=$(json_field "$AB/manifest.json" installMode supervised)
-if [[ "$INSTALL_MODE" != "simple" && "$INSTALL_MODE" != "supervised" ]]; then
-  INSTALL_MODE="supervised"
+# Read install mode from manifest — MANDATORY
+INSTALL_MODE=$(json_field "$AB/manifest.json" installMode "")
+if [[ -z "$INSTALL_MODE" ]]; then
+  echo "[doctor] FATAL: installMode not set in manifest.json. Run 'abtars install' first." >&2
+  exit 1
+fi
+if [[ "$INSTALL_MODE" != "simple" && "$INSTALL_MODE" != "supervised" && "$INSTALL_MODE" != "supervised-daemon" ]]; then
+  echo "[doctor] FATAL: invalid installMode '$INSTALL_MODE' in manifest.json." >&2
+  exit 1
 fi
 
 # Helper: cross-platform file mode (replaces stat -c %a which fails on macOS)
@@ -145,10 +150,10 @@ else
 fi
 
 # LaunchAgent / systemd check (supervised mode only)
-if [[ "$INSTALL_MODE" == "supervised" ]]; then
+if [[ "$INSTALL_MODE" == "supervised" || "$INSTALL_MODE" == "supervised-daemon" ]]; then
 if [[ "$(uname)" == "Darwin" ]]; then
   if ! launchctl list 2>/dev/null | grep -q abtars.watchdog; then
-    if $FIX_FULL; then
+    if $FIX || $FIX_FULL; then
       PLIST_SRC="$(dirname "$0")/com.abtars.watchdog.plist"
       PLIST_DST="$HOME/Library/LaunchAgents/com.abtars.watchdog.plist"
       if [ -f "$PLIST_SRC" ]; then

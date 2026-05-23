@@ -241,9 +241,25 @@ export async function update(opts: UpdateOptions): Promise<number> {
       process.stdout.write(`⚠ native deps check failed: ${err instanceof Error ? err.message : String(err)}\n`);
     }
 
+    // Run doctor before restart
+    const doctorPath = join(paths.home, "scripts", "doctor.sh");
+    if (existsSync(doctorPath)) {
+      process.stdout.write("\n🩺 Health check...\n");
+      try {
+        const { execSync } = await import("node:child_process");
+        execSync(`bash "${doctorPath}" --fix`, { stdio: "inherit", timeout: 30_000 });
+      } catch (err) {
+        process.stderr.write(`⚠️ doctor --fix failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+
     // Auto-restart bridge on new code
     const manifestForRestart = await readManifest(paths.manifest);
-    const restartMode = manifestForRestart?.installMode ?? "supervised";
+    const restartMode = manifestForRestart?.installMode;
+    if (!restartMode) {
+      process.stderr.write("❌ installMode not set in manifest.json. Run 'abtars install' first.\n");
+      return 1;
+    }
 
     if (restartMode === "supervised-daemon") {
       // Send USR1 to watchdog for graceful restart — no sudo needed

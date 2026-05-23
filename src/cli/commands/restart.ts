@@ -69,6 +69,10 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
     // Under supervised-daemon, cold restart requires sudo — refuse and print instructions
     const manifestPath = join(home, "manifest.json");
     const installMode = readJsonField(manifestPath, "installMode") as string | undefined;
+    if (!installMode) {
+      process.stderr.write("❌ installMode not set in manifest.json. Run 'abtars install' first.\n");
+      return 1;
+    }
     if (installMode === "supervised-daemon") {
       const platform = process.platform;
       if (platform === "darwin") {
@@ -77,6 +81,18 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
         process.stderr.write(`Cold restart under supervised-daemon requires sudo:\n  sudo -k systemctl restart abtars\n`);
       }
       return 1;
+    }
+
+    // Run doctor before spawning
+    const doctorPath = join(home, "scripts", "doctor.sh");
+    if (existsSync(doctorPath)) {
+      process.stdout.write("🩺 Health check...\n");
+      try {
+        const { execSync } = await import("node:child_process");
+        execSync(`bash "${doctorPath}" --fix`, { stdio: "inherit", timeout: 30_000 });
+      } catch (err) {
+        process.stderr.write(`⚠️ doctor --fix failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
 
     if (bridgeAlive) await killBridge(bridgePid!);
