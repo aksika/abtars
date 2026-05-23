@@ -397,10 +397,11 @@ export class TelegramAdapter implements PlatformAdapter {
               const policy = new FallbackPolicy(candidates, registry);
               (this.deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
               await this.resetSessionForModelSwitch(chatId);
-              await this.api.sendMessage(chatId, `✅ Switched to ${model} (${providerName})`);
             } catch (err) {
               await this.api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
+              return;
             }
+            try { await this.api.sendMessage(chatId, `✅ Switched to ${model} (${providerName})`); } catch { /* swap succeeded, notification lost */ }
           } else if (isProfessor && providerChanged) {
             // Different transport type — auto /reset (rebuild transport + session reset)
             const cascadeNote = oldType !== newType ? " Subagents also reset." : "";

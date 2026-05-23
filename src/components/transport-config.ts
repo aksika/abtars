@@ -239,7 +239,7 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
 
   const mc = models ?? loadModels();
   const modelEntry = mc[effectiveModel];
-  if (!modelEntry) {
+  if (!modelEntry && effectiveModel) {
     logWarn(TAG, `Model "${effectiveModel}" not in models.json — using defaults`);
   }
 
