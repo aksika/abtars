@@ -69,7 +69,7 @@ export class TelegramAdapter implements PlatformAdapter {
 
   /** Reset session after model switch — saves idle state, clears buffer, marks pendingStart. */
   private async resetSessionForModelSwitch(chatId: number, reason = "model-switch"): Promise<void> {
-    await this.api.sendMessage(chatId, "⏳ Reinitializing transport…");
+    await this.api.sendMessage(chatId, "Resetting session…");
     const p = this.deps.pipeline;
     const sessionKey = `telegram:${chatId}`;
     const bufKey = `telegram:${chatId}`;
