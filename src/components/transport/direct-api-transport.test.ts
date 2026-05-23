@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
-import { normalizeToolCalls } from "./direct-api-transport.js";
+import { normalizeToolCalls, DirectApiTransport } from "./direct-api-transport.js";
 
 // Test the policy-driven fallback logic through the policy itself,
 // since DirectApiTransport.sendWithPolicy is tightly coupled to HTTP streaming.
@@ -144,5 +144,66 @@ describe("normalizeToolCalls — model fragmentation handling", () => {
     const result = normalizeToolCalls(input);
     expect(result).toHaveLength(1);
     expect(result[0]!.function.arguments).toBe('{"command":"ls"}');
+  });
+});
+
+describe("DirectApiTransport — construction and model switching", () => {
+  it("exposes currentModel from config", () => {
+    const reg = new ModelHealthRegistry();
+    const policy = new FallbackPolicy([{ model: "gpt-4", endpoint: "http://localhost", maxContext: 128000 }], reg);
+    const transport = new DirectApiTransport({
+      endpoint: "http://localhost/v1",
+      apiKey: "test",
+      model: "gpt-4",
+      maxContext: 128000,
+      maxOutput: 4096,
+      maxTurns: 50,
+    }, policy);
+    expect(transport.currentModel).toBe("gpt-4");
+  });
+
+  it("switchProvider updates model and endpoint", () => {
+    const reg = new ModelHealthRegistry();
+    const policy = new FallbackPolicy([{ model: "gpt-4", endpoint: "http://localhost", maxContext: 128000 }], reg);
+    const transport = new DirectApiTransport({
+      endpoint: "http://localhost/v1",
+      apiKey: "test",
+      model: "gpt-4",
+      maxContext: 128000,
+      maxOutput: 4096,
+      maxTurns: 50,
+    }, policy);
+
+    const newPolicy = new FallbackPolicy([{ model: "claude-3", endpoint: "http://other", maxContext: 200000 }], reg);
+    transport.switchProvider({ endpoint: "http://other/v1", apiKey: "k2", model: "claude-3", maxContext: 200000, policy: newPolicy });
+    expect(transport.currentModel).toBe("claude-3");
+  });
+
+  it("contextPercent starts at -1 (unknown)", () => {
+    const reg = new ModelHealthRegistry();
+    const policy = new FallbackPolicy([{ model: "gpt-4", endpoint: "http://localhost", maxContext: 128000 }], reg);
+    const transport = new DirectApiTransport({
+      endpoint: "http://localhost/v1",
+      apiKey: "test",
+      model: "gpt-4",
+      maxContext: 128000,
+      maxOutput: 4096,
+      maxTurns: 50,
+    }, policy);
+    expect(transport.contextPercent).toBe(-1);
+  });
+
+  it("toolCallsSucceeded starts at 0", () => {
+    const reg = new ModelHealthRegistry();
+    const policy = new FallbackPolicy([{ model: "gpt-4", endpoint: "http://localhost", maxContext: 128000 }], reg);
+    const transport = new DirectApiTransport({
+      endpoint: "http://localhost/v1",
+      apiKey: "test",
+      model: "gpt-4",
+      maxContext: 128000,
+      maxOutput: 4096,
+      maxTurns: 50,
+    }, policy);
+    expect(transport.toolCallsSucceeded).toBe(0);
   });
 });
