@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { FallbackPolicy } from "./fallback-policy.js";
 import { ModelHealthRegistry } from "./model-health-registry.js";
+import { normalizeToolCalls } from "./direct-api-transport.js";
 
 // Test the policy-driven fallback logic through the policy itself,
 // since DirectApiTransport.sendWithPolicy is tightly coupled to HTTP streaming.
@@ -77,5 +78,71 @@ describe("DirectApiTransport.switchProvider", () => {
     transport.switchProvider({ endpoint: "ep2", apiKey: "k2", model: "new", maxContext: 200000, policy: newPolicy });
 
     expect(transport.currentModel).toBe("new");
+  });
+});
+
+describe("normalizeToolCalls — model fragmentation handling", () => {
+  function tc(name: string, args: string, id = "call_0"): { id: string; type: "function"; function: { name: string; arguments: string } } {
+    return { id, type: "function", function: { name, arguments: args } };
+  }
+
+  it("passes well-formed calls through unchanged", () => {
+    const input = [tc("execute_bash", '{"command":"ls"}', "c1"), tc("memory_recall", '{"query":"test"}', "c2")];
+    const result = normalizeToolCalls(input);
+    expect(result).toHaveLength(2);
+    expect(result[0]!.function.name).toBe("execute_bash");
+    expect(result[1]!.function.name).toBe("memory_recall");
+  });
+
+  it("single call passes through", () => {
+    const input = [tc("execute_bash", '{"command":"ls"}')];
+    expect(normalizeToolCalls(input)).toEqual(input);
+  });
+
+  it("merges adjacent unnamed entry args into preceding named entry", () => {
+    const input = [
+      tc("execute_bash", "{}", "c1"),
+      tc("", "", "c2"),
+      tc("", '{"command":"gws-cli gmail list"}', "c3"),
+    ];
+    const result = normalizeToolCalls(input);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.function.name).toBe("execute_bash");
+    expect(result[0]!.function.arguments).toBe('{"command":"gws-cli gmail list"}');
+  });
+
+  it("handles multiple named calls with fragments between them", () => {
+    const input = [
+      tc("execute_bash", "{}", "c1"),
+      tc("", '{"command":"ls"}', "c2"),
+      tc("memory_store", '{"translated":"fact"}', "c3"),
+    ];
+    const result = normalizeToolCalls(input);
+    expect(result).toHaveLength(2);
+    expect(result[0]!.function.name).toBe("execute_bash");
+    expect(result[0]!.function.arguments).toBe('{"command":"ls"}');
+    expect(result[1]!.function.name).toBe("memory_store");
+    expect(result[1]!.function.arguments).toBe('{"translated":"fact"}');
+  });
+
+  it("drops completely unnamed entries with no args", () => {
+    const input = [
+      tc("execute_bash", '{"command":"pwd"}', "c1"),
+      tc("", "", "c2"),
+      tc("", "{}", "c3"),
+    ];
+    const result = normalizeToolCalls(input);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.function.name).toBe("execute_bash");
+  });
+
+  it("does not merge when named entry already has args", () => {
+    const input = [
+      tc("execute_bash", '{"command":"ls"}', "c1"),
+      tc("", '{"command":"pwd"}', "c2"),
+    ];
+    const result = normalizeToolCalls(input);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.function.arguments).toBe('{"command":"ls"}');
   });
 });

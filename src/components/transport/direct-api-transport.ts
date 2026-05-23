@@ -28,6 +28,40 @@ export interface DirectApiConfig {
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
 
+/**
+ * Normalize tool calls from models that fragment a single call across multiple entries.
+ * Pattern: [name="execute_bash" args="{}"], [name="" args=""], [name="" args='{"command":"..."}']
+ * Fix: merge next unnamed entry's args into preceding named entry. Drop remaining unnamed.
+ */
+export function normalizeToolCalls(raw: ToolCall[]): ToolCall[] {
+  if (raw.length <= 1) return raw;
+
+  const result: ToolCall[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const tc = raw[i]!;
+    if (tc.function.name) {
+      if (!tc.function.arguments || tc.function.arguments === "{}") {
+        // Look ahead for the next unnamed entry with real args
+        for (let j = i + 1; j < raw.length; j++) {
+          const next = raw[j]!;
+          if (next.function.name) break; // hit another named entry, stop
+          if (next.function.arguments && next.function.arguments !== "{}") {
+            tc.function.arguments = next.function.arguments;
+            i = j; // skip all entries up to and including the merged one
+            break;
+          }
+        }
+      }
+      result.push(tc);
+    }
+  }
+
+  if (result.length !== raw.length) {
+    logWarn(TAG, `Normalized ${raw.length} tool call entries → ${result.length} (model fragmentation): ${raw.map(tc => `${tc.function.name || "(unnamed)"}(${tc.function.arguments.slice(0, 60)})`).join(", ")}`);
+  }
+  return result;
+}
+
 export class DirectApiTransport implements IKiroTransport {
   private readonly config: DirectApiConfig;
   private readonly sessions = new Map<string, ConversationSession>();
@@ -344,7 +378,7 @@ export class DirectApiTransport implements IKiroTransport {
         else if (event.type === "done") { usage = event.usage; }
       }
       clearTimeout(timer);
-      const toolCalls: ToolCall[] = [...toolCallAcc.values()].map(tc => ({ id: tc.id, type: "function" as const, function: { name: tc.name, arguments: tc.arguments } }));
+      const toolCalls = this.finalizeToolCalls(toolCallAcc);
       return { content: content || null, toolCalls, usage };
     }
 
@@ -370,7 +404,7 @@ export class DirectApiTransport implements IKiroTransport {
         else if (event.type === "done") { usage = event.usage; }
       }
       clearTimeout(timer);
-      const toolCalls: ToolCall[] = [...toolCallAcc.values()].map(tc => ({ id: tc.id, type: "function" as const, function: { name: tc.name, arguments: tc.arguments } }));
+      const toolCalls = this.finalizeToolCalls(toolCallAcc);
       return { content: content || null, toolCalls, usage };
     }
 
@@ -445,11 +479,7 @@ export class DirectApiTransport implements IKiroTransport {
       }
     }
 
-    const toolCalls: ToolCall[] = [...toolCallAccumulator.values()].map(tc => ({
-      id: tc.id,
-      type: "function" as const,
-      function: { name: tc.name, arguments: tc.arguments },
-    }));
+    const toolCalls = this.finalizeToolCalls(toolCallAccumulator);
 
     return { content: content || null, toolCalls, usage };
     } finally {
@@ -470,6 +500,20 @@ export class DirectApiTransport implements IKiroTransport {
     } else {
       acc.set(key, { id: delta.id ?? `call_${acc.size}`, name: delta.name ?? "", arguments: delta.arguments ?? "" });
     }
+  }
+
+  /**
+   * Convert accumulated tool call map → normalized ToolCall array.
+   * Handles model fragmentation: some models (nemotron, mistral-free) split a
+   * single tool call across multiple SSE entries with different indices/IDs.
+   * Pattern: [name="execute_bash" args="{}"], [name="" args=""], [name="" args='{"command":"..."}']
+   * Fix: merge adjacent unnamed entries' args into the preceding named entry.
+   */
+  private finalizeToolCalls(acc: Map<string, { id: string; name: string; arguments: string }>): ToolCall[] {
+    const raw: ToolCall[] = [...acc.values()].map(tc => ({
+      id: tc.id, type: "function" as const, function: { name: tc.name, arguments: tc.arguments },
+    }));
+    return normalizeToolCalls(raw);
   }
 
   private getOrCreateSession(sessionKey: string): ConversationSession {
