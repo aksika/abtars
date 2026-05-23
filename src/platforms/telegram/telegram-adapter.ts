@@ -186,34 +186,32 @@ export class TelegramAdapter implements PlatformAdapter {
 
       try {
       if (data.startsWith("mslot:")) {
-        // Step 1 result: user picked an agent → show providers (step 2)
+        // Step 1 result: user picked an agent
         const agent = data.slice(6);
         const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
         const tc = loadTransport();
         if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
 
-        // Filter providers by transport layer
-        let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
         if (agent === "professor") {
+          // Professor: show slot picker FIRST (step 2)
           const profResolved = resolveAgent("professor", tc);
-          if (profResolved?.provider.cli) {
-            // CLI: only same provider (same binary) — skip step 2
-            const providerName = profResolved.providerName;
-            const models = getModelsForProvider(providerName);
-            if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No models for ${providerName}`); return; }
-            // Skip to step 3 (slot picker)
-            const fallbacks = tc.agents["professor"]?.fallbacks ?? [];
-            const slots: Array<{ label: string; key: string }> = [{ label: `★ Main: ${profResolved.model}`, key: `mpos:professor:${providerName}:professor` }];
-            for (let i = 0; i < fallbacks.length; i++) slots.push({ label: `↳ Fb${i + 1}: ${fallbacks[i]!.model}`, key: `mpos:professor:${providerName}:professor_fb${i + 1}` });
-            if (fallbacks.length < 3) slots.push({ label: `↳ Fb${fallbacks.length + 1}: (add)`, key: `mpos:professor:${providerName}:professor_fb${fallbacks.length + 1}` });
-            const buttons = slots.map(s => [{ text: s.label, callback_data: s.key }]);
-            await this.api.sendMessage(chatId, `🎯 Which slot? (${providerName})`, { reply_markup: { inline_keyboard: buttons } });
-            return;
+          const fallbacks = tc.agents["professor"]?.fallbacks ?? [];
+          const slots: Array<{ label: string; key: string }> = [
+            { label: `★ Main: ${profResolved?.model ?? "?"}`, key: `mpos:professor::professor` },
+          ];
+          for (let i = 0; i < fallbacks.length; i++) {
+            slots.push({ label: `↳ Fb${i + 1}: ${fallbacks[i]!.model}`, key: `mpos:professor::professor_fb${i + 1}` });
           }
-          // API professor: show all API providers
-          providers = providers.filter(p => p.config.transport === "api");
+          if (fallbacks.length < 3) {
+            slots.push({ label: `↳ Fb${fallbacks.length + 1}: (add)`, key: `mpos:professor::professor_fb${fallbacks.length + 1}` });
+          }
+          const buttons = slots.map(s => [{ text: s.label, callback_data: s.key }]);
+          await this.api.sendMessage(chatId, `🎯 Which slot?`, { reply_markup: { inline_keyboard: buttons } });
+          return;
         }
 
+        // Subagents: show all providers (step 2)
+        let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
         if (providers.length === 0) { await this.api.sendMessage(chatId, "❌ No compatible providers"); return; }
         const currentProvider = resolveAgent(agent, tc)?.providerName;
         const buttons = providers.map(p => {
@@ -224,42 +222,65 @@ export class TelegramAdapter implements PlatformAdapter {
         await this.api.sendMessage(chatId, `🔌 Pick provider:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mprov:")) {
-        // Step 2 result: user picked provider
+        // Step 2 result (subagents): user picked provider → show models (step 3)
         const [, agent, providerName] = data.split(":");
         const { loadTransport, getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
         const tc = loadTransport();
 
-        if (agent === "professor") {
-          // Professor: show slot picker (step 3)
-          const fallbacks = tc?.agents["professor"]?.fallbacks ?? [];
-          const profModel = tc?.agents["professor"]?.model ?? "?";
-          const slots: Array<{ label: string; key: string }> = [{ label: `★ Main: ${profModel}`, key: `mpos:professor:${providerName}:professor` }];
-          for (let i = 0; i < fallbacks.length; i++) slots.push({ label: `↳ Fb${i + 1}: ${fallbacks[i]!.model}`, key: `mpos:professor:${providerName}:professor_fb${i + 1}` });
-          if (fallbacks.length < 3) slots.push({ label: `↳ Fb${fallbacks.length + 1}: (add)`, key: `mpos:professor:${providerName}:professor_fb${fallbacks.length + 1}` });
-          const buttons = slots.map(s => [{ text: s.label, callback_data: s.key }]);
-          await this.api.sendMessage(chatId, `🎯 Which slot? (${providerName})`, { reply_markup: { inline_keyboard: buttons } });
-        } else {
-          // Subagent: skip slot, go straight to model picker (step 4)
-          let models = getModelsForProvider(providerName!);
-          const providerConfig = tc?.providers[providerName!];
-          if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
-          if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
-          this._pendingSlot = agent;
-          const buttons = models.map(m => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${m.id}` }]);
-          await this.api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
-        }
+        let models = getModelsForProvider(providerName!);
+        const providerConfig = tc?.providers[providerName!];
+        if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
+        if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
+        this._pendingSlot = agent;
+        const buttons = models.map(m => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${m.id}` }]);
+        await this.api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mpos:")) {
-        // Step 3 result (professor only): user picked slot → show models (step 4)
-        const [, , providerName, slot] = data.split(":");
+        // Step 2 result (professor): user picked slot → show providers (step 3)
+        // Format: mpos:professor::<slot>
+        const [, , , slot] = data.split(":");
+        const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
+        const tc = loadTransport();
+        if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
+
+        let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
+        const profResolved = resolveAgent("professor", tc);
+        const mainTransport = profResolved?.provider.transport;
+
+        if (slot && slot.startsWith("professor_fb") && mainTransport) {
+          // Fb slot: only providers matching Main's transport
+          if (mainTransport === "api") {
+            providers = providers.filter(p => p.config.transport === "api");
+          } else {
+            // CLI: only same provider as Main
+            providers = providers.filter(p => p.name === profResolved!.providerName);
+          }
+        }
+        // Main slot: show ALL providers (user can switch transport)
+
+        if (providers.length === 0) { await this.api.sendMessage(chatId, "❌ No compatible providers for this slot"); return; }
+        const currentProvider = profResolved?.providerName;
+        const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
+        const buttons = providers.map(p => {
+          const count = getModelsForProvider(p.name).length;
+          const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
+          return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
+        });
+        await this.api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
+
+      } else if (data.startsWith("mprov2:")) {
+        // Step 3 result (professor): user picked provider for a slot → show models (step 4)
+        const [, slot, providerName] = data.split(":");
         const { getModelsForProvider, formatRank, formatCost, loadTransport } = await import("../../components/transport-config.js");
         const tc = loadTransport();
         const providerConfig = tc?.providers[providerName!];
         let models = getModelsForProvider(providerName!);
         if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
         if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
-        const buttons = models.map(m => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${slot}:${providerName}:${m.id}` }]);
-        await this.api.sendMessage(chatId, `📋 Pick model for ${slot!.replace("professor_fb", "Fb").replace("professor", "Main")}:`, { reply_markup: { inline_keyboard: buttons } });
+        this._pendingSlot = slot;
+        const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
+        const buttons = models.map(m => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${m.id}` }]);
+        await this.api.sendMessage(chatId, `📋 Pick model for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mset:")) {
         // Step 4: user picked model — validate + write + switch
