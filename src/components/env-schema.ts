@@ -55,7 +55,7 @@ const SCHEMA: readonly EnvVarDef[] = [
 
   // ── Telegram ──
   { env: "TELEGRAM_BOT_TOKEN", type: "string", description: "Telegram bot token" },
-  { env: "TELEGRAM_TIMEOUT_MS", type: "int", default: "15000", description: "Telegram API timeout (ms)" },
+  { env: "TELEGRAM_TIMEOUT_MS", type: "int", default: "10000", description: "Telegram API timeout (ms)" },
   { env: "TELEGRAM_FILE_TIMEOUT_MS", type: "int", default: "60000", description: "Telegram file up/download timeout (ms) — downloadFile, sendDocument" },
   { env: "POLL_TIMEOUT_S", type: "int", default: "30", description: "Telegram long-poll timeout (seconds)" },
 

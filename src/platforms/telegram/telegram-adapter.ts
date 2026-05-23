@@ -53,6 +53,7 @@ export class TelegramAdapter implements PlatformAdapter {
   private poller: TelegramPoller | null = null;
   private botUsername = "";
   private _pendingSlot: string | undefined;
+  private _modelPickerCache: string[] = [];
 
   constructor(config: TelegramAdapterConfig, deps: TelegramAdapterDeps) {
     this.api = new TelegramApi(config.botToken);
@@ -232,7 +233,8 @@ export class TelegramAdapter implements PlatformAdapter {
         if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
         if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
         this._pendingSlot = agent;
-        const buttons = models.map(m => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${m.id}` }]);
+        this._modelPickerCache = models.map(m => m.id);
+        const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
         await this.api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mpos:")) {
@@ -279,16 +281,21 @@ export class TelegramAdapter implements PlatformAdapter {
         if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
         this._pendingSlot = slot;
         const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
-        const buttons = models.map(m => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${m.id}` }]);
+        this._modelPickerCache = models.map(m => m.id);
+        const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
         await this.api.sendMessage(chatId, `📋 Pick model for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mset:")) {
         // Step 4: user picked model — validate + write + switch
         const parts = data.split(":");
         const providerName = parts[1]!;
-        const model = parts.slice(2).join(":"); // model may contain colons
+        const modelIdx = parseInt(parts[2]!, 10);
+        const model = Number.isFinite(modelIdx) && this._modelPickerCache[modelIdx]
+          ? this._modelPickerCache[modelIdx]!
+          : parts.slice(2).join(":"); // fallback: legacy format with model name
         const slot = this._pendingSlot ?? "professor";
         this._pendingSlot = undefined;
+        this._modelPickerCache = [];
         const { loadTransport, writeTransportConfig, resolveAgent, getModelsForProvider, validateProviderReady, formatValidationError } = await import("../../components/transport-config.js");
         const tc = loadTransport();
         if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
@@ -597,7 +604,9 @@ export class TelegramAdapter implements PlatformAdapter {
 
     // #512: commands bypass the sequential await — execute immediately even if agent is mid-stream
     if (text.startsWith("/") && !text.startsWith("//")) {
-      handleInboundMessage(inbound, this, this.deps.pipeline).catch(() => {});
+      handleInboundMessage(inbound, this, this.deps.pipeline).catch((err) => {
+        logError(TAG, `Command dispatch error: ${err instanceof Error ? err.message : String(err)}`);
+      });
       return;
     }
 
