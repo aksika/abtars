@@ -14,9 +14,9 @@ import { logWarn, redactSecrets } from "../logger.js";
 // #449: append-only audit log
 const AUDIT_DIR = join(process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars"), "logs");
 const AUDIT_PATH = join(AUDIT_DIR, "audit.jsonl");
-try { mkdirSync(AUDIT_DIR, { recursive: true }); } catch {}
+try { mkdirSync(AUDIT_DIR, { recursive: true }); } catch { /* non-critical: audit dir may already exist or be unwritable */ }
 function audit(entry: Record<string, unknown>): void {
-  try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch {}
+  try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch { /* fire-and-forget: audit must never block tool execution */ }
 }
 
 export type ToolDefinition = {

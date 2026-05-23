@@ -33,7 +33,7 @@ export async function* parseResponsesSSE(
         } else if (line.startsWith("data: ") && eventType) {
           const data = line.slice(6).trim();
           let parsed: Record<string, unknown>;
-          try { parsed = JSON.parse(data); } catch { eventType = ""; continue; }
+          try { parsed = JSON.parse(data); } catch { eventType = ""; continue; /* malformed SSE JSON chunk — skip */ }
 
           if (eventType === "response.output_text.delta") {
             const delta = parsed["delta"] as string | undefined;

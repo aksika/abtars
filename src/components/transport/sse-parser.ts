@@ -51,7 +51,7 @@ export async function* parseSSEStream(
         if (data === "[DONE]") return;
 
         let parsed: Record<string, unknown>;
-        try { parsed = JSON.parse(data); } catch { continue; }
+        try { parsed = JSON.parse(data); } catch { continue; /* malformed SSE JSON — skip line */ }
 
         // Usage in final chunk (stream_options: { include_usage: true })
         if (parsed["usage"]) {

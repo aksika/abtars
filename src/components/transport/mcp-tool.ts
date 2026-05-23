@@ -20,7 +20,7 @@ async function ensureDaemon(): Promise<void> {
     logInfo(TAG, "mcporter daemon started (on-demand)");
   } catch {
     logWarn(TAG, "mcporter daemon start failed — calls may still work if already running");
-    daemonStarted = true; // don't retry every call
+    daemonStarted = true; // don't retry every call — assume already running
   }
 }
 
@@ -45,7 +45,7 @@ export const mcpTool: ToolDefinition = {
         const parsed = JSON.parse(args) as Record<string, string>;
         for (const [k, v] of Object.entries(parsed)) cliArgs.push(`${k}=${v}`);
       } catch {
-        cliArgs.push(args); // pass raw if not JSON
+        cliArgs.push(args); /* args not valid JSON — pass raw string as positional */
       }
     }
     try {
