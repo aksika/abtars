@@ -378,12 +378,11 @@ export class TelegramAdapter implements PlatformAdapter {
           }
 
           if (isProfessor && !providerChanged && "setModel" in this.deps.transport) {
-            // Same provider, different model — hot swap
+            // Same provider, different model — hot swap, preserve session
             await (this.deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
-            await this.resetSessionForModelSwitch(chatId);
             await this.api.sendMessage(chatId, `✅ Switched to ${model}`);
           } else if (isProfessor && providerChanged && oldType === newType && "switchProvider" in this.deps.transport) {
-            // Same transport type, different provider — hot swap
+            // Same transport type, different provider — hot swap, preserve session
             try {
               const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
               const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
@@ -396,7 +395,6 @@ export class TelegramAdapter implements PlatformAdapter {
               const registry = (this.deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();
               const policy = new FallbackPolicy(candidates, registry);
               (this.deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
-              await this.resetSessionForModelSwitch(chatId);
             } catch (err) {
               await this.api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
               return;
