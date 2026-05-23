@@ -38,6 +38,7 @@ export interface TelegramAdapterDeps {
   conversationBuffer: ConversationBuffer;
   transport: IKiroTransport;
   memory: IMemorySystem | null;
+  sessionManager: { getActiveSessionId(userId: string, platform: string): string };
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -615,15 +616,15 @@ export class TelegramAdapter implements PlatformAdapter {
       logDebug(TAG, `Buffered reaction signal for group ${chatId}`);
     } else {
       const reactionUser = loadUsers().byPlatformId.get("telegram:" + user.id)?.userId ?? "unknown";
-      const sessionKey = reactionUser + ":telegram";
+      const activeId = this.deps.sessionManager.getActiveSessionId(reactionUser, "telegram");
       const { sessions } = this.deps.pipeline;
-      const entry = sessions.getOrCreate(sessionKey);
+      const entry = sessions.getOrCreate(activeId);
       if (entry.busy) {
-        entry.queue.push({ msg: { sessionKey, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this });
-        logDebug(TAG, `Queued reaction signal for busy ${sessionKey} (${entry.queue.length} pending)`);
+        entry.queue.push({ msg: { sessionKey: activeId, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this });
+        logDebug(TAG, `Queued reaction signal for busy ${activeId} (${entry.queue.length} pending)`);
       } else {
         try {
-          await this.deps.transport.sendPrompt(sessionKey, signal);
+          await this.deps.transport.sendPrompt(activeId, signal);
           logDebug(TAG, `Sent reaction signal to transport for chat ${chatId}`);
         } catch (err) {
           logError(TAG, `Failed to send reaction signal for chat ${chatId}`, err);

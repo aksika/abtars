@@ -27,7 +27,7 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
     for (const cap of staticCaps) {
       if (disabled.has(cap.name)) continue;
       try {
-        const api = createCapabilityApi(capabilities, config, memory, transport, runtime);
+        const api = createCapabilityApi(capabilities, config, memory, transport, runtime, ctx.sessionManager);
         cap.module.register(api);
         loaded.push(cap.name);
       } catch (err) {

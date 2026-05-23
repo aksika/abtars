@@ -132,10 +132,12 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
 
   // System message sender — singleton: system-message._sender
   const { initSystemMessage, sendSystemMessage } = await import("../components/system-message.js");
-  const primaryChatId = String(config.mainChatId ?? "");
+  const masterUser = loadUsers().users.find(u => u.role === "master");
+  const masterUserId = masterUser?.userId ?? "master";
   initSystemMessage(async (prompt: string) => {
     try {
-      const response = await transport.sendPrompt(primaryChatId, `[SYSTEM] ${prompt}`);
+      const activeId = ctx.sessionManager.getActiveSessionId(masterUserId, "telegram");
+      const response = await transport.sendPrompt(activeId, `[SYSTEM] ${prompt}`);
       if (response) {
         const { sendNotification } = await import("../components/notification.js");
         sendNotification(ctx, response);

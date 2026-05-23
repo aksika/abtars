@@ -25,7 +25,8 @@ export function register(api: CapabilityApi): void {
         const chatId = api.config.mainChatId;
         if (chatId) {
           const msg = `[NEW SKILL AVAILABLE] ${skill.name}: ${skill.description}. Read ${skill.path} if you need it.`;
-          await api.transport.sendPrompt(`telegram:${chatId}`, msg);
+          const activeId = api.sessionManager.getActiveSessionId("master", "telegram");
+          await api.transport.sendPrompt(activeId, msg);
           logInfo("skill-reloader", `Injected: ${skill.name}`);
         }
       }

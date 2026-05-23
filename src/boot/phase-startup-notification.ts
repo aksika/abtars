@@ -41,15 +41,16 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<PhaseResul
     const chatId = config.mainChatId;
     if (chatId) {
       const masterUser = loadUsers().users.find(u => u.role === "master");
-      const sessionKey = `${masterUser?.userId ?? "master"}:telegram`;
-      const entry = ctx.sessions.getOrCreate(sessionKey);
+      const userId = masterUser?.userId ?? "master";
+      const activeSessionId = ctx.sessionManager.getActiveSessionId(userId, "telegram");
+      const entry = ctx.sessions.getOrCreate(activeSessionId);
       entry.seen = true;
       entry.busy = true;
       startSession(
         transport,
         memory,
         loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master",
-        sessionKey,
+        activeSessionId,
         "You just came online. Output ONLY a personalized greeting message.",
         async (text) => {
           const { text: clean, reactionEmoji } = cleanResponse(text);
@@ -67,7 +68,7 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<PhaseResul
             transport,
             memory!,
             loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master",
-            sessionKey,
+            activeSessionId,
             "You just came online. Output ONLY a personalized greeting message.",
             async (text) => {
               const { text: clean, reactionEmoji } = cleanResponse(text);
@@ -80,7 +81,7 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<PhaseResul
           logWarn("main", `Startup greeting retry failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
         }
       }).finally(() => {
-        ctx.sessions.getOrCreate(sessionKey).busy = false;
+        ctx.sessions.getOrCreate(activeSessionId).busy = false;
       });
     }
   }

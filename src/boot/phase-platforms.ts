@@ -24,7 +24,7 @@ export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
       const { TelegramAdapter } = await import("../platforms/telegram/telegram-adapter.js");
       const adapter = new TelegramAdapter(
         { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
-        { pipeline: pipelineDeps, conversationBuffer, transport, memory },
+        { pipeline: pipelineDeps, conversationBuffer, transport, memory, sessionManager: ctx.sessionManager },
       );
       ctx.telegramAdapter = adapter;
       platformAdapters.set("telegram", adapter);
