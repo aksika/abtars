@@ -463,25 +463,46 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     return true;
   }
 
-  // /models change — 3-step picker
+  // /models change — 4-stage picker (agent→provider→slot→model)
   if (arg === "change") {
     if (ctx.platform !== "telegram") {
       await ctx.reply("🤖 Use /model list to discover, /model quick <model> to switch.");
       return true;
     }
-    const AGENT_LABELS: Array<{ key: string; label: string; slot?: string }> = [
-      { key: "_provider", label: "🔌 Provider" },
-      { key: "professor", label: "Professor (main)" },
-      { key: "professor_fb1", label: "Professor fallback 1" },
-      { key: "professor_fb2", label: "Professor fallback 2" },
-      { key: "dreamy", label: "Dreamy (sleep)", slot: "dreamy" },
-      { key: "browsie", label: "Browsie (browse)", slot: "browsie" },
-      { key: "coding", label: "Cody (coding)", slot: "coding" },
+    const AGENT_LABELS: Array<{ key: string; label: string }> = [
+      { key: "professor", label: "Professor" },
+      { key: "dreamy", label: "Dreamy (sleep)" },
+      { key: "browsie", label: "Browsie (browse)" },
+      { key: "coding", label: "Cody (coding)" },
     ];
-    // Hide unconfigured co-agent slots
-    const visible = AGENT_LABELS.filter(a => !a.slot || tc!.agents[a.slot]);
-    const buttons = visible.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
+    const buttons = AGENT_LABELS.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
     await ctx.reply("🤖 Which agent to change?", { reply_markup: { inline_keyboard: buttons } });
+    return true;
+  }
+
+  // /model provider <name> — global provider switch (replaces old picker "Provider" option)
+  if (arg.startsWith("provider ")) {
+    const providerName = arg.slice(9).trim();
+    if (!tc || !prof) { await ctx.reply("❌ transport.json not loaded"); return true; }
+    const provider = tc.providers[providerName];
+    if (!provider) { await ctx.reply(`❌ Provider "${providerName}" not found. Available: ${Object.keys(tc.providers).join(", ")}`); return true; }
+    const { validateProviderReady, formatValidationError, loadProviderDefaults } = await import("../transport-config.js");
+    const { getEnv } = await import("../env-schema.js");
+    const validation = validateProviderReady(providerName, provider, getEnv());
+    if (!validation.ok) { await ctx.reply(formatValidationError(providerName, validation)); return true; }
+    const defaults = loadProviderDefaults(providerName);
+    if (defaults?.professor) {
+      tc.agents["professor"] = { model: defaults.professor.model, provider: providerName, fallbacks: defaults.professor.fallbacks?.map(m => ({ model: m, provider: providerName })) };
+      for (const role of ["dreamy", "browsie", "coding"] as const) {
+        tc.agents[role] = { model: defaults[role]?.model ?? defaults.professor.model, provider: providerName };
+      }
+    } else {
+      for (const role of Object.keys(tc.agents)) {
+        tc.agents[role] = { ...tc.agents[role]!, provider: providerName };
+      }
+    }
+    writeTransportConfig(tc, `global provider → ${providerName}`);
+    await ctx.reply(`✅ All agents → ${providerName}. Use /reset to apply.`);
     return true;
   }
 
