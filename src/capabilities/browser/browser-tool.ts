@@ -1,5 +1,8 @@
 import { logDebug } from "../../components/logger.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
+
+const TAG = "browser_tool";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readFileSync } from "node:fs";
@@ -83,7 +86,8 @@ export class BrowserTool {
       let hostname: string;
       try {
         hostname = new URL(url).hostname;
-      } catch {
+      } catch (err) {
+        logAndSwallow(TAG, "parse URL hostname", err);
         hostname = url;
       }
       return {
@@ -100,7 +104,8 @@ export class BrowserTool {
         if (await isPrivateHost(hostname)) {
           return { success: false, error: `Blocked: "${hostname}" resolves to a private/internal IP address` };
         }
-      } catch {
+      } catch (err) {
+        logAndSwallow(TAG, "SSRF check", err);
         return { success: false, error: "Invalid URL" };
       }
     }
@@ -145,7 +150,7 @@ export class BrowserTool {
       // Use Promise.race to detect if click triggers navigation
       const navigationPromise = session.page
         .waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 })
-        .catch(() => null);
+        .catch(err => { logAndSwallow(TAG, "waitForNavigation click", err); return null; });
 
       await session.page.click(selector);
 
@@ -190,8 +195,8 @@ export class BrowserTool {
         `(sel) => { const el = document.querySelector(sel); return el instanceof HTMLInputElement && el.type === "password"; }`,
         selector,
       ) as boolean;
-    } catch {
-      // If evaluate fails (e.g. text= selector), assume not password
+    } catch (err) {
+      logAndSwallow(TAG, "evaluate isPassword", err);
     }
 
     const logValue = isPassword ? "***" : value;
@@ -367,7 +372,7 @@ export class BrowserTool {
     const session = await this._browserManager.getSession(action.sessionId);
     const url = action.url ?? session.page.url();
     let domain: string;
-    try { domain = new URL(url).hostname; } catch { domain = ""; }
+    try { domain = new URL(url).hostname; } catch (err) { logAndSwallow(TAG, "parse cookie domain", err); domain = ""; }
 
     const cookies = Object.entries(json).map(([name, value]) => ({
       name, value: String(value), domain, path: "/",

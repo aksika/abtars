@@ -5,6 +5,7 @@ import { getEnv } from "../env-schema.js";
  */
 
 import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import { withRetry, isFatal } from "../retry.js";
 import { ConversationSession, type ToolCall } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
@@ -142,8 +143,8 @@ export class DirectApiTransport implements IKiroTransport {
           model: this.activeModel, durationMs,
           inputTokens: this._lastPromptTokens || null,
           outputTokens: null, // not tracked per-prompt in DirectApi
-        }).catch(() => {});
-      }).catch(() => {});
+        }).catch(err => logAndSwallow(TAG, "fire AfterPrompt", err));
+      }).catch(err => logAndSwallow(TAG, "import hook-system", err));
       this._promptStartedAt = null;
       this.abortControllers.delete(sessionKey);
     }
@@ -273,11 +274,11 @@ export class DirectApiTransport implements IKiroTransport {
           this.onToolCallStart?.(tc.function.name ?? "tool");
 
           let args: Record<string, string>;
-          try { args = JSON.parse(tc.function.arguments); } catch { args = {}; /* malformed JSON from model — use empty args */ }
+          try { args = JSON.parse(tc.function.arguments); } catch (err) { logAndSwallow(TAG, "JSON.parse tool args", err); args = {}; }
 
           const result = await executeToolCall(tc.function.name, args, { userId: this._activeSessionKey?.split(":")[0] || "master" });
           session.addToolResult(tc.id, tc.function.name, result);
-          try { if (!JSON.parse(result).error) this._toolCallsSucceeded++; } catch { this._toolCallsSucceeded++; /* non-JSON result = success */ }
+          try { if (!JSON.parse(result).error) this._toolCallsSucceeded++; } catch (err) { logAndSwallow(TAG, "JSON.parse tool result", err); this._toolCallsSucceeded++; }
         }
         continue;
       }
@@ -318,7 +319,7 @@ export class DirectApiTransport implements IKiroTransport {
       const res = await fetch(`${this.activeEndpoint}/responses`, {
         method: "POST", headers: hdrs, body: JSON.stringify(reqBody), signal: composed,
       });
-      if (!res.ok) { const text = await res.text().catch(() => ""); throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`); }
+      if (!res.ok) { const text = await res.text().catch(err => { logAndSwallow(TAG, "read error body", err); return ""; }); throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`); }
 
       let content = "";
       let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
@@ -344,7 +345,7 @@ export class DirectApiTransport implements IKiroTransport {
       const res = await fetch(`${this.activeEndpoint}/messages`, {
         method: "POST", headers: hdrs, body: JSON.stringify(reqBody), signal: composed,
       });
-      if (!res.ok) { const text = await res.text().catch(() => ""); throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`); }
+      if (!res.ok) { const text = await res.text().catch(err => { logAndSwallow(TAG, "read error body", err); return ""; }); throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`); }
 
       let content = "";
       let usage: { prompt_tokens: number; completion_tokens: number } | null = null;
@@ -390,7 +391,7 @@ export class DirectApiTransport implements IKiroTransport {
           signal: composed,
         });
         if (!res.ok) {
-          const text = await res.text().catch(() => "");
+          const text = await res.text().catch(err => { logAndSwallow(TAG, "read error body", err); return ""; });
           throw new Error(`API error ${res.status}: ${text.slice(0, 500)}`);
         }
         return res;

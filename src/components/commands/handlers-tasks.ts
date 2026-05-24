@@ -1,6 +1,9 @@
 import { execAsync } from "./exec-async.js";
 import { logError } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext } from "./types.js";
+
+const TAG = "cmd_tasks";
 
 
 export async function handleTasksList(_text: string, ctx: CommandContext): Promise<boolean> {
@@ -88,7 +91,8 @@ export async function handleTasksLog(text: string, ctx: CommandContext): Promise
     const body = `📋 ${data.message}\n\n\`\`\`\n${lines.join("\n") || "(no runs)"}\n\`\`\``;
     if (placeholderId !== undefined && ctx.editReply) await ctx.editReply(placeholderId, body);
     else await ctx.reply(body, { parseMode: "Markdown" });
-  } catch {
+  } catch (err) {
+    logAndSwallow(TAG, "read task history", err);
     const msg = "❌ Failed to read history";
     if (placeholderId !== undefined && ctx.editReply) await ctx.editReply(placeholderId, msg);
     else await ctx.reply(msg);

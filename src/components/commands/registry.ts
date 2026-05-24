@@ -3,6 +3,8 @@ import { resetAndPrepare } from "../message-pipeline.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext, CommandHandler } from "./types.js";
 
+const TAG = "cmd_registry";
+
 const exactCommands: Record<string, CommandHandler> = {};
 const prefixCommands: Array<{ prefix: string; handler: CommandHandler }> = [];
 const KNOWN_COMMANDS = new Set<string>();
@@ -65,7 +67,7 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
 export async function triggerNewSession(ctx: CommandContext, reason = "new-session"): Promise<void> {
   const { hasHooks, fire: fireHook } = await import("../hooks/hook-system.js");
   if (hasHooks("SessionEnd")) {
-    await fireHook("SessionEnd", { event: "SessionEnd", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason }).catch(() => {});
+    await fireHook("SessionEnd", { event: "SessionEnd", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason }).catch(err => logAndSwallow(TAG, "fireHook session", err));
   }
   await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
   await resetAndPrepare({
@@ -74,7 +76,7 @@ export async function triggerNewSession(ctx: CommandContext, reason = "new-sessi
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
   if (hasHooks("SessionStart")) {
-    await fireHook("SessionStart", { event: "SessionStart", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason }).catch(() => {});
+    await fireHook("SessionStart", { event: "SessionStart", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason }).catch(err => logAndSwallow(TAG, "fireHook session", err));
   }
 }
 
@@ -82,7 +84,7 @@ export async function triggerNewSession(ctx: CommandContext, reason = "new-sessi
 export async function triggerResetSession(ctx: CommandContext): Promise<void> {
   const { hasHooks, fire: fireHook } = await import("../hooks/hook-system.js");
   if (hasHooks("SessionEnd")) {
-    await fireHook("SessionEnd", { event: "SessionEnd", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason: "reset-transport" }).catch(() => {});
+    await fireHook("SessionEnd", { event: "SessionEnd", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason: "reset-transport" }).catch(err => logAndSwallow(TAG, "fireHook session", err));
   }
   await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
   const { clearTransportCache } = await import("../transport-config.js");
@@ -94,7 +96,7 @@ export async function triggerResetSession(ctx: CommandContext): Promise<void> {
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
   if (hasHooks("SessionStart")) {
-    await fireHook("SessionStart", { event: "SessionStart", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason: "reset-transport" }).catch(() => {});
+    await fireHook("SessionStart", { event: "SessionStart", timestamp: new Date().toISOString(), sessionKey: ctx.sessionKey, platform: ctx.platform, userId: ctx.userId, reason: "reset-transport" }).catch(err => logAndSwallow(TAG, "fireHook session", err));
   }
 }
 

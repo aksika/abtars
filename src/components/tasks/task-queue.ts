@@ -52,7 +52,7 @@ function loadStaleState(): PersistedState | null {
     const sleepStatus = readBridgeLockField("sleepStatus");
     if (sleepStatus === "hw_sleep") return null;
     return raw;
-  } catch { return null; }
+  } catch (err) { logAndSwallow(TAG, "loadStaleState", err); return null; }
 }
 
 function recordRunToFile(entryId: string, exitCode?: number): void {
@@ -67,7 +67,7 @@ function writeResultFile(message: string, content: string): string | null {
     const file = join(dir, `${slug}-${localDate()}.md`);
     writeFileSync(file, content, "utf-8");
     return file;
-  } catch { return null; }
+  } catch (err) { logAndSwallow(TAG, "writeResultFile", err); return null; }
 }
 
 const DOD_MIN_BYTES = 100;
@@ -345,7 +345,7 @@ export class CronQueue {
           if (parsed && typeof parsed === "object" && "exit_code" in parsed) {
             cleaned = parsed.stdout || parsed.stderr || "(task completed)";
           }
-        } catch { /* not JSON — use as-is */ }
+        } catch (err) { logAndSwallow(TAG, "JSON.parse task output", err); }
         const summary = cleaned.slice(0, 500);
         let exitCode = 0;
         let dodResult = "";

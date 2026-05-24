@@ -3,6 +3,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { logInfo } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 
 const TAG = "self-healer";
 
@@ -16,11 +17,12 @@ export function healPort(port: number): boolean {
     const pids = out.split(/\s+/).map(Number).filter(p => p > 0 && p !== process.pid);
     if (pids.length === 0) return false;
     for (const pid of pids) {
-      try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+      try { process.kill(pid, "SIGKILL"); } catch (err) { logAndSwallow(TAG, "kill pid", err); }
     }
     logInfo(TAG, `healPort(${port}): killed PID ${pids.join(", ")}`);
     return true;
-  } catch {
+  } catch (err) {
+    logAndSwallow(TAG, "healPort", err);
     return false;
   }
 }

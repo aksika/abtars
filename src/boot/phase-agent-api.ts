@@ -9,10 +9,13 @@
 
 import { AgentApiServer } from "../components/agent-api-server.js";
 import { loadAgentApiConfig } from "../components/agent-api-config.js";
+import { logAndSwallow } from "../components/log-and-swallow.js";
 import { logInfo, logError } from "../components/logger.js";
 import { sendNotification } from "../components/notification.js";
 import { setPeerActivityCallback } from "../components/transport/tool-registry.js";
 import type { BootCtx, PhaseResult } from "./context.js";
+
+const TAG = "agent_api";
 
 export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memory, runtime, platforms, registry } = ctx;
@@ -67,7 +70,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
           const answer = await new Promise<string>((resolve, reject) => {
             const body = JSON.stringify({ model: "default", messages: [{ role: "user", content: prompt }] });
             const req = http.request({ hostname: "127.0.0.1", port: agentConfig.port, path: "/v1/chat/completions", method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "Authorization": `Bearer ${process.env["AGENT_API_TOKEN"] ?? ""}`  }, timeout: 55000 }, (res) => {
-              let data = ""; res.on("data", c => data += c); res.on("end", () => { try { resolve(JSON.parse(data)?.choices?.[0]?.message?.content ?? ""); } catch { resolve(""); } });
+              let data = ""; res.on("data", c => data += c); res.on("end", () => { try { resolve(JSON.parse(data)?.choices?.[0]?.message?.content ?? ""); } catch (err) { logAndSwallow(TAG, "JSON.parse agent-api response", err); resolve(""); } });
             });
             req.on("error", reject); req.on("timeout", () => { req.destroy(); reject(new Error("self-call timeout")); });
             req.write(body); req.end();

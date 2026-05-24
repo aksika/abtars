@@ -3,7 +3,10 @@ import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import { abtarsHome } from "../../paths.js";
+
+const TAG = "tmux";
 
 // Kiro CLI prompt pattern: "N% >" or "N% !>" where N is a number (context usage percentage)
 // The "!" appears in trust-all-tools mode
@@ -78,7 +81,7 @@ export class TmuxClient implements IKiroTransport {
           const readCmd = `My full message is in ${tmpFile} — please read it and respond.`;
           const escaped = readCmd.replace(/'/g, "'\\''");
           this.exec(`tmux send-keys -t ${this.sessionName} '${escaped}' Enter`);
-          setTimeout(() => { try { unlinkSync(tmpFile); } catch {} }, 120_000);
+          setTimeout(() => { try { unlinkSync(tmpFile); } catch (err) { logAndSwallow(TAG, "unlink tmpFile", err); } }, 120_000);
         } else {
           const escaped = message.replace(/'/g, "'\\''");
           this.exec(`tmux send-keys -t ${this.sessionName} '${escaped}' Enter`);
@@ -423,7 +426,8 @@ export class TmuxClient implements IKiroTransport {
   private capturePaneRaw(): string {
     try {
       return this.exec(`tmux capture-pane -t ${this.sessionName} -p -e -S -2000`);
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, "capturePaneRaw", err);
       return "";
     }
   }
@@ -432,7 +436,8 @@ export class TmuxClient implements IKiroTransport {
     try {
       this.exec(`tmux has-session -t ${this.sessionName}`);
       return true;
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, "sessionExists check", err);
       return false;
     }
   }

@@ -3,6 +3,10 @@
  * Parses Server-Sent Events into typed events.
  */
 
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "sse_parser";
+
 export type SSEChunkEvent = { type: "chunk"; content: string };
 export type SSEToolCallDelta = { type: "tool_call_delta"; index: number; id?: string; name?: string; arguments?: string };
 export type SSEDoneEvent = { type: "done"; usage: { prompt_tokens: number; completion_tokens: number } | null };
@@ -27,7 +31,7 @@ export async function* parseSSEStream(
     if (staleTimer) clearTimeout(staleTimer);
     staleTimer = setTimeout(() => {
       if (Date.now() - lastChunkAt >= STALE_TIMEOUT_MS) {
-        reader.cancel("stale stream").catch(() => {});
+        reader.cancel("stale stream").catch(err => logAndSwallow(TAG, "reader.cancel stale", err));
       }
     }, STALE_TIMEOUT_MS);
   };
@@ -51,7 +55,7 @@ export async function* parseSSEStream(
         if (data === "[DONE]") return;
 
         let parsed: Record<string, unknown>;
-        try { parsed = JSON.parse(data); } catch { continue; /* malformed SSE JSON — skip line */ }
+        try { parsed = JSON.parse(data); } catch (err) { logAndSwallow(TAG, "JSON.parse SSE chunk", err); continue; }
 
         // Usage in final chunk (stream_options: { include_usage: true })
         if (parsed["usage"]) {

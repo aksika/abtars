@@ -12,6 +12,8 @@ import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind";
 import type { HeartbeatTask } from "abmind";
 import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";
+
+const TAG = "heartbeat_tasks";
 export interface IdleCompactDeps {
   transport: IKiroTransport;
   memory: MemoryManager | null;
@@ -80,7 +82,7 @@ export function createUpdateCheckTask(notify: (msg: string) => void): HeartbeatT
       try {
         const m = JSON.parse(readFileSync(join(abtarsHome(), "manifest.json"), "utf-8"));
         version = m.version ?? "0.0.0";
-      } catch { /* manifest missing */ }
+      } catch (err) { logAndSwallow(TAG, "read manifest.json", err); }
       const result = checkForUpdate("abtars", version);
       if (result?.shouldNotify) {
         notify(`⚡ Update available: ${result.current} → ${result.latest}. Run: abtars update`);

@@ -6,6 +6,8 @@ import type { Browser, BrowserContext, Page } from "patchright";
 import { execFileSync } from "node:child_process";
 import type { BrowserSession } from "../../types/browser.js";
 
+const TAG = "browser_mgr";
+
 // ---------------------------------------------------------------------------
 // Environment variable parsing
 
@@ -179,8 +181,8 @@ export class BrowserManager {
     this._sessions.delete(sessionId);
     try {
       await session.context.close();
-    } catch {
-      // Context may already be closed if browser disconnected.
+    } catch (err) {
+      logAndSwallow(TAG, "closeSession context.close", err);
     }
   }
 
@@ -202,8 +204,8 @@ export class BrowserManager {
   async closeContext(context: BrowserContext): Promise<void> {
     try {
       await context.close();
-    } catch {
-      // Already closed or browser disconnected — safe to ignore.
+    } catch (err) {
+      logAndSwallow(TAG, "closeContext", err);
     }
   }
 
@@ -225,8 +227,8 @@ export class BrowserManager {
     if (this._browser) {
       try {
         await this._browser.close();
-      } catch {
-        // Already closed.
+      } catch (err) {
+        logAndSwallow(TAG, "browser.close shutdown", err);
       }
       this._browser = null;
     }

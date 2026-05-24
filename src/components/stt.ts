@@ -1,4 +1,7 @@
 import { logInfo, logDebug } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
+
+const TAG = "stt";
 
 export type SttProvider = "groq";
 
@@ -42,7 +45,7 @@ export async function transcribeAudio(
   });
 
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
+    const text = await response.text().catch(err => { logAndSwallow(TAG, "read STT error body", err); return ""; });
     throw new Error(`STT failed (${response.status}): ${text}`);
   }
 

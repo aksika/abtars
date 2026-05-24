@@ -115,7 +115,7 @@ function readLatestSleepLock(auditDir: string): { date: string; status: string; 
     const dateMatch = latest.match(/sleep_(\d{4})(\d{2})(\d{2})/);
     const date = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : "unknown";
     return { date, status: raw.status ?? "unknown", llmCalls: raw.llmCalls ?? 0, steps: raw.steps ?? {} };
-  } catch { return null; }
+  } catch (err) { logAndSwallow(TAG, "readLastSleepAudit", err); return null; }
 }
 
 function todayLockPath(auditDir: string): string {

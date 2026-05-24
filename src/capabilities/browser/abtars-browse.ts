@@ -13,6 +13,9 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
+
+const TAG = "browse";
 import { randomBytes } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
 import { localDate } from "../../utils/date.js";
@@ -104,7 +107,7 @@ export function readPendingBrowse(): PendingBrowseEntry[] {
   const p = pendingPath();
   if (!existsSync(p)) return [];
   try { return JSON.parse(readFileSync(p, "utf-8")) as PendingBrowseEntry[]; }
-  catch { return []; }
+  catch (err) { logAndSwallow(TAG, "readPendingBrowse", err); return []; }
 }
 
 export function writePendingBrowse(entries: PendingBrowseEntry[]): void {

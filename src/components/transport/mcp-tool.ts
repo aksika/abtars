@@ -6,6 +6,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { logInfo, logWarn } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import type { ToolDefinition } from "./tool-registry.js";
 
 const execFileAsync = promisify(execFile);
@@ -44,8 +45,9 @@ export const mcpTool: ToolDefinition = {
       try {
         const parsed = JSON.parse(args) as Record<string, string>;
         for (const [k, v] of Object.entries(parsed)) cliArgs.push(`${k}=${v}`);
-      } catch {
-        cliArgs.push(args); /* args not valid JSON — pass raw string as positional */
+      } catch (err) {
+        logAndSwallow(TAG, "JSON.parse mcp args", err);
+        cliArgs.push(args);
       }
     }
     try {

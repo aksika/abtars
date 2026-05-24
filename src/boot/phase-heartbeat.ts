@@ -1,4 +1,5 @@
 import { getEnv } from "../components/env-schema.js";
+import { logAndSwallow } from "../components/log-and-swallow.js";
 /**
  * phase-heartbeat — boot phase 9: HeartbeatSystem + all periodic tasks + watchdog.
  *
@@ -39,6 +40,8 @@ import type { BootCtx, PhaseResult } from "./context.js";
 import { readEnvWithDefault } from "../components/env.js";
 import { startInProcWatchdog } from "./heartbeat-watchdog.js";
 import { createModelHealthTask } from "./heartbeat-model-health.js";
+
+const TAG = "heartbeat";
 
 export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, memory, transport, cronQueue, pipelineDeps, capabilities } = ctx;
@@ -166,7 +169,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
 
   // #440: update check (npm registry, notify if newer version)
   heartbeat.registerTask(createUpdateCheckTask((msg) => {
-    import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(() => {});
+    import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(err => logAndSwallow(TAG, "sendNotification update-check", err));
   }));
 
   if (transport.healthCheck) {
@@ -210,7 +213,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   heartbeat.registerTask(modelHealthTask);
 
   // #318: fire model-health immediately at boot (don't wait for first tick)
-  queueMicrotask(() => { runModelHealth().catch(() => {}); });
+  queueMicrotask(() => { runModelHealth().catch(err => logAndSwallow(TAG, "runModelHealth boot", err)); });
 
   // checkBrowseTasks once on startup, then heartbeat.start
   const { checkBrowseTasks } = await import("../capabilities/browser/browse-delivery.js");

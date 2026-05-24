@@ -4,6 +4,9 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { logAndSwallow } from "./log-and-swallow.js";
+
+const TAG = "peer_jwt";
 
 export interface JwtPayload {
   iss: string;  // sender name
@@ -71,7 +74,8 @@ export function verifyJwt(
   let payload: JwtPayload;
   try {
     payload = JSON.parse(base64urlDecode(payloadB64!));
-  } catch {
+  } catch (err) {
+    logAndSwallow(TAG, "JSON.parse jwt payload", err);
     return { ok: false, reason: "malformed_payload" };
   }
 

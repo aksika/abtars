@@ -9,6 +9,8 @@ import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import type { ServiceState } from "./service-registry.js";
 
+const TAG = "system_status";
+
 export interface SubsystemHealth {
   name: string;
   status: "ok" | "failed" | "skipped" | "stopped" | "retrying";
@@ -159,7 +161,7 @@ export function renderStatusText(status: SystemStatus): string {
       const ver = m.version?.replace(/-[a-f0-9]{7,}$/, "") ?? "?";
       const commit = m.commit?.slice(0, 7) ?? "?";
       lines.push(`abmind v${ver} (${commit})`);    }
-  } catch { /* non-critical */ }
+  } catch (err) { logAndSwallow(TAG, "read abmind manifest", err); }
 
   // Update check (#440)
   try {
@@ -168,7 +170,7 @@ export function renderStatusText(status: SystemStatus): string {
     if (result?.updateAvailable) {
       lines.push(`📦 Update available: ${result.current} → ${result.latest}`);
     }
-  } catch { /* non-critical */ }
+  } catch (err) { logAndSwallow(TAG, "update check", err); }
 
   lines.push(
     `🤖 Model: ${status.model}`,

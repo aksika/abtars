@@ -8,6 +8,9 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "
 import { join, dirname } from "node:path";
 import type { CronEntry } from "../../cli/abtars-task.js";
 import { abtarsHome } from "../../paths.js";
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "task_store";
 
 const storePath = (): string => join(abtarsHome(), "state", "tasks.json");
 
@@ -15,7 +18,7 @@ function readAll(): CronEntry[] {
   const p = storePath();
   if (!existsSync(p)) return [];
   try { return JSON.parse(readFileSync(p, "utf-8")); }
-  catch { return []; }
+  catch (err) { logAndSwallow(TAG, "readAll tasks.json", err); return []; }
 }
 
 function writeAll(entries: CronEntry[]): void {

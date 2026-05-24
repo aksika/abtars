@@ -11,6 +11,7 @@ import { getEnv } from "./env-schema.js";
 
 import { execFile } from "node:child_process";
 import { logError, logDebug, logInfo } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 
 const TAG = "NLMCommand";
 const TIMEOUT_MS = 120_000; // 2 minutes — NLM queries can be slow
@@ -95,8 +96,8 @@ async function handleList(): Promise<NLMCommandResult> {
       `• ${n.title ?? n.name ?? "?"} (${n.id ?? n.notebook_id ?? "?"})`
     );
     return { text: `📚 Notebooks:\n\n${lines.join("\n")}` };
-  } catch {
-    // Non-JSON output — just return it as-is
+  } catch (err) {
+    logAndSwallow(TAG, "JSON.parse notebook list", err);
     return { text: `📚 ${result.data}` };
   }
 }
@@ -111,7 +112,8 @@ async function handleCreate(name: string): Promise<NLMCommandResult> {
     const id = parsed.notebook_id ?? parsed.id ?? "?";
     logInfo(TAG, `Created notebook "${name}" → ${id}`);
     return { text: `✅ Notebook "${name}" created (${id})` };
-  } catch {
+  } catch (err) {
+    logAndSwallow(TAG, "JSON.parse notebook create", err);
     return { text: `✅ ${result.data}` };
   }
 }
@@ -128,7 +130,8 @@ async function handleSources(notebookId: string): Promise<NLMCommandResult> {
       `• [${s.type ?? s.source_type ?? "?"}] ${s.title ?? s.name ?? "?"}`
     );
     return { text: `📄 Sources:\n\n${lines.join("\n")}` };
-  } catch {
+  } catch (err) {
+    logAndSwallow(TAG, "JSON.parse source list", err);
     return { text: `📄 ${result.data}` };
   }
 }
@@ -150,8 +153,8 @@ async function handleQuery(question: string, config: NLMConfig): Promise<NLMComm
       : "";
     logInfo(TAG, `Query OK — answerLen=${String(answer).length}`);
     return { text: `📚 ${answer}${citations}` };
-  } catch {
-    // Non-JSON — return raw output
+  } catch (err) {
+    logAndSwallow(TAG, "JSON.parse query result", err);
     return { text: `📚 ${result.data}` };
   }
 }

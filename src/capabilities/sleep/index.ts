@@ -15,6 +15,8 @@ import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { readEnv, readEnvWithDefault } from "../../components/env.js";
 
+const TAG = "sleep";
+
 export interface SleepOpts {
   sleepHour: number;
   sleepAuditDir: string;
@@ -145,7 +147,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         const sleepNote = hwEnabled ? ` Hardware sleep in ~${hwSleepMin} minutes if no activity.` : "";
 
         if (opts.sendSystemMessage) {
-          opts.sendSystemMessage(`${dreamReport}${sleepNote}`).catch(() => {});
+          opts.sendSystemMessage(`${dreamReport}${sleepNote}`).catch(err => logAndSwallow(TAG, "sendSystemMessage dream report", err));
         }
 
         if (hwEnabled) {

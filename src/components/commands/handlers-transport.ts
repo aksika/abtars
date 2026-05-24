@@ -1,4 +1,5 @@
 import { logInfo, logError } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import type { CommandContext } from "./types.js";
 import { triggerResetSession} from "./registry.js";
 
@@ -157,7 +158,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
           results.push(`✅ ${model} — alive`);
           if (catalog[model]) catalog[model]!.status = "alive";
         } else {
-          const body = await res.text().catch(() => "");
+          const body = await res.text().catch(err => { logAndSwallow(TAG, "read model probe error body", err); return ""; });
           const short = body.slice(0, 80).replace(/\n/g, " ");
           const status = res.status === 404 ? "dead" : res.status === 403 ? "subscription" : res.status === 429 ? "rate_limited" : "error";
           results.push(`❌ ${model} — ${status} (${res.status}: ${short})`);

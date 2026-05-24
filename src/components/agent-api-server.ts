@@ -102,7 +102,7 @@ export class AgentApiServer {
         } as any, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
         logInfo(TAG, "TLS-PSK enabled for agent-api");
       }
-    } catch {}
+    } catch (err) { logAndSwallow(TAG, "TLS-PSK setup", err); }
     if (!hasPsk) {
       this.server = createServer((req, res) => this.handle(req, res));
     }
@@ -121,7 +121,8 @@ export class AgentApiServer {
       for (const p of candidates) {
         try { this.agentRules = readFileSync(p, "utf8"); break; } catch (err) { logAndSwallow("agent_api_server", "op", err); }
       }
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, "load agentRules", err);
       this.agentRules = "";
     }
   }
@@ -301,7 +302,8 @@ export class AgentApiServer {
     let body: unknown;
     try {
       body = JSON.parse(await readBody(req));
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, "JSON.parse chat completions body", err);
       res.writeHead(400, { "Content-Type": "application/json" })
         .end(JSON.stringify(openaiError("Invalid JSON body", "invalid_request_error", "invalid_body")));
       setCurrentPeerHops(null);
@@ -383,7 +385,8 @@ export class AgentApiServer {
     let session: AgentSession;
     try {
       session = await this.ensureAgentSession();
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, "ensureAgentSession", err);
       res.writeHead(503, { "Content-Type": "application/json" })
         .end(JSON.stringify(openaiError("Failed to spawn agent kiro-cli", "server_error", "spawn_failed")));
       setCurrentPeerHops(null);
@@ -424,7 +427,8 @@ export class AgentApiServer {
     let body: unknown;
     try {
       body = JSON.parse(await readBody(req));
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, "JSON.parse embeddings body", err);
       res.writeHead(400, { "Content-Type": "application/json" })
         .end(JSON.stringify(openaiError("Invalid JSON body", "invalid_request_error", "invalid_body")));
       return;

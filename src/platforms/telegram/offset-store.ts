@@ -6,6 +6,9 @@
 
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
+
+const TAG = "offset_store";
 
 export interface OffsetStore {
   read(): Promise<number>;
@@ -22,7 +25,8 @@ export function createFileOffsetStore(filePath: string): OffsetStore {
         const raw = await readFile(filePath, "utf-8");
         const val = parseInt(raw.trim(), 10);
         return Number.isFinite(val) ? val : 0;
-      } catch {
+      } catch (err) {
+        logAndSwallow(TAG, "read offset file", err);
         return 0;
       }
     },
@@ -33,7 +37,7 @@ export function createFileOffsetStore(filePath: string): OffsetStore {
         await mkdir(dirname(filePath), { recursive: true });
         await writeFile(tmp, String(offset), "utf-8");
         await rename(tmp, filePath);
-      }).catch(() => { /* disk full / permission — logged by caller */ });
+      }).catch(err => logAndSwallow(TAG, "write offset file", err));
       return pending;
     },
   };

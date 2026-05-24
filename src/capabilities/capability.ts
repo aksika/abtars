@@ -1,5 +1,8 @@
 import { getEnv } from "../components/env-schema.js";
 import { logError } from "../components/logger.js";
+import { logAndSwallow } from "../components/log-and-swallow.js";
+
+const TAG = "capabilities";
 /**
  * Capability system — typed registration API for bridge subsystems.
  *
@@ -98,7 +101,7 @@ export async function discoverCapabilities(
   const loaded: string[] = [];
   let dirs: string[];
   try { dirs = readdirSync(capabilitiesDir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name); }
-  catch { return loaded; }
+  catch (err) { logAndSwallow(TAG, "readdirSync capabilities", err); return loaded; }
 
   for (const dir of dirs) {
     const manifestPath = join(capabilitiesDir, dir, "capability.json");
@@ -106,7 +109,7 @@ export async function discoverCapabilities(
 
     let manifest: { name: string; description?: string };
     try { manifest = JSON.parse(readFileSync(manifestPath, "utf-8")); }
-    catch { continue; }
+    catch (err) { logAndSwallow(TAG, "JSON.parse capability manifest", err); continue; }
 
     if (disabled.has(manifest.name)) continue;
 

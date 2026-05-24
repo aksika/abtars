@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { scanForInjection } from "abmind";
 import { abtarsHome } from "../../paths.js";
 import { logInfo } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import type { ToolDefinition } from "./tool-registry.js";
 
 const TAG = "skill-authoring";
@@ -25,7 +26,7 @@ function audit(entry: string): void {
     const dir = join(abtarsHome(), "logs");
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     appendFileSync(auditLogPath(), line);
-  } catch { /* silent */ }
+  } catch (err) { logAndSwallow(TAG, "audit write", err); }
 }
 
 function validate(name: string, category: string, description: string, content: string): string | null {

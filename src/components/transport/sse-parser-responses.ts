@@ -5,6 +5,9 @@
  */
 
 import type { SSEEvent } from "./sse-parser.js";
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "sse_parser_responses";
 
 export async function* parseResponsesSSE(
   response: Response,
@@ -33,7 +36,7 @@ export async function* parseResponsesSSE(
         } else if (line.startsWith("data: ") && eventType) {
           const data = line.slice(6).trim();
           let parsed: Record<string, unknown>;
-          try { parsed = JSON.parse(data); } catch { eventType = ""; continue; /* malformed SSE JSON chunk — skip */ }
+          try { parsed = JSON.parse(data); } catch (err) { logAndSwallow(TAG, "JSON.parse SSE chunk", err); eventType = ""; continue; }
 
           if (eventType === "response.output_text.delta") {
             const delta = parsed["delta"] as string | undefined;

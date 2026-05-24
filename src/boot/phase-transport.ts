@@ -17,6 +17,8 @@ import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 
+const TAG = "transport";
+
 export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig } = ctx;
 
@@ -149,7 +151,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       ctx.modelHealthRegistry.onDemote = (model, _endpoint, reason) => {
         import("../components/transport-config.js").then(({ demoteModel }) => demoteModel(model, reason));
         import("../components/notification.js").then(({ sendNotification }) =>
-          sendNotification(ctx, `⚠️ ${model} demoted (${reason}). Next healthy model promoted.`)).catch(() => {});
+          sendNotification(ctx, `⚠️ ${model} demoted (${reason}). Next healthy model promoted.`)).catch(err => logAndSwallow(TAG, "sendNotification model-demote", err));
       };
     }
     const policy = new FallbackPolicy(candidates, ctx.modelHealthRegistry);
@@ -236,7 +238,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
           });
         },
         (_chatId: string) => {
-          try { return ctx.memory?.getLastMessageTimestamp(true) ?? null; } catch { return null; }
+          try { return ctx.memory?.getLastMessageTimestamp(true) ?? null; } catch (err) { logAndSwallow(TAG, "getLastMessageTimestamp", err); return null; }
         },
       );
       (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).contextOrchestrator = orchestrator;
@@ -252,7 +254,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       logInfo("main", msg);
       if (model !== lastNotifiedModel || isLogLevel("debug")) {
         lastNotifiedModel = model;
-        import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(() => {});
+        import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(err => logAndSwallow(TAG, "sendNotification fallback", err));
       }
     };
   }

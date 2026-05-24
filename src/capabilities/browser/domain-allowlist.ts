@@ -1,4 +1,7 @@
 import { getEnv } from "../../components/env-schema.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
+
+const TAG = "domain_allowlist";
 /**
  * Validates URLs against a configurable allowlist of domain patterns.
  * Prevents the agent from navigating to arbitrary domains.
@@ -24,7 +27,8 @@ export class DomainAllowlist {
     let hostname: string;
     try {
       hostname = new URL(url).hostname.toLowerCase();
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, "parse URL", err);
       return false;
     }
 

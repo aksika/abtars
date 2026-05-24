@@ -17,7 +17,7 @@ export function readLastPromptAt(): number {
   try {
     const lock = JSON.parse(readFileSync(join(abtarsHome(), "bridge.lock"), "utf-8"));
     return typeof lock.lastPromptAt === "number" ? lock.lastPromptAt : 0;
-  } catch { return 0; }
+  } catch (err) { logAndSwallow("bridge_lock_transport", "readLastPromptAt", err); return 0; }
 }
 
 /** Update a single field in bridge.lock (read-merge-write). */
@@ -35,7 +35,7 @@ export function readBridgeLockField<T = unknown>(key: string): T | null {
   try {
     const lock = JSON.parse(readFileSync(join(abtarsHome(), "bridge.lock"), "utf-8"));
     return lock[key] ?? null;
-  } catch { return null; }
+  } catch (err) { logAndSwallow("bridge_lock_transport", "readBridgeLockField", err); return null; }
 }
 
 /** Write restart reason to bridge.lock. */

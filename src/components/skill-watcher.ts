@@ -107,7 +107,8 @@ export class SkillWatcher implements ISkillSlot {
     try {
       require.resolve(pkg);
       return true;
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, `require.resolve ${pkg}`, err);
       return false;
     }
   }
@@ -119,7 +120,8 @@ export class SkillWatcher implements ISkillSlot {
         // execFileSync (not execSync) — no shell interpolation on untrusted `requires:` values.
         execFileSync("which", [bin], { timeout: 1000, stdio: "pipe" });
         this.binaryCache.set(bin, true);
-      } catch {
+      } catch (err) {
+        logAndSwallow(TAG, `which ${bin}`, err);
         this.binaryCache.set(bin, false);
       }
     }
@@ -181,7 +183,8 @@ export class SkillWatcher implements ISkillSlot {
       const name = heading?.replace(/^#+\s*/, "").trim() ?? basename(dirname(filepath));
       const desc = lines.find(l => !l.startsWith("#") && l.trim().length > 10)?.trim() ?? "";
       return { name, description: desc.slice(0, 120) };
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, "parseSkillMeta", err);
       return { name: basename(dirname(filepath)), description: "" };
     }
   }

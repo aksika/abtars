@@ -7,6 +7,7 @@ import { getEnv } from "./env-schema.js";
  */
 import type { IMemorySystem } from "abmind";
 import { logInfo } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 import { safeReadJson } from "./safe-json.js";
 import { hasSleepAuditToday } from "abmind";
 import { readBridgeLockField } from "./transport/bridge-lock-transport.js";
@@ -73,7 +74,7 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   try {
     const row = deps.memory?.getLastMessageTimestamp(true, "A");
     currentMsgTs = row ?? 0;
-  } catch { return false; }
+  } catch (err) { logAndSwallow("daily_cycle", "getLastMessageTimestamp", err); return false; }
 
   if (currentMsgTs > lastSeenMsgTs) {
     // New message arrived — reset counter

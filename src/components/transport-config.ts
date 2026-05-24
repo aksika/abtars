@@ -107,7 +107,8 @@ export function loadTransport(): TransportConfig | null {
       pendingRepairs = repairs;
     }
     return cachedTransport;
-  } catch {
+  } catch (err) {
+    logAndSwallow(TAG, "loadTransport parse", err);
     // Fallback to transport.default.json
     try {
       cachedTransport = JSON.parse(readFileSync(join(dir, "transport.default.json"), "utf-8")) as TransportConfig;
@@ -311,7 +312,7 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): void
   }
   const p = join(configDir(), getEnv().transportConfig);
   // Save current as .old before overwriting (enables /model restore)
-  try { writeFileSync(p.replace(".json", ".old.json"), readFileSync(p, "utf-8"), "utf-8"); } catch { /* first write or missing — no .old to save */ }
+  try { writeFileSync(p.replace(".json", ".old.json"), readFileSync(p, "utf-8"), "utf-8"); } catch (err) { logAndSwallow(TAG, "backup transport.old.json", err); }
   writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
   cachedTransport = tc;
   logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");

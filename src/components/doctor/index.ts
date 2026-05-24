@@ -4,6 +4,9 @@
  */
 
 import { logInfo } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "doctor";
 
 export interface ProbeResult {
   name: string;
@@ -77,7 +80,8 @@ const probeHeartbeat: ProbeFn = async (ctx) => {
     const info = ctx.memory.getCronInfo();
     const running = info.heartbeatRunning;
     return { name: "heartbeat", status: running ? "ok" : "failed", latencyMs: Date.now() - start, detail: running ? `interval ${info.intervalMs}ms` : "not running" };
-  } catch {
+  } catch (err) {
+    logAndSwallow(TAG, "probe heartbeat", err);
     return { name: "heartbeat", status: "failed", latencyMs: Date.now() - start };
   }
 };
@@ -99,7 +103,8 @@ const probeDashboard: ProbeFn = async (ctx) => {
   try {
     const res = await fetch(`http://localhost:${port}/`, { signal: AbortSignal.timeout(5000) });
     return { name: "dashboard", status: res.ok ? "ok" : "failed", latencyMs: Date.now() - start };
-  } catch {
+  } catch (err) {
+    logAndSwallow(TAG, "probe dashboard", err);
     return { name: "dashboard", status: "skipped", latencyMs: Date.now() - start, detail: "not running" };
   }
 };
@@ -109,7 +114,8 @@ const probeOllama: ProbeFn = async (_ctx) => {
   try {
     const res = await fetch("http://localhost:11434/api/tags", { signal: AbortSignal.timeout(5000) });
     return { name: "ollama", status: res.ok ? "ok" : "failed", latencyMs: Date.now() - start };
-  } catch {
+  } catch (err) {
+    logAndSwallow(TAG, "probe ollama", err);
     return { name: "ollama", status: "skipped", latencyMs: Date.now() - start, detail: "not reachable" };
   }
 };
@@ -134,7 +140,7 @@ const probeSecretPerms: ProbeFn = async (_ctx) => {
   const start = Date.now();
   const secretDir = join(abtarsHome(), "secret");
   let files: string[];
-  try { files = readdirSync(secretDir); } catch { return { name: "secret-perms", status: "skipped", latencyMs: 0, detail: "no secret/ dir" }; }
+  try { files = readdirSync(secretDir); } catch (err) { logAndSwallow(TAG, "readdirSync secret dir", err); return { name: "secret-perms", status: "skipped", latencyMs: 0, detail: "no secret/ dir" }; }
   const bad: string[] = [];
   for (const f of files) {
     const st = statSync(join(secretDir, f));
@@ -206,7 +212,7 @@ export async function getDoctorReport(ctx: DoctorCtx, opts?: { force?: boolean }
     } else if (result) {
       results.push({ name: "version", status: "ok", latencyMs: 0, detail: `${result.current} (latest)` });
     }
-  } catch { /* non-critical */ }
+  } catch (err) { logAndSwallow(TAG, "version check", err); }
 
   const report: DoctorReport = { results, totalMs, cached: false };
   lastReport = { report, generatedAt: now };

@@ -21,7 +21,7 @@ function ensureAgentConfig(agentName: string, model: string): void {
       const config = { name: agentName, model, tools: ["*"], allowedTools: ["@builtin"], includeMcpJson: true };
       writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
     }
-  } catch { /* non-fatal — kiro-cli will use its default */ }
+  } catch (err) { logAndSwallow(TAG, "ensureAgentConfig", err); }
 }
 
 export class ModelNotFoundError extends Error {
@@ -58,6 +58,8 @@ import type { IKiroTransport } from "./kiro-transport.js";
 import { logInfo, logDebug, logWarn, logError } from "../logger.js";
 import { writeRestartReason } from "../transport/bridge-lock-transport.js";
 import { TransportStateMachine } from "./transport-state.js";
+
+const TAG = "acp";
 
 /**
  * ACP transport using @agentclientprotocol/sdk.
@@ -297,8 +299,8 @@ export class AcpTransport implements IKiroTransport {
           sessionKey, platform: "", userId: "",
           model: this.modelId ?? "unknown", durationMs,
           inputTokens: null, outputTokens: null,
-        }).catch(() => {});
-      }).catch(() => {});
+        }).catch(err => logAndSwallow(TAG, "fire AfterPrompt", err));
+      }).catch(err => logAndSwallow(TAG, "import hook-system", err));
       this.sm.promptCompleted();
     }
   }

@@ -1,5 +1,6 @@
 import { getEnv } from "../../components/env-schema.js";
 import { logDebug } from "../../components/logger.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import type {
   TelegramUpdate,
   TelegramInlineKeyboardMarkup,
@@ -225,7 +226,7 @@ export class TelegramApi {
       try {
         const response = await requestFn(composed);
         if (!response.ok) {
-          const text = await response.text().catch(() => "");
+          const text = await response.text().catch(err2 => { logAndSwallow(TAG, "read TG API error body", err2); return ""; });
           const err = new Error(`Telegram API ${opts.method} failed (${response.status}): ${text}`);
           // 4xx treated as permanent unless caller opts in
           if (response.status >= 400 && response.status < 500 && !opts.retryable4xx) throw err;

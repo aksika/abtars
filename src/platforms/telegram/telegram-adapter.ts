@@ -17,6 +17,7 @@ import { formatReactionSignal, routeReaction } from "../../components/reactions.
 export const TELEGRAM_CAPABILITIES: PlatformCapabilities = { voice: true, reactions: true, typing: true, threads: true };
 import { emojiToScore } from "abmind";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
 import type { TelegramUpdate } from "../../types/index.js";
@@ -64,7 +65,7 @@ export class TelegramAdapter implements PlatformAdapter {
 
   /** Send a system notification to a chat (fire-and-forget). */
   sendNotification(chatId: string, text: string): void {
-    this.api.sendMessage(parseInt(chatId, 10), text).catch(() => {});
+    this.api.sendMessage(parseInt(chatId, 10), text).catch(err => logAndSwallow(TAG, "sendNotification", err));
   }
 
   /** Reset session after model switch — saves idle state, clears buffer, marks pendingStart. */
@@ -182,7 +183,7 @@ export class TelegramAdapter implements PlatformAdapter {
     if (update.callback_query) {
       const data = update.callback_query.data ?? "";
       const chatId = update.callback_query.message?.chat?.id;
-      this.api.answerCallbackQuery(update.callback_query.id).catch(() => {});
+      this.api.answerCallbackQuery(update.callback_query.id).catch(err => logAndSwallow(TAG, "answerCallbackQuery", err));
       if (!chatId) return;
 
       try {
@@ -323,7 +324,7 @@ export class TelegramAdapter implements PlatformAdapter {
             if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
             const res = await fetch(`${endpoint}/models`, { headers, signal: AbortSignal.timeout(5000) });
             if (!res.ok) { await this.api.sendMessage(chatId, `⚠️ ${providerName} unreachable (${res.status}). Try another?`); return; }
-          } catch { await this.api.sendMessage(chatId, `⚠️ ${providerName} unreachable. Try another?`); return; }
+          } catch (err) { logAndSwallow(TAG, "provider reachability check", err); await this.api.sendMessage(chatId, `⚠️ ${providerName} unreachable. Try another?`); return; }
         }
 
         // Determine agent key
@@ -399,7 +400,7 @@ export class TelegramAdapter implements PlatformAdapter {
               await this.api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
               return;
             }
-            try { await this.api.sendMessage(chatId, `✅ Switched to ${model} (${providerName})`); } catch { /* swap succeeded, notification lost */ }
+            try { await this.api.sendMessage(chatId, `✅ Switched to ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "sendMessage model switch confirm", err); }
           } else if (isProfessor && providerChanged) {
             // Different transport type — auto /reset (rebuild transport + session reset)
             const cascadeNote = oldType !== newType ? " Subagents also reset." : "";
@@ -430,7 +431,7 @@ export class TelegramAdapter implements PlatformAdapter {
       }
       } catch (err) {
         logWarn(TAG, `Callback handler error: ${err instanceof Error ? err.message : String(err)}`);
-        this.api.sendMessage(chatId, `⚠️ Action failed — try again.`).catch(() => {});
+        this.api.sendMessage(chatId, `⚠️ Action failed — try again.`).catch(err2 => logAndSwallow(TAG, "sendMessage action failed", err2));
       }
       return;
     }

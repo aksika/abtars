@@ -5,6 +5,7 @@
  */
 
 import { logInfo, logWarn, logError, logDebug } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
 import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { tryReaction } from "./reactions.js";
@@ -230,7 +231,7 @@ export async function handleInboundMessage(
     if (adapter.sendTyping) {
       await adapter.sendTyping(channelId, msg.threadId);
       typingInterval = setInterval(() => {
-        adapter.sendTyping!(channelId, msg.threadId).catch(() => {});
+        adapter.sendTyping!(channelId, msg.threadId).catch(err => logAndSwallow(TAG, "adapter call", err));
       }, 8000);
     }
 
@@ -255,7 +256,7 @@ export async function handleInboundMessage(
       if (!totalToolStartAt) totalToolStartAt = Date.now();
       currentToolName = toolName;
       toolStartAt = Date.now();
-      adapter.sendTyping?.(channelId, msg.threadId).catch(() => {});
+      adapter.sendTyping?.(channelId, msg.threadId).catch(err => logAndSwallow(TAG, "adapter call", err));
 
       // Clear previous elapsed timer
       if (toolElapsedTimer) { clearInterval(toolElapsedTimer); toolElapsedTimer = undefined; }
@@ -269,9 +270,9 @@ export async function handleInboundMessage(
             const names = toolBatch.join(", ");
             const status = `🔧 ${names}...`;
             if (streamMsgId && adapter.editMessage) {
-              adapter.editMessage(channelId, streamMsgId, status + "...").catch(() => {});
+              adapter.editMessage(channelId, streamMsgId, status + "...").catch(err => logAndSwallow(TAG, "adapter call", err));
             } else {
-              const id = await adapter.sendMessage(channelId, status, { threadId: msg.threadId }).catch(() => undefined);
+              const id = await adapter.sendMessage(channelId, status, { threadId: msg.threadId }).catch(err => { logAndSwallow(TAG, "sendMessage tool status", err); return undefined; });
               if (id && adapter.editMessage) streamMsgId = id;
             }
             lastToolNotifyAt = now;
@@ -287,7 +288,7 @@ export async function handleInboundMessage(
         const elapsedStr = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m${elapsed % 60}s` : `${elapsed}s`;
         const status = `🔧 ${currentToolName} (${elapsedStr})...`;
         if (streamMsgId && adapter.editMessage) {
-          adapter.editMessage(channelId, streamMsgId, status + "...").catch(() => {});
+          adapter.editMessage(channelId, streamMsgId, status + "...").catch(err => logAndSwallow(TAG, "adapter call", err));
         }
       }, 10_000);
     };
@@ -298,7 +299,7 @@ export async function handleInboundMessage(
       (transport as any).onFallback = (model: string, _ctxPct: number, reason?: string) => {
         prev?.(model, _ctxPct, reason);
         const short = model.split("/").pop() ?? model;
-        adapter.sendMessage(channelId, `⚠️ Switched to ${short}${reason ? ` (${reason})` : ""}`, { threadId: msg.threadId }).catch(() => {});
+        adapter.sendMessage(channelId, `⚠️ Switched to ${short}${reason ? ` (${reason})` : ""}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
       };
     }
 
@@ -307,9 +308,9 @@ export async function handleInboundMessage(
     transport.onSegmentBreak = (text: string) => {
       fullResponseSegments.push(text);
       if (streamMsgId && adapter.editMessage) {
-        adapter.editMessage(channelId, streamMsgId, text).catch(() => {});
+        adapter.editMessage(channelId, streamMsgId, text).catch(err => logAndSwallow(TAG, "adapter call", err));
       } else if (text) {
-        adapter.sendMessage(channelId, text, { threadId: msg.threadId }).catch(() => {});
+        adapter.sendMessage(channelId, text, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
       }
       streamMsgId = undefined;
     };
@@ -344,13 +345,13 @@ export async function handleInboundMessage(
         return;
       }
       if (reactionEmoji) {
-        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
         await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
         return;
       }
       if (transport.toolCallsSucceeded > 0) {
         logDebug(TAG, `Empty text but ${transport.toolCallsSucceeded} tool call(s) succeeded — suppressing fallback`);
-        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
       } else {
         logWarn(TAG, "Empty response from transport");
         if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "🤷");
@@ -361,7 +362,7 @@ export async function handleInboundMessage(
 
     // --- Clear 👀 reaction ---
     if (adapter.setReaction && msg.messageId) {
-      await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+      await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
     }
 
     // --- Standalone emoji → try reaction, fallback to message ---
@@ -436,7 +437,7 @@ export async function handleInboundMessage(
         sessionKey, platform: msg.platform, userId,
         chatId: String(chatId), text: text,
         response: userResponse, model: ("currentModel" in transport ? String((transport as Record<string, unknown>).currentModel) : "unknown"), success: true,
-      }).catch(() => {});
+      }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } catch (err) {
     // #287: model not found — surface actionable message to user
@@ -447,7 +448,7 @@ export async function handleInboundMessage(
       logError(TAG, `Error for ${sessionKey} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
     }
     if (adapter.setReaction && msg.messageId) {
-      await adapter.setReaction(channelId, msg.messageId, "").catch(() => {});
+      await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
     }
 
     // AfterMessage hook on error
@@ -457,7 +458,7 @@ export async function handleInboundMessage(
         sessionKey, platform: msg.platform, userId,
         chatId: String(chatId), text: text, success: false,
         error: err instanceof Error ? err.message : String(err),
-      }).catch(() => {});
+      }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
 
     // Auto-reset on context window overflow (ValidationException or actual context errors)
@@ -469,17 +470,17 @@ export async function handleInboundMessage(
     if (isContextOverflow) {
       logWarn(TAG, `Context overflow detected — auto-resetting session`);
       await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}`, sessions });
-      await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(() => {});
+      await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
-      await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(() => {});
+      await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else {
       const reason = errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
         : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."
         : errStr.includes("connect") || errStr.includes("ECONNREFUSED") ? "Connection lost."
         : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
         : "Something went wrong.";
-      await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(() => {});
+      await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } finally {
     clearInterval(typingInterval);

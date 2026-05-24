@@ -5,6 +5,8 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { abtarsHome } from "../../paths.js";
 import type { CommandContext } from "./types.js";
 
+const TAG = "cmd_admin";
+
 
 export async function handleUsers(text: string, ctx: CommandContext): Promise<boolean> {
   const { loadUsers } = await import("../user-registry.js");
@@ -145,7 +147,8 @@ export async function handleMcp(_text: string, ctx: CommandContext): Promise<boo
         lines.push(`    ${mark} ${s.name ?? "?"} (${detail})`);
       }
       body = lines.join("\n");
-    } catch {
+    } catch (err) {
+      logAndSwallow(TAG, "JSON.parse mcp list", err);
       body = "📦 MCP: installed, list output unparseable";
     }
   }

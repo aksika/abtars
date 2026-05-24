@@ -10,13 +10,16 @@ import { homedir } from "node:os";
 import type { MemoryBackend } from "abmind";
 import type { InstantStoreParams } from "../../types/index.js";
 import { logWarn, redactSecrets } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "tool_registry";
 
 // #449: append-only audit log
 const AUDIT_DIR = join(process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars"), "logs");
 const AUDIT_PATH = join(AUDIT_DIR, "audit.jsonl");
-try { mkdirSync(AUDIT_DIR, { recursive: true }); } catch { /* non-critical: audit dir may already exist or be unwritable */ }
+try { mkdirSync(AUDIT_DIR, { recursive: true }); } catch (err) { logAndSwallow(TAG, "mkdirSync audit dir", err); }
 function audit(entry: Record<string, unknown>): void {
-  try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch { /* fire-and-forget: audit must never block tool execution */ }
+  try { appendFileSync(AUDIT_PATH, JSON.stringify(entry) + "\n"); } catch (err) { logAndSwallow(TAG, "audit write", err); }
 }
 
 export type ToolDefinition = {

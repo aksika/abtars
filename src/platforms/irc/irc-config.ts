@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../../paths.js";
 import { logWarn } from "../../components/logger.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { validateShape, IRC_SCHEMA } from "../../components/config-validator.js";
+
+const TAG = "irc_config";
 
 export interface IrcChannelConfig {
   mode: "plain" | "signed";
@@ -35,7 +38,7 @@ export interface IrcConfig {
 export function loadIrcConfig(): IrcConfig | null {
   const path = join(abtarsHome(), "config", "irc.json");
   let raw: string;
-  try { raw = readFileSync(path, "utf-8"); } catch { return null; }
+  try { raw = readFileSync(path, "utf-8"); } catch (err) { logAndSwallow(TAG, "read irc.json", err); return null; }
   let parsed: any;
   try { parsed = JSON.parse(raw); } catch (err) {
     logWarn("irc-config", `Invalid JSON in irc.json: ${err instanceof Error ? err.message : String(err)}`);

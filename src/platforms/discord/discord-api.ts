@@ -95,7 +95,7 @@ export class DiscordApi {
       try {
         if (reaction.partial) await reaction.fetch();
         if (user.partial) await user.fetch();
-      } catch { return; }
+      } catch (err) { logAndSwallow(TAG, "fetch reaction/user partial", err); return; }
       try {
         const result = handler(reaction as MessageReaction, user as User);
         if (result instanceof Promise) result.catch((err: unknown) => logError(TAG, "Reaction handler error", err));
@@ -164,7 +164,7 @@ export class DiscordApi {
         const botId = this.client.user?.id;
         if (botId) {
           for (const reaction of message.reactions.cache.values()) {
-            await reaction.users.remove(botId).catch(() => {});
+            await reaction.users.remove(botId).catch(err => logAndSwallow(TAG, "remove bot reaction", err));
           }
         }
       } else {
@@ -207,6 +207,6 @@ export class DiscordApi {
       if (!channel?.isTextBased()) return null;
       const msg = await (channel as TextChannel).messages.fetch(messageId);
       return msg ? { authorId: msg.author.id } : null;
-    } catch { return null; }
+    } catch (err) { logAndSwallow(TAG, "fetchMessage", err); return null; }
   }
 }

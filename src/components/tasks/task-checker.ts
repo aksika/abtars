@@ -28,7 +28,7 @@ export interface PendingReminder {
 export function readPendingReminders(): PendingReminder[] {
   if (!existsSync(remindersPath())) return [];
   try { return JSON.parse(readFileSync(remindersPath(), "utf-8")) as PendingReminder[]; }
-  catch { return []; }
+  catch (err) { logAndSwallow(TAG, "readPendingReminders", err); return []; }
 }
 
 export function clearPendingReminders(): void {
@@ -98,7 +98,7 @@ export function checkCron(): CronEntry[] {
       try {
         const expr = CronExpressionParser.parse(entry.schedule);
         entry.fireAt = expr.next().getTime();
-      } catch { entry.fired = true; }
+      } catch (err) { logAndSwallow(TAG, "cron parse next", err); entry.fired = true; }
     } else {
       entry.fired = true;
     }

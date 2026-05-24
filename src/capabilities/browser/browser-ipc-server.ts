@@ -1,5 +1,8 @@
 import { logDebug } from "../../components/logger.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import * as net from "node:net";
+
+const TAG = "browser_ipc";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { BrowserAction, BrowserToolResult } from "../../types/browser.js";
@@ -127,8 +130,8 @@ export class BrowserIpcServer {
       if (fs.existsSync(this._socketPath)) {
         fs.unlinkSync(this._socketPath);
       }
-    } catch {
-      // Best-effort removal.
+    } catch (err) {
+      logAndSwallow(TAG, "unlink socket", err);
     }
   }
 }

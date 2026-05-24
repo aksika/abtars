@@ -25,6 +25,8 @@ import { loadAgentApiConfig } from "../components/agent-api-config.js";
 import type { IDashboardSlot, DashboardSlotOpts } from "../components/skeleton.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
+const TAG = "dashboard";
+
 export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
   const { platforms, config, memory, transport, registry, heartbeat, nlmConfig } = ctx;
   if (!platforms.web) return "skipped";
@@ -53,7 +55,7 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
   }
 
   const agentApiOpts = platforms.agent
-    ? (() => { try { return loadAgentApiConfig(process.env as Record<string, string | undefined>); } catch { return null; } })()
+    ? (() => { try { return loadAgentApiConfig(process.env as Record<string, string | undefined>); } catch (err) { logAndSwallow(TAG, "loadAgentApiConfig", err); return null; } })()
     : null;
 
   const getStatus = (): ReturnType<typeof buildStatusSnapshot> => {

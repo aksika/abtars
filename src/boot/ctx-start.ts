@@ -23,7 +23,7 @@ export function updateCtxStart(memoryDir: string, userId: string, ts = Date.now(
 export function resetAllCtxStarts(memoryDir: string): void {
   const p = join(memoryDir, "context-window-start.json");
   let data: Record<string, number> = {};
-  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch { return; }
+  try { data = JSON.parse(readFileSync(p, "utf-8")); } catch (err) { logAndSwallow("ctx_start", "read ctx-start json", err); return; }
   const now = Date.now();
   for (const key of Object.keys(data)) data[key] = now;
   writeFileSync(p, JSON.stringify(data), "utf-8");

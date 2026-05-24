@@ -2,6 +2,7 @@
  * /session command handler (#510).
  */
 import { logInfo } from "../logger.js";
+import { logAndSwallow } from "../log-and-swallow.js";
 import { parseSessionType, typeLabel } from "../session-manager.js";
 import type { CommandContext } from "./types.js";
 
@@ -61,7 +62,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
       try {
         const db = (ctx.memory as any).db;
         if (db) db.prepare("DELETE FROM messages WHERE session_id = ?").run(result.id);
-      } catch { /* non-critical */ }
+      } catch (err) { logAndSwallow(TAG, "delete session messages", err); }
     }
     await ctx.reply(`🗑️ Session #${result.shortIndex} (${typeLabel(result.type)}) killed.`);
     logInfo(TAG, `Killed session ${result.id}`);

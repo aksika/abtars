@@ -15,6 +15,7 @@ import { formatReactionSignal } from "../../components/reactions.js";
 export const DISCORD_CAPABILITIES: PlatformCapabilities = { voice: false, reactions: true, typing: true, threads: true };
 import { emojiToScore } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
+import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
 import { handleInboundMessage, type PipelineDeps } from "../../components/message-pipeline.js";
 import type { PlatformAdapter, PlatformCapabilities, InboundMessage, SendOpts } from "../../types/platform.js";
@@ -290,7 +291,7 @@ export class DiscordAdapter implements PlatformAdapter {
           try {
             const referenced = await this.api.fetchMessage(message.channelId, message.replyReferenceMessageId);
             isReplyToBot = referenced?.authorId === this.config.appId;
-          } catch { /* deleted or inaccessible */ }
+          } catch (err) { logAndSwallow(TAG, "fetchMessage reply ref", err); }
         }
 
         const addressed = message.mentionsBotId || message.mentionsBotRole || isReplyToBot;
@@ -320,7 +321,7 @@ export class DiscordAdapter implements PlatformAdapter {
 
     // #512: commands bypass sequential await
     if (text.startsWith("/") && !text.startsWith("//")) {
-      handleInboundMessage(inbound, this, this.deps.pipeline).catch(() => {});
+      handleInboundMessage(inbound, this, this.deps.pipeline).catch(err => logAndSwallow(TAG, "handleInboundMessage command", err));
       return;
     }
 

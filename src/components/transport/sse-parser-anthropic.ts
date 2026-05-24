@@ -5,6 +5,9 @@
  */
 
 import type { SSEEvent } from "./sse-parser.js";
+import { logAndSwallow } from "../log-and-swallow.js";
+
+const TAG = "sse_parser_anthropic";
 
 export async function* parseAnthropicSSE(
   response: Response,
@@ -34,7 +37,7 @@ export async function* parseAnthropicSSE(
         } else if (line.startsWith("data: ") && eventType) {
           const data = line.slice(6).trim();
           let parsed: Record<string, unknown>;
-          try { parsed = JSON.parse(data); } catch { eventType = ""; continue; /* malformed SSE JSON chunk — skip */ }
+          try { parsed = JSON.parse(data); } catch (err) { logAndSwallow(TAG, "JSON.parse SSE chunk", err); eventType = ""; continue; }
 
           if (eventType === "content_block_delta") {
             const delta = parsed["delta"] as Record<string, unknown> | undefined;
