@@ -12,7 +12,7 @@
 
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
 import { hostname, homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
@@ -485,6 +485,29 @@ export async function install(opts: InstallOptions): Promise<number> {
     process.stdout.write(`\nRestore complete.\n`);
     process.stdout.write(`Next: 'abtars update' to build and activate.\n`);
     return 0;
+  }
+
+  // --- supervised: load user-scope watchdog (LaunchAgent / systemd user) ---
+  if (mode === 'supervised') {
+    const { execSync } = await import('node:child_process');
+    if (process.platform === 'darwin') {
+      const plistSrc = join(home, 'scripts', 'com.abtars.watchdog.plist');
+      const plistDst = join(homedir(), 'Library', 'LaunchAgents', 'com.abtars.watchdog.plist');
+      if (existsSync(plistSrc)) {
+        copyFileSync(plistSrc, plistDst);
+        try { execSync(`launchctl load "${plistDst}"`, { stdio: 'ignore' }); } catch { /* already loaded */ }
+        process.stdout.write(`✓ watchdog LaunchAgent loaded\n`);
+      }
+    } else if (process.platform === 'linux') {
+      const unitSrc = join(home, 'scripts', 'abtars-watchdog.service');
+      const unitDir = join(homedir(), '.config', 'systemd', 'user');
+      if (existsSync(unitSrc)) {
+        mkdirSync(unitDir, { recursive: true });
+        copyFileSync(unitSrc, join(unitDir, 'abtars-watchdog.service'));
+        try { execSync('systemctl --user daemon-reload && systemctl --user enable --now abtars-watchdog', { stdio: 'ignore' }); } catch { /* may fail in chroot */ }
+        process.stdout.write(`✓ watchdog systemd user service enabled\n`);
+      }
+    }
   }
 
   process.stdout.write(`\nInstall complete.\n`);
