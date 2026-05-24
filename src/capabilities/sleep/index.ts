@@ -10,7 +10,7 @@ import { execSync } from "node:child_process";
 import { writeSleepStatus, readAndClearForceSleep } from "../../components/transport/bridge-lock-transport.js";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { hasSleepAuditToday, runSleepCycle, parseLevel, DEFAULT_LEVEL } from "abmind";
+import { hasSleepAuditToday, runSleepCycle, parseLevel, DEFAULT_LEVEL, type Level } from "abmind";
 import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { readEnv, readEnvWithDefault } from "../../components/env.js";
@@ -110,6 +110,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     logInfo("sleep", `😴 Sleep started in-process (attempt ${attempts}, model=dreamy)`);
 
     const level = (() => {
+      if (forced && forceSleep?.includes("fresh")) return "ultimate" as Level;
       const raw = getEnv().sleepQuality;
       if (!raw) return DEFAULT_LEVEL;
       try { return parseLevel(raw); }
