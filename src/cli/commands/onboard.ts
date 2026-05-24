@@ -23,6 +23,7 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { packagePaths, readManifest } from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
 
@@ -586,6 +587,22 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   // Seed default tasks (#383) — morning greeting + midnight backup
   if (answers.telegramChatId) {
     await seedDefaultTasks(answers.telegramChatId, paths.home);
+  }
+
+  // Seed default agent-api rules
+  const agentsDir = join(paths.home, 'agents');
+  const agentRulesPath = join(agentsDir, 'default.md');
+  const { existsSync: agentRulesExists } = await import('node:fs');
+  if (!agentRulesExists(agentRulesPath)) {
+    await mkdir(agentsDir, { recursive: true });
+    const bundledPath = join(dirname(fileURLToPath(import.meta.url)), 'agents', 'default.md');
+    const fallbackPath = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'agents', 'default.md');
+    let content = '# Agent-to-Agent API\n\n<!-- See docs for configuration -->\n';
+    try { content = (await readFile(bundledPath, 'utf-8')); } catch {
+      try { content = (await readFile(fallbackPath, 'utf-8')); } catch { /* use default */ }
+    }
+    await writeFile(agentRulesPath, content);
+    process.stdout.write(`✓ agents/default.md → ${agentRulesPath}\n`);
   }
 
   process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://github.com/aksika/abtars/blob/main/docs/install.md\n`);

@@ -114,6 +114,7 @@ export class AgentApiServer {
       const base = dirname(fileURLToPath(import.meta.url));
       const name = deps.config.agentCodename;
       const candidates = [
+        join(base, `agents/${name}.md`),
         join(base, `../../agents/${name}.md`),
         join(abtarsHome(), "agents", `${name}.md`),
       ];
