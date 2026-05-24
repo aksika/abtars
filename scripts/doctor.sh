@@ -553,4 +553,5 @@ else
   fi
 fi
 
-exit $(( WARNS > 0 && ! $FIX ? 1 : 0 ))
+if $FIX; then exit 0; fi
+exit $(( WARNS > 0 ? 1 : 0 ))
