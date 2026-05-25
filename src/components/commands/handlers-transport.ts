@@ -260,6 +260,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       { key: "coding", label: "Cody (coding)" },
     ];
     const buttons = AGENT_LABELS.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
+    buttons.push([{ text: "← Cancel", callback_data: "mb:" }]);
     await ctx.reply("🤖 Which agent to change?", { reply_markup: { inline_keyboard: buttons } });
     return true;
   }

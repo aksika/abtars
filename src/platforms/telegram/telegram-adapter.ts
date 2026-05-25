@@ -187,7 +187,47 @@ export class TelegramAdapter implements PlatformAdapter {
       if (!chatId) return;
 
       try {
-      if (data.startsWith("mslot:")) {
+      if (data.startsWith("mb:")) {
+        // Back button handler
+        const target = data.slice(3);
+        if (!target) {
+          // Dismiss picker
+          await this.api.sendMessage(chatId, "👌 Cancelled.");
+          return;
+        }
+        if (target === "a") {
+          // Back to agent list
+          const AGENT_LABELS = [
+            { key: "professor", label: "Professor" },
+            { key: "dreamy", label: "Dreamy (sleep)" },
+            { key: "browsie", label: "Browsie (browse)" },
+            { key: "coding", label: "Cody (coding)" },
+          ];
+          const buttons = AGENT_LABELS.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
+          buttons.push([{ text: "← Cancel", callback_data: "mb:" }]);
+          await this.api.sendMessage(chatId, "🤖 Which agent to change?", { reply_markup: { inline_keyboard: buttons } });
+          return;
+        }
+        if (target.startsWith("p:")) {
+          // Back to provider list for agent
+          const agent = target.slice(2);
+          const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
+          const tc = loadTransport();
+          if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
+          let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
+          if (providers.length === 0) { await this.api.sendMessage(chatId, "❌ No compatible providers"); return; }
+          const currentProvider = resolveAgent(agent, tc)?.providerName;
+          const prefix = agent === "professor" ? "mprov2:professor" : `mprov:${agent}`;
+          const buttons = providers.map(p => {
+            const count = getModelsForProvider(p.name).length;
+            const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
+            return [{ text: label, callback_data: `${prefix}:${p.name}` }];
+          });
+          buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
+          await this.api.sendMessage(chatId, `🔌 Pick provider:`, { reply_markup: { inline_keyboard: buttons } });
+          return;
+        }
+      } else if (data.startsWith("mslot:")) {
         // Step 1 result: user picked an agent
         const agent = data.slice(6);
         const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
@@ -208,6 +248,7 @@ export class TelegramAdapter implements PlatformAdapter {
             slots.push({ label: `↳ Fb${fallbacks.length + 1}: (add)`, key: `mpos:professor::professor_fb${fallbacks.length + 1}` });
           }
           const buttons = slots.map(s => [{ text: s.label, callback_data: s.key }]);
+          buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
           await this.api.sendMessage(chatId, `🎯 Which slot?`, { reply_markup: { inline_keyboard: buttons } });
           return;
         }
@@ -221,6 +262,7 @@ export class TelegramAdapter implements PlatformAdapter {
           const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
           return [{ text: label, callback_data: `mprov:${agent}:${p.name}` }];
         });
+        buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
         await this.api.sendMessage(chatId, `🔌 Pick provider:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mprov:")) {
@@ -236,6 +278,7 @@ export class TelegramAdapter implements PlatformAdapter {
         this._pendingSlot = agent;
         this._modelPickerCache = models.map(m => m.id);
         const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
+        buttons.push([{ text: "← Back", callback_data: `mb:p:${agent}` }]);
         await this.api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mpos:")) {
@@ -269,6 +312,7 @@ export class TelegramAdapter implements PlatformAdapter {
           const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
           return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
         });
+        buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
         await this.api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mprov2:")) {
@@ -284,6 +328,7 @@ export class TelegramAdapter implements PlatformAdapter {
         const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
         this._modelPickerCache = models.map(m => m.id);
         const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
+        buttons.push([{ text: "← Back", callback_data: `mb:p:professor` }]);
         await this.api.sendMessage(chatId, `📋 Pick model for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mset:")) {
