@@ -118,6 +118,7 @@ export async function buildPrompt(
           const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]\n\n`;
           prompt = block + prompt;
           logDebug(TAG, `Active recall: ${hits.length} hits, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
+          logTrace(TAG, `recall content: ${block}`);
         }
       } catch (err) {
         logDebug(TAG, `Active recall failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -191,6 +192,7 @@ export function buildSessionStartPrompt(
     if (ctx) {
       contextParts.push(ctx);
       logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
+      logTrace(TAG, `session-start content: ${ctx}`);
     }
 
     try {
@@ -204,6 +206,7 @@ export function buildSessionStartPrompt(
         if (wakeUp) {
           contextParts.push(wakeUp);
           logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
+          logTrace(TAG, `wake-up content: ${wakeUp}`);
         }
       }
     } catch (err) { logAndSwallow("prompt_builder", "op", err); }
@@ -214,6 +217,7 @@ export function buildSessionStartPrompt(
     : "";
 
   const result = contextBlock + prompt;
+  logTrace(TAG, `session-start assembled: ${contextParts.length} parts, context=${contextBlock.length} chars, prompt=${prompt.length} chars, total=${result.length} chars`);
   if (result.length < 5000) {
     logInfo(TAG, `Session-start prompt suspiciously small (${result.length} chars) — SOUL may be missing`);
   }
