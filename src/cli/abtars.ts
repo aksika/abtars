@@ -119,6 +119,10 @@ export async function main(argv: readonly string[]): Promise<number> {
         return await restart({ cold: flags.get('cold') === true });
       case 'stop':
         return await stop({ force: flags.get('force') === true });
+      case 'passwd': {
+        const { passwd } = await import('./commands/passwd.js');
+        return await passwd();
+      }
       case '':
       case 'help':
       case '--help':
