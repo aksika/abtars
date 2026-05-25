@@ -15,7 +15,7 @@ describe("FallbackPolicy", () => {
   let policy: FallbackPolicy;
 
   beforeEach(() => {
-    reg = new ModelHealthRegistry();
+    reg = new ModelHealthRegistry({ leakPerMinute: 0 });
     policy = new FallbackPolicy(makeCandidates(), reg);
   });
 
