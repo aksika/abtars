@@ -87,6 +87,7 @@ export interface TransportDeps {
   transport: IKiroTransport;
   config: { agentTransport: string; workingDir: string };
   startedAt: number;
+  maxContext?: number;
 }
 
 /** Memory system deps. */
@@ -189,7 +190,7 @@ export async function handleInboundMessage(
 
     // --- Build prompt ---
     const { prompt: builtPrompt } = await buildPrompt(msg, text, {
-      memory, memoryConfig, sessions, conversationBuffer, contextPercent: ctxPct,
+      memory, memoryConfig, sessions, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
     }, registry);
 
     if (builtPrompt === "__INJECTION_BLOCKED__") {

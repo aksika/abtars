@@ -5,7 +5,7 @@
  */
 
 import { logAndSwallow } from "../log-and-swallow.js";
-import { logInfo, logDebug, logTrace } from "../logger.js";
+import { logInfo, logDebug, logTrace, logWarn } from "../logger.js";
 import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { loadSoulBundle } from "../soul-loader.js";
@@ -28,6 +28,7 @@ export interface BuildPromptDeps {
   sessions: SessionRegistry;
   conversationBuffer: ConversationBuffer;
   contextPercent: number;
+  maxContext?: number;
 }
 
 export interface BuildPromptResult {
@@ -66,7 +67,7 @@ export async function buildPrompt(
   const isSessionStart = entry.pendingStart || !entry.seen;
   logTrace(TAG, `session-state: key=${sessionKey} seen=${entry.seen} pendingStart=${entry.pendingStart} isSessionStart=${isSessionStart}`);
   if (isSessionStart && memory) {
-    prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey);
+    prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey, deps.maxContext);
   }
   entry.seen = true;
   entry.pendingStart = false;
@@ -151,6 +152,7 @@ export function buildSessionStartPrompt(
   memory: MemoryManager,
   userId: string,
   sessionKey?: string,
+  maxContext?: number,
 ): string {
   const contextParts: string[] = [];
 
@@ -188,7 +190,7 @@ export function buildSessionStartPrompt(
   if (compSummary && sessionKey) {
     // Dead path — kept for type safety during transition
   } else {
-    const ctx = buildSessionStartContext(memory, userId);
+    const ctx = buildSessionStartContext(memory, userId, maxContext);
     if (ctx) {
       contextParts.push(ctx);
       logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
@@ -220,6 +222,9 @@ export function buildSessionStartPrompt(
   logTrace(TAG, `session-start assembled: ${contextParts.length} parts, context=${contextBlock.length} chars, prompt=${prompt.length} chars, total=${result.length} chars`);
   if (result.length < 5000) {
     logInfo(TAG, `Session-start prompt suspiciously small (${result.length} chars) — SOUL may be missing`);
+  }
+  if (maxContext && contextBlock.length > maxContext * 0.15) {
+    logWarn(TAG, `⚠️ Session injection is ${Math.round(contextBlock.length / maxContext * 100)}% of context window — consider reducing SESSION_HISTORY_PCT`);
   }
   return result;
 }
