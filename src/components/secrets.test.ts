@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 // Mock abtarsHome to use temp dir
 const TEST_DIR = "/tmp/abtars-secrets-test-" + process.pid;
-const SECRETS_DIR = join(TEST_DIR, "secrets");
+const SECRETS_DIR = join(TEST_DIR, "secret");
 
 vi.mock("../paths.js", () => ({ abtarsHome: () => TEST_DIR }));
 vi.mock("abmind", () => {

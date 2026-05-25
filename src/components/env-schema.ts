@@ -420,7 +420,7 @@ export function initEnv(): Readonly<EnvConfig> {
       if (!env) return undefined;
       if (env === "<secret>") {
         const value = readSecret(envName);
-        if (!value) logError("secrets", `${envName}=<secret> but ~/.abtars/secrets/${envName} is missing or empty`);
+        if (!value) logError("secrets", `${envName}=<secret> but ~/.abtars/secret/${envName} is missing or empty`);
         return value;
       }
       return env;

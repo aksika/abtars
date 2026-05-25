@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
 import { abtarsHome } from "../paths.js";
 
-const SECRETS_DIR = join(abtarsHome(), "secrets");
+const SECRETS_DIR = join(abtarsHome(), "secret");
 const cache = new Map<string, string>();
 const ALGO = "aes-256-gcm";
 const IV_LEN = 12;
