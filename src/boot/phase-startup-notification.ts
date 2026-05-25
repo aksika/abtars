@@ -17,24 +17,32 @@ import { cleanResponse } from "../components/clean-response.js";
 import { sendToMainChat } from "../components/main-chat.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
-async function sendBackOnline(ctx: BootCtx): Promise<void> {
-  await sendToMainChat(
+async function sendBackOnline(ctx: BootCtx): Promise<boolean> {
+  const result = await sendToMainChat(
     { telegram: ctx.telegramAdapter, discord: ctx.discordAdapter },
     "🔄 Back online.",
   );
-  logInfo("main", "Startup: Back online notification sent");
+  if (result.ok) logInfo("main", "Startup: Back online notification sent");
+  return result.ok;
 }
 
 export async function phaseStartupNotification(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, memory, transport, telegramAdapter } = ctx;
   if (!memoryConfig.memoryEnabled) return "skipped";
 
-  // #324: Small delay to let platforms finish connecting
-  setTimeout(() => {
-    sendBackOnline(ctx).catch((err) => {
+  // #603: 3s delay (Molty needs time for Telegram API over Tailscale) + retry
+  setTimeout(async () => {
+    try {
+      const ok = await sendBackOnline(ctx);
+      if (!ok) {
+        await new Promise(r => setTimeout(r, 5000));
+        const retryOk = await sendBackOnline(ctx);
+        if (!retryOk) logWarn("main", "Back online notification failed after retry");
+      }
+    } catch (err) {
       logWarn("main", `Back online notification error: ${err instanceof Error ? err.message : String(err)}`);
-    });
-  }, 500);
+    }
+  }, 3000);
 
   // Startup session: SOUL + context + personalized greeting → Telegram
   if (telegramAdapter && memory && transport) {
