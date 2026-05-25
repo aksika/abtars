@@ -69,7 +69,7 @@ export async function handleStatus(_text: string, ctx: CommandContext): Promise<
 export async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.transport.sendInterrupt();
   ctx.sessions.getOrCreate(ctx.sessionKey).busy = false;
-  await ctx.reply("🛑 Ctrl+C sent to Kiro.");
+  await ctx.reply("🛑 Ctrl+C sent.");
   logInfo(TAG, "Ctrl+C interrupt sent");
   return true;
 }
