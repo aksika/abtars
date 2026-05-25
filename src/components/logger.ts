@@ -30,15 +30,35 @@ export function isLogLevel(minLevel: LogLevel): boolean {
   return LEVEL_ORDER[currentLevel] >= LEVEL_ORDER[minLevel];
 }
 
+// ── Buffered file writer ────────────────────────────────────────────────────
+let buffer: string[] = [];
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
 function writeToFile(line: string): void {
   if (!fileLogging) return;
-  try {
-    mkdirSync(LOG_DIR, { recursive: true });
-    appendFileSync(getLogFile(), redactSecrets(line) + "\n");
-  } catch {
-    // silently ignore file write errors
+  buffer.push(redactSecrets(line));
+  if (buffer.length >= 200) flush();
+  else if (!flushTimer) {
+    flushTimer = setTimeout(flush, 5000);
+    flushTimer.unref();
   }
 }
+
+function flush(): void {
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  if (buffer.length === 0) return;
+  const lines = buffer;
+  buffer = [];
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    appendFileSync(getLogFile(), lines.join("\n") + "\n");
+  } catch { /* silently ignore file write errors */ }
+}
+
+/** Flush buffered logs synchronously. Called on process exit. */
+export function flushLogs(): void { flush(); }
+
+process.on("exit", flush);
 
 // ── Credential redaction ────────────────────────────────────────────────────
 //
