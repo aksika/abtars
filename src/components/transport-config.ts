@@ -430,7 +430,9 @@ export function formatRank(rank: number): string {
 
 export function formatCost(cost: ModelCost): string {
   if (cost.input === 0 && cost.output === 0) return "free";
-  return `$${cost.input}/M in`;
+  const inp = `$${cost.input}`;
+  const out = cost.output != null ? `$${cost.output}` : "$???";
+  return `${inp}/${out}`;
 }
 
 // ── Provider readiness validation (#367) ────────────────────────────────────
