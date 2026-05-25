@@ -211,6 +211,11 @@ export async function update(opts: UpdateOptions): Promise<number> {
     for (const d of ["custom", "downloaded", "self"]) {
       await mkdir(join(paths.home, "skills", d), { recursive: true });
     }
+    // Migration (#614): remove stale pre-#438 top-level skill dirs (duplicates of core/)
+    for (const stale of ["memory", "ops", "tools", "coding"]) {
+      const p = join(paths.home, "skills", stale);
+      if (existsSync(p)) { rmSync(p, { recursive: true, force: true }); }
+    }
 
     if (serviceChanged) {
       if (process.platform === 'darwin') {
