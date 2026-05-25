@@ -72,7 +72,14 @@ export class SkillWatcher implements ISkillSlot {
       }
       entries.push(`- [${this.getSourceDir(filepath)}] ${header.name}: ${header.description}`);
     }
-    const content = `# Skills Catalog\n\nWhen a user request matches a skill below, read its SKILL.md at ~/.abtars/skills/<dir>/SKILL.md for detailed instructions before acting.\n\n${entries.join("\n")}\n`;
+    const guidance = [
+      "",
+      "## Skill maintenance",
+      "- If you solved something non-trivial (multi-step, error-prone, or likely to recur), save it as a skill with skill_create.",
+      "- If a skill you just used was wrong or incomplete, fix it with skill_patch before moving on.",
+      "",
+    ].join("\n");
+    const content = `# Skills Catalog\n\nWhen a user request matches a skill below, read its SKILL.md at ~/.abtars/skills/<dir>/SKILL.md for detailed instructions before acting.\n\n${entries.join("\n")}\n${guidance}`;
     try {
       writeFileSync(this.catalogPath, content, "utf-8");
       const skippedStr = skipped.length > 0 ? `, ${skipped.length} skipped — ${skipped.join(", ")}` : "";
