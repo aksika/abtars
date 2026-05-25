@@ -192,7 +192,7 @@ export class DirectApiTransport implements IKiroTransport {
         }
         return result;
       } catch (err) {
-        if (signal.aborted) throw err; // Don't poison other models on user interrupt
+        if (signal.aborted) { session.rollbackToLastUser(); throw err; }
         const status = this.parseErrorStatus(err);
         const kind = classifyError(status);
         const retryAfterMs = this.parseRetryAfter(err);
