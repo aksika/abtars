@@ -238,3 +238,63 @@ function formatUptime(ms: number): string {
 }
 
 // ── /users command ──────────────────────────────────────────────────────────
+
+// ── /usage command ──────────────────────────────────────────────────────────
+
+export async function handleUsage(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { readUsage, resetUsage } = await import("../usage-tracker.js");
+  const { loadModels } = await import("../transport-config.js");
+
+  const arg = _text.replace("/usage", "").trim();
+
+  if (arg === "reset") {
+    resetUsage();
+    await ctx.reply("✓ Usage stats reset.");
+    return true;
+  }
+
+  const models = loadModels();
+  const costTable = new Map<string, { input: number; output: number }>();
+  for (const [id, entry] of Object.entries(models)) {
+    costTable.set(id, entry.cost);
+  }
+
+  const now = Date.now();
+  const startOfToday = new Date().setHours(0, 0, 0, 0);
+  const startOfYesterday = startOfToday - 86_400_000;
+  const startOfDayBefore = startOfYesterday - 86_400_000;
+
+  const today = readUsage(startOfToday, costTable);
+  const yesterday = readUsage(startOfYesterday, costTable);
+  const dayBefore = readUsage(startOfDayBefore, costTable);
+  const week = readUsage(now - 7 * 86_400_000, costTable);
+  const month = readUsage(now - 30 * 86_400_000, costTable);
+
+  // Subtract to get single-day values
+  const yIn = yesterday.inputTokens - today.inputTokens;
+  const yOut = yesterday.outputTokens - today.outputTokens;
+  const yCost = yesterday.cost - today.cost;
+  const dbIn = dayBefore.inputTokens - yesterday.inputTokens;
+  const dbOut = dayBefore.outputTokens - yesterday.outputTokens;
+  const dbCost = dayBefore.cost - yesterday.cost;
+
+  const fmt = (n: number): string => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+  const fmtCost = (c: number): string => c < 0.01 ? `$${c.toFixed(4)}` : `$${c.toFixed(2)}`;
+
+  let msg = `📊 Token usage\n\n`;
+  msg += `Today:      ${fmt(today.inputTokens)} / ${fmt(today.outputTokens)} — ${fmtCost(today.cost)}\n`;
+  msg += `Yesterday:  ${fmt(yIn)} / ${fmt(yOut)} — ${fmtCost(yCost)}\n`;
+  msg += `Day before: ${fmt(dbIn)} / ${fmt(dbOut)} — ${fmtCost(dbCost)}\n`;
+  msg += `Last 7d:    ${fmt(week.inputTokens)} / ${fmt(week.outputTokens)} — ${fmtCost(week.cost)}\n`;
+  msg += `Last 30d:   ${fmt(month.inputTokens)} / ${fmt(month.outputTokens)} — ${fmtCost(month.cost)}\n`;
+
+  if (arg === "detail") {
+    msg += `\n📋 Today by model:\n`;
+    for (const [model, stats] of today.byModel) {
+      msg += `  ${model}: ${fmt(stats.in)}/${fmt(stats.out)} — ${fmtCost(stats.cost)}\n`;
+    }
+  }
+
+  await ctx.reply(msg.trim());
+  return true;
+}

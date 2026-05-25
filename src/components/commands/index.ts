@@ -14,7 +14,7 @@ import {
   handleEmergencyAlias, handleModels, handleHeartbeat,
   handleMemory, handleNlm, handleWakeup,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
-  handleHooks, handleMcp, handleUsers,
+  handleHooks, handleMcp, handleUsers, handleUsage,
 } from "./handlers.js";
 import { handleSession } from "./session-handler.js";
 
@@ -46,6 +46,7 @@ registerExact("/wakeup", handleWakeup);
 registerExact("/sleep", handleSleep);
 registerExact("/mcp", handleMcp);
 registerExact("/hooks", handleHooks);
+registerExact("/usage", handleUsage);
 registerExact("/session", handleSession);
 
 // ── Prefix-match commands ───────────────────────────────────────────────────
@@ -58,6 +59,7 @@ registerPrefix("/task log ", handleTasksLog);
 registerPrefix("/cron log ", handleTasksLog);
 registerPrefix("/nlm", handleNlm);
 registerPrefix("/sleep ", handleSleepSub);
+registerPrefix("/usage ", handleUsage);
 registerPrefix("/task pause ", handleTaskPause);
 registerPrefix("/task resume ", handleTaskPause);
 registerPrefix("/tasks pause ", handleTaskPause);

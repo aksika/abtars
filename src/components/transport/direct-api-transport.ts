@@ -12,6 +12,7 @@ import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
 import { classifyError } from "./model-health-registry.js";
 import { normalizeToolCalls, parseErrorStatus, parseRetryAfter } from "./transport-utils.js";
+import { recordUsage } from "../usage-tracker.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport } from "./kiro-transport.js";
 
@@ -257,6 +258,7 @@ export class DirectApiTransport implements IKiroTransport {
         this._lastPromptTokens = usage.prompt_tokens;
         this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
         logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
+        recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0);
       }
 
       if (toolCalls.length > 0) {

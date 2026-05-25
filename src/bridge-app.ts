@@ -72,6 +72,8 @@ export class Bridge {
     if (this.ctx.mcpDaemonStarted) {
       await step("mcp-daemon", () => { execFileSync("mcporter", ["daemon", "stop"], { stdio: "pipe" }); });
     }
+    const { flushUsage } = await import("./components/usage-tracker.js");
+    flushUsage();
     clearTimeout(forceTimer);
     this._resolve?.(this._exitCode);
   }

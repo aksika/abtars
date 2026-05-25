@@ -41,6 +41,10 @@ export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   ctx.bridgeLockPath = join(abtarsHome(), "bridge.lock");
   ctx.sleepAuditDir = join(ctx.memoryConfig.memoryDir, "sleep");
 
+  // Usage tracker
+  const { initUsageTracker } = await import("../components/usage-tracker.js");
+  initUsageTracker(abtarsHome());
+
   // STT/TTS/NLM config (lightweight — just reads env vars)
   ctx.sttConfig = ctx.config.voice.sttEnabled
     ? ({ provider: "groq", apiKey: ctx.config.voice.groqApiKey, model: ctx.config.voice.sttModel } satisfies SttConfig)
