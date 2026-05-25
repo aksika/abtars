@@ -99,3 +99,18 @@ export async function handleTasksLog(text: string, ctx: CommandContext): Promise
   }
   return true;
 }
+
+export async function handleTaskPause(text: string, ctx: CommandContext): Promise<boolean> {
+  const match = text.match(/^\/(tasks?|cron)\s+(pause|resume)\s+(.+)/i);
+  if (!match) { await ctx.reply("Usage: /task pause|resume <id>"); return true; }
+  const action = match[2]!.toLowerCase();
+  const id = match[3]!.trim();
+  try {
+    const raw = await execAsync("abtars-task", [action, id], 5000);
+    const data = JSON.parse(raw || "{}");
+    await ctx.reply(data.ok ? `✓ ${id} ${action}d` : `❌ ${data.error ?? "unknown error"}`);
+  } catch (err) {
+    await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return true;
+}

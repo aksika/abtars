@@ -190,6 +190,8 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/task run <id> — Manually fire a task",
+    "/task pause <id> — Pause a task",
+    "/task resume <id> — Resume a paused task",
     "/facts — Core knowledge (user profile + agent notes)",
     "/skills — List loaded skills",
     "/session — List sessions",

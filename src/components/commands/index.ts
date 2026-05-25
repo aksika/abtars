@@ -10,7 +10,7 @@ import {
   handleNewReset, handleCompact,
   handleStatus, handleDoctor, handleStop, handleRestart,
   handleFull, handleShort, handleHealing, handleFacts,
-  handleTasksList, handleTasksTrigger, handleTasksLog,
+  handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause,
   handleEmergencyAlias, handleModels, handleHeartbeat,
   handleMemory, handleNlm, handleWakeup,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
@@ -58,3 +58,7 @@ registerPrefix("/task log ", handleTasksLog);
 registerPrefix("/cron log ", handleTasksLog);
 registerPrefix("/nlm", handleNlm);
 registerPrefix("/sleep ", handleSleepSub);
+registerPrefix("/task pause ", handleTaskPause);
+registerPrefix("/task resume ", handleTaskPause);
+registerPrefix("/tasks pause ", handleTaskPause);
+registerPrefix("/tasks resume ", handleTaskPause);
