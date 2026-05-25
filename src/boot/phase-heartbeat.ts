@@ -30,7 +30,7 @@ import {
   writeRestartReason, readAndClearRestartRequested, readBridgeLockField, updateBridgeLockField, writeSleepStatus,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
-import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask } from "../components/heartbeat-tasks.js";
+import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask, createSkillStatsFlushTask, createSkillTrashPruneTask } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
@@ -50,6 +50,10 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   }
 
   const cronCallback = createCronCallback(ctx);
+
+  // #613: initialize skill usage stats from disk
+  const { init: initSkillStats } = await import("../components/skill-stats.js");
+  initSkillStats();
 
   // bridge.lock already written at process start (bridge-app.ts) — just update startedAt from ctx
   updateBridgeLockField("startedAt", ctx.startedAt);
@@ -166,6 +170,10 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
+
+  // #613: skill usage stats flush + trash pruning
+  heartbeat.registerTask(createSkillStatsFlushTask());
+  heartbeat.registerTask(createSkillTrashPruneTask());
 
   // #440: update check (npm registry, notify if newer version)
   heartbeat.registerTask(createUpdateCheckTask((msg) => {

@@ -508,11 +508,11 @@ const secretGetTool: ToolDefinition = {
   },
 };
 
-import { skillCreateTool } from "./skill-authoring.js";
+import { skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool } from "./skill-authoring.js";
 import { mcpTool } from "./mcp-tool.js";
 import { getDelegationTools } from "./delegation-tools.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, mcpTool, ...getDelegationTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, ...getDelegationTools()];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
@@ -523,6 +523,18 @@ export function getToolSchemas(): Array<{ type: "function"; function: { name: st
   }));
 }
 
+import { bumpRead } from "../skill-stats.js";
+
+/** Check if a bash command result indicates a skill file was read. */
+function checkSkillRead(toolName: string, args: Record<string, string>): void {
+  if (toolName !== "execute_bash") return;
+  const cmd = args["command"] ?? "";
+  if (cmd.includes("/.abtars/skills/") && cmd.includes("/SKILL.md")) {
+    const match = cmd.match(/\/.abtars\/skills\/[^/]+\/([^/]+)\/SKILL\.md/);
+    if (match) bumpRead(match[1]!);
+  }
+}
+
 export async function executeToolCall(name: string, args: Record<string, string>, context?: { userId: string; signal?: AbortSignal }): Promise<string> {
   const tool = ALL_TOOLS.find(t => t.name === name);
   if (!tool) return JSON.stringify({ error: `Unknown tool: ${name}` });
@@ -531,6 +543,7 @@ export async function executeToolCall(name: string, args: Record<string, string>
   try {
     const result = await tool.execute(args, context);
     audit({ ts, tool: name, status: "ok", chars: result.length });
+    checkSkillRead(name, args);
     return result;
   } catch (err) {
     audit({ ts, tool: name, status: "error", error: err instanceof Error ? err.message : String(err) });

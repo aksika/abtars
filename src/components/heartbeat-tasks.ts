@@ -90,3 +90,43 @@ export function createUpdateCheckTask(notify: (msg: string) => void): HeartbeatT
     },
   };
 }
+
+/** #613: Flush skill usage stats to disk every heartbeat tick. */
+export function createSkillStatsFlushTask(): HeartbeatTask {
+  return {
+    name: "skill-stats-flush",
+    execute: async () => {
+      const { flush } = await import("./skill-stats.js");
+      flush();
+    },
+  };
+}
+
+/** #613: Prune .trash/ entries older than 7 days. */
+export function createSkillTrashPruneTask(): HeartbeatTask {
+  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+  let counter = 0;
+  return {
+    name: "skill-trash-prune",
+    execute: async () => {
+      counter++;
+      if (counter % 72 !== 0) return; // ~hourly (72 ticks × 50s)
+      const { existsSync, readdirSync, rmSync, statSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { abtarsHome } = await import("../paths.js");
+      const trashPath = join(abtarsHome(), "skills", ".trash");
+      if (!existsSync(trashPath)) return;
+      const now = Date.now();
+      for (const entry of readdirSync(trashPath)) {
+        try {
+          const full = join(trashPath, entry);
+          const stat = statSync(full);
+          if (now - stat.mtimeMs > SEVEN_DAYS_MS) {
+            rmSync(full, { recursive: true });
+            logInfo("skill-trash-prune", `Pruned: ${entry}`);
+          }
+        } catch (err) { logAndSwallow(TAG, "prune entry", err); }
+      }
+    },
+  };
+}
