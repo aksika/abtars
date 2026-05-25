@@ -192,6 +192,7 @@ export class DirectApiTransport implements IKiroTransport {
         }
         return result;
       } catch (err) {
+        if (signal.aborted) throw err; // Don't poison other models on user interrupt
         const status = this.parseErrorStatus(err);
         const kind = classifyError(status);
         const retryAfterMs = this.parseRetryAfter(err);
@@ -276,7 +277,7 @@ export class DirectApiTransport implements IKiroTransport {
           let args: Record<string, string>;
           try { args = JSON.parse(tc.function.arguments); } catch (err) { logAndSwallow(TAG, "JSON.parse tool args", err); args = {}; }
 
-          const result = await executeToolCall(tc.function.name, args, { userId: this._activeSessionKey?.split(":")[0] || "master" });
+          const result = await executeToolCall(tc.function.name, args, { userId: this._activeSessionKey?.split(":")[0] || "master", signal });
           session.addToolResult(tc.id, tc.function.name, result);
           try { if (!JSON.parse(result).error) this._toolCallsSucceeded++; } catch (err) { logAndSwallow(TAG, "JSON.parse tool result", err); this._toolCallsSucceeded++; }
         }

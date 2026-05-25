@@ -26,7 +26,7 @@ export type ToolDefinition = {
   readonly name: string;
   readonly description: string;
   readonly parameters: Record<string, unknown>;
-  execute(args: Record<string, string>, context?: { userId: string }): Promise<string>;
+  execute(args: Record<string, string>, context?: { userId: string; signal?: AbortSignal }): Promise<string>;
 };
 
 const BASH_TIMEOUT_MS = 300_000;
@@ -65,7 +65,7 @@ function isBridgeKillCommand(cmd: string): boolean {
   return false;
 }
 
-function runBash(cmd: string, timeout = BASH_TIMEOUT_MS): Promise<string> {
+function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
   // Guardrails: command check
   const { checkCommand } = require("../guardrails.js") as typeof import("../guardrails.js");
   const cmdBlock = checkCommand(cmd);
@@ -89,7 +89,7 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS): Promise<string> {
     }));
   }
   return new Promise((resolve) => {
-    execFile("bash", ["-c", cmd], { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    const child = execFile("bash", ["-c", cmd], { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       const result: Record<string, unknown> = {};
       if (stdout) result["stdout"] = stdout.slice(0, 50_000);
       if (stderr) result["stderr"] = stderr.slice(0, 10_000);
@@ -97,6 +97,12 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS): Promise<string> {
       else result["exit_code"] = 0;
       resolve(JSON.stringify(result));
     });
+    if (signal) {
+      if (signal.aborted) { child.kill("SIGTERM"); return; }
+      const onAbort = (): void => { child.kill("SIGTERM"); };
+      signal.addEventListener("abort", onAbort, { once: true });
+      child.on("exit", () => signal.removeEventListener("abort", onAbort));
+    }
   });
 }
 
@@ -124,7 +130,7 @@ const bashTool: ToolDefinition = {
     properties: { command: { type: "string", description: "The bash command to execute" } },
     required: ["command"],
   },
-  execute: (args) => runBash(args["command"] ?? ""),
+  execute: (args, context) => runBash(args["command"] ?? "", BASH_TIMEOUT_MS, context?.signal),
 };
 
 let _storeCount = 0;
@@ -517,7 +523,7 @@ export function getToolSchemas(): Array<{ type: "function"; function: { name: st
   }));
 }
 
-export async function executeToolCall(name: string, args: Record<string, string>, context?: { userId: string }): Promise<string> {
+export async function executeToolCall(name: string, args: Record<string, string>, context?: { userId: string; signal?: AbortSignal }): Promise<string> {
   const tool = ALL_TOOLS.find(t => t.name === name);
   if (!tool) return JSON.stringify({ error: `Unknown tool: ${name}` });
   const ts = Date.now();
