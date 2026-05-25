@@ -494,7 +494,9 @@ export async function install(opts: InstallOptions): Promise<number> {
       const plistSrc = join(home, 'scripts', 'com.abtars.watchdog.plist');
       const plistDst = join(homedir(), 'Library', 'LaunchAgents', 'com.abtars.watchdog.plist');
       if (existsSync(plistSrc)) {
-        copyFileSync(plistSrc, plistDst);
+        const content = readFileSync(plistSrc, 'utf-8').replaceAll('{{HOME}}', homedir());
+        const { writeFileSync } = await import('node:fs');
+        writeFileSync(plistDst, content);
         try { execSync(`launchctl load "${plistDst}"`, { stdio: 'ignore' }); } catch { /* already loaded */ }
         process.stdout.write(`✓ watchdog LaunchAgent loaded\n`);
       }

@@ -157,7 +157,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
       PLIST_SRC="$(dirname "$0")/com.abtars.watchdog.plist"
       PLIST_DST="$HOME/Library/LaunchAgents/com.abtars.watchdog.plist"
       if [ -f "$PLIST_SRC" ]; then
-        cp "$PLIST_SRC" "$PLIST_DST"
+        sed "s|{{HOME}}|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
         launchctl load "$PLIST_DST" 2>/dev/null && fix "installed and loaded watchdog LaunchAgent"
       else
         warn "watchdog LaunchAgent not loaded -- plist not found at $PLIST_SRC"
