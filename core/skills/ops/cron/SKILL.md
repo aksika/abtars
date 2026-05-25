@@ -4,31 +4,31 @@ description: Schedule time-based reminders and tasks
 user-invocable: false
 ---
 
-# Cron
+# Scheduled Tasks
 
-Schedule reminders and tasks via `abtars-cron`. Never use host crontab.
+Schedule reminders and tasks via `abtars-task`. Never use host crontab.
 
 ## One-shot
 ```bash
-abtars-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type reminder
-abtars-cron add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type task --executor agent
+abtars-task add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type reminder
+abtars-task add --at "YYYY-MM-DDTHH:MM" --message "..." --chat-id <ID> --type task --executor agent
 ```
 
 ## Recurring
 ```bash
-abtars-cron add --schedule "30 7 * * *" --message "command or prompt" --chat-id <ID> --type task --executor script
-abtars-cron add --schedule "0 10 * * *" --message "Follow the research prompt..." --chat-id <ID> --type task --executor agent
+abtars-task add --schedule "30 7 * * *" --message "command or prompt" --chat-id <ID> --type task --executor script
+abtars-task add --schedule "0 10 * * *" --message "Follow the research prompt..." --chat-id <ID> --type task --executor agent
 ```
 
 Schedule format: `min hour dom month dow` (standard cron).
 
 ## Management
 ```bash
-abtars-cron list              # show pending/recurring
-abtars-cron remove <id>       # cancel by 6-char hex ID
-abtars-cron pause <id>        # temporarily disable
-abtars-cron resume <id>       # re-enable
-abtars-cron history <id>      # last 10 runs
+abtars-task list              # show pending/recurring
+abtars-task remove <id>       # cancel by 6-char hex ID
+abtars-task pause <id>        # temporarily disable
+abtars-task resume <id>       # re-enable
+abtars-task history <id>      # last 10 runs
 ```
 
 ## How it fires
