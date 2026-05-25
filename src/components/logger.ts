@@ -39,7 +39,7 @@ function writeToFile(line: string): void {
   buffer.push(redactSecrets(line));
   if (buffer.length >= 200) flush();
   else if (!flushTimer) {
-    flushTimer = setTimeout(flush, 30_000);
+    flushTimer = setTimeout(flush, 30000);
     flushTimer.unref();
   }
 }
