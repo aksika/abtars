@@ -29,10 +29,6 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
     // Init agent session for non-Main types (coding, browse)
     await ctx.sessionManager.initAgentSession(result);
-    // Only reset main transport for Main sessions — non-Main use their own agentSession transport
-    if (result.type === "A") {
-      await ctx.transport.resetSession(result.id);
-    }
     await ctx.reply(`✅ Session #${result.shortIndex} (${typeLabel(result.type)}) created.`);
     logInfo(TAG, `New session ${result.id} for ${ctx.userId}`);
     return true;
