@@ -81,7 +81,9 @@ const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
 
 interface WizardAnswers {
   readonly installMode: "simple" | "supervised" | "supervised-daemon";
+  readonly agentName: string;
   readonly userName: string;
+  readonly passphrase: string;
   readonly telegramToken: string;
   readonly telegramChatId: string;
   readonly discordBotToken: string;
@@ -118,13 +120,29 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(installMode)) { cancel('Cancelled.'); return null; }
 
-  // 1b. User name (for personal greeting)
+  // 1b. Agent name
+  const agentName = await text({
+    message: 'Agent name (identity for this deployment)',
+    placeholder: 'e.g. KP, Molty',
+    initialValue: '',
+  });
+  if (isCancel(agentName)) { cancel('Cancelled.'); return null; }
+
+  // 1c. User name (for personal greeting + encryption salt)
   const userName = await text({
-    message: 'Your name',
-    placeholder: 'e.g. Alex',
+    message: 'Your name (used for encryption — same on all machines)',
+    placeholder: 'e.g. aksika',
     initialValue: existing?.userName ?? '',
   });
   if (isCancel(userName)) { cancel('Cancelled.'); return null; }
+
+  // 1d. Passphrase (for memory encryption)
+  const passphrase = await text({
+    message: 'Encryption passphrase (protects memories + secrets)',
+    placeholder: 'min 6 chars — remember this!',
+    validate: (v) => (v && v.length >= 6) ? undefined : 'min 6 characters',
+  });
+  if (isCancel(passphrase)) { cancel('Cancelled.'); return null; }
 
   // 2-3. Telegram (optional)
   const telegramToken = await text({
@@ -320,7 +338,9 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
 
   return {
     installMode: installMode as "simple" | "supervised" | "supervised-daemon",
+    agentName: String(agentName ?? '').trim(),
     userName: String(userName ?? '').trim(),
+    passphrase: String(passphrase ?? ''),
     telegramToken: String(telegramToken ?? '').trim(),
     telegramChatId: String(telegramChatId ?? '').trim(),
     discordBotToken: String(discordBotToken ?? '').trim(),
@@ -366,7 +386,9 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   }
   return {
     installMode: 'supervised',
+    agentName: '',
     userName: '',
+    passphrase: '',
     telegramToken: opts.telegramToken ?? '',
     telegramChatId: opts.telegramChatId ?? '',
     discordBotToken: '',
@@ -397,7 +419,9 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
     const apiKeyEnv = PROVIDER_API_KEY_ENV[provider];
     return {
       installMode: 'simple',
+      agentName: '',
       userName: kv.get('USER_DISPLAY_NAME') ?? '',
+      passphrase: '',
       telegramToken: kv.get('TELEGRAM_BOT_TOKEN') ?? '',
       telegramChatId: kv.get('MAIN_CHAT_ID') ?? '',
       discordBotToken: kv.get('DISCORD_BOT_TOKEN') ?? '',
@@ -581,6 +605,20 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       await mkdir(profileDir, { recursive: true });
       await writeFile(profilePath, `# User Profile\n\nName: ${answers.userName}\n`, { mode: 0o600 });
       process.stdout.write(`✓ user_profile.md → ${profilePath}\n`);
+    }
+  }
+
+  // Initialize passphrase-based encryption (#607)
+  if (answers.passphrase && answers.userName) {
+    try {
+      const { deriveFromPassphrase, writeKeyVerify } = await import("abmind");
+      const { writeToKeyring } = await import("abmind");
+      const key = deriveFromPassphrase(answers.passphrase, answers.userName);
+      writeKeyVerify(key);
+      const stored = writeToKeyring(answers.passphrase);
+      process.stdout.write(`✓ Encryption key derived from passphrase${stored ? " (stored in keyring)" : ""}\n`);
+    } catch (err) {
+      process.stdout.write(`⚠ Key init failed: ${err instanceof Error ? err.message : String(err)}\n`);
     }
   }
 
