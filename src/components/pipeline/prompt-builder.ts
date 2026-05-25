@@ -79,7 +79,7 @@ export async function buildPrompt(
   }
 
   // --- Active recall ---
-  if (getEnv().activeMemory && memory && !isSessionStart) {
+  if (getEnv().activeMemory && memory) {
     const userEntry = registry.byUserId.get(userId);
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
       try {
