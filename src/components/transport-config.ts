@@ -6,7 +6,7 @@ import { validateShape, TRANSPORT_SCHEMA } from "./config-validator.js";
  * Falls back to .env defaults if JSON is broken.
  */
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 import { readEnvWithDefault } from "./env.js";
@@ -312,7 +312,12 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): void
   }
   const p = join(configDir(), getEnv().transportConfig);
   // Save current as .old before overwriting (enables /model restore)
-  try { writeFileSync(p.replace(".json", ".old.json"), readFileSync(p, "utf-8"), "utf-8"); } catch (err) { logAndSwallow(TAG, "backup transport.old.json", err); }
+  // Only overwrite .old if it's >15min old — preserves last-known-good during rapid changes
+  const oldPath = p.replace(".json", ".old.json");
+  try {
+    const oldAge = Date.now() - statSync(oldPath).mtimeMs;
+    if (oldAge > 15 * 60_000) writeFileSync(oldPath, readFileSync(p, "utf-8"), "utf-8");
+  } catch { try { writeFileSync(oldPath, readFileSync(p, "utf-8"), "utf-8"); } catch (err) { logAndSwallow(TAG, "backup transport.old.json", err); } }
   writeFileSync(p, JSON.stringify(tc, null, 2), "utf-8");
   cachedTransport = tc;
   logInfo(TAG, reason ? `transport.json updated — ${reason}` : "transport.json updated");
