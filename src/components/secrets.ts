@@ -85,5 +85,5 @@ export async function writeSecret(name: string, value: string): Promise<void> {
   cache.set(name, value);
 }
 
-/** Clear cached secrets (for testing or reload). */
-export function clearSecretCache(): void { cache.clear(); cachedKey = null; }
+/** Clear cached secret values (for testing or reload). Does not clear the encryption key. */
+export function clearSecretCache(): void { cache.clear(); }
