@@ -162,6 +162,17 @@ export function buildSessionStartPrompt(
     logInfo(TAG, `Injected restart reason: ${reason}`);
   }
 
+  // Session identity (#624)
+  if (sessionKey) {
+    const parts = sessionKey.split("_");
+    if (parts.length === 3) {
+      const typeMap: Record<string, string> = { A: "Main", B: "Browse", C: "Code", T: "Task" };
+      const type = typeMap[parts[1]!] ?? parts[1];
+      const index = parseInt(parts[2]!, 10);
+      contextParts.push(`[SESSION] #${index} (${type})`);
+    }
+  }
+
   const soul = loadSoulBundle(memory);
   if (soul) {
     contextParts.push(soul);
