@@ -59,7 +59,8 @@ export async function passwd(): Promise<number> {
       if (existsSync(dbPath)) {
         const oldDbKey = Buffer.from(hkdfSync("sha256", oldKey, "", "abmind-secrets-v1", 32));
         const newDbKey = Buffer.from(hkdfSync("sha256", newKey, "", "abmind-secrets-v1", 32));
-        const Database = require("better-sqlite3");
+        const { loadNative } = await import("abmind");
+        const Database = loadNative("better-sqlite3") as any;
         const db = new Database(dbPath, { readonly: false });
         const rows = db.prepare("SELECT id, content_en FROM extracted_memories WHERE classification = 3").all() as Array<{ id: number; content_en: string }>;
         const update = db.prepare("UPDATE extracted_memories SET content_en = ? WHERE id = ?");
