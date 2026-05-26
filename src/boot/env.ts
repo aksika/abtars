@@ -29,18 +29,21 @@ loadDotenv({ path: resolve(process.cwd(), ".env"), override: false });
 // Load secrets from ~/.abtars/secret/ — decrypt + auto-encrypt plaintext + load into process.env
 import { readdirSync, statSync, writeFileSync } from "node:fs";
 import { createDecipheriv, createCipheriv, randomBytes, hkdfSync } from "node:crypto";
-import { createRequire } from "node:module";
 
 const secretDir = resolve(home, "secret");
 if (existsSync(secretDir)) {
   let purposeKey: Buffer | null = null;
-  const _require = createRequire(import.meta.url);
 
   function getPurposeKey(): Buffer | null {
     if (purposeKey) return purposeKey;
     try {
-      const abmind = _require("abmind") as typeof import("abmind");
-      const master = abmind.loadKey();
+      // Read master key directly from file (no abmind import needed in bundle)
+      const abmindHome = process.env["ABMIND_HOME"] ?? resolve(homedir(), ".abmind");
+      const keyFile = resolve(abmindHome, "secret", "abmind.key");
+      if (!existsSync(keyFile)) return null;
+      const hex = readFileSync(keyFile, "utf-8").trim();
+      if (hex.length !== 64) return null;
+      const master = Buffer.from(hex, "hex");
       purposeKey = Buffer.from(hkdfSync("sha256", master, "", "abtars-secrets-files-v1", 32));
       return purposeKey;
     } catch { return null; }
