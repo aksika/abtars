@@ -312,10 +312,8 @@ let _ircSend: ((channel: string, message: string) => void) | null = null;
 /** Inject IRC send from bridge for irc_send tool. */
 export function setIrcSend(fn: (channel: string, message: string) => void): void { _ircSend = fn; }
 
-let _secretGetDb: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } | null = null;
-
-/** Inject DB handle for secret_get tool. */
-export function setSecretGetDb(db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } }): void { _secretGetDb = db; }
+/** @deprecated — secret_get now reads from file, not DB. Kept for backward compat (callers may still call this). */
+export function setSecretGetDb(_db: unknown): void { /* no-op */ }
 
 let _sendDocument: ((path: string, caption?: string) => Promise<number>) | null = null;
 
@@ -480,28 +478,47 @@ const ircSendTool: ToolDefinition = {
 
 const secretGetTool: ToolDefinition = {
   name: "secret_get",
-  description: "Retrieve a stored secret (class=3) and inject as env var. Returns the $VAR_NAME to use in commands. NEVER echoes the value to the user.",
+  description: "Retrieve a secret from ~/.abtars/secret/. For env-var secrets (no extension), returns the value. For files (with extension like .json), returns the full decrypted content. NEVER echo the value to the user.",
   parameters: {
     properties: {
-      name: { type: "string", description: "Keyword to search for (e.g. 'openrouter', 'github token')" },
+      name: { type: "string", description: "Exact filename in secret/ dir (e.g. 'OPENROUTER_API_KEY', 'x-cookies.json')" },
     },
     required: ["name"],
   },
   execute: async (args) => {
-    const keyword = args.name?.trim();
-    if (!keyword) return JSON.stringify({ error: "name is required" });
-    if (!_secretGetDb) return JSON.stringify({ error: "memory not available" });
+    const name = args.name?.trim();
+    if (!name) return JSON.stringify({ error: "name is required" });
     try {
-      const { decrypt, hasKey } = await import("abmind");
-      if (!hasKey()) return JSON.stringify({ error: "no encryption key" });
-      const row = _secretGetDb.prepare(
-        "SELECT content_en, encrypted FROM extracted_memories WHERE classification = 3 AND (content_en LIKE ? OR content_original LIKE ?) LIMIT 1"
-      ).get(`%${keyword}%`, `%${keyword}%`) as { content_en: string; encrypted: number } | undefined;
-      if (!row) return JSON.stringify({ error: `no secret found matching '${keyword}'` });
-      const value = row.encrypted ? decrypt(row.content_en) : row.content_en;
-      const varName = `SECRET_${keyword.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
-      process.env[varName] = value;
-      return JSON.stringify({ ok: true, env_var: `$${varName}`, hint: `Use $${varName} in commands. NEVER print or echo the value.` });
+      const { join } = await import("node:path");
+      const { homedir } = await import("node:os");
+      const { readFileSync, existsSync } = await import("node:fs");
+      const { createDecipheriv, hkdfSync } = await import("node:crypto");
+      const { loadKey } = await import("abmind");
+
+      const secretPath = join(homedir(), ".abtars", "secret", name);
+      if (!existsSync(secretPath)) return JSON.stringify({ error: `secret '${name}' not found` });
+
+      const raw = readFileSync(secretPath, "utf-8").trim();
+      if (!raw) return JSON.stringify({ error: `secret '${name}' is empty` });
+
+      let value: string;
+      if (raw.startsWith("ENC:")) {
+        const master = loadKey();
+        const key = Buffer.from(hkdfSync("sha256", master, "", "abtars-secrets-files-v1", 32));
+        const buf = Buffer.from(raw.slice(4), "base64");
+        const d = createDecipheriv("aes-256-gcm", key, buf.subarray(1, 13));
+        d.setAuthTag(buf.subarray(buf.length - 16));
+        value = d.update(buf.subarray(13, buf.length - 16), undefined, "utf-8") + d.final("utf-8");
+      } else {
+        value = raw;
+      }
+
+      // For env-var type (no extension): also inject into process.env
+      if (!name.includes(".")) {
+        process.env[name] = value;
+        return JSON.stringify({ ok: true, env_var: `$${name}`, hint: `Use $${name} in commands. NEVER print or echo the value.` });
+      }
+      return JSON.stringify({ ok: true, content: value });
     } catch (err) {
       return JSON.stringify({ error: `secret_get failed: ${err instanceof Error ? err.message : String(err)}` });
     }
