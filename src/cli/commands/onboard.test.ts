@@ -91,11 +91,13 @@ describe('onboard command (non-interactive)', () => {
     });
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
-    expect(env).toMatch(/TELEGRAM_BOT_TOKEN=123:secret/);
     expect(env).toMatch(/MAIN_CHAT_ID=4242/);
     expect(env).toMatch(/DEFAULT_PROVIDER=openrouter/);
     expect(env).toMatch(/DEFAULT_MODEL=z-ai\/glm-4\.6/);
     expect(env).not.toMatch(/DISCORD_A2A_CHANNEL_ID=/);
+    // Secrets go to secret/ dir
+    const token = await readFile(join(fakeHome, 'secret', 'TELEGRAM_BOT_TOKEN'), 'utf-8');
+    expect(token).toBe('123:secret');
   });
 
   it('preserves operator-added lines in .env', async () => {
@@ -113,7 +115,8 @@ describe('onboard command (non-interactive)', () => {
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
     expect(env).toContain('CUSTOM_OPERATOR_KEY=x');
     expect(env).toContain('OTHER=y');
-    expect(env).toMatch(/TELEGRAM_BOT_TOKEN=999:aa/);
+    const token = await readFile(join(fakeHome, 'secret', 'TELEGRAM_BOT_TOKEN'), 'utf-8');
+    expect(token).toBe('999:aa');
   });
 
   it('overwrites owned keys but not custom ones on re-run', async () => {
@@ -148,9 +151,9 @@ describe('onboard command (non-interactive)', () => {
     });
     expect(code).toBe(0);
     const env = await readFile(join(fakeHome, 'config', '.env'), 'utf-8');
-    expect(env).toMatch(/TELEGRAM_BOT_TOKEN=2:b/);
-    expect(env).not.toMatch(/TELEGRAM_BOT_TOKEN=1:a/);
     expect(env).toMatch(/DEFAULT_PROVIDER=anthropic/);
+    const token = await readFile(join(fakeHome, 'secret', 'TELEGRAM_BOT_TOKEN'), 'utf-8');
+    expect(token).toBe('2:b');
   });
 
   it('refuses if not installed (no manifest)', async () => {

@@ -120,7 +120,8 @@ export class SessionManager {
     if (alive.length >= this.maxSessions) {
       return `Max sessions reached (${this.maxSessions}). End or kill a session first.`;
     }
-    const session = this.allocateSession(state, type, true);
+    const active = state.sessions.find(s => s.shortIndex === state.activeIndex && !s.ended);
+    const session = this.allocateSession(state, type, true, active?.id);
     state.activeIndex = session.shortIndex;
     return session;
   }

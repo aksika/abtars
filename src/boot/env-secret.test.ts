@@ -8,18 +8,18 @@ const CONFIG_DIR = join(TEST_HOME, "config");
 const SECRET_DIR = join(TEST_HOME, "secret");
 const CWD = join(__dirname, "../..");
 
-describe("boot/env.ts — <secret> resolution", () => {
+describe("boot/env.ts — secret file loading", () => {
   beforeEach(() => {
     mkdirSync(CONFIG_DIR, { recursive: true });
     mkdirSync(SECRET_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(join(CONFIG_DIR, ".env"), "");
   });
 
   afterEach(() => {
     rmSync(TEST_HOME, { recursive: true, force: true });
   });
 
-  function run(envContent: string): { stdout: string; stderr: string } {
-    writeFileSync(join(CONFIG_DIR, ".env"), envContent);
+  function run(): { stdout: string; stderr: string } {
     const r = spawnSync("node", [
       "--import", "./dist/boot/env.js",
       "-e", `console.log(JSON.stringify({ MY_KEY: process.env.MY_KEY || null }))`,
@@ -32,28 +32,29 @@ describe("boot/env.ts — <secret> resolution", () => {
     return { stdout: r.stdout, stderr: r.stderr };
   }
 
-  it("resolves <secret> when file exists", () => {
+  it("loads secret file into process.env", () => {
     writeFileSync(join(SECRET_DIR, "MY_KEY"), "super-secret-value\n");
-    const { stdout } = run("MY_KEY=<secret>\n");
+    const { stdout } = run();
     expect(JSON.parse(stdout.trim())).toEqual({ MY_KEY: "super-secret-value" });
   });
 
-  it("logs BOOT ERROR when secret file is missing", () => {
-    const { stderr } = run("MY_KEY=<secret>\n");
-    expect(stderr).toContain("[BOOT ERROR]");
-    expect(stderr).toContain("MY_KEY");
-    expect(stderr).toContain("does not exist");
+  it("skips missing secret files silently", () => {
+    // No MY_KEY file in secret dir
+    const { stdout, stderr } = run();
+    expect(JSON.parse(stdout.trim())).toEqual({ MY_KEY: null });
+    expect(stderr).not.toContain("Error");
   });
 
-  it("logs BOOT ERROR when secret file is empty", () => {
+  it("skips empty secret files", () => {
     writeFileSync(join(SECRET_DIR, "MY_KEY"), "   \n");
-    const { stderr } = run("MY_KEY=<secret>\n");
-    expect(stderr).toContain("[BOOT ERROR]");
-    expect(stderr).toContain("empty");
+    const { stdout } = run();
+    expect(JSON.parse(stdout.trim())).toEqual({ MY_KEY: null });
   });
 
-  it("does not touch env vars with normal values", () => {
-    const { stdout } = run("MY_KEY=normal-value\n");
+  it("does not touch env vars with normal values in .env", () => {
+    writeFileSync(join(CONFIG_DIR, ".env"), "MY_KEY=normal-value\n");
+    const { stdout } = run();
+    // Secret dir takes precedence if file exists, otherwise .env value stays
     expect(JSON.parse(stdout.trim())).toEqual({ MY_KEY: "normal-value" });
   });
 });
