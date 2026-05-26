@@ -443,13 +443,11 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
 }
 
 function mergeEnvContent(existing: string, answers: WizardAnswers): string {
-  const providerKeyName = PROVIDER_API_KEY_ENV[answers.defaultProvider];
   const owned = new Set([
-    'TELEGRAM_BOT_TOKEN', 'MAIN_CHAT_ID',
-    'DISCORD_BOT_TOKEN', 'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
+    'MAIN_CHAT_ID',
+    'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
-    'BED_TIME', 'WAKE_TIME', 'GROQ_API_KEY', 'EMBEDDING_ENABLED', 'TRUST_MODE',
-    ...(providerKeyName ? [providerKeyName] : []),
+    'BED_TIME', 'WAKE_TIME', 'EMBEDDING_ENABLED', 'TRUST_MODE',
   ]);
   const keptLines: string[] = [];
   for (const line of existing.split('\n')) {
@@ -465,18 +463,12 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     `DEFAULT_PROVIDER=${answers.defaultProvider}`,
     `DEFAULT_MODEL=${answers.defaultModel}`,
   ];
-  if (answers.telegramToken) newBlock.push(`TELEGRAM_BOT_TOKEN=${answers.telegramToken}`);
   if (answers.telegramChatId) newBlock.push(`MAIN_CHAT_ID=${answers.telegramChatId}`);
   else if (answers.discordA2aChannel) newBlock.push(`MAIN_CHAT_ID=${answers.discordA2aChannel}`);
-  if (answers.discordBotToken) newBlock.push(`DISCORD_BOT_TOKEN=${answers.discordBotToken}`);
   if (answers.discordAppId) newBlock.push(`DISCORD_APP_ID=${answers.discordAppId}`);
   if (answers.discordA2aChannel) newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
-  if (providerKeyName && answers.providerApiKey) {
-    newBlock.push(`${providerKeyName}=${answers.providerApiKey}`);
-  }
   if (answers.bedTime) newBlock.push(`BED_TIME=${answers.bedTime}`);
   if (answers.wakeTime) newBlock.push(`WAKE_TIME=${answers.wakeTime}`);
-  if (answers.groqApiKey) newBlock.push(`GROQ_API_KEY=${answers.groqApiKey}`);
   newBlock.push(`EMBEDDING_ENABLED=${answers.embeddingEnabled ? 'true' : 'false'}`);
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
 
@@ -529,6 +521,22 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   const next = mergeEnvContent(currentContent, answers);
   await writeFile(envPath, next, { mode: 0o600 });
   process.stdout.write(`\n✓ Wrote ${envPath}\n`);
+
+  // Write secrets to ~/.abtars/secret/ (boot auto-encrypts on first start)
+  const secretDirPath = join(paths.home, 'secret');
+  await mkdir(secretDirPath, { recursive: true });
+  const secrets: Array<[string, string]> = [];
+  if (answers.telegramToken) secrets.push(['TELEGRAM_BOT_TOKEN', answers.telegramToken]);
+  if (answers.discordBotToken) secrets.push(['DISCORD_BOT_TOKEN', answers.discordBotToken]);
+  if (answers.providerApiKey) {
+    const providerKeyName = PROVIDER_API_KEY_ENV[answers.defaultProvider];
+    if (providerKeyName) secrets.push([providerKeyName, answers.providerApiKey]);
+  }
+  if (answers.groqApiKey) secrets.push(['GROQ_API_KEY', answers.groqApiKey]);
+  for (const [name, value] of secrets) {
+    await writeFile(join(secretDirPath, name), value, { mode: 0o600 });
+  }
+  if (secrets.length > 0) process.stdout.write(`✓ ${secrets.length} secrets → ${secretDirPath}\n`);
 
   // Write install mode to manifest
   const { writeManifest } = await import('../deploy-lib-import.js');
