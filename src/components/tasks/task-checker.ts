@@ -15,7 +15,7 @@ import { readEntries as dbReadEntries, writeEntry, removeEntry as dbRemoveEntry 
 import type { CronEntry } from "../../cli/abtars-task.js";
 
 const TAG = "cron-checker";
-const memoryDir = (): string => join(abtarsHome(), "memory");
+const memoryDir = (): string => join(abtarsHome(), "state");
 const remindersPath = (): string => join(memoryDir(), "pending_reminders.json");
 
 export interface PendingReminder {

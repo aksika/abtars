@@ -101,7 +101,7 @@ export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string)
 
 // --- Pending browse file ---
 
-const pendingPath = (): string => join(abtarsHome(), "memory", "pending_browse.json");
+const pendingPath = (): string => join(abtarsHome(), "workspace", "browse", "pending_browse.json");
 
 export function readPendingBrowse(): PendingBrowseEntry[] {
   const p = pendingPath();
@@ -111,7 +111,7 @@ export function readPendingBrowse(): PendingBrowseEntry[] {
 }
 
 export function writePendingBrowse(entries: PendingBrowseEntry[]): void {
-  const dir = join(abtarsHome(), "memory");
+  const dir = join(abtarsHome(), "workspace", "browse");
   mkdirSync(dir, { recursive: true });
   writeFileSync(pendingPath(), JSON.stringify(entries, null, 2), "utf-8");
 }

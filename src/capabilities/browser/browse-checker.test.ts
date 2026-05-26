@@ -14,10 +14,11 @@ describe("browse-delivery", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "browsechk-test-"));
     process.env.HOME = tmpDir;
-    memDir = join(tmpDir, ".abtars", "memory");
+    memDir = join(tmpDir, ".abtars", "workspace", "browse");
     mkdirSync(memDir, { recursive: true });
+    mkdirSync(join(tmpDir, ".abtars", "state"), { recursive: true });
     browsePath = join(memDir, "pending_browse.json");
-    remindersPath = join(memDir, "pending_reminders.json");
+    remindersPath = join(tmpDir, ".abtars", "state", "pending_reminders.json");
   });
 
   afterEach(() => {

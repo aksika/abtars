@@ -8,19 +8,19 @@
  *   abtars-todo done 3
  *   abtars-todo remove 3
  *
- * File: ~/.abtars/memory/todo.md
+ * File: ~/.abtars/workspace/todo/todo.md
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 import { localDate } from "../utils/date.js";
 
-const todoPath = (): string => join(abtarsHome(), "memory", "todo.md");
+const todoPath = (): string => join(abtarsHome(), "workspace", "todo", "todo.md");
 const HEADER = "# Todo List\n";
 
 function ensureFile(): void {
   const p = todoPath();
-  const dir = join(abtarsHome(), "memory");
+  const dir = join(abtarsHome(), "workspace", "todo");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   if (!existsSync(p)) writeFileSync(p, HEADER, "utf-8");
 }

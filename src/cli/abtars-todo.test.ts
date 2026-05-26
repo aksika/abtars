@@ -16,7 +16,7 @@ describe("abtars-todo", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "todo-test-"));
     process.env.HOME = tmpDir;
-    todoPath = join(tmpDir, ".abtars", "memory", "todo.md");
+    todoPath = join(tmpDir, ".abtars", "workspace", "todo", "todo.md");
   });
 
   afterEach(() => {
