@@ -19,6 +19,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "hooks", description: "List configured hooks" },
   { name: "stop", description: "Stop current response" },
   { name: "models", description: "Model, transport & agents" },
+  { name: "change", description: "Switch model/provider" },
   { name: "emergency", description: "Activate paid hailMary model" },
   { name: "heartbeat", description: "Heartbeat diagnostics" },
   { name: "memory", description: "Memory stats" },

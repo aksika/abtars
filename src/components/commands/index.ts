@@ -37,6 +37,7 @@ registerExact("/memory", handleMemory);
 registerExact("/heartbeat", handleHeartbeat);
 registerExact("/models", handleModels);
 registerExact("/model", handleModels);
+registerExact("/change", (_, ctx) => handleModels("/model change", ctx));
 registerExact("/emergency", handleEmergencyAlias);
 registerExact("/help", handleHelp);
 registerExact("/users", handleUsers);
