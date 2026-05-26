@@ -7,7 +7,7 @@
  */
 
 import { createInterface } from "node:readline";
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createDecipheriv, createCipheriv, randomBytes, hkdfSync } from "node:crypto";
@@ -115,10 +115,10 @@ export async function passwd(): Promise<number> {
       }
     }
 
-    // Finalize
+    // Finalize — write key file + key.verify atomically
     _resetKeyCache();
+    writeFileSync(keyFile, newKey.toString("hex") + "\n", { mode: 0o600 });
     writeKeyVerify(newKey);
-    if (existsSync(keyFile)) renameSync(keyFile, keyFile + ".backup");
     const stored = writeToKeyring(newPass);
 
     console.log(`✓ Done. ${dbCount} memories + ${fileCount} secrets re-encrypted.`);
