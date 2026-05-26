@@ -539,7 +539,14 @@ export async function executeToolCall(name: string, args: Record<string, string>
   const tool = ALL_TOOLS.find(t => t.name === name);
   if (!tool) return JSON.stringify({ error: `Unknown tool: ${name}` });
   const ts = Date.now();
-  audit({ ts, tool: name, args: redactSecrets(JSON.stringify(args)), userId: context?.userId });
+
+  // #621: redact abmind_store args based on classification
+  const storeClass = (name === "abmind_store" || name === "memory_store") ? parseInt(args.classification ?? args.class ?? "1", 10) : 0;
+  const auditArgs = storeClass >= 2
+    ? `{"class":${storeClass},"[REDACTED]":true}`
+    : redactSecrets(JSON.stringify(args));
+  audit({ ts, tool: name, args: auditArgs, userId: context?.userId });
+
   try {
     const result = await tool.execute(args, context);
     audit({ ts, tool: name, status: "ok", chars: result.length });

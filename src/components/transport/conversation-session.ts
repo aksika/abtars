@@ -77,4 +77,13 @@ export class ConversationSession {
     }
     this.totalPromptTokens = this.estimateTokens();
   }
+
+  /** #621: Replace a literal secret value with [REDACTED] across all messages. */
+  scrubFromHistory(value: string): void {
+    for (const msg of this.messages) {
+      if (msg.content && msg.content.includes(value)) {
+        msg.content = msg.content.replaceAll(value, "[REDACTED]");
+      }
+    }
+  }
 }

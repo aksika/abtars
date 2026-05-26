@@ -264,7 +264,13 @@ export class DirectApiTransport implements IKiroTransport {
       if (toolCalls.length > 0) {
         session.addAssistant(content, toolCalls);
         logDebug(TAG, `Tool calls: ${toolCalls.map(tc => tc.function.name).join(", ")}`);
-        logTrace(TAG, `Tool args: ${toolCalls.map(tc => `${tc.function.name}(${tc.function.arguments})`).join(", ")}`);
+        logTrace(TAG, `Tool args: ${toolCalls.map(tc => {
+          // #621: redact abmind_store args based on classification
+          if ((tc.function.name === "abmind_store" || tc.function.name === "memory_store") && /class(?:ification)?[":\s]+[23]/.test(tc.function.arguments)) {
+            return `${tc.function.name}([REDACTED])`;
+          }
+          return `${tc.function.name}(${tc.function.arguments})`;
+        }).join(", ")}`);
 
         // Deliver pre-tool text immediately (segment break)
         if (content?.trim()) {
@@ -281,6 +287,15 @@ export class DirectApiTransport implements IKiroTransport {
 
           const result = await executeToolCall(tc.function.name, args, { userId: this._activeSessionKey?.split(":")[0] || "master", signal });
           session.addToolResult(tc.id, tc.function.name, result);
+
+          // #621: scrub secret values from conversation history after store
+          if ((tc.function.name === "abmind_store" || tc.function.name === "memory_store") && parseInt(args.classification ?? args.class ?? "1", 10) >= 2) {
+            const secretValue = args.content ?? args.value ?? args.translated;
+            if (secretValue && secretValue.length > 4) {
+              session.scrubFromHistory(secretValue);
+            }
+          }
+
           try { if (!JSON.parse(result).error) this._toolCallsSucceeded++; } catch (err) { logAndSwallow(TAG, "JSON.parse tool result", err); this._toolCallsSucceeded++; }
         }
         continue;
