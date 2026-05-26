@@ -120,7 +120,7 @@ export async function passwd(): Promise<number> {
 
     console.log(`✓ Done. ${dbCount} memories + ${fileCount} secrets re-encrypted.`);
     if (stored) console.log("✓ Passphrase stored in OS keyring.");
-    else console.log("Set ABMIND_PASSPHRASE env var for daemon mode.");
+    else console.log("Set ABTARS_PASS env var for daemon mode.");
     return 0;
   } finally { rl.close(); }
 }
