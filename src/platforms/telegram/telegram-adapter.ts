@@ -227,6 +227,25 @@ export class TelegramAdapter implements PlatformAdapter {
           await this.api.sendMessage(chatId, `🔌 Pick provider:`, { reply_markup: { inline_keyboard: buttons } });
           return;
         }
+        if (target.startsWith("s:")) {
+          // Back to provider list for a professor slot (preserves slot context)
+          const slot = target.slice(2);
+          this._pendingSlot = slot;
+          const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
+          const tc = loadTransport();
+          if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
+          let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
+          const currentProvider = resolveAgent("professor", tc)?.providerName;
+          const slotLabel = slot === "professor" ? "Main" : slot.replace("professor_fb", "Fb");
+          const buttons = providers.map(p => {
+            const count = getModelsForProvider(p.name).length;
+            const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
+            return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
+          });
+          buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
+          await this.api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
+          return;
+        }
       } else if (data.startsWith("mslot:")) {
         // Step 1 result: user picked an agent
         const agent = data.slice(6);
@@ -328,7 +347,7 @@ export class TelegramAdapter implements PlatformAdapter {
         const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
         this._modelPickerCache = models.map(m => m.id);
         const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
-        buttons.push([{ text: "← Back", callback_data: `mb:p:professor` }]);
+        buttons.push([{ text: "← Back", callback_data: `mb:s:${slot}` }]);
         await this.api.sendMessage(chatId, `📋 Pick model for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mset:")) {
