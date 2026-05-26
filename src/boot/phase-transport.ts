@@ -7,8 +7,7 @@ import { getEnv } from "../components/env-schema.js";
  * (including provider switches that can't be live-patched).
  */
 
-import { execFileSync, execSync } from "node:child_process";
-import { join } from "node:path";
+import { execSync } from "node:child_process";
 import { TmuxClient } from "../components/transport/tmux-client.js";
 import { createAgentTransport } from "../components/agent-registry.js";
 import { logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
@@ -20,17 +19,7 @@ import type { IKiroTransport } from "../components/transport/kiro-transport.js";
 const TAG = "transport";
 
 export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
-  const { config, memoryConfig } = ctx;
-
-  // Pre-flight: tmux session
-  if (config.transport.agentTransport === "tmux") {
-    logInfo("main", `♻️  Starting tmux session '${config.transport.tmuxSession}'...`);
-    try {
-      execFileSync(join(import.meta.dirname, "..", "..", "scripts", "tmux-session.sh"), { stdio: "pipe" });
-    } catch (err) {
-      logError("main", "tmux session start failed", err);
-    }
-  }
+  const { memoryConfig } = ctx;
 
   await buildTransport(ctx);
 
@@ -173,7 +162,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     transport = createAgentTransport("professor", {
       cliPath: resolved.provider.cli ?? config.transport.agentCliPath,
       workingDir: config.transport.workingDir,
-      agentCli: resolved.provider.cli ?? config.transport.agentCli,
+      agentCli: resolved.provider.cli ?? "kiro-cli",
       model: resolved.model,
     });
   }

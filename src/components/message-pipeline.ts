@@ -85,7 +85,7 @@ export async function resetAndPrepare(opts: {
 /** Transport + agent runtime deps. */
 export interface TransportDeps {
   transport: IKiroTransport;
-  config: { agentTransport: string; workingDir: string };
+  config: { workingDir: string };
   startedAt: number;
   maxContext?: number;
 }

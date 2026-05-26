@@ -91,7 +91,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     idleSave: ctx.idleSave,
     conversationBuffer: ctx.conversationBuffer,
     config: {
-      agentTransport: config.transport.agentTransport,
       workingDir: config.transport.workingDir,
     },
     startedAt: ctx.startedAt,

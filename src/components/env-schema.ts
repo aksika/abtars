@@ -37,8 +37,6 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "LOG_FORMAT", type: "string", default: "text", description: "Log format: text or json" },
 
   // ── Transport ──
-  { env: "AGENT_TRANSPORT", type: "string", default: "api", description: "Transport: api, acp, tmux" },
-  { env: "AGENT_CLI", type: "string", default: "kiro", description: "Agent CLI name: kiro, gemini" },
   { env: "AGENT_CLI_PATH", type: "string", description: "Override path to agent CLI binary" },
   { env: "API_KEY", type: "string", description: "Default API key fallback (prefer per-provider keys)" },
   { env: "TMUX_SESSION", type: "string", default: "kiro", description: "Tmux session name" },
@@ -156,8 +154,6 @@ export interface EnvConfig {
   logFormat: "text" | "json";
 
   // Transport
-  agentTransport: string;
-  agentCli: string;
   agentCliPath: string | undefined;
   apiKey: string | undefined;
   tmuxSession: string;
@@ -335,8 +331,6 @@ export function initEnv(): Readonly<EnvConfig> {
     logLevel: readOr("LOG_LEVEL", "low").toLowerCase(),
     logFormat: readOr("LOG_FORMAT", "text") === "json" ? "json" : "text",
 
-    agentTransport: readOr("AGENT_TRANSPORT", "api").toLowerCase(),
-    agentCli: readOr("AGENT_CLI", "kiro"),
     agentCliPath: read("AGENT_CLI_PATH"),
     apiKey: read("API_KEY"),
     tmuxSession: readOr("TMUX_SESSION", "kiro"),

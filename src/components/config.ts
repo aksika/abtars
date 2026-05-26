@@ -1,7 +1,7 @@
 import { access, stat, constants } from "node:fs/promises";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
-import { type Config, type AgentTransport, CONFIG_DEFAULTS } from "../types/index.js";
+import { type Config, CONFIG_DEFAULTS } from "../types/index.js";
 import { loadUsers } from "./user-registry.js";
 import { parseBoolEnv, parseNumberEnv } from "./env-utils.js";
 import { readEnv } from "./env.js";
@@ -98,21 +98,13 @@ export async function loadAndValidateConfig(): Promise<Config> {
   }
 
   // --- AGENT_CLI_PATH ---
-  const agentCli = getEnv().agentCli;
-  const defaultCliPath = agentCli === "gemini" ? "gemini" : agentCli === "kiro" ? "kiro-cli" : agentCli;
+  const defaultCliPath = "kiro-cli";
   const agentCliPath = getEnv().agentCliPath || defaultCliPath;
   try {
     await validateCliPath(agentCliPath);
   } catch {
     logError("config", `CLI binary "${agentCliPath}" is not accessible or not executable — will fail at prompt time`);
   }
-
-  // --- AGENT_TRANSPORT ---
-  const rawTransport = getEnv().agentTransport;
-  if (rawTransport !== "tmux" && rawTransport !== "acp" && rawTransport !== "api") {
-    logError("config", `AGENT_TRANSPORT must be "tmux", "acp", or "api", got "${rawTransport}" — defaulting to "api"`);
-  }
-  const agentTransport = (rawTransport === "tmux" || rawTransport === "acp" || rawTransport === "api" ? rawTransport : "api") as AgentTransport;
 
   // --- WORKING_DIR (optional, default cwd) ---
   let workingDir = getEnv().workingDir;
@@ -228,8 +220,6 @@ export async function loadAndValidateConfig(): Promise<Config> {
       allowedUserIds: discordAllowedUserIds,
     },
     transport: {
-      agentTransport,
-      agentCli,
       agentCliPath,
       workingDir,
       trustMode,

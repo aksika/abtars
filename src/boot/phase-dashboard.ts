@@ -28,7 +28,7 @@ import type { BootCtx, PhaseResult } from "./context.js";
 const TAG = "dashboard";
 
 export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
-  const { platforms, config, memory, transport, registry, heartbeat, nlmConfig } = ctx;
+  const { platforms, memory, transport, registry, heartbeat, nlmConfig } = ctx;
   if (!platforms.web) return "skipped";
   if (!transport || !heartbeat) { ctx.phaseHealth.set(phaseDashboard.name, { status: "skipped", error: "no transport/heartbeat" }); logWarn("boot", `${phaseDashboard.name}: skipping — deps not available`); return "skipped"; }
 
@@ -74,7 +74,7 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
       discordPoller: { started: svcStates.discord?.running ?? false },
       services: svcStates,
       transport: {
-        type: config.transport.agentTransport as "tmux" | "acp" | "api",
+        type: (transport as any).transportType ?? "api" as "tmux" | "acp" | "api",
         isReady: transport.isReady,
         contextPercent: transport.contextPercent,
       },

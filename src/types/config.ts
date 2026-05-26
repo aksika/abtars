@@ -17,8 +17,6 @@ export type DiscordConfig = {
 };
 
 export type TransportConfig = {
-  agentTransport: AgentTransport;
-  agentCli: string;
   agentCliPath: string;
   workingDir: string;
   trustMode: boolean;
@@ -50,9 +48,7 @@ export type Config = {
 /** Default values for optional config fields. */
 export const CONFIG_DEFAULTS = {
   transport: {
-    agentCli: "kiro",
     agentCliPath: "kiro-cli",
-    agentTransport: "acp" as AgentTransport,
     workingDir: "~/.abtars/workspace",
     trustMode: false,
     permissionTimeoutMs: 60_000,

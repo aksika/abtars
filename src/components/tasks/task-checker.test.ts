@@ -15,7 +15,7 @@ describe("cron-checker", () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "cronchk-test-"));
     process.env.HOME = tmpDir;
-    memDir = join(tmpDir, ".abtars", "memory");
+    memDir = join(tmpDir, ".abtars", "state");
     mkdirSync(memDir, { recursive: true });
     remindersPath = join(memDir, "pending_reminders.json");
     closeDb(); // force fresh DB for new HOME

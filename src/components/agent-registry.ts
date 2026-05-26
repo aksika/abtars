@@ -167,7 +167,7 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const transport = createAgentTransport(SUBAGENT_ACP_ROLE[role], {
       cliPath: agent.provider.cli ?? config.transport.agentCliPath,
       workingDir: config.transport.workingDir,
-      agentCli: agent.provider.cli ?? config.transport.agentCli,
+      agentCli: agent.provider.cli ?? "kiro-cli",
       model,
     });
     try {
