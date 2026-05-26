@@ -374,7 +374,7 @@ export class TelegramAdapter implements PlatformAdapter {
 
         // Determine agent key
         const agentKey = slot.startsWith("professor_fb") ? "professor" : slot;
-        const fbIndex = slot === "professor_fb1" ? 0 : slot === "professor_fb2" ? 1 : -1;
+        const fbIndex = slot === "professor_fb1" ? 0 : slot === "professor_fb2" ? 1 : slot === "professor_fb3" ? 2 : -1;
 
         if (fbIndex >= 0) {
           // Fallback change
