@@ -242,7 +242,7 @@ export class TelegramAdapter implements PlatformAdapter {
             const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
             return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
           });
-          buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
+          buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
           await this.api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
           return;
         }
@@ -331,7 +331,7 @@ export class TelegramAdapter implements PlatformAdapter {
           const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
           return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
         });
-        buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
+        buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
         await this.api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
 
       } else if (data.startsWith("mprov2:")) {
