@@ -35,7 +35,10 @@ export async function passwd(): Promise<number> {
     const oldPass = await ask(rl, "Current passphrase (empty = migrate from key file): ");
     if (oldPass) {
       oldKey = deriveFromPassphrase(oldPass, username.trim());
-      if (existsSync(verifyFile) && !validateKey(oldKey)) {
+      if (!existsSync(verifyFile)) {
+        console.error("No key.verify file — cannot validate passphrase. Run migration with empty old passphrase first."); return 1;
+      }
+      if (!validateKey(oldKey)) {
         console.error("Wrong passphrase."); return 1;
       }
     } else {
@@ -121,7 +124,7 @@ export async function passwd(): Promise<number> {
     console.log(`✓ Done. ${dbCount} memories + ${fileCount} secrets re-encrypted.`);
     console.log(`\nABMIND_KEY=${newKey.toString("hex")}`);
     if (stored) console.log("✓ Passphrase stored in OS keyring.");
-    else console.log("Set ABMIND_KEY as OS env var for daemon mode. Write your passphrase on paper.");
+    else console.log("Set ABMIND_KEY as OS env var for daemon mode.");
     return 0;
   } finally { rl.close(); }
 }
