@@ -57,21 +57,23 @@ export async function passwd(): Promise<number> {
       const memDir = process.env["ABMIND_HOME"] ?? join(homedir(), ".abmind");
       const dbPath = join(memDir, "memory", "memory.db");
       if (existsSync(dbPath)) {
+        const oldDbKey = Buffer.from(hkdfSync("sha256", oldKey, "", "abmind-secrets-v1", 32));
+        const newDbKey = Buffer.from(hkdfSync("sha256", newKey, "", "abmind-secrets-v1", 32));
         const Database = require("better-sqlite3");
         const db = new Database(dbPath, { readonly: false });
-        const rows = db.prepare("SELECT id, content FROM memories WHERE classification = 3 AND (content LIKE 'eyJ%' OR content LIKE 'eyA%')").all() as Array<{ id: number; content: string }>;
-        const update = db.prepare("UPDATE memories SET content = ? WHERE id = ?");
+        const rows = db.prepare("SELECT id, content_en FROM extracted_memories WHERE classification = 3").all() as Array<{ id: number; content_en: string }>;
+        const update = db.prepare("UPDATE extracted_memories SET content_en = ? WHERE id = ?");
         for (const row of rows) {
           try {
-            const buf = Buffer.from(row.content, "base64");
+            const buf = Buffer.from(row.content_en, "base64");
             const iv = buf.subarray(0, 12);
             const tag = buf.subarray(buf.length - 16);
             const ct = buf.subarray(12, buf.length - 16);
-            const d = createDecipheriv("aes-256-gcm", oldKey, iv);
+            const d = createDecipheriv("aes-256-gcm", oldDbKey, iv);
             d.setAuthTag(tag);
             const plain = d.update(ct, undefined, "utf-8") + d.final("utf-8");
             const newIv = randomBytes(12);
-            const c = createCipheriv("aes-256-gcm", newKey, newIv);
+            const c = createCipheriv("aes-256-gcm", newDbKey, newIv);
             const enc = Buffer.concat([c.update(plain, "utf-8"), c.final()]);
             update.run(Buffer.concat([newIv, enc, c.getAuthTag()]).toString("base64"), row.id);
             dbCount++;
