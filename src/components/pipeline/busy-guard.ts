@@ -9,7 +9,10 @@ const MAX_QUEUE_DEPTH = 20;
 
 export const busyGuardMiddleware: Middleware = async (ctx, next) => {
   const { msg, adapter, deps } = ctx;
-  const entry = deps.sessions.getOrCreate(msg.sessionKey);
+  // Resolve the SAME session key the pipeline uses for busy (#671)
+  const userId = msg.sessionKey.includes(":") ? msg.sessionKey.split(":")[0]! : "master";
+  const activeId = deps.sessionManager.getActiveSessionId(userId, msg.platform);
+  const entry = deps.sessions.getOrCreate(activeId);
 
   if (entry.busy) {
     const text = ctx.text.trim();

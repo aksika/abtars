@@ -249,10 +249,19 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
+  private _pendingPrompt: { sessionKey: string; message: string } | undefined;
+
   async sendPrompt(sessionKey: string, message: string, _image?: { mime: string; base64: string }): Promise<string> {
     if (!this.client) {
       logWarn(this.tag, "ACP client dead — reinitializing");
       await this.initialize();
+    }
+
+    // Layer 2 (#671): queue concurrent prompts instead of crashing
+    if (this.sm.state !== "idle") {
+      logWarn(this.tag, `Concurrent prompt while ${this.sm.state} — queuing for after completion`);
+      this._pendingPrompt = { sessionKey, message };
+      return "";
     }
 
     this._toolCallsSucceeded = 0;
@@ -302,6 +311,14 @@ export class AcpTransport implements IKiroTransport {
         }).catch(err => logAndSwallow(TAG, "fire AfterPrompt", err));
       }).catch(err => logAndSwallow(TAG, "import hook-system", err));
       this.sm.promptCompleted();
+
+      // Drain queued concurrent prompt (#671 Layer 2)
+      if (this._pendingPrompt) {
+        const pending = this._pendingPrompt;
+        this._pendingPrompt = undefined;
+        logInfo(this.tag, `Draining queued prompt after completion`);
+        queueMicrotask(() => { this.sendPrompt(pending.sessionKey, pending.message).catch(err => logAndSwallow(TAG, "drain pending prompt", err)); });
+      }
     }
   }
 

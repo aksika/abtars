@@ -4,10 +4,16 @@ import { SessionRegistry } from "../session-registry.js";
 
 function makeCtx(overrides: Record<string, unknown> = {}) {
   const sessions = new SessionRegistry();
+  const sessionKey = (overrides.sessionKey as string) ?? "master:tg";
+  const activeId = "1_A_01"; // transport session ID
   return {
-    msg: { sessionKey: "master:tg", channelId: "100", threadId: undefined, ...overrides },
+    msg: { sessionKey, channelId: "100", threadId: undefined, platform: "tg", ...overrides },
     adapter: { sendMessage: vi.fn().mockResolvedValue(1) },
-    deps: { sessions, transport: { sendInterrupt: vi.fn() } },
+    deps: {
+      sessions,
+      transport: { sendInterrupt: vi.fn() },
+      sessionManager: { getActiveSessionId: () => activeId },
+    },
     text: (overrides.text as string) ?? "hello",
     handled: false,
   } as any;
@@ -24,18 +30,18 @@ describe("busyGuardMiddleware", () => {
 
   it("queues message when busy", async () => {
     const ctx = makeCtx();
-    ctx.deps.sessions.getOrCreate("master:tg").busy = true;
+    ctx.deps.sessions.getOrCreate("1_A_01").busy = true;
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
     expect(ctx.handled).toBe(true);
     expect(next).not.toHaveBeenCalled();
     expect(ctx.adapter.sendMessage).not.toHaveBeenCalled();
-    expect(ctx.deps.sessions.get("master:tg")?.queue).toHaveLength(1);
+    expect(ctx.deps.sessions.get("1_A_01")?.queue).toHaveLength(1);
   });
 
   it("shows coffee message when compacting", async () => {
     const ctx = makeCtx();
-    const entry = ctx.deps.sessions.getOrCreate("master:tg");
+    const entry = ctx.deps.sessions.getOrCreate("1_A_01");
     entry.busy = true;
     entry.compacting = true;
     const next = vi.fn();
@@ -46,7 +52,7 @@ describe("busyGuardMiddleware", () => {
   it("bare wait interrupts and stops (legacy compat)", async () => {
     const ctx = makeCtx({ text: "wait" });
     ctx.text = "wait";
-    ctx.deps.sessions.getOrCreate("master:tg").busy = true;
+    ctx.deps.sessions.getOrCreate("1_A_01").busy = true;
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
     expect(ctx.deps.transport.sendInterrupt).toHaveBeenCalled();
@@ -56,13 +62,13 @@ describe("busyGuardMiddleware", () => {
 
   it("skips generic notification when ctx.deferReply is set", async () => {
     const ctx = makeCtx();
-    ctx.deps.sessions.getOrCreate("master:tg").busy = true;
+    ctx.deps.sessions.getOrCreate("1_A_01").busy = true;
     ctx.deferReply = true;
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
     expect(ctx.handled).toBe(true);
     expect(ctx.adapter.sendMessage).not.toHaveBeenCalled();
     // Still queued
-    expect(ctx.deps.sessions.get("master:tg")?.queue).toHaveLength(1);
+    expect(ctx.deps.sessions.get("1_A_01")?.queue).toHaveLength(1);
   });
 });
