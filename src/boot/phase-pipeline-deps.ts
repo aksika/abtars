@@ -126,6 +126,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     phaseHealth: ctx.phaseHealth,
     registry: ctx.registry,
     bridgeLockPath: ctx.bridgeLockPath,
+    get maxContext() { return (transport as any).config?.maxContext; },
   };
   ctx.pipelineDeps = pipelineDeps;
   return "ran";
