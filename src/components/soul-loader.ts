@@ -89,3 +89,31 @@ export function loadSoulBundle(memory?: MemoryManager | null): string | null {
   logDebug(TAG, `Bundle parts: soul=${!!soul} profile=${!!profile} notes=${!!notes} memTools=${!!memoryTools} coreFacts=${!!coreFacts} skills=${!!skillsCatalog}`);
   return parts.join("\n\n---\n\n");
 }
+
+/**
+ * Minimal soul for Code sessions (#658): agent_notes + memory-tools + skills + time.
+ * No personality, no user_profile, no core_facts, no emotional context.
+ */
+export function loadMinimalSoul(memory?: MemoryManager | null): string | null {
+  const parts: string[] = [];
+
+  let bundle: { notes: string; memoryTools: string } | null = null;
+  try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow("soul_loader", "op", err); }
+
+  const notes = bundle?.notes || readOr(join(HOST_CORE_DIR, "agent_notes.md"));
+  const memoryTools = bundle?.memoryTools || readOr(join(HOST_CORE_DIR, "TOOLS.md"));
+
+  if (notes) parts.push(notes);
+  if (memoryTools) parts.push(memoryTools);
+
+  const skillsCatalog = readOr(join(HOST_CORE_DIR, "skills_catalog.md"));
+  if (skillsCatalog) parts.push(skillsCatalog);
+
+  const now = new Date();
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  parts.push(`[CURRENT TIME] ${now.toLocaleDateString("en-GB")} ${days[now.getDay()]}, ${now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`);
+
+  if (parts.length === 0) return null;
+  logInfo(TAG, `Minimal soul (Code): ${parts.length} parts`);
+  return parts.join("\n\n---\n\n");
+}

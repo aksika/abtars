@@ -8,7 +8,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { logInfo, logDebug, logTrace, logWarn } from "../logger.js";
 import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
-import { loadSoulBundle } from "../soul-loader.js";
+import { loadSoulBundle, loadMinimalSoul } from "../soul-loader.js";
 import { loadUsers } from "../user-registry.js";
 import { renderMemory, buildSessionStartContext } from "abmind";
 import { getEnv } from "../env-schema.js";
@@ -163,20 +163,33 @@ export function buildSessionStartPrompt(
   }
 
   // Session identity (#624)
+  let sessionType = "A"; // default Main
   if (sessionKey) {
     const parts = sessionKey.split("_");
     if (parts.length === 3) {
+      sessionType = parts[1]!;
       const typeMap: Record<string, string> = { A: "Main", B: "Browse", C: "Code", T: "Task" };
-      const type = typeMap[parts[1]!] ?? parts[1];
+      const type = typeMap[sessionType] ?? sessionType;
       const index = parseInt(parts[2]!, 10);
       contextParts.push(`[SESSION] #${index} (${type})`);
     }
   }
 
-  const soul = loadSoulBundle(memory);
-  if (soul) {
-    contextParts.push(soul);
-    logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
+  const isCodeSession = sessionType === "C";
+
+  // Soul bundle: full for Main, minimal for Code (#658)
+  if (isCodeSession) {
+    const minimal = loadMinimalSoul(memory);
+    if (minimal) {
+      contextParts.push(minimal);
+      logInfo(TAG, `Injected minimal soul for Code session (${minimal.length} chars)`);
+    }
+  } else {
+    const soul = loadSoulBundle(memory);
+    if (soul) {
+      contextParts.push(soul);
+      logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
+    }
   }
 
   if (sessionKey) {
@@ -201,10 +214,11 @@ export function buildSessionStartPrompt(
   if (compSummary && sessionKey) {
     // Dead path — kept for type safety during transition
   } else {
-    const ctx = buildSessionStartContext(memory, userId, maxContext);
+    const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : undefined;
+    const ctx = buildSessionStartContext(memory, userId, maxContext, ctxOpts);
     if (ctx) {
       contextParts.push(ctx);
-      logInfo(TAG, `Injected session-start context (${ctx.length} chars)`);
+      logInfo(TAG, `Injected session-start context (${ctx.length} chars${isCodeSession ? ", Code mode" : ""})`);
       logTrace(TAG, `session-start content: ${ctx}`);
     }
 
@@ -214,7 +228,8 @@ export function buildSessionStartPrompt(
         contextParts.push("Hi! How can I help?");
       } else if (userRole === "user") {
         contextParts.push("[SESSION START] Returning user. Be friendly and helpful.");
-      } else {
+      } else if (!isCodeSession) {
+        // Wake-up only for Main sessions
         const wakeUp = memory.buildWakeUp();
         if (wakeUp) {
           contextParts.push(wakeUp);
