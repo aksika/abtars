@@ -1,8 +1,7 @@
 import { logAndSwallow } from "./log-and-swallow.js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { createServer as createHttpsServer } from "https";
-import { createHash } from "crypto";
-import { readFileSync, appendFileSync, mkdirSync } from "fs";
+import { readFileSync, existsSync, appendFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { abtarsHome } from "../paths.js";
@@ -83,27 +82,25 @@ export class AgentApiServer {
     this.runtime = deps.runtime;
     this.onPeerActivity = deps.onPeerActivity;
 
-    // Use HTTPS with TLS-PSK if any peer has pskSecret configured
-    let hasPsk = false;
-    try {
-      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
-      const peerConfig = loadPeerConfig();
-      hasPsk = Object.values(peerConfig.peers).some(p => p.pskSecret);
-      if (hasPsk) {
+    // Use HTTPS with self-signed identity cert if available
+    const configDir = join(abtarsHome(), "config");
+    const identityCrtPath = join(configDir, "identity.crt");
+    const identityKeyPath = join(configDir, "identity.tls.key");
+    let hasTls = false;
+    if (existsSync(identityCrtPath) && existsSync(identityKeyPath)) {
+      try {
         this.server = createHttpsServer({
+          key: readFileSync(identityKeyPath),
+          cert: readFileSync(identityCrtPath),
           minVersion: "TLSv1.3",
-          ciphers: "TLS_AES_256_GCM_SHA384",
-          pskCallback: (_socket: unknown, identity: string | null) => {
-            if (!identity) return null;
-            const peer = Object.entries(peerConfig.peers).find(([name]) => name === identity);
-            if (!peer?.[1].pskSecret) return null;
-            return { psk: createHash("sha384").update(peer[1].pskSecret).digest(), identity };
-          },
-        } as any, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
-        logInfo(TAG, "TLS-PSK enabled for agent-api");
-      }
-    } catch (err) { logAndSwallow(TAG, "TLS-PSK setup", err); }
-    if (!hasPsk) {
+        }, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
+        hasTls = true;
+        logInfo(TAG, "TLS 1.3 enabled for agent-api (self-signed cert)");
+      } catch (err) { logAndSwallow(TAG, "TLS setup", err); }
+    } else {
+      logWarn(TAG, "identity.crt/identity.tls.key not found — agent-api starting without TLS (plain HTTP)");
+    }
+    if (!hasTls) {
       this.server = createServer((req, res) => this.handle(req, res));
     }
 

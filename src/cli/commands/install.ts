@@ -382,6 +382,22 @@ export async function install(opts: InstallOptions): Promise<number> {
     process.stdout.write(`✓ identity keypair generated\n`);
   }
 
+  // Generate self-signed Ed25519 TLS certificate (skip if already exists)
+  const identityCrt = join(paths.config, 'identity.crt');
+  const identityTlsKey = join(paths.config, 'identity.tls.key');
+  if (!opts.dryRun && !(await exists(identityCrt))) {
+    const { execSync } = await import('node:child_process');
+    const { chmodSync } = await import('node:fs');
+    const agentName = hostname();
+    try {
+      execSync(`openssl req -x509 -newkey ed25519 -keyout identity.tls.key -out identity.crt -days 3650 -nodes -subj "/CN=${agentName}"`, { cwd: paths.config, stdio: 'ignore' });
+      chmodSync(identityTlsKey, 0o600);
+      process.stdout.write(`✓ TLS certificate generated (Ed25519, 10yr)\n`);
+    } catch (err) {
+      process.stderr.write(`⚠ TLS cert generation failed (openssl not found?). Agent-api will start without TLS.\n`);
+    }
+  }
+
   // Seed config from examples (only missing ones)
   const seeded = await seedConfig(repoRoot, paths.config, opts.dryRun, home);
   if (seeded.length > 0) {

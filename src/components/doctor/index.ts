@@ -133,6 +133,21 @@ const probeCoreFiles: ProbeFn = async (_ctx) => {
   return { name: "core-files", status: "failed", latencyMs: Date.now() - start, detail: `missing: ${missing.join(", ")}` };
 };
 
+const probeTlsIdentity: ProbeFn = async (_ctx) => {
+  const { existsSync } = await import("node:fs");
+  const { execSync } = await import("node:child_process");
+  const { join } = await import("node:path");
+  const { abtarsHome } = await import("../../paths.js");
+  const start = Date.now();
+  const issues: string[] = [];
+  try { execSync("which openssl", { stdio: "ignore" }); } catch { issues.push("openssl not found"); }
+  const configDir = join(abtarsHome(), "config");
+  if (!existsSync(join(configDir, "identity.crt"))) issues.push("identity.crt missing");
+  if (!existsSync(join(configDir, "identity.tls.key"))) issues.push("identity.tls.key missing");
+  if (issues.length === 0) return { name: "tls-identity", status: "ok", latencyMs: Date.now() - start };
+  return { name: "tls-identity", status: "failed", latencyMs: Date.now() - start, detail: issues.join(", ") };
+};
+
 const probeSecretPerms: ProbeFn = async (_ctx) => {
   const { readdirSync, statSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -157,6 +172,7 @@ const probeSecretPerms: ProbeFn = async (_ctx) => {
 const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   { fn: probeCoreFiles, timeout: 1000 },
   { fn: probeSecretPerms, timeout: 1000 },
+  { fn: probeTlsIdentity, timeout: 2000 },
   { fn: probeMemory, timeout: 5000 },
   { fn: probeTelegram, timeout: 5000 },
   { fn: probeDiscord, timeout: 5000 },

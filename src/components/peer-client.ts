@@ -4,7 +4,6 @@
  */
 
 import { request as httpsRequest } from "node:https";
-import { createHash } from "node:crypto";
 import { loadPeerConfig, type PeerEntry } from "./peer-config.js";
 import { logInfo } from "./logger.js";
 
@@ -91,10 +90,22 @@ function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops:
   });
 
   return new Promise((resolve, reject) => {
-    if (!peer.pskSecret) {
-      throw new PeerCallError("auth_failed", `Peer '${peerName}' has no pskSecret — TLS-PSK required for all peers`);
-    }
-    const req = httpsRequest({
+    const useTls = !!(peer.certFingerprint || peer.certPem);
+    const requestFn = useTls ? httpsRequest : require("node:http").request;
+
+    const tlsOpts = useTls ? {
+      minVersion: "TLSv1.3" as const,
+      rejectUnauthorized: true,
+      ...(peer.certPem ? { ca: [peer.certPem] } : {}),
+      checkServerIdentity: (_hostname: string, cert: { fingerprint256?: string }) => {
+        if (peer.certFingerprint && cert.fingerprint256 !== peer.certFingerprint) {
+          return new Error(`Cert fingerprint mismatch: expected ${peer.certFingerprint}, got ${cert.fingerprint256}`);
+        }
+        return undefined;
+      },
+    } : {};
+
+    const req = requestFn({
       hostname: peer.host,
       port: peer.port,
       path: "/v1/chat/completions",
@@ -106,14 +117,10 @@ function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops:
         "X-Peer-Hops": String(hops),
       },
       timeout: timeoutMs,
-      minVersion: "TLSv1.3",
-      ciphers: "TLS_AES_256_GCM_SHA384",
-      pskCallback: () => ({ psk: createHash("sha384").update(peer.pskSecret!).digest(), identity: selfName }),
-      checkServerIdentity: () => undefined,
-      rejectUnauthorized: false,
-    } as any, (res) => {
+      ...tlsOpts,
+    } as any, (res: any) => {
       let data = "";
-      res.on("data", (c) => data += c);
+      res.on("data", (c: any) => data += c);
       res.on("end", () => {
         if (res.statusCode === 401 || res.statusCode === 403) {
           reject(new PeerCallError("auth_failed", `Peer rejected auth (${res.statusCode})`));
@@ -137,7 +144,7 @@ function postCompletion(peer: PeerEntry, peerName: string, prompt: string, hops:
       });
     });
     req.on("timeout", () => { req.destroy(); reject(new PeerCallError("timeout", `Peer '${peer.host}:${peer.port}' timed out (${timeoutMs}ms)`)); });
-    req.on("error", (err) => reject(new PeerCallError("unreachable", `Peer unreachable: ${err.message}`)));
+    req.on("error", (err: Error) => reject(new PeerCallError("unreachable", `Peer unreachable: ${err.message}`)));
     req.write(body);
     req.end();
   });
