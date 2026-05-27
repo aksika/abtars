@@ -3,9 +3,13 @@
  * Manages message history and token tracking.
  */
 
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | ContentPart[] | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -27,8 +31,15 @@ export class ConversationSession {
     this.messages.push({ role: "system", content: systemPrompt });
   }
 
-  addUser(content: string): void {
-    this.messages.push({ role: "user", content });
+  addUser(content: string, image?: { mime: string; base64: string }): void {
+    if (image) {
+      this.messages.push({ role: "user", content: [
+        { type: "image_url", image_url: { url: `data:${image.mime};base64,${image.base64}` } },
+        { type: "text", text: content },
+      ]});
+    } else {
+      this.messages.push({ role: "user", content });
+    }
   }
 
   addAssistant(content: string | null, toolCalls?: ToolCall[]): void {
@@ -81,7 +92,7 @@ export class ConversationSession {
   /** #621: Replace a literal secret value with [REDACTED] across all messages. */
   scrubFromHistory(value: string): void {
     for (const msg of this.messages) {
-      if (msg.content && msg.content.includes(value)) {
+      if (typeof msg.content === "string" && msg.content.includes(value)) {
         msg.content = msg.content.replaceAll(value, "[REDACTED]");
       }
     }

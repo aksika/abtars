@@ -7,7 +7,7 @@ import { getEnv } from "../env-schema.js";
 import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { withRetry, isFatal } from "../retry.js";
-import { ConversationSession, type ToolCall } from "./conversation-session.js";
+import { ConversationSession, type ToolCall, type ContentPart } from "./conversation-session.js";
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
 import { classifyError } from "./model-health-registry.js";
@@ -99,7 +99,7 @@ export class DirectApiTransport implements IKiroTransport {
     this.systemPrompt = prompt;
   }
 
-  async sendPrompt(sessionKey: string, message: string): Promise<string> {
+  async sendPrompt(sessionKey: string, message: string, image?: { mime: string; base64: string }): Promise<string> {
     const session = this.getOrCreateSession(sessionKey);
     this._activeSessionKey = sessionKey;
 
@@ -118,7 +118,7 @@ export class DirectApiTransport implements IKiroTransport {
       }
     }
 
-    session.addUser(message);
+    session.addUser(message, image);
 
     this._lastAnswer = "";
     this._toolCallsSucceeded = 0;
@@ -308,7 +308,8 @@ export class DirectApiTransport implements IKiroTransport {
     }
 
     logWarn(TAG, `Max turns (${this.config.maxTurns}) reached`);
-    return session.messages.at(-1)?.content ?? "(max turns reached)";
+    const last = session.messages.at(-1)?.content;
+    return (typeof last === "string" ? last : null) ?? "(max turns reached)";
   }
 
   private parseErrorStatus(err: unknown): number { return parseErrorStatus(err); }
@@ -330,7 +331,7 @@ export class DirectApiTransport implements IKiroTransport {
     if (this.config.apiFormat === "responses") {
       const { toResponsesRequest } = await import("./responses-adapter.js");
       const { parseResponsesSSE } = await import("./sse-parser-responses.js");
-      const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" }));
+      const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" as string | ContentPart[] }));
       const reqBody = { ...toResponsesRequest(this.activeModel, msgs, getToolSchemas(), this.config.maxOutput), stream: true };
       const hdrs: Record<string, string> = { "Content-Type": "application/json" };
       if (this.activeApiKey) hdrs["Authorization"] = `Bearer ${this.activeApiKey}`;
@@ -357,7 +358,7 @@ export class DirectApiTransport implements IKiroTransport {
     if (this.config.apiFormat === "anthropic") {
       const { toAnthropicRequest, buildAnthropicHeaders } = await import("./anthropic-adapter.js");
       const { parseAnthropicSSE } = await import("./sse-parser-anthropic.js");
-      const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "", tool_call_id: m.tool_call_id }));
+      const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" as string | ContentPart[], tool_call_id: m.tool_call_id }));
       const reqBody = { ...toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput, getToolSchemas()), stream: true };
       const hdrs = buildAnthropicHeaders(this.activeApiKey ?? "");
       const res = await fetch(`${this.activeEndpoint}/messages`, {

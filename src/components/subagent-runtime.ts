@@ -26,7 +26,7 @@ export interface AgentOpts {
 
 /** Persistent transport handle for multi-turn callers. */
 export interface AgentSession {
-  sendPrompt(sessionKey: string, prompt: string): Promise<string>;
+  sendPrompt(sessionKey: string, prompt: string, image?: { mime: string; base64: string }): Promise<string>;
   destroy(): Promise<void>;
   readonly isReady: boolean;
 }

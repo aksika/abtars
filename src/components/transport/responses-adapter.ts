@@ -19,19 +19,19 @@ export interface ResponsesResponse {
 /** Convert chat/completions-style messages to Responses API request. */
 export function toResponsesRequest(
   model: string,
-  messages: Array<{ role: string; content: string }>,
+  messages: Array<{ role: string; content: string | unknown[] }>,
   tools?: unknown[],
   maxTokens?: number,
 ): ResponsesRequest {
   // System message → instructions, rest → concatenated input
   const system = messages.find(m => m.role === "system");
   const userMessages = messages.filter(m => m.role !== "system");
-  const input = userMessages.map(m => m.content).join("\n\n");
+  const input = userMessages.map(m => typeof m.content === "string" ? m.content : JSON.stringify(m.content)).join("\n\n");
 
   return {
     model,
     input,
-    ...(system ? { instructions: system.content } : {}),
+    ...(system ? { instructions: typeof system.content === "string" ? system.content : "" } : {}),
     ...(tools?.length ? { tools } : {}),
     ...(maxTokens ? { max_output_tokens: maxTokens } : {}),
   };

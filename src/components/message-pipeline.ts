@@ -189,7 +189,7 @@ export async function handleInboundMessage(
     // No queueing needed
 
     // --- Build prompt ---
-    const { prompt: builtPrompt } = await buildPrompt(msg, text, {
+    const { prompt: builtPrompt, imageContent } = await buildPrompt(msg, text, {
       memory, memoryConfig, sessions, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: "getOrCreateSession" in transport,
     }, registry);
@@ -234,8 +234,8 @@ export async function handleInboundMessage(
     }
 
     const responsePromise = agentSession
-      ? agentSession.sendPrompt(activeSessionId, prompt)
-      : transport.sendPrompt(activeSessionId, prompt);
+      ? agentSession.sendPrompt(activeSessionId, prompt, imageContent)
+      : transport.sendPrompt(activeSessionId, prompt, imageContent);
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {
