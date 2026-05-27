@@ -189,6 +189,9 @@ export function buildSessionStartPrompt(
     if (soul) {
       contextParts.push(soul);
       logInfo(TAG, `Injected soul bundle (${soul.length} chars)`);
+    } else {
+      contextParts.push("[⚠️ SOUL BUNDLE MISSING] Your persona files failed to load. Alert the user immediately and request a /reset.");
+      logWarn(TAG, "Soul bundle empty — injected missing-soul warning");
     }
   }
 
