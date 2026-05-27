@@ -450,6 +450,9 @@ export class AcpTransport implements IKiroTransport {
 
     const sessionId = params.sessionId;
 
+    // Guard: drop late events from a session that already completed/failed (#649)
+    if ((this.sm.state === "idle" || this.sm.state === "destroyed") && !this.responseChunks.has(sessionId)) return;
+
     switch (update.sessionUpdate) {
       case "agent_message_chunk": {
         const content = update.content;
