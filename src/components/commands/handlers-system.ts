@@ -66,6 +66,14 @@ export async function handleStatus(_text: string, ctx: CommandContext): Promise<
   return true;
 }
 
+export async function handleWait(text: string, ctx: CommandContext): Promise<boolean> {
+  // When idle, /wait is a no-op (nothing running to steer). Inform user.
+  const body = text.replace(/^\/(wait|steer)\s*/i, "").trim();
+  if (!body) { await ctx.reply("Nothing running. Send a message to start."); return true; }
+  // Has a message body but idle — just pass it as a normal prompt (return false = not handled)
+  return false;
+}
+
 export async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.transport.sendInterrupt();
   ctx.sessions.getOrCreate(ctx.sessionKey).busy = false;

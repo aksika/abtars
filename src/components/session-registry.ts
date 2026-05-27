@@ -21,6 +21,7 @@ export interface SessionEntry {
   compactFailures: number;
   primingTerms: string[];
   lastActiveAt: number;
+  pendingWait?: string;
 }
 
 function createEntry(): SessionEntry {

@@ -18,6 +18,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "mcp", description: "MCP server status" },
   { name: "hooks", description: "List configured hooks" },
   { name: "stop", description: "Stop current response" },
+  { name: "wait", description: "Inject message mid-run (non-interrupting)" },
   { name: "models", description: "Model, transport & agents" },
   { name: "change", description: "Switch model/provider" },
   { name: "emergency", description: "Activate paid hailMary model" },

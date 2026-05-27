@@ -8,7 +8,7 @@ export { registerCommand, handleCommand, triggerNewSession, triggerResetSession,
 import { registerExact, registerPrefix } from "./registry.js";
 import {
   handleNewReset, handleCompact,
-  handleStatus, handleDoctor, handleStop, handleRestart,
+  handleStatus, handleDoctor, handleStop, handleWait, handleRestart,
   handleFull, handleShort, handleHealing, handleFacts,
   handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause,
   handleEmergencyAlias, handleModels, handleHeartbeat,
@@ -25,6 +25,8 @@ registerExact("/status", handleStatus);
 registerExact("/doctor", handleDoctor);
 registerExact("/stop", handleStop);
 registerExact("/ctrlc", handleStop);
+registerExact("/wait", handleWait);
+registerExact("/steer", handleWait);
 registerExact("/restart", handleRestart);
 registerExact("/full", handleFull);
 registerExact("/short", handleShort);

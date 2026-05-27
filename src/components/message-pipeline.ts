@@ -221,6 +221,17 @@ export async function handleInboundMessage(
       (transport as any).isPaused = () => activeSession.paused;
     }
 
+    // Wire /wait steer injection (#655) — agent loop drains this between tool rounds
+    if ("getPendingInstruction" in transport) {
+      const sessionEntry = deps.sessions.getOrCreate(msg.sessionKey);
+      (transport as any).getPendingInstruction = () => {
+        const pending = sessionEntry.pendingWait;
+        if (!pending) return undefined;
+        sessionEntry.pendingWait = undefined;
+        return pending;
+      };
+    }
+
     const responsePromise = agentSession
       ? agentSession.sendPrompt(activeSessionId, prompt)
       : transport.sendPrompt(activeSessionId, prompt);

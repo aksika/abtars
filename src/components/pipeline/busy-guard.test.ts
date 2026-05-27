@@ -43,14 +43,15 @@ describe("busyGuardMiddleware", () => {
     expect(ctx.adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("coffee"), expect.any(Object));
   });
 
-  it("WAIT interrupt clears busy and falls through", async () => {
-    const ctx = makeCtx({ text: "wait stop" });
-    ctx.text = "wait stop";
+  it("bare wait interrupts and stops (legacy compat)", async () => {
+    const ctx = makeCtx({ text: "wait" });
+    ctx.text = "wait";
     ctx.deps.sessions.getOrCreate("master:tg").busy = true;
     const next = vi.fn();
     await busyGuardMiddleware(ctx, next);
     expect(ctx.deps.transport.sendInterrupt).toHaveBeenCalled();
-    expect(next).toHaveBeenCalled();
+    expect(ctx.handled).toBe(true);
+    expect(next).not.toHaveBeenCalled();
   });
 
   it("skips generic notification when ctx.deferReply is set", async () => {
