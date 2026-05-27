@@ -1,4 +1,3 @@
-import { getEnv } from "../../components/env-schema.js";
 import { BOT_COMMANDS } from "../../components/command-registry.js";
 import { abtarsHome } from "../../paths.js";
 /**
@@ -25,6 +24,7 @@ import type { ConversationBuffer } from "../../components/conversation-buffer.js
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 import type { IMemorySystem } from "abmind";
 import { loadUsers } from "../../components/user-registry.js";
+import { isModelPickerCallback, handleModelPickerCallback } from "./telegram-model-picker.js";
 
 const TAG = "telegram";
 
@@ -53,8 +53,8 @@ export class TelegramAdapter implements PlatformAdapter {
   private readonly deps: TelegramAdapterDeps;
   private poller: TelegramPoller | null = null;
   private botUsername = "";
-  private _pendingSlot: string | undefined;
-  private _modelPickerCache: string[] = [];
+  _pendingSlot: string | undefined;
+  _modelPickerCache: string[] = [];
 
   constructor(config: TelegramAdapterConfig, deps: TelegramAdapterDeps) {
     this.api = new TelegramApi(config.botToken);
@@ -187,298 +187,12 @@ export class TelegramAdapter implements PlatformAdapter {
       if (!chatId) return;
 
       try {
-      if (data.startsWith("mb:")) {
-        // Back button handler
-        const target = data.slice(3);
-        if (!target) {
-          // Dismiss picker
-          await this.api.sendMessage(chatId, "👌 Cancelled.");
-          return;
-        }
-        if (target === "a") {
-          // Back to agent list
-          const AGENT_LABELS = [
-            { key: "professor", label: "Professor" },
-            { key: "dreamy", label: "Dreamy (sleep)" },
-            { key: "browsie", label: "Browsie (browse)" },
-            { key: "coding", label: "Cody (coding)" },
-          ];
-          const buttons = AGENT_LABELS.map(a => [{ text: a.label, callback_data: `mslot:${a.key}` }]);
-          buttons.push([{ text: "← Cancel", callback_data: "mb:" }]);
-          await this.api.sendMessage(chatId, "🤖 Which agent to change?", { reply_markup: { inline_keyboard: buttons } });
-          return;
-        }
-        if (target.startsWith("p:")) {
-          // Back to provider list for agent
-          const agent = target.slice(2);
-          const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
-          const tc = loadTransport();
-          if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
-          let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
-          if (providers.length === 0) { await this.api.sendMessage(chatId, "❌ No compatible providers"); return; }
-          const currentProvider = resolveAgent(agent, tc)?.providerName;
-          const prefix = agent === "professor" ? "mprov2:professor" : `mprov:${agent}`;
-          const buttons = providers.map(p => {
-            const count = getModelsForProvider(p.name).length;
-            const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
-            return [{ text: label, callback_data: `${prefix}:${p.name}` }];
-          });
-          buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
-          await this.api.sendMessage(chatId, `🔌 Pick provider:`, { reply_markup: { inline_keyboard: buttons } });
-          return;
-        }
-        if (target.startsWith("s:")) {
-          // Back to provider list for a professor slot (preserves slot context)
-          const slot = target.slice(2);
-          this._pendingSlot = slot;
-          const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
-          const tc = loadTransport();
-          if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
-          let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
-          const currentProvider = resolveAgent("professor", tc)?.providerName;
-          const slotLabel = slot === "professor" ? "Main" : slot.replace("professor_fb", "Fb");
-          const buttons = providers.map(p => {
-            const count = getModelsForProvider(p.name).length;
-            const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
-            return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
-          });
-          buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
-          await this.api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
-          return;
-        }
-      } else if (data.startsWith("mslot:")) {
-        // Step 1 result: user picked an agent
-        const agent = data.slice(6);
-        const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
-        const tc = loadTransport();
-        if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
-
-        if (agent === "professor") {
-          // Professor: show slot picker FIRST (step 2)
-          const profResolved = resolveAgent("professor", tc);
-          const fallbacks = tc.agents["professor"]?.fallbacks ?? [];
-          const slots: Array<{ label: string; key: string }> = [
-            { label: `★ Main: ${profResolved?.model ?? "?"}`, key: `mpos:professor::professor` },
-          ];
-          for (let i = 0; i < fallbacks.length; i++) {
-            slots.push({ label: `↳ Fb${i + 1}: ${fallbacks[i]!.model}`, key: `mpos:professor::professor_fb${i + 1}` });
-          }
-          if (fallbacks.length < 3) {
-            slots.push({ label: `↳ Fb${fallbacks.length + 1}: (add)`, key: `mpos:professor::professor_fb${fallbacks.length + 1}` });
-          }
-          const buttons = slots.map(s => [{ text: s.label, callback_data: s.key }]);
-          buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
-          await this.api.sendMessage(chatId, `🎯 Which slot?`, { reply_markup: { inline_keyboard: buttons } });
-          return;
-        }
-
-        // Subagents: show all providers (step 2)
-        let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
-        if (providers.length === 0) { await this.api.sendMessage(chatId, "❌ No compatible providers"); return; }
-        const currentProvider = resolveAgent(agent, tc)?.providerName;
-        const buttons = providers.map(p => {
-          const count = getModelsForProvider(p.name).length;
-          const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
-          return [{ text: label, callback_data: `mprov:${agent}:${p.name}` }];
+      if (isModelPickerCallback(data)) {
+        await handleModelPickerCallback(data, chatId, this.api, this, {
+          transport: this.deps.transport as any,
+          pipeline: this.deps.pipeline as any,
+          resetSessionForModelSwitch: (cid, reason) => this.resetSessionForModelSwitch(cid, reason),
         });
-        buttons.push([{ text: "← Back", callback_data: "mb:a" }]);
-        await this.api.sendMessage(chatId, `🔌 Pick provider:`, { reply_markup: { inline_keyboard: buttons } });
-
-      } else if (data.startsWith("mprov:")) {
-        // Step 2 result (subagents): user picked provider → show models (step 3)
-        const [, agent, providerName] = data.split(":");
-        const { loadTransport, getModelsForProvider, formatRank, formatCost } = await import("../../components/transport-config.js");
-        const tc = loadTransport();
-
-        let models = getModelsForProvider(providerName!);
-        const providerConfig = tc?.providers[providerName!];
-        if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
-        if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
-        this._pendingSlot = agent;
-        this._modelPickerCache = models.map(m => m.id);
-        const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
-        buttons.push([{ text: "← Back", callback_data: `mb:p:${agent}` }]);
-        await this.api.sendMessage(chatId, `📋 Models on ${providerName}:`, { reply_markup: { inline_keyboard: buttons } });
-
-      } else if (data.startsWith("mpos:")) {
-        // Step 2 result (professor): user picked slot → show providers (step 3)
-        // Format: mpos:professor::<slot>
-        const [, , , slot] = data.split(":");
-        const { loadTransport, resolveAgent, getAvailableProviders, getModelsForProvider } = await import("../../components/transport-config.js");
-        const tc = loadTransport();
-        if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
-
-        let providers = getAvailableProviders(tc).filter(p => p.config.transport !== "tmux");
-        const profResolved = resolveAgent("professor", tc);
-        const mainTransport = profResolved?.provider.transport;
-
-        if (slot && slot.startsWith("professor_fb") && mainTransport) {
-          // Fb slot: only providers matching Main's transport
-          if (mainTransport === "api") {
-            providers = providers.filter(p => p.config.transport === "api");
-          } else {
-            // CLI: only same provider as Main
-            providers = providers.filter(p => p.name === profResolved!.providerName);
-          }
-        }
-        // Main slot: show ALL providers (user can switch transport)
-
-        if (providers.length === 0) { await this.api.sendMessage(chatId, "❌ No compatible providers for this slot"); return; }
-        const currentProvider = profResolved?.providerName;
-        const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
-        const buttons = providers.map(p => {
-          const count = getModelsForProvider(p.name).length;
-          const label = p.name === currentProvider ? `✅ ${p.name} (${count})` : `${p.name} (${count})`;
-          return [{ text: label, callback_data: `mprov2:${slot}:${p.name}` }];
-        });
-        buttons.push([{ text: "← Back", callback_data: "mslot:professor" }]);
-        await this.api.sendMessage(chatId, `🔌 Provider for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
-
-      } else if (data.startsWith("mprov2:")) {
-        // Step 3 result (professor): user picked provider for a slot → show models (step 4)
-        const [, slot, providerName] = data.split(":");
-        const { getModelsForProvider, formatRank, formatCost, loadTransport } = await import("../../components/transport-config.js");
-        const tc = loadTransport();
-        const providerConfig = tc?.providers[providerName!];
-        let models = getModelsForProvider(providerName!);
-        if (providerConfig?.transport === "api") models = models.filter(m => !m.entry.status || m.entry.status === "alive");
-        if (models.length === 0) { await this.api.sendMessage(chatId, `❌ No alive models for ${providerName}`); return; }
-        this._pendingSlot = slot;
-        const slotLabel = slot === "professor" ? "Main" : slot!.replace("professor_fb", "Fb");
-        this._modelPickerCache = models.map(m => m.id);
-        const buttons = models.map((m, i) => [{ text: `${m.id} (${formatRank(m.entry.rank)}, ${formatCost(m.entry.cost)})`, callback_data: `mset:${providerName}:${i}` }]);
-        buttons.push([{ text: "← Back", callback_data: `mb:s:${slot}` }]);
-        await this.api.sendMessage(chatId, `📋 Pick model for ${slotLabel}:`, { reply_markup: { inline_keyboard: buttons } });
-
-      } else if (data.startsWith("mset:")) {
-        // Step 4: user picked model — validate + write + switch
-        const parts = data.split(":");
-        const providerName = parts[1]!;
-        const modelIdx = parseInt(parts[2]!, 10);
-        const model = Number.isFinite(modelIdx) && this._modelPickerCache[modelIdx]
-          ? this._modelPickerCache[modelIdx]!
-          : parts.slice(2).join(":"); // fallback: legacy format with model name
-        const slot = this._pendingSlot ?? "professor";
-        this._pendingSlot = undefined;
-        this._modelPickerCache = [];
-        const { loadTransport, writeTransportConfig, resolveAgent, getModelsForProvider, validateProviderReady, formatValidationError } = await import("../../components/transport-config.js");
-        const tc = loadTransport();
-        if (!tc) { await this.api.sendMessage(chatId, "❌ transport.json not loaded"); return; }
-
-        // Safety net: validate model is served by this provider
-        const validModels = getModelsForProvider(providerName);
-        if (!validModels.some(m => m.id === model)) {
-          await this.api.sendMessage(chatId, `❌ ${model} is not available on ${providerName}. Pick another.`);
-          return;
-        }
-
-        // #367 — validate provider readiness BEFORE mutating transport.json.
-        const providerConfig = tc.providers[providerName];
-        if (!providerConfig) { await this.api.sendMessage(chatId, `❌ Provider ${providerName} not found`); return; }
-        const validation = validateProviderReady(providerName, providerConfig, getEnv());
-        if (!validation.ok) { await this.api.sendMessage(chatId, formatValidationError(providerName, validation)); return; }
-
-        // Liveness check
-        const provider = tc.providers[providerName];
-        if (provider?.transport === "api") {
-          try {
-            const endpoint = provider.endpoint ?? "";
-            const apiKey = getEnv().getApiKey(provider.apiKeyEnv ?? "API_KEY");
-            const headers: Record<string, string> = {};
-            if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-            const res = await fetch(`${endpoint}/models`, { headers, signal: AbortSignal.timeout(5000) });
-            if (!res.ok) { await this.api.sendMessage(chatId, `⚠️ ${providerName} unreachable (${res.status}). Try another?`); return; }
-          } catch (err) { logAndSwallow(TAG, "provider reachability check", err); await this.api.sendMessage(chatId, `⚠️ ${providerName} unreachable. Try another?`); return; }
-        }
-
-        // Determine agent key
-        const agentKey = slot.startsWith("professor_fb") ? "professor" : slot;
-        const fbIndex = slot === "professor_fb1" ? 0 : slot === "professor_fb2" ? 1 : slot === "professor_fb3" ? 2 : -1;
-
-        if (fbIndex >= 0) {
-          // Fallback change
-          if (!tc.agents["professor"]) tc.agents["professor"] = { model: "", provider: "" };
-          if (!tc.agents["professor"]!.fallbacks) tc.agents["professor"]!.fallbacks = [];
-          tc.agents["professor"]!.fallbacks[fbIndex] = { model, provider: providerName };
-          const { cleanDemotedModels } = await import("../../components/transport-config.js");
-          cleanDemotedModels(tc, model);
-          writeTransportConfig(tc, `professor fallback ${fbIndex + 1} → ${model} (${providerName})`);
-          await this.api.sendMessage(chatId, `✅ Fallback ${fbIndex + 1} → ${model} (${providerName})`);
-        } else {
-          // Main or subagent change
-          const oldProvider = tc.agents[agentKey]?.provider;
-          tc.agents[agentKey] = { ...tc.agents[agentKey]!, model, provider: providerName };
-          const { cleanDemotedModels } = await import("../../components/transport-config.js");
-          cleanDemotedModels(tc, model);
-          writeTransportConfig(tc, `${agentKey} → ${model} (${providerName})`);
-
-          const providerChanged = oldProvider !== providerName;
-          const isProfessor = agentKey === "professor";
-
-          // Resolve transport types for professor changes
-          let oldType: string | undefined;
-          let newType: string | undefined;
-          let newResolved: ReturnType<typeof resolveAgent> | undefined;
-          if (isProfessor && providerChanged) {
-            const oldResolved = resolveAgent("_old", { ...tc, agents: { ...tc.agents, _old: { model: "", provider: oldProvider! } } });
-            newResolved = resolveAgent("_new", { ...tc, agents: { ...tc.agents, _new: { model, provider: providerName } } });
-            oldType = oldResolved?.provider.transport ?? "api";
-            newType = newResolved?.provider.transport ?? "api";
-
-            // Cross-transport switch: cascade all subagents to professor's new assignment
-            if (oldType !== newType) {
-              const resetAgents: string[] = [];
-              for (const [a, assignment] of Object.entries(tc.agents)) {
-                if (a === "professor") continue;
-                const ap = tc.providers[assignment.provider];
-                if (ap && ap.transport !== newType) {
-                  tc.agents[a] = { model, provider: providerName };
-                  resetAgents.push(a);
-                }
-              }
-              if (resetAgents.length > 0) {
-                writeTransportConfig(tc, `cascade: ${resetAgents.join(", ")} → ${providerName}`);
-              }
-            }
-          }
-
-          if (isProfessor && !providerChanged && "setModel" in this.deps.transport) {
-            // Same provider, different model — hot swap, preserve session
-            await (this.deps.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(model);
-            await this.api.sendMessage(chatId, `✅ Switched to ${model}`);
-          } else if (isProfessor && providerChanged && oldType === newType && "switchProvider" in this.deps.transport) {
-            // Same transport type, different provider — hot swap, preserve session
-            try {
-              const { FallbackPolicy } = await import("../../components/transport/fallback-policy.js");
-              const { ModelHealthRegistry } = await import("../../components/transport/model-health-registry.js");
-              const apiKey = getEnv().getApiKey(newResolved?.provider.apiKeyEnv ?? "API_KEY");
-              const candidates = [{ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow }];
-              for (const fb of (tc.agents["professor"]?.fallbacks ?? [])) {
-                const fbRes = resolveAgent("_fb", { ...tc, agents: { ...tc.agents, _fb: { model: fb.model, provider: fb.provider } } });
-                if (fbRes) candidates.push({ endpoint: fbRes.provider.endpoint!, apiKey: fbRes.provider.apiKeyEnv ? getEnv().getApiKey(fbRes.provider.apiKeyEnv) : apiKey, model: fb.model, maxContext: fbRes.contextWindow });
-              }
-              const registry = (this.deps.transport as unknown as { policy?: { registry: InstanceType<typeof ModelHealthRegistry> } }).policy?.registry ?? new ModelHealthRegistry();
-              const policy = new FallbackPolicy(candidates, registry);
-              (this.deps.transport as unknown as { switchProvider: (o: unknown) => void }).switchProvider({ endpoint: newResolved!.provider.endpoint!, apiKey, model, maxContext: newResolved!.contextWindow, policy });
-            } catch (err) {
-              await this.api.sendMessage(chatId, `⚠️ Hot swap failed: ${err instanceof Error ? err.message : String(err)}. Use /reset to apply.`);
-              return;
-            }
-            try { await this.api.sendMessage(chatId, `✅ Switched to ${model} (${providerName})`); } catch (err) { logAndSwallow(TAG, "sendMessage model switch confirm", err); }
-          } else if (isProfessor && providerChanged) {
-            // Different transport type — auto /reset (rebuild transport + session reset)
-            const cascadeNote = oldType !== newType ? " Subagents also reset." : "";
-            try {
-              if (this.deps.pipeline.rebuildTransport) await this.deps.pipeline.rebuildTransport();
-              await this.resetSessionForModelSwitch(chatId, "cross-transport-switch");
-              await this.api.sendMessage(chatId, `🔄 Switched to ${model} (${providerName}). Transport rebuilt.${cascadeNote}`);
-            } catch (err) {
-              await this.api.sendMessage(chatId, `⚠️ Transport rebuild failed: ${err instanceof Error ? err.message : String(err)}. Try /reset manually.`);
-            }
-          } else {
-            await this.api.sendMessage(chatId, `✅ ${agentKey} → ${model} (${providerName})`);
-          }
-        }
       } else if (data.startsWith("model:")) {
         // Legacy callback — direct model switch
         const newModel = data.slice(6);
