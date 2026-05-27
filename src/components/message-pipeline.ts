@@ -191,7 +191,7 @@ export async function handleInboundMessage(
     // --- Build prompt ---
     const { prompt: builtPrompt, imageContent } = await buildPrompt(msg, text, {
       memory, memoryConfig, sessions, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
-      isAcp: "getOrCreateSession" in transport,
+      isAcp: !("agentLoop" in transport),
     }, registry);
 
     if (builtPrompt === "__INJECTION_BLOCKED__") {
