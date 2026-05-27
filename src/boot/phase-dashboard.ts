@@ -52,6 +52,8 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
       logInfo("dashboard", `🔑 WEB_AUTH_TOKEN auto-generated (not persisted: ${err instanceof Error ? err.message : String(err)})`);
     }
     logInfo("dashboard", `🔑 WEB_AUTH_TOKEN: ${token}`);
+  } else {
+    logInfo("dashboard", `🔑 WEB_AUTH_TOKEN: ${dashConfig.webAuthToken}`);
   }
 
   const agentApiOpts = platforms.agent

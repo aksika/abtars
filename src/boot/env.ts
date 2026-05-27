@@ -70,6 +70,9 @@ if (existsSync(secretDir)) {
     return "ENC:" + Buffer.concat([Buffer.from([0x01]), iv, enc, c.getAuthTag()]).toString("base64");
   }
 
+  // Tokens that should stay readable (not encrypted) — localhost convenience tokens
+  const SKIP_ENCRYPT = new Set(["WEB_AUTH_TOKEN"]);
+
   for (const file of readdirSync(secretDir)) {
     const fullPath = resolve(secretDir, file);
     if (!statSync(fullPath).isFile()) continue;
@@ -82,9 +85,11 @@ if (existsSync(secretDir)) {
       if (!value) continue;
     } else {
       value = raw;
-      // Auto-encrypt plaintext in place
-      const encrypted = encryptFile(value);
-      if (encrypted) { try { writeFileSync(fullPath, encrypted, { mode: 0o600 }); } catch { /* leave plaintext */ } }
+      // Auto-encrypt plaintext in place (skip tokens that need to stay readable)
+      if (!SKIP_ENCRYPT.has(file)) {
+        const encrypted = encryptFile(value);
+        if (encrypted) { try { writeFileSync(fullPath, encrypted, { mode: 0o600 }); } catch { /* leave plaintext */ } }
+      }
     }
 
     // No extension → env var. Has extension → tool access only.
