@@ -195,13 +195,33 @@ export class DirectApiTransport implements IKiroTransport {
       } catch (err) {
         if (signal.aborted) { session.rollbackToLastUser(); throw err; }
         const errMsg = err instanceof Error ? err.message : String(err);
-        // Capability miss — abort immediately, no fallback
+        // Capability miss — strip image and retry text-only (#670)
         if (errMsg.includes("does not support image input") || errMsg.includes("No endpoints found that support image")) {
           session.rollbackToLastUser();
-          throw new Error("❌ Current model does not support images.");
+          // Strip image parts from session, retry same model text-only
+          for (const m of session.messages) {
+            if (Array.isArray(m.content)) {
+              const textParts = (m.content as Array<{ type: string; text?: string }>).filter(p => p.type === "text");
+              m.content = textParts.map(p => p.text ?? "").join("\n") || "User sent an image (not supported by this model).";
+            }
+          }
+          logWarn(TAG, `${candidate.model} doesn't support images — retrying text-only`);
+          if (this.onIntermediateResponse) this.onIntermediateResponse("⚠️ Model doesn't support images via this provider. Sending text-only.\n");
+          try {
+            const result = await this.agentLoop(session, signal);
+            this._lastAnswer = result;
+            policy.recordSuccess(candidate);
+            return result;
+          } catch (retryErr) {
+            const retryStatus = this.parseErrorStatus(retryErr);
+            const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            policy.recordError(candidate, classifyError(retryStatus, retryMsg));
+            session.rollbackToLastUser();
+            throw retryErr;
+          }
         }
         const status = this.parseErrorStatus(err);
-        const kind = classifyError(status);
+        const kind = classifyError(status, errMsg);
         const retryAfterMs = this.parseRetryAfter(err);
         policy.recordError(candidate, kind, retryAfterMs);
         const bucket = policy.registry.getBucketLevel(candidate.model, candidate.endpoint);
@@ -236,8 +256,9 @@ export class DirectApiTransport implements IKiroTransport {
         return result;
       } catch (err) {
         const status = this.parseErrorStatus(err);
-        policy.recordError(smallest, classifyError(status));
-        failedAttempts.push({ model: smallest.model, kind: classifyError(status), bucket: policy.registry.getBucketLevel(smallest.model, smallest.endpoint) });
+        const errMsg2 = err instanceof Error ? err.message : String(err);
+        policy.recordError(smallest, classifyError(status, errMsg2));
+        failedAttempts.push({ model: smallest.model, kind: classifyError(status, errMsg2), bucket: policy.registry.getBucketLevel(smallest.model, smallest.endpoint) });
       }
     }
 
