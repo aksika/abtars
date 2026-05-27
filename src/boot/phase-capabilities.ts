@@ -47,7 +47,7 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
   for (const cap of staticCaps) {
     if (disabled.has(cap.name)) continue;
     try {
-      const api = createCapabilityApi(capabilities, config, memory, transport, runtime, ctx.sessionManager);
+      const api = createCapabilityApi(capabilities, config, memory, transport, runtime, ctx.sessionManager, ctx.sendSystemMessage);
       cap.module.register(api);
       loaded.push(cap.name);
     } catch (err) {
@@ -58,7 +58,7 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
   ctx.capabilitiesLoaded = loaded;
   if (loaded.length > 0) {
     logInfo("main", `🔌 Capabilities: ${loaded.join(", ")}`);
-    pipelineDeps.loadedCapabilities = ["sleep", ...loaded];
+    pipelineDeps.loadedCapabilities = loaded;
   }
 
   // MCP daemon — starts on-demand via mcp tool or /mcp start (#471 v2)

@@ -37,6 +37,7 @@ export interface CapabilityApi {
   readonly transport: IKiroTransport;
   readonly runtime: SubagentRuntime;
   readonly sessionManager: { getActiveSessionId(userId: string, platform: string): string };
+  readonly sendSystemMessage?: (prompt: string) => Promise<void>;
   registerCommand(name: string, handler: CapabilityCommandHandler): void;
   registerHeartbeatTask(task: HeartbeatTask): void;
   registerService(name: string, factory: CapabilityServiceFactory): void;
@@ -69,6 +70,7 @@ export function createCapabilityApi(
   transport: IKiroTransport,
   runtime: SubagentRuntime,
   sessionManager?: { getActiveSessionId(userId: string, platform: string): string },
+  sendSystemMessage?: (prompt: string) => Promise<void>,
 ): CapabilityApi {
   return {
     config,
@@ -76,6 +78,7 @@ export function createCapabilityApi(
     transport,
     runtime,
     sessionManager: sessionManager ?? { getActiveSessionId: () => "master:telegram" },
+    sendSystemMessage,
     registerCommand(name, handler) { registry.commands.set(name, handler); },
     registerHeartbeatTask(task) { registry.heartbeatTasks.push(task); },
     registerService(name, factory) { registry.services.set(name, factory); },

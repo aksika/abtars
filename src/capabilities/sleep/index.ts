@@ -1,5 +1,6 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
+import type { CapabilityApi } from "../capability.js";
 /**
  * Sleep capability — spawn nightly sleep cycle via tick system.
  * One path: BED_TIME + quiet ticks → Dreamy → quiet ticks → hardware sleep.
@@ -228,4 +229,13 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     spawn: spawnSleep,
     checkHwSleep,
   };
+}
+
+/** Capability registration — called by discoverCapabilities(). */
+export function register(_api: CapabilityApi): void {
+  // Sleep registration is a no-op here — the actual SleepHandle is created
+  // in phase-sleep.ts because it needs ctx.sendSystemMessage + memory deps
+  // that aren't available at capability discovery time.
+  // This manifest exists so sleep appears in discoverCapabilities() and
+  // can be disabled via DISABLED_CAPABILITIES=sleep.
 }
