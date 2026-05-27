@@ -2,7 +2,7 @@
  * SkillWatcher — generates skills_catalog.md on startup and on-demand via /skill reload.
  *
  * #369 — Parses YAML-style frontmatter to extract name/description/requires.
- * #412 — Structured requires: bins/npm/env/files (OpenClaw pattern).
+ * #412 — Structured requires: bins/npm/env/files.
  *        Skills declare their own deps; loader checks eligibility at boot.
  */
 
