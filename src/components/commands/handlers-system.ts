@@ -295,6 +295,28 @@ export async function handleUsage(_text: string, ctx: CommandContext): Promise<b
     }
   }
 
+  // OpenRouter credits
+  const { fetchOpenRouterCredits } = await import("../openrouter-credits.js");
+  const credits = await fetchOpenRouterCredits();
+  if (credits) {
+    msg += `\n💳 OpenRouter: $${credits.remaining.toFixed(2)} remaining ($${credits.purchased.toFixed(2)} purchased, $${credits.used.toFixed(2)} used)`;
+  }
+
   await ctx.reply(msg.trim());
+  return true;
+}
+
+// ── /openrouter command ─────────────────────────────────────────────────────
+
+export async function handleOpenRouter(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { fetchOpenRouterCredits } = await import("../openrouter-credits.js");
+  const credits = await fetchOpenRouterCredits();
+  if (!credits) {
+    await ctx.reply("❌ OpenRouter API key not set or request failed.");
+    return true;
+  }
+  await ctx.reply(
+    `💳 OpenRouter credits\n\nPurchased: $${credits.purchased.toFixed(2)}\nUsed:      $${credits.used.toFixed(2)}\nRemaining: $${credits.remaining.toFixed(2)}`,
+  );
   return true;
 }
