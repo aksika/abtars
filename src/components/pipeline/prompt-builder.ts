@@ -29,6 +29,7 @@ export interface BuildPromptDeps {
   conversationBuffer: ConversationBuffer;
   contextPercent: number;
   maxContext?: number;
+  isAcp?: boolean;
 }
 
 export interface BuildPromptResult {
@@ -52,28 +53,33 @@ export async function buildPrompt(
   let prompt = `[${localTime()}] ${text}`;
   let imageContent: { mime: string; base64: string; path: string } | undefined;
   if (msg.mediaPath) {
-    // Try to inject as vision content; fall back to path reference
-    const { readFileSync } = await import("node:fs");
-    const ext = msg.mediaPath.split(".").pop()?.toLowerCase();
-    const visionMimes: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" };
-    const mime = ext ? visionMimes[ext] : undefined;
-    if (mime) {
-      try {
-        const buf = readFileSync(msg.mediaPath);
-        const b64 = buf.toString("base64");
-        const maxCtxPct = parseInt(process.env["IMAGE_MAX_CONTEXT_PCT"] ?? "30", 10);
-        const maxContext = deps.maxContext ?? 128000;
-        const imgTokens = Math.ceil(b64.length / 4);
-        if (imgTokens <= maxContext * (maxCtxPct / 100)) {
-          imageContent = { mime, base64: b64, path: msg.mediaPath };
-        } else {
-          prompt += `\n⚠️ Image skipped (too large for context). Saved at: ${msg.mediaPath}`;
+    if (deps.isAcp) {
+      // ACP: agent reads files itself — just provide the path, no I/O
+      prompt += `\nImage saved at: ${msg.mediaPath}`;
+    } else {
+      // DirectApi: encode for API
+      const { readFileSync } = await import("node:fs");
+      const ext = msg.mediaPath.split(".").pop()?.toLowerCase();
+      const visionMimes: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" };
+      const mime = ext ? visionMimes[ext] : undefined;
+      if (mime) {
+        try {
+          const buf = readFileSync(msg.mediaPath);
+          const b64 = buf.toString("base64");
+          const maxCtxPct = parseInt(process.env["IMAGE_MAX_CONTEXT_PCT"] ?? "30", 10);
+          const maxContext = deps.maxContext ?? 128000;
+          const imgTokens = Math.ceil(b64.length / 4);
+          if (imgTokens <= maxContext * (maxCtxPct / 100)) {
+            imageContent = { mime, base64: b64, path: msg.mediaPath };
+          } else {
+            prompt += `\n⚠️ Image too large. Saved at: ${msg.mediaPath}`;
+          }
+        } catch {
+          prompt += `\nFile saved at: ${msg.mediaPath}`;
         }
-      } catch {
+      } else {
         prompt += `\nFile saved at: ${msg.mediaPath}`;
       }
-    } else {
-      prompt += `\nFile saved at: ${msg.mediaPath}`;
     }
   }
 
