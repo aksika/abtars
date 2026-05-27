@@ -360,6 +360,19 @@ export class TelegramAdapter implements PlatformAdapter {
       text = `[Replying to ${replyFrom}: "${reply.text.slice(0, 500)}"]\n${text}`;
     }
 
+    // --- Reply-to-photo: re-download and inject (#668) ---
+    if (reply?.photo?.length && !mediaPath && this.securityGate.authorizeById(String(message.from?.id))) {
+      try {
+        const { saveInboundMedia } = await import("../../components/media-utils.js");
+        const photo = reply.photo[reply.photo.length - 1]!;
+        const buf = await this.downloadVoice(photo.file_id);
+        const saved = await saveInboundMedia(buf, chatId, { extHint: ".jpg" });
+        if (saved) mediaPath = saved.path;
+      } catch (err) {
+        logWarn(TAG, `Reply-to-photo download failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     // --- Dispatch to pipeline ---
     const resolvedUser = loadUsers().byPlatformId.get("telegram:" + message.from.id)?.userId ?? "unknown";
     const inbound: InboundMessage = {
