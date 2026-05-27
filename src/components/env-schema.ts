@@ -452,6 +452,10 @@ const SYSTEM_ENV_VARS = new Set([
   "VITEST", "CI",
   // WSL
   "WT_SESSION", "WT_PROFILE_ID", "WSLENV", "WSL_DISTRO_NAME", "WSL_INTEROP",
+  "QT_ACCESSIBILITY",
+  // Windows/.NET (inherited via WSL)
+  "POWERSHELL_UPDATECHECK", "POWERSHELL_TELEMETRY_OPTOUT",
+  "DOTNET_CLI_TELEMETRY_OPTOUT",
   // macOS / Homebrew
   "XPC_FLAGS", "XPC_SERVICE_NAME", "__CF_USER_TEXT_ENCODING",
   "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COMMAND_MODE",
@@ -469,6 +473,8 @@ const SYSTEM_ENV_VARS = new Set([
   // Sleep / capabilities
   "SUPERVISION", "SLEEP_TIMEOUT_MIN", "NOTEBOOKLM_CLI_PATH",
   "BROWSER_ENGINE", "BROWSER_SOCKET_PATH",
+  // abmind (read by abmind directly, not via abtars schema)
+  "SESSION_HISTORY_PCT", "SESSION_HISTORY_MIN_MSGS", "SESSION_HISTORY_CAP",
 ]);
 
 /** Find closest known var name (Levenshtein distance ≤ 3). */
