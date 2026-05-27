@@ -10,6 +10,7 @@ import { localISO } from "../../utils/local-time.js";
 
 import * as http from "node:http";
 import { readFileSync, existsSync } from "node:fs";
+import { abtarsHome } from "../../paths.js";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Socket } from "node:net";
@@ -139,6 +140,15 @@ export class DashboardServer implements IDashboardSlot {
       // Static files — serve from public/ (supports nested paths)
       if (method === "GET" && /^\/(js|css|assets|[\w-]+\.(js|css|jpg|png|ico))/.test(pathname ?? "")) {
         const safePath = (pathname ?? "").replace(/\.\./g, "");
+        // Custom logo from ~/.abtars/logo/ (#296)
+        if (safePath === "/assets/logo.png") {
+          const customLogo = join(abtarsHome(), "logo", "logo.png");
+          if (existsSync(customLogo)) {
+            res.writeHead(200, { "Content-Type": "image/png" });
+            res.end(readFileSync(customLogo));
+            return;
+          }
+        }
         const filePath = join(dirname(fileURLToPath(import.meta.url)), "public", safePath);
         if (existsSync(filePath)) {
           const ext = safePath.split(".").pop() ?? "";
