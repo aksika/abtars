@@ -346,8 +346,12 @@ export async function handleInboundMessage(
         return;
       }
       if (reactionEmoji) {
-        if (adapter.setReaction && msg.messageId) await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
-        await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
+        if (adapter.setReaction && msg.messageId) {
+          try { await adapter.setReaction(channelId, msg.messageId, reactionEmoji); }
+          catch { await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId }); }
+        } else {
+          await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
+        }
         return;
       }
       if (transport.toolCallsSucceeded > 0) {
@@ -387,7 +391,12 @@ export async function handleInboundMessage(
 
     // --- Send reaction emoji as separate message (if extracted by cleanResponse) ---
     if (reactionEmoji) {
-      await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
+      if (adapter.setReaction && msg.messageId) {
+        try { await adapter.setReaction(channelId, msg.messageId, reactionEmoji); }
+        catch { await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId }); }
+      } else {
+        await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
+      }
     }
 
     // --- Update priming buffer ---
