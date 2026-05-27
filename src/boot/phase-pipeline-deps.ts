@@ -66,6 +66,13 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
         });
       }
     }
+
+    // #662: inject task result into agent context
+    import("../components/system-message.js").then(({ sendSystemMessage }) => {
+      const summary = result.length > 500 ? result.slice(0, 500) + "…" : result;
+      const status = result.length > 4000 ? "truncated" : "complete";
+      sendSystemMessage(`[SYSTEM] [TASK RESULT] Task "${message}" — ${status}.\nOutput: ${summary}`).catch(err => logWarn("main", `Task result injection failed: ${err}`));
+    }).catch(() => {});
   };
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
