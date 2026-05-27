@@ -194,6 +194,12 @@ export class DirectApiTransport implements IKiroTransport {
         return result;
       } catch (err) {
         if (signal.aborted) { session.rollbackToLastUser(); throw err; }
+        const errMsg = err instanceof Error ? err.message : String(err);
+        // Capability miss — abort immediately, no fallback
+        if (errMsg.includes("does not support image input") || errMsg.includes("No endpoints found that support image")) {
+          session.rollbackToLastUser();
+          throw new Error("❌ Current model does not support images.");
+        }
         const status = this.parseErrorStatus(err);
         const kind = classifyError(status);
         const retryAfterMs = this.parseRetryAfter(err);
@@ -201,7 +207,7 @@ export class DirectApiTransport implements IKiroTransport {
         const bucket = policy.registry.getBucketLevel(candidate.model, candidate.endpoint);
         failedAttempts.push({ model: candidate.model, kind, bucket });
         session.rollbackToLastUser();
-        logWarn(TAG, `${candidate.model} failed (${kind}, bucket: ${bucket}%${retryAfterMs ? `, retry-after: ${Math.round(retryAfterMs / 1000)}s` : ""}): ${err instanceof Error ? err.message.slice(0, 100) : String(err)}`);
+        logWarn(TAG, `${candidate.model} failed (${kind}, bucket: ${bucket}%${retryAfterMs ? `, retry-after: ${Math.round(retryAfterMs / 1000)}s` : ""}): ${errMsg.slice(0, 100)}`);
       }
 
       candidate = policy.selectModel(this._lastPromptTokens);

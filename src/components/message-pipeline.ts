@@ -311,8 +311,6 @@ export async function handleInboundMessage(
       const prev = (transport as any).onFallback;
       (transport as any).onFallback = (model: string, _ctxPct: number, reason?: string) => {
         prev?.(model, _ctxPct, reason);
-        const short = model.split("/").pop() ?? model;
-        adapter.sendMessage(channelId, `⚠️ Switched to ${short}${reason ? ` (${reason})` : ""}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
       };
     }
 
