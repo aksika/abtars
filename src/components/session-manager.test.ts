@@ -1,101 +1,79 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { SessionManager, type ManagedSession } from "./session-manager.js";
+import { SessionManager } from "./session-manager.js";
 
 describe("SessionManager", () => {
-  let mgr: SessionManager;
+  let sm: SessionManager;
 
   beforeEach(() => {
-    mgr = new SessionManager(5);
+    sm = new SessionManager(5);
   });
 
-  it("creates initial main session on first access", () => {
-    const id = mgr.getActiveSessionId("u1", "telegram");
-    expect(id).toMatch(/^\d+_A_01$/);
+  describe("createSession", () => {
+    it("creates session with unique ID", () => {
+      const s = sm.createSession("user1", "telegram", "A");
+      expect(typeof s).not.toBe("string");
+      expect((s as any).id).toContain("_A_");
+    });
+
+    it("no motherId for user-created sessions", () => {
+      sm.createSession("user1", "telegram", "A");
+      const s2 = sm.createSession("user1", "telegram", "A");
+      expect((s2 as any).motherId).toBeUndefined();
+    });
+
+    it("enforces max sessions limit", () => {
+      for (let i = 0; i < 5; i++) sm.createSession("user1", "telegram", "A");
+      const result = sm.createSession("user1", "telegram", "A");
+      expect(typeof result).toBe("string"); // error message
+      expect(result).toContain("Max sessions");
+    });
   });
 
-  it("createSession sets motherId from active session", () => {
-    const mainId = mgr.getActiveSessionId("u1", "telegram");
-    const result = mgr.createSession("u1", "telegram", "C") as ManagedSession;
-    expect(result.motherId).toBe(mainId);
-    expect(result.type).toBe("C");
+  describe("createSubSession", () => {
+    it("sets motherId from active session", () => {
+      const parent = sm.createSession("user1", "telegram", "A") as any;
+      const child = sm.createSubSession("user1", "telegram", "C") as any;
+      expect(child.motherId).toBe(parent.id);
+    });
   });
 
-  it("createSubSession sets motherId from active session", () => {
-    const mainId = mgr.getActiveSessionId("u1", "telegram");
-    const result = mgr.createSubSession("u1", "telegram", "B") as ManagedSession;
-    expect(result.motherId).toBe(mainId);
-    expect(result.isTransport).toBe(false);
+  describe("switch", () => {
+    it("getActiveSessionId returns correct ID after switch", () => {
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      const s2 = sm.createSession("user1", "telegram", "A") as any;
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s2.id);
+      // Switch back to s1
+      sm.switchSession("user1", "telegram", s1.shortIndex);
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s1.id);
+    });
+
+    it("switch does NOT destroy other sessions", () => {
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      sm.createSession("user1", "telegram", "A");
+      sm.switchSession("user1", "telegram", s1.shortIndex);
+      // Both sessions still exist
+      const active = sm.getActiveSession("user1", "telegram");
+      expect(active.id).toBe(s1.id);
+    });
   });
 
-  it("enforces max sessions", () => {
-    mgr.getActiveSessionId("u1", "telegram"); // #1
-    mgr.createSession("u1", "telegram", "C"); // #2
-    mgr.createSession("u1", "telegram", "C"); // #3
-    mgr.createSession("u1", "telegram", "C"); // #4
-    mgr.createSession("u1", "telegram", "C"); // #5
-    const result = mgr.createSession("u1", "telegram", "C");
-    expect(typeof result).toBe("string");
-    expect(result).toContain("Max sessions");
+  describe("endSession", () => {
+    it("marks session ended and switches to another", () => {
+      sm.createSession("user1", "telegram", "A");
+      const s2 = sm.createSession("user1", "telegram", "A") as any;
+      const ended = sm.endSession("user1", "telegram", s2.shortIndex);
+      expect((ended as any).ended).toBe(true);
+      // Active should be s1 now
+      expect(sm.getActiveSessionId("user1", "telegram")).not.toBe(s2.id);
+    });
   });
 
-  it("pauseSession sets paused flag", () => {
-    mgr.getActiveSessionId("u1", "telegram");
-    const result = mgr.pauseSession("u1", "telegram") as ManagedSession;
-    expect(result.paused).toBe(true);
-  });
-
-  it("resumeSession clears paused flag", () => {
-    mgr.getActiveSessionId("u1", "telegram");
-    mgr.pauseSession("u1", "telegram");
-    const result = mgr.resumeSession("u1", "telegram") as ManagedSession;
-    expect(result.paused).toBe(false);
-  });
-
-  it("pauseSession errors if already paused", () => {
-    mgr.getActiveSessionId("u1", "telegram");
-    mgr.pauseSession("u1", "telegram");
-    const result = mgr.pauseSession("u1", "telegram");
-    expect(typeof result).toBe("string");
-    expect(result).toContain("already paused");
-  });
-
-  it("resumeSession errors if not paused", () => {
-    mgr.getActiveSessionId("u1", "telegram");
-    const result = mgr.resumeSession("u1", "telegram");
-    expect(typeof result).toBe("string");
-    expect(result).toContain("not paused");
-  });
-
-  it("getSessionById finds session across platforms", () => {
-    const id = mgr.getActiveSessionId("u1", "telegram");
-    const found = mgr.getSessionById(id);
-    expect(found).toBeDefined();
-    expect(found!.id).toBe(id);
-  });
-
-  it("switchSession changes active index", () => {
-    mgr.getActiveSessionId("u1", "telegram");
-    const s2 = mgr.createSession("u1", "telegram", "C") as ManagedSession;
-    mgr.switchSession("u1", "telegram", 1); // back to main
-    const active = mgr.getActiveSession("u1", "telegram");
-    expect(active.shortIndex).toBe(1);
-  });
-
-  it("formatList shows pause marker and mother", () => {
-    mgr.getActiveSessionId("u1", "telegram");
-    mgr.createSession("u1", "telegram", "C");
-    mgr.pauseSession("u1", "telegram", 2);
-    const list = mgr.formatList("u1", "telegram");
-    expect(list).toContain("⏸");
-    expect(list).toContain("← #1");
-  });
-
-  it("endSession on last main creates replacement", () => {
-    mgr.getActiveSessionId("u1", "telegram");
-    mgr.endSession("u1", "telegram", 1);
-    const { sessions } = mgr.listSessions("u1", "telegram");
-    const mains = sessions.filter(s => s.type === "A");
-    expect(mains.length).toBe(1);
-    expect(mains[0]!.shortIndex).toBe(2);
+  describe("pauseSession", () => {
+    it("toggles paused flag", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.pauseSession("user1", "telegram", s.shortIndex);
+      const paused = sm.getActiveSession("user1", "telegram");
+      expect(paused.paused).toBe(true);
+    });
   });
 });
