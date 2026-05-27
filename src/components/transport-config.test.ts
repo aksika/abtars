@@ -323,7 +323,7 @@ describe("resolveAgent with demotion", () => {
 });
 
 describe("cleanDemotedModels", () => {
-  it("removes demoted fallbacks", () => {
+  it("keeps demoted fallbacks but does not remove them", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
       agents: {
@@ -336,7 +336,9 @@ describe("cleanDemotedModels", () => {
       maxTurns: 50,
     };
     cleanDemotedModels(tc);
-    expect(tc.agents["professor"]!.fallbacks).toEqual([]);
+    // Fallback stays — only demoted flag cleared if model matches chosenModel
+    expect(tc.agents["professor"]!.fallbacks).toHaveLength(1);
+    expect(tc.agents["professor"]!.fallbacks![0]!.model).toBe("minimax-m2.5:cloud");
   });
 
   it("resurrects chosen model (clears demotion)", () => {
@@ -354,7 +356,7 @@ describe("cleanDemotedModels", () => {
     expect((tc.agents["professor"] as any).demotedReason).toBeUndefined();
   });
 
-  it("keeps non-demoted fallbacks intact", () => {
+  it("keeps all fallbacks — demoted and non-demoted", () => {
     const tc: TransportConfig = {
       ...TRANSPORT,
       agents: {
@@ -368,6 +370,6 @@ describe("cleanDemotedModels", () => {
       maxTurns: 50,
     };
     cleanDemotedModels(tc);
-    expect(tc.agents["professor"]!.fallbacks).toEqual([{ model: "minimax-m2.5:cloud", provider: "ollama" }]);
+    expect(tc.agents["professor"]!.fallbacks).toHaveLength(2);
   });
 });

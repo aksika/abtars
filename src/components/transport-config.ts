@@ -328,12 +328,11 @@ export function writeTransportConfig(tc: TransportConfig, reason?: string): void
 export function cleanDemotedModels(tc: TransportConfig, chosenModel?: string): void {
   for (const agent of Object.values(tc.agents)) {
     if ((agent as any).demoted) {
-      if (agent.model === chosenModel) { delete (agent as any).demoted; delete (agent as any).demotedReason; }
+      if (agent.model === chosenModel) { delete (agent as any).demoted; delete (agent as any).demotedReason; delete (agent as any).demotedModel; }
     }
     if (agent.fallbacks) {
-      agent.fallbacks = agent.fallbacks.filter((fb: any) => !fb.demoted || fb.model === chosenModel);
       for (const fb of agent.fallbacks) {
-        if ((fb as any).demoted && fb.model === chosenModel) { delete (fb as any).demoted; delete (fb as any).demotedReason; }
+        if ((fb as any).demoted && fb.model === chosenModel) { delete (fb as any).demoted; delete (fb as any).demotedReason; delete (fb as any).demotedModel; }
       }
     }
   }
