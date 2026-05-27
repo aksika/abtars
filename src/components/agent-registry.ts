@@ -110,15 +110,19 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       candidates.push({ endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1", apiKey, model: agent.model, maxContext: agent.contextWindow });
     }
 
-    // Add professor's model as fallback if different
+    // Add professor's model as fallback if different and transport-compatible
     const profAgent = tc ? resolveAgent("professor", tc) : null;
+    const agentTransport = agent.provider.transport ?? "api";
     if (profAgent && profAgent.model !== startModel && !candidates.some(c => c.model === profAgent.model)) {
-      candidates.push({
-        endpoint: profAgent.provider.endpoint ?? agent.provider.endpoint!,
-        apiKey: profAgent.provider.apiKeyEnv ? getEnv().getApiKey(profAgent.provider.apiKeyEnv) : apiKey,
-        model: profAgent.model,
-        maxContext: profAgent.contextWindow,
-      });
+      const profTransport = profAgent.provider.transport ?? "api";
+      if (profTransport === agentTransport && profAgent.provider.endpoint) {
+        candidates.push({
+          endpoint: profAgent.provider.endpoint,
+          apiKey: profAgent.provider.apiKeyEnv ? getEnv().getApiKey(profAgent.provider.apiKeyEnv) : apiKey,
+          model: profAgent.model,
+          maxContext: profAgent.contextWindow,
+        });
+      }
     }
 
     // Append agent-level cross-provider fallbacks
