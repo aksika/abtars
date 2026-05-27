@@ -28,6 +28,7 @@ export interface CronEntry {
   priority?: "high" | "medium" | "low";
   taskFile?: string;
   paused?: boolean;
+  consecutiveFails?: number;
   fired: boolean;
   createdAt: number;
   lastRanAt?: number;
@@ -162,6 +163,7 @@ function resume(id: string): void {
   const entry = readEntry(id);
   if (!entry) { console.log(JSON.stringify({ ok: false, error: `Entry ${id} not found` })); process.exit(1); }
   entry.paused = false;
+  entry.consecutiveFails = 0;
   writeEntry(entry);
   console.log(JSON.stringify({ ok: true, action: "resumed", id }));
 }

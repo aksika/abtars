@@ -159,9 +159,8 @@ describe("handleInboundMessage", () => {
 
     await handleInboundMessage(makeMsg({ messageId: 7 }), adapter, deps);
 
-    // Reaction-only: emoji sent as separate message
-    const sendCalls = (adapter.sendMessage as ReturnType<typeof vi.fn>).mock.calls;
-    expect(sendCalls.some((c: unknown[]) => c[1] === "👍")).toBe(true);
+    // Reaction sent via setReaction
+    expect(adapter.setReaction).toHaveBeenCalledWith(expect.any(String), 7, "👍");
   });
 
   it("cleans up busyChats and resets idle timer in finally block", async () => {

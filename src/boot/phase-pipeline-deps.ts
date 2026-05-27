@@ -41,6 +41,11 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
         logWarn("main", `Cron auto-fix inject failed: ${err}`);
       });
     },
+    (chatId, title, reason) => {
+      if (!ctx.telegramAdapter) return;
+      const msg = `⏸ Auto-paused task "${title}" after 3 consecutive failures.\nLast error: ${reason}\nResume with: /task resume <id>`;
+      ctx.telegramAdapter.sendNotification(String(chatId), msg);
+    },
   );
   ctx.cronQueue = cronQueue;
 

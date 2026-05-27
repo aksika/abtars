@@ -138,6 +138,7 @@ function scheduleRetry(entry: CronEntry, isRetry: boolean): void {
 
 export type TaskCompleteCallback = (chatId: number, message: string, result: string, dodFiles?: string[]) => void;
 export type FailInjectCallback = (entryId: string, command: string, result: string) => void;
+export type TaskPausedCallback = (chatId: number, title: string, reason: string) => void;
 
 interface QueuedJob {
   entry: CronEntry;
@@ -158,10 +159,12 @@ export class CronQueue {
   private _current: RunningJob | null = null;
   private timeout: ReturnType<typeof setTimeout> | null = null;
   private readonly onFailInject?: FailInjectCallback;
+  private readonly onTaskPaused?: TaskPausedCallback;
   private readonly failCounts = new Map<string, { date: string; count: number }>();
 
-  constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback) {
+  constructor(_cliPath: string, _workingDir: string, onFailInject?: FailInjectCallback, onTaskPaused?: TaskPausedCallback) {
     this.onFailInject = onFailInject;
+    this.onTaskPaused = onTaskPaused;
     // #267: recover stale state from previous process
     const stale = loadStaleState();
     if (stale) {
@@ -259,6 +262,21 @@ export class CronQueue {
     this.onFailInject(entry.id, entry.message, result);
   }
 
+  private checkAutoPause(entry: CronEntry, exitCode: number, lastError: string): void {
+    if (!entry.schedule) return;
+    if (exitCode === 0) {
+      if (entry.consecutiveFails) { entry.consecutiveFails = 0; writeEntry(entry); }
+      return;
+    }
+    entry.consecutiveFails = (entry.consecutiveFails ?? 0) + 1;
+    if (entry.consecutiveFails >= 3) {
+      entry.paused = true;
+      logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${entry.consecutiveFails} consecutive failures`);
+      this.onTaskPaused?.(entry.chatId, entry.title ?? entry.message.slice(0, 60), lastError.slice(0, 200));
+    }
+    writeEntry(entry);
+  }
+
   private runScript(entry: CronEntry, onComplete?: TaskCompleteCallback): void {
     logInfo(TAG, `▶ Script: "${entry.message.slice(0, 60)}"`);
     try {
@@ -274,6 +292,7 @@ export class CronQueue {
         const status = code === 0 ? "✅" : `❌ (exit ${code})`;
         logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
         recordRunToFile(entry.id, code ?? undefined);
+        this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
         if (code !== 0) {
           scheduleRetry(entry, !!entry._retrying);
           this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
@@ -363,6 +382,7 @@ export class CronQueue {
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         recordRunToFile(entry.id, exitCode);
+        this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
         const icon = exitCode === 0 ? "✅" : "❌";
         if (exitCode !== 0) {
           scheduleRetry(entry, !!entry._retrying);
@@ -374,6 +394,7 @@ export class CronQueue {
       .catch((err) => {
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
         recordRunToFile(entry.id, 1);
+        this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
         scheduleRetry(entry, !!entry._retrying);
         const errMsg = `❌ Failed: ${err instanceof Error ? err.message : String(err)}`;
         this.tryInjectFailure(entry, errMsg);
