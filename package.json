@@ -26,6 +26,7 @@
     "discord.js": "^14.26.3",
     "dotenv": "^16.6.1",
     "file-type": "^22.0.1",
+    "jimp": "1.6.0",
     "patchright": "^1.59.4",
     "pdf-parse": "^2.4.5",
     "ws": "^8.20.0",

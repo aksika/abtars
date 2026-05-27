@@ -34,6 +34,7 @@ export interface BuildPromptDeps {
 export interface BuildPromptResult {
   prompt: string;
   isSessionStart: boolean;
+  imageContent?: { mime: string; base64: string; path: string };
 }
 
 export async function buildPrompt(
@@ -49,8 +50,31 @@ export async function buildPrompt(
 
   // --- Timestamp prefix ---
   let prompt = `[${localTime()}] ${text}`;
+  let imageContent: { mime: string; base64: string; path: string } | undefined;
   if (msg.mediaPath) {
-    prompt += `\nFile saved at: ${msg.mediaPath}`;
+    // Try to inject as vision content; fall back to path reference
+    const { readFileSync } = await import("node:fs");
+    const ext = msg.mediaPath.split(".").pop()?.toLowerCase();
+    const visionMimes: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" };
+    const mime = ext ? visionMimes[ext] : undefined;
+    if (mime) {
+      try {
+        const buf = readFileSync(msg.mediaPath);
+        const b64 = buf.toString("base64");
+        const maxCtxPct = parseInt(process.env["IMAGE_MAX_CONTEXT_PCT"] ?? "30", 10);
+        const maxContext = deps.maxContext ?? 128000;
+        const imgTokens = Math.ceil(b64.length / 4);
+        if (imgTokens <= maxContext * (maxCtxPct / 100)) {
+          imageContent = { mime, base64: b64, path: msg.mediaPath };
+        } else {
+          prompt += `\n⚠️ Image skipped (too large for context). Saved at: ${msg.mediaPath}`;
+        }
+      } catch {
+        prompt += `\nFile saved at: ${msg.mediaPath}`;
+      }
+    } else {
+      prompt += `\nFile saved at: ${msg.mediaPath}`;
+    }
   }
 
   // --- Group buffer drain ---
@@ -139,11 +163,11 @@ export async function buildPrompt(
     if (!scan.safe) {
       logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map(f => f.category).join(", ")}`);
       // Return a sentinel — caller checks and sends the block message
-      return { prompt: "__INJECTION_BLOCKED__", isSessionStart };
+      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined };
     }
   }
 
-  return { prompt, isSessionStart };
+  return { prompt, isSessionStart, imageContent };
 }
 
 /** Single path for session-start injection: SOUL + memory wake-up + context + user identity + restart reason. */

@@ -2,7 +2,7 @@
  * media-utils.ts — inbound media handling: validate, detect MIME, save to disk, cleanup.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 import { randomBytes } from "node:crypto";
@@ -11,6 +11,8 @@ import { logInfo, logWarn } from "./logger.js";
 
 const TAG = "media";
 const MAX_FILE_BYTES = 16 * 1024 * 1024; // 16MB
+const IMAGE_MAX_PX = parseInt(process.env["IMAGE_MAX_PX"] ?? "1024", 10);
+const IMAGE_MAX_BASE64_MB = parseFloat(process.env["IMAGE_MAX_BASE64_MB"] ?? "3");
 
 const MEDIA_DIR = join(abtarsHome(), "received", "media");
 const FILES_DIR = join(abtarsHome(), "received", "files");
@@ -94,10 +96,93 @@ export async function saveInboundMedia(
   ensureDir(dir);
   const filename = buildFilename(chatId, ext);
   const path = join(dir, filename);
-  writeFileSync(path, buffer);
-  logInfo(TAG, `Saved ${isImage ? "image" : "file"}: ${filename} (${buffer.length}B, ${mime})`);
 
-  return { path, mime, ext, size: buffer.length, isImage };
+  // Resize images if needed (progressive: halve + reduce quality until under target)
+  let finalBuffer = buffer;
+  if (isImage && (mime === "image/jpeg" || mime === "image/png")) {
+    try {
+      finalBuffer = await resizeImage(buffer, mime);
+    } catch (err) {
+      logWarn(TAG, `Resize failed, saving original: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  writeFileSync(path, finalBuffer);
+  logInfo(TAG, `Saved ${isImage ? "image" : "file"}: ${filename} (${finalBuffer.length}B, ${mime})`);
+
+  return { path, mime, ext, size: finalBuffer.length, isImage };
+}
+
+/** Progressive resize: cap dimensions + reduce quality until base64 fits under target. */
+async function resizeImage(buffer: Buffer, mime: string): Promise<Buffer> {
+  const { Jimp } = await import("jimp");
+  const img = await Jimp.read(buffer);
+  const maxBytes = IMAGE_MAX_BASE64_MB * 1024 * 1024;
+  let w = img.width;
+  let h = img.height;
+
+  // Cap longest edge at IMAGE_MAX_PX
+  if (w > IMAGE_MAX_PX || h > IMAGE_MAX_PX) {
+    const scale = IMAGE_MAX_PX / Math.max(w, h);
+    w = Math.round(w * scale);
+    h = Math.round(h * scale);
+    img.resize({ w, h });
+  }
+
+  // Progressive quality reduction (JPEG only, up to 4 rounds)
+  const isJpeg = mime === "image/jpeg";
+  const qualities = isJpeg ? [85, 70, 50, 30] : [undefined];
+  for (let round = 0; round < 4; round++) {
+    for (const q of qualities) {
+      const out = isJpeg
+        ? await img.getBuffer("image/jpeg", { quality: q })
+        : await img.getBuffer("image/png");
+      const b64Size = Math.ceil(out.length * 4 / 3);
+      if (b64Size <= maxBytes) return Buffer.from(out);
+    }
+    // Still too large — halve dimensions
+    w = Math.round(w / 2);
+    h = Math.round(h / 2);
+    if (w < 64 || h < 64) break;
+    img.resize({ w, h });
+  }
+
+  // Last resort: return smallest we got
+  const out = isJpeg
+    ? await img.getBuffer("image/jpeg", { quality: 30 })
+    : await img.getBuffer("image/png");
+  return Buffer.from(out);
+}
+
+/** Prune media folder: delete files >7 days old, then oldest if >100MB total. */
+export function pruneMediaFolder(): number {
+  if (!existsSync(MEDIA_DIR)) return 0;
+  const maxAge = 7 * 24 * 60 * 60 * 1000;
+  const maxBytes = 100 * 1024 * 1024;
+  const now = Date.now();
+  let deleted = 0;
+
+  // Pass 1: delete old files
+  const files = readdirSync(MEDIA_DIR)
+    .map(f => ({ name: f, path: join(MEDIA_DIR, f), stat: statSync(join(MEDIA_DIR, f)) }))
+    .sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs); // oldest first
+
+  for (const f of files) {
+    if (now - f.stat.mtimeMs > maxAge) {
+      try { unlinkSync(f.path); deleted++; } catch { /* */ }
+    }
+  }
+
+  // Pass 2: prune oldest if still over budget
+  const remaining = files.filter(f => existsSync(f.path));
+  let totalSize = remaining.reduce((sum, f) => sum + f.stat.size, 0);
+  for (const f of remaining) {
+    if (totalSize <= maxBytes) break;
+    try { unlinkSync(f.path); totalSize -= f.stat.size; deleted++; } catch { /* */ }
+  }
+
+  if (deleted > 0) logInfo(TAG, `Pruned ${deleted} media files`);
+  return deleted;
 }
 
 /**
