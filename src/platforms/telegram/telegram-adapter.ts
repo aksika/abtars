@@ -12,6 +12,7 @@ import { createFileOffsetStore } from "./offset-store.js";
 import { SecurityGate } from "../../components/security-gate.js";
 import { ResponseFormatter } from "../../components/response-formatter.js";
 import { formatReactionSignal, routeReaction } from "../../components/reactions.js";
+import { cleanResponse } from "../../components/clean-response.js";
 
 export const TELEGRAM_CAPABILITIES: PlatformCapabilities = { voice: true, reactions: true, typing: true, threads: true };
 import { emojiToScore } from "abmind";
@@ -435,8 +436,18 @@ export class TelegramAdapter implements PlatformAdapter {
         logDebug(TAG, `Queued reaction signal for busy ${activeId} (${entry.queue.length} pending)`);
       } else {
         try {
-          await this.deps.transport.sendPrompt(activeId, signal);
+          const response = await this.deps.transport.sendPrompt(activeId, signal);
           logDebug(TAG, `Sent reaction signal to transport for chat ${chatId}`);
+          if (response) {
+            const { text, reactionEmoji, noReply } = cleanResponse(response);
+            if (noReply) { /* silent */ }
+            else if (reactionEmoji) {
+              try { await this.api.setMessageReaction(chatId, reaction.message_id, [{ type: "emoji", emoji: reactionEmoji }]); }
+              catch { await this.sendMessage(String(chatId), reactionEmoji); }
+            } else if (text.trim()) {
+              await this.sendMessage(String(chatId), text.trim());
+            }
+          }
         } catch (err) {
           logError(TAG, `Failed to send reaction signal for chat ${chatId}`, err);
         }
