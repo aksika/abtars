@@ -246,7 +246,7 @@
         'void main() {',
         '  float d = length(gl_PointCoord - vec2(0.5));',
         '  if (d > 0.5) discard;',
-        '  float glow = exp(-d * 4.0);',
+        '  float glow = exp(-d * 12.0);',
         // Core dot for trust
         '  float core = vHasEmbed * smoothstep(0.08, 0.0, d) * 0.8;',
         '  vec3 col = vColor * glow + vec3(core);',
