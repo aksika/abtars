@@ -93,7 +93,7 @@ describe("handleInboundMessage", () => {
     const deps = mockDeps(transport);
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(transport.sendPrompt).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("hello"));
+    expect(transport.sendPrompt).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("hello"), undefined);
     expect(adapter.sendMessage).toHaveBeenCalledWith("100", "Hello from Kiro!", expect.any(Object));
   });
 
@@ -202,7 +202,7 @@ describe("handleInboundMessage", () => {
 
     await handleInboundMessage(makeMsg({ text: "//agent list" }), adapter, deps);
 
-    expect(transport.sendPrompt).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("/agent list"));
+    expect(transport.sendPrompt).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("/agent list"), undefined);
   });
 
   it("returns early for voice without STT config", async () => {
