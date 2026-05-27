@@ -10,7 +10,7 @@ import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { loadSoulBundle, loadMinimalSoul } from "../soul-loader.js";
 import { loadUsers } from "../user-registry.js";
-import { renderMemory, buildSessionStartContext } from "abmind";
+import { renderMemory, buildSessionStartContext, buildStatusBlock } from "abmind";
 import { getEnv } from "../env-schema.js";
 import { readAndClearRestartReason } from "../transport/bridge-lock-transport.js";
 import type { SessionRegistry } from "../session-registry.js";
@@ -235,6 +235,12 @@ export function buildSessionStartPrompt(
           contextParts.push(wakeUp);
           logInfo(TAG, `Injected ABM wake-up (${wakeUp.length} chars)`);
           logTrace(TAG, `wake-up content: ${wakeUp}`);
+        }
+
+        // #646 — system status (skip for Code sessions)
+        if (sessionKey && !sessionKey.includes("_C_")) {
+          const status = buildStatusBlock(memory);
+          if (status) contextParts.push(status);
         }
       }
     } catch (err) { logAndSwallow("prompt_builder", "op", err); }
