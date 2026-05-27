@@ -46,15 +46,15 @@ const SCHEMA: readonly EnvVarDef[] = [
 
   // ── Transport timeouts ──
   { env: "PROMPT_TIMEOUT_SEC", type: "int", default: "180", description: "ACP prompt timeout (seconds)" },
-  { env: "MODEL_API_TIMEOUT_MS", type: "int", default: "120000", description: "Direct API model timeout (ms)" },
+  { env: "MODEL_API_TIMEOUT_SEC", type: "int", default: "120", description: "Direct API model timeout (seconds)" },
   { env: "WATCHDOG_TOOL_TIMEOUT_SEC", type: "int", default: "180", description: "Watchdog tool call timeout (seconds)" },
   { env: "WATCHDOG_SILENT_SEC", type: "int", default: "300", description: "Watchdog silent timeout (seconds)" },
   { env: "WATCHDOG_ENDLESS_SEC", type: "int", default: "600", description: "Watchdog endless loop timeout (seconds)" },
 
   // ── Telegram ──
   { env: "TELEGRAM_BOT_TOKEN", type: "string", description: "Telegram bot token" },
-  { env: "TELEGRAM_TIMEOUT_MS", type: "int", default: "10000", description: "Telegram API timeout (ms)" },
-  { env: "TELEGRAM_FILE_TIMEOUT_MS", type: "int", default: "60000", description: "Telegram file up/download timeout (ms) — downloadFile, sendDocument" },
+  { env: "TELEGRAM_TIMEOUT_SEC", type: "int", default: "10", description: "Telegram API timeout (seconds)" },
+  { env: "TELEGRAM_FILE_TIMEOUT_SEC", type: "int", default: "60", description: "Telegram file up/download timeout (seconds)" },
   { env: "POLL_TIMEOUT_S", type: "int", default: "30", description: "Telegram long-poll timeout (seconds)" },
 
   // ── Discord ──
@@ -70,8 +70,8 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "CTX_IDLE_COMPACT_MIN", type: "int", default: "10", description: "Minutes idle before floating compaction" },
 
   // ── Typing / streaming ──
-  { env: "TYPING_TTL_MS", type: "int", default: "300000", description: "Typing indicator TTL (ms)" },
-  { env: "TYPING_SILENT_THRESHOLD_MS", type: "int", default: "90000", description: "Silent threshold before 'still working' (ms)" },
+  { env: "TYPING_TTL_SEC", type: "int", default: "300", description: "Typing indicator TTL (seconds)" },
+  { env: "TYPING_SILENT_THRESHOLD_SEC", type: "int", default: "90", description: "Silent threshold before still-working msg (seconds)" },
   { env: "STREAM_FLUSH_SEC", type: "int", default: "3", description: "Stream edit flush interval (seconds, 0=disabled)" },
 
   // ── Memory ──
@@ -115,9 +115,9 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "BROWSER_ALLOWED_DOMAINS", type: "string", default: "", description: "Comma-separated allowed domains" },
   { env: "BROWSER_SOCKET_PATH", type: "string", default: "/run/browser/browser.sock", description: "Browser IPC socket path" },
   { env: "BROWSER_MAX_SESSIONS", type: "int", default: "3", description: "Max concurrent browser sessions" },
-  { env: "BROWSER_SESSION_TIMEOUT_MS", type: "int", default: "300000", description: "Browser session timeout (ms)" },
+  { env: "BROWSER_SESSION_TIMEOUT_SEC", type: "int", default: "300", description: "Browser session timeout (seconds)" },
   { env: "WEB_SCRAPE_USER_AGENT", type: "string", description: "User agent for web scraping" },
-  { env: "WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_MS", type: "int", default: "30000", description: "Playwright page timeout (ms)" },
+  { env: "WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_SEC", type: "int", default: "30", description: "Playwright page timeout (seconds)" },
   { env: "SSRF_CHECK", type: "bool", default: "true", description: "Enable SSRF protection for browser" },
   { env: "BROWSING_AGENT", type: "string", description: "Model override for browsing agent" },
 
@@ -127,7 +127,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "DASHBOARD_MODULE", type: "string", description: "Custom dashboard module path" },
   { env: "NOTEBOOKLM_ENABLED", type: "bool", default: "false", description: "Enable NotebookLM integration" },
   { env: "NOTEBOOKLM_DEFAULT_NOTEBOOK", type: "string", default: "", description: "Default NotebookLM notebook" },
-  { env: "PERMISSION_TIMEOUT_MS", type: "int", default: "60000", description: "Permission prompt timeout (ms)" },
+  { env: "PERMISSION_TIMEOUT_SEC", type: "int", default: "60", description: "Permission prompt timeout (seconds)" },
   { env: "TRUST_MODE", type: "bool", default: "false", description: "Skip permission prompts" },
   { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | sandbox" },
   { env: "TELEGRAM_ENABLED", type: "bool", default: "", description: "Enable Telegram platform (fallback: token presence)" },
@@ -339,14 +339,14 @@ export function initEnv(): Readonly<EnvConfig> {
     modelsConfig: readOr("MODELS_CONFIG", "models.json").replace("config/", ""),
 
     promptTimeoutSec: parseIntSafe(readOr("PROMPT_TIMEOUT_SEC", "180"), "PROMPT_TIMEOUT_SEC"),
-    modelApiTimeoutMs: parseIntSafe(readOr("MODEL_API_TIMEOUT_MS", "120000"), "MODEL_API_TIMEOUT_MS"),
+    modelApiTimeoutMs: parseIntSafe(readOr("MODEL_API_TIMEOUT_SEC", "120"), "MODEL_API_TIMEOUT_SEC") * 1000,
     watchdogToolTimeoutSec: parseIntSafe(readOr("WATCHDOG_TOOL_TIMEOUT_SEC", "180"), "WATCHDOG_TOOL_TIMEOUT_SEC"),
     watchdogSilentSec: parseIntSafe(readOr("WATCHDOG_SILENT_SEC", "300"), "WATCHDOG_SILENT_SEC"),
     watchdogEndlessSec: parseIntSafe(readOr("WATCHDOG_ENDLESS_SEC", "600"), "WATCHDOG_ENDLESS_SEC"),
 
     telegramBotToken: read("TELEGRAM_BOT_TOKEN"),
-    telegramTimeoutMs: parseIntSafe(readOr("TELEGRAM_TIMEOUT_MS", "15000"), "TELEGRAM_TIMEOUT_MS"),
-    telegramFileTimeoutMs: parseIntSafe(readOr("TELEGRAM_FILE_TIMEOUT_MS", "60000"), "TELEGRAM_FILE_TIMEOUT_MS"),
+    telegramTimeoutMs: parseIntSafe(readOr("TELEGRAM_TIMEOUT_SEC", "10"), "TELEGRAM_TIMEOUT_SEC") * 1000,
+    telegramFileTimeoutMs: parseIntSafe(readOr("TELEGRAM_FILE_TIMEOUT_SEC", "60"), "TELEGRAM_FILE_TIMEOUT_SEC") * 1000,
     pollTimeoutS: parseIntSafe(readOr("POLL_TIMEOUT_S", "30"), "POLL_TIMEOUT_S"),
 
     discordBotToken: read("DISCORD_BOT_TOKEN"),
@@ -359,8 +359,8 @@ export function initEnv(): Readonly<EnvConfig> {
     ctxIdleCompactPct: parseIntSafe(readOr("CTX_IDLE_COMPACT_PCT", "65"), "CTX_IDLE_COMPACT_PCT"),
     ctxIdleCompactMin: parseIntSafe(readOr("CTX_IDLE_COMPACT_MIN", "10"), "CTX_IDLE_COMPACT_MIN"),
 
-    typingTtlMs: parseIntSafe(readOr("TYPING_TTL_MS", "300000"), "TYPING_TTL_MS"),
-    typingSilentThresholdMs: parseIntSafe(readOr("TYPING_SILENT_THRESHOLD_MS", "90000"), "TYPING_SILENT_THRESHOLD_MS"),
+    typingTtlMs: parseIntSafe(readOr("TYPING_TTL_SEC", "300"), "TYPING_TTL_SEC") * 1000,
+    typingSilentThresholdMs: parseIntSafe(readOr("TYPING_SILENT_THRESHOLD_SEC", "90"), "TYPING_SILENT_THRESHOLD_SEC") * 1000,
     streamFlushSec: parseIntSafe(readOr("STREAM_FLUSH_SEC", "3"), "STREAM_FLUSH_SEC"),
 
     activeMemory: parseBool(readOr("ACTIVE_MEMORY", "false")),
@@ -389,9 +389,9 @@ export function initEnv(): Readonly<EnvConfig> {
     browserAllowedDomains: readOr("BROWSER_ALLOWED_DOMAINS", ""),
     browserSocketPath: readOr("BROWSER_SOCKET_PATH", "/run/browser/browser.sock"),
     browserMaxSessions: parseIntSafe(readOr("BROWSER_MAX_SESSIONS", "3"), "BROWSER_MAX_SESSIONS"),
-    browserSessionTimeoutMs: parseIntSafe(readOr("BROWSER_SESSION_TIMEOUT_MS", "300000"), "BROWSER_SESSION_TIMEOUT_MS"),
+    browserSessionTimeoutMs: parseIntSafe(readOr("BROWSER_SESSION_TIMEOUT_SEC", "300"), "BROWSER_SESSION_TIMEOUT_SEC") * 1000,
     webScrapeUserAgent: read("WEB_SCRAPE_USER_AGENT"),
-    webScrapePlaywrightTimeoutMs: parseIntSafe(readOr("WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_MS", "30000"), "WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_MS"),
+    webScrapePlaywrightTimeoutMs: parseIntSafe(readOr("WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_SEC", "30"), "WEB_SCRAPE_PLAYWRIGHT_TIMEOUT_SEC") * 1000,
     ssrfCheck: read("SSRF_CHECK") !== "0",
     browsingAgent: read("BROWSING_AGENT"),
 
@@ -400,7 +400,7 @@ export function initEnv(): Readonly<EnvConfig> {
     dashboardModule: read("DASHBOARD_MODULE"),
     notebooklmEnabled: parseBool(readOr("NOTEBOOKLM_ENABLED", "false")),
     notebooklmDefaultNotebook: readOr("NOTEBOOKLM_DEFAULT_NOTEBOOK", ""),
-    permissionTimeoutMs: parseIntSafe(readOr("PERMISSION_TIMEOUT_MS", "60000"), "PERMISSION_TIMEOUT_MS"),
+    permissionTimeoutMs: parseIntSafe(readOr("PERMISSION_TIMEOUT_SEC", "60"), "PERMISSION_TIMEOUT_SEC") * 1000,
     trustMode: parseBool(readOr("TRUST_MODE", "false")),
     securityMode: readOr("SECURITY_MODE", "off"),
     enableDashboard: parseBool(readOr("ENABLE_DASHBOARD", "false")),
