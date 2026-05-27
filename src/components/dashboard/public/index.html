@@ -49,6 +49,21 @@
   <div style="display:flex;gap:8px;flex-wrap:wrap;">
     <button class="btn-search-toggle" data-action="toggle-overlay" data-target="log-overlay">📋 Log</button>
   </div>
+  <hr style="border-color:#0f3460;margin:12px 0;">
+  <h2>Memory</h2>
+  <div id="memory-stats">
+    <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value" id="mem-status">—</span></div>
+    <div class="stat-row"><span class="stat-label">Messages</span><span class="stat-value" id="mem-messages">—</span></div>
+    <div class="stat-row"><span class="stat-label">Extracted</span><span class="stat-value" id="mem-extracted">—</span></div>
+    <div class="stat-row"><span class="stat-label">Consolidations (D/W/Q)</span><span class="stat-value" id="mem-consolidations">—</span></div>
+    <div class="stat-row"><span class="stat-label">Documents</span><span class="stat-value" id="mem-documents">—</span></div>
+    <div class="stat-row"><span class="stat-label">DB Size</span><span class="stat-value" id="mem-dbsize">—</span></div>
+  </div>
+  <hr style="border-color:#0f3460;margin:12px 0;">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button class="btn-search-toggle" data-action="load-universe">🌌 Universe</button>
+    <button class="btn-search-toggle" data-action="toggle-overlay" data-target="search-overlay">🔍 Search</button>
+  </div>
 </div>
 
 <!-- Platforms -->
@@ -95,25 +110,7 @@
   </div>
 </div>
 
-<!-- Memory -->
-<div class="card" id="card-memory">
-  <h2>Memory</h2>
-  <div id="memory-stats">
-    <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value" id="mem-status">—</span></div>
-    <div class="stat-row"><span class="stat-label">Messages</span><span class="stat-value" id="mem-messages">—</span></div>
-    <div class="stat-row"><span class="stat-label">Extracted</span><span class="stat-value" id="mem-extracted">—</span></div>
-    <div class="stat-row"><span class="stat-label">Consolidations (D/W/Q)</span><span class="stat-value" id="mem-consolidations">—</span></div>
-    <div class="stat-row"><span class="stat-label">Documents</span><span class="stat-value" id="mem-documents">—</span></div>
-    <div class="stat-row"><span class="stat-label">DB Size</span><span class="stat-value" id="mem-dbsize">—</span></div>
-  </div>
-  <hr style="border-color:#0f3460;margin:12px 0;">
-  <div style="display:flex;gap:8px;flex-wrap:wrap;">
-    <button class="btn-search-toggle" data-action="load-universe">🌌 Universe</button>
-    <button class="btn-search-toggle" data-action="toggle-overlay" data-target="search-overlay">🔍 Search</button>
-  </div>
-</div>
-
-<!-- Cron -->
+<!-- Scheduled Tasks (4th column) -->
 <div class="card" id="card-cron">
   <h2>Scheduled Tasks</h2>
   <div id="cron-entries"><div style="color:#666;font-size:0.82rem;">Loading...</div></div>
