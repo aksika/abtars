@@ -134,11 +134,8 @@ export async function loadAndValidateConfig(): Promise<Config> {
     CONFIG_DEFAULTS.transport.trustMode,
   );
 
-  // --- PERMISSION_TIMEOUT_MS (optional number, default 60000) ---
-  const permissionTimeoutMs = parseNumberEnv(
-    "PERMISSION_TIMEOUT_MS",
-    CONFIG_DEFAULTS.transport.permissionTimeoutMs,
-  );
+  // --- PERMISSION_TIMEOUT (from env-schema: PERMISSION_TIMEOUT_SEC * 1000) ---
+  const permissionTimeoutMs = getEnv().permissionTimeoutMs;
 
   // --- POLL_TIMEOUT_S (optional number, default 30) ---
   const pollTimeoutS = parseNumberEnv(

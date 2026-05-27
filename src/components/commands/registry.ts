@@ -9,7 +9,7 @@ const exactCommands: Record<string, CommandHandler> = {};
 const prefixCommands: Array<{ prefix: string; handler: CommandHandler }> = [];
 const KNOWN_COMMANDS = new Set<string>();
 
-const NON_MASTER_COMMANDS = new Set(["/new", "/reset", "/stop", "/ctrlc", "/status", "/help"]);
+const NON_MASTER_COMMANDS = new Set(["/new", "/reset", "/stop", "/ctrlc", "/status", "/help", "/whoami"]);
 
 export function registerExact(name: string, handler: CommandHandler): void {
   exactCommands[name] = handler;

@@ -328,3 +328,19 @@ export async function handleOpenRouter(_text: string, ctx: CommandContext): Prom
   );
   return true;
 }
+
+// ── /whoami command ─────────────────────────────────────────────────────────
+
+export async function handleWhoami(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { loadUsers } = await import("../user-registry.js");
+  const reg = loadUsers();
+  const CLASS_NAMES = ["UNCLASSIFIED", "RESTRICTED", "CONFIDENTIAL", "SECRET"];
+  const user = ctx.userId ? reg.byUserId.get(ctx.userId) : undefined;
+  if (user) {
+    const clearance = CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`;
+    await ctx.reply(`${user.displayName ?? user.userId} (${user.role}, ${clearance} clearance)`);
+  } else {
+    await ctx.reply(`${ctx.userId ?? "unknown"} (unregistered)`);
+  }
+  return true;
+}

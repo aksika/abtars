@@ -22,7 +22,7 @@ function setValidEnv() {
   process.env["AGENT_CLI_PATH"] = "kiro-cli";
   process.env["WORKING_DIR"] = process.cwd();
   delete process.env["TRUST_MODE"];
-  delete process.env["PERMISSION_TIMEOUT_MS"];
+  delete process.env["PERMISSION_TIMEOUT_SEC"];
   delete process.env["POLL_TIMEOUT_S"];
   delete process.env["AGENT_TRANSPORT"];
   delete process.env["TMUX_SESSION"];
@@ -141,18 +141,19 @@ describe("loadAndValidateConfig", () => {
     expect(config.transport.trustMode).toBe(false);
   });
 
-  // --- PERMISSION_TIMEOUT_MS ---
+  // --- PERMISSION_TIMEOUT_SEC ---
 
-  it("parses PERMISSION_TIMEOUT_MS as a number", async () => {
-    process.env["PERMISSION_TIMEOUT_MS"] = "30000";
+  it("parses PERMISSION_TIMEOUT_SEC as a number", async () => {
+    process.env["PERMISSION_TIMEOUT_SEC"] = "30";
+    _resetEnv();
     const config = await loadAndValidateConfig();
     expect(config.transport.permissionTimeoutMs).toBe(30_000);
   });
 
-  it("throws when PERMISSION_TIMEOUT_MS is not a number", async () => {
-    process.env["PERMISSION_TIMEOUT_MS"] = "abc";
+  it("throws when PERMISSION_TIMEOUT_SEC is not a number", async () => {
+    process.env["PERMISSION_TIMEOUT_SEC"] = "abc";
     _resetEnv();
-    await expect(loadAndValidateConfig()).rejects.toThrow("PERMISSION_TIMEOUT_MS");
+    await expect(loadAndValidateConfig()).rejects.toThrow("PERMISSION_TIMEOUT_SEC");
   });
 
   // --- POLL_TIMEOUT_S ---
