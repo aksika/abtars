@@ -30,7 +30,7 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<PhaseResul
   const { config, memoryConfig, memory, transport, telegramAdapter } = ctx;
   if (!memoryConfig.memoryEnabled) return "skipped";
 
-  // #603: 3s delay (Molty needs time for Telegram API over Tailscale) + retry
+  // #603: 3s delay (remote hosts need time for Telegram API) + retry
   setTimeout(async () => {
     try {
       const ok = await sendBackOnline(ctx);

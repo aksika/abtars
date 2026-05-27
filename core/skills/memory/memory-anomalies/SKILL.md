@@ -33,7 +33,7 @@ Escalation comes from **user context**, not agent inference. Do NOT flag: operat
 0=UNCLASSIFIED, 1=RESTRICTED, 2=CONFIDENTIAL, 3=SECRET
 
 ## Trust scale
-0=untrusted (web), 1=peer (A2A), 2=self, 3=owner (aksika)
+0=untrusted (web), 1=peer (A2A), 2=self, 3=owner
 
 ## Credibility scale
 1=confirmed, 2=probably true, 3=possibly true, 4=doubtful, 5=improbable, 6=unknown
