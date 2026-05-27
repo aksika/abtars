@@ -383,9 +383,11 @@ export async function handleInboundMessage(
     const chunks = adapter.chunkResponse(userResponse);
     logDebug(TAG, `Sending ${chunks.length} chunk(s)`);
     for (const chunk of chunks) {
-      if (chunk.trim()) {
+      // #652: defense-in-depth — strip leaked metadata tags before delivery
+      const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
+      if (clean) {
         await adapter.sendTyping?.(channelId, msg.threadId);
-        lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, chunk, { threadId: msg.threadId }));
+        lastSentMsgId = await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
       }
     }
 
