@@ -20,6 +20,7 @@ import { readEntry as cronReadEntry } from "../components/tasks/task-store.js";
 import { CronQueue } from "../components/tasks/task-queue.js";
 import { IdleSave } from "../components/idle-save.js";
 import { logWarn } from "../components/logger.js";
+import { loadTransport, resolveAgent } from "../components/transport-config.js";
 import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
@@ -126,7 +127,16 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     phaseHealth: ctx.phaseHealth,
     registry: ctx.registry,
     bridgeLockPath: ctx.bridgeLockPath,
-    get maxContext() { return (transport as any).config?.maxContext; },
+    get maxContext() {
+      try {
+        const tc = loadTransport();
+        if (tc) {
+          const prof = resolveAgent("professor", tc);
+          if (prof?.contextWindow) return prof.contextWindow;
+        }
+      } catch { /* fallback */ }
+      return 128000;
+    },
   };
   ctx.pipelineDeps = pipelineDeps;
   return "ran";
