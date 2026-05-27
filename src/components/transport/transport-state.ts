@@ -68,6 +68,7 @@ export class TransportStateMachine {
   }
 
   promptCompleted(): void {
+    if (this._state === "idle") return; // stale late completion — retry already reset state
     this.transition("idle", "promptCompleted");
   }
 
