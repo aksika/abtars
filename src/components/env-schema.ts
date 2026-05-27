@@ -300,18 +300,18 @@ export function initEnv(): Readonly<EnvConfig> {
   const knownVars = new Set(SCHEMA.map(s => s.env));
   const warnings: string[] = [];
 
-  // Detect unknown vars in .env (stale/typo detection)
+  // Detect typos: only warn if an unknown var is close (Levenshtein ≤ 3) to a known abtars var.
+  // System vars (QT_*, POWERSHELL_*, etc.) are far from any known var → silently ignored.
   const envKeys = Object.keys(process.env).filter(k => /^[A-Z_]+$/.test(k));
   for (const k of envKeys) {
-    if (!knownVars.has(k) && !SYSTEM_ENV_VARS.has(k)) {
-      // Allow *_API_KEY pattern (provider keys referenced dynamically by transport.json)
-      if (k.endsWith("_API_KEY") || k.endsWith("_API_ID")) continue;
-      // Allow HA_* (Home Assistant, loaded from .env.skills)
-      if (k.startsWith("HA_")) continue;
-      const suggestion = findClosest(k, knownVars);
-      warnings.push(suggestion
-        ? `Unknown env var ${k} — did you mean ${suggestion}?`
-        : `Unknown env var ${k} — not used by any code, consider removing`);
+    if (knownVars.has(k)) continue;
+    // Allow *_API_KEY pattern (provider keys referenced dynamically by transport.json)
+    if (k.endsWith("_API_KEY") || k.endsWith("_API_ID")) continue;
+    // Allow HA_* (Home Assistant, loaded from .env.skills)
+    if (k.startsWith("HA_")) continue;
+    const suggestion = findClosest(k, knownVars);
+    if (suggestion) {
+      warnings.push(`Unknown env var ${k} — did you mean ${suggestion}?`);
     }
   }
 
@@ -430,52 +430,6 @@ export function initEnv(): Readonly<EnvConfig> {
 export function _resetEnv(): void { _env = null; }
 
 // ── Typo detection helpers ──────────────────────────────────────────────────
-
-/** System env vars to ignore in unknown-var detection. */
-const SYSTEM_ENV_VARS = new Set([
-  // POSIX / Linux
-  "HOME", "PATH", "USER", "SHELL", "TERM", "LANG", "LC_ALL", "EDITOR",
-  "HOSTTYPE", "HOSTNAME", "LOGNAME", "OLDPWD", "PWD", "SHLVL", "TMPDIR",
-  "XDG_DATA_DIRS", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
-  "LESSOPEN", "LESSCLOSE", "_", "LS_COLORS", "COLORTERM",
-  "DISPLAY", "PULSE_SERVER", "WAYLAND_DISPLAY",
-  "DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY",
-  "GPG_AGENT_INFO", "NAME", "TTY", "SHELL_PID", "FPATH", "INFOPATH",
-  // systemd-injected
-  "INVOCATION_ID", "MANAGERPID", "JOURNAL_STREAM", "MEMORY_PRESSURE_WATCH",
-  "MEMORY_PRESSURE_WRITE", "SYSTEMD_EXEC_PID",
-  // Ubuntu/distro
-  "COMMAND_NOT_FOUND_INSTALL_PROMPT",
-  // Node / NVM
-  "NODE_ENV", "NODE_PATH", "NODE_OPTIONS", "NPM_CONFIG_PREFIX", "NVM_DIR",
-  "NVM_BIN", "NVM_INC", "NVM_CD_FLAGS",
-  "VITEST", "CI",
-  // WSL
-  "WT_SESSION", "WT_PROFILE_ID", "WSLENV", "WSL_DISTRO_NAME", "WSL_INTEROP",
-  "QT_ACCESSIBILITY",
-  // Windows/.NET (inherited via WSL)
-  "POWERSHELL_UPDATECHECK", "POWERSHELL_TELEMETRY_OPTOUT",
-  "DOTNET_CLI_TELEMETRY_OPTOUT",
-  // macOS / Homebrew
-  "XPC_FLAGS", "XPC_SERVICE_NAME", "__CF_USER_TEXT_ENCODING",
-  "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COMMAND_MODE",
-  "HOMEBREW_PREFIX", "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY",
-  // Kiro CLI / Q terminal
-  "KIRO_CLI_USING_ZSH_AUTOSUGGESTIONS", "KIRO_SESSION_ID",
-  "QTERM_SESSION_ID", "Q_SET_PARENT_CHECK", "Q_TERM",
-  // AWS (injected by runtime, not ours)
-  "AWS_EXECUTION_ENV",
-  // sudo / install-time
-  "SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND",
-  // Agent API + Dashboard (read outside getEnv by dedicated config loaders)
-  "AGENT_API_PORT",
-  "WEB_AUTH_TOKEN", "WEB_PORT", "WEB_HOST",
-  // Sleep / capabilities
-  "SUPERVISION", "SLEEP_TIMEOUT_MIN", "NOTEBOOKLM_CLI_PATH",
-  "BROWSER_ENGINE", "BROWSER_SOCKET_PATH",
-  // abmind (read by abmind directly, not via abtars schema)
-  "SESSION_HISTORY_PCT", "SESSION_HISTORY_MIN_MSGS", "SESSION_HISTORY_CAP",
-]);
 
 /** Find closest known var name (Levenshtein distance ≤ 3). */
 function findClosest(input: string, known: Set<string>): string | undefined {
