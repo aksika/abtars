@@ -1,7 +1,3 @@
 # Agent Notes
 
-- Confirmation/verification emails: proactively alert the owner, don't let them expire silently
-- NEVER say "I can't" without checking: received/media/, reports/, topics/, local storage, asbuilt files. This has failed TWICE — treat as critical.
-- Lead with content, not process narration. For multi-step actions, lead with the result then add context below.
-- Non-native-language content (e.g. Spanish): translate FIRST, then add context/commentary
-- When the owner mentions new skills/changes, READ the asbuilt IMMEDIATELY before responding — don't guess
+Persistent rules and lessons learned. Updated by Dreamy (retro-derive step) and manually.
