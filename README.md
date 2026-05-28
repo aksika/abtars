@@ -67,7 +67,7 @@ Full docs, configuration reference, and guides: **[Wiki](https://github.com/aksi
 
 - Node.js 22+
 - A Telegram bot token
-- At least one model provider (kiro-cli, gemini-cli, ollama, or OpenRouter)
+- At least one model provider (kiro-cli, gemini-cli, ollama, OpenRouter, Codex, or Claude Code)
 
 Optional: ollama + `nomic-embed-text` for memory embeddings.
 
