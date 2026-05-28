@@ -209,18 +209,20 @@ export async function handleChatCompletions(
   }
 
   const sessionKey = extractSessionKey(req.headers as Record<string, string | string[] | undefined>);
+  const isPeer = !!deps.guestName;
+  const effectiveSessionKey = isPeer ? `${Math.floor(Date.now() / 1000)}_P_01` : sessionKey;
 
-  // Record the NEW user turn only (prior messages[] entries are client history)
+  // Record the NEW user turn only — skip for peer (A2A) sessions
   const now = Date.now();
-  deps.memory?.recordMessage({ role: "user", content: flat.prompt, timestamp: now, userId: "master", sessionId: sessionKey });
+  if (!isPeer) deps.memory?.recordMessage({ role: "user", content: flat.prompt, timestamp: now, userId: "master", sessionId: effectiveSessionKey });
 
-  logInfo(TAG, `/v1/chat/completions guest=${deps.guestName} session=${sessionKey} promptLen=${flat.prompt.length} stream=${stream}`);
+  logInfo(TAG, `/v1/chat/completions guest=${deps.guestName} session=${effectiveSessionKey} promptLen=${flat.prompt.length} stream=${stream}`);
 
   // Send to the agent — this is the slow bit
-  const reply = await deps.session.sendPrompt(sessionKey, fullPrompt);
+  const reply = await deps.session.sendPrompt(effectiveSessionKey, fullPrompt);
 
-  // Record the assistant turn
-  deps.memory?.recordMessage({ role: "assistant", content: reply, timestamp: Date.now(), userId: "master", sessionId: sessionKey });
+  // Record the assistant turn — skip for peer (A2A) sessions
+  if (!isPeer) deps.memory?.recordMessage({ role: "assistant", content: reply, timestamp: Date.now(), userId: "master", sessionId: effectiveSessionKey });
 
   if (stream) {
     return {

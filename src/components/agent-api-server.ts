@@ -144,7 +144,7 @@ export class AgentApiServer {
       this.resetIdleTimer();
       return this.agentSession;
     }
-    this.agentSession = await this.runtime.session("browsie");
+    this.agentSession = await this.runtime.session("coding");
     this.resetIdleTimer();
     return this.agentSession;
   }
