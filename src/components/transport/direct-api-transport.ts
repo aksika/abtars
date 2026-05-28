@@ -11,7 +11,7 @@ import { ConversationSession, type ToolCall, type ContentPart } from "./conversa
 import { parseSSEStream, type SSEToolCallDelta } from "./sse-parser.js";
 import { getToolSchemas, executeToolCall } from "./tool-registry.js";
 import { classifyError } from "./model-health-registry.js";
-import { normalizeToolCalls, parseErrorStatus, parseRetryAfter } from "./transport-utils.js";
+import { normalizeToolCalls, parseErrorStatus, parseRetryAfter, parseUsageLimitCooldown } from "./transport-utils.js";
 import { recordUsage } from "../usage-tracker.js";
 import type { FallbackPolicy } from "./fallback-policy.js";
 import type { IKiroTransport } from "./kiro-transport.js";
@@ -224,7 +224,7 @@ export class DirectApiTransport implements IKiroTransport {
         }
         const status = this.parseErrorStatus(err);
         const kind = classifyError(status, errMsg);
-        const retryAfterMs = this.parseRetryAfter(err);
+        const retryAfterMs = this.parseRetryAfter(err) ?? parseUsageLimitCooldown(errMsg);
         policy.recordError(candidate, kind, retryAfterMs);
         const bucket = policy.registry.getBucketLevel(candidate.model, candidate.endpoint);
         failedAttempts.push({ model: candidate.model, kind, bucket });

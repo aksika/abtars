@@ -63,3 +63,29 @@ export function parseRetryAfter(err: unknown): number | undefined {
   }
   return undefined;
 }
+
+/** Detect "day/week/month limit" in error message and return cooldown ms. */
+export function parseUsageLimitCooldown(message: string): number | undefined {
+  const lower = message.toLowerCase();
+  if (!lower.includes("limit")) return undefined;
+  if (lower.includes("day")) {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+    return tomorrow.getTime() - Date.now();
+  }
+  if (lower.includes("week")) {
+    const now = new Date();
+    const daysUntilMonday = (8 - now.getDay()) % 7 || 7;
+    const monday = new Date(now);
+    monday.setDate(monday.getDate() + daysUntilMonday);
+    monday.setHours(0, 0, 0, 0);
+    return monday.getTime() - Date.now();
+  }
+  if (lower.includes("month")) {
+    const now = new Date();
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    return nextMonth.getTime() - Date.now();
+  }
+  return undefined;
+}
