@@ -8,7 +8,7 @@ import { AcpTransport } from "./transport/acp-transport.js";
 import { logInfo, logWarn } from "./logger.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
-export type AgentRole = "professor" | "dreamy" | "browsie" | "coding" | "cron";
+export type AgentRole = "professor" | "dreamy" | "browsie" | "coding" | "task";
 
 export interface AgentRoleConfig {
   agent: string | null;
@@ -24,7 +24,7 @@ const AGENT_ROLES: Record<AgentRole, AgentRoleConfig> = {
   dreamy: { agent: "dreamy", model: null, persona: "persona/prompts/sleep/00-identity.md", autoReinit: false, tag: "acp-sleep", trust: 2 },
   coding: { agent: "coding-agent", model: null, persona: null, autoReinit: true, tag: "acp-coding", trust: 2 },
   browsie: { agent: "browsie", model: null, persona: null, autoReinit: false, tag: "acp-browsie", trust: 1 },
-  cron: { agent: "professor", model: null, persona: null, autoReinit: false, tag: "acp-cron", trust: 2 },
+  task: { agent: "professor", model: null, persona: null, autoReinit: false, tag: "acp-task", trust: 2 },
 };
 
 function resolveModel(role: AgentRole): string | undefined {
@@ -61,20 +61,20 @@ export function createAgentTransport(
   });
 }
 
-export type SubagentRole = "sleep" | "browse" | "coding" | "cron";
+export type SubagentRole = "sleep" | "browse" | "coding" | "task";
 
 const SUBAGENT_TO_AGENT: Record<SubagentRole, string> = {
   sleep: "dreamy",
   browse: "browsie",
   coding: "coding",
-  cron: "professor",
+  task: "professor",
 };
 
 const SUBAGENT_ACP_ROLE: Record<SubagentRole, AgentRole> = {
   sleep: "dreamy",
   browse: "browsie",
   coding: "coding",
-  cron: "cron",
+  task: "task",
 };
 
 /** Unified transport factory for all subagents. Reads from transport.json + models.json. */

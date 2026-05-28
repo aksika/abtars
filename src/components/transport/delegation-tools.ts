@@ -43,7 +43,7 @@ export function getActiveBackgrounds(): Map<string, BackgroundEntry> {
 const TYPE_MAP: Record<string, { sessionType: SessionType; agent: AgentName }> = {
   code: { sessionType: "C", agent: "coding" },
   browse: { sessionType: "B", agent: "browsie" },
-  task: { sessionType: "T", agent: "cron" },
+  task: { sessionType: "T", agent: "task" },
 };
 
 export const spawnSessionTool: ToolDefinition = {

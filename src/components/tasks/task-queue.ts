@@ -353,7 +353,7 @@ export class CronQueue {
       runtime.shutdown();
     }, AGENT_TIMEOUT_MS);
 
-    runtime.complete("cron", prompt)
+    runtime.complete("task", prompt)
       .then((response) => {
         // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
         // extract just the meaningful content. This happens when the model echoes its last

@@ -13,7 +13,7 @@ import type { ModelHealthRegistry } from "./transport/model-health-registry.js";
 
 const TAG = "runtime";
 
-export type AgentName = "professor" | "dreamy" | "browsie" | "coding" | "cron";
+export type AgentName = "professor" | "dreamy" | "browsie" | "coding" | "task";
 
 export interface AgentOpts {
   /** Override default session strategy for this call. */
@@ -52,7 +52,7 @@ const DEFAULT_SESSION: Record<AgentName, "fresh" | "reuse"> = {
   dreamy: "fresh",
   browsie: "fresh",
   coding: "reuse",
-  cron: "fresh",
+  task: "fresh",
 };
 
 const DEFAULT_SPAWN_TIMEOUT_MS = 600_000; // 10 min
@@ -129,7 +129,7 @@ export class SubagentRuntime {
 
     // Create sub-session for visibility in /session list (#510)
     if (this._sessionManager) {
-      const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", cron: "T" };
+      const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
       const sessionType = typeMap[agent];
       if (sessionType) this._sessionManager.createSubSession("master", "telegram", sessionType);
     }
@@ -216,9 +216,9 @@ const BROWSE_SYSTEM_PROMPT = `You are a web browsing assistant. You have two too
 Prefer the browser tool when the page likely uses JavaScript rendering or requires interaction. Use curl when a simple HTTP request suffices.`;
 
 const AGENT_TO_ROLE: Record<AgentName, import("./agent-registry.js").SubagentRole> = {
-  professor: "cron",
+  professor: "task",
   dreamy: "sleep",
   browsie: "browse",
   coding: "coding",
-  cron: "cron",
+  task: "task",
 };

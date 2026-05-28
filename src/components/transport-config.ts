@@ -210,7 +210,7 @@ export function resolveAgent(role: string, transport?: TransportConfig | null, m
   if (!tc) return null;
 
   // cron inherits professor
-  const effectiveRole = role === "cron" ? "professor" : role;
+  const effectiveRole = role === "task" ? "professor" : role;
   const assignment = tc.agents[effectiveRole];
   if (!assignment) {
     logWarn(TAG, `No agent assignment for role "${role}"`);

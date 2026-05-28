@@ -111,7 +111,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
             channelId: String(r.chatId),
             sessionKey: (loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master") + ":telegram",
             senderId: String(r.chatId),
-            senderName: "cron",
+            senderName: "task",
             text: `[Scheduled reminder] ${r.message}`,
             timestamp: Date.now(),
             threadId: r.threadId ? String(r.threadId) : undefined,
