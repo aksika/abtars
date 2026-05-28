@@ -11,6 +11,7 @@ import type { MemoryBackend } from "abmind";
 import type { InstantStoreParams } from "../../types/index.js";
 import { logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
+import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
 
 const TAG = "tool_registry";
 
@@ -533,8 +534,9 @@ const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
-export function getToolSchemas(): Array<{ type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }> {
-  return ALL_TOOLS.map(t => ({
+export function getToolSchemas(policy?: SandboxPolicy): Array<{ type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }> {
+  const tools = policy ? ALL_TOOLS.filter(t => checkTool(t.name, policy).allowed) : ALL_TOOLS;
+  return tools.map(t => ({
     type: "function" as const,
     function: { name: t.name, description: t.description, parameters: t.parameters },
   }));
@@ -552,7 +554,26 @@ function checkSkillRead(toolName: string, args: Record<string, string>): void {
   }
 }
 
-export async function executeToolCall(name: string, args: Record<string, string>, context?: { userId: string; signal?: AbortSignal }): Promise<string> {
+export async function executeToolCall(name: string, args: Record<string, string>, context?: { userId: string; signal?: AbortSignal; sandboxPolicy?: SandboxPolicy }): Promise<string> {
+  // Sandbox enforcement
+  if (context?.sandboxPolicy) {
+    const toolCheck = checkTool(name, context.sandboxPolicy);
+    if (!toolCheck.allowed) {
+      const available = ALL_TOOLS.filter(t => checkTool(t.name, context.sandboxPolicy!).allowed).map(t => t.name);
+      auditDeny(name, undefined, "session", toolCheck.reason!);
+      return JSON.stringify({ error: `Tool '${name}' not available in this session`, available_tools: available, reason: "peer_sandbox" });
+    }
+    const filePath = args["path"] ?? args["file_path"];
+    if (filePath) {
+      const mode = name.includes("read") || name === "memory_recall" ? "read" as const : "write" as const;
+      const pathCheck = checkPath(filePath, mode, context.sandboxPolicy);
+      if (!pathCheck.allowed) {
+        auditDeny(name, filePath, "session", pathCheck.reason!);
+        return JSON.stringify({ error: pathCheck.reason, reason: "peer_sandbox" });
+      }
+    }
+  }
+
   const tool = ALL_TOOLS.find(t => t.name === name);
   if (!tool) return JSON.stringify({ error: `Unknown tool: ${name}` });
   const ts = Date.now();

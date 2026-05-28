@@ -130,3 +130,43 @@ export function createSkillTrashPruneTask(): HeartbeatTask {
     },
   };
 }
+
+/** #681: Rotate audit.jsonl when > 10MB, prune files older than 30 days. */
+export function createAuditRotationTask(): HeartbeatTask {
+  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+  let counter = 0;
+  return {
+    name: "audit-rotation",
+    execute: async () => {
+      counter++;
+      if (counter % 72 !== 0) return; // ~hourly
+      const { existsSync, statSync, renameSync, readdirSync, unlinkSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { abtarsHome } = await import("../paths.js");
+      const logsDir = join(abtarsHome(), "logs");
+      const auditPath = join(logsDir, "audit.jsonl");
+      if (!existsSync(auditPath)) return;
+      try {
+        const stat = statSync(auditPath);
+        if (stat.size > 10 * 1024 * 1024) {
+          const date = new Date().toISOString().slice(0, 10);
+          renameSync(auditPath, join(logsDir, `audit-${date}.jsonl`));
+          logInfo("audit-rotation", `Rotated audit.jsonl (${(stat.size / 1024 / 1024).toFixed(1)}MB)`);
+        }
+      } catch (err) { logAndSwallow(TAG, "audit rotate", err); }
+      // Prune old audit files
+      const now = Date.now();
+      try {
+        for (const f of readdirSync(logsDir)) {
+          if (!f.startsWith("audit-") || !f.endsWith(".jsonl")) continue;
+          const full = join(logsDir, f);
+          const stat = statSync(full);
+          if (now - stat.mtimeMs > THIRTY_DAYS_MS) {
+            unlinkSync(full);
+            logInfo("audit-rotation", `Pruned: ${f}`);
+          }
+        }
+      } catch (err) { logAndSwallow(TAG, "audit prune", err); }
+    },
+  };
+}

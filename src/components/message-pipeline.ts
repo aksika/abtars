@@ -217,6 +217,11 @@ export async function handleInboundMessage(
     const agentSession = activeSession.agentSession;
     logDebug(TAG, `Route: session=${activeSessionId} type=${activeSession.type} agentSession=${agentSession ? "yes" : "no"}`);
 
+    // #681: attach sandbox policy (owner for now — peer/guest in #678)
+    if ("sandboxPolicy" in transport) {
+      const { buildPolicy } = await import("./tool-sandbox.js");
+      (transport as any).sandboxPolicy = buildPolicy("owner");
+    }
     // Wire cooperative pause check (#539) — agent loop checks this between tool calls
     if ("isPaused" in transport) {
       (transport as any).isPaused = () => activeSession.paused;

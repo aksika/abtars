@@ -57,6 +57,8 @@ export class DirectApiTransport implements IKiroTransport {
   onIntermediateResponse?: (text: string) => void;
   onToolCallStart?: (toolName: string) => void;
   onSegmentBreak?: (text: string) => void;
+  /** Sandbox policy for tool access control (#681). Set by pipeline before prompt. */
+  sandboxPolicy?: import("../tool-sandbox.js").SandboxPolicy;
   /** Called when fallback model is selected — send notification before response. */
   onFallback?: (model: string, ctxPercent: number, reason?: string) => void;
   /** Cooperative pause check — if returns true, agent loop breaks between tool calls. */
@@ -312,7 +314,7 @@ export class DirectApiTransport implements IKiroTransport {
           let args: Record<string, string>;
           try { args = JSON.parse(tc.function.arguments); } catch (err) { logAndSwallow(TAG, "JSON.parse tool args", err); args = {}; }
 
-          const result = await executeToolCall(tc.function.name, args, { userId: this._activeSessionKey?.split(":")[0] || "master", signal });
+          const result = await executeToolCall(tc.function.name, args, { userId: this._activeSessionKey?.split(":")[0] || "master", signal, sandboxPolicy: this.sandboxPolicy });
           session.addToolResult(tc.id, tc.function.name, result);
 
           // #621: scrub secret values from conversation history after store
@@ -359,7 +361,7 @@ export class DirectApiTransport implements IKiroTransport {
       const { toResponsesRequest } = await import("./responses-adapter.js");
       const { parseResponsesSSE } = await import("./sse-parser-responses.js");
       const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" as string | ContentPart[] }));
-      const reqBody = { ...toResponsesRequest(this.activeModel, msgs, getToolSchemas(), this.config.maxOutput), stream: true };
+      const reqBody = { ...toResponsesRequest(this.activeModel, msgs, getToolSchemas(this.sandboxPolicy), this.config.maxOutput), stream: true };
       const hdrs: Record<string, string> = { "Content-Type": "application/json" };
       if (this.activeApiKey) hdrs["Authorization"] = `Bearer ${this.activeApiKey}`;
       const res = await fetch(`${this.activeEndpoint}/responses`, {
@@ -386,7 +388,7 @@ export class DirectApiTransport implements IKiroTransport {
       const { toAnthropicRequest, buildAnthropicHeaders } = await import("./anthropic-adapter.js");
       const { parseAnthropicSSE } = await import("./sse-parser-anthropic.js");
       const msgs = session.messages.map(m => ({ role: m.role, content: m.content ?? "" as string | ContentPart[], tool_call_id: m.tool_call_id }));
-      const reqBody = { ...toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput, getToolSchemas()), stream: true };
+      const reqBody = { ...toAnthropicRequest(this.activeModel, msgs, this.config.maxOutput, getToolSchemas(this.sandboxPolicy)), stream: true };
       const hdrs = buildAnthropicHeaders(this.activeApiKey ?? "");
       const res = await fetch(`${this.activeEndpoint}/messages`, {
         method: "POST", headers: hdrs, body: JSON.stringify(reqBody), signal: composed,
@@ -410,7 +412,7 @@ export class DirectApiTransport implements IKiroTransport {
     const body: Record<string, unknown> = {
       model: this.activeModel,
       messages: session.messages,
-      tools: getToolSchemas(),
+      tools: getToolSchemas(this.sandboxPolicy),
       max_tokens: this.config.maxOutput,
       stream: true,
       stream_options: { include_usage: true },
