@@ -19,6 +19,9 @@ export interface PeerEntry {
   udpPort?: number;
   certFingerprint?: string;
   certPem?: string;
+  allowedTools?: string[];
+  allowedRead?: string[];
+  allowedWrite?: string[];
 }
 
 export interface PeerConfig {
@@ -54,6 +57,9 @@ export function loadPeerConfig(): PeerConfig {
             ...(typeof e.udpPort === "number" ? { udpPort: e.udpPort } : {}),
             ...(typeof e.certFingerprint === "string" ? { certFingerprint: e.certFingerprint } : {}),
             ...(typeof e.certPem === "string" ? { certPem: e.certPem } : {}),
+            ...(Array.isArray(e.allowedTools) ? { allowedTools: e.allowedTools as string[] } : {}),
+            ...(Array.isArray(e.allowedRead) ? { allowedRead: e.allowedRead as string[] } : {}),
+            ...(Array.isArray(e.allowedWrite) ? { allowedWrite: e.allowedWrite as string[] } : {}),
           };
         } else {
           logWarn(TAG, `Skipped peer '${name}' — missing host/port/token`);

@@ -29,6 +29,8 @@ export interface AgentSession {
   sendPrompt(sessionKey: string, prompt: string, image?: { mime: string; base64: string }): Promise<string>;
   destroy(): Promise<void>;
   readonly isReady: boolean;
+  /** Underlying transport — used to set sandboxPolicy for peer sessions (#678). */
+  readonly transport?: IKiroTransport;
 }
 
 export interface SpawnResult {
@@ -118,6 +120,7 @@ export class SubagentRuntime {
         logInfo(TAG, `${agent} session destroyed`);
       },
       get isReady() { return cached.transport.isReady; },
+      get transport() { return cached.transport; },
     };
   }
 
