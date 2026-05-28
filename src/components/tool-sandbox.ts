@@ -4,6 +4,7 @@
  */
 
 import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -41,15 +42,20 @@ export function checkTool(name: string, policy: SandboxPolicy): CheckResult {
   return { allowed: false, reason: `Tool '${name}' not available in this session` };
 }
 
-export function checkPath(path: string, mode: "read" | "write", policy: SandboxPolicy): CheckResult {
-  const abs = resolve(path.replace(/^~/, homedir()));
+export function checkPath(filePath: string, mode: "read" | "write", policy: SandboxPolicy): CheckResult {
+  // Resolve ~, normalize .., and resolve symlinks to prevent traversal attacks
+  const expanded = filePath.replace(/^~/, homedir());
+  const normalized = resolve(expanded);
+  let abs: string;
+  try { abs = realpathSync(normalized); } catch { abs = normalized; /* file may not exist yet (write) */ }
+
   const list = mode === "read" ? policy.allowedRead : policy.allowedWrite;
   // If wildcard, skip blacklist (owner sessions)
   if (list.length === 1 && list[0] === "*") return { allowed: true };
   // Blacklist always enforced for explicit path lists
   for (const blocked of PATH_BLACKLIST) {
     if (abs === blocked || abs.startsWith(blocked + "/")) {
-      return { allowed: false, reason: `Path '${path}' is restricted` };
+      return { allowed: false, reason: `Path '${filePath}' is restricted` };
     }
   }
   if (list.length === 0) return { allowed: false, reason: `No ${mode} access in this session` };
@@ -57,7 +63,7 @@ export function checkPath(path: string, mode: "read" | "write", policy: SandboxP
     const absPrefix = resolve(prefix.replace(/^~/, homedir()));
     if (abs === absPrefix || abs.startsWith(absPrefix + "/")) return { allowed: true };
   }
-  return { allowed: false, reason: `Path '${path}' not in allowed ${mode} paths` };
+  return { allowed: false, reason: `Path '${filePath}' not in allowed ${mode} paths` };
 }
 
 export function buildPolicy(source: "owner" | "peer" | "guest", config?: Partial<SandboxPolicy>): Readonly<SandboxPolicy> {

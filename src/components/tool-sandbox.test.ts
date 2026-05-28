@@ -126,3 +126,67 @@ describe("ToolLoopGuard", () => {
     expect(guard.beforeCall("execute_bash", args).allowed).toBe(true);
   });
 });
+
+describe("checkPath — traversal attacks", () => {
+  const policy: SandboxPolicy = {
+    allowedTools: ["file_read", "file_write"],
+    allowedRead: ["~/.abtars/workspace/a2a/"],
+    allowedWrite: ["~/.abtars/workspace/a2a/"],
+    canExecuteBash: false,
+  };
+
+  it("blocks ../ traversal to config", () => {
+    const r = checkPath("~/.abtars/workspace/a2a/../../config/.env", "read", policy);
+    expect(r.allowed).toBe(false);
+  });
+
+  it("blocks ../ traversal to secret", () => {
+    const r = checkPath("~/.abtars/workspace/a2a/../secret/OPENAI_API_KEY", "read", policy);
+    expect(r.allowed).toBe(false);
+  });
+
+  it("blocks ../ traversal to abmind", () => {
+    const r = checkPath("~/.abtars/workspace/a2a/../../../.abmind/memory/memory.db", "read", policy);
+    expect(r.allowed).toBe(false);
+  });
+
+  it("blocks normalized path that escapes sandbox", () => {
+    const r = checkPath("~/.abtars/workspace/a2a/./../../config/peers.json", "read", policy);
+    expect(r.allowed).toBe(false);
+  });
+
+  it("allows valid path within sandbox", () => {
+    const r = checkPath("~/.abtars/workspace/a2a/output.json", "write", policy);
+    expect(r.allowed).toBe(true);
+  });
+
+  it("blocks absolute path to blacklisted dir", () => {
+    const home = require("os").homedir();
+    const r = checkPath(`${home}/.abmind/memory/memory.db`, "read", policy);
+    expect(r.allowed).toBe(false);
+  });
+});
+
+describe("checkTool — edge cases", () => {
+  const policy: SandboxPolicy = {
+    allowedTools: ["web_fetch", "peer_ask"],
+    allowedRead: [],
+    allowedWrite: [],
+    canExecuteBash: false,
+  };
+
+  it("rejects case-variant tool names (strict match)", () => {
+    expect(checkTool("Web_Fetch", policy).allowed).toBe(false);
+    expect(checkTool("WEB_FETCH", policy).allowed).toBe(false);
+    expect(checkTool("PEER_ASK", policy).allowed).toBe(false);
+  });
+
+  it("rejects tool with extra whitespace", () => {
+    expect(checkTool(" web_fetch", policy).allowed).toBe(false);
+    expect(checkTool("web_fetch ", policy).allowed).toBe(false);
+  });
+
+  it("rejects empty string tool name", () => {
+    expect(checkTool("", policy).allowed).toBe(false);
+  });
+});
