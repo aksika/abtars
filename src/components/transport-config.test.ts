@@ -40,8 +40,8 @@ describe("resolveAgent", () => {
     expect(r.contextWindow).toBe(128000);
   });
 
-  it("cron inherits professor", () => {
-    const r = resolveAgent("cron", TRANSPORT, MODELS)!;
+  it("task inherits professor", () => {
+    const r = resolveAgent("task", TRANSPORT, MODELS)!;
     expect(r.model).toBe("claude-sonnet-4.6");
     expect(r.providerName).toBe("kiro-free");
   });
