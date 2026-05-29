@@ -55,7 +55,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
     const adapter = ctx.telegramAdapter;
 
-    adapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
+    adapter.sendMessage(String(chatId), `${result}`).catch(err => {
       logWarn("main", `Cron task TG report failed: ${err}`);
     });
 
@@ -155,7 +155,7 @@ export function createCronCallback(ctx: BootCtx): TaskCompleteCallback {
     if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
     const adapter = ctx.telegramAdapter;
 
-    adapter.sendMessage(String(chatId), `Cron: ${message}\n\n${result}`).catch(err => {
+    adapter.sendMessage(String(chatId), `${result}`).catch(err => {
       logWarn("main", `Cron task TG report failed: ${err}`);
     });
 
