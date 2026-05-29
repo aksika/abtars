@@ -48,7 +48,7 @@ export async function handleStatus(_text: string, ctx: CommandContext): Promise<
       transport: ctx.transport,
       startedAt: ctx.startedAt,
       bridgeLockPath: ctx.bridgeLockPath ?? "",
-      heartbeat: null,
+      heartbeat: { intervalMs: Math.max(60, parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "60", 10)) * 1000 },
     });
     let text = renderStatusText(status);
     // #255: append sanitized env dump on /status full

@@ -249,6 +249,7 @@ while true; do
     log "Bridge process gone (PID=$BRIDGE_PID)"
     notify "🚨 Watchdog: bridge process gone, restarting"
     BRIDGE_PID=""
+    rm -f "$LOCK"
     spawn_bridge "${BRIDGE_ARGS[@]}"
     continue
   fi
