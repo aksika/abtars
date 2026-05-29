@@ -29,6 +29,8 @@ export interface CronEntry {
   taskFile?: string;
   paused?: boolean;
   consecutiveFails?: number;
+  agentFollowUp?: boolean;
+  agentMessage?: string;
   fired: boolean;
   createdAt: number;
   lastRanAt?: number;

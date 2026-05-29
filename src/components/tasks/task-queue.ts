@@ -293,6 +293,13 @@ export class CronQueue {
         logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
         recordRunToFile(entry.id, code ?? undefined);
         this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
+        if (code === 0 && output.trim() && entry.agentFollowUp && entry.agentMessage) {
+          logInfo(TAG, `■ Gate triggered → enqueuing agent follow-up for "${entry.id}"`);
+          const agentEntry: CronEntry = { ...entry, executor: "agent", message: entry.agentMessage.replace("{{GATE_OUTPUT}}", output.trim()), agentFollowUp: undefined };
+          this.clearCurrent();
+          this.enqueue(agentEntry, onComplete);
+          return;
+        }
         if (code !== 0) {
           scheduleRetry(entry, !!entry._retrying);
           this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
