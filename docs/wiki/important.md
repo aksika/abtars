@@ -57,7 +57,7 @@ Send `/wait <message>` while the agent is working to inject a course correction 
 
 ### Peer-to-Peer (A2A)
 
-Peer communication between abTARS instances (e.g. KP ↔ Molty) works via authenticated HTTP. Stable for basic message exchange. Advanced coordination features are under active development.
+Peer communication between abTARS instances (e.g. Instance A ↔ Instance B) works via authenticated HTTP. Stable for basic message exchange. Advanced coordination features are under active development.
 
 ## Recommendations
 

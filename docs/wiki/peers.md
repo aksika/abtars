@@ -8,7 +8,7 @@ Each abTARS instance exposes an **Agent API** — an authenticated HTTPS endpoin
 
 ```
 ┌──────────┐   peer_ask    ┌──────────┐
-│    KP    │ ────────────► │  Molty   │
+│ Instance A │ ──────────► │ Instance B │
 │ (WSL)    │ ◄──────────── │  (Mac)   │
 └──────────┘   response    └──────────┘
 ```
@@ -47,7 +47,7 @@ The remote instance processes the message through its full agent pipeline (model
   },
   "peers": {
     "molty": {
-      "host": "100.82.167.127",
+      "host": "<peer-ip-or-hostname>",
       "port": 3100,
       "token": "<shared secret for JWT>",
       "verifyKey": "<molty's Ed25519 public key>",
@@ -74,7 +74,7 @@ See the [TLS Certificate Setup](/abtars/peers-tls) guide for step-by-step instru
 
 ## Use cases
 
-- **Cross-host delegation:** "Ask Molty to check if Ollama is running"
+- **Cross-host delegation:** "Ask peer to check if Ollama is running"
 - **Information sharing:** "What did you tell the user last?"
 - **Coordinated tasks:** One instance triggers work on another
 - **Health checks:** Verify a peer is alive and responsive

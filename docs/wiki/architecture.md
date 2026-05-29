@@ -18,7 +18,7 @@
 │                    A2A (Peer-to-Peer)                    │
 │                                                         │
 │  abTARS instance ◀──── /v1/chat/completions ────▶ abTARS instance  │
-│  (KP on WSL)          JWT + digital signatures     (Molty on Mac)  │
+│  (Instance A)         JWT + digital signatures     (Instance B)  │
 │                       over Tailscale                               │
 └─────────────────────────────────────────────────────────┘
 ```

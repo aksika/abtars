@@ -47,7 +47,7 @@ On **your** host, add the peer's cert info:
 {
   "peers": {
     "molty": {
-      "host": "100.82.167.127",
+      "host": "<peer-tailscale-ip>",
       "port": 3100,
       "token": "...",
       "verifyKey": "...",
