@@ -287,11 +287,11 @@ If you had an older `~/.abtars/` with `dist/` at the root (no `releases/`), firs
 
 1. **Stop the bridge + watchdog:**
    ```bash
-   # Linux / KP:
+   # Linux / peer-a:
    pkill -f "watchdog.*--all"
    pkill -TERM -f 'node.*dist/main\.js'
 
-   # macOS / Molty:
+   # macOS / peer-b:
    launchctl unload ~/Library/LaunchAgents/com.abtars.watchdog.plist
    ```
    Verify with `pgrep -f 'node.*abtars.*dist/main\.js'` → empty.
@@ -319,10 +319,10 @@ If you had an older `~/.abtars/` with `dist/` at the root (no `releases/`), firs
 
 4. **Restart:**
    ```bash
-   # Linux / KP:
+   # Linux / peer-a:
    ~/.abtars/watchdog.sh &  # reads platform config from .env
 
-   # macOS / Molty:
+   # macOS / peer-b:
    launchctl load ~/Library/LaunchAgents/com.abtars.watchdog.plist
    ```
 
@@ -384,7 +384,7 @@ The watchdog:
 
 For persistent service supervision:
 
-### macOS (launchd — Molty)
+### macOS (launchd — peer-b)
 `~/Library/LaunchAgents/com.abtars.watchdog.plist` — the file is shipped in the repo's `scripts/` and installed by `install`. Load:
 ```bash
 launchctl load ~/Library/LaunchAgents/com.abtars.watchdog.plist
@@ -397,7 +397,7 @@ sudo cp ~/workspace/ab/abtars/scripts/abtars@.service /etc/systemd/system/
 sudo systemctl enable --now abtars@$USER
 ```
 
-For KP dev: just background the watchdog (`~/.abtars/watchdog.sh &  # reads platform config from .env`). Restart manually on reboot.
+For peer-a dev: just background the watchdog (`~/.abtars/watchdog.sh &  # reads platform config from .env`). Restart manually on reboot.
 
 ---
 
@@ -467,7 +467,7 @@ Should be gone in schema v17. Check with `abmind status` — version should be c
 
 The `/setMyCommands` call happens at bridge boot (see `src/boot/phase-platforms.ts`). Restart bridge to re-sync.
 
-### Agent API permission denied from Molty
+### Agent API permission denied from peer-b
 
 Check `config/.env`:
 ```

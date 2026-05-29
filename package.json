@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
   "type": "module",
-  "main": "dist/main.js",
+  "main": "bundle/abtars.js",
   "scripts": {
     "build": "tsc && rm -rf dist/components/dashboard/public && cp -r src/components/dashboard/public dist/components/dashboard/public && git log -1 --format='{\"hash\":\"%h\",\"date\":\"%ci\"}' > dist/build-info.json",
     "bundle": "rm -rf bundle && cd ../abmind && npm run build && cd ../abtars && node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public && cp -r agents bundle/agents",
@@ -43,10 +43,17 @@
     "vitest": "^4.1.5"
   },
   "bin": {
-    "abtars": "dist/cli/abtars.js",
-    "abtars-browser": "dist/cli/abtars-browser.js",
-    "abtars-task": "dist/cli/abtars-task.js",
-    "abtars-tweet": "dist/cli/abtars-tweet.js"
+    "abtars": "bundle/abtars-cli.js",
+    "abtars-browser": "bundle/abtars-browser.js",
+    "abtars-restart": "bundle/abtars-restart.js"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "files": [
+    "bundle/",
+    "core/",
+    "scripts/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ]
 }

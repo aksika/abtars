@@ -2,7 +2,7 @@
 
 ## What it is
 
-The main agent (KP/Molty) can spawn independent background sessions that work on tasks asynchronously. The user keeps chatting normally while background workers handle complex tasks in parallel.
+The main agent (peer-a/peer-b) can spawn independent background sessions that work on tasks asynchronously. The user keeps chatting normally while background workers handle complex tasks in parallel.
 
 ## How it works
 

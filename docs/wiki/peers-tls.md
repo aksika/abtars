@@ -46,7 +46,7 @@ On **your** host, add the peer's cert info:
 ```json
 {
   "peers": {
-    "molty": {
+    "peer-b": {
       "host": "<peer-tailscale-ip>",
       "port": 3100,
       "token": "...",

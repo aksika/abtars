@@ -135,7 +135,7 @@ describe("#373 — buildModelsList", () => {
 
 describe("#373 — extractSessionKey", () => {
   it("returns header value when present", () => {
-    expect(extractSessionKey({ "x-session-id": "molty" })).toBe("molty");
+    expect(extractSessionKey({ "x-session-id": "my-agent" })).toBe("my-agent");
   });
 
   it("returns 'default' when header absent", () => {

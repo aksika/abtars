@@ -123,7 +123,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   // 1b. Agent name
   const agentName = await text({
     message: 'Agent name (identity for this deployment)',
-    placeholder: 'e.g. KP, Molty',
+    placeholder: 'e.g. MyAgent, HomeBot',
     initialValue: '',
   });
   if (isCancel(agentName)) { cancel('Cancelled.'); return null; }

@@ -29,7 +29,7 @@ Both must pass. Compromising one doesn't break the other.
 The agent uses `peer_ask` to talk to another instance:
 
 ```
-peer_ask(peer: "molty", message: "What's your current sleep status?")
+peer_ask(peer: "peer-b", message: "What's your current sleep status?")
 → "I'm awake, last slept 6 hours ago."
 ```
 
@@ -46,11 +46,11 @@ The remote instance processes the message through its full agent pipeline (model
     "signingKey": "<Ed25519 private key for JWT signing>"
   },
   "peers": {
-    "molty": {
+    "peer-b": {
       "host": "<peer-ip-or-hostname>",
       "port": 3100,
       "token": "<shared secret for JWT>",
-      "verifyKey": "<molty's Ed25519 public key>",
+      "verifyKey": "<peer-b's Ed25519 public key>",
       "certFingerprint": "SHA256:B3:9A:5D:...",
       "certPem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"
     }

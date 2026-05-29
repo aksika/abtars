@@ -62,7 +62,7 @@ Skills are NOT code — they're markdown instructions the agent reads at runtime
 
 | Skill | Description |
 |-------|-------------|
-| `a2a-communication` | Communicate with other abtars instances (Molty ↔ KP) via `peer_ask`. Delegate tasks across hosts. |
+| `a2a-communication` | Communicate with other abtars instances (peer-b ↔ peer-a) via `peer_ask`. Delegate tasks across hosts. |
 | `browse-delegate` | Delegate complex multi-step browser tasks to the Browsie sub-agent (Level 2 browsing). |
 | `browser` | Control headless Chromium — navigate, fill forms, extract text, take screenshots, multi-step workflows. |
 | `clawhub` | Search, install, and update community skills from ClawHub (clawhub.ai). |

@@ -34,15 +34,15 @@ The agent doesn't load every skill into context — just the catalog. Full skill
 
 ```markdown
 ---
-name: deploy-molty
+name: deploy-peer-b
 description: Deploy abTARS to the Mac mini via SSH
-tags: [deploy, molty, ssh]
+tags: [deploy, peer-b, ssh]
 related: [deploy-kp, watchdog]
 ---
 
 ## Steps
 
-1. SSH into molty...
+1. SSH into peer-b...
 2. Pull latest...
 ...
 ```
