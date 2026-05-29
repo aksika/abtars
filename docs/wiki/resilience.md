@@ -35,6 +35,29 @@ A lightweight process monitor watches the bridge. If the bridge crashes or becom
 
 The watchdog itself is supervised by the OS (launchd on macOS, systemd on Linux). If the watchdog dies, the OS restarts it. Two layers of supervision — the bridge almost never stays dead.
 
+## Runtime Self-Healer
+
+A background log watcher that detects recurring errors and either auto-fixes them or notifies the owner.
+
+**How it works:**
+
+1. Tails the bridge log file in real-time
+2. Matches ERROR lines against known patterns
+3. For fixable patterns → runs an auto-fix action (e.g. restart a subsystem)
+4. For unfixable patterns → sends a ⚠️ notification to the owner via Telegram
+
+**Notification throttling:**
+
+| Rule | Value |
+|------|-------|
+| Cooldown per error key | 2 hours (same error won't notify again within 2h) |
+| Daily cap | 12 notifications/day total |
+| Auto-fix circuit breaker | 3 failures → pauses auto-fix for that pattern (24h reset) |
+
+**Auto-fix rules** are pattern-based. When a known error fires, the self-healer runs a predefined repair action. If the repair fails 3 times in a row, the circuit breaker trips and the owner gets a "paused" notification.
+
+**Toggle:** `/healing` command enables/disables the self-healer. `/healing reset` clears circuit breakers.
+
 ## Model Fallbacks
 
 If the primary AI model fails (rate limit, timeout, outage), the bridge automatically falls back to the next model in the chain. No user intervention needed — the response arrives from whichever model is healthy.
