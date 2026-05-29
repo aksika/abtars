@@ -102,8 +102,13 @@ export class TelegramPoller {
         const baseDelay = Math.min(2 ** failures * 1000, 60_000);
         const jitter = Math.random() * baseDelay;
         const delay = baseDelay + jitter;
-        const log = failures < 3 ? logWarn : logError;
-        log("poller", `Error (attempt ${failures}), retrying in ${Math.round(delay)}ms`, err);
+        const is409 = String(err).includes("409") || String(err).includes("terminated by other getUpdates");
+        const log = is409 ? (failures >= 50 ? logError : logWarn) : (failures < 3 ? logWarn : logError);
+        if (is409 && failures < 50) {
+          log("poller", `409 conflict (attempt ${failures}) — another instance running, backing off`);
+        } else {
+          log("poller", `Error (attempt ${failures}), retrying in ${Math.round(delay)}ms`, err);
+        }
         await sleep(delay);
       }
     }

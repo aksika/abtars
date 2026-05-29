@@ -39,7 +39,8 @@ function loadAutoFixRules(): AutoFixRule[] {
   } catch { return []; }
 }
 
-const NOTIFY_COOLDOWN_MS = 60 * 60 * 1000; // 60min
+const NOTIFY_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2h
+const MAX_NOTIFICATIONS_PER_DAY = 12;
 
 interface ErrorState {
   lastNotifiedAt: number;
@@ -50,6 +51,9 @@ interface ErrorState {
 
 const CIRCUIT_BREAKER_MAX = 3;
 const CIRCUIT_BREAKER_RESET_MS = 24 * 60 * 60 * 1000; // 24h
+
+let notificationsToday = 0;
+let notificationDayStart = 0;
 
 function logAutoFix(message: string): void {
   const dir = join(abtarsHome(), "logs");
@@ -170,7 +174,11 @@ export function createSelfHealerTask(
 
           // Notify tier
           if (now - state.lastNotifiedAt < NOTIFY_COOLDOWN_MS) continue;
+          const dayStart = new Date().setHours(0, 0, 0, 0);
+          if (dayStart !== notificationDayStart) { notificationsToday = 0; notificationDayStart = dayStart; }
+          if (notificationsToday >= MAX_NOTIFICATIONS_PER_DAY) continue;
           state.lastNotifiedAt = now;
+          notificationsToday++;
           const summary = match[2]!.slice(0, 120);
           const countText = state.count > 1 ? ` (${state.count}x in last hour)` : "";
           adapter.sendNotification(String(chatId), `⚠️ [${match[1]}] ${summary}${countText}`);
