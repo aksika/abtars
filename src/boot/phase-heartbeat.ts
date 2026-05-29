@@ -58,7 +58,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   // bridge.lock already written at process start (bridge-app.ts) — just update startedAt from ctx
   updateBridgeLockField("startedAt", ctx.startedAt);
 
-  const hbIntervalMs = parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "300", "heartbeat tick interval"), 10) * 1000;
+  const hbIntervalMs = Math.max(60, parseInt(readEnvWithDefault("HEARTBEAT_INTERVAL_SEC", "60", "heartbeat tick interval"), 10)) * 1000;
 
   // In-proc watchdog (#263: extracted to heartbeat-watchdog.ts)
   const WD_THRESHOLD_MS = hbIntervalMs * 3;
@@ -228,7 +228,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   checkBrowseTasks();
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);
-  logInfo("main", "💓 Heartbeat started (5-min interval)");
+  logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
 
   // Expose sendSystemMessage for phase-sleep
   ctx.sendSystemMessage = sendSystemMessage;

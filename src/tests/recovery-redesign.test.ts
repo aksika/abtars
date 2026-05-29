@@ -12,6 +12,7 @@ describe("safeReadJson", () => {
   let tmpDir: string;
 
   beforeEach(() => {
+    process.env["HEARTBEAT_INTERVAL_SEC"] = "300";
     tmpDir = mkdtempSync(join(tmpdir(), "safe-json-"));
   });
 
@@ -64,6 +65,7 @@ describe("isDailyCycleDue — quiet tick counter", () => {
   }
 
   beforeEach(() => {
+    process.env["HEARTBEAT_INTERVAL_SEC"] = "300";
     tmpDir = mkdtempSync(join(tmpdir(), "bedtime-"));
     // Bridge started yesterday, lastHeartbeat exists
     writeFileSync(

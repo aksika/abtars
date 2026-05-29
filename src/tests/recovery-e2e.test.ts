@@ -24,6 +24,7 @@ function makeDeps(overrides: Partial<DailyCycleDeps> = {}): DailyCycleDeps {
 }
 
 describe("Recovery E2E: standby resume + daily cycle", () => {
+  process.env["HEARTBEAT_INTERVAL_SEC"] = "300";
   afterEach(() => {
     if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
     vi.useRealTimers();

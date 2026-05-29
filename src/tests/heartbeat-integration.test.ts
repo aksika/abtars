@@ -26,6 +26,7 @@ function makeDeps(overrides: Partial<AgeCheckDeps> = {}): AgeCheckDeps {
 
 describe("Integration: age-check task", () => {
   beforeEach(() => {
+    process.env["HEARTBEAT_INTERVAL_SEC"] = "300";
     tmpDir = mkdtempSync(join(tmpdir(), "hb-int-"));
   });
 

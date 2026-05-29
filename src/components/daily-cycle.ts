@@ -86,7 +86,7 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
 
   // No new messages this tick — increment quiet counter
   quietTickCount++;
-  const hbSec = parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "300", 10);
+  const hbSec = parseInt(process.env["HEARTBEAT_INTERVAL_SEC"] ?? "60", 10);
   const threshold = Math.ceil(getEnv().bedQuietMin * 60 / hbSec);
   logInfo("bedtime", `Quiet tick ${quietTickCount}/${threshold} (BED_TIME ${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")})`);
 

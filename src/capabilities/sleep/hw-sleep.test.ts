@@ -78,6 +78,7 @@ async function armHwSleep(opts: Required<Pick<SleepOpts, "sleepHour" | "sleepAud
 
 describe("checkHwSleep", () => {
   beforeEach(() => {
+    process.env["HEARTBEAT_INTERVAL_SEC"] = "300";
     rmSync(HOME, { recursive: true, force: true });
     mkdirSync(SLEEP_DIR, { recursive: true });
     vi.clearAllMocks();
