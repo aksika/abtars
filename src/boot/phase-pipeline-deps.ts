@@ -26,6 +26,7 @@ import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
 import { sanitizeOutbound } from "../components/sanitize-outbound.js";
+import { getEnv } from "../components/env-schema.js";
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
@@ -38,14 +39,21 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     config.transport.agentCliPath,
     config.transport.workingDir,
     (entryId, command, result) => {
+      if (ctx.telegramAdapter) {
+        ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `⚠️ ${entryId} failed`);
+      }
+      if (!getEnv().selfhealEnabled) return;
+      if (ctx.telegramAdapter) {
+        ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `🔧 Calling self-healing agent`);
+      }
       const msg = `[System] Cron task "${entryId}" failed:\nCommand: ${command}\nResult: ${result}\n\nDiagnose and fix if possible. If you can't fix it, tell the user.`;
       transport.sendPrompt("system:cron-fix", msg).catch(err => {
         logWarn("main", `Cron auto-fix inject failed: ${err}`);
       });
     },
-    (chatId, title, reason) => {
+    (chatId, title, _reason) => {
       if (!ctx.telegramAdapter) return;
-      const msg = `⏸ Auto-paused task "${title}" after 3 consecutive failures.\nLast error: ${reason}\nResume with: /task resume <id>`;
+      const msg = `⛔ "${title}" needs manual fix, further errors suppressed.\nResume with: /task resume <id>`;
       ctx.telegramAdapter.sendNotification(String(chatId), msg);
     },
   );
