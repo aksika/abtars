@@ -266,8 +266,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
       return 1;
     }
 
-    if (restartMode === "supervised-daemon") {
-      // Send USR1 to watchdog for graceful restart — no sudo needed
+    if (restartMode === "supervised-daemon" || restartMode === "supervised") {
+      // Send USR1 to watchdog for graceful restart (#688)
       process.stdout.write("\nRestarting bridge via watchdog...\n");
       const wdLock = join(paths.home, "watchdog.lock");
       const wdPid = readJsonField(wdLock, "pid") as number | undefined;
@@ -278,21 +278,21 @@ export async function update(opts: UpdateOptions): Promise<number> {
         } catch {
           process.stdout.write(`⚠️ Could not signal watchdog (PID ${wdPid}). Restart manually:\n`);
           if (process.platform === "darwin") {
-            process.stdout.write(`  sudo -k launchctl kickstart -k system/com.abtars.daemon\n`);
+            process.stdout.write(`  launchctl kickstart -k gui/$(id -u)/com.abtars.watchdog\n`);
           } else {
-            process.stdout.write(`  sudo -k systemctl restart abtars\n`);
+            process.stdout.write(`  systemctl --user restart abtars-watchdog\n`);
           }
         }
       } else {
-        process.stdout.write(`⚠️ Watchdog PID not found. Restart manually:\n`);
-        if (process.platform === "darwin") {
-          process.stdout.write(`  sudo -k launchctl kickstart -k system/com.abtars.daemon\n`);
-        } else {
-          process.stdout.write(`  sudo -k systemctl restart abtars\n`);
-        }
+        // No watchdog running — fall back to cold restart
+        process.stdout.write(`⚠️ Watchdog not running. Cold restart...\n`);
+        const { restart } = await import("./restart.js");
+        await restart({ cold: true }).catch((err: unknown) => {
+          process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        });
       }
     } else {
-      // simple + supervised: cold restart as before
+      // simple mode: no watchdog, cold restart
       process.stdout.write("\nRestarting bridge...\n");
       const { restart } = await import("./restart.js");
       await restart({ cold: true }).catch((err: unknown) => {
