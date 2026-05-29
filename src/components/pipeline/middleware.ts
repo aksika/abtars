@@ -9,6 +9,7 @@
 import type { PlatformAdapter, InboundMessage } from "../../types/platform.js";
 import type { PipelineDeps } from "../message-pipeline.js";
 import type { Reply } from "../commands/types.js";
+import { sanitizeOutbound } from "../sanitize-outbound.js";
 
 /** Mutable context flowing through the middleware pipeline. */
 export interface MessageContext {
@@ -59,7 +60,11 @@ export function createMessageContext(
   adapter: PlatformAdapter,
   deps: PipelineDeps,
 ): MessageContext {
-  const reply: Reply = (text, opts) => adapter.sendMessage(msg.channelId, text, { threadId: msg.threadId, ...opts });
+  const reply: Reply = (text, opts) => {
+    const clean = sanitizeOutbound(text);
+    if (!clean) return Promise.resolve(undefined);
+    return adapter.sendMessage(msg.channelId, clean, { threadId: msg.threadId, ...opts });
+  };
   const chatId = parseInt(msg.channelId, 10) || 0;
   const userId = msg.sessionKey.includes(":") ? msg.sessionKey.split(":")[0]! : "master";
   return {

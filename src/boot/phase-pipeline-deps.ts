@@ -25,6 +25,7 @@ import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import type { PipelineDeps } from "../components/message-pipeline.js";
 import type { TaskCompleteCallback } from "../components/tasks/task-queue.js";
+import { sanitizeOutbound } from "../components/sanitize-outbound.js";
 
 export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, transport } = ctx;
@@ -55,7 +56,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
     const adapter = ctx.telegramAdapter;
 
-    adapter.sendMessage(String(chatId), `${result}`).catch(err => {
+    adapter.sendMessage(String(chatId), sanitizeOutbound(result)).catch(err => {
       logWarn("main", `Cron task TG report failed: ${err}`);
     });
 
@@ -155,7 +156,7 @@ export function createCronCallback(ctx: BootCtx): TaskCompleteCallback {
     if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
     const adapter = ctx.telegramAdapter;
 
-    adapter.sendMessage(String(chatId), `${result}`).catch(err => {
+    adapter.sendMessage(String(chatId), sanitizeOutbound(result)).catch(err => {
       logWarn("main", `Cron task TG report failed: ${err}`);
     });
 
