@@ -59,7 +59,7 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
       return true;
     }
     writeForceSleep("resume via /sleep resume");
-    await ctx.reply("⚡ Sleep resume queued — retries failed steps on next heartbeat tick (≤5min)");
+    await ctx.reply("Sleep resume queued");
     logInfo(TAG, "Sleep resume triggered via /sleep resume");
     return true;
   }
