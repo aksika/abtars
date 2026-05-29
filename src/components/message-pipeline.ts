@@ -357,7 +357,7 @@ export async function handleInboundMessage(
     // --- Empty response ---
     if (!userResponse) {
       if (noReply) {
-        logDebug(TAG, "LLM returned [NO-REPLY], dropping silently");
+        logDebug(TAG, "LLM returned [NO_REPLY], dropping silently");
         return;
       }
       if (reactionEmoji) {
@@ -540,7 +540,7 @@ export async function startSession(
   const prompt = buildSessionStartPrompt(greeting, memory, userId, sessionKey);
   logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
   const response = await transport.sendPrompt(sessionKey, prompt);
-  if (response?.trim() && response.trim() !== "[NO-REPLY]" && response.trim() !== "(no response)") {
+  if (response?.trim() && response.trim() !== "[NO_REPLY]" && response.trim() !== "(no response)") {
     await sendResponse(response);
   }
 }

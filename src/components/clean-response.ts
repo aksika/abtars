@@ -4,7 +4,7 @@
  */
 
 const REACT_RE = /\[REACT:(.+?)\]/;
-const NO_REPLY_RE = /\s*\[NO-REPLY\]\s*/gi;
+const NO_REPLY_RE = /\s*\[NO_REPLY\]\s*/gi;
 const LANG_TAG_RE = /^\[lang:\w{2}\]\s*/i;
 const TOPICS_RE = /\[TOPICS:\s*(.+?)\]/i;
 
@@ -22,7 +22,7 @@ export interface CleanedResponse {
   text: string;
   /** Emoji extracted from [REACT:emoji], if present. */
   reactionEmoji?: string;
-  /** True if [NO-REPLY] was present in the original. */
+  /** True if [NO_REPLY] was present in the original. */
   noReply: boolean;
   /** Keywords extracted from [TOPICS: kw1, kw2, kw3], if present. */
   topics?: string[];

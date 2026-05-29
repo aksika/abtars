@@ -139,9 +139,9 @@ describe("handleInboundMessage", () => {
     expect(adapter.setReaction).toHaveBeenCalledWith("100", 4, "");
   });
 
-  it("handles [NO-REPLY]", async () => {
+  it("handles [NO_REPLY]", async () => {
     const noReplyTransport = mockTransport();
-    (noReplyTransport.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue("[NO-REPLY]");
+    (noReplyTransport.sendPrompt as ReturnType<typeof vi.fn>).mockResolvedValue("[NO_REPLY]");
     const adapter = mockAdapter();
     const deps = mockDeps(noReplyTransport);
 

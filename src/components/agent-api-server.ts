@@ -345,9 +345,9 @@ export class AgentApiServer {
       }
     }
 
-    // [NO-REPLY] filter — peer signaled no response needed (#421)
+    // [NO_REPLY] filter — peer signaled no response needed (#421)
     if (lastMsg?.content && /\[NO-REPLY\]/i.test(lastMsg.content)) {
-      logInfo(TAG, `Peer ${caller} sent [NO-REPLY] — returning empty completion`);
+      logInfo(TAG, `Peer ${caller} sent [NO_REPLY] — returning empty completion`);
       res.writeHead(200, { "Content-Type": "application/json" })
         .end(JSON.stringify({ id: "no-reply", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" }] }));
       setCurrentPeerHops(null);

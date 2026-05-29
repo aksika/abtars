@@ -110,7 +110,7 @@ export class IrcAdapter implements PlatformAdapter {
     // Content dedup — catch echoed messages regardless of sender nick (#420)
     if (this.recentOutgoing.has(text)) return;
 
-    // [NO-REPLY] filter — other agent signaled no response needed (#421)
+    // [NO_REPLY] filter — other agent signaled no response needed (#421)
     if (/\[NO-REPLY\]/i.test(text)) return;
 
     // Only handle channel messages

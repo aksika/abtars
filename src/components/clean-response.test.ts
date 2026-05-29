@@ -32,8 +32,8 @@ describe("cleanResponse", () => {
     expect(reactionEmoji).toBe("👋");
   });
 
-  it("detects [NO-REPLY]", () => {
-    const { text, noReply } = cleanResponse("[NO-REPLY]");
+  it("detects [NO_REPLY]", () => {
+    const { text, noReply } = cleanResponse("[NO_REPLY]");
     expect(text).toBe("");
     expect(noReply).toBe(true);
   });

@@ -21,7 +21,8 @@ abTARS (agent brain)
   ├── Skills (hot-reloadable, self-authoring)
   │
   ├── kiro-cli     → Claude (AWS subscription)
-  ├── gemini-cli   → Gemini (Google free tier)
+  ├── gemini-cli   → Gemini
+  ├── Codex / Claude Code → OpenAI / Anthropic
   └── Direct API   → ollama, OpenRouter, any OpenAI-compatible
 ```
 
@@ -56,12 +57,11 @@ Full docs, configuration reference, and guides: **[Wiki](https://github.com/aksi
 
 ## Supported Transports
 
-| Transport | Provider | Cost |
-|-----------|----------|------|
-| ACP (kiro-cli) | Claude Sonnet/Opus | AWS subscription (flat fee) |
-| ACP (gemini-cli) | Gemini 2.5 Pro | Google free tier |
-| Direct API | OpenRouter | Pay-per-token or free models |
-| Direct API | ollama | Local, free, no rate limits |
+| Transport | Provider | 
+|-----------|----------|
+| ACP | kiro-cli, gemini-cli, Codex, Claude Code |
+| Direct API | OpenRouter, ollama, any OpenAI-compatible endpoint |
+| Hooks | abmind hooks (standalone CLI agents) |
 
 ## Requirements
 
