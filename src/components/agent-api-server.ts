@@ -296,6 +296,18 @@ export class AgentApiServer {
         .end(JSON.stringify(openaiError("Peer hop limit reached", "loop_detected", "hop_exceeded")));
       return;
     }
+
+    // #691 — per-caller rate limit
+    const { checkRateLimit } = await import("./agent-api-rate-limit.js");
+    const limit = checkRateLimit(caller);
+    if (!limit.allowed) {
+      const retryAfter = Math.ceil((limit.retryAfterMs ?? 60_000) / 1000);
+      res.writeHead(429, { "Retry-After": String(retryAfter), "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError(`Rate limit exceeded for ${caller}`, "rate_limit_error", "rate_limit")));
+      logWarn(TAG, `Rate limited ${caller} — retry in ${retryAfter}s`);
+      return;
+    }
+
     // Set module-level hop state so peer_session tool knows the budget for outbound calls
     const { setCurrentPeerHops } = await import("./peer-client.js");
     setCurrentPeerHops(hopValue);

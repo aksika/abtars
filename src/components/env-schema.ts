@@ -130,6 +130,8 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "PERMISSION_TIMEOUT_SEC", type: "int", default: "60", description: "Permission prompt timeout (seconds)" },
   { env: "TRUST_MODE", type: "bool", default: "false", description: "Skip permission prompts" },
   { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | sandbox" },
+  { env: "MAX_AGENT_CALL_PER_HOUR", type: "int", required: true, description: "Agent API rate limit: max requests per caller per hour" },
+  { env: "MAX_AGENT_CALL_PER_DAY", type: "int", required: true, description: "Agent API rate limit: max requests per caller per day" },
   { env: "TELEGRAM_ENABLED", type: "bool", default: "", description: "Enable Telegram platform (fallback: token presence)" },
   { env: "DISCORD_ENABLED", type: "bool", default: "", description: "Enable Discord platform (fallback: token presence)" },
   { env: "IRC_ENABLED", type: "bool", default: "", description: "Enable IRC platform (fallback: irc.json presence)" },
@@ -241,6 +243,8 @@ export interface EnvConfig {
   enableAgentApi: boolean;
   enableAsyncDelegation: boolean;
   maxSessions: number;
+  maxAgentCallPerHour: number;
+  maxAgentCallPerDay: number;
 
   /** Dynamic API key lookup — for provider.apiKeyEnv pattern. */
   getApiKey(envName: string): string | undefined;
@@ -407,6 +411,8 @@ export function initEnv(): Readonly<EnvConfig> {
     enableAgentApi: parseBool(readOr("ENABLE_AGENT_API", "false")),
     enableAsyncDelegation: parseBool(readOr("ENABLE_ASYNC_DELEGATION", "false")),
     maxSessions: parseIntSafe(readOr("MAX_SESSIONS", "10"), "MAX_SESSIONS"),
+    maxAgentCallPerHour: parseIntSafe(readOr("MAX_AGENT_CALL_PER_HOUR", "30"), "MAX_AGENT_CALL_PER_HOUR"),
+    maxAgentCallPerDay: parseIntSafe(readOr("MAX_AGENT_CALL_PER_DAY", "100"), "MAX_AGENT_CALL_PER_DAY"),
 
     getApiKey(envName: string): string | undefined {
       return process.env[envName]?.trim() || undefined;
