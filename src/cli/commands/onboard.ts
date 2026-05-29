@@ -728,10 +728,13 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 // ── Default task seeding (#383) ─────────────────────────────────────────────
 
 interface TaskTemplateEntry {
+  readonly id?: string;
+  readonly title?: string;
   readonly message: string;
   readonly schedule: string;
   readonly type: "task" | "reminder";
   readonly executor: "agent" | "script";
+  readonly maxRunsPerDay?: number;
 }
 
 /**
@@ -776,14 +779,18 @@ async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<voi
   const { spawnSync } = await import('node:child_process');
   let seeded = 0;
   for (const entry of template) {
-    const result = spawnSync('abtars-task', [
+    const args = [
       'add',
       '--schedule', entry.schedule,
       '--message', entry.message,
       '--chat-id', chatId,
       '--type', entry.type,
       '--executor', entry.executor,
-    ], {
+    ];
+    if (entry.id) args.push('--id', entry.id);
+    if (entry.title) args.push('--title', entry.title);
+    if (entry.maxRunsPerDay) args.push('--max-runs-per-day', String(entry.maxRunsPerDay));
+    const result = spawnSync('abtars-task', args, {
       encoding: 'utf-8',
       env: { ...process.env, ABTARS_HOME: abtarsHome },
     });

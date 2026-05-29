@@ -1,14 +1,20 @@
 [
   {
+    "id": "morning-greeting",
+    "title": "Morning Greeting",
     "message": "Good morning",
     "schedule": "0 9 * * *",
     "type": "task",
-    "executor": "agent"
+    "executor": "agent",
+    "maxRunsPerDay": 2
   },
   {
+    "id": "daily-backup",
+    "title": "Daily Backup",
     "message": "bash ~/.abtars/scripts/daily-backup.sh",
     "schedule": "0 0 * * *",
     "type": "task",
-    "executor": "script"
+    "executor": "script",
+    "maxRunsPerDay": 2
   }
 ]
