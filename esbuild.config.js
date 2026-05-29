@@ -60,6 +60,7 @@ const result = await esbuild.build({
   entryPoints: {
     abtars: "src/main.ts",
     "abtars-cli": "src/cli/abtars.ts",
+    "abtars-task": "src/cli/abtars-task.ts",
     "abtars-browser": "src/cli/abtars-browser.ts",
     "abtars-restart": "src/cli/commands/restart.ts",
     "abtars-rss": "src/cli/abtars-rss.ts",
