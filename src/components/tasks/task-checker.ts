@@ -75,6 +75,23 @@ export function checkCron(): CronEntry[] {
   for (const entry of entries) {
     if (entry.fired || entry.paused || entry.fireAt > now) continue;
 
+    // #692: daily rate limit — skip if maxRunsPerDay reached
+    if (entry.maxRunsPerDay && entry.history) {
+      const todayStart = new Date().setHours(0, 0, 0, 0);
+      const todayRuns = entry.history.filter(h => h.ts >= todayStart).length;
+      if (todayRuns >= entry.maxRunsPerDay) {
+        // Advance to next occurrence without running
+        if (entry.schedule) {
+          try {
+            const expr = CronExpressionParser.parse(entry.schedule);
+            entry.fireAt = expr.next().getTime();
+            writeEntry(entry);
+          } catch (err) { logAndSwallow("cron_checker", "op", err); }
+        }
+        continue;
+      }
+    }
+
     // #327: stale detection — if past the catch-up window, advance to next occurrence
     if (entry.schedule && entry.fireAt <= now) {
       const maxDelay = (entry.catchUp ?? 0) * 3600_000;

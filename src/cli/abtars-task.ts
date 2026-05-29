@@ -28,6 +28,7 @@ export interface CronEntry {
   priority?: "high" | "medium" | "low";
   taskFile?: string;
   paused?: boolean;
+  maxRunsPerDay?: number;
   consecutiveFails?: number;
   agentFollowUp?: boolean;
   agentMessage?: string;
