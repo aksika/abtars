@@ -91,7 +91,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
       try {
         const lock = JSON.parse(readFileSync(ctx.bridgeLockPath, "utf-8"));
         const ago = Math.round((Date.now() - (lock.lastHeartbeat || 0)) / 60000);
-        entry.detail = `5min, last tick ${ago}m ago`;
+        entry.detail = `${Math.round(ctx.heartbeat.intervalMs / 1000)}s, last tick ${ago}m ago`;
       } catch (err) { logAndSwallow("system_status", "op", err); }
     }
     if (name === "phaseDashboard" && health.status === "ok") {
