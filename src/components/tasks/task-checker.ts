@@ -46,7 +46,7 @@ const MAX_HISTORY = 10;
 const GC_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /** Record a run in the entry's history (keeps last MAX_HISTORY). */
-function recordRun(entry: CronEntry, exitCode?: number): void {
+export function recordRun(entry: CronEntry, exitCode?: number): void {
   if (!entry.history) entry.history = [];
   entry.history.push({ ts: Date.now(), ...(exitCode !== undefined ? { exitCode } : {}) });
   if (entry.history.length > MAX_HISTORY) entry.history = entry.history.slice(-MAX_HISTORY);
@@ -75,11 +75,11 @@ export function checkCron(): CronEntry[] {
   for (const entry of entries) {
     if (entry.fired || entry.paused || entry.fireAt > now) continue;
 
-    // #692: daily rate limit — skip if maxRunsPerDay reached
+    // #692: daily rate limit — skip if maxRunsPerDay reached (count only successful runs)
     if (entry.maxRunsPerDay && entry.history) {
       const todayStart = new Date().setHours(0, 0, 0, 0);
-      const todayRuns = entry.history.filter(h => h.ts >= todayStart).length;
-      if (todayRuns >= entry.maxRunsPerDay) {
+      const todaySuccesses = entry.history.filter(h => h.ts >= todayStart && h.exitCode !== 1).length;
+      if (todaySuccesses >= entry.maxRunsPerDay) {
         // Advance to next occurrence without running
         if (entry.schedule) {
           try {
@@ -126,7 +126,6 @@ export function checkCron(): CronEntry[] {
       recordRun(entry);
       logInfo(TAG, `⏰ Reminder fired: "${entry.message}" → chat ${entry.chatId}`);
     } else {
-      recordRun(entry);
       dueTasks.push({ ...entry, _retrying: wasRetry || undefined });
     }
 

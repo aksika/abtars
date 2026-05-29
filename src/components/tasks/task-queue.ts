@@ -16,6 +16,7 @@ import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt, readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./task-store.js";
+import { recordRun } from "./task-checker.js";
 import type { CronEntry } from "../../cli/abtars-task.js";
 import { localDate } from "../../utils/date.js";
 
@@ -292,6 +293,7 @@ export class CronQueue {
         const status = code === 0 ? "✅" : `❌ (exit ${code})`;
         logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
         recordRunToFile(entry.id, code ?? undefined);
+        if (code === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
         this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
         if (code === 0 && output.trim() && entry.agentFollowUp && entry.agentMessage) {
           logInfo(TAG, `■ Gate triggered → enqueuing agent follow-up for "${entry.id}"`);
@@ -389,6 +391,7 @@ export class CronQueue {
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         recordRunToFile(entry.id, exitCode);
+        if (exitCode === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
         this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
         const icon = exitCode === 0 ? "✅" : "❌";
         if (exitCode !== 0) {
