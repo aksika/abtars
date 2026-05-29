@@ -13,7 +13,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   try {
     const { readEntries } = await import("../tasks/task-store.js");
     const entries = readEntries();
-    const active = entries.filter((e: any) => !e.fired && !e.paused);
+    const active = entries.filter((e: any) => !e.fired);
     active.sort((a: any, b: any) => {
       const timeOf = (e: any): number => {
         const s = e.schedule;
@@ -46,7 +46,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
       const failed = e.history?.some((h: any) => h.exitCode !== undefined && h.exitCode !== 0 && new Date(h.ts).toDateString() === today.toDateString());
       const started = e.lastRanAt && new Date(e.lastRanAt).toDateString() === today.toDateString();
       const running = ctx.cronCurrentJob?.entryId === e.id;
-      const tick = !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
+      const tick = e.paused ? "⏸" : !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
       const label = e.title || e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
       return `${tick}  ${e.id.padEnd(22)}${sched.padEnd(16)}${label}`;
     });
