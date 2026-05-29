@@ -59,7 +59,7 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   if (ctx.cronCurrentJob) {
     const j = ctx.cronCurrentJob;
     const ago = Math.round((Date.now() - j.startedAt) / 1000);
-    running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.message}`;
+    running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.entryId}`;
   }
   await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "HTML" });
   return true;
