@@ -447,7 +447,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'MAIN_CHAT_ID',
     'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
-    'BED_TIME', 'WAKE_TIME', 'EMBEDDING_ENABLED', 'TRUST_MODE',
+    'BED_TIME', 'WAKE_TIME', 'HEARTBEAT_INTERVAL_SEC', 'EMBEDDING_ENABLED', 'TRUST_MODE',
   ]);
   const keptLines: string[] = [];
   for (const line of existing.split('\n')) {
@@ -469,6 +469,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   if (answers.discordA2aChannel) newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
   if (answers.bedTime) newBlock.push(`BED_TIME=${answers.bedTime}`);
   if (answers.wakeTime) newBlock.push(`WAKE_TIME=${answers.wakeTime}`);
+  newBlock.push(`HEARTBEAT_INTERVAL_SEC=300`);
   newBlock.push(`EMBEDDING_ENABLED=${answers.embeddingEnabled ? 'true' : 'false'}`);
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
 
