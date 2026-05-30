@@ -46,7 +46,8 @@
     "prompts",
     "core",
     "secret",
-    "overflow"
+    "overflow",
+    "state"
   ],
   "configSeeds": [
     {

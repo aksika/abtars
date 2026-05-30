@@ -92,6 +92,7 @@ async function seedConfig(repoRoot: string, _configDir: string, dryRun: boolean,
       continue;
     }
     const content = await readFile(src, 'utf-8');
+    await mkdir(dirname(dst), { recursive: true });
     await writeFile(dst, content, { mode: seed.mode ? parseInt(seed.mode, 8) : 0o644 });
     seeded.push(basename(dst));
   }
@@ -197,14 +198,9 @@ function isWSL(): boolean {
 async function installSupervisedDaemon(home: string, repoRoot: string, dryRun: boolean): Promise<number> {
   const platform = process.platform;
 
-  // WSL guard
+  // WSL: warn but don't block — systemd works on WSL2 with systemd enabled
   if (platform === 'linux' && isWSL()) {
-    process.stderr.write(
-      `supervised-daemon on WSL can't survive Windows-level lifecycle events.\n` +
-      `Recommended: --mode=simple (run from tmux).\n` +
-      `Re-run with --mode=simple to proceed.\n`,
-    );
-    return 2;
+    process.stderr.write(`ℹ️  WSL detected — ensure systemd is enabled (wsl.conf: [boot] systemd=true)\n`);
   }
 
   // Sudo check — supervised-daemon requires root for system-scope service install
