@@ -8,9 +8,9 @@ import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 
-const AB_SAVE = ["config", "skills", "prompts", "core", "secret", "tasks", "logo"];
+const AB_SAVE = ["config", "skills", "prompts", "core", "secret", "tasks", "logo", "workspace"];
 const ABMIND_SAVE = ["config", "prompts", "secret"];
-const ABMIND_MEMORY_SAVE = ["core"]; // subdirs of memory/ to include
+const ABMIND_MEMORY_SAVE = ["core", "weekly"]; // subdirs of memory/ to include
 
 export async function backup(outputDir?: string): Promise<number> {
   const abHome = abtarsHome();
@@ -40,6 +40,16 @@ export async function backup(outputDir?: string): Promise<number> {
   for (const dir of ABMIND_MEMORY_SAVE) {
     const abs = join(abmindHome, "memory", dir);
     if (existsSync(abs)) collectDir(abs, `abmind/memory/${dir}`, files);
+  }
+
+  // abmind memory/ loose files (garbage.json, watermarks, etc.)
+  const memDir = join(abmindHome, "memory");
+  if (existsSync(memDir)) {
+    for (const entry of readdirSync(memDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name !== "memory.db" && !entry.name.endsWith("-wal") && !entry.name.endsWith("-shm")) {
+        files.push({ absPath: join(memDir, entry.name), zipPath: `abmind/memory/${entry.name}` });
+      }
+    }
   }
 
   // abmind memory.db — WAL-safe backup via sqlite3 CLI
