@@ -169,8 +169,35 @@ const probeSecretPerms: ProbeFn = async (_ctx) => {
 
 // ── Collector ────────────────────────────────────────────────────────────────
 
+const probeFtsIntegrity: ProbeFn = async (_ctx) => {
+  const { join } = await import("node:path");
+  const { homedir } = await import("node:os");
+  const { execSync } = await import("node:child_process");
+  const start = Date.now();
+  try {
+    const dbPath = join(process.env["ABMIND_MEMORY_DIR"] || join(homedir(), ".abmind", "memory"), "memory.db");
+    const tables = ["extracted_memories_fts", "content_en_trigram", "content_original_trigram"];
+    const rebuilt: string[] = [];
+    for (const t of tables) {
+      try {
+        execSync(`sqlite3 "${dbPath}" "INSERT INTO ${t}(${t}) VALUES('integrity-check')"`, { stdio: "pipe", timeout: 2000 });
+      } catch {
+        try {
+          execSync(`sqlite3 "${dbPath}" "INSERT INTO ${t}(${t}) VALUES('rebuild')"`, { stdio: "pipe", timeout: 5000 });
+          rebuilt.push(t);
+        } catch { /* table may not exist */ }
+      }
+    }
+    if (rebuilt.length > 0) return { name: "fts-integrity", status: "ok", latencyMs: Date.now() - start, detail: `rebuilt: ${rebuilt.join(", ")}` };
+    return { name: "fts-integrity", status: "ok", latencyMs: Date.now() - start };
+  } catch (err) {
+    return { name: "fts-integrity", status: "failed", latencyMs: Date.now() - start, detail: err instanceof Error ? err.message : String(err) };
+  }
+};
+
 const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   { fn: probeCoreFiles, timeout: 1000 },
+  { fn: probeFtsIntegrity, timeout: 3000 },
   { fn: probeSecretPerms, timeout: 1000 },
   { fn: probeTlsIdentity, timeout: 2000 },
   { fn: probeMemory, timeout: 5000 },

@@ -173,7 +173,26 @@ const memoryStoreTool: ToolDefinition = {
         const result = await memoryBackend.instantStore({ ...params, createdBy: "tool:memory_store" });
         return JSON.stringify(result);
       } catch (err) {
-        return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
+        const msg = err instanceof Error ? err.message : String(err);
+        // #706: FTS5 corruption self-heal — rebuild indexes and retry once
+        if (msg.includes("fts5") || msg.includes("corruption")) {
+          try {
+            memoryBackend.rebuildFtsIndexes();
+            logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
+            const params: InstantStoreParams = {
+              userId: context?.userId ?? "master",
+              contentEn: args["translated"] ?? "",
+              contentOriginal: args["original"] ?? args["translated"] ?? "",
+              memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
+              emotionScore: parseInt(args["emotion"] ?? "0", 10),
+              confidence: parseInt(args["confidence"] ?? "3", 10),
+              classification: parseInt(args["classification"] ?? "1", 10),
+            };
+            const result = await memoryBackend.instantStore({ ...params, createdBy: "tool:memory_store" });
+            return JSON.stringify(result);
+          } catch (retryErr) { /* fall through */ }
+        }
+        return JSON.stringify({ error: msg });
       }
     }
     let cmd = `abmind store --translated ${JSON.stringify(args["translated"] ?? "")} --type ${args["type"] ?? "fact"}`;
