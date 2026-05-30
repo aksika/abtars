@@ -11,7 +11,7 @@ export interface IKiroTransport {
    * For ACP: sends session/prompt and collects streaming chunks.
    * For tmux: sends via send-keys and polls capture-pane for output.
    */
-  sendPrompt(sessionKey: string, message: string, image?: { mime: string; base64: string }): Promise<string>;
+  sendPrompt(sessionKey: string, message: string, image?: { mime: string; base64: string }, userId?: string): Promise<string>;
 
   /** Reset/recreate the session for a given chat. */
   resetSession(sessionKey: string): Promise<void>;

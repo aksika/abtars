@@ -240,7 +240,7 @@ export async function handleInboundMessage(
 
     const responsePromise = agentSession
       ? agentSession.sendPrompt(activeSessionId, prompt, imageContent)
-      : transport.sendPrompt(activeSessionId, prompt, imageContent);
+      : transport.sendPrompt(activeSessionId, prompt, imageContent, userId);
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {
@@ -539,7 +539,7 @@ export async function startSession(
 ): Promise<void> {
   const prompt = buildSessionStartPrompt(greeting, memory, userId, sessionKey);
   logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
-  const response = await transport.sendPrompt(sessionKey, prompt);
+  const response = await transport.sendPrompt(sessionKey, prompt, undefined, userId);
   if (response?.trim() && response.trim() !== "[NO_REPLY]" && response.trim() !== "(no response)") {
     await sendResponse(response);
   }

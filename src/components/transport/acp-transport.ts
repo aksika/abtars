@@ -251,7 +251,7 @@ export class AcpTransport implements IKiroTransport {
 
   private _pendingPrompt: { sessionKey: string; message: string } | undefined;
 
-  async sendPrompt(sessionKey: string, message: string, _image?: { mime: string; base64: string }): Promise<string> {
+  async sendPrompt(sessionKey: string, message: string, _image?: { mime: string; base64: string }, _userId?: string): Promise<string> {
     if (!this.client) {
       logWarn(this.tag, "ACP client dead — reinitializing");
       await this.initialize();

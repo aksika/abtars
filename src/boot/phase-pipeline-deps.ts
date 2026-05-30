@@ -47,7 +47,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
         ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `🔧 Calling self-healing agent`);
       }
       const msg = `[System] Cron task "${entryId}" failed:\nCommand: ${command}\nResult: ${result}\n\nDiagnose and fix if possible. If you can't fix it, tell the user.`;
-      transport.sendPrompt("system:cron-fix", msg).catch(err => {
+      transport.sendPrompt("system:cron-fix", msg, undefined, "aksika").catch(err => {
         logWarn("main", `Cron auto-fix inject failed: ${err}`);
       });
     },

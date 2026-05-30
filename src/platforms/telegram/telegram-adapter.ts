@@ -449,7 +449,7 @@ export class TelegramAdapter implements PlatformAdapter {
         logDebug(TAG, `Queued reaction signal for busy ${activeId} (${entry.queue.length} pending)`);
       } else {
         try {
-          const response = await this.deps.transport.sendPrompt(activeId, signal);
+          const response = await this.deps.transport.sendPrompt(activeId, signal, undefined, reactionUser);
           logDebug(TAG, `Sent reaction signal to transport for chat ${chatId}`);
           if (response) {
             const { text, reactionEmoji, noReply } = cleanResponse(response);

@@ -50,6 +50,7 @@ export class DirectApiTransport implements IKiroTransport {
   private activeModel: string;
   private _lastPromptTokens = 0;
   private _activeSessionKey = "";
+  private _activeUserId = "master";
 
   /** Currently active model (may differ from config if on fallback). */
   get currentModel(): string { return this.activeModel; }
@@ -101,9 +102,10 @@ export class DirectApiTransport implements IKiroTransport {
     this.systemPrompt = prompt;
   }
 
-  async sendPrompt(sessionKey: string, message: string, image?: { mime: string; base64: string }): Promise<string> {
+  async sendPrompt(sessionKey: string, message: string, image?: { mime: string; base64: string }, userId?: string): Promise<string> {
     const session = this.getOrCreateSession(sessionKey);
     this._activeSessionKey = sessionKey;
+    this._activeUserId = userId || "master";
 
     // If context orchestrator is active, rebuild messages from DB
     if (this.contextOrchestrator) {
@@ -314,7 +316,7 @@ export class DirectApiTransport implements IKiroTransport {
           let args: Record<string, string>;
           try { args = JSON.parse(tc.function.arguments); } catch (err) { logAndSwallow(TAG, "JSON.parse tool args", err); args = {}; }
 
-          const result = await executeToolCall(tc.function.name, args, { userId: this._activeSessionKey?.split(":")[0] || "master", signal, sandboxPolicy: this.sandboxPolicy });
+          const result = await executeToolCall(tc.function.name, args, { userId: this._activeUserId, signal, sandboxPolicy: this.sandboxPolicy });
           session.addToolResult(tc.id, tc.function.name, result);
 
           // #621: scrub secret values from conversation history after store

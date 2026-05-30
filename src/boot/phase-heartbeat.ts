@@ -144,7 +144,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   initSystemMessage(async (prompt: string) => {
     try {
       const activeId = ctx.sessionManager.getActiveSessionId(masterUserId, "telegram");
-      const response = await transport.sendPrompt(activeId, `[SYSTEM] ${prompt}`);
+      const response = await transport.sendPrompt(activeId, `[SYSTEM] ${prompt}`, undefined, masterUserId);
       if (response) {
         const { sendNotification } = await import("../components/notification.js");
         sendNotification(ctx, response);
