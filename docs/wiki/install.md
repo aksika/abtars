@@ -10,31 +10,25 @@
 ## Quick install
 
 ```bash
-# 1. Clone both repos side by side (abtars depends on abmind)
-cd ~/workspace
-git clone git@github.com:aksika/abmind.git
+# 1. Clone the repo
 git clone git@github.com:aksika/abtars.git
+cd abtars
 
-# 2. Build abmind first
-cd abmind
+# 2. Build
 npm install && npm run build
 
-# 3. Build abtars (picks up abmind via file:../abmind)
-cd ../abtars
-npm install && npm run build
-
-# 4. Install
+# 3. Install
 node dist/cli/abtars.js install --mode=supervised-daemon
 
-# 5. Add to PATH (if not already)
+# 4. Add to PATH (if not already)
 export PATH="$HOME/.local/bin:$PATH"
 # Add to ~/.bashrc or ~/.zshrc to persist:
 #   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 
-# 6. Interactive setup (Telegram token, chat ID, model provider)
+# 5. Interactive setup (Telegram token, chat ID, model provider)
 abtars onboard
 
-# 7. Start
+# 6. Start
 abtars start
 ```
 
@@ -67,8 +61,10 @@ abtars config    # verify your .env (secrets redacted)
 ├── workspace/       # agent working directory
 └── bridge.pid       # PID of running bridge
 ~/.abmind/
-└── memory/          # memory.db (created on first run)
+└── memory/          # memory.db (auto-created on first bridge start)
 ```
+
+abmind is bundled as an npm dependency — no separate install needed. The memory database is initialized automatically when the bridge starts for the first time.
 
 ## Providers
 
@@ -84,8 +80,7 @@ Configure in `~/.abtars/config/transport.json`.
 ## Updating
 
 ```bash
-cd ~/workspace/abmind && git pull && npm run build
-cd ~/workspace/abtars && git pull && npm run build
+cd ~/abtars && git pull && npm install && npm run build
 abtars update --from-local
 ```
 
@@ -116,7 +111,7 @@ abtars start
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 ```
 
-**`npm install` fails with "abmind not found"** — abmind must be cloned alongside abtars (same parent directory). The dependency is `"abmind": "file:../abmind"`.
+**`npm install` fails** — make sure you have Node.js 22+. Run `node --version` to check.
 
 **EADDRINUSE on start** — a stale process is holding the port:
 ```bash
