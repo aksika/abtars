@@ -11,10 +11,10 @@
   {
     "id": "daily-backup",
     "title": "Daily Backup",
-    "message": "bash ~/.abtars/scripts/daily-backup.sh",
+    "message": "abtars backup",
     "schedule": "0 0 * * *",
     "type": "task",
     "executor": "script",
-    "maxRunsPerDay": 2
+    "maxRunsPerDay": 1
   }
 ]
