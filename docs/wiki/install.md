@@ -3,25 +3,40 @@
 ## Requirements
 
 - Node.js 22+
+- Git
 - A Telegram bot token (from @BotFather) or Discord bot token
-- At least one model provider configured in `transport.json`
+- At least one model provider (ollama, OpenRouter, Kiro CLI, or Gemini CLI)
 
 ## Quick install
 
 ```bash
+# 1. Clone both repos side by side (abtars depends on abmind)
+cd ~/workspace
+git clone git@github.com:aksika/abmind.git
 git clone git@github.com:aksika/abtars.git
-cd abtars
+
+# 2. Build abmind first
+cd abmind
 npm install && npm run build
+
+# 3. Build abtars (picks up abmind via file:../abmind)
+cd ../abtars
+npm install && npm run build
+
+# 4. Install
 node dist/cli/abtars.js install --mode=supervised-daemon
+
+# 5. Add to PATH (if not already)
+export PATH="$HOME/.local/bin:$PATH"
+# Add to ~/.bashrc or ~/.zshrc to persist:
+#   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+
+# 6. Interactive setup (Telegram token, chat ID, model provider)
 abtars onboard
+
+# 7. Start
 abtars start
 ```
-
-## What each step does
-
-1. **install** — creates `~/.abtars/`, deploys the bridge, sets up the watchdog
-2. **onboard** — interactive wizard: sets Telegram bot token, chat ID, default model provider
-3. **start** — launches the bridge (watchdog supervises it from here)
 
 ## Post-install verification
 
@@ -34,15 +49,28 @@ abtars config    # verify your .env (secrets redacted)
 
 ## Install modes
 
-| Mode | Watchdog | Auto-start on boot |
-|------|----------|--------------------|
-| `simple` | No | No |
-| `supervised` | Yes | No (manual `abtars start`) |
-| `supervised-daemon` | Yes | Yes (systemd/launchd) |
+| Mode | Watchdog | Auto-start on boot | OS service |
+|------|----------|--------------------|----|
+| `simple` | No | No | None |
+| `supervised` | Yes | No (manual `abtars start`) | None |
+| `supervised-daemon` | Yes | Yes | systemd (Linux) / launchd (macOS) |
+
+## What gets created
+
+```
+~/.abtars/
+├── config/          # .env, transport.json, peers.json
+├── current/         # symlink → active release
+├── releases/        # versioned bundles
+├── logs/            # bridge-YYYY-MM-DD.log
+├── scripts/         # watchdog.sh, doctor.sh
+├── workspace/       # agent working directory
+└── bridge.pid       # PID of running bridge
+~/.abmind/
+└── memory/          # memory.db (created on first run)
+```
 
 ## Providers
-
-abTARS supports multiple model providers out of the box:
 
 | Provider | Transport | Setup |
 |----------|-----------|-------|
@@ -56,23 +84,46 @@ Configure in `~/.abtars/config/transport.json`.
 ## Updating
 
 ```bash
-cd ~/abtars && git pull && npm run build
+cd ~/workspace/abmind && git pull && npm run build
+cd ~/workspace/abtars && git pull && npm run build
 abtars update --from-local
 ```
 
 Or from a running bridge: send `/restart` in Telegram.
 
+## Platform-specific notes
+
+### Linux (systemd)
+
+The watchdog runs as a systemd user service (`abtars-watchdog.service`). If it warns:
+```bash
+systemctl --user daemon-reload
+systemctl --user restart abtars-watchdog
+```
+
+### macOS (launchd)
+
+The watchdog runs via launchd (`com.abtars.watchdog.plist`). To stop/start:
+```bash
+abtars stop --force    # --force required (launchd would respawn otherwise)
+abtars start
+```
+
 ## Troubleshooting
 
-If `abtars start` fails with EADDRINUSE:
+**`abtars: command not found`** — `~/.local/bin` is not on your PATH. Add it:
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+```
+
+**`npm install` fails with "abmind not found"** — abmind must be cloned alongside abtars (same parent directory). The dependency is `"abmind": "file:../abmind"`.
+
+**EADDRINUSE on start** — a stale process is holding the port:
 ```bash
 abtars stop --force
 abtars start
 ```
 
-If systemd warns about the watchdog:
-```bash
-systemctl --user daemon-reload && systemctl --user restart abtars-watchdog
-```
+**Memory DB missing** — `~/.abmind/memory/memory.db` is created automatically on first bridge start. If it's missing after install, start the bridge once and it will initialize.
 
 Run `abtars doctor --fix` for automatic repair of common issues.
