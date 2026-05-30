@@ -66,8 +66,11 @@ Usage:
   abtars doctor [<args passed to doctor.sh>...]
   abtars onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   abtars restart [--cold]
+  abtars start
   abtars stop [--force]
   abtars status
+  abtars logs
+  abtars config
 `,
   );
 }
@@ -119,6 +122,18 @@ export async function main(argv: readonly string[]): Promise<number> {
         return await restart({ cold: flags.get('cold') === true });
       case 'stop':
         return await stop({ force: flags.get('force') === true });
+      case 'start': {
+        const { start: startCmd } = await import('./commands/start.js');
+        return await startCmd();
+      }
+      case 'logs': {
+        const { logs } = await import('./commands/logs.js');
+        return await logs();
+      }
+      case 'config': {
+        const { configShow } = await import('./commands/config-show.js');
+        return await configShow();
+      }
       case 'passwd': {
         const { passwd } = await import('./commands/passwd.js');
         return await passwd();

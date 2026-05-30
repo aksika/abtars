@@ -14,6 +14,8 @@ abtars start
 abtars stop       [--force]
 abtars restart
 abtars status
+abtars logs
+abtars config
 abtars doctor     [<args passed to doctor.sh>...]
 abtars onboard    [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
 abtars passwd
@@ -56,6 +58,10 @@ Creates a zip archive of config and state (`~/.abtars/config/`, secrets, task DB
 
 Starts the bridge (and watchdog if in supervised mode).
 
+### start
+
+Starts the bridge (and watchdog if in supervised mode). If already running, prints "already running" and exits.
+
 ### stop
 
 Stops the bridge and watchdog.
@@ -88,3 +94,11 @@ Interactive first-run wizard. Sets up Telegram bot token, chat ID, and initial c
 ### passwd
 
 Change or set the agent API password (used for peer authentication).
+
+### logs
+
+Tails the current day's bridge log (`~/.abtars/logs/bridge-YYYY-MM-DD.log`). Ctrl+C to exit.
+
+### config
+
+Shows the current `.env` configuration. Secret values (tokens, keys) are redacted.
