@@ -22,6 +22,7 @@ const BLACKLIST = [
   "ECONNRESET", "ETIMEDOUT", "socket hang up",
   "auto-approved", "permission",
   "BUG REPORT", "AUTO-FIX",
+  "Tool args", "Normalized",
 ];
 
 interface AutoFixRule {

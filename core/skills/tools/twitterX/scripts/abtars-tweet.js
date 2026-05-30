@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-#!/usr/bin/env node
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 function abtarsHome() {
