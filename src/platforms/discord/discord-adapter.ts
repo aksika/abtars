@@ -13,7 +13,7 @@ import { ResponseFormatter } from "../../components/response-formatter.js";
 import { formatReactionSignal } from "../../components/reactions.js";
 
 export const DISCORD_CAPABILITIES: PlatformCapabilities = { voice: false, reactions: true, typing: true, threads: true };
-import { emojiToScore } from "abmind";
+import { emojiToScore } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";

@@ -15,7 +15,6 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAndValidateConfig } from "../components/config.js";
-import { loadMemoryConfig } from "abmind";
 import { parsePlatformFlags } from "../components/cli-flags.js";
 import { setLogLevel, logInfo } from "../components/logger.js";
 import { loadNLMConfig } from "../components/nlm-command-handler.js";
@@ -35,7 +34,14 @@ export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   ctx.config = await loadAndValidateConfig();
   setLogLevel(ctx.config.logLevel);
 
-  ctx.memoryConfig = loadMemoryConfig();
+  let memoryConfig;
+  try {
+    const abmind = await import("abmind");
+    memoryConfig = abmind.loadMemoryConfig();
+  } catch {
+    memoryConfig = { memoryEnabled: false, memoryDir: join(abtarsHome(), "../.abmind/memory") } as any;
+  }
+  ctx.memoryConfig = memoryConfig;
   // startedAt set by createBootCtx; preserved here
   ctx.bridgeLockPath = join(abtarsHome(), "bridge.lock");
   ctx.sleepAuditDir = join(ctx.memoryConfig.memoryDir, "sleep");

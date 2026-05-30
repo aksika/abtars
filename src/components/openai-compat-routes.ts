@@ -11,7 +11,8 @@
  */
 
 import { IncomingMessage, ServerResponse } from "node:http";
-import { scanForInjection, type IMemorySystem } from "abmind";
+import type { IMemorySystem } from "abmind";
+import { abmind } from "../utils/abmind-lazy.js";
 import type { AgentSession } from "./subagent-runtime.js";
 import {
   flattenMessages,
@@ -178,7 +179,7 @@ export async function handleChatCompletions(
   for (let i = 0; i < flat.allContents.length; i++) {
     const content = flat.allContents[i]!;
     if (!content.trim()) continue;
-    const scan = scanForInjection(content);
+    const scan = abmind()!.scanForInjection(content);
     if (!scan.safe) {
       const top = scan.flags[0]!;
       logWarn(TAG, `BLOCKED /v1/chat/completions — injection in messages[${i}]: ${top.category} (score=${scan.score}) from guest=${deps.guestName}`);

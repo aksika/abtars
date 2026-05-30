@@ -11,7 +11,8 @@ import { execSync } from "node:child_process";
 import { writeSleepStatus, readAndClearForceSleep } from "../../components/transport/bridge-lock-transport.js";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { hasSleepAuditToday, runSleepCycle, parseLevel, DEFAULT_LEVEL, type Level } from "abmind";
+import type { Level } from "abmind";
+import { abmind } from "../../utils/abmind-lazy.js";
 import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { readEnv, readEnvWithDefault } from "../../components/env.js";
@@ -100,7 +101,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           return;
         }
       }
-      if (hasSleepAuditToday(opts.sleepAuditDir)) {
+      if (abmind()!.hasSleepAuditToday(opts.sleepAuditDir)) {
         logDebug("sleep", "😴 Sleep already done today — skip");
         return;
       }
@@ -115,12 +116,12 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     const level = (() => {
       if (forced && forceSleep?.includes("fresh")) return "ultimate" as Level;
       const raw = getEnv().sleepQuality;
-      if (!raw) return DEFAULT_LEVEL;
-      try { return parseLevel(raw); }
-      catch (err) { logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`); return DEFAULT_LEVEL; }
+      if (!raw) return abmind()!.DEFAULT_LEVEL;
+      try { return abmind()!.parseLevel(raw); }
+      catch (err) { logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${abmind()!.DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`); return abmind()!.DEFAULT_LEVEL; }
     })();
 
-    runSleepCycle({ runtime: opts.runtime, level })
+    abmind()!.runSleepCycle({ runtime: opts.runtime, level })
       .then((result) => {
         running = false;
         progress = null;

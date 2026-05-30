@@ -7,7 +7,7 @@ import { fileURLToPath } from "url";
 import { abtarsHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import type { IMemorySystem } from "abmind";
-import { scanForInjection } from "abmind";
+import { abmind } from "../utils/abmind-lazy.js";
 import { logInfo, logWarn } from "./logger.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
 import type { AgentSession } from "./subagent-runtime.js";
@@ -397,7 +397,7 @@ export class AgentApiServer {
 
     // #678 — Injection scan on peer message content
     if (lastMsg?.content) {
-      const scan = scanForInjection(lastMsg.content);
+      const scan = abmind()!.scanForInjection(lastMsg.content);
       if (!scan.safe) {
         res.writeHead(400, { "Content-Type": "application/json" })
           .end(JSON.stringify(openaiError("Message rejected by injection scanner", "security_error", "injection_detected")));

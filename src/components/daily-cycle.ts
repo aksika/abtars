@@ -9,7 +9,7 @@ import type { IMemorySystem } from "abmind";
 import { logInfo } from "./logger.js";
 import { logAndSwallow } from "./log-and-swallow.js";
 import { safeReadJson } from "./safe-json.js";
-import { hasSleepAuditToday } from "abmind";
+import { abmind } from "../utils/abmind-lazy.js";
 import { readBridgeLockField } from "./transport/bridge-lock-transport.js";
 
 import type { SessionRegistry } from "./session-registry.js";
@@ -63,7 +63,7 @@ export function isDailyCycleDue(deps: DailyCycleDeps): boolean {
   }
 
   // Single source of truth: lock file status
-  if (hasSleepAuditToday(deps.sleepAuditDir)) return false;
+  if (abmind()?.hasSleepAuditToday(deps.sleepAuditDir)) return false;
 
   const lockData = safeReadJson<{ startedAt?: number; lastHeartbeat?: number }>(deps.bridgeLockPath, {});
   if (!lockData.startedAt) return false; // fail-closed on missing/corrupt lock

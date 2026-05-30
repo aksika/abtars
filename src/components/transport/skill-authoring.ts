@@ -5,7 +5,7 @@
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, renameSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { scanForInjection } from "abmind";
+import { abmind } from "../../utils/abmind-lazy.js";
 import { abtarsHome } from "../../paths.js";
 import { logInfo } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
@@ -41,7 +41,7 @@ function validate(name: string, description: string, content: string): string | 
   if (bytes > MAX_BYTES) return `Content too large (${bytes} bytes, maximum ${MAX_BYTES}). Split into a skill + references/ files.`;
   const path = join(selfDir(), name, "SKILL.md");
   if (existsSync(path)) return `Skill "${name}" already exists. Use skill_update to modify it.`;
-  const scan = scanForInjection(content);
+  const scan = abmind()!.scanForInjection(content);
   if (!scan.safe) return `Content blocked by injection scanner: ${scan.flags[0]?.category ?? "unknown"} (score=${scan.score}). Rephrase the content.`;
   return null;
 }
@@ -160,7 +160,7 @@ export const skillUpdateTool: ToolDefinition = {
     if (bytes < MIN_BYTES) return JSON.stringify({ error: `Content too short (${bytes} bytes, minimum ${MIN_BYTES}).` });
     if (bytes > MAX_BYTES) return JSON.stringify({ error: `Content too large (${bytes} bytes, maximum ${MAX_BYTES}).` });
 
-    const scan = scanForInjection(content);
+    const scan = abmind()!.scanForInjection(content);
     if (!scan.safe) return JSON.stringify({ error: `Content blocked by injection scanner: ${scan.flags[0]?.category ?? "unknown"}.` });
 
     const filePath = join(selfDir(), name, "SKILL.md");
@@ -215,7 +215,7 @@ export const skillPatchTool: ToolDefinition = {
     if (count > 1) return JSON.stringify({ error: `old_string matches ${count} times — must match exactly once.` });
 
     const patched = existing.replace(old_string, new_string);
-    const scan = scanForInjection(patched);
+    const scan = abmind()!.scanForInjection(patched);
     if (!scan.safe) return JSON.stringify({ error: `Patched content blocked by injection scanner: ${scan.flags[0]?.category ?? "unknown"}.` });
 
     const tmpPath = filePath + ".tmp";

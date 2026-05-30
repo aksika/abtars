@@ -10,7 +10,7 @@ import { localTime } from "../../utils/local-time.js";
 import { interceptLargeMessage } from "../message-interceptor.js";
 import { loadSoulBundle, loadMinimalSoul } from "../soul-loader.js";
 import { loadUsers } from "../user-registry.js";
-import { renderMemory, buildSessionStartContext, buildStatusBlock } from "abmind";
+import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import { readAndClearRestartReason } from "../transport/bridge-lock-transport.js";
 import type { SessionRegistry } from "../session-registry.js";
@@ -139,7 +139,7 @@ export async function buildPrompt(
           return true;
         });
         if (hits.length > 0) {
-          const lines = hits.map(h => renderMemory({
+          const lines = hits.map(h => abmind()!.renderMemory({
             content_en: h.content,
             topic: h.topic ?? undefined,
             emotion_tags: h.emotionTags ?? undefined,
@@ -166,7 +166,7 @@ export async function buildPrompt(
 
   // --- Injection scan for non-master ---
   if (userRole !== "master" && text.length > 10) {
-    const { scanForInjection } = await import("abmind");
+    const scanForInjection = abmind()!.scanForInjection;
     const scan = scanForInjection(text);
     if (!scan.safe) {
       logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map(f => f.category).join(", ")}`);
@@ -250,7 +250,7 @@ export function buildSessionStartPrompt(
     // Dead path — kept for type safety during transition
   } else {
     const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : undefined;
-    const ctx = buildSessionStartContext(memory, userId, maxContext, ctxOpts);
+    const ctx = abmind()!.buildSessionStartContext(memory, userId, maxContext, ctxOpts);
     if (ctx) {
       contextParts.push(ctx);
       logInfo(TAG, `Injected session-start context (${ctx.length} chars${isCodeSession ? ", Code mode" : ""})`);
@@ -274,7 +274,7 @@ export function buildSessionStartPrompt(
 
         // #646 — system status (skip for Code sessions)
         if (sessionKey && !sessionKey.includes("_C_")) {
-          const status = buildStatusBlock(memory);
+          const status = abmind()!.buildStatusBlock(memory);
           if (status) contextParts.push(status);
         }
       }

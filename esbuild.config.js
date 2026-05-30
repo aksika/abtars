@@ -54,6 +54,8 @@ function capabilityRegistryPlugin() {
 const external = [
   "rettiwt-api",
   "patchright",
+  "better-sqlite3",
+  "abmind",
 ];
 
 const result = await esbuild.build({

@@ -12,20 +12,35 @@
  * internal logger, not an abtars singleton).
  */
 
-import { MemoryManager } from "abmind";
-import { logInfo } from "../components/logger.js";
+import { logInfo, logWarn } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
+import { nullMemory } from "../components/null-memory.js";
+import { loadAbmind } from "../utils/abmind-lazy.js";
 
 export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
-  if (!ctx.memoryConfig.memoryEnabled) {
-    logInfo("main", "🧠 Memory disabled");
+  const mod = await loadAbmind();
+
+  if (!mod) {
+    logWarn("main", "⚠️ abmind not available — running without persistent memory");
+    ctx.memory = nullMemory;
     return "skipped";
   }
 
-  const memory = new MemoryManager(ctx.memoryConfig);
-  await memory.initialize();
+  if (!ctx.memoryConfig.memoryEnabled) {
+    logInfo("main", "🧠 Memory disabled");
+    ctx.memory = nullMemory;
+    return "skipped";
+  }
 
-  ctx.memory = memory;
-  logInfo("main", `🧠 Memory enabled (dir=${ctx.memoryConfig.memoryDir})`);
-  return "ran";
+  try {
+    const memory = new mod.MemoryManager(ctx.memoryConfig);
+    await memory.initialize();
+    ctx.memory = memory;
+    logInfo("main", `🧠 Memory enabled (dir=${ctx.memoryConfig.memoryDir})`);
+    return "ran";
+  } catch (err) {
+    logWarn("main", `⚠️ Memory init failed: ${err instanceof Error ? err.message : String(err)}. Running without persistent memory.`);
+    ctx.memory = nullMemory;
+    return "skipped";
+  }
 }
