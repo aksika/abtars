@@ -55,7 +55,7 @@ function mockDeps(transport: IKiroTransport, overrides: Partial<PipelineDeps> = 
     sttConfig: null,
     ttsConfig: null,
     sessions: new SessionRegistry(),
-    sessionManager: new SessionManager(),
+    sessionManager: { getActiveSessionId: () => "test_A_01", getActiveSession: () => ({ id: "test_A_01", type: "A", shortIndex: 1, ended: false }) } as any,
     updateCtxStart: vi.fn(),
     ...overrides,
   };
@@ -65,7 +65,7 @@ function makeMsg(overrides: Partial<InboundMessage> = {}): InboundMessage {
   return {
     platform: "telegram",
     channelId: "100",
-    sessionKey: "master:telegram",
+    userId: "master",
     senderId: "42",
     senderName: "Test",
     text: "hello",
@@ -169,8 +169,8 @@ describe("handleInboundMessage", () => {
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(deps.sessions.get("master:telegram")?.busy).toBe(false);
-    expect(deps.idleSave.reset).toHaveBeenCalledWith("master:telegram", 100);
+    expect(deps.sessions.get("test_A_01")?.busy).toBe(false);
+    expect(deps.idleSave.reset).toHaveBeenCalledWith("test_A_01", 100);
   });
 
   it("handles transport error gracefully", async () => {
@@ -182,7 +182,7 @@ describe("handleInboundMessage", () => {
     await handleInboundMessage(makeMsg(), adapter, deps);
 
     expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Something went wrong"), expect.any(Object));
-    expect(deps.sessions.get("master:telegram")?.busy).toBe(false);
+    expect(deps.sessions.get("test_A_01")?.busy).toBe(false);
   });
 
   it("handles command and returns early", async () => {

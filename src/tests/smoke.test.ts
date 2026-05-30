@@ -63,7 +63,7 @@ function makeAdapter(): PlatformAdapter & { sent: string[] } {
 
 function makeMsg(text: string, overrides: Partial<InboundMessage> = {}): InboundMessage {
   return {
-    platform: "telegram", channelId: "100", sessionKey: "telegram:100",
+    platform: "telegram", channelId: "100", userId: "master",
     senderId: "42", senderName: "Test", text, timestamp: Date.now(),
     isGroup: false, isVoice: false, ...overrides,
   };
@@ -82,7 +82,7 @@ function makeDeps(transport: IKiroTransport, memory: MemoryManager | null, overr
     startedAt: Date.now(),
     sttConfig: null, ttsConfig: null,
     sessions: new SessionRegistry(),
-    sessionManager: new SessionManager(),
+    sessionManager: { getActiveSessionId: () => "test_A_01", getActiveSession: () => ({ id: "test_A_01", type: "A", shortIndex: 1, ended: false }) } as any,
     updateCtxStart: vi.fn(),
     ...overrides,
   };
@@ -118,7 +118,7 @@ describe("Smoke: bridge lifecycle", () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
     const sessions = new SessionRegistry();
-    sessions.getOrCreate("telegram:100").pendingStart = true;
+    sessions.getOrCreate("test_A_01").pendingStart = true;
     const deps = makeDeps(transport, memory, { sessions });
 
     await handleInboundMessage(makeMsg("hello"), adapter, deps);
@@ -133,7 +133,7 @@ describe("Smoke: bridge lifecycle", () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
     const sessions = new SessionRegistry();
-    sessions.getOrCreate("telegram:100").seen = true;
+    sessions.getOrCreate("test_A_01").seen = true;
     const deps = makeDeps(transport, memory, { sessions });
 
     await handleInboundMessage(makeMsg("hello again"), adapter, deps);
@@ -146,7 +146,7 @@ describe("Smoke: bridge lifecycle", () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
     const sessions = new SessionRegistry();
-    sessions.getOrCreate("telegram:100").seen = true;
+    sessions.getOrCreate("test_A_01").seen = true;
     const deps = makeDeps(transport, memory, { sessions });
 
     // First message — no SOUL (already seen)
@@ -155,7 +155,7 @@ describe("Smoke: bridge lifecycle", () => {
 
     // Reset
     await resetAndPrepare({
-      transport, sessionKey: "telegram:100", reason: "test-reset",
+      transport, sessionKey: "test_A_01", reason: "test-reset",
       sessions,
     });
 
@@ -169,7 +169,7 @@ describe("Smoke: bridge lifecycle", () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
     const sessions = new SessionRegistry();
-    sessions.getOrCreate("telegram:100").pendingStart = true;
+    sessions.getOrCreate("test_A_01").pendingStart = true;
     const deps = makeDeps(transport, memory, { sessions });
 
     await handleInboundMessage(makeMsg("hello"), adapter, deps);

@@ -26,6 +26,7 @@ export interface BuildPromptDeps {
   memory: MemoryManager | null;
   memoryConfig: { memoryEnabled: boolean; memoryDir: string };
   sessions: SessionRegistry;
+  sessionManager: import("../session-manager.js").SessionManager;
   conversationBuffer: ConversationBuffer;
   contextPercent: number;
   maxContext?: number;
@@ -45,8 +46,9 @@ export async function buildPrompt(
   registry: UserRegistry,
 ): Promise<BuildPromptResult> {
   const { memory, sessions, conversationBuffer, contextPercent } = deps;
-  const { sessionKey, channelId, isGroup } = msg;
-  const userId = sessionKey.includes(":") ? sessionKey.split(":")[0]! : "master";
+  const { channelId, isGroup } = msg;
+  const userId = msg.userId;
+  const sessionKey = deps.sessionManager.getActiveSessionId(userId, msg.platform);
   const bufKey = `${msg.platform}:${channelId}`;
 
   // --- Timestamp prefix ---

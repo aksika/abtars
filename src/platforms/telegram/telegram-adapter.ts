@@ -378,7 +378,7 @@ export class TelegramAdapter implements PlatformAdapter {
     const inbound: InboundMessage = {
       platform: "telegram",
       channelId: String(chatId),
-      sessionKey: resolvedUser + ":telegram",
+      userId: resolvedUser,
       senderId: String(message.from.id),
       senderName,
       text,
@@ -445,7 +445,7 @@ export class TelegramAdapter implements PlatformAdapter {
       const { sessions } = this.deps.pipeline;
       const entry = sessions.getOrCreate(activeId);
       if (entry.busy) {
-        entry.queue.push({ msg: { sessionKey: activeId, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this });
+        entry.queue.push({ msg: { userId: reactionUser, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this });
         logDebug(TAG, `Queued reaction signal for busy ${activeId} (${entry.queue.length} pending)`);
       } else {
         try {

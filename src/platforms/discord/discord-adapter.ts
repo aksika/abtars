@@ -119,7 +119,7 @@ export class DiscordAdapter implements PlatformAdapter {
     const msg: InboundMessage = {
       text: commandText,
       channelId,
-      sessionKey: `${userId}:discord`,
+      userId,
       senderId: interaction.user.id,
       senderName: interaction.user.username ?? "unknown",
       platform: "discord",
@@ -180,7 +180,7 @@ export class DiscordAdapter implements PlatformAdapter {
         const msg: InboundMessage = {
           text: `/model ${providerId} ${modelId}`,
           channelId: modelInteraction.channelId,
-          sessionKey: `${interaction.user.id}:discord`,
+          userId: interaction.user.id,
           senderId: interaction.user.id,
           senderName: interaction.user.username ?? "unknown",
           platform: "discord",
@@ -308,7 +308,7 @@ export class DiscordAdapter implements PlatformAdapter {
     const inbound: InboundMessage = {
       platform: "discord",
       channelId: message.channelId,
-      sessionKey: (loadUsers().byPlatformId.get("discord:" + message.authorId)?.userId ?? "unknown") + ":discord",
+      userId: loadUsers().byPlatformId.get("discord:" + message.authorId)?.userId ?? "unknown",
       senderId: message.authorId,
       senderName: message.authorUsername,
       text: senderPrefix + text,

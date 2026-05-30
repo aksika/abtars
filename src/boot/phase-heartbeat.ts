@@ -109,7 +109,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
           ctx.telegramAdapter.injectMessage({
             platform: "telegram",
             channelId: String(r.chatId),
-            sessionKey: (loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master") + ":telegram",
+            userId: loadUsers().byPlatformId.get("telegram:" + r.chatId)?.userId ?? "master",
             senderId: String(r.chatId),
             senderName: "task",
             text: `[Scheduled reminder] ${r.message}`,

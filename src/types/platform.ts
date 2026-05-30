@@ -12,7 +12,7 @@ export interface SendOpts {
 export interface InboundMessage {
   platform: Platform;
   channelId: string;         // raw platform channel ID
-  sessionKey: string;        // "telegram:123" / "discord:456"
+  userId: string;            // resolved from users.json (e.g. "aksika")
   senderId: string;
   senderName: string;
   text: string;

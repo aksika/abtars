@@ -20,13 +20,12 @@ const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/res
 export const commandMiddleware: Middleware = async (ctx, next) => {
   const { msg, deps } = ctx;
   const { transport, config, startedAt, memory, memoryConfig, nlmConfig,
-    idleSave, sessions,
+    idleSave, sessions, sessionManager,
     updateCtxStart, conversationBuffer } = deps;
 
   // #157: strip leading bangs for non-master (kiro-cli executes ! as shell)
-  // Resolve user from sessionKey (adapter already resolved userId)
   const registry = loadUsers();
-  const resolvedUserId = msg.sessionKey.includes(":") ? msg.sessionKey.split(":")[0]! : "master";
+  const resolvedUserId = msg.userId;
   const user = registry.byUserId.get(resolvedUserId);
   const isMaster = user?.role === "master";
   if (!isMaster && BANG_PREFIX.test(ctx.text)) {
@@ -43,14 +42,15 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
   const cmd = trimmed.split(/\s/)[0]!.toLowerCase();
 
   // Interrupt commands: kill in-progress response first, then handle
-  if (INTERRUPT_COMMANDS.has(cmd) && sessions.get(msg.sessionKey)?.busy) {
+  const activeId = sessionManager.getActiveSessionId(msg.userId, msg.platform);
+  if (INTERRUPT_COMMANDS.has(cmd) && sessions.get(activeId)?.busy) {
     logInfo("commands", `Interrupt command ${cmd} while busy — stopping current response`);
     await transport.sendInterrupt();
-    sessions.getOrCreate(msg.sessionKey).busy = false;
+    sessions.getOrCreate(activeId).busy = false;
   }
 
   // Non-interrupt destructive commands while busy: defer to busy guard (will be queued)
-  if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && sessions.get(msg.sessionKey)?.busy) {
+  if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && sessions.get(activeId)?.busy) {
     const deferredWording: Record<string, string> = {
       "/compact": "⏳ Will /compact after current response finishes.",
       "/coding": "⏳ Will switch to coding mode after current response finishes.",
@@ -71,7 +71,7 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     : undefined;
 
   const cmdCtx: CommandContext = {
-    sessionKey: msg.sessionKey, chatId: ctx.chatId, userId: ctx.userId ?? "master", platform: msg.platform, reply: ctx.reply,
+    sessionKey: activeId, chatId: ctx.chatId, userId: ctx.userId ?? "master", platform: msg.platform, reply: ctx.reply,
     editReply,
     transport, config, startedAt,
     memory, memoryConfig, nlmConfig,

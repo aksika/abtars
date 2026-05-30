@@ -3,7 +3,7 @@ import { runPipeline, createMessageContext, type Middleware, type MessageContext
 import { SessionRegistry } from "../session-registry.js";
 
 function makeMsg(overrides = {}) {
-  return { platform: "telegram", channelId: "100", sessionKey: "master:telegram", senderId: "42", senderName: "Test", text: "hello", timestamp: Date.now(), isGroup: false, isVoice: false, ...overrides } as any;
+  return { platform: "telegram", channelId: "100", userId: "master", senderId: "42", senderName: "Test", text: "hello", timestamp: Date.now(), isGroup: false, isVoice: false, ...overrides } as any;
 }
 function makeAdapter() { return { sendMessage: vi.fn().mockResolvedValue(1), chunkResponse: (t: string) => [t] } as any; }
 function makeDeps() { return { sessions: new SessionRegistry(), transport: {} } as any; }
@@ -36,13 +36,13 @@ describe("runPipeline", () => {
 });
 
 describe("createMessageContext", () => {
-  it("extracts userId from sessionKey", () => {
-    const ctx = createMessageContext(makeMsg({ sessionKey: "aksika:telegram" }), makeAdapter(), makeDeps());
+  it("passes userId from message", () => {
+    const ctx = createMessageContext(makeMsg({ userId: "aksika" }), makeAdapter(), makeDeps());
     expect(ctx.userId).toBe("aksika");
   });
 
-  it("defaults userId to master for plain sessionKey", () => {
-    const ctx = createMessageContext(makeMsg({ sessionKey: "plain" }), makeAdapter(), makeDeps());
+  it("uses userId directly from message", () => {
+    const ctx = createMessageContext(makeMsg({ userId: "master" }), makeAdapter(), makeDeps());
     expect(ctx.userId).toBe("master");
   });
 

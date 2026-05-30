@@ -144,10 +144,9 @@ export async function handleInboundMessage(
 
   // --- BeforeMessage hook ---
   if (hasHooks("BeforeMessage")) {
-    const userId = msg.sessionKey.includes(":") ? msg.sessionKey.split(":")[0]! : "master";
     const result = await fireHook("BeforeMessage", {
       event: "BeforeMessage", timestamp: new Date().toISOString(),
-      sessionKey: msg.sessionKey, platform: msg.platform, userId,
+      sessionKey: "", platform: msg.platform, userId: msg.userId,
       chatId: String(ctx.chatId), text: ctx.text,
     });
     if (result?.decision === "block") {
@@ -164,13 +163,12 @@ export async function handleInboundMessage(
     sessions,
   } = deps;
 
-  const { sessionKey, channelId, isVoice } = msg;
+  const { channelId, isVoice } = msg;
   const chatId = ctx.chatId;
   const text = ctx.text;
 
-  // Resolve userId from sessionKey (adapter already resolved it)
   const registry = loadUsers();
-  const userId = sessionKey.includes(":") ? sessionKey.split(":")[0]! : "master";
+  const userId = msg.userId;
 
   // Resolve active transport session via session manager (#510)
   const activeSessionId = deps.sessionManager.getActiveSessionId(userId, msg.platform);
@@ -190,7 +188,7 @@ export async function handleInboundMessage(
 
     // --- Build prompt ---
     const { prompt: builtPrompt, imageContent } = await buildPrompt(msg, text, {
-      memory, memoryConfig, sessions, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
+      memory, memoryConfig, sessions, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: !("agentLoop" in transport),
     }, registry);
 
@@ -229,7 +227,7 @@ export async function handleInboundMessage(
 
     // Wire /wait steer injection (#655) — agent loop drains this between tool rounds
     if ("getPendingInstruction" in transport) {
-      const sessionEntry = deps.sessions.getOrCreate(msg.sessionKey);
+      const sessionEntry = deps.sessions.getOrCreate(activeSessionId);
       (transport as any).getPendingInstruction = () => {
         const pending = sessionEntry.pendingWait;
         if (!pending) return undefined;
@@ -461,7 +459,7 @@ export async function handleInboundMessage(
     if (hasHooks("AfterMessage")) {
       fireHook("AfterMessage", {
         event: "AfterMessage", timestamp: new Date().toISOString(),
-        sessionKey, platform: msg.platform, userId,
+        sessionKey: activeSessionId, platform: msg.platform, userId,
         chatId: String(chatId), text: text,
         response: userResponse, model: ("currentModel" in transport ? String((transport as Record<string, unknown>).currentModel) : "unknown"), success: true,
       }).catch(err => logAndSwallow(TAG, "adapter call", err));
@@ -469,10 +467,10 @@ export async function handleInboundMessage(
   } catch (err) {
     // #287: model not found — surface actionable message to user
     if (err instanceof ModelNotFoundError) {
-      logWarn(TAG, `Model not found for ${sessionKey}: ${err.message}`);
+      logWarn(TAG, `Model not found for ${activeSessionId}: ${err.message}`);
       await adapter.sendMessage(channelId, `❌ ${err.message}\nUse /model to switch.`, { threadId: msg.threadId });
     } else {
-      logError(TAG, `Error for ${sessionKey} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
+      logError(TAG, `Error for ${activeSessionId} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
     }
     if (adapter.setReaction && msg.messageId) {
       await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
@@ -482,7 +480,7 @@ export async function handleInboundMessage(
     if (hasHooks("AfterMessage")) {
       fireHook("AfterMessage", {
         event: "AfterMessage", timestamp: new Date().toISOString(),
-        sessionKey, platform: msg.platform, userId,
+        sessionKey: activeSessionId, platform: msg.platform, userId,
         chatId: String(chatId), text: text, success: false,
         error: err instanceof Error ? err.message : String(err),
       }).catch(err => logAndSwallow(TAG, "adapter call", err));
@@ -516,13 +514,13 @@ export async function handleInboundMessage(
     transport.onToolCallStart = undefined;
     transport.onSegmentBreak = undefined;
     busyEntry.busy = false;
-    idleSave.reset(sessionKey, chatId);
+    idleSave.reset(activeSessionId, chatId);
 
     // Drain queued messages
-    const entry = sessions.get(sessionKey);
+    const entry = sessions.get(activeSessionId);
     if (entry?.queue.length) {
       const next = entry.queue.shift()!;
-      logInfo(TAG, `Draining queued message for ${sessionKey} (${entry.queue.length} remaining)`);
+      logInfo(TAG, `Draining queued message for ${activeSessionId} (${entry.queue.length} remaining)`);
       handleInboundMessage(next.msg, next.adapter, deps).catch(e => logError(TAG, "Queue drain error", e));
     }
   }

@@ -163,7 +163,7 @@ export class IrcAdapter implements PlatformAdapter {
     const msg: InboundMessage = {
       platform: "irc",
       channelId,
-      sessionKey: `${sender}:irc`,
+      userId: sender,
       senderId: sender,
       senderName: sender,
       text,

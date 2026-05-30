@@ -66,7 +66,7 @@ export function createMessageContext(
     return adapter.sendMessage(msg.channelId, clean, { threadId: msg.threadId, ...opts });
   };
   const chatId = parseInt(msg.channelId, 10) || 0;
-  const userId = msg.sessionKey.includes(":") ? msg.sessionKey.split(":")[0]! : "master";
+  const userId = msg.userId;
   return {
     msg,
     adapter,
