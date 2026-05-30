@@ -95,7 +95,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
       } catch (err) { logAndSwallow("system_status", "op", err); }
     }
     if (name === "phaseDashboard" && health.status === "ok") {
-      entry.detail = ":3000";
+      entry.detail = `:${process.env["WEB_PORT"] || "3000"}`;
     }
 
     subsystems.push(entry);
