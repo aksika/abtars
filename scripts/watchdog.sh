@@ -33,6 +33,8 @@ MAX_LOG_BYTES=10485760
 BRIDGE_PID=""
 SPAWNED_AT=0
 RESTART_TIMES=()
+RESTARTING=false
+RESTART_STARTED_AT=0
 
 # ── Load .env for Telegram notifications ──
 TG_TOKEN=""
@@ -178,8 +180,12 @@ kill_bridge() {
 }
 
 graceful_restart() {
+  RESTARTING=true
+  RESTART_STARTED_AT=$(date +%s)
   log "USR1 received — graceful restart"
+  notify "♻️ Restarting bridge..."
   if [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    log "Stopping old bridge (PID=$BRIDGE_PID)..."
     kill -TERM "$BRIDGE_PID" 2>/dev/null || true
     local i=0
     while kill -0 "$BRIDGE_PID" 2>/dev/null && (( i < 20 )); do
@@ -191,14 +197,16 @@ graceful_restart() {
       kill -9 "$BRIDGE_PID" 2>/dev/null || true
       wait_for_death "$BRIDGE_PID"
     fi
+    log "Old bridge exited"
   fi
   rm -f "$LOCK"
   BRIDGE_PID=""
-  spawn_bridge "$@"
+  spawn_bridge "${BRIDGE_ARGS[@]}"
+  RESTARTING=false
 }
 
 BRIDGE_ARGS=("$@")
-trap 'graceful_restart "${BRIDGE_ARGS[@]}"' USR1
+trap 'graceful_restart' USR1
 # Exit non-zero on TERM/INT so launchd KeepAlive restarts us even if a policy
 # variant treats exit 0 as "intentional shutdown, do not restart".
 trap 'kill_bridge "watchdog exit"; rm -f "$WD_LOCK"; exit 1' TERM INT
@@ -243,6 +251,17 @@ while true; do
 
   if [[ -n "$lock_pid" && "$lock_pid" != "0" ]]; then
     BRIDGE_PID="$lock_pid"
+  fi
+
+  # Guard: don't spawn if graceful_restart is in progress
+  if [[ "$RESTARTING" == "true" ]]; then
+    local elapsed=$(( $(date +%s) - RESTART_STARTED_AT ))
+    if (( elapsed > 30 )); then
+      log "RESTARTING flag stuck for ${elapsed}s — resetting"
+      RESTARTING=false
+    else
+      continue
+    fi
   fi
 
   if [[ -z "$BRIDGE_PID" ]] || ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
