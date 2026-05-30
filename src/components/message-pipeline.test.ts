@@ -214,4 +214,28 @@ describe("handleInboundMessage", () => {
     expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("STT"), expect.any(Object));
     expect(transport.sendPrompt).not.toHaveBeenCalled();
   });
+
+  it("different users get different session keys from SessionManager", async () => {
+    const sm = {
+      getActiveSessionId: vi.fn((userId: string) => `${userId}_A_01`),
+      getActiveSession: () => ({ id: "x", type: "A", shortIndex: 1, ended: false }),
+    };
+    const deps = mockDeps(transport, { sessionManager: sm } as any);
+    const adapter = mockAdapter();
+
+    await handleInboundMessage(makeMsg({ userId: "aksika" }), adapter, deps);
+    await handleInboundMessage(makeMsg({ userId: "adrika" }), adapter, deps);
+
+    expect(sm.getActiveSessionId).toHaveBeenCalledWith("aksika", "telegram");
+    expect(sm.getActiveSessionId).toHaveBeenCalledWith("adrika", "telegram");
+  });
+
+  it("userId flows to transport.sendPrompt for tool context", async () => {
+    const deps = mockDeps(transport);
+    const adapter = mockAdapter();
+
+    await handleInboundMessage(makeMsg({ userId: "adrika" }), adapter, deps);
+
+    expect(transport.sendPrompt).toHaveBeenCalledWith("test_A_01", expect.any(String), undefined, "adrika");
+  });
 });
