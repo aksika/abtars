@@ -9,7 +9,7 @@
 import type { Platform } from "../types/platform.js";
 import type { SubagentRuntime, AgentSession, AgentName } from "./subagent-runtime.js";
 
-export type SessionType = "A" | "B" | "C" | "T" | "P";
+export type SessionType = "A" | "B" | "C" | "T" | "P" | "S";
 
 export interface ManagedSession {
   id: string;           // "1747563282_A_01"
@@ -29,8 +29,8 @@ interface PlatformState {
   nextIndex: number;    // monotonic counter
 }
 
-const TYPE_LABELS: Record<SessionType, string> = { A: "Main", B: "Browse", C: "Code", T: "Task", P: "Peer" };
-const TYPE_AGENT: Partial<Record<SessionType, AgentName>> = { C: "coding", B: "browsie", P: "coding" };
+const TYPE_LABELS: Record<SessionType, string> = { A: "Main", B: "Browse", C: "Code", T: "Task", P: "Peer", S: "System" };
+const TYPE_AGENT: Partial<Record<SessionType, AgentName>> = { C: "coding", B: "browsie", P: "coding", S: "coding" };
 
 export function typeLabel(t: SessionType): string { return TYPE_LABELS[t]; }
 

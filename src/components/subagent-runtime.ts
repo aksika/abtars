@@ -22,6 +22,8 @@ export interface AgentOpts {
   context?: Record<string, unknown>;
   /** Override model API timeout for this call (ms). */
   timeoutMs?: number;
+  /** Override session type (default: derived from agent name). */
+  sessionType?: import("./session-manager.js").SessionType;
 }
 
 /** Persistent transport handle for multi-turn callers. */

@@ -47,9 +47,16 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
         ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `🔧 Calling self-healing agent`);
       }
       const msg = `[System] Cron task "${entryId}" failed:\nCommand: ${command}\nResult: ${result}\n\nDiagnose and fix if possible. If you can't fix it, tell the user.`;
-      transport.sendPrompt("system:cron-fix", msg, undefined, "system").catch(err => {
-        logWarn("main", `Cron auto-fix inject failed: ${err}`);
-      });
+      void (async () => {
+        try {
+          const { SubagentRuntime } = await import("../components/subagent-runtime.js");
+          const runtime = new SubagentRuntime();
+          await runtime.complete("coding", msg, { sessionType: "S" });
+          await runtime.shutdown();
+        } catch (err) {
+          logWarn("main", `SHA session failed: ${err}`);
+        }
+      })();
     },
     (chatId, title, _reason) => {
       if (!ctx.telegramAdapter) return;
