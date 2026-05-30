@@ -17,7 +17,7 @@ export async function backup(outputDir?: string): Promise<number> {
   const abmindHome = process.env["ABMIND_HOME"] ?? join(dirname(abHome), ".abmind");
   const timestamp = new Date().toISOString().replace(/[T:]/g, "-").replace(/\..+/, "");
   const zipName = `abtars-backup-${timestamp}.zip`;
-  const destDir = outputDir ?? process.cwd();
+  const destDir = outputDir ?? join(dirname(abHome), ".backup-abtars");
   mkdirSync(destDir, { recursive: true });
   const zipPath = join(destDir, zipName);
 
