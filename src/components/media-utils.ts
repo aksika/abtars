@@ -99,7 +99,7 @@ export async function saveInboundMedia(
 
   // Resize images if needed (progressive: halve + reduce quality until under target)
   let finalBuffer = buffer;
-  if (isImage && (mime === "image/jpeg" || mime === "image/png")) {
+  if (isImage && buffer.length > 300_000 && (mime === "image/jpeg" || mime === "image/png")) {
     try {
       finalBuffer = await resizeImage(buffer, mime);
     } catch (err) {
