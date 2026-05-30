@@ -205,7 +205,7 @@ export async function handleInboundMessage(
     if (completions.length > 0) {
       const notes = completions.map(c => {
         const cost = c.inputTokens + c.outputTokens > 0 ? ` [${((c.inputTokens + c.outputTokens) / 1000).toFixed(1)}k tokens]` : "";
-        return `[Background session ${c.sessionId} ${c.status}]\nGoal: ${c.goal}\nResult: ${c.result}${cost}`;
+        return `[SYSTEM] Background session ${c.sessionId} ${c.status}\nGoal: ${c.goal}\nResult: ${c.result}${cost}`;
       }).join("\n\n");
       prompt = `${notes}\n\n---\n\n${prompt}`;
     }
