@@ -1,6 +1,6 @@
 {
   "name": "abtars",
-  "version": "0.1.0-alpha.16",
+  "version": "0.1.0-alpha.17",
   "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
   "type": "module",
   "main": "bundle/abtars.js",
@@ -55,6 +55,7 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
-    "install-manifest.json"
+    "install-manifest.json",
+    "config/"
   ]
 }

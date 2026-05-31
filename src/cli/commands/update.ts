@@ -248,6 +248,30 @@ export async function update(opts: UpdateOptions): Promise<number> {
       if (existsSync(p)) { rmSync(p, { recursive: true, force: true }); }
     }
 
+    // Seed missing config files from release defaults (#738)
+    const releaseConfig = join(staged.stagedPath, "config");
+    const destConfig = join(paths.home, "config");
+    if (existsSync(releaseConfig)) {
+      for (const f of readdirSync(releaseConfig)) {
+        if (!f.endsWith('.example')) continue;
+        const target = join(destConfig, f.replace('.example', ''));
+        if (!existsSync(target)) {
+          cpSync(join(releaseConfig, f), target);
+        }
+      }
+      // Also copy transport.default.json (fallback for transport-config)
+      const defaultTransport = join(releaseConfig, 'transport.default.json');
+      if (existsSync(defaultTransport)) cpSync(defaultTransport, join(destConfig, 'transport.default.json'));
+    }
+
+    // Sync core/ to ~/.abtars/core/ (for skill-reloader etc.)
+    const coreSrc = join(staged.stagedPath, "core");
+    const coreDst = join(paths.home, "core");
+    if (existsSync(coreSrc)) {
+      await mkdir(coreDst, { recursive: true });
+      cpSync(coreSrc, coreDst, { recursive: true });
+    }
+
     if (serviceChanged) {
       if (process.platform === 'darwin') {
         process.stdout.write(`⚠️  LaunchAgent plist updated — reload with: launchctl bootout gui/$(id -u)/com.abtars.watchdog && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist\n`);

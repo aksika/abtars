@@ -131,6 +131,8 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         if (existsSync(coreDir)) await cp(coreDir, join(stagedPath, 'core'), { recursive: true });
         const scriptsSrc = join(repoRoot, 'scripts');
         if (existsSync(scriptsSrc)) await cp(scriptsSrc, join(stagedPath, 'scripts'), { recursive: true });
+        const configSrc = join(repoRoot, 'config');
+        if (existsSync(configSrc)) await cp(configSrc, join(stagedPath, 'config'), { recursive: true });
         const manifestSrc = join(repoRoot, 'install-manifest.json');
         if (existsSync(manifestSrc)) await copyFile(manifestSrc, join(stagedPath, 'install-manifest.json'));
         await writeFile(join(stagedPath, 'package.json'), JSON.stringify({ type: "module", name: "abtars", version }, null, 2) + "\n");

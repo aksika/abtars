@@ -198,7 +198,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   logInfo("main", "✅ Transport ready");
 
-  if (resolved.provider.transport === "api" && ctx.memory) {
+  if (resolved.provider.transport === "api" && (ctx.memory as any)?.available) {
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
     const { SqliteBackend } = await import("abmind");
     const backend = new SqliteBackend(memoryConfig);
@@ -207,7 +207,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     logInfo("main", "🧠 In-process memory wired to tool registry");
 
     // Wire context engine for automatic compaction
-    const db = ctx.memory.getDb?.() ?? ctx.memory.getDatabase?.();
+    const db = ctx.memory!.getDb?.() ?? ctx.memory!.getDatabase?.();
     if (db && resolved.contextWindow >= 128000) {
       const { ContextEngine } = await import("abmind");
       const { createContextOrchestrator } = await import("../components/context/index.js");
