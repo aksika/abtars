@@ -112,9 +112,9 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   const installMode = await select<"simple" | "supervised" | "supervised-daemon">({
     message: 'Deployment mode',
     options: [
-      { value: 'simple', label: 'simple — laptop/WSL, start manually' },
-      { value: 'supervised', label: 'supervised — 24/7 host, launchd/systemd user-scope auto-restart' },
-      { value: 'supervised-daemon', label: 'supervised-daemon — server/headless, system-scope (requires sudo once)' },
+      { value: 'simple', label: 'simple — laptop/dev, start manually' },
+      { value: 'supervised', label: 'supervised — 24/7 host, user-scope auto-restart (recommended: macOS)' },
+      { value: 'supervised-daemon', label: 'supervised-daemon — system-scope service (recommended: Linux)' },
     ],
     initialValue: existing?.installMode ?? 'simple',
   });
