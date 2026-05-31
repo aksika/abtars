@@ -136,28 +136,40 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(userName)) { cancel('Cancelled.'); return null; }
 
-  // 1d. Passphrase (for memory encryption)
-  const passphrase = await text({
-    message: 'Encryption passphrase (protects memories + secrets)',
-    placeholder: 'min 6 chars — remember this!',
-    validate: (v) => (v && v.length >= 6) ? undefined : 'min 6 characters',
-  });
-  if (isCancel(passphrase)) { cancel('Cancelled.'); return null; }
+  // 1d. Passphrase — moved to `abmind install` (#716)
+  const passphrase = '';
 
   // 2-3. Telegram (optional)
   const telegramToken = await text({
-    message: `Telegram bot token (from @BotFather, ${noteEmpty})`,
-    placeholder: '1234567890:AA...',
+    message: `Telegram bot token (@BotFather → /mybots → API Token, ${noteEmpty})`,
+    placeholder: '123456789:ABCdefGHI...',
     initialValue: existing?.telegramToken,
     validate: (v) => (!v || v.trim() === '' || v.includes(':')) ? undefined : 'expected format "<id>:<secret>" or empty',
   });
   if (isCancel(telegramToken)) { cancel('Cancelled.'); return null; }
 
+  // Auto-detect chat ID: ask user to send /start to the bot
+  let detectedChatId = existing?.telegramChatId ?? '';
+  if (telegramToken && telegramToken.trim() && !detectedChatId) {
+    process.stdout.write('\n📱 Send /start to your bot on Telegram now... (waiting 30s)\n');
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${telegramToken.trim()}/getUpdates?timeout=30&allowed_updates=["message"]`);
+      const data = await res.json() as { result?: Array<{ message?: { chat?: { id?: number } } }> };
+      const id = data.result?.find(u => u.message?.chat?.id)?.message?.chat?.id;
+      if (id) {
+        detectedChatId = String(id);
+        process.stdout.write(`✓ Detected your chat ID: ${detectedChatId}\n`);
+      } else {
+        process.stdout.write('⚠ No message received — enter manually below.\n');
+      }
+    } catch { process.stdout.write('⚠ Could not reach Telegram API — enter manually below.\n'); }
+  }
+
   const telegramChatId = await text({
-    message: `Primary Telegram chat ID (${noteEmpty})`,
+    message: `Your Telegram user ID (${noteEmpty})`,
     placeholder: '123456789',
-    initialValue: existing?.telegramChatId,
-    validate: (v) => (!v || v.trim() === '' || /^-?\d+$/.test(v.trim())) ? undefined : 'expected numeric chat id or empty',
+    initialValue: detectedChatId,
+    validate: (v) => (!v || v.trim() === '' || /^-?\d+$/.test(v.trim())) ? undefined : 'expected numeric user ID or empty',
   });
   if (isCancel(telegramChatId)) { cancel('Cancelled.'); return null; }
 
@@ -276,29 +288,8 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(groqApiKey)) { cancel('Cancelled.'); return null; }
 
-  // 12b. Embeddings
-  const embeddingEnabled = await confirm({
-    message: 'Enable memory embeddings? (requires ollama + 274MB model)',
-    initialValue: existing?.embeddingEnabled ?? false,
-  });
-  if (isCancel(embeddingEnabled)) { cancel('Cancelled.'); return null; }
-
-  if (embeddingEnabled) {
-    const { checkEmbeddingHealth } = await import('abmind');
-    const health = await checkEmbeddingHealth();
-    if (!health.reachable) {
-      process.stdout.write(`\n⚠️  ollama not found. Install with:\n   curl -fsSL https://ollama.com/install.sh | sh\n   Then re-run onboard.\n\n`);
-    } else if (!health.modelPulled) {
-      const pull = await confirm({ message: 'Pull nomic-embed-text (274MB)?', initialValue: true });
-      if (!isCancel(pull) && pull) {
-        process.stdout.write('Pulling nomic-embed-text...\n');
-        const { spawnSync } = await import('node:child_process');
-        spawnSync('ollama', ['pull', 'nomic-embed-text'], { stdio: 'inherit' });
-      }
-    } else {
-      process.stdout.write('✓ ollama + nomic-embed-text ready\n');
-    }
-  }
+  // 12b. Embeddings — handled by `abmind install`, not here
+  const embeddingEnabled = false;
 
   const trustMode = await confirm({
     message: 'TRUST_MODE — auto-approve all permission requests from the agent? (recommended for personal/automated use)',
@@ -353,7 +344,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     bedTime: String(bedTime ?? '').trim(),
     wakeTime: String(wakeTime ?? '').trim(),
     groqApiKey: String(groqApiKey ?? '').trim() || existing?.groqApiKey || '',
-    embeddingEnabled: embeddingEnabled === true,
+    embeddingEnabled: false,
     trustMode: trustMode === true,
   };
 }

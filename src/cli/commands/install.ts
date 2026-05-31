@@ -328,20 +328,6 @@ export async function install(opts: InstallOptions): Promise<number> {
   await createSkeleton(home, opts.dryRun);
   process.stdout.write(`✓ skeleton at ${home}\n`);
 
-  // Create abmind skeleton — abtars depends on abmind at runtime
-  const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(home), '.abmind');
-  const abmindDirs = [
-    { path: join(abmindHome, 'config'), mode: 0o700 },
-    { path: join(abmindHome, 'memory'), mode: 0o700 },
-    { path: join(abmindHome, 'memory', 'sleep') },
-  ];
-  if (opts.dryRun) {
-    process.stdout.write(`[dry-run] mkdir -p: ${abmindDirs.map(d => d.path).join(', ')}\n`);
-  } else {
-    for (const d of abmindDirs) await mkdir(d.path, { recursive: true, mode: d.mode });
-  }
-  process.stdout.write(`✓ abmind skeleton at ${abmindHome}\n`);
-
   // Core templates: abmind seeds its own on first boot (#427 ensureInitialized).
   // No longer seeded by abtars install.
 

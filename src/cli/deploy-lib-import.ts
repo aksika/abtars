@@ -1,9 +1,6 @@
 /**
- * Re-export of abmind's deploy-lib primitives, so command files can import
- * from a single stable path inside abtars. If we ever decide to vendor
- * or fork deploy-lib, only this file changes.
- *
- * All imports go through abmind's "./deploy-lib" subpath export (#355).
+ * Re-export of deploy-lib primitives. Local copy — synchronized with abmind's
+ * deploy-lib manually. See abproject/docs/shared-utilities.md.
  */
 
 export {
@@ -34,4 +31,4 @@ export {
   removePath,
   type RemovePlan,
   safeCopyTree,
-} from 'abmind/deploy-lib';
+} from './deploy-lib/index.js';

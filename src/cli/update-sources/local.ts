@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { copyFile, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { hashFile } from 'abmind/deploy-lib';
+import { hashFile } from '../deploy-lib-import.js';
 import type { PrepareContext, StagedRelease, UpdateSource } from './types.js';
 
 export class LocalBuildError extends Error {
