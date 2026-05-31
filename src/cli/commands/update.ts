@@ -253,10 +253,13 @@ export async function update(opts: UpdateOptions): Promise<number> {
     const destConfig = join(paths.home, "config");
     if (existsSync(releaseConfig)) {
       for (const f of readdirSync(releaseConfig)) {
-        if (!f.endsWith('.example')) continue;
-        const target = join(destConfig, f.replace('.example', ''));
-        if (!existsSync(target)) {
-          cpSync(join(releaseConfig, f), target);
+        const src = join(releaseConfig, f);
+        if (f.endsWith('.example')) {
+          // Always overwrite .example files (user reference for latest schema)
+          cpSync(src, join(destConfig, f));
+          // Seed the real file if missing
+          const target = join(destConfig, f.replace('.example', ''));
+          if (!existsSync(target)) cpSync(src, target);
         }
       }
       // Also copy transport.default.json (fallback for transport-config)
