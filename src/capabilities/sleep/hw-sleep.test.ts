@@ -40,6 +40,16 @@ vi.mock("abmind", async () => {
   };
 });
 
+vi.mock("../../utils/abmind-lazy.js", () => ({
+  abmind: () => ({
+    hasSleepAuditToday: () => false,
+    DEFAULT_LEVEL: "normal",
+    parseLevel: (s: string) => s,
+    runSleepCycle: vi.fn(async () => ({ ok: true, failCount: 0 })),
+  }),
+  loadAbmind: async () => ({}),
+}));
+
 import { createSleepHandle, type SleepHandle, type SleepOpts } from "./index.js";
 import { readAndClearForceSleep } from "../../components/transport/bridge-lock-transport.js";
 

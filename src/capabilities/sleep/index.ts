@@ -101,7 +101,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           return;
         }
       }
-      if (abmind()!.hasSleepAuditToday(opts.sleepAuditDir)) {
+      if (abmind()?.hasSleepAuditToday(opts.sleepAuditDir)) {
         logDebug("sleep", "😴 Sleep already done today — skip");
         return;
       }

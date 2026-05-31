@@ -19,14 +19,28 @@ vi.mock("../../paths.js", () => ({
   reportsDir: (cat: string) => join(HOME, "reports", cat),
 }));
 
+const { mockRunSleepCycle } = vi.hoisted(() => ({
+  mockRunSleepCycle: vi.fn(async () => ({ ok: true, failCount: 0 })),
+}));
+
 vi.mock("abmind", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("abmind");
   return {
     ...actual,
-    runSleepCycle: vi.fn(async () => ({ ok: true, failCount: 0 })),
+    runSleepCycle: mockRunSleepCycle,
     hasSleepAuditToday: vi.fn(() => false),
   };
 });
+
+vi.mock("../../utils/abmind-lazy.js", () => ({
+  abmind: () => ({
+    hasSleepAuditToday: () => false,
+    DEFAULT_LEVEL: "normal",
+    parseLevel: (s: string) => s,
+    runSleepCycle: mockRunSleepCycle,
+  }),
+  loadAbmind: async () => ({}),
+}));
 
 import { createSleepHandle } from "./index.js";
 import { runSleepCycle } from "abmind";

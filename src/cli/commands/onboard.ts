@@ -479,13 +479,16 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
   const envPath = join(paths.config, '.env');
   const existing = await readExisting(envPath);
-  if (existing !== null && !opts.force) {
+  const secretDir = join(paths.home, 'secret');
+  const { existsSync: secretExists } = await import('node:fs');
+  const hasSecretToken = secretExists(join(secretDir, 'TELEGRAM_BOT_TOKEN')) || secretExists(join(secretDir, 'DISCORD_BOT_TOKEN'));
+  const hasUserConfig = existing !== null && (existing.telegramToken || existing.discordBotToken || hasSecretToken);
+  if (hasUserConfig && !opts.force) {
     showHintOnce("onboard-reoffer", "Re-running onboard overwrites config. Use --force to confirm, or edit ~/.abtars/config/.env directly.");
     if (opts.nonInteractive) {
       process.stderr.write(`config/.env already configured. Re-run with --force to overwrite.\n`);
       return 3;
     }
-    // Interactive: we'll pre-fill and let the user edit.
   }
 
   let answers: WizardAnswers | null;

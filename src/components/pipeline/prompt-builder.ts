@@ -250,7 +250,7 @@ export function buildSessionStartPrompt(
     // Dead path — kept for type safety during transition
   } else {
     const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : undefined;
-    const ctx = abmind()!.buildSessionStartContext(memory, userId, maxContext, ctxOpts);
+    const ctx = abmind()?.buildSessionStartContext(memory, userId, maxContext, ctxOpts);
     if (ctx) {
       contextParts.push(ctx);
       logInfo(TAG, `Injected session-start context (${ctx.length} chars${isCodeSession ? ", Code mode" : ""})`);

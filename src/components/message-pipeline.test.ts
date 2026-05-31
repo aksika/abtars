@@ -200,9 +200,10 @@ describe("handleInboundMessage", () => {
     const adapter = mockAdapter();
     const deps = mockDeps(transport);
 
-    await handleInboundMessage(makeMsg({ text: "//agent list" }), adapter, deps);
+    await handleInboundMessage(makeMsg({ text: "//status" }), adapter, deps);
 
-    expect(transport.sendPrompt).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("/agent list"), undefined, "master");
+    // // stripped to / — no commands registered in test → falls through to transport
+    expect(transport.sendPrompt).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("/status"), undefined, "master");
   });
 
   it("returns early for voice without STT config", async () => {

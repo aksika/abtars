@@ -18,6 +18,13 @@ vi.mock("abmind", () => ({
   renderMemory: vi.fn((m) => `[memory] ${m.content_en}`),
   buildSessionStartContext: vi.fn(() => "Session context: last active 2h ago"),
 }));
+vi.mock("../../utils/abmind-lazy.js", () => ({
+  abmind: () => ({
+    buildSessionStartContext: () => "Session context: last active 2h ago",
+    renderMemory: (m: any) => `[memory] ${m.content_en}`,
+  }),
+  loadAbmind: async () => ({}),
+}));
 vi.mock("../transport/bridge-lock-transport.js", () => ({
   readAndClearRestartReason: vi.fn(() => null),
 }));
