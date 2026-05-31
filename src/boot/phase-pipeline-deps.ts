@@ -46,7 +46,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       if (ctx.telegramAdapter) {
         ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `🔧 Calling self-healing agent`);
       }
-      const msg = `[System] You ARE the self-healing agent. A cron task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}\n\nDiagnose the root cause. If you can fix it programmatically (config change, script fix, token refresh), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.`;
+      const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}\n\nDiagnose the root cause. If you can fix it programmatically (config change, script fix, token refresh), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.`;
       void (async () => {
         try {
           const { SubagentRuntime } = await import("../components/subagent-runtime.js");
