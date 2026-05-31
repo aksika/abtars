@@ -81,7 +81,6 @@ const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
 
 interface WizardAnswers {
   readonly installMode: "simple" | "supervised" | "supervised-daemon";
-  readonly agentName: string;
   readonly userName: string;
   readonly passphrase: string;
   readonly telegramToken: string;
@@ -114,14 +113,6 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   const mfPaths = pp('abtars');
   const mf = await rm(mfPaths.manifest);
   const installMode = mf?.installMode ?? 'supervised';
-
-  // 1b. Agent name
-  const agentName = await text({
-    message: 'Agent name (identity for this deployment)',
-    placeholder: 'e.g. MyAgent, HomeBot',
-    initialValue: '',
-  });
-  if (isCancel(agentName)) { cancel('Cancelled.'); return null; }
 
   // 1c. User name (for personal greeting + encryption salt)
   const userName = await text({
@@ -336,7 +327,6 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
 
   return {
     installMode: installMode as "simple" | "supervised" | "supervised-daemon",
-    agentName: String(agentName ?? '').trim(),
     userName: String(userName ?? '').trim(),
     passphrase: String(passphrase ?? ''),
     telegramToken: String(telegramToken ?? '').trim(),
@@ -385,7 +375,6 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   }
   return {
     installMode: 'supervised',
-    agentName: '',
     userName: '',
     passphrase: '',
     telegramToken: opts.telegramToken ?? '',
@@ -419,7 +408,6 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
     const apiKeyEnv = PROVIDER_API_KEY_ENV[provider];
     return {
       installMode: 'simple',
-      agentName: '',
       userName: kv.get('USER_DISPLAY_NAME') ?? '',
       passphrase: '',
       telegramToken: kv.get('TELEGRAM_BOT_TOKEN') ?? '',
@@ -595,29 +583,26 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     process.stdout.write(`✓ transport.json → ${transportPath}\n`);
   }
 
-  // Write users.json
+  // Write users.json (always — onboard has the real chat ID)
   {
     const usersPath = join(paths.config, 'users.json');
-    const { existsSync: usersExist } = await import('node:fs');
-    if (!usersExist(usersPath)) {
-      const userId = answers.userName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'user';
-      const platforms: Record<string, unknown> = {};
-      if (answers.telegramChatId) platforms["telegram"] = parseInt(answers.telegramChatId, 10) || answers.telegramChatId;
-      if (answers.discordAppId) platforms["discord"] = answers.discordAppId;
-      const users = {
-        users: [{
-          userId,
-          displayName: answers.userName || userId,
-          role: "master",
-          maxClass: 3,
-          tools: ["all"],
-          platforms,
-          allowedChats: [],
-        }],
-      };
-      await writeFile(usersPath, JSON.stringify(users, null, 2) + '\n', { mode: 0o600 });
-      process.stdout.write(`✓ users.json → ${usersPath}\n`);
-    }
+    const userId = answers.userName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'user';
+    const platforms: Record<string, unknown> = {};
+    if (answers.telegramChatId) platforms["telegram"] = parseInt(answers.telegramChatId, 10) || answers.telegramChatId;
+    if (answers.discordAppId) platforms["discord"] = answers.discordAppId;
+    const users = {
+      users: [{
+        userId,
+        displayName: answers.userName || userId,
+        role: "master",
+        maxClass: 3,
+        tools: ["all"],
+        platforms,
+        allowedChats: [],
+      }],
+    };
+    await writeFile(usersPath, JSON.stringify(users, null, 2) + '\n', { mode: 0o600 });
+    process.stdout.write(`✓ users.json → ${usersPath}\n`);
   }
 
   // Seed abmind user_profile.md — only if abmind is already installed
@@ -710,7 +695,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   const { confirm } = await import('@clack/prompts');
   const startCmds: string[] = [];
   if (answers.installMode === 'simple') {
-    startCmds.push(`~/.abtars/abtars.sh --all`);
+    startCmds.push('abtars start');
   } else {
     if (process.platform === 'darwin') {
       startCmds.push(`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist`);
