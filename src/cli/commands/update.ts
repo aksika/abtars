@@ -47,7 +47,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
     let repoRoot = opts.repoRoot ?? process.cwd();
     if (!opts.repoRoot && !existsSync(join(repoRoot, '.git'))) {
       // Not in a git checkout — try npm global package path
-      const scriptPath = process.argv[1] ?? '';
+      const { realpathSync } = await import('node:fs');
+      const scriptPath = realpathSync(process.argv[1] ?? '');
       const candidate = join(dirname(scriptPath), '..');
       if (existsSync(join(candidate, 'bundle'))) repoRoot = candidate;
     }
