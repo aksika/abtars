@@ -331,13 +331,7 @@ for f in "$AB/core/user_profile.md" "$AB/core/agent_notes.md" "$AB/core/core_fac
   fi
 done
 
-# 12. Schema version check
-if [ -f "$DB" ]; then
-  SCHEMA_VER=$(sqlite3 "$DB" "SELECT version FROM schema_version LIMIT 1" 2>/dev/null || echo 0)
-  if [ "$SCHEMA_VER" -lt 8 ]; then
-    warn "memory.db schema version is $SCHEMA_VER expected >=8 -- ABM v2 migration pending"
-  fi
-fi
+# 12. Schema version check (removed — schema managed by MemoryManager, no migration table)
 
 # 14. Orphaned kiro-cli processes
 KIRO_PROCS=$(pgrep -f 'kiro-cli acp' 2>/dev/null | wc -l)
