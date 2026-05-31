@@ -55,13 +55,5 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
-  ],
-  "peerDependencies": {
-    "abmind": ">=0.1.4"
-  },
-  "peerDependenciesMeta": {
-    "abmind": {
-      "optional": true
-    }
-  }
+  ]
 }
