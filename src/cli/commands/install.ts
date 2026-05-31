@@ -346,12 +346,30 @@ export async function install(opts: InstallOptions): Promise<number> {
     const pkgRoot = join(dirname(scriptPath), '..');
     const bundleDir = join(pkgRoot, 'bundle');
     if (existsSync(bundleDir)) {
-      const { update } = await import('./update.js');
-      const code = await update({ source: 'local', fromLocal: true, allowAbmindMismatch: true, repoRoot: pkgRoot });
-      if (code !== 0) {
-        process.stderr.write(`⚠ auto-stage failed (exit ${code})\n`);
-        return code;
-      }
+      // Read version from package.json in the npm package
+      let version = '0.1.0';
+      try { version = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf-8')).version ?? version; } catch { /* use default */ }
+      const releaseName = version;
+      const releaseDir = join(home, 'releases', releaseName);
+      await mkdir(releaseDir, { recursive: true });
+      // Copy bundle
+      const { cpSync } = await import('node:fs');
+      cpSync(bundleDir, join(releaseDir, 'bundle'), { recursive: true });
+      // Copy core/ and scripts/ if present
+      const coreDir = join(pkgRoot, 'core');
+      if (existsSync(coreDir)) cpSync(coreDir, join(releaseDir, 'core'), { recursive: true });
+      const scriptsDir = join(pkgRoot, 'scripts');
+      if (existsSync(scriptsDir)) cpSync(scriptsDir, join(releaseDir, 'scripts'), { recursive: true });
+      // Copy install-manifest.json
+      const manifestSrc = join(pkgRoot, 'install-manifest.json');
+      if (existsSync(manifestSrc)) copyFileSync(manifestSrc, join(releaseDir, 'install-manifest.json'));
+      // Create main.js symlink
+      const { symlinkSync } = await import('node:fs');
+      try { symlinkSync('bundle/abtars.js', join(releaseDir, 'main.js')); } catch { /* ignore */ }
+      // Flip current → release
+      const { activate } = await import('../deploy-lib-import.js');
+      await activate(join(home, 'current'), releaseName);
+      process.stdout.write(`✓ release staged: ${releaseName}\n`);
     }
   }
 
