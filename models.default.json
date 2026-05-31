@@ -23,57 +23,6 @@
       "kiro"
     ]
   },
-  "claude-opus-4.5": {
-    "contextWindow": 200000,
-    "maxOutput": 16384,
-    "rank": 1,
-    "cost": {
-      "input": 2.2,
-      "output": 2.2
-    },
-    "transports": [
-      "kiro"
-    ]
-  },
-  "claude-sonnet-4.5": {
-    "contextWindow": 200000,
-    "maxOutput": 16384,
-    "rank": 1,
-    "cost": {
-      "input": 1.3,
-      "output": 1.3
-    },
-    "transports": [
-      "kiro",
-      "kiro"
-    ]
-  },
-  "claude-sonnet-4": {
-    "contextWindow": 200000,
-    "maxOutput": 16384,
-    "rank": 1,
-    "cost": {
-      "input": 1.3,
-      "output": 1.3
-    },
-    "transports": [
-      "kiro",
-      "kiro"
-    ]
-  },
-  "claude-haiku-4.5": {
-    "contextWindow": 200000,
-    "maxOutput": 16384,
-    "rank": 3,
-    "cost": {
-      "input": 0.4,
-      "output": 0.4
-    },
-    "transports": [
-      "kiro",
-      "kiro"
-    ]
-  },
   "deepseek-3.2": {
     "contextWindow": 128000,
     "maxOutput": 8192,
