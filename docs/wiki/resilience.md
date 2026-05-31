@@ -37,7 +37,11 @@ The watchdog itself is supervised by the OS (launchd on macOS, systemd on Linux)
 
 ## Runtime Self-Healer
 
-A background log watcher that detects recurring errors and either auto-fixes them or notifies the owner.
+Two self-healing paths that keep the bridge healthy without human intervention.
+
+### Log-based (background watcher)
+
+A heartbeat task that detects recurring errors in the bridge log and either auto-fixes them or notifies the owner.
 
 **How it works:**
 
@@ -57,6 +61,29 @@ A background log watcher that detects recurring errors and either auto-fixes the
 **Auto-fix rules** are pattern-based. When a known error fires, the self-healer runs a predefined repair action. If the repair fails 3 times in a row, the circuit breaker trips and the owner gets a "paused" notification.
 
 **Toggle:** `/healing` command enables/disables the self-healer. `/healing reset` clears circuit breakers.
+
+### Task-failure SHA
+
+When a scheduled task fails, a dedicated self-healing agent session diagnoses and attempts to fix the issue.
+
+**Flow:**
+
+1. Task fails → user sees `⚠️ <task> failed`
+2. SHA fires in an isolated `_S_` (System) session → user sees `🔧 Calling self-healing agent`
+3. SHA diagnoses root cause and attempts programmatic fix
+4. If fixed → task succeeds on next tick
+5. If unfixable → SHA reports "Requires human intervention: <reason>"
+6. After 3 consecutive failures → task auto-pauses, user sees `⛔ Needs manual fix`
+
+**Three-state concurrency guard:**
+
+| State | On failure | Rationale |
+|-------|-----------|-----------|
+| `idle` | Fire SHA with all pending failures | Normal path |
+| `running` | Drop entirely (no count, no notify) | SHA might be fixing it right now |
+| `cooldown` (60s) | Count + notify, skip SHA | Let fix propagate before retrying |
+
+**Isolation:** SHA runs in a System session (`_S_` type) — no access to user memory, no memory storage, minimal SOUL prompt. Cannot pollute the user's conversation context.
 
 ## Model Fallbacks
 
