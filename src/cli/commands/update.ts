@@ -159,6 +159,22 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
     process.stdout.write(`\nUpdate complete: ${staged.version}\n`);
 
+    // Clear stale model demotions (#739)
+    const transportJson = join(paths.home, "config", "transport.json");
+    if (existsSync(transportJson)) {
+      try {
+        const tc = JSON.parse(readFileSync(transportJson, "utf-8"));
+        let cleared = false;
+        for (const agent of Object.values(tc.agents ?? {})) {
+          if ((agent as any).demoted) { delete (agent as any).demoted; delete (agent as any).demotedReason; delete (agent as any).demotedModel; cleared = true; }
+          for (const fb of (agent as any).fallbacks ?? []) {
+            if (fb.demoted) { delete fb.demoted; delete fb.demotedReason; delete fb.demotedModel; cleared = true; }
+          }
+        }
+        if (cleared) { const { writeFileSync: wfs } = await import("node:fs"); wfs(transportJson, JSON.stringify(tc, null, 2) + "\n"); }
+      } catch { /* best effort */ }
+    }
+
     // Refresh scripts from repo — manifest-driven
     const { loadManifest } = await import('../install-manifest.js');
     const sourceRoot = staged.stagedPath;

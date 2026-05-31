@@ -338,10 +338,16 @@ export function cleanDemotedModels(tc: TransportConfig, chosenModel?: string): v
   }
 }
 
-/** Mark a model as demoted in transport.json. Skipped by candidate loading. */
+/** Mark a model as demoted in transport.json. Skipped by candidate loading. Never demotes the last available model for a role. */
 export function demoteModel(model: string, reason: "auth" | "timeout"): void {
   const tc = loadTransport();
   if (!tc) return;
+  // Guard: don't demote if it's the last non-demoted model for any role
+  for (const agent of Object.values(tc.agents)) {
+    const all = [agent, ...(agent.fallbacks ?? [])];
+    const healthy = all.filter((m: any) => !m.demoted);
+    if (healthy.length <= 1 && healthy.some((m: any) => m.model === model)) return;
+  }
   let found = false;
   for (const agent of Object.values(tc.agents)) {
     if (agent.model === model) { (agent as any).demoted = new Date().toISOString(); (agent as any).demotedReason = reason; (agent as any).demotedModel = model; found = true; }

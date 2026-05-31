@@ -12,6 +12,7 @@ ExecStart=/home/{{USER}}/.abtars/watchdog.sh
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
+Environment=PATH={{PATH}}
 Environment=ABTARS_HOME=/home/{{USER}}/.abtars
 Environment=ABMIND_HOME=/home/{{USER}}/.abmind
 Environment=SUPERVISION=systemd
