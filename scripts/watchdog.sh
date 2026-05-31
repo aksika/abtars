@@ -140,6 +140,19 @@ spawn_bridge() {
   RESTART_TIMES+=("$(date +%s)")
   rm -f "$LOCK"
 
+  # #686: Kill stale bridge holding port 3100
+  if [ -f "$AB/bridge.pid" ]; then
+    old_pid=$(cat "$AB/bridge.pid")
+    if kill -0 "$old_pid" 2>/dev/null; then
+      log "Killing stale bridge (pid $old_pid)..."
+      kill "$old_pid" 2>/dev/null
+      for i in 1 2 3 4 5; do kill -0 "$old_pid" 2>/dev/null || break; sleep 1; done
+      kill -0 "$old_pid" 2>/dev/null && kill -9 "$old_pid" 2>/dev/null
+    fi
+  fi
+  # Wait for port 3100 release
+  for i in 1 2 3 4 5; do lsof -ti :3100 >/dev/null 2>&1 || break; sleep 1; done
+
   # Clean stale socket
   rm -f "${ABMIND_HOME:-$HOME/.abmind}/memory.sock" 2>/dev/null || true
 
@@ -148,7 +161,7 @@ spawn_bridge() {
   # Stable entry point: main.js symlink created by abtars update.
   log "Starting bridge: node current/main.js $*"
   cd "$AB"
-  NODE_PATH="current/node_modules:${NODE_PATH:-}" node current/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
+  NODE_PATH="current/node_modules:$(npm root -g 2>/dev/null || echo ''):${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node current/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
   SPAWNED_AT=$(date +%s)
 
   # Wait for bridge.lock with PID

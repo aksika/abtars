@@ -6,6 +6,7 @@
 
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { existsSync, readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
 
 function abtarsHome(): string {
@@ -21,6 +22,21 @@ function readJsonField(file: string, field: string): unknown {
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/** #686: Kill any process holding port 3100 before spawning a new bridge. */
+function killPortHolder(port: number): void {
+  try {
+    const pid = execSync(`lsof -ti :${port}`, { encoding: "utf-8", timeout: 3000 }).trim();
+    if (!pid) return;
+    process.stdout.write(`🛑 Killing stale process on port ${port} (pid ${pid})...\n`);
+    try { execSync(`kill ${pid}`, { timeout: 3000, stdio: "pipe" }); } catch { /* */ }
+    for (let i = 0; i < 5; i++) {
+      try { execSync(`lsof -ti :${port}`, { stdio: "pipe", timeout: 1000 }); } catch { return; }
+      try { execSync("sleep 1", { timeout: 2000, stdio: "pipe" }); } catch { /* */ }
+    }
+    try { execSync(`kill -9 ${pid}`, { timeout: 1000, stdio: "pipe" }); } catch { /* */ }
+  } catch { /* no process on port — good */ }
 }
 
 async function spawnLauncher(home: string, argv: string[]): Promise<number> {
@@ -96,6 +112,7 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
     }
 
     if (bridgeAlive) await killBridge(bridgePid!);
+    killPortHolder(3100);
     const argv: string[] = []; // #534: env is SSoT — no CLI args needed
     return spawnLauncher(home, argv);
   }
