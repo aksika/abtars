@@ -337,7 +337,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   // Auto-stage: if no release exists, stage from our own package (fresh npm install)
   const currentLink = join(home, 'current');
   if (!existsSync(currentLink)) {
-    const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
     const bundleDir = join(pkgRoot, 'bundle');
     if (existsSync(bundleDir)) {
       const { update } = await import('./update.js');

@@ -30,7 +30,7 @@ function unitName(scope: Scope): string {
 
 async function daemonInstall(): Promise<number> {
   const platform = process.platform;
-  const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
   if (platform === "linux" && isWSL()) {
     process.stderr.write(`ℹ️  WSL detected — ensure systemd is enabled (wsl.conf: [boot] systemd=true)\n`);
