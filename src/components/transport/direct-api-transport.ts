@@ -274,7 +274,8 @@ export class DirectApiTransport implements IKiroTransport {
   }
 
   private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
-    let zeroTokenRetried = false;
+    let zeroTokenRetries = 0;
+    const loopStart = Date.now();
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
       if (signal.aborted) throw new Error("Aborted");
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
@@ -335,11 +336,17 @@ export class DirectApiTransport implements IKiroTransport {
 
       // No tool calls — final response
       const answer = content ?? "";
-      // Retry once if API returned 0 tokens (didn't process input — transient hiccup)
-      if (!answer && usage && usage.prompt_tokens === 0 && !zeroTokenRetried) {
-        zeroTokenRetried = true;
-        logWarn(TAG, "API returned 0 tokens — retrying once");
-        continue;
+      // Budget-aware backoff on 0→0 token response (#732)
+      if (!answer && usage && usage.prompt_tokens === 0) {
+        const elapsed = Date.now() - loopStart;
+        const remaining = (this._timeoutOverrideMs ?? 60_000) - elapsed;
+        const retryDelay = 5000 + (zeroTokenRetries * 3000);
+        if (remaining > retryDelay + 5000) {
+          zeroTokenRetries++;
+          logWarn(TAG, `API returned 0 tokens — retry #${zeroTokenRetries} after ${retryDelay / 1000}s (${Math.round(remaining / 1000)}s left)`);
+          await new Promise(r => setTimeout(r, retryDelay));
+          continue;
+        }
       }
       session.addAssistant(answer);
       return answer;
