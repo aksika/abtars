@@ -309,7 +309,12 @@ export class CronQueue {
           scheduleRetry(entry, !!entry._retrying);
           if (!paused) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
         }
-        if (!paused) onComplete?.(entry.chatId, entry.message, `${status}\n${(output || "(no output)").slice(0, 500)}`);
+        if (!paused) {
+          // Silent success: don't notify user when script exits 0 with no output
+          if (code !== 0 || output.trim()) {
+            onComplete?.(entry.chatId, entry.message, `${status}\n${(output || "(no output)").slice(0, 500)}`);
+          }
+        }
         this.clearCurrent();
         this.processNext();
       });
