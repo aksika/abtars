@@ -10,7 +10,7 @@ import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 
-const AB_SAVE = ["config", "skills", "prompts", "core", "secret", "tasks", "logo", "workspace"];
+const AB_SAVE = ["config", "secret", "tasks", "logo", "workspace", "skills/custom", "skills/self"];
 const DEFAULT_PRUNE_DAYS = 7;
 
 export async function backup(outputDir?: string, pruneDays?: number): Promise<number> {
