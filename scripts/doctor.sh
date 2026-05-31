@@ -229,7 +229,9 @@ done
 # 4. Cookie file exists and is valid JSON (only if cookies dir exists — optional feature)
 COOKIE="$AB/secret/cookies/x-cookies.json"
 if [ -f "$COOKIE" ]; then
-  if ! python3 -c "import json; json.load(open('$COOKIE'))" 2>/dev/null; then
+  if head -c4 "$COOKIE" | grep -q "^ENC:"; then
+    : # encrypted at rest — skip JSON validation
+  elif ! python3 -c "import json; json.load(open('$COOKIE'))" 2>/dev/null; then
     warn "$COOKIE is not valid JSON -- cookie auth will fail"
   fi
 fi
