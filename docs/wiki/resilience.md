@@ -68,11 +68,11 @@ When a scheduled task fails, a dedicated self-healing agent session diagnoses an
 
 **Flow:**
 
-1. Task fails → user sees `⚠️ <task> failed`
+1. Task fails → user sees `⚠️ &lt;task&gt; failed`
 2. SHA fires in an isolated `_S_` (System) session → user sees `🔧 Calling self-healing agent`
 3. SHA diagnoses root cause and attempts programmatic fix
 4. If fixed → task succeeds on next tick
-5. If unfixable → SHA reports "Requires human intervention: <reason>"
+5. If unfixable → SHA reports "Requires human intervention: &lt;reason&gt;"
 6. After 3 consecutive failures → task auto-pauses, user sees `⛔ Needs manual fix`
 
 **Three-state concurrency guard:**
