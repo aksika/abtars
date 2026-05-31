@@ -4,7 +4,8 @@
  */
 
 import { readFileSync, existsSync, mkdirSync, copyFileSync, chmodSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { logWarn } from "../components/logger.js";
 
 const TAG = "manifest";
@@ -58,7 +59,7 @@ let cached: InstallManifest | null = null;
 
 export function loadManifest(repoRoot?: string): InstallManifest {
   if (cached) return cached;
-  const root = repoRoot ?? process.cwd();
+  const root = repoRoot ?? join(dirname(fileURLToPath(import.meta.url)), "..");
   const p = join(root, "install-manifest.json");
   let raw: InstallManifest;
   try { raw = JSON.parse(readFileSync(p, "utf-8")) as InstallManifest; }
