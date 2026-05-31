@@ -163,4 +163,4 @@ The agent calls it via `execute_bash`:
 | Skill (instructions) | `~/.abtars/skills/self/<name>.md` | `home-assistant.md` |
 | Script (optional) | `~/.abtars/skills/self/scripts/<name>.sh` | `ha-control.sh` |
 
-After adding all files: `abtars restart` — the agent now knows about the service and has credentials to use it.
+After adding all files: `abtars restart` (or `/restart` in chat) — the agent now knows about the service and has credentials to use it.
