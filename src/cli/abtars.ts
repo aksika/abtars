@@ -58,7 +58,7 @@ function printUsage(): void {
     `abtars — install/update CLI (#158)
 
 Usage:
-  abtars install [--force] [--mode=simple|supervised|supervised-daemon] [--restore <backup.zip>]
+  abtars install [--force] [--mode=simple|supervised] [--restore <backup.zip>]
   abtars uninstall [--yes]
   abtars update  [--source local|npm|github] [--from-local]
   abtars rollback [--to <version>]
@@ -86,7 +86,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           restore: typeof flags.get('restore') === 'string' ? (flags.get('restore') as string) : undefined,
           force: flags.get('force') === true,
           dryRun: flags.get('dry-run') === true,
-          mode: flags.get('mode') === 'simple' ? 'simple' : flags.get('mode') === 'supervised' ? 'supervised' : flags.get('mode') === 'supervised-daemon' ? 'supervised-daemon' : undefined,
+          mode: flags.get('mode') === 'simple' ? 'simple' : flags.get('mode') === 'supervised' ? 'supervised' : undefined,
         });
       case 'uninstall':
         return await uninstall({ yes: flags.get('yes') === true });
@@ -130,6 +130,10 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'start': {
         const { start: startCmd } = await import('./commands/start.js');
         return await startCmd();
+      }
+      case 'daemon': {
+        const { daemon: daemonCmd } = await import('./commands/daemon.js');
+        return await daemonCmd(argv.slice(1));
       }
       case 'logs': {
         const { logs } = await import('./commands/logs.js');
