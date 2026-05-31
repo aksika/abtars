@@ -7,7 +7,7 @@
 
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { makeLocalBuildSource } from '../update-sources/local.js';
@@ -43,9 +43,17 @@ export async function update(opts: UpdateOptions): Promise<number> {
   const release = await acquireLock(paths.lock, `update --source ${opts.source}`);
 
   try {
+    // Resolve source root: explicit > cwd (if git) > npm package (from argv[1])
+    let repoRoot = opts.repoRoot ?? process.cwd();
+    if (!opts.repoRoot && !existsSync(join(repoRoot, '.git'))) {
+      // Not in a git checkout — try npm global package path
+      const scriptPath = process.argv[1] ?? '';
+      const candidate = join(dirname(scriptPath), '..');
+      if (existsSync(join(candidate, 'bundle'))) repoRoot = candidate;
+    }
     const source = opts.source === 'npm'
       ? makeNpmSource('abtars')
-      : makeLocalBuildSource({ repoRoot: opts.repoRoot ?? process.cwd(), allowStale: opts.fromLocal });
+      : makeLocalBuildSource({ repoRoot, allowStale: opts.fromLocal });
     if (opts.fromLocal) {
       showHintOnce("update-from-local", "Building from working copy (--from-local). To sync with remote first: git pull && abtars update");
     }

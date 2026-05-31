@@ -110,9 +110,35 @@ async function readPackageVersion(repoRoot: string): Promise<string> {
 
 export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource {
   const repoRoot = opts.repoRoot ?? process.cwd();
+  const isNpmPackage = !existsSync(join(repoRoot, '.git'));
+
   return {
     name: 'local',
     async prepare(ctx: PrepareContext): Promise<StagedRelease> {
+      // npm package mode: no git, no build — just copy the pre-built bundle
+      if (isNpmPackage) {
+        const bundleDir = join(repoRoot, 'bundle');
+        if (!existsSync(bundleDir)) {
+          throw new Error(`No bundle/ found at ${repoRoot}. Run from the abtars npm package or a git checkout.`);
+        }
+        const pkgVersion = await readPackageVersion(repoRoot);
+        const version = pkgVersion;
+        const stagedPath = join(ctx.releasesDir, version);
+        await rm(stagedPath, { recursive: true, force: true });
+        await mkdir(stagedPath, { recursive: true });
+        await cp(bundleDir, join(stagedPath, 'bundle'), { recursive: true });
+        const coreDir = join(repoRoot, 'core');
+        if (existsSync(coreDir)) await cp(coreDir, join(stagedPath, 'core'), { recursive: true });
+        const scriptsSrc = join(repoRoot, 'scripts');
+        if (existsSync(scriptsSrc)) await cp(scriptsSrc, join(stagedPath, 'scripts'), { recursive: true });
+        const manifestSrc = join(repoRoot, 'install-manifest.json');
+        if (existsSync(manifestSrc)) await copyFile(manifestSrc, join(stagedPath, 'install-manifest.json'));
+        await writeFile(join(stagedPath, 'package.json'), JSON.stringify({ type: "module", name: "abtars", version }, null, 2) + "\n");
+        process.stdout.write(`✓ staged ${version} (from npm package)\n`);
+        return { version, stagedPath, commit: null, branch: null, packageLockHash: null, source: 'local' };
+      }
+
+      // Git checkout mode: build from source
       const { commit, branch } = checkStaleness(repoRoot, opts.allowStale === true || ctx.allowStale);
       const pkgVersion = await readPackageVersion(repoRoot);
       const version = `${pkgVersion}-${commit}`;
