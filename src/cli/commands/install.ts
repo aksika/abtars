@@ -328,7 +328,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   const homeExists = await exists(home);
   const manifest = homeExists ? await readManifest(paths.manifest) : null;
 
-  if (homeExists && manifest && !opts.force && !opts.restore) {
+  if (homeExists && manifest && !opts.force && !opts.restore && opts.mode !== 'supervised-daemon') {
     process.stderr.write(
       `~/.abtars already installed at version ${manifest.version || '(unset)'}.\nUse 'abtars update' to upgrade, or --force to re-seed missing config.\n`,
     );
