@@ -97,6 +97,14 @@ async function daemonInstall(): Promise<number> {
     writeFileSync(dst, content);
     execFileSync("systemctl", ["daemon-reload"]);
     execFileSync("systemctl", ["enable", "--now", "abtars"]);
+    // Update manifest mode
+    const manifestPath = join(home, "manifest.json");
+    try {
+      const { readFileSync: rfs, writeFileSync: wfs } = await import("node:fs");
+      const mf = JSON.parse(rfs(manifestPath, "utf-8"));
+      mf.installMode = "supervised-daemon";
+      wfs(manifestPath, JSON.stringify(mf, null, 2) + "\n");
+    } catch { /* best effort */ }
     process.stdout.write(`✓ systemd unit installed at ${dst}\n`);
     process.stdout.write(`✓ bridge runs as ${sudoUser}, survives logout + reboot\n`);
     return 0;
