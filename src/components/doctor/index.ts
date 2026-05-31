@@ -75,7 +75,7 @@ const probeDiscord: ProbeFn = async (ctx) => {
 
 const probeHeartbeat: ProbeFn = async (ctx) => {
   const start = Date.now();
-  if (!ctx.memory) return { name: "heartbeat", status: "skipped", latencyMs: 0 };
+  if (!ctx.memory || typeof ctx.memory.getCronInfo !== "function") return { name: "heartbeat", status: "skipped", latencyMs: 0 };
   try {
     const info = ctx.memory.getCronInfo();
     const running = info.heartbeatRunning;

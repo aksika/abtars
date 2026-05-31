@@ -44,7 +44,6 @@
       "output": 0.25
     },
     "transports": [
-      "kiro",
       "kiro"
     ]
   },
@@ -57,7 +56,6 @@
       "output": 0.15
     },
     "transports": [
-      "kiro",
       "kiro"
     ]
   },
@@ -82,7 +80,6 @@
       "output": 0.05
     },
     "transports": [
-      "kiro",
       "kiro"
     ]
   },
@@ -95,8 +92,7 @@
       "output": 0.6
     },
     "transports": [
-      "gemini-free",
-      "gemini-paid",
+      "gemini",
       "openrouter"
     ]
   },
@@ -109,7 +105,7 @@
       "output": 10.0
     },
     "transports": [
-      "gemini-paid"
+      "gemini"
     ]
   },
   "kimi-k2.5:cloud": {

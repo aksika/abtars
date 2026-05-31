@@ -27,8 +27,8 @@ async function sendBackOnline(ctx: BootCtx): Promise<boolean> {
 }
 
 export async function phaseStartupNotification(ctx: BootCtx): Promise<PhaseResult> {
-  const { config, memoryConfig, memory, transport, telegramAdapter } = ctx;
-  if (!memoryConfig.memoryEnabled) return "skipped";
+  const { config, memory, transport, telegramAdapter } = ctx;
+  if (!ctx.telegramAdapter) return "skipped";
 
   // #603: 3s delay (remote hosts need time for Telegram API) + retry
   setTimeout(async () => {

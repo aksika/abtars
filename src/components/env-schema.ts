@@ -367,7 +367,7 @@ export function initEnv(): Readonly<EnvConfig> {
     typingSilentThresholdMs: parseIntSafe(readOr("TYPING_SILENT_THRESHOLD_SEC", "90"), "TYPING_SILENT_THRESHOLD_SEC") * 1000,
     streamFlushSec: parseIntSafe(readOr("STREAM_FLUSH_SEC", "3"), "STREAM_FLUSH_SEC"),
 
-    activeMemory: parseBool(readOr("ACTIVE_MEMORY", "false")),
+    activeMemory: parseBool(readOr("ACTIVE_MEMORY", "true")),
     primingModelTopics: read("PRIMING_MODEL_TOPICS") !== "false",
 
     bedTime: parseTime(readOr("BED_TIME", "0:30"), "BED_TIME"),

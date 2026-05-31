@@ -4,7 +4,7 @@
  */
 
 const REACT_RE = /\[REACT:(.+?)\]/;
-const NO_REPLY_RE = /\s*\[NO_REPLY\]\s*/gi;
+const NO_REPLY_RE = /\s*\[NO[-_]REPLY\]\s*/gi;
 const LANG_TAG_RE = /^\[lang:\w{2}\]\s*/i;
 const TOPICS_RE = /\[TOPICS:\s*(.+?)\]/i;
 
