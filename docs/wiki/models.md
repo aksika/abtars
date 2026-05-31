@@ -132,7 +132,7 @@ Defines which model each agent slot uses:
 2. Drop the API key: `echo "sk-ant-..." > ~/.abtars/secret/ANTHROPIC_API_KEY`
 3. Add models to `models.json`:
    ```json
-   "anthropic": [{ "id": "claude-sonnet-4-20250514", "contextWindow": 200000 }]
+   "anthropic": [{ "id": "claude-sonnet-4.6", "contextWindow": 200000 }]
    ```
 4. Restart: `/restart` or `abtars restart`
 
