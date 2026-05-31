@@ -667,22 +667,12 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     return 0;
   }
 
-  // ── Auto-run: abtars update ──
-  // Only auto-update if we're inside the abtars repo (git repo with package.json)
   const { existsSync } = await import('node:fs');
-  const inRepo = existsSync(join(process.cwd(), '.git')) && existsSync(join(process.cwd(), 'package.json'));
-  if (!inRepo) {
-    process.stdout.write(`\nNext: cd into the abtars repo and run 'abtars update' to build and activate.\n`);
+  const hasRelease = existsSync(join(paths.home, 'current'));
+  if (!hasRelease) {
+    process.stdout.write(`\nNext: run 'abtars update' to stage the release, then start the bridge.\n`);
     return 0;
   }
-  process.stdout.write(`\n── Running 'abtars update' ──\n`);
-  const { update } = await import('./update.js');
-  const updRc = await update({ source: 'local', fromLocal: true, allowAbmindMismatch: false });
-  if (updRc !== 0) {
-    process.stderr.write(`\n⚠️  'abtars update' exited with code ${updRc}. Fix and re-run manually.\n`);
-    return updRc;
-  }
-
   // ── abmind install (optional — only if abmind is available) ──
   try {
     const { spawnSync } = await import('node:child_process');
