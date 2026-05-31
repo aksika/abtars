@@ -161,8 +161,9 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
     // Refresh scripts from repo — manifest-driven
     const { loadManifest } = await import('../install-manifest.js');
-    const installManifest = loadManifest(process.cwd());
-    const repoScripts = join(process.cwd(), 'scripts');
+    const sourceRoot = staged.stagedPath;
+    const installManifest = loadManifest(sourceRoot);
+    const repoScripts = join(sourceRoot, 'scripts');
     const destScripts = join(paths.home, 'scripts');
     await mkdir(destScripts, { recursive: true });
     const allScriptFiles = await readdir(repoScripts).catch(() => [] as string[]);
