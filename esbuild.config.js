@@ -75,6 +75,7 @@ const result = await esbuild.build({
   external,
   banner: {
     js: [
+      `#!/usr/bin/env node\n`,
       `import { createRequire as __bundleCreateRequire } from 'node:module';`,
       `import { fileURLToPath as __bundleFileURLToPath } from 'node:url';`,
       `import { dirname as __bundleDirname } from 'node:path';`,

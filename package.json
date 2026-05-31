@@ -1,6 +1,6 @@
 {
   "name": "abtars",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.3",
   "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
   "type": "module",
   "main": "bundle/abtars.js",
