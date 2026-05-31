@@ -158,9 +158,16 @@ export function renderStatusText(status: SystemStatus): string {
     const abmindManifest = join(homedir(), ".abmind", "manifest.json");
     if (existsSync(abmindManifest)) {
       const m = JSON.parse(readFileSync(abmindManifest, "utf-8"));
-      const ver = m.version?.replace(/-[a-f0-9]{7,}$/, "") ?? "?";
-      const commit = m.commit?.slice(0, 7) ?? "?";
-      lines.push(`abmind v${ver} (${commit})`);    }
+      const ver = m.version?.replace(/-[a-f0-9]{7,}$/, "") || null;
+      const commit = m.commit?.slice(0, 7) ?? "";
+      if (ver) {
+        lines.push(`abmind v${ver}${commit ? ` (${commit})` : ""}`);
+      } else {
+        lines.push("abmind: installed (version unknown)");
+      }
+    } else {
+      lines.push("abmind: not installed");
+    }
   } catch (err) { logAndSwallow(TAG, "read abmind manifest", err); }
 
   // Update check (#440)

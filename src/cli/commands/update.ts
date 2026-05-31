@@ -85,9 +85,29 @@ export async function update(opts: UpdateOptions): Promise<number> {
       symlinkSync(entry, mainLink);
     }
 
+    // Preserve abmind symlinks from old release (#722)
+    const { existsSync: ex2, lstatSync, readlinkSync, symlinkSync: sl2, mkdirSync: mk2 } = await import("node:fs");
+    const oldNm = join(paths.home, "current", "node_modules");
+    const preservedLinks: Array<{ name: string; target: string }> = [];
+    if (ex2(oldNm)) {
+      for (const name of ["abmind", "better-sqlite3"]) {
+        const p = join(oldNm, name);
+        try { if (ex2(p) && lstatSync(p).isSymbolicLink()) preservedLinks.push({ name, target: readlinkSync(p) }); } catch { /* skip */ }
+      }
+    }
+
     // Flip current → releases/<version>
     await activate(paths.current, staged.version);
     process.stdout.write(`✓ current -> releases/${staged.version}\n`);
+
+    // Recreate preserved symlinks in new release
+    if (preservedLinks.length > 0) {
+      const newNm = join(paths.home, "current", "node_modules");
+      mk2(newNm, { recursive: true });
+      for (const { name, target } of preservedLinks) {
+        try { sl2(target, join(newNm, name)); } catch { /* best effort */ }
+      }
+    }
 
     // Update manifest
     const prior = await readManifest(paths.manifest);
