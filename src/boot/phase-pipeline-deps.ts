@@ -35,18 +35,30 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   ctx.idleSave = new IdleSave(transport, memoryConfig.memoryDir, memoryConfig.memoryEnabled);
 
   // CronQueue first — pipelineDeps references it
+  let shaState: "idle" | "running" | "cooldown" = "idle";
+  const shaPending: string[] = [];
   const cronQueue = new CronQueue(
     config.transport.agentCliPath,
     config.transport.workingDir,
     (entryId, command, result) => {
+      // Three-state SHA guard (#719)
+      if (shaState === "running") return; // drop entirely — SHA might be fixing it
       if (ctx.telegramAdapter) {
         ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `⚠️ ${entryId} failed`);
       }
       if (!getEnv().selfhealEnabled) return;
+      if (shaState === "cooldown") {
+        shaPending.push(entryId);
+        return;
+      }
+      // SHA idle → fire
+      shaState = "running";
+      const pending = shaPending.length > 0 ? `\nAlso failed recently: ${shaPending.join(", ")}` : "";
+      shaPending.length = 0;
       if (ctx.telegramAdapter) {
         ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `🔧 Calling self-healing agent`);
       }
-      const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}\n\nDiagnose the root cause. If you can fix it programmatically (config change, script fix, token refresh), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.`;
+      const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}${pending}\n\nDiagnose the root cause. If you can fix it programmatically (config change, script fix, token refresh), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.`;
       void (async () => {
         try {
           const { SubagentRuntime } = await import("../components/subagent-runtime.js");
@@ -55,6 +67,9 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
           await runtime.shutdown();
         } catch (err) {
           logWarn("main", `SHA session failed: ${err}`);
+        } finally {
+          shaState = "cooldown";
+          setTimeout(() => { shaState = "idle"; }, 60_000);
         }
       })();
     },
