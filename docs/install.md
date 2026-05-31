@@ -55,13 +55,12 @@ If `~/.local/bin` isn't on `$PATH`, `install` prints the shell config line.
 
 | Command | Purpose |
 |---|---|
-| `abtars install [--upgrade] [--force]` | First-time setup. Creates dirs, seeds `config/.env` + `config/.env.skills` from examples, writes CLI wrappers, creates PATH symlinks. `--upgrade` runs the one-time flat→releases migration on pre-#158 hosts. `--force` re-seeds missing config. |
+| `abtars install [--upgrade] [--force]` | First-time setup. Creates dirs, seeds `config/.env` + `config/.env.skills` from examples, writes CLI wrappers, creates PATH symlinks. `--force` re-seeds missing config. |
 | `abtars update [--source local\|npm\|github] [--from-local]` | Build current checkout → stage → flip `current` → prune old. Reads `~/.abmind/manifest.json` for version compat (errors with actionable hint if abmind is outdated, unless `--allow-abmind-mismatch`). Runs 001/002 env-path migrations at end. Warns and exits if local branch behind `origin/<branch>` (use `--from-local` to override). |
 | `abtars rollback [--to <version>]` | Flip `current` back. Validates target exists in `releases/`. Refuses if `package-lock.json` hash differs (requires full rebuild instead). |
 | `abtars reset --scope <config\|config+data\|full> [--yes] [--dry-run] [--non-interactive] [--no-backup] [--force]` | Scoped destructive reset. `config` wipes `config/` only. `config+data` adds `memory/`, `logs/`, `reports/`, `received/`. `full` removes `~/.abtars/` + PATH symlinks (automatic backup unless `--no-backup`). Non-interactive requires `--yes`. |
 | `abtars onboard` | Interactive first-time config wizard. Prompts for Telegram bot token, primary chat ID, default transport provider, default model, optional Discord A2A channel. Writes `config/.env`. Re-run requires `--force` to overwrite owned keys. Non-interactive: `--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ... --default-provider ...` |
 | `abtars doctor [args]` | Thin wrapper around `scripts/doctor.sh`. Runs pgrep/filesystem/lock inspection, reports issues. `--fix` attempts automated recovery. |
-| `abtars migrate [--only <name>] [--dry-run]` | Standalone migration runner. Migrations also run at the end of `update` (001/002). 003-flat-to-releases only runs via `install --upgrade`. |
 | `abtars status` | Print manifest + lock state. Exit 1 if not installed or layout mismatched. |
 
 Plus utility CLIs: `abtars-browser`, `abtars-restart`, `abtars-tweet`.
@@ -278,67 +277,6 @@ Rollback via symlink is unsafe. Instead:
   abtars update --from-local
 ```
 Because `node_modules/` is shared and the old release's deps aren't present. Full rebuild is the correct recovery.
-
----
-
-## Migration from pre-#158 flat layout
-
-If you had an older `~/.abtars/` with `dist/` at the root (no `releases/`), first time only:
-
-1. **Stop the bridge + watchdog:**
-   ```bash
-   # Linux / peer-a:
-   pkill -f "watchdog.*--all"
-   pkill -TERM -f 'node.*dist/main\.js'
-
-   # macOS / peer-b:
-   launchctl unload ~/Library/LaunchAgents/com.abtars.watchdog.plist
-   ```
-   Verify with `pgrep -f 'node.*abtars.*dist/main\.js'` → empty.
-
-2. **Run the upgrade migration:**
-   ```bash
-   cd ~/workspace/ab/abtars
-   abtars install --upgrade
-   ```
-
-   The migration:
-   - Refuses if any bridge process is still running
-   - Backs up `~/.abtars/` → `~/.abtars.pre-158.bak/` (automated, ~several hundred MB)
-   - Moves `dist/` → `releases/<derived-version>/dist/`
-   - Creates `current -> releases/<derived-version>`
-   - Preserves any custom files in `bin/` under `bin.pre-158.bak/` inside the backup
-   - Regenerates launcher scripts (`abtars.sh`, `watchdog.sh`, `browser-patchright.sh`) to use `current/dist/main.js`
-   - Writes initial manifest with migration record
-
-3. **First real update:**
-   ```bash
-   abtars update
-   ```
-   Builds the current checkout into a proper versioned release.
-
-4. **Restart:**
-   ```bash
-   # Linux / peer-a:
-   ~/.abtars/watchdog.sh &  # reads platform config from .env
-
-   # macOS / peer-b:
-   launchctl load ~/Library/LaunchAgents/com.abtars.watchdog.plist
-   ```
-
-5. **Verify:**
-   ```bash
-   abtars status
-   tail -f ~/.abtars/logs/bridge-$(date +%F).log
-   ```
-
-**Rollback of the migration itself:**
-```bash
-pkill -f watchdog && pkill -TERM -f 'node.*main\.js'
-rm -rf ~/.abtars
-mv ~/.abtars.pre-158.bak ~/.abtars
-# Restart via your platform's service manager
-```
 
 ---
 
