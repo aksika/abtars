@@ -113,6 +113,9 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
 
     if (bridgeAlive) await killBridge(bridgePid!);
     killPortHolder(3100);
+    // Clear stale restart requests so the new bridge doesn't restart again (#731)
+    const { updateBridgeLockField } = await import("../../components/transport/bridge-lock-transport.js");
+    updateBridgeLockField("restartRequested", null);
     const argv: string[] = []; // #534: env is SSoT — no CLI args needed
     return spawnLauncher(home, argv);
   }
