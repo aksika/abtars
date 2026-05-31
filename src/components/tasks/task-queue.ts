@@ -263,19 +263,22 @@ export class CronQueue {
     this.onFailInject(entry.id, entry.message, result);
   }
 
-  private checkAutoPause(entry: CronEntry, exitCode: number, lastError: string): void {
-    if (!entry.schedule) return;
+  private checkAutoPause(entry: CronEntry, exitCode: number, lastError: string): boolean {
+    if (!entry.schedule) return false;
     if (exitCode === 0) {
       if (entry.consecutiveFails) { entry.consecutiveFails = 0; writeEntry(entry); }
-      return;
+      return false;
     }
     entry.consecutiveFails = (entry.consecutiveFails ?? 0) + 1;
     if (entry.consecutiveFails >= 3) {
       entry.paused = true;
       logWarn(TAG, `⏸ Auto-paused "${entry.id}" after ${entry.consecutiveFails} consecutive failures`);
       this.onTaskPaused?.(entry.chatId, entry.title ?? entry.message.slice(0, 60), lastError.slice(0, 200));
+      writeEntry(entry);
+      return true;
     }
     writeEntry(entry);
+    return false;
   }
 
   private runScript(entry: CronEntry, onComplete?: TaskCompleteCallback): void {
@@ -294,7 +297,7 @@ export class CronQueue {
         logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
         recordRunToFile(entry.id, code ?? undefined);
         if (code === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
-        this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
+        const paused = this.checkAutoPause(entry, code ?? 1, (output || "(no output)").slice(0, 200));
         if (code === 0 && output.trim() && entry.agentFollowUp && entry.agentMessage) {
           logInfo(TAG, `■ Gate triggered → enqueuing agent follow-up for "${entry.id}"`);
           const agentEntry: CronEntry = { ...entry, executor: "agent", message: entry.agentMessage.replace("{{GATE_OUTPUT}}", output.trim()), agentFollowUp: undefined };
@@ -304,9 +307,9 @@ export class CronQueue {
         }
         if (code !== 0) {
           scheduleRetry(entry, !!entry._retrying);
-          this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
+          if (!paused) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
         }
-        onComplete?.(entry.chatId, entry.message, `${status}\n${(output || "(no output)").slice(0, 500)}`);
+        if (!paused) onComplete?.(entry.chatId, entry.message, `${status}\n${(output || "(no output)").slice(0, 500)}`);
         this.clearCurrent();
         this.processNext();
       });
@@ -392,23 +395,27 @@ export class CronQueue {
 
         recordRunToFile(entry.id, exitCode);
         if (exitCode === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
-        this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
+        const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
         const icon = exitCode === 0 ? "✅" : "❌";
         if (exitCode !== 0) {
           scheduleRetry(entry, !!entry._retrying);
-          this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
+          if (!paused) this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);
         }
-        const producedFiles = dodPaths.filter(p => existsSync(p));
-        onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`, producedFiles.length > 0 ? producedFiles : undefined);
+        if (!paused) {
+          const producedFiles = dodPaths.filter(p => existsSync(p));
+          onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`, producedFiles.length > 0 ? producedFiles : undefined);
+        }
       })
       .catch((err) => {
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
         recordRunToFile(entry.id, 1);
-        this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
+        const paused = this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
         scheduleRetry(entry, !!entry._retrying);
-        const errMsg = `❌ Failed: ${err instanceof Error ? err.message : String(err)}`;
-        this.tryInjectFailure(entry, errMsg);
-        onComplete?.(entry.chatId, entry.message, errMsg);
+        if (!paused) {
+          const errMsg = `❌ Failed: ${err instanceof Error ? err.message : String(err)}`;
+          this.tryInjectFailure(entry, errMsg);
+          onComplete?.(entry.chatId, entry.message, errMsg);
+        }
       })
       .finally(() => {
         runtime.shutdown();

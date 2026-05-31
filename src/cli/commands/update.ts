@@ -237,14 +237,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
       process.stdout.write(`✓ invariants: ${invariantResults.join(", ")}\n`);
     }
 
-    // #494 — Ensure native deps (sqlite-vec) are installed at ~/.abmind/lib/
-    try {
-      const { ensureNativeDeps, recordToolchain } = await import("../ensure-native-deps.js");
-      recordToolchain();
-      await ensureNativeDeps();
-    } catch (err) {
-      process.stdout.write(`⚠ native deps check failed: ${err instanceof Error ? err.message : String(err)}\n`);
-    }
+    // Native deps (sqlite-vec, better-sqlite3) handled by `abmind install` (#716)
 
     // Run doctor before restart
     const doctorPath = join(paths.home, "scripts", "doctor.sh");

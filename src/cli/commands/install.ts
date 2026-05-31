@@ -314,6 +314,16 @@ export async function install(opts: InstallOptions): Promise<number> {
   const userBinDir = resolveUserBinDir();
   const repoRoot = process.cwd();
 
+  // Install log (#718)
+  const { initInstallLog, logInstall, logInstallHeader } = await import("../install-log.js");
+  initInstallLog(home);
+  logInstallHeader("install");
+  const _origWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: any, ...args: any[]) => {
+    if (typeof chunk === "string" && (chunk.startsWith("✓") || chunk.startsWith("⚠"))) logInstall(chunk.trimEnd());
+    return _origWrite(chunk, ...args);
+  }) as typeof process.stdout.write;
+
   const homeExists = await exists(home);
   const manifest = homeExists ? await readManifest(paths.manifest) : null;
 

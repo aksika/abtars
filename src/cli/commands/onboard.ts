@@ -97,6 +97,7 @@ interface WizardAnswers {
   readonly wakeTime: string;
   readonly groqApiKey: string;
   readonly embeddingEnabled: boolean;
+  readonly securityMode: string;
   readonly trustMode: boolean;
 }
 
@@ -108,17 +109,11 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   intro('abtars onboard — first-time setup');
   const noteEmpty = 'press Enter to skip';
 
-  // 1. Deployment mode
-  const installMode = await select<"simple" | "supervised" | "supervised-daemon">({
-    message: 'Deployment mode',
-    options: [
-      { value: 'simple', label: 'simple — laptop/dev, start manually' },
-      { value: 'supervised', label: 'supervised — 24/7 host, user-scope auto-restart (recommended: macOS)' },
-      { value: 'supervised-daemon', label: 'supervised-daemon — system-scope service (recommended: Linux)' },
-    ],
-    initialValue: existing?.installMode ?? 'simple',
-  });
-  if (isCancel(installMode)) { cancel('Cancelled.'); return null; }
+  // 1. Deployment mode — set by `abtars install --mode=X`, read from manifest
+  const { packagePaths: pp, readManifest: rm } = await import("../deploy-lib-import.js");
+  const mfPaths = pp('abtars');
+  const mf = await rm(mfPaths.manifest);
+  const installMode = mf?.installMode ?? 'supervised';
 
   // 1b. Agent name
   const agentName = await text({
@@ -131,7 +126,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   // 1c. User name (for personal greeting + encryption salt)
   const userName = await text({
     message: 'Your name (used for encryption — same on all machines)',
-    placeholder: 'e.g. aksika',
+    placeholder: 'your name',
     initialValue: existing?.userName ?? '',
   });
   if (isCancel(userName)) { cancel('Cancelled.'); return null; }
@@ -139,7 +134,25 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   // 1d. Passphrase — moved to `abmind install` (#716)
   const passphrase = '';
 
-  // 2-3. Telegram (optional)
+  // 2. Security mode
+  const securityMode = await select({
+    message: 'Security mode — restrict agent file/command access?',
+    options: [
+      { value: 'guardrails', label: 'guardrails — path guard + command blocklist (recommended)' },
+      { value: 'off', label: 'off — no restrictions (legacy)' },
+    ],
+    initialValue: existing?.securityMode ?? 'guardrails',
+  });
+  if (isCancel(securityMode)) { cancel('Cancelled.'); return null; }
+
+  // 3. Trust mode
+  const trustMode = await confirm({
+    message: 'Trust mode — auto-approve agent permission requests? (recommended for personal use)',
+    initialValue: true,
+  });
+  if (isCancel(trustMode)) { cancel('Cancelled.'); return null; }
+
+  // 4-5. Telegram (optional)
   const telegramToken = await text({
     message: `Telegram bot token (@BotFather → /mybots → API Token, ${noteEmpty})`,
     placeholder: '123456789:ABCdefGHI...',
@@ -291,12 +304,6 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   // 12b. Embeddings — handled by `abmind install`, not here
   const embeddingEnabled = false;
 
-  const trustMode = await confirm({
-    message: 'TRUST_MODE — auto-approve all permission requests from the agent? (recommended for personal/automated use)',
-    initialValue: existing?.trustMode ?? true,
-  });
-  if (isCancel(trustMode)) { cancel('Cancelled.'); return null; }
-
   // 13. Summary + confirmation
   const mask = (s: string): string => s ? (s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-4)}` : '***') : '(skipped)';
   const lines = [
@@ -345,6 +352,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     wakeTime: String(wakeTime ?? '').trim(),
     groqApiKey: String(groqApiKey ?? '').trim() || existing?.groqApiKey || '',
     embeddingEnabled: false,
+    securityMode: String(securityMode ?? 'guardrails'),
     trustMode: trustMode === true,
   };
 }
@@ -393,7 +401,8 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     wakeTime: '',
     groqApiKey: '',
     embeddingEnabled: false,
-    trustMode: false,
+    securityMode: 'guardrails',
+    trustMode: true,
   };
 }
 
@@ -426,6 +435,7 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       wakeTime: kv.get('WAKE_TIME') ?? '',
       groqApiKey: kv.get('GROQ_API_KEY') ?? '',
       embeddingEnabled: kv.get('EMBEDDING_ENABLED') === 'true',
+      securityMode: kv.get('SECURITY_MODE') ?? 'guardrails',
       trustMode: kv.get('TRUST_MODE') === 'true',
     };
   } catch {
@@ -462,6 +472,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   if (answers.wakeTime) newBlock.push(`WAKE_TIME=${answers.wakeTime}`);
   newBlock.push(`HEARTBEAT_INTERVAL_SEC=300`);
   newBlock.push(`EMBEDDING_ENABLED=${answers.embeddingEnabled ? 'true' : 'false'}`);
+  newBlock.push(`SECURITY_MODE=${answers.securityMode}`);
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
@@ -469,6 +480,17 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
 
 export async function onboard(opts: OnboardOptions): Promise<number> {
   const paths = packagePaths('abtars');
+
+  // Install log (#718)
+  const { initInstallLog, logInstall, logInstallHeader } = await import("../install-log.js");
+  initInstallLog(paths.home);
+  logInstallHeader("onboard");
+  const _origWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: any, ...args: any[]) => {
+    if (typeof chunk === "string" && (chunk.startsWith("✓") || chunk.startsWith("⚠") || chunk.startsWith("•"))) logInstall(chunk.trimEnd());
+    return _origWrite(chunk, ...args);
+  }) as typeof process.stdout.write;
+
   const manifest = await readManifest(paths.manifest);
   if (!manifest) {
     process.stderr.write(
@@ -598,16 +620,17 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     }
   }
 
-  // Seed abmind user_profile.md with user's name (if abmind is in use and file doesn't exist)
+  // Seed abmind user_profile.md — only if abmind is already installed
   if (answers.userName) {
     const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(paths.home), '.abmind');
     const profileDir = join(abmindHome, 'memory', 'core');
-    const profilePath = join(profileDir, 'user_profile.md');
     const { existsSync: profileExists } = await import('node:fs');
-    if (!profileExists(profilePath)) {
-      await mkdir(profileDir, { recursive: true });
-      await writeFile(profilePath, `# User Profile\n\nName: ${answers.userName}\n`, { mode: 0o600 });
-      process.stdout.write(`✓ user_profile.md → ${profilePath}\n`);
+    if (profileExists(profileDir)) {
+      const profilePath = join(profileDir, 'user_profile.md');
+      if (!profileExists(profilePath)) {
+        await writeFile(profilePath, `# User Profile\n\nName: ${answers.userName}\n`, { mode: 0o600 });
+        process.stdout.write(`✓ user_profile.md → ${profilePath}\n`);
+      }
     }
   }
 
@@ -646,7 +669,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     process.stdout.write(`✓ agents/default.md → ${agentRulesPath}\n`);
   }
 
-  process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://github.com/aksika/abtars/blob/main/docs/install.md\n`);
+  process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://aksika.github.io/abtars/\n`);
 
   // Skip the build+start automation in non-interactive mode (scripts expect to do it themselves)
   if (opts.nonInteractive) {
@@ -670,23 +693,18 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     return updRc;
   }
 
-  // ── Auto-run: abmind install + update ──
-  process.stdout.write(`\n── Running 'abmind install && abmind update' ──\n`);
-  const { spawn } = await import('node:child_process');
-  const runAbmind = (sub: 'install' | 'update'): Promise<number> => new Promise((resolve) => {
-    // abmind is a sibling package under the workspace — resolve relative to repo root's parent.
-    const abmindRepo = join(process.cwd(), '..', 'abmind');
-    const cliPath = join(abmindRepo, 'dist', 'cli', `abmind-${sub}.js`);
-    const child = spawn('node', [cliPath], { stdio: 'inherit', cwd: abmindRepo });
-    child.on('exit', (code) => resolve(code ?? 1));
-  });
-  const abInstallRc = await runAbmind('install');
-  if (abInstallRc === 0) {
-    const abUpdateRc = await runAbmind('update');
-    if (abUpdateRc !== 0) process.stderr.write(`\n⚠️  'abmind update' exited with code ${abUpdateRc}.\n`);
-  } else {
-    process.stderr.write(`\n⚠️  'abmind install' exited with code ${abInstallRc}. Skipping abmind update.\n`);
-  }
+  // ── abmind install (optional — only if abmind is available) ──
+  try {
+    const { spawnSync } = await import('node:child_process');
+    const which = spawnSync('which', ['abmind'], { encoding: 'utf-8' });
+    if (which.status === 0) {
+      process.stdout.write(`\n── Running 'abmind install' ──\n`);
+      const r = spawnSync('abmind', ['install'], { stdio: 'inherit' });
+      if (r.status !== 0) process.stdout.write(`⚠ abmind install exited with code ${r.status}\n`);
+    } else {
+      process.stdout.write(`\nℹ️  abmind not installed. Run 'npm install -g abmind && abmind install' later to enable persistent memory.\n`);
+    }
+  } catch { /* abmind not available — skip silently */ }
 
   // ── Start commands — print + ask to run ──
   const { confirm } = await import('@clack/prompts');
@@ -703,6 +721,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   }
 
   process.stdout.write(`\n── Start the bridge ──\n`);
+  const { spawn } = await import('node:child_process');
   for (const cmd of startCmds) {
     const run = await confirm({ message: `Run: ${cmd}`, initialValue: true });
     if (run === true) {

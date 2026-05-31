@@ -22,9 +22,11 @@ zip -qr "$DEST/abtars-$DATE.zip" \
   -x "config/.env.skills" 2>/dev/null || true
 
 # Add abmind memory/core + sleep reports
-cd "$ABMIND"
-zip -qr "$DEST/abtars-$DATE.zip" \
-  memory/core/ memory/sleep/ 2>/dev/null || true
+if [ -d "$ABMIND/memory" ]; then
+  cd "$ABMIND"
+  zip -qr "$DEST/abtars-$DATE.zip" \
+    memory/core/ memory/sleep/ 2>/dev/null || true
+fi
 
 # Add the WAL-safe DB copy
 if [ -f "$DB_TMP" ]; then
