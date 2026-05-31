@@ -114,7 +114,12 @@ if (existsSync(secretDir)) {
 
     let value: string | null;
     if (raw.startsWith("ENC:")) {
-      value = decryptFile(raw);
+      try {
+        value = decryptFile(raw);
+      } catch {
+        process.stderr.write(`[env] ⚠ Failed to decrypt secret/${file} — skipping (wrong key?)\n`);
+        continue;
+      }
       if (!value) continue;
     } else {
       value = raw;
