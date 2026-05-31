@@ -24,6 +24,7 @@ export interface UpdateOptions {
   readonly source: SourceName;
   readonly fromLocal: boolean;
   readonly allowAbmindMismatch: boolean;
+  readonly repoRoot?: string;
 }
 
 export async function update(opts: UpdateOptions): Promise<number> {
@@ -44,7 +45,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
   try {
     const source = opts.source === 'npm'
       ? makeNpmSource('abtars')
-      : makeLocalBuildSource({ repoRoot: process.cwd(), allowStale: opts.fromLocal });
+      : makeLocalBuildSource({ repoRoot: opts.repoRoot ?? process.cwd(), allowStale: opts.fromLocal });
     if (opts.fromLocal) {
       showHintOnce("update-from-local", "Building from working copy (--from-local). To sync with remote first: git pull && abtars update");
     }

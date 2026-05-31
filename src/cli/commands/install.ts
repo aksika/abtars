@@ -15,6 +15,7 @@ import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
 import { hostname, homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
 
 export interface InstallOptions {
@@ -453,6 +454,21 @@ export async function install(opts: InstallOptions): Promise<number> {
     await writeManifest(paths.manifest, { ...manifestForMode, installMode: mode });
   }
   process.stdout.write(`✓ install mode: ${mode}\n`);
+
+  // Auto-stage: if no release exists, stage from our own package (fresh npm install)
+  const currentLink = join(home, 'current');
+  if (!existsSync(currentLink)) {
+    const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    const bundleDir = join(pkgRoot, 'bundle');
+    if (existsSync(bundleDir)) {
+      const { update } = await import('./update.js');
+      const code = await update({ source: 'local', fromLocal: true, allowAbmindMismatch: true, repoRoot: pkgRoot });
+      if (code !== 0) {
+        process.stderr.write(`⚠ auto-stage failed (exit ${code})\n`);
+        return code;
+      }
+    }
+  }
 
   // --- supervised-daemon: system-scope service install (additive, does not touch simple/supervised paths) ---
   if (mode === 'supervised-daemon') {
