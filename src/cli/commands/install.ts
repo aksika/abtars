@@ -171,7 +171,12 @@ if [ -f "${target}" ]; then
 elif [ -f "${fallback}" ]; then
   exec node "${fallback}" "$@"
 else
-  echo "abtars: no release staged yet. Run 'abtars update' or 'npm run bundle' in the repo checkout." >&2
+  # No local release — fall through to npm global binary
+  GLOBAL_BIN="$(npm root -g 2>/dev/null)/abtars/bundle/${bundleFile}"
+  if [ -f "$GLOBAL_BIN" ]; then
+    exec node "$GLOBAL_BIN" "$@"
+  fi
+  echo "abtars: no release staged. Run 'abtars install' first." >&2
   exit 1
 fi
 `;
@@ -337,7 +342,8 @@ export async function install(opts: InstallOptions): Promise<number> {
   // Auto-stage: if no release exists, stage from our own package (fresh npm install)
   const currentLink = join(home, 'current');
   if (!existsSync(currentLink)) {
-    const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+    const scriptPath = process.argv[1] ?? fileURLToPath(import.meta.url);
+    const pkgRoot = join(dirname(scriptPath), '..');
     const bundleDir = join(pkgRoot, 'bundle');
     if (existsSync(bundleDir)) {
       const { update } = await import('./update.js');
