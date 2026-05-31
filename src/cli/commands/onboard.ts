@@ -114,9 +114,9 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   const mf = await rm(mfPaths.manifest);
   const installMode = mf?.installMode ?? 'supervised';
 
-  // 1c. User name (for personal greeting + encryption salt)
+  // 1c. User name (for personal greeting)
   const userName = await text({
-    message: 'Your name (used for encryption — same on all machines)',
+    message: 'Your name',
     placeholder: 'your name',
     initialValue: existing?.userName ?? '',
   });
@@ -155,9 +155,14 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   // Auto-detect chat ID: ask user to send /start to the bot
   let detectedChatId = existing?.telegramChatId ?? '';
   if (telegramToken && telegramToken.trim() && !detectedChatId) {
-    process.stdout.write('\n📱 Send /start to your bot on Telegram now... (waiting 30s)\n');
+    const botUrl = `https://api.telegram.org/bot${telegramToken.trim()}`;
     try {
-      const res = await fetch(`https://api.telegram.org/bot${telegramToken.trim()}/getUpdates?timeout=30&allowed_updates=["message"]`);
+      // Clear any stale webhook/updates so getUpdates works fresh
+      await fetch(`${botUrl}/deleteWebhook?drop_pending_updates=true`);
+    } catch { /* best effort */ }
+    process.stdout.write('\nSend /start to your bot on Telegram now... (waiting 30s)\n');
+    try {
+      const res = await fetch(`${botUrl}/getUpdates?timeout=30&allowed_updates=["message"]`);
       const data = await res.json() as { result?: Array<{ message?: { chat?: { id?: number } } }> };
       const id = data.result?.find(u => u.message?.chat?.id)?.message?.chat?.id;
       if (id) {
@@ -707,15 +712,18 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
   process.stdout.write(`\n── Start the bridge ──\n`);
   const { spawn } = await import('node:child_process');
-  for (const cmd of startCmds) {
-    const run = await confirm({ message: `Run: ${cmd}`, initialValue: true });
+  if (startCmds.length > 0) {
+    for (const cmd of startCmds) process.stdout.write(`  → ${cmd}\n`);
+    const run = await confirm({ message: `Enable and start the watchdog service?`, initialValue: true });
     if (run === true) {
-      await new Promise<void>((resolve) => {
-        const child = spawn('bash', ['-lc', cmd], { stdio: 'inherit' });
-        child.on('exit', () => resolve());
-      });
+      for (const cmd of startCmds) {
+        await new Promise<void>((resolve) => {
+          const child = spawn('bash', ['-lc', cmd], { stdio: 'inherit' });
+          child.on('exit', () => resolve());
+        });
+      }
     } else {
-      process.stdout.write(`  → manual: ${cmd}\n`);
+      process.stdout.write(`  → skipped (run manually)\n`);
     }
   }
 

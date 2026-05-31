@@ -9,6 +9,12 @@ type AbmindModule = typeof import("abmind");
 let _mod: AbmindModule | null = null;
 let _loaded = false;
 
+/** Reset cache — called on in-process restart. */
+export function resetAbmindCache(): void {
+  _mod = null;
+  _loaded = false;
+}
+
 /** Call once at boot (phase-memory). Caches the module. */
 export async function loadAbmind(): Promise<AbmindModule | null> {
   if (_loaded) return _mod;
