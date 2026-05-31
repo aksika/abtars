@@ -29,7 +29,6 @@ function unitName(scope: Scope): string {
 // ── install ──
 
 async function daemonInstall(): Promise<number> {
-  const home = abtarsHome();
   const platform = process.platform;
   const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -49,6 +48,11 @@ async function daemonInstall(): Promise<number> {
     process.stderr.write(`Cannot determine target user — $SUDO_USER is not set.\n`);
     return 2;
   }
+
+  // Resolve the SUDO_USER's home, not root's
+  const { execSync: execSyncHome } = await import("node:child_process");
+  const userHome = execSyncHome(`eval echo ~${sudoUser}`, { encoding: "utf-8" }).trim();
+  const home = join(userHome, ".abtars");
 
   const currentLink = join(home, "current");
   if (!existsSync(currentLink)) {
