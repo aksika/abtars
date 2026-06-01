@@ -125,11 +125,29 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
       }
     }
 
+    // Inherit professor's full fallback chain (fb1→fb2→fb3)
+    if (profAgent) {
+      for (const fb of profAgent.fallbacks ?? []) {
+        if (candidates.some(c => c.model === fb.model)) continue;
+        const fbProvider = tc?.providers[fb.provider];
+        const fbEndpoint = fbProvider?.endpoint ?? profAgent.provider.endpoint;
+        if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
+        const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
+        candidates.push({ endpoint: fbEndpoint, apiKey: fbApiKey, model: fb.model, maxContext: profAgent.contextWindow });
+      }
+      for (const chainModel of profAgent.provider.fallbackChain ?? []) {
+        if (candidates.some(c => c.model === chainModel)) continue;
+        if (!profAgent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
+        candidates.push({ endpoint: profAgent.provider.endpoint, apiKey, model: chainModel, maxContext: profAgent.contextWindow });
+      }
+    }
+
     // Append agent-level cross-provider fallbacks
     for (const fb of agent.fallbacks) {
       if (candidates.some(c => c.model === fb.model)) continue;
       const fbProvider = tc?.providers[fb.provider];
-      const fbEndpoint = fbProvider?.endpoint ?? agent.provider.endpoint ?? "http://localhost:11434/v1";
+      const fbEndpoint = fbProvider?.endpoint ?? agent.provider.endpoint;
+      if (!fbEndpoint) { logWarn("subagent", `Skipping fallback ${fb.model} — no endpoint configured`); continue; }
       const fbApiKey = fbProvider?.apiKeyEnv ? getEnv().getApiKey(fbProvider.apiKeyEnv) : apiKey;
       candidates.push({ endpoint: fbEndpoint, apiKey: fbApiKey, model: fb.model, maxContext: agent.contextWindow });
     }
@@ -138,8 +156,9 @@ export async function createSubagentTransport(role: SubagentRole, registry?: imp
     const chain = agent.provider.fallbackChain ?? [];
     for (const chainModel of chain) {
       if (!candidates.some(c => c.model === chainModel)) {
+        if (!agent.provider.endpoint) { logWarn("subagent", `Skipping chain model ${chainModel} — no endpoint configured`); continue; }
         candidates.push({
-          endpoint: agent.provider.endpoint ?? "http://localhost:11434/v1",
+          endpoint: agent.provider.endpoint,
           apiKey, model: chainModel, maxContext: agent.contextWindow,
         });
       }
