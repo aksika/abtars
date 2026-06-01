@@ -156,22 +156,36 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   let detectedChatId = existing?.telegramChatId ?? '';
   if (telegramToken && telegramToken.trim() && !detectedChatId) {
     const botUrl = `https://api.telegram.org/bot${telegramToken.trim()}`;
+    try { await fetch(`${botUrl}/deleteWebhook`); } catch { /* best effort */ }
+    // Quick check: any pending updates already?
     try {
-      // Clear any stale webhook/updates so getUpdates works fresh
-      await fetch(`${botUrl}/deleteWebhook`);
-    } catch { /* best effort */ }
-    process.stdout.write('\nSend /start to your bot on Telegram now... (waiting 30s)\n');
-    try {
-      const res = await fetch(`${botUrl}/getUpdates?timeout=30&allowed_updates=${encodeURIComponent('["message"]')}`);
-      const data = await res.json() as { result?: Array<{ message?: { chat?: { id?: number } } }> };
-      const id = data.result?.find(u => u.message?.chat?.id)?.message?.chat?.id;
-      if (id) {
-        detectedChatId = String(id);
+      const quick = await fetch(`${botUrl}/getUpdates?timeout=2&allowed_updates=${encodeURIComponent('["message"]')}`);
+      const qData = await quick.json() as { result?: Array<{ message?: { chat?: { id?: number } } }> };
+      const qId = qData.result?.find(u => u.message?.chat?.id)?.message?.chat?.id;
+      if (qId) {
+        detectedChatId = String(qId);
         process.stdout.write(`✓ Detected your chat ID: ${detectedChatId}\n`);
-      } else {
-        process.stdout.write('⚠ No message received — enter manually below.\n');
       }
-    } catch { process.stdout.write('⚠ Could not reach Telegram API — enter manually below.\n'); }
+    } catch { /* ignore */ }
+    // If not found, ask user to send /start
+    if (!detectedChatId) {
+      process.stdout.write('\n→ Open Telegram, find your bot, and tap Start (or send any message).\n');
+      process.stdout.write('  Then press Enter here...\n');
+      await new Promise<void>(resolve => {
+        process.stdin.once('data', () => resolve());
+      });
+      try {
+        const res = await fetch(`${botUrl}/getUpdates?timeout=10&allowed_updates=${encodeURIComponent('["message"]')}`);
+        const data = await res.json() as { result?: Array<{ message?: { chat?: { id?: number } } }> };
+        const id = data.result?.find(u => u.message?.chat?.id)?.message?.chat?.id;
+        if (id) {
+          detectedChatId = String(id);
+          process.stdout.write(`✓ Detected your chat ID: ${detectedChatId}\n`);
+        } else {
+          process.stdout.write('⚠ No message received — enter manually below.\n');
+        }
+      } catch { process.stdout.write('⚠ Could not reach Telegram API — enter manually below.\n'); }
+    }
   }
 
   const telegramChatId = await text({
