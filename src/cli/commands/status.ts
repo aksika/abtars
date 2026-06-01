@@ -26,17 +26,19 @@ export async function status(): Promise<number> {
     `  commit:        ${manifest.commit ?? '(unknown)'}`,
     `  branch:        ${manifest.branch ?? '(unknown)'}`,
     `  source:        ${manifest.source}`,
+    `  mode:          ${manifest.installMode ?? 'supervised'}`,
     `  activated:     ${manifest.activatedAt}`,
     `  current ->:    ${current ?? '(missing)'}`,
     `  host:          ${manifest.host}`,
     `  prior:         ${manifest.priorReleases.length > 0 ? manifest.priorReleases.map((r: PriorRelease) => r.version).join(', ') : '(none)'}`,
   ];
   if (lock.held) {
+    const alive = (() => { try { process.kill(lock.content.pid, 0); return true; } catch { return false; } })();
     lines.push(
-      `  lock:          HELD by pid ${lock.content.pid} (${lock.content.cmd})${lock.stale ? ' — STALE' : ''}`,
+      `  bridge:        ${alive ? '● running' : '✗ dead'} (pid ${lock.content.pid})${lock.stale ? ' — STALE' : ''}`,
     );
   } else {
-    lines.push(`  lock:          not held`);
+    lines.push(`  bridge:        ○ stopped`);
   }
   process.stdout.write(`${lines.join('\n')}\n`);
 
