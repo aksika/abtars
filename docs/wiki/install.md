@@ -6,7 +6,11 @@
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather)) or Discord bot token
 - At least one model provider (ollama, OpenRouter, Kiro CLI, Gemini CLI, Codex, or Claude Code)
 
-## Quick install (npm)
+## Agent install
+
+Give this page to your favourite AI agent (Claude, Gemini, Codex, Kiro) and ask it to install abTARS for you. It has all the information it needs right here. 😉
+
+## Manual install (npm)
 
 ```bash
 npm install -g abtars abmind
