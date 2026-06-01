@@ -360,6 +360,11 @@ export class CronQueue {
     // and calls processNext() again while we're awaiting the dynamic import.
     this.setCurrent(entry, 0, "agent");
 
+    // Set $WORKSPACE for agent tool execution — all output goes here
+    const workspace = join(abtarsHome(), "workspace", entry.id);
+    mkdirSync(workspace, { recursive: true });
+    process.env["WORKSPACE"] = workspace;
+
     const { SubagentRuntime } = await import("../subagent-runtime.js");
     const runtime = new SubagentRuntime();
 
