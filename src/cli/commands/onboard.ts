@@ -152,43 +152,11 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(telegramToken)) { cancel('Cancelled.'); return null; }
 
-  // Auto-detect chat ID: ask user to send /start to the bot
+  // Chat ID — user enters manually
   let detectedChatId = existing?.telegramChatId ?? '';
-  if (telegramToken && telegramToken.trim() && !detectedChatId) {
-    const botUrl = `https://api.telegram.org/bot${telegramToken.trim()}`;
-    try { await fetch(`${botUrl}/deleteWebhook`); } catch { /* best effort */ }
-    // Quick check: any pending updates already?
-    try {
-      const quick = await fetch(`${botUrl}/getUpdates?timeout=2&allowed_updates=${encodeURIComponent('["message"]')}`);
-      const qData = await quick.json() as { result?: Array<{ message?: { chat?: { id?: number } } }> };
-      const qId = qData.result?.find(u => u.message?.chat?.id)?.message?.chat?.id;
-      if (qId) {
-        detectedChatId = String(qId);
-        process.stdout.write(`✓ Detected your chat ID: ${detectedChatId}\n`);
-      }
-    } catch { /* ignore */ }
-    // If not found, ask user to send /start
-    if (!detectedChatId) {
-      process.stdout.write('\n→ Send /start to your bot on Telegram, then press Enter here.\n');
-      await new Promise<void>(resolve => {
-        process.stdin.once('data', () => resolve());
-      });
-      try {
-        const res = await fetch(`${botUrl}/getUpdates?timeout=10&allowed_updates=${encodeURIComponent('["message"]')}`);
-        const data = await res.json() as { result?: Array<{ message?: { chat?: { id?: number } } }> };
-        const id = data.result?.find(u => u.message?.chat?.id)?.message?.chat?.id;
-        if (id) {
-          detectedChatId = String(id);
-          process.stdout.write(`✓ Detected your chat ID: ${detectedChatId}\n`);
-        } else {
-          process.stdout.write('⚠ No message received — enter manually below.\n');
-        }
-      } catch { process.stdout.write('⚠ Could not reach Telegram API — enter manually below.\n'); }
-    }
-  }
 
   const telegramChatId = await text({
-    message: `Your Telegram user ID (${noteEmpty})`,
+    message: `Your Telegram chat ID (send /start to your bot, then check the URL: api.telegram.org/bot<TOKEN>/getUpdates)`,
     placeholder: '123456789',
     initialValue: detectedChatId,
     validate: (v) => (!v || v.trim() === '' || /^-?\d+$/.test(v.trim())) ? undefined : 'expected numeric user ID or empty',
