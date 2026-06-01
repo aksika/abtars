@@ -56,6 +56,14 @@ echo ""
 echo "━━━ Configuration ━━━"
 abtars onboard
 
+# ── 6. Optional deps ──
+echo ""
+read -p "Install optional dependencies (browser, image, pdf, youtube)? [y/N] " -n 1 -r
+echo ""
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+  abtars deps install browser image pdf youtube
+fi
+
 # ── Done ──
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
