@@ -95,27 +95,29 @@ export async function update(opts: UpdateOptions): Promise<number> {
       symlinkSync(entry, mainLink);
     }
 
-    // Preserve abmind symlinks from old release (#722)
-    const { existsSync: ex2, lstatSync, readlinkSync, symlinkSync: sl2, mkdirSync: mk2 } = await import("node:fs");
-    const oldNm = join(paths.home, "current", "node_modules");
-    const preservedLinks: Array<{ name: string; target: string }> = [];
-    if (ex2(oldNm)) {
-      for (const name of ["abmind", "better-sqlite3"]) {
-        const p = join(oldNm, name);
-        try { if (ex2(p) && lstatSync(p).isSymbolicLink()) preservedLinks.push({ name, target: readlinkSync(p) }); } catch { /* skip */ }
-      }
-    }
+    // Ensure abmind symlink in new release (#722)
+    const { existsSync: ex2, symlinkSync: sl2, mkdirSync: mk2, unlinkSync: ul2 } = await import("node:fs");
+    const { dirname: dn2 } = await import("node:path");
 
     // Flip current → releases/<version>
     await activate(paths.current, staged.version);
     process.stdout.write(`✓ current -> releases/${staged.version}\n`);
 
-    // Recreate preserved symlinks in new release
-    if (preservedLinks.length > 0) {
+    // Create abmind + better-sqlite3 symlinks if globally available
+    const globalModules = join(dn2(process.execPath), "..", "lib", "node_modules");
+    const abmindHome = process.env["ABMIND_HOME"] ?? join(process.env["HOME"] ?? "", ".abmind");
+    const links: Array<{ name: string; target: string }> = [];
+    const globalAbmind = join(globalModules, "abmind");
+    if (ex2(globalAbmind)) links.push({ name: "abmind", target: globalAbmind });
+    const bsq3 = join(abmindHome, "lib", "node_modules", "better-sqlite3");
+    if (ex2(bsq3)) links.push({ name: "better-sqlite3", target: bsq3 });
+    if (links.length > 0) {
       const newNm = join(paths.home, "current", "node_modules");
       mk2(newNm, { recursive: true });
-      for (const { name, target } of preservedLinks) {
-        try { sl2(target, join(newNm, name)); } catch { /* best effort */ }
+      for (const { name, target } of links) {
+        const dest = join(newNm, name);
+        try { if (ex2(dest)) ul2(dest); } catch { /* ignore */ }
+        try { sl2(target, dest); } catch { /* best effort */ }
       }
     }
 

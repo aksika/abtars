@@ -673,18 +673,6 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     process.stdout.write(`\nNext: run 'abtars update' to stage the release, then start the bridge.\n`);
     return 0;
   }
-  // ── abmind install (optional — only if abmind is available) ──
-  try {
-    const { spawnSync } = await import('node:child_process');
-    const which = spawnSync('which', ['abmind'], { encoding: 'utf-8' });
-    if (which.status === 0) {
-      process.stdout.write(`\n── Running 'abmind install' ──\n`);
-      const r = spawnSync('abmind', ['install'], { stdio: 'inherit' });
-      if (r.status !== 0) process.stdout.write(`⚠ abmind install exited with code ${r.status}\n`);
-    } else {
-      process.stdout.write(`\nℹ️  abmind not installed. Run 'npm install -g abmind && abmind install' later to enable persistent memory.\n`);
-    }
-  } catch { /* abmind not available — skip silently */ }
 
   // ── Start commands — print + ask to run ──
   const { confirm } = await import('@clack/prompts');
