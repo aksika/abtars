@@ -4,6 +4,8 @@
  */
 
 import { inspectLock, packagePaths, readCurrent, readManifest, type PriorRelease } from '../deploy-lib-import.js';
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 export async function status(): Promise<number> {
   const paths = packagePaths('abtars');
@@ -38,7 +40,18 @@ export async function status(): Promise<number> {
       `  bridge:        ${alive ? '● running' : '✗ dead'} (pid ${lock.content.pid})${lock.stale ? ' — STALE' : ''}`,
     );
   } else {
-    lines.push(`  bridge:        ○ stopped`);
+    // Check bridge.lock directly (the deploy lock is for updates, not bridge state)
+    try {
+      const bridgeLock = JSON.parse(readFileSync(join(paths.home, 'bridge.lock'), 'utf-8'));
+      if (bridgeLock.pid) {
+        const alive = (() => { try { process.kill(bridgeLock.pid, 0); return true; } catch { return false; } })();
+        lines.push(`  bridge:        ${alive ? '● running' : '✗ dead'} (pid ${bridgeLock.pid})`);
+      } else {
+        lines.push(`  bridge:        ○ stopped`);
+      }
+    } catch {
+      lines.push(`  bridge:        ○ stopped`);
+    }
   }
   process.stdout.write(`${lines.join('\n')}\n`);
 
