@@ -169,8 +169,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     } catch { /* ignore */ }
     // If not found, ask user to send /start
     if (!detectedChatId) {
-      process.stdout.write('\n→ Open Telegram, find your bot, and tap Start (or send any message).\n');
-      process.stdout.write('  Then press Enter here...\n');
+      process.stdout.write('\n→ Send /start to your bot on Telegram, then press Enter here.\n');
       await new Promise<void>(resolve => {
         process.stdin.once('data', () => resolve());
       });
