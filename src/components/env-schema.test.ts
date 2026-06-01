@@ -26,7 +26,7 @@ describe("env-schema", () => {
     expect(env.bedTime.minute).toBe(30);
     expect(env.selfhealEnabled).toBe(false);
     expect(env.ctxWarnPct).toBe(70);
-    expect(env.activeMemory).toBe(false);
+    expect(env.activeMemory).toBe(true);
     expect(Object.isFrozen(env)).toBe(true);
   });
 

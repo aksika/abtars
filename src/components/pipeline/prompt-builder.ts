@@ -166,12 +166,14 @@ export async function buildPrompt(
 
   // --- Injection scan for non-master ---
   if (userRole !== "master" && text.length > 10) {
-    const scanForInjection = abmind()!.scanForInjection;
-    const scan = scanForInjection(text);
-    if (!scan.safe) {
-      logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map(f => f.category).join(", ")}`);
+    const scanFn = abmind()?.scanForInjection;
+    if (scanFn) {
+      const scan = scanFn(text);
+      if (!scan.safe) {
+        logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map(f => f.category).join(", ")}`);
       // Return a sentinel — caller checks and sends the block message
       return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined };
+    }
     }
   }
 
