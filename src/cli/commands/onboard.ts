@@ -158,7 +158,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     const botUrl = `https://api.telegram.org/bot${telegramToken.trim()}`;
     try {
       // Clear any stale webhook/updates so getUpdates works fresh
-      await fetch(`${botUrl}/deleteWebhook?drop_pending_updates=true`);
+      await fetch(`${botUrl}/deleteWebhook`);
     } catch { /* best effort */ }
     process.stdout.write('\nSend /start to your bot on Telegram now... (waiting 30s)\n');
     try {
