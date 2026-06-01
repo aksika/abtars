@@ -156,7 +156,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   let detectedChatId = existing?.telegramChatId ?? '';
 
   const telegramChatId = await text({
-    message: `Your Telegram chat ID (send /start to your bot, then check the URL: api.telegram.org/bot<TOKEN>/getUpdates)`,
+    message: `Your Telegram chat ID (message @userinfobot on Telegram to get it)`,
     placeholder: '123456789',
     initialValue: detectedChatId,
     validate: (v) => (!v || v.trim() === '' || /^-?\d+$/.test(v.trim())) ? undefined : 'expected numeric user ID or empty',
