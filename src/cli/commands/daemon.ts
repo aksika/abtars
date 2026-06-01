@@ -91,9 +91,10 @@ async function daemonInstall(): Promise<number> {
     if (!existsSync(unitSrc)) { process.stderr.write(`Template not found: ${unitSrc}\n`); return 1; }
     let content = readFileSync(unitSrc, "utf-8");
     content = content.replaceAll("{{USER}}", sudoUser);
-    const nodeBin = dirname(process.execPath);
-    const userLocalBin = join(userHome, ".local", "bin");
-    content = content.replaceAll("{{PATH}}", `${nodeBin}:${userLocalBin}:/usr/local/bin:/usr/bin:/bin`);
+    // Get the user's full login PATH (includes nvm, cargo, etc.)
+    let userPath = `/usr/local/bin:/usr/bin:/bin`;
+    try { userPath = execSyncHome(`su - ${sudoUser} -c 'echo $PATH'`, { encoding: "utf-8" }).trim(); } catch { /* fallback */ }
+    content = content.replaceAll("{{PATH}}", userPath);
     const dst = "/etc/systemd/system/abtars.service";
 
     const { writeFileSync } = await import("node:fs");
