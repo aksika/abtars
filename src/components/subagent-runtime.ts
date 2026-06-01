@@ -88,7 +88,7 @@ export class SubagentRuntime {
       (await import("./transport/tool-registry.js")).resetStoreCounter();
     }
 
-    const { transport, model, sessionKey } = cached ?? await this.createAgent(agent);
+    const { transport, model, sessionKey } = cached ?? await this.createAgent(agent, opts?.sessionType);
 
     // Per-call timeout override (e.g. dreamy sleep steps need longer than default)
     if (opts?.timeoutMs && transport.setTimeoutOverride) {
@@ -192,7 +192,7 @@ export class SubagentRuntime {
     return true;
   }
 
-  private async createAgent(agent: AgentName): Promise<CachedAgent> {
+  private async createAgent(agent: AgentName, sessionType?: import("./session-manager.js").SessionType): Promise<CachedAgent> {
     const { createSubagentTransport } = await import("./agent-registry.js");
     const role = AGENT_TO_ROLE[agent];
     const mainModel = this._mainTransport && "currentModel" in this._mainTransport
@@ -200,9 +200,13 @@ export class SubagentRuntime {
       : undefined;
     const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, mainModel);
 
-    // #524: inject system prompt for browse sessions
-    if (agent === "browsie" && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
-      (transport as any).setSystemPrompt(BROWSE_SYSTEM_PROMPT);
+    // Inject session-type-appropriate SOUL bundle (#744)
+    const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
+    const resolvedType = sessionType || typeMap[agent];
+    if (resolvedType && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
+      const { buildSoulBundle } = await import("./soul-bundle.js");
+      const bundle = buildSoulBundle(sessionType);
+      if (bundle) (transport as any).setSystemPrompt(bundle);
     }
 
     const sessionKey = `system:${agent}`;
@@ -212,13 +216,6 @@ export class SubagentRuntime {
     return entry;
   }
 }
-
-const BROWSE_SYSTEM_PROMPT = `You are a web browsing assistant. You have two tools for web access:
-
-1. **browser tool** (navigate, click, fill, extract_text, screenshot) — use for JS-heavy pages, rendered content, page interaction, login flows, or anything that needs a real browser.
-2. **curl / execute_bash** — use for simple API calls, raw downloads, fetching headers, or static pages.
-
-Prefer the browser tool when the page likely uses JavaScript rendering or requires interaction. Use curl when a simple HTTP request suffices.`;
 
 const AGENT_TO_ROLE: Record<AgentName, import("./agent-registry.js").SubagentRole> = {
   professor: "task",
