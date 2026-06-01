@@ -2,7 +2,7 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { logInfo, logDebug, logWarn } from "./logger.js";
+import { logInfo, logDebug, logWarn, logTrace } from "./logger.js";
 import { abtarsHome } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
 import type { MemoryManager } from "abmind";
@@ -87,7 +87,9 @@ export function loadSoulBundle(memory?: MemoryManager | null): string | null {
 
   logInfo(TAG, `Session bundle: ${parts.length} parts (abmind: ${bundle ? "API" : "fallback"})`);
   logDebug(TAG, `Bundle parts: soul=${!!soul} profile=${!!profile} notes=${!!notes} memTools=${!!memoryTools} coreFacts=${!!coreFacts} skills=${!!skillsCatalog}`);
-  return parts.join("\n\n---\n\n");
+  const assembled = parts.join("\n\n---\n\n");
+  logTrace(TAG, `Full bundle content:\n${assembled}`);
+  return assembled;
 }
 
 /**
