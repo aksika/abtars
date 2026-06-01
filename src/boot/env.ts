@@ -28,7 +28,7 @@ loadDotenv({ path: resolve(process.cwd(), ".env"), override: false });
 
 // #721: Migrate misplaced API keys from .env.skills → secret/
 // Only acts on uncommented lines with actual values (dotenv skips # comments)
-const SECRET_SUFFIXES = ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
+const SECRET_SUFFIXES = ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_API_ID"];
 const envSkillsPath = resolve(home, "config", ".env.skills");
 const secretDir = resolve(home, "secret");
 if (existsSync(envSkillsPath) && existsSync(secretDir)) {
