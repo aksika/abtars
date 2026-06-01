@@ -7,7 +7,7 @@
  * Missing fields fall back to hardcoded defaults.
  */
 
-export type ErrorKind = "rate_limit" | "auth" | "transient" | "weak";
+export type ErrorKind = "rate_limit" | "auth" | "transient" | "weak" | "empty" | "truncated";
 export type ModelStatus = "healthy" | "degraded" | "exhausted" | "auth_failed";
 
 export interface HealthPolicyConfig {
@@ -23,6 +23,10 @@ export interface HealthPolicyConfig {
   rateLimitFill?: number;
   /** Weak-model fill per hit. Default: 0.05 */
   weakFill?: number;
+  /** Empty response (0 tokens) fill per hit. Default: 0.25 */
+  emptyFill?: number;
+  /** Truncated response (finish_reason=length) fill per hit. Default: 0 (disabled) */
+  truncatedFill?: number;
   /** Transient progressive fill array. Default: [0.1, 0.2, 0.4, 0.8] */
   transientProgressive?: number[];
   /** Consecutive errors before cooldown kicks in. Default: 3 */
@@ -46,6 +50,8 @@ const D_LEAK_PER_MIN = 0.03;
 const D_AUTH_STICKY = true;
 const D_RATE_LIMIT_FILL = 0.5;
 const D_WEAK_FILL = 0.35;
+const D_EMPTY_FILL = 0.25;
+const D_TRUNCATED_FILL = 0;
 const D_TRANSIENT_PROGRESSIVE = [0.1, 0.2, 0.4, 0.8];
 const D_TRANSIENT_COOLDOWN_AFTER = 3;
 const D_TRANSIENT_MAX_COOLDOWN_SEC = 300;
@@ -57,6 +63,8 @@ export class ModelHealthRegistry {
   private readonly authSticky: boolean;
   private readonly rateLimitFill: number;
   private readonly weakFill: number;
+  private readonly emptyFill: number;
+  private readonly truncatedFill: number;
   private readonly transientProgressive: number[];
   private readonly transientCooldownAfter: number;
   private readonly transientMaxCooldownMs: number;
@@ -70,6 +78,8 @@ export class ModelHealthRegistry {
     this.authSticky = config?.authSticky ?? D_AUTH_STICKY;
     this.rateLimitFill = config?.rateLimitFill ?? D_RATE_LIMIT_FILL;
     this.weakFill = config?.weakFill ?? D_WEAK_FILL;
+    this.emptyFill = config?.emptyFill ?? D_EMPTY_FILL;
+    this.truncatedFill = config?.truncatedFill ?? D_TRUNCATED_FILL;
     this.transientProgressive = config?.transientProgressive ?? D_TRANSIENT_PROGRESSIVE;
     this.transientCooldownAfter = config?.transientCooldownAfter ?? D_TRANSIENT_COOLDOWN_AFTER;
     this.transientMaxCooldownMs = (config?.transientMaxCooldownSec ?? D_TRANSIENT_MAX_COOLDOWN_SEC) * 1000;
@@ -129,6 +139,12 @@ export class ModelHealthRegistry {
         break;
       case "weak":
         b.level = Math.min(1.0, b.level + this.weakFill);
+        break;
+      case "empty":
+        b.level = Math.min(1.0, b.level + this.emptyFill);
+        break;
+      case "truncated":
+        if (this.truncatedFill > 0) b.level = Math.min(1.0, b.level + this.truncatedFill);
         break;
     }
 

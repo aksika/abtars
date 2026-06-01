@@ -191,7 +191,7 @@ export class DirectApiTransport implements IKiroTransport {
         const result = await this.agentLoop(session, signal);
         this._lastAnswer = result;
         if (!result || !result.trim()) {
-          policy.recordError(candidate, "weak");
+          policy.recordError(candidate, "empty");
         } else {
           policy.recordSuccess(candidate);
         }
@@ -255,7 +255,7 @@ export class DirectApiTransport implements IKiroTransport {
       try {
         const result = await this.agentLoop(session, signal);
         this._lastAnswer = result;
-        if (!result || !result.trim()) policy.recordError(smallest, "weak");
+        if (!result || !result.trim()) policy.recordError(smallest, "empty");
         else policy.recordSuccess(smallest);
         return result;
       } catch (err) {
