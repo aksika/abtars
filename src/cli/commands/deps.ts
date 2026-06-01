@@ -1,0 +1,78 @@
+/**
+ * `abtars deps` — manage optional dependencies.
+ */
+import { OPTIONAL_DEPS, isInstalled, installPackages } from "../../utils/lazy-require.js";
+import { join } from "node:path";
+import { existsSync, rmSync } from "node:fs";
+import { abtarsHome } from "../../paths.js";
+
+function list(): number {
+  process.stdout.write("Optional dependencies:\n\n");
+  for (const [name, dep] of Object.entries(OPTIONAL_DEPS)) {
+    const installed = dep.packages.every(p => isInstalled(p));
+    const icon = installed ? "✓" : "○";
+    process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label} (${dep.packages.join(", ")})\n`);
+  }
+  process.stdout.write(`\nInstall: abtars deps install <name>\nRemove:  abtars deps remove <name>\n`);
+  return 0;
+}
+
+function install(names: string[]): number {
+  if (names.length === 0) {
+    process.stderr.write("Usage: abtars deps install <name> [<name>...]\nRun 'abtars deps list' to see available.\n");
+    return 1;
+  }
+  for (const name of names) {
+    const dep = OPTIONAL_DEPS[name];
+    if (!dep) {
+      process.stderr.write(`Unknown dep: ${name}. Run 'abtars deps list'.\n`);
+      return 1;
+    }
+    if (dep.packages.every(p => isInstalled(p))) {
+      process.stdout.write(`✓ ${name} already installed\n`);
+      continue;
+    }
+    process.stdout.write(`→ Installing ${dep.label} (${dep.packages.join(", ")})...\n`);
+    try {
+      installPackages(dep.packages);
+      process.stdout.write(`✓ ${name} installed\n`);
+    } catch (err) {
+      process.stderr.write(`✗ ${name} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
+  return 0;
+}
+
+function remove(names: string[]): number {
+  if (names.length === 0) {
+    process.stderr.write("Usage: abtars deps remove <name>\n");
+    return 1;
+  }
+  const libNm = join(abtarsHome(), "lib", "node_modules");
+  for (const name of names) {
+    const dep = OPTIONAL_DEPS[name];
+    if (!dep) {
+      process.stderr.write(`Unknown dep: ${name}\n`);
+      return 1;
+    }
+    for (const pkg of dep.packages) {
+      const p = join(libNm, pkg);
+      if (existsSync(p)) rmSync(p, { recursive: true });
+    }
+    process.stdout.write(`✓ ${name} removed\n`);
+  }
+  return 0;
+}
+
+export async function deps(args: string[]): Promise<number> {
+  const sub = args[0] ?? "list";
+  switch (sub) {
+    case "list": return list();
+    case "install": return install(args.slice(1));
+    case "remove": return remove(args.slice(1));
+    default:
+      process.stderr.write(`Unknown: abtars deps ${sub}\nUsage: abtars deps [list|install|remove]\n`);
+      return 1;
+  }
+}

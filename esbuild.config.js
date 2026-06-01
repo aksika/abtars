@@ -56,6 +56,9 @@ const external = [
   "patchright",
   "better-sqlite3",
   "abmind",
+  "pdf-parse",
+  "youtube-transcript",
+  "jimp",
 ];
 
 const result = await esbuild.build({

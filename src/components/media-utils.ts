@@ -115,7 +115,7 @@ export async function saveInboundMedia(
 
 /** Progressive resize: cap dimensions + reduce quality until base64 fits under target. */
 async function resizeImage(buffer: Buffer, mime: string): Promise<Buffer> {
-  const { Jimp } = await import("jimp");
+  const { Jimp } = await (await import("../utils/lazy-require.js")).lazyRequire("jimp", "image");
   const img = await Jimp.read(buffer);
   const maxBytes = IMAGE_MAX_BASE64_MB * 1024 * 1024;
   let w = img.width;

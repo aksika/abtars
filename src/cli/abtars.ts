@@ -135,6 +135,10 @@ export async function main(argv: readonly string[]): Promise<number> {
         const { daemon: daemonCmd } = await import('./commands/daemon.js');
         return await daemonCmd(argv.slice(1));
       }
+      case 'deps': {
+        const { deps: depsCmd } = await import('./commands/deps.js');
+        return await depsCmd(argv.slice(1));
+      }
       case 'logs': {
         const { logs } = await import('./commands/logs.js');
         return await logs();
