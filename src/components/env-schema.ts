@@ -75,6 +75,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "STREAM_FLUSH_SEC", type: "int", default: "3", description: "Stream edit flush interval (seconds, 0=disabled)" },
 
   // ── Memory ──
+  { env: "MEMORY", type: "string", default: "auto", description: "Memory dir path, 'auto' (detect ~/.abmind/memory), or 'none'" },
   { env: "ACTIVE_MEMORY", type: "bool", default: "true", description: "Enable ambient recall on every turn" },
   { env: "PRIMING_MODEL_TOPICS", type: "bool", default: "true", description: "Use model-generated topics for priming" },
 
@@ -194,6 +195,7 @@ export interface EnvConfig {
   streamFlushSec: number;
 
   // Memory
+  memory: string;
   activeMemory: boolean;
   primingModelTopics: boolean;
 
@@ -368,6 +370,7 @@ export function initEnv(): Readonly<EnvConfig> {
     streamFlushSec: parseIntSafe(readOr("STREAM_FLUSH_SEC", "3"), "STREAM_FLUSH_SEC"),
 
     activeMemory: parseBool(readOr("ACTIVE_MEMORY", "true")),
+    memory: readOr("MEMORY", "auto"),
     primingModelTopics: read("PRIMING_MODEL_TOPICS") !== "false",
 
     bedTime: parseTime(readOr("BED_TIME", "0:30"), "BED_TIME"),

@@ -12,11 +12,13 @@
  */
 
 import { logAndSwallow } from "../components/log-and-swallow.js";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { loadAndValidateConfig } from "../components/config.js";
 import { parsePlatformFlags } from "../components/cli-flags.js";
 import { setLogLevel, logInfo } from "../components/logger.js";
+import { getEnv } from "../components/env-schema.js";
 import { loadNLMConfig } from "../components/nlm-command-handler.js";
 import { abtarsHome } from "../paths.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -34,17 +36,28 @@ export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   ctx.config = await loadAndValidateConfig();
   setLogLevel(ctx.config.logLevel);
 
-  let memoryConfig;
-  try {
-    const abmind = await import("abmind");
-    memoryConfig = abmind.loadMemoryConfig();
-  } catch {
-    memoryConfig = { memoryEnabled: false, memoryDir: join(abtarsHome(), "../.abmind/memory") } as any;
+  // Resolve memory path from MEMORY env var
+  const memoryEnv = getEnv().memory;
+  let memoryDir: string;
+  let memoryEnabled: boolean;
+
+  if (memoryEnv === "none") {
+    memoryEnabled = false;
+    memoryDir = "";
+  } else if (memoryEnv === "auto") {
+    const defaultPath = join(homedir(), ".abmind", "memory");
+    memoryEnabled = existsSync(join(defaultPath, "memory.db"));
+    memoryDir = defaultPath;
+  } else {
+    // Explicit path
+    memoryDir = memoryEnv.startsWith("~") ? join(homedir(), memoryEnv.slice(1)) : memoryEnv;
+    memoryEnabled = true;
   }
-  ctx.memoryConfig = memoryConfig;
+
+  ctx.memoryConfig = { memoryEnabled, memoryDir } as any;
   // startedAt set by createBootCtx; preserved here
   ctx.bridgeLockPath = join(abtarsHome(), "bridge.lock");
-  ctx.sleepAuditDir = join(ctx.memoryConfig.memoryDir, "sleep");
+  ctx.sleepAuditDir = join(memoryDir || join(homedir(), ".abmind", "memory"), "sleep");
 
   // Usage tracker
   const { initUsageTracker } = await import("../components/usage-tracker.js");
