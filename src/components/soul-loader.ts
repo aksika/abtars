@@ -88,7 +88,10 @@ export function loadSoulBundle(memory?: MemoryManager | null): string | null {
   logInfo(TAG, `Session bundle: ${parts.length} parts (abmind: ${bundle ? "API" : "fallback"})`);
   logDebug(TAG, `Bundle parts: soul=${!!soul} profile=${!!profile} notes=${!!notes} memTools=${!!memoryTools} coreFacts=${!!coreFacts} skills=${!!skillsCatalog}`);
   const assembled = parts.join("\n\n---\n\n");
-  logTrace(TAG, `Full bundle content:\n${assembled}`);
+  const partLabels = ["soul", "profile", "notes", "memTools", "coreFacts", "skills", "time", "extra1", "extra2"];
+  for (let i = 0; i < parts.length; i++) {
+    logTrace(TAG, `[${partLabels[i] ?? i}] ${parts[i].slice(0, 100).replace(/\n/g, " ")}`);
+  }
   return assembled;
 }
 
