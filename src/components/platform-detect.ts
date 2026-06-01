@@ -39,14 +39,11 @@ export function classifyResume(): ResumeKind {
 
 function classifyMacOS(): ResumeKind {
   try {
-    // Tab-delimited match on the event-type column only.
-    // Excludes noise lines ("Wake Requests", "Kernel Client Acks...Wake notifications").
-    const out = execSync(
-      "pmset -g log 2>/dev/null | grep -P '\\t(DarkWake|Wake)\\t' | tail -1",
-      { timeout: 3000, encoding: "utf-8" },
-    );
-    if (out.includes("DarkWake")) return "dark";
-    if (out.includes("Wake")) return "full";
+    const out = execSync("pmset -g log 2>/dev/null", { timeout: 3000, encoding: "utf-8" });
+    const lines = out.split("\n").filter(l => /\bDarkWake\b|\bWake\b/.test(l) && !l.includes("Notification"));
+    const last = lines.at(-1) ?? "";
+    if (last.includes("DarkWake")) return "dark";
+    if (last.includes("Wake")) return "full";
   } catch (err) { logAndSwallow("platform_detect", "op", err); }
   return "unknown";
 }
