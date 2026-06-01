@@ -3,147 +3,121 @@
 ## Requirements
 
 - Node.js 22+
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather)) or Discord bot token
-- At least one model provider (ollama, OpenRouter, Kiro CLI, Gemini CLI, Codex, or Claude Code)
+- Optional: ollama (for vector embeddings — FTS5 + trigram work without it)
 
-## Quick install (npm)
+## Path 1: npm (recommended)
 
 ```bash
-npm install -g abtars abmind
-abtars install
-abtars update
+npm install -g abtars
+abtars install --mode=supervised-daemon
 abtars onboard
-sudo $(which abtars) daemon install
+abtars start
 ```
+
+## Path 2: From source
+
+```bash
+git clone git@github.com:aksika/abtars.git
+cd abtars
+npm install && npm run build
+node dist/cli/abtars.js install --mode=supervised-daemon
+abtars update --from-local
+abtars onboard
+abtars start
+```
+
+## What each step does
 
 | Step | What happens |
 |------|-------------|
-| `npm install -g abtars abmind` | Installs CLI tools globally |
-| `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
-| `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
-| `abtars onboard` | Interactive setup: Telegram token, model, user ID + runs `abmind install` |
-| `sudo ... daemon install` | Registers systemd service (auto-start on boot) |
+| `install` | Creates `~/.abtars/`, stages release, sets up watchdog |
+| `onboard` | Interactive wizard: Telegram token, chat ID, model provider |
+| `start` | Launches the bridge (watchdog supervises from here) |
 
-After `daemon install`, the bridge is running and responding to messages.
+## Install modes
 
-## Install from source (git clone)
+| Mode | Watchdog | Auto-start on boot | OS service |
+|------|----------|--------------------|----|
+| `simple` | No | No | None |
+| `supervised` | Yes | No (manual `abtars start`) | None |
+| `supervised-daemon` | Yes | Yes | systemd (Linux) / launchd (macOS) |
+
+## Add memory (optional)
 
 ```bash
-git clone https://github.com/aksika/abtars.git
-cd abtars
-npm install
-npm run bundle
-abtars install
-abtars update --from-local
-abtars onboard
-sudo $(which abtars) daemon install
+npm install -g abmind
+abmind install
+abtars restart
 ```
 
-To update after pulling new commits:
+Memory features (recall, store, sleep cycles, credential vault) activate on next restart. The bridge works without abmind — it just won't have persistent memory.
+
+## Post-install verification
 
 ```bash
-git pull
-abtars update --from-local
-```
-
-This rebuilds and hot-restarts the bridge in one command.
-
-## Memory (abmind)
-
-`abmind` is optional but recommended. Without it, the bridge responds but forgets between sessions. The `abtars onboard` wizard installs it automatically if available on PATH.
-
-What memory adds:
-- Persistent recall across sessions
-- Overnight sleep maintenance (fact extraction, consolidation)
-- Emotion tagging and memory promotion
-- Searchable memory via tools
-- Personalized SOUL (agent identity)
-
-## Daemon management
-
-```bash
-abtars daemon status      # show service state
-abtars daemon stop        # stop the bridge
-abtars daemon start       # start the bridge
-abtars daemon restart     # restart
-abtars daemon uninstall   # remove the service
-```
-
-For development (no daemon):
-```bash
-abtars start    # direct start, foreground watchdog
-abtars stop     # stop
+abtars status    # should show "running"
+abtars doctor    # should show all green
+abtars logs      # tail the live log
+abtars config    # verify your .env (secrets redacted)
 ```
 
 ## What gets created
 
 ```
 ~/.abtars/
-├── config/          # .env, transport.json, models.json, users.json
-├── secret/          # API keys (encrypted at rest)
+├── config/          # .env, transport.json, models.json
 ├── current/         # symlink → active release
 ├── releases/        # versioned bundles
 ├── logs/            # bridge-YYYY-MM-DD.log
 ├── scripts/         # watchdog.sh, doctor.sh
-├── skills/          # core/ + custom/ + self/
+├── skills/          # core/ + self/
 ├── workspace/       # agent working directory
 └── bridge.pid       # PID of running bridge
-
-~/.abmind/           # (only after abmind install)
-└── memory/
-    ├── memory.db    # SQLite + FTS5 + embeddings
-    ├── core/        # SOUL.md, agent_notes.md, user_profile.md
-    ├── daily/       # daily summaries + retrospectives
-    └── sleep/       # sleep cycle state + logs
 ```
 
 ## Providers
 
 | Provider | Transport | Setup |
 |----------|-----------|-------|
-| ollama | Direct API | `ollama serve` locally, free |
-| OpenRouter | Direct API | API key in `~/.abtars/secret/OPENROUTER_API_KEY` |
-| Kiro CLI | ACP | `kiro-cli` installed, AWS account |
-| Gemini CLI | ACP | `gemini` installed, Google account |
-| Codex | ACP | `codex` installed |
-| Claude Code | ACP | `claude` installed |
+| ollama | API | `ollama serve` locally, free |
+| OpenRouter | API | API key in `secret/` |
+| Kiro CLI | CLI (ACP) | `kiro-cli` installed |
+| Gemini CLI | CLI (ACP) | `gemini` installed |
 
-Configure in `~/.abtars/config/transport.json`. The onboard wizard sets this up interactively.
-
-## Post-install verification
-
-```bash
-abtars daemon status    # should show active
-abtars doctor           # should show all green
-```
-
-Send a message to your bot on Telegram — it should respond.
+Configure in `~/.abtars/config/transport.json`. See [Model Management](models.md).
 
 ## Updating
 
+**npm install:**
 ```bash
 npm update -g abtars
 abtars update
 ```
 
-Or from a running bridge: send `/restart` in Telegram.
+**From source:**
+```bash
+cd ~/abtars && git pull && npm install && npm run build
+abtars update --from-local
+```
+
+Or from a running bridge: send `/restart` in chat.
 
 ## Platform-specific notes
 
 ### Linux (systemd)
 
-Daemon mode installs `/etc/systemd/system/abtars.service`:
+The watchdog runs as a systemd user service. If it warns:
 ```bash
-abtars daemon status
-abtars daemon restart
+systemctl --user daemon-reload
+systemctl --user restart abtars-watchdog
 ```
 
 ### macOS (launchd)
 
-Daemon mode installs `/Library/LaunchDaemons/com.abtars.daemon.plist`:
+The watchdog runs via launchd. To stop/start:
 ```bash
-abtars daemon stop
-abtars daemon start
+abtars stop --force    # --force required (launchd would respawn otherwise)
+abtars start
 ```
 
 ### WSL
@@ -156,18 +130,20 @@ systemd=true
 
 ## Troubleshooting
 
-**`abtars: command not found`** — npm global bin not on PATH:
+**`abtars: command not found`** — `~/.local/bin` not on PATH:
 ```bash
-echo 'export PATH="$(npm config get prefix)/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 ```
 
 **EADDRINUSE on start** — stale process holding the port:
 ```bash
-abtars daemon stop && abtars daemon start
+abtars stop --force
+abtars start
 ```
 
-**No memory tools available** — run `abmind install` then `abtars daemon restart`.
-
-**`abmind v (?)` in /status** — abmind manifest missing version. Re-run `abmind install --force`.
+**Memory not working** — install abmind:
+```bash
+npm install -g abmind && abmind install && abtars restart
+```
 
 Run `abtars doctor --fix` for automatic repair of common issues.
