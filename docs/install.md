@@ -280,25 +280,15 @@ Because `node_modules/` is shared and the old release's deps aren't present. Ful
 
 ---
 
-## Reset / uninstall
+## Uninstall
 
 ```bash
-# Wipe only operator config (re-run onboard to restore)
-abtars reset --scope config --yes
+# Remove daemon service (if installed)
+sudo $(which abtars) daemon uninstall
 
-# Wipe config + memory + logs + reports + received. Keeps code (releases/).
-abtars reset --scope config+data --yes
-
-# Full uninstall. Removes ~/.abtars/ + PATH symlinks.
-# Automatic backup to ~/.abtars.reset-<ts>.bak/ unless --no-backup.
-abtars reset --scope full --yes
+# Full uninstall — stops watchdog, removes ~/.abtars/ + PATH symlinks
+abtars uninstall --yes
 ```
-
-All destructive ops:
-- Support `--dry-run` for preview
-- Refuse unsafe targets (`/`, `$HOME`, outside-home paths)
-- Require `--yes` in non-interactive mode
-- `full` scope only touches PATH symlinks that point into our own `~/.abtars/bin/` (exact-match check; never clobbers symlinks owned by other installs)
 
 ---
 
@@ -419,23 +409,21 @@ Update + restart bridge.
 
 If the CLI is broken:
 ```bash
-# Stop everything first
+# Stop everything
 pkill -f watchdog
-pkill -TERM -f 'node.*dist/main\.js'
+pkill -TERM -f 'node.*main\.js'
+
+# Remove daemon service
+sudo rm -f /etc/systemd/system/abtars.service   # Linux
+launchctl unload ~/Library/LaunchAgents/com.abtars.watchdog.plist 2>/dev/null  # macOS
+rm -f ~/Library/LaunchAgents/com.abtars.watchdog.plist
 
 # Remove runtime
 rm -rf ~/.abtars
 
 # Remove PATH symlinks
 rm -f ~/.local/bin/abtars ~/.local/bin/abtars-browser \
-      ~/.local/bin/abtars-restart ~/.local/bin/abtars-tweet
-
-# Remove launchd service (macOS only)
-launchctl unload ~/Library/LaunchAgents/com.abtars.watchdog.plist
-rm ~/Library/LaunchAgents/com.abtars.watchdog.plist
-
-# Optionally remove the git checkout
-rm -rf ~/workspace/ab/abtars
+      ~/.local/bin/abtars-restart ~/.local/bin/abtars-task ~/.local/bin/abtars-tweet
 ```
 
 abmind is independent — uninstall separately per `abmind/docs/install.md`.
