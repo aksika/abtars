@@ -40,7 +40,7 @@ Users can pause any session:
 
 ## Limits
 
-- Max 3 concurrent background sessions
+- Concurrent sessions governed by MAX_SESSIONS env (default: 10)
 - 10 minute timeout per session
 - Children cannot interact with the user directly
 - No nested delegation (depth = 1)
