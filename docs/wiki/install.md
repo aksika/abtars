@@ -10,6 +10,16 @@
 
 Give this page to your favourite AI agent (Claude, Gemini, Codex, Kiro) and ask it to install abTARS for you. It has all the information it needs right here. 😉
 
+## Install channels
+
+| Channel | Command | Who |
+|---|---|---|
+| **Stable** | `npm install -g abtars abmind` | Normal users |
+| **Alpha** | `npm install -g abtars@alpha abmind@alpha` | Early adopters, testers |
+| **Dev** | `git clone` + `abtars update --from-local` | Contributors, developers |
+
+Stable ≤ Alpha ≤ Dev. Alpha always includes the latest stable.
+
 ## Manual install (npm)
 
 ```bash
