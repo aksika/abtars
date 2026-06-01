@@ -90,7 +90,10 @@ export function loadSoulBundle(memory?: MemoryManager | null): string | null {
   const assembled = parts.join("\n\n---\n\n");
   const partLabels = ["soul", "profile", "notes", "memTools", "coreFacts", "skills", "time", "extra1", "extra2"];
   for (let i = 0; i < parts.length; i++) {
-    logTrace(TAG, `[${partLabels[i] ?? i}] ${parts[i].slice(0, 100).replace(/\n/g, " ")}`);
+    const p = parts[i];
+    const flat = p.replace(/\n/g, " ");
+    const preview = p.length <= 75 ? flat : `${flat.slice(0, 50)}…${flat.slice(-20)}`;
+    logTrace(TAG, `[${partLabels[i] ?? i}] (${p.length}ch) ${preview}`);
   }
   return assembled;
 }
