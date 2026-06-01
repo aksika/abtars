@@ -1,6 +1,6 @@
 {
   "name": "abtars",
-  "version": "0.1.0-alpha.20",
+  "version": "0.1.0-alpha.21",
   "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
   "type": "module",
   "main": "bundle/abtars.js",
@@ -22,7 +22,6 @@
     "@agentclientprotocol/sdk": "^0.14.1",
     "@andresaya/edge-tts": "^1.8.0",
     "@clack/prompts": "^1.2.0",
-    "abmind": "file:../abmind",
     "cron-parser": "^5.5.0",
     "discord.js": "^14.26.3",
     "dotenv": "^16.6.1",
