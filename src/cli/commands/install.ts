@@ -356,11 +356,15 @@ export async function install(opts: InstallOptions): Promise<number> {
       process.stderr.write(`error: unzip failed: ${unzip.stderr}\n`);
       return 1;
     }
-    // Copy abtars files
+    // Copy abtars files — overwrite everything EXCEPT binaries (releases/, current, bin/)
     const abSrc = join(tmpDir, 'abtars');
     if (fileExists(abSrc)) {
-      spawnSync('cp', ['-r', ...readdirSync(abSrc).map(f => join(abSrc, f)), home], { stdio: 'inherit' });
-      process.stdout.write(`✓ restored abtars config\n`);
+      const skipSet = new Set(['releases', 'current', 'bin']);
+      for (const f of readdirSync(abSrc)) {
+        if (skipSet.has(f)) continue;
+        spawnSync('cp', ['-r', join(abSrc, f), home], { stdio: 'inherit' });
+      }
+      process.stdout.write(`✓ restored abtars data\n`);
     }
     // Copy abmind files
     const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(home), '.abmind');
@@ -369,10 +373,9 @@ export async function install(opts: InstallOptions): Promise<number> {
       spawnSync('cp', ['-r', ...readdirSync(abmindSrc).map(f => join(abmindSrc, f)), abmindHome], { stdio: 'inherit' });
       process.stdout.write(`✓ restored abmind data\n`);
     }
-    // Cleanup
+    // Cleanup + resync
     spawnSync('rm', ['-rf', tmpDir]);
-    process.stdout.write(`\nRestore complete.\n`);
-    process.stdout.write(`Next: 'abtars update' to build and activate.\n`);
+    process.stdout.write(`\n✓ Restore complete. Run 'abtars update' to resync.\n`);
     return 0;
   }
 
