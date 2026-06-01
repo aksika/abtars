@@ -26,14 +26,17 @@ loadDotenv({ path: resolve(home, "config", ".env"), override: false });
 loadDotenv({ path: resolve(home, "config", ".env.skills"), override: false });
 loadDotenv({ path: resolve(process.cwd(), ".env"), override: false });
 
-// #721: Migrate misplaced API keys from .env.skills → secret/
-// Only acts on uncommented lines with actual values (dotenv skips # comments)
+// #721/#752: Migrate misplaced API keys from any .env file → secret/
 const SECRET_SUFFIXES = ["_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_API_ID"];
-const envSkillsPath = resolve(home, "config", ".env.skills");
 const secretDir = resolve(home, "secret");
-if (existsSync(envSkillsPath) && existsSync(secretDir)) {
-  const skillsContent = readFileSync(envSkillsPath, "utf-8");
-  const lines = skillsContent.split("\n");
+const ENV_FILES = [
+  resolve(home, "config", ".env"),
+  resolve(home, "config", ".env.skills"),
+];
+for (const envPath of ENV_FILES) {
+  if (!existsSync(envPath) || !existsSync(secretDir)) continue;
+  const content = readFileSync(envPath, "utf-8");
+  const lines = content.split("\n");
   const migrated: string[] = [];
   for (const line of lines) {
     const trimmed = line.trim();
@@ -49,15 +52,15 @@ if (existsSync(envSkillsPath) && existsSync(secretDir)) {
     migrated.push(key);
   }
   if (migrated.length > 0) {
-    // Remove migrated keys from .env.skills
     const cleaned = lines.filter(l => {
       const t = l.trim();
       if (!t || t.startsWith("#")) return true;
       const k = t.slice(0, t.indexOf("="));
       return !migrated.includes(k);
     }).join("\n");
-    writeFileSync(envSkillsPath, cleaned, { mode: 0o600 });
-    for (const k of migrated) process.stderr.write(`[env] Migrated ${k} from .env.skills → secret/\n`);
+    writeFileSync(envPath, cleaned, { mode: 0o600 });
+    const name = envPath.split("/").pop();
+    for (const k of migrated) process.stderr.write(`[env] Migrated ${k} from ${name} → secret/\n`);
   }
 }
 
