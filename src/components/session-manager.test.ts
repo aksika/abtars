@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { SessionManager } from "./session-manager.js";
+import { SessionManager, parseSessionType, typeLabel } from "./session-manager.js";
 
 describe("SessionManager", () => {
   let sm: SessionManager;
@@ -9,23 +9,52 @@ describe("SessionManager", () => {
   });
 
   describe("createSession", () => {
-    it("creates session with unique ID", () => {
-      const s = sm.createSession("user1", "telegram", "A");
-      expect(typeof s).not.toBe("string");
-      expect((s as any).id).toContain("_A_");
+    it("creates session with type-stamped ID", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      expect(s.id).toMatch(/_A_\d+$/);
+      expect(s.type).toBe("A");
+      expect(s.isTransport).toBe(true);
+      expect(s.ended).toBe(false);
+      expect(s.paused).toBe(false);
+    });
+
+    it("increments shortIndex monotonically", () => {
+      // First getOrCreateState creates index 1 (auto-main)
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      const s2 = sm.createSession("user1", "telegram", "A") as any;
+      expect(s2.shortIndex).toBe(s1.shortIndex + 1);
+    });
+
+    it("sets new session as active", () => {
+      sm.createSession("user1", "telegram", "A");
+      const s2 = sm.createSession("user1", "telegram", "A") as any;
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s2.id);
     });
 
     it("no motherId for user-created sessions", () => {
-      sm.createSession("user1", "telegram", "A");
-      const s2 = sm.createSession("user1", "telegram", "A");
-      expect((s2 as any).motherId).toBeUndefined();
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      expect(s.motherId).toBeUndefined();
     });
 
     it("enforces max sessions limit", () => {
       for (let i = 0; i < 5; i++) sm.createSession("user1", "telegram", "A");
       const result = sm.createSession("user1", "telegram", "A");
-      expect(typeof result).toBe("string"); // error message
+      expect(typeof result).toBe("string");
       expect(result).toContain("Max sessions");
+    });
+
+    it("isolates users — different users have independent sessions", () => {
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      const s2 = sm.createSession("user2", "telegram", "A") as any;
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s1.id);
+      expect(sm.getActiveSessionId("user2", "telegram")).toBe(s2.id);
+    });
+
+    it("isolates platforms — same user different platforms are independent", () => {
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      const s2 = sm.createSession("user1", "discord", "A") as any;
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s1.id);
+      expect(sm.getActiveSessionId("user1", "discord")).toBe(s2.id);
     });
   });
 
@@ -35,45 +64,240 @@ describe("SessionManager", () => {
       const child = sm.createSubSession("user1", "telegram", "C") as any;
       expect(child.motherId).toBe(parent.id);
     });
+
+    it("isTransport is false for sub-sessions", () => {
+      sm.createSession("user1", "telegram", "A");
+      const child = sm.createSubSession("user1", "telegram", "B") as any;
+      expect(child.isTransport).toBe(false);
+    });
+
+    it("does not change active session", () => {
+      const parent = sm.createSession("user1", "telegram", "A") as any;
+      sm.createSubSession("user1", "telegram", "C");
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(parent.id);
+    });
+
+    it("respects max sessions limit", () => {
+      for (let i = 0; i < 5; i++) sm.createSession("user1", "telegram", "A");
+      const result = sm.createSubSession("user1", "telegram", "T");
+      expect(typeof result).toBe("string");
+    });
   });
 
-  describe("switch", () => {
-    it("getActiveSessionId returns correct ID after switch", () => {
+  describe("switchSession", () => {
+    it("switches active to target index", () => {
       const s1 = sm.createSession("user1", "telegram", "A") as any;
-      const s2 = sm.createSession("user1", "telegram", "A") as any;
-      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s2.id);
-      // Switch back to s1
+      sm.createSession("user1", "telegram", "A");
       sm.switchSession("user1", "telegram", s1.shortIndex);
       expect(sm.getActiveSessionId("user1", "telegram")).toBe(s1.id);
     });
 
-    it("switch does NOT destroy other sessions", () => {
+    it("returns error for non-existent index", () => {
+      sm.createSession("user1", "telegram", "A");
+      const result = sm.switchSession("user1", "telegram", 999);
+      expect(typeof result).toBe("string");
+      expect(result).toContain("not found");
+    });
+
+    it("cannot switch to ended session", () => {
       const s1 = sm.createSession("user1", "telegram", "A") as any;
       sm.createSession("user1", "telegram", "A");
-      sm.switchSession("user1", "telegram", s1.shortIndex);
-      // Both sessions still exist
-      const active = sm.getActiveSession("user1", "telegram");
-      expect(active.id).toBe(s1.id);
+      sm.endSession("user1", "telegram", s1.shortIndex);
+      const result = sm.switchSession("user1", "telegram", s1.shortIndex);
+      expect(typeof result).toBe("string");
+    });
+
+    it("cannot switch to sub-session (non-transport)", () => {
+      sm.createSession("user1", "telegram", "A");
+      const sub = sm.createSubSession("user1", "telegram", "C") as any;
+      const result = sm.switchSession("user1", "telegram", sub.shortIndex);
+      expect(typeof result).toBe("string");
     });
   });
 
   describe("endSession", () => {
-    it("marks session ended and switches to another", () => {
+    it("marks session ended", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      const ended = sm.endSession("user1", "telegram", s.shortIndex) as any;
+      expect(ended.ended).toBe(true);
+    });
+
+    it("auto-creates replacement when ending last Main", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.endSession("user1", "telegram", s.shortIndex);
+      // Should have a new active Main
+      const active = sm.getActiveSession("user1", "telegram");
+      expect(active.type).toBe("A");
+      expect(active.ended).toBe(false);
+      expect(active.id).not.toBe(s.id);
+    });
+
+    it("switches to another Main when ending active", () => {
+      // getOrCreateState auto-creates Main #1, createSession creates #2, #3
       sm.createSession("user1", "telegram", "A");
-      const s2 = sm.createSession("user1", "telegram", "A") as any;
-      const ended = sm.endSession("user1", "telegram", s2.shortIndex);
-      expect((ended as any).ended).toBe(true);
-      // Active should be s1 now
-      expect(sm.getActiveSessionId("user1", "telegram")).not.toBe(s2.id);
+      const s3 = sm.createSession("user1", "telegram", "A") as any;
+      sm.endSession("user1", "telegram", s3.shortIndex);
+      // Should fall back to any alive Main (not s3)
+      const activeId = sm.getActiveSessionId("user1", "telegram");
+      expect(activeId).not.toBe(s3.id);
+    });
+
+    it("ended sessions don't appear in list", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.endSession("user1", "telegram", s.shortIndex);
+      const { sessions } = sm.listSessions("user1", "telegram");
+      expect(sessions.find(x => x.id === s.id)).toBeUndefined();
     });
   });
 
-  describe("pauseSession", () => {
+  describe("killSession", () => {
+    it("marks session ended", () => {
+      sm.createSession("user1", "telegram", "A");
+      const s2 = sm.createSession("user1", "telegram", "A") as any;
+      const killed = sm.killSession("user1", "telegram", s2.shortIndex) as any;
+      expect(killed.ended).toBe(true);
+    });
+
+    it("auto-creates replacement when killing last Main", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.killSession("user1", "telegram", s.shortIndex);
+      const active = sm.getActiveSession("user1", "telegram");
+      expect(active.type).toBe("A");
+      expect(active.id).not.toBe(s.id);
+    });
+  });
+
+  describe("pauseSession / resumeSession", () => {
     it("toggles paused flag", () => {
       const s = sm.createSession("user1", "telegram", "A") as any;
       sm.pauseSession("user1", "telegram", s.shortIndex);
-      const paused = sm.getActiveSession("user1", "telegram");
-      expect(paused.paused).toBe(true);
+      expect(sm.getActiveSession("user1", "telegram").paused).toBe(true);
+      sm.resumeSession("user1", "telegram", s.shortIndex);
+      expect(sm.getActiveSession("user1", "telegram").paused).toBe(false);
     });
+
+    it("pause returns error if already paused", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.pauseSession("user1", "telegram", s.shortIndex);
+      const result = sm.pauseSession("user1", "telegram", s.shortIndex);
+      expect(typeof result).toBe("string");
+      expect(result).toContain("already paused");
+    });
+
+    it("resume returns error if not paused", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      const result = sm.resumeSession("user1", "telegram", s.shortIndex);
+      expect(typeof result).toBe("string");
+      expect(result).toContain("not paused");
+    });
+  });
+
+  describe("expireAutoSessions", () => {
+    it("expires old sub-sessions", () => {
+      sm.createSession("user1", "telegram", "A");
+      const sub = sm.createSubSession("user1", "telegram", "C") as any;
+      // Backdate
+      sub.createdAt = Date.now() - 100_000;
+      const expired = sm.expireAutoSessions(50_000);
+      expect(expired).toHaveLength(1);
+      expect(expired[0]!.id).toBe(sub.id);
+      expect(sub.ended).toBe(true);
+    });
+
+    it("does not expire transport sessions", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      s.createdAt = Date.now() - 100_000;
+      const expired = sm.expireAutoSessions(50_000);
+      expect(expired).toHaveLength(0);
+    });
+
+    it("does not expire recent sub-sessions", () => {
+      sm.createSession("user1", "telegram", "A");
+      sm.createSubSession("user1", "telegram", "C");
+      const expired = sm.expireAutoSessions(50_000);
+      expect(expired).toHaveLength(0);
+    });
+  });
+
+  describe("getSessionById", () => {
+    it("finds session across platforms", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      expect(sm.getSessionById(s.id)?.id).toBe(s.id);
+    });
+
+    it("returns undefined for unknown ID", () => {
+      expect(sm.getSessionById("nonexistent")).toBeUndefined();
+    });
+  });
+
+  describe("clearPlatform / clearAll", () => {
+    it("clearPlatform removes one user+platform", () => {
+      sm.createSession("user1", "telegram", "A");
+      sm.createSession("user1", "discord", "A");
+      sm.clearPlatform("user1", "telegram");
+      // telegram gone, discord still there
+      const { sessions } = sm.listSessions("user1", "discord");
+      expect(sessions.length).toBeGreaterThan(0);
+    });
+
+    it("clearAll removes everything", () => {
+      sm.createSession("user1", "telegram", "A");
+      sm.createSession("user2", "discord", "A");
+      sm.clearAll();
+      // Fresh state — getActiveSessionId creates new
+      const id = sm.getActiveSessionId("user1", "telegram");
+      expect(id).toMatch(/_A_/);
+    });
+  });
+
+  describe("formatList", () => {
+    it("shows active marker", () => {
+      sm.createSession("user1", "telegram", "A");
+      const output = sm.formatList("user1", "telegram");
+      expect(output).toContain("*");
+      expect(output).toContain("Main");
+    });
+
+    it("shows paused marker", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.pauseSession("user1", "telegram", s.shortIndex);
+      const output = sm.formatList("user1", "telegram");
+      expect(output).toContain("⏸");
+    });
+
+    it("shows motherId lineage", () => {
+      sm.createSession("user1", "telegram", "A");
+      sm.createSubSession("user1", "telegram", "C");
+      const output = sm.formatList("user1", "telegram");
+      expect(output).toContain("←");
+    });
+  });
+
+  describe("auto-main on first access", () => {
+    it("getActiveSessionId creates Main session on first call", () => {
+      const id = sm.getActiveSessionId("newuser", "telegram");
+      expect(id).toMatch(/_A_01$/);
+    });
+  });
+});
+
+describe("parseSessionType", () => {
+  it("parses known types", () => {
+    expect(parseSessionType("browse")).toBe("B");
+    expect(parseSessionType("code")).toBe("C");
+    expect(parseSessionType("task")).toBe("T");
+  });
+
+  it("returns null for unknown", () => {
+    expect(parseSessionType("main")).toBeNull();
+    expect(parseSessionType("xyz")).toBeNull();
+  });
+});
+
+describe("typeLabel", () => {
+  it("returns human labels", () => {
+    expect(typeLabel("A")).toBe("Main");
+    expect(typeLabel("S")).toBe("System");
+    expect(typeLabel("P")).toBe("Peer");
   });
 });
