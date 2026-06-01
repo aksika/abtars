@@ -1,147 +1,98 @@
-# Quick Setup Guide
+# Quick Start
 
-Steps only. For detailed explanations, see [Installation Reference](/abtars/install).
+Steps only. For detailed explanations, see [Installation](./install.md).
 
-## 1. Create a dedicated user
+## 1. Install
 
 ```bash
-# Linux/WSL
-sudo useradd -m -s /bin/bash abtars && sudo passwd abtars
-su - abtars
-
-# macOS
-sudo sysadminctl -addUser abtars -password "<password>" -home /Users/abtars
-su - abtars
+npm install -g abtars abmind
 ```
 
-No sudo access for this user. The agent runs shell commands — limit the blast radius.
+Requires Node.js 22+. For alpha builds: `npm install -g abtars@alpha abmind@alpha`
 
-## 2. Install dependencies
-
-```bash
-# Node.js 22+
-curl -fsSL https://fnm.vercel.app/install | bash && fnm install 22 && fnm use 22
-
-# Ollama (local models)
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull nemotron-3-super    # recommended cloud-capable model
-```
-
-## 3. Choose supervision model
-
-| Platform | Recommended |
-|----------|-------------|
-| macOS | launchd (auto-start + auto-restart) |
-| Linux/WSL | systemd user service |
-| Manual | `abtars start` in tmux |
-
-The installer configures this automatically.
-
-## 4. Install abmind (memory)
+## 2. Setup
 
 ```bash
-git clone https://github.com/aksika/abmind.git && cd abmind
-npm install && npm run build
-node dist/cli/abmind.js install && abmind update
-```
-
-## 5. Install abTARS (bridge)
-
-```bash
-cd ~ && git clone https://github.com/aksika/abtars.git && cd abtars
-npm install && npm run build
-node dist/cli/abtars.js install && abtars update
-```
-
-## 6. Get a Telegram bot
-
-1. Open [@BotFather](https://t.me/BotFather) on Telegram
-2. `/newbot` → pick a name → copy the **bot token**
-3. Send any message to your new bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your **chat ID**
-
-## 7. Get model provider credentials
-
-Ollama runs locally (no key needed), but for better results use a paid provider:
-
-| Provider | Get key at | What you get |
-|----------|-----------|--------------|
-| OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys) | Access to Claude, GPT, Gemini, open models |
-| OpenAI (Codex) | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | GPT-5.4-mini, GPT-5.5 |
-| Google (Gemini) | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Gemini 2.5 Flash/Pro |
-| Kiro CLI | Install via `npm i -g @anthropic-ai/kiro-cli` | Claude models via CLI |
-
-Pick at least one. Store keys in `~/.abtars/secret/<KEY_NAME>` (chmod 600) after install.
-
-## 8. Onboard
-
-```bash
+abtars install
+abtars update
 abtars onboard
 ```
 
-The wizard asks for: platform (Telegram), bot token, chat ID, provider, model.
+The onboard wizard asks for:
+- Telegram bot token (from [@BotFather](https://t.me/BotFather))
+- Model provider (Kiro CLI, OpenRouter, ollama, etc.)
+- Agent name and passphrase (for memory encryption)
 
-## 9. Start
-
-```bash
-abtars start
-```
-
-## 10. Verify
+## 3. Start
 
 ```bash
-abtars doctor
+sudo $(which abtars) daemon install
 ```
 
-Send a message to your bot on Telegram — it should respond.
+Done. Your bot is live on Telegram.
 
----
+## 4. Verify
+
+```bash
+abtars status       # should show bridge: ● running
+abtars doctor       # should show all green
+```
+
+Send a message to your bot — it should respond.
 
 ## Post-install cheat sheet
 
-### Customize the agent's personality
-
-Edit `~/.abmind/memory/core/SOUL.md` — this defines who your agent is: name, personality, language, tone. Check [sould.md](https://sould.md) for inspiration and examples.
-
-### Useful chat commands
+### Telegram commands
 
 | Command | What it does |
 |---------|-------------|
+| `/status` | Bridge health, uptime, model |
 | `/model` | Switch model/provider on the fly |
-| `/status` | Bridge health, uptime, current model |
 | `/new` | Start a fresh conversation session |
-| `/skill` | Reload skills catalog |
 | `/sleep` | Trigger sleep + memory consolidation |
-| `/stop` | Shut down the bridge |
+| `/restart` | Restart the bridge |
 | `/help` | Full command list |
 
-### Adding models later
+### Customize personality
 
-Use `/model` in chat — it walks you through provider → model selection interactively. No file editing needed.
+Edit `~/.abmind/memory/core/SOUL.md` — defines who your agent is: name, personality, language, tone.
 
 ### Updating
 
 ```bash
-cd ~/abtars && git pull && abtars update
+npm update -g abtars abmind
+abtars update
 ```
 
-Rebuilds, deploys, restarts. Zero downtime.
+### Stop / restart
+
+```bash
+sudo systemctl stop abtars      # stop
+sudo systemctl restart abtars   # restart
+```
 
 ### Something broke?
 
 ```bash
-abtars doctor                                    # health check
-tail -50 ~/.abtars/logs/bridge-$(date +%F).log   # recent logs
-abtars stop && abtars start                      # restart
+abtars doctor --fix
+tail -20 ~/.abtars/logs/bridge-$(date +%F).log
 ```
+
+See [Health Check](./healthcheck.md) for more.
 
 ### Where is everything?
 
 ```
 ~/.abtars/
 ├── config/          .env, transport.json, models.json, users.json
-├── secret/          API keys (one file per key, chmod 600)
-├── logs/            Daily log files (bridge-YYYY-MM-DD.log)
-├── skills/          core/, self/, custom/, downloaded/
+├── secret/          API keys (encrypted at rest)
+├── logs/            Daily log files
+├── skills/          core/, self/, custom/
 ├── releases/        Versioned deployments
-└── current -> releases/0.1.0-<sha>
+└── current → releases/<version>
+
+~/.abmind/
+├── memory/core/     SOUL.md, agent_notes.md, user_profile.md
+├── memory/memory.db SQLite memory database
+└── secret/          Encryption key
 ```
