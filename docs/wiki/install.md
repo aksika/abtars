@@ -36,11 +36,11 @@ abtars start
 
 ## Install modes
 
-| Mode | Watchdog | Auto-start on boot | OS service |
-|------|----------|--------------------|----|
-| `simple` | No | No | None |
-| `supervised` | Yes | No (manual `abtars start`) | None |
-| `supervised-daemon` | Yes | Yes | systemd (Linux) / launchd (macOS) |
+| Mode | Watchdog | Auto-start on boot |
+|------|----------|--------------------|
+| `simple` | No | No |
+| `supervised` | Yes | macOS: yes (launchd), Linux: no |
+| `supervised-daemon` | Yes | Yes (systemd + launchd) |
 
 ## Add memory (optional)
 
