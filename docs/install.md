@@ -1,6 +1,6 @@
 # AgentBridge Installation Guide
 
-**Version:** 0.1.0 (post-#158 lifecycle rewrite)
+**Version:** 0.1.0
 
 AgentBridge ships a full lifecycle CLI: `install`, `update`, `rollback`, `reset`, `onboard`, `doctor`, `migrate`, `status`.
 
@@ -69,7 +69,7 @@ Run `abtars <cmd> --help` for per-command usage.
 
 ---
 
-## Runtime layout (post-#158)
+## Runtime layout
 
 ```
 ~/.abtars/
