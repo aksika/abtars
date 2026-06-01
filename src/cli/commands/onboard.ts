@@ -674,38 +674,10 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     return 0;
   }
 
-  // ── Start commands — print + ask to run ──
-  const { confirm } = await import('@clack/prompts');
-  const startCmds: string[] = [];
-  if (answers.installMode === 'simple') {
-    startCmds.push('abtars start');
-  } else {
-    if (process.platform === 'darwin') {
-      startCmds.push(`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist`);
-    } else if (process.platform === 'linux') {
-      startCmds.push(`systemctl --user daemon-reload`);
-      startCmds.push(`systemctl --user enable --now abtars-watchdog`);
-    }
-  }
-
-  process.stdout.write(`\n── Start the bridge ──\n`);
-  const { spawn } = await import('node:child_process');
-  if (startCmds.length > 0) {
-    for (const cmd of startCmds) process.stdout.write(`  → ${cmd}\n`);
-    const run = await confirm({ message: `Enable and start the watchdog service?`, initialValue: true });
-    if (run === true) {
-      for (const cmd of startCmds) {
-        await new Promise<void>((resolve) => {
-          const child = spawn('bash', ['-lc', cmd], { stdio: 'inherit' });
-          child.on('exit', () => resolve());
-        });
-      }
-    } else {
-      process.stdout.write(`  → skipped (run manually)\n`);
-    }
-  }
-
   process.stdout.write(`\n✓ Onboarding complete.\n`);
+  process.stdout.write(`\nNext: start the bridge\n`);
+  process.stdout.write(`  Daemon mode:  sudo $(which abtars) daemon install\n`);
+  process.stdout.write(`  Manual mode:  abtars start\n`);
   return 0;
 }
 
