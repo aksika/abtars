@@ -162,7 +162,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     } catch { /* best effort */ }
     process.stdout.write('\nSend /start to your bot on Telegram now... (waiting 30s)\n');
     try {
-      const res = await fetch(`${botUrl}/getUpdates?timeout=30&allowed_updates=["message"]`);
+      const res = await fetch(`${botUrl}/getUpdates?timeout=30&allowed_updates=${encodeURIComponent('["message"]')}`);
       const data = await res.json() as { result?: Array<{ message?: { chat?: { id?: number } } }> };
       const id = data.result?.find(u => u.message?.chat?.id)?.message?.chat?.id;
       if (id) {
