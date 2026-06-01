@@ -41,6 +41,7 @@ import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt, buildSessionStartPrompt } from "./pipeline/prompt-builder.js";
 
 import { getEnv } from "./env-schema.js";
+import { sanitizeOutbound } from "./sanitize-outbound.js";
 
 const TAG = "pipeline";
 const PRIMING_MAX = 8;
@@ -320,11 +321,13 @@ export async function handleInboundMessage(
     // --- Segment break: deliver pre-tool text immediately ---
     let fullResponseSegments: string[] = [];
     transport.onSegmentBreak = (text: string) => {
-      fullResponseSegments.push(text);
+      const clean = sanitizeOutbound(text);
+      if (!clean) return;
+      fullResponseSegments.push(clean);
       if (streamMsgId && adapter.editMessage) {
-        adapter.editMessage(channelId, streamMsgId, text).catch(err => logAndSwallow(TAG, "adapter call", err));
-      } else if (text) {
-        adapter.sendMessage(channelId, text, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
+        adapter.editMessage(channelId, streamMsgId, clean).catch(err => logAndSwallow(TAG, "adapter call", err));
+      } else {
+        adapter.sendMessage(channelId, clean, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
       }
       streamMsgId = undefined;
     };
