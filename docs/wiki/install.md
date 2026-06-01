@@ -3,121 +3,152 @@
 ## Requirements
 
 - Node.js 22+
-- Optional: ollama (for vector embeddings — FTS5 + trigram work without it)
+- A Telegram bot token (from [@BotFather](https://t.me/BotFather)) or Discord bot token
+- At least one model provider (ollama, OpenRouter, Kiro CLI, Gemini CLI, Codex, or Claude Code)
 
-## Path 1: npm (recommended)
-
-```bash
-npm install -g abtars
-abtars install --mode=supervised-daemon
-abtars onboard
-abtars start
-```
-
-## Path 2: From source
+## Quick install (npm)
 
 ```bash
-git clone git@github.com:aksika/abtars.git
-cd abtars
-npm install && npm run build
-node dist/cli/abtars.js install --mode=supervised-daemon
-abtars update --from-local
+npm install -g abtars abmind
+abtars install
+abtars update
 abtars onboard
-abtars start
+sudo $(which abtars) daemon install
 ```
 
-## What each step does
+> **Alpha channel** (latest development builds):
+> ```bash
+> npm install -g abtars@alpha abmind@alpha
+> ```
 
 | Step | What happens |
 |------|-------------|
-| `install` | Creates `~/.abtars/`, stages release, sets up watchdog |
-| `onboard` | Interactive wizard: Telegram token, chat ID, model provider |
-| `start` | Launches the bridge (watchdog supervises from here) |
+| `npm install -g abtars abmind` | Installs CLI tools globally |
+| `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
+| `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
+| `abtars onboard` | Interactive setup: Telegram token, model, user ID + runs `abmind install` |
+| `sudo ... daemon install` | Registers systemd service, starts the bridge |
 
-## Install modes
+After `daemon install`, the bridge is running and responding to messages. No separate restart needed.
 
-| Mode | Watchdog | Auto-start on boot |
-|------|----------|--------------------|
-| `simple` | No | No |
-| `supervised` | Yes | macOS: yes (launchd), Linux: no |
-| `supervised-daemon` | Yes | Yes (systemd + launchd) |
-
-## Add memory (optional)
+## Install from source (git clone)
 
 ```bash
-npm install -g abmind
-abmind install
-abtars restart
+git clone https://github.com/aksika/abtars.git
+cd abtars
+npm install
+npm run bundle
+abtars install
+abtars update --from-local
+abtars onboard
+sudo $(which abtars) daemon install
 ```
 
-Memory features (recall, store, sleep cycles, credential vault) activate on next restart. The bridge works without abmind — it just won't have persistent memory.
-
-## Post-install verification
+To update after pulling new commits:
 
 ```bash
-abtars status    # should show "running"
-abtars doctor    # should show all green
-abtars logs      # tail the live log
-abtars config    # verify your .env (secrets redacted)
+git pull
+abtars update --from-local
+```
+
+This rebuilds and hot-restarts the bridge in one command.
+
+## Memory (abmind)
+
+`abmind` is optional but recommended. Without it, the bridge responds but forgets between sessions. The `abtars onboard` wizard installs it automatically if available on PATH.
+
+What memory adds:
+- Persistent recall across sessions
+- Overnight sleep maintenance (fact extraction, consolidation)
+- Emotion tagging and memory promotion
+- Searchable memory via tools
+- Personalized SOUL (agent identity)
+
+## Daemon management
+
+```bash
+abtars daemon status      # show service state
+sudo systemctl stop abtars       # stop
+sudo systemctl start abtars      # start
+sudo systemctl restart abtars    # restart
+sudo $(which abtars) daemon uninstall   # remove the service
+```
+
+For development (no daemon):
+```bash
+abtars start    # direct start, foreground watchdog
+abtars stop     # stop
 ```
 
 ## What gets created
 
 ```
 ~/.abtars/
-├── config/          # .env, transport.json, models.json
+├── config/          # .env, transport.json, models.json, users.json
+├── secret/          # API keys (encrypted at rest)
 ├── current/         # symlink → active release
 ├── releases/        # versioned bundles
 ├── logs/            # bridge-YYYY-MM-DD.log
 ├── scripts/         # watchdog.sh, doctor.sh
-├── skills/          # core/ + self/
+├── skills/          # core/ + custom/ + self/
 ├── workspace/       # agent working directory
 └── bridge.pid       # PID of running bridge
+
+~/.abmind/           # (only after abmind install)
+└── memory/
+    ├── memory.db    # SQLite + FTS5 + embeddings
+    ├── core/        # SOUL.md, agent_notes.md, user_profile.md
+    ├── daily/       # daily summaries + retrospectives
+    └── sleep/       # sleep cycle state + logs
 ```
 
 ## Providers
 
 | Provider | Transport | Setup |
 |----------|-----------|-------|
-| ollama | API | `ollama serve` locally, free |
-| OpenRouter | API | API key in `secret/` |
-| Kiro CLI | CLI (ACP) | `kiro-cli` installed |
-| Gemini CLI | CLI (ACP) | `gemini` installed |
+| ollama | Direct API | `ollama serve` locally, free |
+| OpenRouter | Direct API | API key in `~/.abtars/secret/OPENROUTER_API_KEY` |
+| Kiro CLI | ACP | `kiro-cli` installed, AWS account |
+| Gemini CLI | ACP | `gemini` installed, Google account |
+| Codex | ACP | `codex` installed |
+| Claude Code | ACP | `claude` installed |
 
-Configure in `~/.abtars/config/transport.json`. See [Model Management](models.md).
+Configure in `~/.abtars/config/transport.json`. The onboard wizard sets this up interactively.
+
+## Post-install verification
+
+See [Health Check](./healthcheck.md) for detailed commands.
+
+```bash
+abtars status           # should show bridge: ● running
+abtars doctor           # should show all green
+```
+
+Send a message to your bot on Telegram — it should respond.
 
 ## Updating
 
-**npm install:**
 ```bash
-npm update -g abtars
+npm update -g abtars abmind
 abtars update
 ```
-
-**From source:**
-```bash
-cd ~/abtars && git pull && npm install && npm run build
-abtars update --from-local
-```
-
-Or from a running bridge: send `/restart` in chat.
 
 ## Platform-specific notes
 
 ### Linux (systemd)
 
-The watchdog runs as a systemd user service. If it warns:
+Daemon mode installs `/etc/systemd/system/abtars.service`:
 ```bash
-systemctl --user daemon-reload
-systemctl --user restart abtars-watchdog
+sudo systemctl status abtars
+sudo systemctl restart abtars
 ```
 
 ### macOS (launchd)
 
-The watchdog runs via launchd. To stop/start:
+Daemon mode installs `/Library/LaunchDaemons/com.abtars.daemon.plist`:
 ```bash
-abtars stop --force    # --force required (launchd would respawn otherwise)
-abtars start
+sudo $(which abtars) daemon stop
+sudo $(which abtars) daemon start
 ```
 
 ### WSL
@@ -128,5 +159,6 @@ Ensure systemd is enabled in `/etc/wsl.conf`:
 systemd=true
 ```
 
+## Troubleshooting
 
-→ [Install Troubleshooting Tips](troubleshooting.md) if something goes wrong.
+See [Health Check](./healthcheck.md) and [Troubleshooting](./troubleshooting.md).
