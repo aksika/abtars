@@ -12,9 +12,20 @@
 
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
-import { hostname, homedir } from 'node:os';
+import { hostname, homedir as _homedir } from 'node:os';
+import { execSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
 import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
+
+/** Resolve real user home even under sudo. */
+function homedir(): string {
+  const sudoUser = process.env['SUDO_USER'];
+  if (sudoUser) {
+    try { return execSync(`getent passwd ${sudoUser}`, { encoding: 'utf-8' }).split(':')[5]!.trim(); }
+    catch { /* fall through */ }
+  }
+  return _homedir();
+}
 
 export interface InstallOptions {
   readonly restore?: string;
@@ -351,9 +362,12 @@ export async function install(opts: InstallOptions): Promise<number> {
     }
     // Extract to temp dir
     const tmpDir = join(process.env['TMPDIR'] ?? '/tmp', `abtars-restore-${Date.now()}`);
-    const unzip = spawnSync('unzip', ['-o', zipPath, '-d', tmpDir], { encoding: 'utf-8' });
-    if (unzip.status !== 0) {
-      process.stderr.write(`error: unzip failed: ${unzip.stderr}\n`);
+    const is7z = zipPath.endsWith('.7z');
+    const extractCmd = is7z
+      ? spawnSync('7z', ['x', zipPath, `-o${tmpDir}`, '-y'], { encoding: 'utf-8' })
+      : spawnSync('unzip', ['-o', zipPath, '-d', tmpDir], { encoding: 'utf-8' });
+    if (extractCmd.status !== 0) {
+      process.stderr.write(`error: extract failed: ${extractCmd.stderr}\n`);
       return 1;
     }
     // Copy abtars files — overwrite everything EXCEPT binaries (releases/, current, bin/)
