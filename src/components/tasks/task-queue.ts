@@ -60,12 +60,11 @@ function recordRunToFile(entryId: string, exitCode?: number): void {
   dbRecordRun(entryId, exitCode);
 }
 
-function writeResultFile(message: string, content: string): string | null {
+function writeResultFile(entryId: string, content: string): string | null {
   try {
-    const slug = message.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
-    const dir = join(abtarsHome(), "workspace", slug);
+    const dir = join(abtarsHome(), "workspace", entryId);
     mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${slug}-${localDate()}.md`);
+    const file = join(dir, `${entryId}-${localDate()}.md`);
     writeFileSync(file, content, "utf-8");
     return file;
   } catch (err) { logAndSwallow(TAG, "writeResultFile", err); return null; }
@@ -395,7 +394,7 @@ export class CronQueue {
         }
 
         // Write result file
-        const resultPath = writeResultFile(entry.message, cleaned);
+        const resultPath = writeResultFile(entry.id, cleaned);
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         recordRunToFile(entry.id, exitCode);
