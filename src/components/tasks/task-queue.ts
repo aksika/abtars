@@ -306,7 +306,7 @@ export class CronQueue {
         }
         if (code !== 0) {
           scheduleRetry(entry, !!entry._retrying);
-          if (!paused) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
+          if (!paused && code !== 2) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
         }
         if (!paused) {
           // Silent success: don't notify user when script exits 0 with no output

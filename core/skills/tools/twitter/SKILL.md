@@ -64,6 +64,15 @@ node {baseDir}/scripts/abtars-tweet.js --user <handle>
 - **Cookies:** `~/.abtars/secret/x-cookies.json` (encrypted at rest, required for full mode)
 - **Output:** `~/.abtars/workspace/twitterX/output/` (daily JSON reports)
 
+### Accessing cookies (encrypted)
+
+Before running full mode commands, decrypt cookies via get_secret tool:
+```bash
+TWITTER_COOKIES=$(get_secret x-cookies.json) node {baseDir}/scripts/abtars-tweet.js --feed
+```
+
+If cookies are missing or expired (exit code 2), tell the user — this requires manual browser export.
+
 ## Use cases
 
 - User shares a tweet URL → quick mode (FXTwitter)

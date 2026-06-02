@@ -17,7 +17,7 @@ function logAndSwallow(_tag, _ctx, _err) {
 import { join, basename } from "node:path";
 const AB_HOME = abtarsHome();
 const TWITTER_DIR = join(AB_HOME, "workspace", "twitterX");
-const COOKIE_PATH = join(AB_HOME, "secret", "cookies", "x-cookies.json");
+const COOKIE_PATH = join(AB_HOME, "secret", "x-cookies.json");
 const BASE_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_BASE_FOLLOWS_FILE"] ?? "base.follows.json");
 const AGENT_FOLLOWS = join(TWITTER_DIR, process.env["TWEET_FOLLOWS_FILE"] ?? "agent.follows.json");
 const REPORTS_DIR = reportsDir("x");
@@ -41,14 +41,27 @@ async function sendReportToTelegram(filePath, caption) {
 }
 const AI_BIO_KEYWORDS = /\b(ai|ml|llm|machine.?learning|deep.?learning|neural|nlp|computer.?vision|reinforcement|transformer|diffusion|robotics|research|phd|professor|scientist)\b/i;
 function loadApiKey() {
-  if (!existsSync(COOKIE_PATH)) return void 0;
+  // Priority: TWITTER_COOKIES env (from get_secret tool) > file on disk
+  let raw;
+  if (process.env["TWITTER_COOKIES"]) {
+    raw = process.env["TWITTER_COOKIES"];
+  } else if (!existsSync(COOKIE_PATH)) {
+    process.stderr.write("⚠️ Twitter cookies not configured. Add x-cookies.json to ~/.abtars/secret/\n");
+    process.exit(2);
+  } else {
+    raw = readFileSync(COOKIE_PATH, "utf8");
+    if (raw.startsWith("ENC:")) {
+      process.stderr.write("⚠️ Cannot read cookies (encrypted). Use get_secret tool: get_secret(\"x-cookies.json\") and pass via TWITTER_COOKIES env.\n");
+      process.exit(2);
+    }
+  }
   try {
-    const raw = readFileSync(COOKIE_PATH, "utf8");
     const parsed = JSON.parse(raw);
     const cookieStr = Object.entries(parsed).map(([k, v]) => `${k}=${v}`).join("; ") + ";";
     return Buffer.from(cookieStr).toString("base64");
   } catch {
-    return void 0;
+    process.stderr.write("⚠️ Twitter cookies invalid JSON.\n");
+    process.exit(2);
   }
 }
 function loadFollows() {
@@ -250,9 +263,17 @@ const GQL_FEATURES = {
   responsive_web_enhance_cards_enabled: false
 };
 function loadCookieHeader() {
-  if (!existsSync(COOKIE_PATH)) return void 0;
+  let raw;
+  if (process.env["TWITTER_COOKIES"]) {
+    raw = process.env["TWITTER_COOKIES"];
+  } else if (!existsSync(COOKIE_PATH)) {
+    return void 0;
+  } else {
+    raw = readFileSync(COOKIE_PATH, "utf8");
+    if (raw.startsWith("ENC:")) return void 0;
+  }
   try {
-    const parsed = JSON.parse(readFileSync(COOKIE_PATH, "utf8"));
+    const parsed = JSON.parse(raw);
     const cookie = Object.entries(parsed).map(([k, v]) => `${k}=${v}`).join("; ");
     return { cookie, csrf: parsed.ct0 };
   } catch {
