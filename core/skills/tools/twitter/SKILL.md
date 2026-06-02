@@ -61,7 +61,7 @@ node {baseDir}/scripts/abtars-tweet.js --user <handle>
 ## Config
 
 - **Follows:** `~/.abtars/workspace/twitterX/base.follows.json` + `agent.follows.json`
-- **Cookies:** `~/.abtars/secret/cookies/x-cookies.json` (required for full mode)
+- **Cookies:** `~/.abtars/secret/x-cookies.json` (encrypted at rest, required for full mode)
 - **Output:** `~/.abtars/workspace/twitterX/output/` (daily JSON reports)
 
 ## Use cases
