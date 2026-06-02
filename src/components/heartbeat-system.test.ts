@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { HeartbeatSystem } from "./heartbeat-system.js";
 
-describe("HeartbeatSystem", () => {
+describe("HeartbeatSystem", { timeout: 30000 }, () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 

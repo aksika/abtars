@@ -19,8 +19,25 @@
 import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { install } from './install.js';
+
+vi.mock('../install-manifest.js', () => ({
+  loadManifest: () => ({
+    manifestVersion: 2,
+    directories: [],
+    lazyRoots: [],
+    configSeeds: [],
+    requiredConfigs: [],
+    scripts: { include: [], executable: "*.sh" },
+    services: { supervised: {} },
+    cliWrappers: ["abtars"],
+    postInstall: [],
+  }),
+  _resetManifestCache: () => {},
+  isLazyRootAllowed: () => true,
+  reconcileManifest: () => ({ ok: [], warnings: [], fixed: [] }),
+}));
 
 describe('install: PATH symlink collision policy (regression #158 smoke)', () => {
   let fakeHome: string;
@@ -44,8 +61,10 @@ describe('install: PATH symlink collision policy (regression #158 smoke)', () =>
     await mkdir(fakeUserBin, { recursive: true });
     await mkdir(otherInstallBin, { recursive: true });
     await mkdir(join(fakeHome, 'state'), { recursive: true });
+    await mkdir(join(fakeHome, 'config'), { recursive: true });
     const { writeFileSync } = await import('node:fs');
     writeFileSync(join(fakeHome, 'state', 'tasks.json'), '[]');
+    writeFileSync(join(fakeHome, 'config', 'identity.key'), 'test-key');
 
     process.env['ABTARS_HOME'] = fakeHome;
     process.env['HOME'] = root;

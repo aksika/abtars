@@ -18,7 +18,8 @@ beforeEach(() => {
 
 describe("loadManifest", () => {
   it("loads manifest from repo root", () => {
-    const m = loadManifest();
+    const repoRoot = join(import.meta.dirname, "..", "..");
+    const m = loadManifest(repoRoot);
     expect(m.manifestVersion).toBe(2);
     expect(m.directories.length).toBeGreaterThan(0);
     expect(m.lazyRoots.length).toBeGreaterThan(0);

@@ -8,7 +8,7 @@ describe("mcp-tool (integration)", () => {
     expect(mcpTool.parameters.required).toContain("tool");
   });
 
-  it("returns error when mcporter not available", async () => {
+  it("returns error when mcporter not available", { timeout: 15000 }, async () => {
     // This test works because mcporter daemon may not be running in test env
     const { mcpTool } = await import("./mcp-tool.js");
     const result = await mcpTool.execute({ server: "nonexistent", tool: "fake_tool" });

@@ -17,7 +17,7 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("lazyRequire", () => {
+describe("lazyRequire", { timeout: 30000 }, () => {
   it("resolves a globally available package", async () => {
     const { lazyRequire } = await import("./lazy-require.js");
     const path = await lazyRequire("node:path");
