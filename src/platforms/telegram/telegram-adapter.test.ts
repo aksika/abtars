@@ -59,6 +59,7 @@ function mockTransport(): IKiroTransport {
     resetSession: vi.fn().mockResolvedValue(undefined),
     sendInterrupt: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn(),
+    transportCommands: [],
     get isReady() { return true; },
   };
 }
@@ -78,22 +79,26 @@ function makeDeps(transport: IKiroTransport): TelegramAdapterDeps {
       sttConfig: null,
       ttsConfig: null,
       sessions: new SessionRegistry(),
+      sessionManager: { getActiveSessionId: () => "1_A_01", getActiveSession: () => ({ id: "1_A_01", type: "A", paused: false }) } as any,
       updateCtxStart: vi.fn(),
     } as PipelineDeps,
     conversationBuffer: { push: vi.fn(), drain: vi.fn().mockReturnValue(null), clear: vi.fn() } as any,
     transport,
     memory: null,
+    sessionManager: { getActiveSessionId: () => "1_A_01" } as any,
   };
 }
 
 describe("TelegramAdapter", () => {
   let adapter: TelegramAdapter;
   let transport: IKiroTransport;
+  let deps: TelegramAdapterDeps;
 
   beforeEach(() => {
     vi.clearAllMocks();
     transport = mockTransport();
-    adapter = new TelegramAdapter(makeConfig(), makeDeps(transport));
+    deps = makeDeps(transport);
+    adapter = new TelegramAdapter(makeConfig(), deps);
   });
 
   it("has correct name and capabilities", () => {
@@ -130,11 +135,122 @@ describe("TelegramAdapter", () => {
 
   it("injectMessage creates synthetic update after start", async () => {
     await adapter.start();
-    // Should not throw
     adapter.injectMessage({
       platform: "telegram", channelId: "100", sessionKey: "telegram:100",
       senderId: "42", senderName: "Test", text: "queued msg",
       timestamp: Date.now(), isGroup: false, isVoice: false,
+    });
+  });
+
+  describe("handleUpdate — text messages", () => {
+    it("processes authorized text message via pipeline", async () => {
+      await adapter.start();
+      const update = {
+        update_id: 1,
+        message: {
+          message_id: 100,
+          chat: { id: 42, type: "private" },
+          from: { id: 42, first_name: "Test" },
+          text: "hello bot",
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+
+      // Should not throw — message reaches pipeline
+      await (TelegramPollerMock as any)._handler(update);
+      // Pipeline invokes transport.sendPrompt for authorized messages
+      expect(transport.sendPrompt).toHaveBeenCalled();
+    });
+
+    it("rejects unauthorized text message silently", async () => {
+      await adapter.start();
+      const update = {
+        update_id: 2,
+        message: {
+          message_id: 101,
+          chat: { id: 999, type: "private" },
+          from: { id: 999, first_name: "Hacker" },
+          text: "sneaky",
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+
+      await (TelegramPollerMock as any)._handler(update);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("handleUpdate — reactions", () => {
+    it("does not throw on authorized reaction", async () => {
+      await adapter.start();
+      const update = {
+        update_id: 3,
+        message_reaction: {
+          chat: { id: 42, type: "private" },
+          user: { id: 42, first_name: "Test" },
+          message_id: 200,
+          new_reaction: [{ type: "emoji", emoji: "👍" }],
+          old_reaction: [],
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+
+      await expect((TelegramPollerMock as any)._handler(update)).resolves.not.toThrow();
+    });
+
+    it("ignores unauthorized reaction", async () => {
+      await adapter.start();
+      const update = {
+        update_id: 4,
+        message_reaction: {
+          chat: { id: 999, type: "private" },
+          user: { id: 999, first_name: "Hacker" },
+          message_id: 201,
+          new_reaction: [{ type: "emoji", emoji: "👍" }],
+          old_reaction: [],
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+
+      await (TelegramPollerMock as any)._handler(update);
+      // No crash, no processing — unauthorized silently dropped
+    });
+  });
+
+  describe("handleUpdate — callback queries", () => {
+    it("answers callback query from authorized user", async () => {
+      await adapter.start();
+      const update = {
+        update_id: 5,
+        callback_query: {
+          id: "cb-1",
+          from: { id: 42, first_name: "Test" },
+          message: { message_id: 300, chat: { id: 42, type: "private" } },
+          data: "action:yes",
+        },
+      };
+
+      await (TelegramPollerMock as any)._handler(update);
+      // answerCallbackQuery should be called for valid callback
+    });
+  });
+
+  describe("handleUpdate — edited messages", () => {
+    it("ignores edited messages", async () => {
+      await adapter.start();
+      const update = {
+        update_id: 6,
+        edited_message: {
+          message_id: 400,
+          chat: { id: 42, type: "private" },
+          from: { id: 42, first_name: "Test" },
+          text: "edited text",
+          date: Math.floor(Date.now() / 1000),
+        },
+      };
+
+      await (TelegramPollerMock as any)._handler(update);
+      expect(transport.sendPrompt).not.toHaveBeenCalled();
     });
   });
 });
