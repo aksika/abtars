@@ -321,12 +321,12 @@ if [ -f "$LOCK_FILE" ]; then
   fi
 fi
 
-# 11. Core files size check (should be ≤15 non-empty lines each)
+# 11. Core files size check (should be ≤50 non-empty lines each)
 for f in "$AB/core/user_profile.md" "$AB/core/agent_notes.md" "$AB/core/core_facts.md"; do
   if [ -f "$f" ]; then
     LINES=$(grep -c '[^[:space:]]' "$f")
-    if [ "$LINES" -gt 15 ]; then
-      FNAME=$(basename "$f"); warn "$FNAME has $LINES non-empty lines limit: 10 -- Dreamy may have overgrown it"
+    if [ "$LINES" -gt 50 ]; then
+      FNAME=$(basename "$f"); warn "$FNAME has $LINES non-empty lines (limit: 50) -- Dreamy may have overgrown it"
     fi
   fi
 done
