@@ -23,6 +23,7 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { packagePaths, readManifest } from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
@@ -589,6 +590,15 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     };
     await writeFile(usersPath, JSON.stringify(users, null, 2) + '\n', { mode: 0o600 });
     process.stdout.write(`✓ users.json → ${usersPath}\n`);
+
+    // Check abmind encryption compatibility
+    try {
+      const manifestPath = join(homedir(), '.abmind', 'manifest.json');
+      const manifest = JSON.parse((await import('node:fs')).readFileSync(manifestPath, 'utf-8'));
+      if (manifest.encryptionUser && manifest.encryptionUser !== answers.userName) {
+        process.stdout.write(`⚠️  abmind encryption uses name '${manifest.encryptionUser}' but you entered '${answers.userName}'. Backup restore will need the encryption name ('${manifest.encryptionUser}').\n`);
+      }
+    } catch { /* no abmind or no manifest — fine */ }
   }
 
   // Seed abmind user_profile.md — only if abmind is already installed
