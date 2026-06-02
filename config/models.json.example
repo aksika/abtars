@@ -225,5 +225,41 @@
     "transports": [
       "openrouter"
     ]
+  },
+  "deepseek/deepseek-v4-flash": {
+    "contextWindow": 1048576,
+    "maxOutput": 131072,
+    "rank": 2,
+    "cost": {
+      "input": 0.0983,
+      "output": 0.1966
+    },
+    "transports": [
+      "openrouter"
+    ]
+  },
+  "qwen/qwen3-235b-a22b-2507": {
+    "contextWindow": 262144,
+    "maxOutput": 16384,
+    "rank": 2,
+    "cost": {
+      "input": 0.071,
+      "output": 0.1
+    },
+    "transports": [
+      "openrouter"
+    ]
+  },
+  "tencent/hy3-preview": {
+    "contextWindow": 262144,
+    "maxOutput": 16384,
+    "rank": 3,
+    "cost": {
+      "input": 0.063,
+      "output": 0.21
+    },
+    "transports": [
+      "openrouter"
+    ]
   }
 }
