@@ -53,15 +53,17 @@ All commands work on Telegram, Discord, and IRC unless noted otherwise.
 | Command | Description |
 |---------|-------------|
 | `/tasks` | List scheduled tasks |
-| `/task run <id>` | Manually fire a task |
+| `/tasks run <id>` | Manually fire a task |
 | `/tasks log <id>` | Last 5 runs for a task |
+| `/tasks pause <id>` | Pause a scheduled task |
+| `/tasks resume <id>` | Resume a paused task |
 
 ## Skills & Mode
 
 | Command | Description |
 |---------|-------------|
 | `/skills` | List loaded skills |
-| `/default` | Switch back to default agent |
+| `/skill` | Reload skills catalog |
 
 ## Sessions
 
@@ -108,3 +110,7 @@ Types: **A**=Main, **B**=Browse, **C**=Code, **T**=Task.
 | `/users` | All | List users, approve/revoke access |
 | `/users approve <id>` | All | Approve a new user by platform ID |
 | `/users revoke <id>` | All | Revoke user access |
+| `/whoami` | All | Show your user identity and role |
+| `/usage` | All | Token usage and estimated cost this session |
+| `/openrouter` | All | OpenRouter account info |
+| `/help` | All | Show all available commands |
