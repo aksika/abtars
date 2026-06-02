@@ -37,6 +37,7 @@ The script handles everything: Node.js detection, package install, memory setup,
 
 ```bash
 npm install -g abtars abmind
+abmind install
 abtars install
 abtars update
 abtars onboard
@@ -51,9 +52,10 @@ sudo $(which abtars) daemon install
 | Step | What happens |
 |------|-------------|
 | `npm install -g abtars abmind` | Installs CLI tools globally |
+| `abmind install` | Creates `~/.abmind/`, generates encryption key, initializes memory DB |
 | `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
 | `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
-| `abtars onboard` | Interactive setup: Telegram token, model, user ID + runs `abmind install` |
+| `abtars onboard` | Interactive setup: Telegram token, model, user ID |
 | `sudo ... daemon install` | Registers systemd service, starts the bridge |
 
 After `daemon install`, the bridge is running and responding to messages. No separate restart needed.
