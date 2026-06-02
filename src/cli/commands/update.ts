@@ -75,6 +75,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
         const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
         const externals: Record<string, string> = { patchright: "^1.59.4", "rettiwt-api": "^4.1.3" };
         pkg.dependencies = { ...pkg.dependencies, ...externals };
+        // #722: strip file: refs that can't resolve from staging dir
+        if (pkg.dependencies?.abmind?.startsWith("file:")) delete pkg.dependencies.abmind;
         writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
         const { execSync } = await import("node:child_process");
         execSync("npm install --omit=dev --ignore-scripts 2>/dev/null", { cwd: staged.stagedPath, timeout: 60_000 });
@@ -108,16 +110,24 @@ export async function update(opts: UpdateOptions): Promise<number> {
     const abmindHome = process.env["ABMIND_HOME"] ?? join(process.env["HOME"] ?? "", ".abmind");
     const links: Array<{ name: string; target: string }> = [];
     const globalAbmind = join(globalModules, "abmind");
+    const homeAbmind = join(process.env["HOME"] ?? "", "abmind");
+    const localAbmind = join(paths.home, "current", "node_modules", "abmind");
     if (ex2(globalAbmind)) links.push({ name: "abmind", target: globalAbmind });
+    else if (ex2(homeAbmind)) links.push({ name: "abmind", target: homeAbmind });
+    else if (ex2(localAbmind)) links.push({ name: "abmind", target: localAbmind });
     const bsq3 = join(abmindHome, "lib", "node_modules", "better-sqlite3");
     if (ex2(bsq3)) links.push({ name: "better-sqlite3", target: bsq3 });
     if (links.length > 0) {
-      const newNm = join(paths.home, "current", "node_modules");
-      mk2(newNm, { recursive: true });
-      for (const { name, target } of links) {
-        const dest = join(newNm, name);
-        try { if (ex2(dest)) ul2(dest); } catch { /* ignore */ }
-        try { sl2(target, dest); } catch { /* best effort */ }
+      // Bundle entry is at bundle/abtars.js — ESM resolves from there
+      const bundleNm = join(paths.home, "current", "bundle", "node_modules");
+      const rootNm = join(paths.home, "current", "node_modules");
+      for (const dir of [bundleNm, rootNm]) {
+        mk2(dir, { recursive: true });
+        for (const { name, target } of links) {
+          const dest = join(dir, name);
+          try { if (ex2(dest)) ul2(dest); } catch { /* ignore */ }
+          try { sl2(target, dest); } catch { /* best effort */ }
+        }
       }
     }
 
