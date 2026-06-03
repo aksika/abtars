@@ -36,7 +36,6 @@ describe('onboard command (non-interactive)', () => {
         source: 'local',
         migrationsApplied: [],
         priorReleases: [],
-        preMigrationBackup: null,
       }),
     );
   });

@@ -41,7 +41,7 @@ function killPortHolder(port: number): void {
 
 async function spawnLauncher(home: string, argv: string[]): Promise<number> {
   const { spawn } = await import("node:child_process");
-  const launcher = join(home, "abtars.sh");
+  const launcher = join(home, "scripts", "abtars.sh");
   if (!existsSync(launcher)) {
     process.stderr.write(`Launcher not found: ${launcher}\n`);
     return 1;

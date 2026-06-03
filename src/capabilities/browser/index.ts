@@ -34,7 +34,7 @@ export function register(api: CapabilityApi): void {
   };
 
   // Browse-spawn IPC — CLI sends task, bridge spawns via runtime
-  const spawnSocketPath = join(abtarsHome(), "browse-spawn.sock");
+  const spawnSocketPath = join(abtarsHome(), "browser-socket", "browse-spawn.sock");
   try { unlinkSync(spawnSocketPath); } catch (err) { logAndSwallow("index", "op", err); }
 
   const spawnServer = net.createServer((conn) => {

@@ -132,7 +132,7 @@ if [ -f "$WD_LOCK" ]; then
       elif command -v systemctl &>/dev/null && systemctl --user is-enabled abtars-watchdog.service &>/dev/null; then
         systemctl --user restart abtars-watchdog.service 2>/dev/null && fix "restarted watchdog via systemd"
       else
-        warn "watchdog not running -- start manually: ~/.abtars/watchdog.sh --all --web --agent &"
+        warn "watchdog not running -- start manually: ~/.abtars/scripts/watchdog.sh &"
       fi
     fi
   fi
@@ -144,7 +144,7 @@ else
     elif command -v systemctl &>/dev/null && systemctl --user is-enabled abtars-watchdog.service &>/dev/null; then
       systemctl --user start abtars-watchdog.service 2>/dev/null && fix "started watchdog via systemd"
     else
-      warn "start manually: ~/.abtars/watchdog.sh --all --web --agent &"
+      warn "start manually: ~/.abtars/scripts/watchdog.sh &"
     fi
   fi
 fi

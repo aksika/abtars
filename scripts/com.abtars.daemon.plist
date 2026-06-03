@@ -8,7 +8,7 @@
   <key>WorkingDirectory</key><string>/Users/{{USER}}/.abtars</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/{{USER}}/.abtars/watchdog.sh</string>
+    <string>/Users/{{USER}}/.abtars/scripts/watchdog.sh</string>
   </array>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>

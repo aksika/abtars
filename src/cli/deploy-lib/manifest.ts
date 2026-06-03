@@ -28,8 +28,6 @@ export interface Manifest {
   readonly migrationsApplied: readonly string[];
   /** Prior releases still retained (newest first). Empty on fresh install. */
   readonly priorReleases: readonly PriorRelease[];
-  /** Pre-158 backup location, if this install was migrated from the flat layout. */
-  readonly preMigrationBackup: string | null;
   /** Install mode: simple (manual), supervised (launchd/systemd user-scope), or supervised-daemon (system-scope). */
   readonly installMode?: 'simple' | 'supervised' | 'supervised-daemon';
 }
@@ -67,6 +65,5 @@ export function emptyManifest(pkg: 'abtars' | 'abmind', host: string): Manifest 
     source: 'local',
     migrationsApplied: [],
     priorReleases: [],
-    preMigrationBackup: null,
   };
 }

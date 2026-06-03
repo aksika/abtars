@@ -45,7 +45,6 @@ describe('deploy-lib/manifest', () => {
     expect(m.version).toBe('');
     expect(m.migrationsApplied).toHaveLength(0);
     expect(m.priorReleases).toHaveLength(0);
-    expect(m.preMigrationBackup).toBeNull();
   });
 
   it('written manifest is human-readable pretty JSON', async () => {

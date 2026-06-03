@@ -62,6 +62,7 @@ describe('install: PATH symlink collision policy (regression #158 smoke)', () =>
     await mkdir(otherInstallBin, { recursive: true });
     await mkdir(join(fakeHome, 'state'), { recursive: true });
     await mkdir(join(fakeHome, 'config'), { recursive: true });
+    await mkdir(join(fakeHome, 'tasks'), { recursive: true });
     const { writeFileSync } = await import('node:fs');
     writeFileSync(join(fakeHome, 'tasks', 'tasks.json'), '[]');
     writeFileSync(join(fakeHome, 'config', 'identity.key'), 'test-key');

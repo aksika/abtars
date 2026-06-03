@@ -1,12 +1,9 @@
 /**
- * `abtars install [--upgrade]` — first-time setup.
+ * `abtars install [--force]` — first-time setup.
  *
- * Phase 1 behavior:
  *   - No existing ~/.abtars: create dirs, seed config/ from .env.example,
  *     create PATH symlinks. Does NOT run onboard (Phase 3).
- *   - Existing ~/.abtars with flat layout (pre-158): refuse unless
- *     --upgrade, then run migration 003-flat-to-releases (Phase 1c).
- *   - Existing ~/.abtars with new layout: refuse unless --force (which
+ *   - Existing ~/.abtars: refuse unless --force (which
  *     re-seeds missing config and reconciles symlinks, no code changes).
  */
 
@@ -344,7 +341,6 @@ export async function install(opts: InstallOptions): Promise<number> {
     await writeManifest(paths.manifest, {
       ...emptyManifest('abtars', hostname()),
       version: '',
-      preMigrationBackup: null,
     });
     process.stdout.write(`✓ manifest initialized at ${paths.manifest}\n`);
   }

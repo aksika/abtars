@@ -153,7 +153,7 @@ Usage:
   const prompt = loadBrowsePrompt(task, chatId, taskId);
 
   // Send spawn request to bridge via IPC
-  const spawnSocket = join(abtarsHome(), "browse-spawn.sock");
+  const spawnSocket = join(abtarsHome(), "browser-socket", "browse-spawn.sock");
   const net = await import("node:net");
   const result = await new Promise<{ ok: boolean; taskId?: string; error?: string }>((resolve, reject) => {
     const conn = net.createConnection(spawnSocket);
