@@ -229,6 +229,18 @@ export async function install(opts: InstallOptions): Promise<number> {
     return 2;
   }
 
+  // Kill stale daemon/watchdog from previous install (#771)
+  try {
+    const { execSync } = await import("node:child_process");
+    execSync("systemctl is-active abtars 2>/dev/null", { stdio: "ignore" });
+    execSync("sudo -n systemctl stop abtars 2>/dev/null", { stdio: "ignore" });
+    execSync("sudo -n systemctl disable abtars 2>/dev/null", { stdio: "ignore" });
+  } catch { /* not running or no sudo — fine */ }
+  try {
+    const { execSync } = await import("node:child_process");
+    execSync("pkill -f 'watchdog.sh' 2>/dev/null", { stdio: "ignore" });
+  } catch { /* no watchdog — fine */ }
+
   // Create skeleton (idempotent)
   await createSkeleton(home, opts.dryRun);
   process.stdout.write(`✓ skeleton at ${home}\n`);
