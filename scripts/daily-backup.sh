@@ -17,7 +17,7 @@ if $CONFIG_ONLY; then
   # Minimal: config + secrets + tasks
   cd "$AB"
   zip -qr "$DEST/abtars-config-$DATE.zip" \
-    config/ secret/ tasks/ skills/ \
+    config/ secret/ tasks/ skills/ core/ \
     2>/dev/null || true
   echo "✓ abtars-config-$DATE.zip (config-only)"
   exit 0
