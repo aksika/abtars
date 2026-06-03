@@ -147,10 +147,6 @@ export async function main(argv: readonly string[]): Promise<number> {
         const { configShow } = await import('./commands/config-show.js');
         return await configShow();
       }
-      case 'passwd': {
-        const { passwd } = await import('./commands/passwd.js');
-        return await passwd();
-      }
       case '':
       case 'help':
       case '--help':
