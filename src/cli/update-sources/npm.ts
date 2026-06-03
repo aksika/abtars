@@ -20,7 +20,7 @@ function run(cmd: string, args: string[], cwd: string): string {
 
 function readLocalVersion(home: string): string | null {
   try {
-    const pkg = JSON.parse(readFileSync(join(home, "current", "package.json"), "utf-8"));
+    const pkg = JSON.parse(readFileSync(join(home, "app", "package.json"), "utf-8"));
     return pkg.version ?? null;
   } catch { return null; }
 }
@@ -35,7 +35,7 @@ export function makeNpmSource(packageName: string): UpdateSource {
         throw new Error(`Already at latest version (${latest}). Nothing to update.`);
       }
 
-      const stagedPath = join(ctx.releasesDir, latest);
+      const stagedPath = ctx.stagingDir;
       await rm(stagedPath, { recursive: true, force: true });
       await mkdir(stagedPath, { recursive: true });
 

@@ -123,7 +123,7 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         }
         const pkgVersion = await readPackageVersion(repoRoot);
         const version = pkgVersion;
-        const stagedPath = join(ctx.releasesDir, version);
+        const stagedPath = ctx.stagingDir;
         await rm(stagedPath, { recursive: true, force: true });
         await mkdir(stagedPath, { recursive: true });
         await cp(bundleDir, join(stagedPath, 'bundle'), { recursive: true });
@@ -145,89 +145,32 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
       const pkgVersion = await readPackageVersion(repoRoot);
       const version = `${pkgVersion}-${commit}`;
 
-      // Install deps into the shared node_modules/ (if not skipped).
+      // Install deps into the repo (if not skipped).
       if (opts.skipInstall !== true) {
         runCmd('npm', ['install', '--no-audit', '--no-fund'], repoRoot);
       }
 
-      // Build: bundle mode (esbuild) or legacy mode (tsc)
-      const useBundle = process.env['AGENTBRIDGE_BUILD_MODE'] !== 'tsc';
+      // Bundle mode (esbuild) — the only supported mode now
+      runCmd('npm', ['run', 'bundle'], repoRoot);
 
-      if (useBundle) {
-        // Bundle mode: esbuild → bundle/ + pruned native deps
-        runCmd('npm', ['run', 'bundle'], repoRoot);
-
-        const stagedPath = join(ctx.releasesDir, version);
-        await rm(stagedPath, { recursive: true, force: true });
-        await mkdir(stagedPath, { recursive: true });
-        await cp(join(repoRoot, 'bundle'), join(stagedPath, 'bundle'), { recursive: true });
-
-        // Copy core skills for runtime sync (#438)
-        const coreSkillsSrc = join(repoRoot, 'core', 'skills');
-        if (existsSync(coreSkillsSrc)) {
-          await cp(coreSkillsSrc, join(stagedPath, 'core', 'skills'), { recursive: true });
-        }
-
-        // Ensure ESM works without warnings (MODULE_TYPELESS_PACKAGE_JSON)
-        await writeFile(join(stagedPath, 'package.json'), JSON.stringify({ type: "module", name: "abtars", version }, null, 2) + "\n");
-
-        // Copy install-manifest.json for doctor reconciliation
-        await copyFile(join(repoRoot, 'install-manifest.json'), join(stagedPath, 'install-manifest.json'));
-
-        // Native addons (better-sqlite3, sqlite-vec) live at ~/.abmind/lib/node_modules/
-        // and are loaded via native-loader.ts from there. No need to copy into release.
-        // See #431 (persistent install) + native-loader.ts.
-
-        const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));
-        return { version, stagedPath, commit, branch, packageLockHash, source: 'local' };
-      }
-
-      // Legacy tsc mode (AGENTBRIDGE_BUILD_MODE=tsc)
-      runCmd('npm', ['run', 'build'], repoRoot);
-
-      // Stage releases/<version>/dist/
-      const stagedPath = join(ctx.releasesDir, version);
+      const stagedPath = ctx.stagingDir;
       await rm(stagedPath, { recursive: true, force: true });
       await mkdir(stagedPath, { recursive: true });
-      await cp(join(repoRoot, 'dist'), join(stagedPath, 'dist'), { recursive: true });
+      await cp(join(repoRoot, 'bundle'), join(stagedPath, 'bundle'), { recursive: true });
+
+      // Copy core skills for runtime sync
+      const coreSkillsSrc = join(repoRoot, 'core', 'skills');
+      if (existsSync(coreSkillsSrc)) {
+        await cp(coreSkillsSrc, join(stagedPath, 'core', 'skills'), { recursive: true });
+      }
+
+      // Ensure ESM works
+      await writeFile(join(stagedPath, 'package.json'), JSON.stringify({ type: "module", name: "abtars", version }, null, 2) + "\n");
 
       // Copy install-manifest.json for doctor reconciliation
       await copyFile(join(repoRoot, 'install-manifest.json'), join(stagedPath, 'install-manifest.json'));
 
-      // Sync node_modules/ to the shared location.
-      //
-      // Use `rsync -aL` to DEREFERENCE symlinks — critical because
-      // package.json `"abmind": "file:../abmind"` creates a symlink at
-      // node_modules/abmind pointing into the dev workspace. Plain cp
-      // preserves the symlink, so the runtime ends up with abmind code
-      // served from the developer's working tree (active live edits +
-      // test-suite contention on memory.db). We want a materialized copy.
-      //
-      // Delete destination first so rsync's --delete is unnecessary (and
-      // safer — we don't want to rsync-delete anything outside).
-      await rm(ctx.nodeModulesDir, { recursive: true, force: true });
-      await mkdir(ctx.nodeModulesDir, { recursive: true });
-      const rsyncResult = spawnSync(
-        'rsync',
-        ['-aL', '--quiet', `${join(repoRoot, 'node_modules')}/`, `${ctx.nodeModulesDir}/`],
-        { stdio: 'inherit' },
-      );
-      if (rsyncResult.status !== 0) {
-        throw new LocalBuildError(
-          `rsync of node_modules failed (status ${rsyncResult.status ?? -1})`,
-          `Ensure rsync is installed. Falling back to node cp would re-create symlinks.`,
-        );
-      }
-
-      // Note: abmind's nested node_modules/ (rsync'd from its dev workspace)
-      // stays in place. Previously deleted to avoid duplicate better-sqlite3
-      // native-addon conflict (#230-related), but since f24b33f removed
-      // better-sqlite3 from abtars's deps, abmind's nested copy is the
-      // only one and must remain — deleting it breaks module resolution for
-      // abmind at runtime ('Cannot find package better-sqlite3').
-
       const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));
-
       return { version, stagedPath, commit, branch, packageLockHash, source: 'local' };
     },
   };

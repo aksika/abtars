@@ -10,13 +10,13 @@ import { readFile, writeFile } from 'node:fs/promises';
 
 export interface Manifest {
   readonly package: 'abtars' | 'abmind';
-  /** Currently active release version (matches releases/<version>/ dirname). */
+  /** Currently active release version. */
   readonly version: string;
   /** Git SHA of the source that produced the active release, if known. */
   readonly commit: string | null;
   /** Git branch, if known. */
   readonly branch: string | null;
-  /** Hash of package-lock.json at time of last node_modules install. */
+  /** Hash of package-lock.json at time of last install. */
   readonly packageLockHash: string | null;
   /** ISO timestamp of when the active release became active. */
   readonly activatedAt: string;
@@ -26,17 +26,12 @@ export interface Manifest {
   readonly source: 'local' | 'npm' | 'github';
   /** Applied migrations (ordered). */
   readonly migrationsApplied: readonly string[];
-  /** Prior releases still retained (newest first). Empty on fresh install. */
-  readonly priorReleases: readonly PriorRelease[];
+  /** Previous version (for rollback). Null on first install. */
+  readonly previousVersion: string | null;
+  /** Previous commit (for rollback reference). */
+  readonly previousCommit: string | null;
   /** Install mode: simple (manual), supervised (launchd/systemd user-scope), or supervised-daemon (system-scope). */
   readonly installMode?: 'simple' | 'supervised' | 'supervised-daemon';
-}
-
-export interface PriorRelease {
-  readonly version: string;
-  readonly commit: string | null;
-  readonly activatedAt: string;
-  readonly packageLockHash: string | null;
 }
 
 export async function readManifest(path: string): Promise<Manifest | null> {
@@ -64,6 +59,7 @@ export function emptyManifest(pkg: 'abtars' | 'abmind', host: string): Manifest 
     host,
     source: 'local',
     migrationsApplied: [],
-    priorReleases: [],
+    previousVersion: null,
+    previousCommit: null,
   };
 }

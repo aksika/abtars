@@ -158,10 +158,9 @@ spawn_bridge() {
 
   # Source .env so platform ENABLED vars reach the node process
   if [ -f "$AB/config/.env" ]; then set -a; source "$AB/config/.env"; set +a; fi
-  # Stable entry point: main.js symlink created by abtars update.
-  log "Starting bridge: node current/main.js $*"
+  log "Starting bridge: node app/bundle/abtars.js $*"
   cd "$AB"
-  NODE_PATH="current/node_modules:$(npm root -g 2>/dev/null || echo ''):${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node current/main.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
+  NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
   SPAWNED_AT=$(date +%s)
 
   # Wait for bridge.lock with PID

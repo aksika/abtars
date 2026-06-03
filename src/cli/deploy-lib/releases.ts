@@ -1,103 +1,121 @@
 /**
- * Release management: stage / activate (flip symlink) / prune.
+ * Deploy primitives: atomic swap, config snapshot, health probe, hash.
  *
- * Invariants (per plan §"Directory layout"):
- *   - releases/<version>/dist/ holds only compiled code, no node_modules
- *   - node_modules/ lives at the package home root, shared across releases
- *   - current is a symlink to releases/<version>/
- *   - Retention = 3 (plan §"Key invariants"); oldest pruned on activate
- *
- * Activation is atomic via rename(2): write current.new → rename to current.
- * This replaces the existing symlink in one syscall; readers never see a
- * broken state.
+ * #785: replaces the old releases/current symlink model with
+ * app/ + app.prev/ atomic rename swap.
  */
 
 import { createHash } from 'node:crypto';
-import { readFile, readdir, rename, rm, stat, symlink, unlink } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { existsSync, mkdirSync, rmSync, renameSync, readdirSync, cpSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
-const RETENTION = 3;
-
-export interface StagedRelease {
-  readonly version: string;
-  readonly stagedPath: string;
-  readonly commit: string | null;
-  readonly packageLockHash: string | null;
-  readonly source: 'local' | 'npm' | 'github';
+/**
+ * Atomic swap: app.staging/ → app/, old app/ → app.prev/.
+ * Two renames (~instant). Caller must ensure app.staging/ is fully built.
+ */
+export function atomicSwap(appDir: string, appPrevDir: string, appStagingDir: string): void {
+  // Remove old prev
+  if (existsSync(appPrevDir)) {
+    rmSync(appPrevDir, { recursive: true, force: true });
+  }
+  // app/ → app.prev/
+  if (existsSync(appDir)) {
+    renameSync(appDir, appPrevDir);
+  }
+  // app.staging/ → app/
+  renameSync(appStagingDir, appDir);
 }
 
 /**
- * List release versions in a releases/ dir, newest-activation-first as
- * reported by the caller (this function sorts lexicographically; callers
- * with a preferred order should rely on manifest priorReleases).
+ * Rotate config snapshots (3 slots) and create a fresh snapshot.
+ * Excludes .pre-update* dirs from the copy to avoid recursion.
  */
-export async function listReleases(releasesDir: string): Promise<string[]> {
+export function configSnapshot(configDir: string): void {
+  const slot0 = join(configDir, '.pre-update');
+  const slot1 = join(configDir, '.pre-update.1');
+  const slot2 = join(configDir, '.pre-update.2');
+
+  // Rotate
+  if (existsSync(slot2)) rmSync(slot2, { recursive: true, force: true });
+  if (existsSync(slot1)) renameSync(slot1, slot2);
+  if (existsSync(slot0)) renameSync(slot0, slot1);
+
+  // Fresh snapshot — copy config/ contents excluding .pre-update* dirs
+  mkdirSync(slot0, { recursive: true });
+  if (!existsSync(configDir)) return;
+  for (const entry of readdirSync(configDir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.pre-update')) continue;
+    const src = join(configDir, entry.name);
+    const dst = join(slot0, entry.name);
+    if (entry.isDirectory()) {
+      cpSync(src, dst, { recursive: true });
+    } else {
+      cpSync(src, dst);
+    }
+  }
+}
+
+/**
+ * Poll bridge.lock for a fresh lastHeartbeat after restart.
+ * Returns true if healthy within timeoutMs, false otherwise.
+ */
+export async function healthProbe(
+  home: string,
+  afterTimestamp: number,
+  timeoutMs: number = 60_000,
+): Promise<{ healthy: boolean; pid?: number; heartbeat?: number }> {
+  const lockPath = join(home, 'bridge.lock');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const content = JSON.parse(await readFile(lockPath, 'utf-8'));
+      if (content.lastHeartbeat && content.lastHeartbeat > afterTimestamp) {
+        return { healthy: true, pid: content.pid, heartbeat: content.lastHeartbeat };
+      }
+    } catch {
+      // File doesn't exist yet or invalid JSON — keep polling
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  return { healthy: false };
+}
+
+/**
+ * Write/read/clear the update sentinel.
+ */
+export interface UpdateSentinel {
+  version: string;
+  previousVersion: string | null;
+  startedAt: string;
+  status: 'pending' | 'success';
+}
+
+export function writeSentinel(home: string, sentinel: UpdateSentinel): void {
+  const dir = join(home, 'state');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'update.sentinel'), JSON.stringify(sentinel, null, 2) + '\n');
+}
+
+export function readSentinel(home: string): UpdateSentinel | null {
   try {
-    const entries = await readdir(releasesDir, { withFileTypes: true });
-    return entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
-    throw err;
+    const content = readFileSync(join(home, 'state', 'update.sentinel'), 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return null;
   }
 }
 
-/**
- * Resolve the currently active release version from the `current` symlink.
- * Returns null if the symlink is missing or dangling.
- */
-export async function readCurrent(currentLink: string): Promise<string | null> {
+export function clearSentinel(home: string, _version: string): void {
+  const path = join(home, 'state', 'update.sentinel');
+  if (!existsSync(path)) return;
   try {
-    const s = await stat(currentLink);
-    if (!s.isDirectory()) return null;
-    const { readlink } = await import('node:fs/promises');
-    const target = await readlink(currentLink);
-    // Target is like "releases/vX.Y.Z" or absolute path ending in vX.Y.Z.
-    return basename(target);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw err;
+    const sentinel: UpdateSentinel = JSON.parse(readFileSync(path, 'utf-8'));
+    sentinel.status = 'success';
+    writeFileSync(path, JSON.stringify(sentinel, null, 2) + '\n');
+  } catch {
+    // Best effort
   }
-}
-
-/**
- * Atomically flip the `current` symlink to point at releases/<version>/.
- * Link target is relative (so moves of the package home don't break it).
- */
-export async function activate(currentLink: string, version: string): Promise<void> {
-  const tmp = `${currentLink}.new`;
-  // Relative symlink target: "releases/<version>"
-  const target = join('releases', version);
-  // Clear any leftover tmp from a crashed prior run.
-  try {
-    await unlink(tmp);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
-  await symlink(target, tmp);
-  await rename(tmp, currentLink);
-}
-
-/**
- * Prune old releases, keeping the `keep` newest (by activation order provided
- * by caller, most-recent-first). Never removes the currently-active release
- * even if it falls outside the window.
- */
-export async function pruneReleases(
-  releasesDir: string,
-  activatedOrder: readonly string[],
-  currentVersion: string,
-  keep: number = RETENTION,
-): Promise<string[]> {
-  const retained = new Set<string>([currentVersion]);
-  for (const v of activatedOrder.slice(0, keep)) retained.add(v);
-  const all = await listReleases(releasesDir);
-  const pruned: string[] = [];
-  for (const version of all) {
-    if (retained.has(version)) continue;
-    await rm(join(releasesDir, version), { recursive: true, force: true });
-    pruned.push(version);
-  }
-  return pruned;
 }
 
 export async function hashFile(path: string): Promise<string | null> {
@@ -111,18 +129,10 @@ export async function hashFile(path: string): Promise<string | null> {
 }
 
 /**
- * Validate that `releases/<version>/` exists and has a dist/ subdir. Used by
- * rollback to refuse flipping to a pruned or partial release.
+ * Clean up stale app.staging/ from a previously interrupted update.
  */
-export async function releaseExists(releasesDir: string, version: string): Promise<boolean> {
-  try {
-    const s = await stat(join(releasesDir, version, 'dist'));
-    return s.isDirectory();
-  } catch {
-    return false;
+export function cleanStaleStaging(stagingDir: string): void {
+  if (existsSync(stagingDir)) {
+    rmSync(stagingDir, { recursive: true, force: true });
   }
 }
-
-export { RETENTION };
-// dirname import preserves tree-shake correctness with downstream tooling
-export const _dirname = dirname;

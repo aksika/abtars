@@ -97,9 +97,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           allowAbmindMismatch: flags.get('allow-abmind-mismatch') === true,
         });
       case 'rollback':
-        return await rollback({
-          to: typeof flags.get('to') === 'string' ? (flags.get('to') as string) : undefined,
-        });
+        return await rollback();
       case 'backup':
         return await backup(typeof flags.get('output') === 'string' ? (flags.get('output') as string) : undefined);
       case 'restore': {

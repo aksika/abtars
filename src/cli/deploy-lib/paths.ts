@@ -35,12 +35,15 @@ export function resolveUserBinDir(): string {
 export interface PackagePaths {
   readonly home: string;
   readonly config: string;
-  readonly releases: string;
-  readonly current: string;
-  readonly nodeModules: string;
+  readonly app: string;
+  readonly appPrev: string;
+  readonly appStaging: string;
   readonly bin: string;
   readonly manifest: string;
   readonly lock: string;
+  // Legacy — kept for migration detection only. Remove after all hosts migrated.
+  readonly releases: string;
+  readonly current: string;
 }
 
 export function packagePaths(pkg: PackageName): PackagePaths {
@@ -48,11 +51,14 @@ export function packagePaths(pkg: PackageName): PackagePaths {
   return {
     home,
     config: join(home, 'config'),
-    releases: join(home, 'releases'),
-    current: join(home, 'current'),
-    nodeModules: join(home, 'node_modules'),
+    app: join(home, 'app'),
+    appPrev: join(home, 'app.prev'),
+    appStaging: join(home, 'app.staging'),
     bin: join(home, 'bin'),
     manifest: join(home, 'manifest.json'),
     lock: join(home, '.update.lock'),
+    // Legacy
+    releases: join(home, 'releases'),
+    current: join(home, 'current'),
   };
 }

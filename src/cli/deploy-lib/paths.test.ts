@@ -38,9 +38,9 @@ describe('deploy-lib/paths', () => {
     const p = packagePaths('abtars');
     expect(p.home).toBe('/x/ab');
     expect(p.config).toBe('/x/ab/config');
-    expect(p.releases).toBe('/x/ab/releases');
-    expect(p.current).toBe('/x/ab/current');
-    expect(p.nodeModules).toBe('/x/ab/node_modules');
+    expect(p.app).toBe('/x/ab/app');
+    expect(p.appPrev).toBe('/x/ab/app.prev');
+    expect(p.appStaging).toBe('/x/ab/app.staging');
     expect(p.bin).toBe('/x/ab/bin');
     expect(p.manifest).toBe('/x/ab/manifest.json');
     expect(p.lock).toBe('/x/ab/.update.lock');

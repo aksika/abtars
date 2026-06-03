@@ -1,19 +1,25 @@
 /**
- * `abtars update` — build current checkout, stage new release, flip symlink.
+ * `abtars update` — build, stage, atomic swap, health-verified restart.
  *
- * Phase 1 implements --source local only. Other sources error with a
- * "not yet supported" stub (Phase 5 will add NpmSource).
+ * #785: replaces releases/ + current symlink with app/ + app.prev/ atomic rename.
+ * Flow: pre-flight → build → validate → config snapshot → atomic swap →
+ *       housekeeping → sentinel → restart → health probe → auto-rollback.
  */
 
-import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { hostname } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
-import { copyFile, mkdir, chmod, readdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, chmod, readdir } from 'node:fs/promises';
+import { rmSync, cpSync, readdirSync, mkdirSync } from 'node:fs';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import { makeNpmSource } from '../update-sources/npm.js';
 import type { SourceName } from '../update-sources/types.js';
-import { acquireLock, activate, emptyManifest, hashFile, packagePaths, pruneReleases, readManifest, writeManifest, RETENTION, type PriorRelease } from '../deploy-lib-import.js';
+import {
+  acquireLock, atomicSwap, cleanStaleStaging, configSnapshot,
+  emptyManifest, hashFile, healthProbe, packagePaths,
+  readManifest, readSentinel, writeManifest, writeSentinel,
+  type UpdateSentinel,
+} from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
 
 function readJsonField(file: string, field: string): unknown {
@@ -25,6 +31,8 @@ export interface UpdateOptions {
   readonly fromLocal: boolean;
   readonly allowAbmindMismatch: boolean;
   readonly repoRoot?: string;
+  readonly dryRun?: boolean;
+  readonly check?: boolean;
 }
 
 export async function update(opts: UpdateOptions): Promise<number> {
@@ -35,43 +43,77 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
   const paths = packagePaths('abtars');
 
+  // ── Step 0: Pre-flight ──────────────────────────────────────────────
+  const sentinel = readSentinel(paths.home);
+  if (sentinel?.status === 'pending') {
+    const age = Date.now() - new Date(sentinel.startedAt).getTime();
+    if (age > 5 * 60_000) {
+      process.stderr.write(`⚠️ Previous update (${sentinel.version}) never completed successfully. Proceeding...\n`);
+    }
+  }
+
+  // --check: just report ahead/behind, no lock, no build
+  if (opts.check) {
+    return checkForUpdates(paths.home, opts);
+  }
+
   const release = await acquireLock(paths.lock, `update --source ${opts.source}`);
 
   try {
-    // Resolve source root: explicit > cwd (if git) > npm package (from argv[1])
+    // Clean stale staging from interrupted previous run
+    cleanStaleStaging(paths.appStaging);
+
+    // Register interruption handler
+    const cleanupHandler = (): void => {
+      if (existsSync(paths.appStaging) && existsSync(paths.app)) {
+        rmSync(paths.appStaging, { recursive: true, force: true });
+      }
+    };
+    process.on('SIGHUP', () => { cleanupHandler(); process.exit(130); });
+    process.on('SIGTERM', () => { cleanupHandler(); process.exit(143); });
+
+    // ── Step 1: Resolve source ──────────────────────────────────────────
     let repoRoot = opts.repoRoot ?? process.cwd();
     if (!opts.repoRoot && !existsSync(join(repoRoot, '.git'))) {
-      // Not in a git checkout — try npm global package path
       const { realpathSync } = await import('node:fs');
       const scriptPath = realpathSync(process.argv[1] ?? '');
+      const { dirname } = await import('node:path');
       const candidate = join(dirname(scriptPath), '..');
       if (existsSync(join(candidate, 'bundle'))) repoRoot = candidate;
     }
+
     const source = opts.source === 'npm'
       ? makeNpmSource('abtars')
       : makeLocalBuildSource({ repoRoot, allowStale: opts.fromLocal });
+
     if (opts.fromLocal) {
       showHintOnce("update-from-local", "Building from working copy (--from-local). To sync with remote first: git pull && abtars update");
     }
-    process.stdout.write(`Building from local checkout (${process.cwd()})...\n`);
+
+    // --dry-run: print plan and exit
+    if (opts.dryRun) {
+      return printDryRun(paths, repoRoot, opts);
+    }
+
+    process.stdout.write(`Building from local checkout (${repoRoot})...\n`);
+
+    // ── Step 2: Build into app.staging/ ─────────────────────────────────
     const staged = await source.prepare({
-      releasesDir: paths.releases,
-      nodeModulesDir: paths.nodeModules,
+      stagingDir: paths.appStaging,
       home: paths.home,
       allowStale: opts.fromLocal,
     });
-    process.stdout.write(`✓ staged ${staged.version} at ${staged.stagedPath}\n`);
+    process.stdout.write(`✓ staged ${staged.version}\n`);
 
-    // Install external runtime deps at the release dir (#582)
+    // Install external runtime deps
     {
       const pkgPath = join(staged.stagedPath, "package.json");
-      const { readFileSync, writeFileSync } = await import("node:fs");
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
         const externals: Record<string, string> = { patchright: "^1.59.4", "rettiwt-api": "^4.1.3" };
         pkg.dependencies = { ...pkg.dependencies, ...externals };
-        // #722: strip file: refs that can't resolve from staging dir
         if (pkg.dependencies?.abmind?.startsWith("file:")) delete pkg.dependencies.abmind;
+        const { writeFileSync } = await import("node:fs");
         writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
         const { execSync } = await import("node:child_process");
         execSync("npm install --omit=dev --ignore-scripts 2>/dev/null", { cwd: staged.stagedPath, timeout: 60_000 });
@@ -81,298 +123,312 @@ export async function update(opts: UpdateOptions): Promise<number> {
       }
     }
 
-    // Create stable entry point symlink (main.js → bundle or dist)
-    {
-      const { existsSync, unlinkSync, symlinkSync } = await import("node:fs");
-      const mainLink = join(staged.stagedPath, "main.js");
-      try { unlinkSync(mainLink); } catch (err) { logAndSwallow("update", "op", err); }
-      const entry = existsSync(join(staged.stagedPath, "bundle", "abtars.js"))
-        ? "bundle/abtars.js"
-        : "dist/main.js";
-      symlinkSync(entry, mainLink);
+    // Copy abmind into staging
+    await copyAbmind(staged.stagedPath, repoRoot);
+
+    // ── Step 3: Validate staging ────────────────────────────────────────
+    const entryPoint = join(staged.stagedPath, 'bundle', 'abtars.js');
+    if (!existsSync(entryPoint)) {
+      process.stderr.write(`❌ Entry point not found: ${entryPoint}\n`);
+      return 1;
     }
 
-    // Ensure abmind symlink in new release (#722)
-    const { existsSync: ex2, symlinkSync: sl2, mkdirSync: mk2, unlinkSync: ul2 } = await import("node:fs");
-    const { dirname: dn2 } = await import("node:path");
+    // ── Step 4: Config snapshot ─────────────────────────────────────────
+    configSnapshot(paths.config);
+    process.stdout.write(`✓ config snapshot (3-slot rotation)\n`);
 
-    // Flip current → releases/<version>
-    await activate(paths.current, staged.version);
-    process.stdout.write(`✓ current -> releases/${staged.version}\n`);
+    // ── Step 5: Atomic swap ─────────────────────────────────────────────
+    atomicSwap(paths.app, paths.appPrev, paths.appStaging);
+    process.stdout.write(`✓ atomic swap: app.staging/ → app/\n`);
 
-    // Create abmind + better-sqlite3 symlinks if globally available
-    const globalModules = join(dn2(process.execPath), "..", "lib", "node_modules");
-    const abmindHome = process.env["ABMIND_HOME"] ?? join(process.env["HOME"] ?? "", ".abmind");
-    const links: Array<{ name: string; target: string }> = [];
-    const globalAbmind = join(globalModules, "abmind");
-    const homeAbmind = join(process.env["HOME"] ?? "", "abmind");
-    const localAbmind = join(paths.home, "current", "node_modules", "abmind");
-    if (ex2(globalAbmind)) links.push({ name: "abmind", target: globalAbmind });
-    else if (ex2(homeAbmind)) links.push({ name: "abmind", target: homeAbmind });
-    else if (ex2(localAbmind)) links.push({ name: "abmind", target: localAbmind });
-    const bsq3 = join(abmindHome, "lib", "node_modules", "better-sqlite3");
-    if (ex2(bsq3)) links.push({ name: "better-sqlite3", target: bsq3 });
-    if (links.length > 0) {
-      // Bundle entry is at bundle/abtars.js — ESM resolves from there
-      const bundleNm = join(paths.home, "current", "bundle", "node_modules");
-      const rootNm = join(paths.home, "current", "node_modules");
-      for (const dir of [bundleNm, rootNm]) {
-        mk2(dir, { recursive: true });
-        for (const { name, target } of links) {
-          const dest = join(dir, name);
-          try { if (ex2(dest)) ul2(dest); } catch { /* ignore */ }
-          try { sl2(target, dest); } catch { /* best effort */ }
-        }
-      }
-    }
+    // ── Step 6: Post-swap housekeeping ──────────────────────────────────
+    await postSwapHousekeeping(paths, repoRoot, staged);
+
+    // ── Step 7: Write restart sentinel ──────────────────────────────────
+    const prior = await readManifest(paths.manifest);
+    const sentinelData: UpdateSentinel = {
+      version: staged.version,
+      previousVersion: prior?.version ?? null,
+      startedAt: new Date().toISOString(),
+      status: 'pending',
+    };
+    writeSentinel(paths.home, sentinelData);
 
     // Update manifest
-    const prior = await readManifest(paths.manifest);
-    const now = new Date().toISOString();
-    const newPriorReleases = prior?.version
-      ? [
-          {
-            version: prior.version,
-            commit: prior.commit,
-            activatedAt: prior.activatedAt,
-            packageLockHash: prior.packageLockHash,
-          },
-          ...(prior.priorReleases ?? []),
-        ].slice(0, RETENTION - 1)
-      : prior?.priorReleases ?? [];
-
     await writeManifest(paths.manifest, {
       ...(prior ?? emptyManifest('abtars', hostname())),
       version: staged.version,
       commit: staged.commit,
       branch: staged.branch,
       packageLockHash: staged.packageLockHash,
-      activatedAt: now,
+      activatedAt: new Date().toISOString(),
       source: 'local',
-      priorReleases: newPriorReleases,
+      previousVersion: prior?.version ?? null,
+      previousCommit: prior?.commit ?? null,
     });
     process.stdout.write(`✓ manifest updated\n`);
 
-    // Prune old releases
-    const pruned = await pruneReleases(
-      paths.releases,
-      [staged.version, ...newPriorReleases.map((r: PriorRelease) => r.version)],
-      staged.version,
-      RETENTION,
-    );
-    if (pruned.length > 0) {
-      process.stdout.write(`✓ pruned ${pruned.length} old release${pruned.length === 1 ? '' : 's'}: ${pruned.join(', ')}\n`);
+    // ── Step 8: Restart bridge ──────────────────────────────────────────
+    const restartTimestamp = Date.now();
+    const restarted = await restartBridge(paths);
+
+    if (!restarted) {
+      process.stdout.write(`⚠️ Could not restart bridge. Start manually.\n`);
+      return 0;
     }
 
-    process.stdout.write(`\nUpdate complete: ${staged.version}\n`);
+    // ── Step 9: Health probe ────────────────────────────────────────────
+    process.stdout.write(`Waiting for bridge health...\n`);
+    const health = await healthProbe(paths.home, restartTimestamp, 60_000);
 
-    // Clear stale model demotions (#739)
-    const transportJson = join(paths.home, "config", "transport.json");
-    if (existsSync(transportJson)) {
-      try {
-        const tc = JSON.parse(readFileSync(transportJson, "utf-8"));
-        let cleared = false;
-        for (const agent of Object.values(tc.agents ?? {})) {
-          if ((agent as any).demoted) { delete (agent as any).demoted; delete (agent as any).demotedReason; delete (agent as any).demotedModel; cleared = true; }
-          for (const fb of (agent as any).fallbacks ?? []) {
-            if (fb.demoted) { delete fb.demoted; delete fb.demotedReason; delete fb.demotedModel; cleared = true; }
-          }
-        }
-        if (cleared) { const { writeFileSync: wfs } = await import("node:fs"); wfs(transportJson, JSON.stringify(tc, null, 2) + "\n"); }
-      } catch { /* best effort */ }
+    if (health.healthy) {
+      writeSentinel(paths.home, { ...sentinelData, status: 'success' });
+      process.stdout.write(`✓ Bridge healthy (PID ${health.pid}, tick at ${new Date(health.heartbeat!).toISOString()})\n`);
+      return 0;
     }
 
-    // Refresh scripts from repo — read manifest directly (avoid stale cache)
-    const installManifestPath = join(repoRoot, 'install-manifest.json');
-    const installManifest = JSON.parse(await readFile(installManifestPath, 'utf-8')) as { scripts: { include: string[]; executable: string }; services: any; cliWrappers: string[]; configSeeds: any };
-    const repoScripts = join(repoRoot, 'scripts');
-    const destScripts = join(paths.home, 'scripts');
-    await mkdir(destScripts, { recursive: true });
-    const allScriptFiles = await readdir(repoScripts).catch(() => [] as string[]);
-    // Filter by manifest include patterns
-    const matchesInclude = (name: string): boolean =>
-      installManifest.scripts.include.some(pattern => {
-        const ext = pattern.replace("*", "");
-        return name.endsWith(ext);
-      });
-    const scriptFiles = allScriptFiles.filter(matchesInclude);
-    const home = process.env['HOME'] ?? '';
-    let serviceChanged = false;
+    // ── Step 10: Auto-rollback ──────────────────────────────────────────
+    process.stderr.write(`❌ Bridge unhealthy after 60s. Auto-rolling back...\n`);
 
-    // Resolve install mode — skip supervisor artifacts in simple mode
-    const installMode = (await readManifest(paths.manifest))?.installMode ?? "supervised";
-
-    const isExecutable = (name: string): boolean => {
-      const ext = installManifest.scripts.executable.replace("*", "");
-      return name.endsWith(ext);
-    };
-
-    for (const name of scriptFiles) {
-      await copyFile(join(repoScripts, name), join(destScripts, name));
-      if (isExecutable(name)) await chmod(join(destScripts, name), 0o755);
-      // macOS: template + install LaunchAgent plist (supervised only)
-      const macService = installManifest.services.supervised.macos;
-      if (macService && name === macService.plist && process.platform === 'darwin' && home && installMode === 'supervised') {
-        const launchAgentsDir = join(home, 'Library', 'LaunchAgents');
-        await mkdir(launchAgentsDir, { recursive: true });
-        const dst = join(launchAgentsDir, name);
-        const oldContent = await readFile(dst, 'utf-8').catch(() => '');
-        let templated = await readFile(join(repoScripts, name), 'utf-8');
-        for (const ph of macService.placeholders) templated = templated.replaceAll(ph, home);
-        await writeFile(dst, templated);
-        if (oldContent !== templated) serviceChanged = true;
-      }
-      // Linux: install systemd user service (supervised only)
-      const linuxService = installManifest.services.supervised.linux;
-      if (linuxService?.units.includes(name) && process.platform === 'linux' && home && installMode === 'supervised') {
-        const systemdDir = join(home, '.config', 'systemd', 'user');
-        await mkdir(systemdDir, { recursive: true });
-        const dst = join(systemdDir, name);
-        const oldContent = await readFile(dst, 'utf-8').catch(() => '');
-        await copyFile(join(repoScripts, name), dst);
-        const newContent = await readFile(dst, 'utf-8').catch(() => '');
-        if (oldContent !== newContent) serviceChanged = true;
-      }
-    }
-    process.stdout.write(`✓ scripts refreshed (${scriptFiles.length} files)\n`);
-
-    // Regenerate CLI bin wrappers (#310) — keeps wrapper paths in sync with build layout
-    const { writeWrapper } = await import('./install.js');
-    await mkdir(paths.bin, { recursive: true });
-    for (const name of installManifest.cliWrappers) {
-      await writeWrapper(paths.bin, name, paths.current, false);
-    }
-    process.stdout.write(`✓ wrappers refreshed (${installManifest.cliWrappers.length} files)\n`);
-
-    // Sync core skills from release to runtime (#438)
-    const { rmSync, cpSync, readdirSync } = await import("node:fs");
-    const skillsCoreSrc = join(staged.stagedPath, "core", "skills");
-    const skillsCoreDst = join(paths.home, "skills", "core");
-    if (existsSync(skillsCoreSrc)) {
-      rmSync(skillsCoreDst, { recursive: true, force: true });
-      cpSync(skillsCoreSrc, skillsCoreDst, { recursive: true });
-      const files = readdirSync(skillsCoreDst, { recursive: true }) as string[];
-      const count = files.filter(f => f.endsWith("SKILL.md")).length;
-      process.stdout.write(`✓ skills/core synced (${count} skills)\n`);
-    }
-    // Ensure other skill dirs exist
-    for (const d of ["custom", "downloaded", "self"]) {
-      await mkdir(join(paths.home, "skills", d), { recursive: true });
-    }
-    // Migration (#614): remove stale pre-#438 top-level skill dirs (duplicates of core/)
-    for (const stale of ["memory", "ops", "tools", "coding"]) {
-      const p = join(paths.home, "skills", stale);
-      if (existsSync(p)) { rmSync(p, { recursive: true, force: true }); }
+    if (!existsSync(paths.appPrev)) {
+      process.stderr.write(`❌ No app.prev/ to roll back to. Manual intervention required.\n`);
+      process.stderr.write(`   Check: ~/.abtars/logs/bridge.log\n`);
+      return 2;
     }
 
-    // Seed missing config files from release defaults (#738)
-    const releaseConfig = join(staged.stagedPath, "config");
-    const destConfig = join(paths.home, "config");
-    if (existsSync(releaseConfig)) {
-      for (const f of readdirSync(releaseConfig)) {
-        const src = join(releaseConfig, f);
-        if (f.endsWith('.example')) {
-          // Always overwrite .example files (user reference for latest schema)
-          cpSync(src, join(destConfig, f));
-          // Seed the real file if missing
-          const target = join(destConfig, f.replace('.example', ''));
-          if (!existsSync(target)) cpSync(src, target);
-        }
-      }
-      // Also copy transport.default.json (fallback for transport-config)
-      const defaultTransport = join(releaseConfig, 'transport.default.json');
-      if (existsSync(defaultTransport)) cpSync(defaultTransport, join(destConfig, 'transport.default.json'));
+    // Swap back
+    const brokenDir = join(paths.home, 'app.broken');
+    rmSync(brokenDir, { recursive: true, force: true });
+    const { renameSync } = await import('node:fs');
+    renameSync(paths.app, brokenDir);
+    renameSync(paths.appPrev, paths.app);
+
+    // Restore manifest
+    if (prior) {
+      await writeManifest(paths.manifest, prior);
     }
 
-    // Sync core/ to ~/.abtars/core/ (for skill-reloader etc.)
-    const coreSrc = join(staged.stagedPath, "core");
-    const coreDst = join(paths.home, "core");
-    if (existsSync(coreSrc)) {
-      await mkdir(coreDst, { recursive: true });
-      cpSync(coreSrc, coreDst, { recursive: true });
-    }
+    // Restart again
+    const rollbackTs = Date.now();
+    await restartBridge(paths);
+    const rollbackHealth = await healthProbe(paths.home, rollbackTs, 30_000);
 
-    if (serviceChanged) {
-      if (process.platform === 'darwin') {
-        process.stdout.write(`⚠️  LaunchAgent plist updated — reload with: launchctl bootout gui/$(id -u)/com.abtars.watchdog && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist\n`);
-      } else {
-        process.stdout.write(`⚠️  systemd service updated — reload with: systemctl --user daemon-reload && systemctl --user restart abtars-watchdog\n`);
-      }
-    }
-
-
-    // hashFile is unused here but imported to validate the re-export surface;
-    // leaving this no-op call removed — the re-export is exercised by tests.
-    void hashFile;
-
-    // #426 — Seed missing config + run config migrations
-    const { ensureInstallInvariants } = await import("../ensure-invariants.js");
-    const invariantResults = await ensureInstallInvariants(process.cwd(), paths.home);
-    if (invariantResults.length > 0) {
-      process.stdout.write(`✓ invariants: ${invariantResults.join(", ")}\n`);
-    }
-
-    // Native deps (sqlite-vec, better-sqlite3) handled by `abmind install` (#716)
-
-    // Run doctor before restart
-    const doctorPath = join(paths.home, "scripts", "doctor.sh");
-    if (existsSync(doctorPath)) {
-      process.stdout.write("\n🩺 Health check...\n");
-      try {
-        const { execSync } = await import("node:child_process");
-        execSync(`bash "${doctorPath}" --fix`, { stdio: "inherit", timeout: 30_000 });
-      } catch (err) {
-        process.stderr.write(`⚠️ doctor --fix failed: ${err instanceof Error ? err.message : String(err)}\n`);
-      }
-    }
-
-    // Auto-restart bridge on new code
-    const manifestForRestart = await readManifest(paths.manifest);
-    const restartMode = manifestForRestart?.installMode;
-    if (!restartMode) {
-      process.stderr.write("❌ installMode not set in manifest.json. Run 'abtars install' first.\n");
+    if (rollbackHealth.healthy) {
+      process.stderr.write(`⚠️ Rolled back to previous version. Investigate ${brokenDir} for the failure.\n`);
+      rmSync(brokenDir, { recursive: true, force: true });
       return 1;
     }
 
-    if (restartMode === "supervised-daemon" || restartMode === "supervised") {
-      // Send USR1 to watchdog for graceful restart (#688)
-      process.stdout.write("\nRestarting bridge via watchdog...\n");
-      const wdLock = join(paths.home, "watchdog.lock");
-      const wdPid = readJsonField(wdLock, "pid") as number | undefined;
-      if (wdPid && wdPid > 0) {
-        try {
-          process.kill(wdPid, "SIGUSR1");
-          process.stdout.write(`♻️ USR1 sent to watchdog (PID ${wdPid}) — bridge will restart\n`);
-        } catch {
-          process.stdout.write(`⚠️ Could not signal watchdog (PID ${wdPid}). Restart manually:\n`);
-          if (process.platform === "darwin") {
-            process.stdout.write(`  launchctl kickstart -k gui/$(id -u)/com.abtars.watchdog\n`);
-          } else {
-            process.stdout.write(`  systemctl --user restart abtars-watchdog\n`);
-          }
-        }
-      } else {
-        // No watchdog running — fall back to cold restart
-        process.stdout.write(`⚠️ Watchdog not running. Cold restart...\n`);
-        const { restart } = await import("./restart.js");
-        await restart({ cold: true }).catch((err: unknown) => {
-          process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
-        });
-      }
-    } else {
-      // simple mode: no watchdog, cold restart
-      process.stdout.write("\nRestarting bridge...\n");
-      const { restart } = await import("./restart.js");
-      await restart({ cold: true }).catch((err: unknown) => {
-        process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
-      });
-    }
+    process.stderr.write(`❌ Rollback also failed. Manual intervention required.\n`);
+    process.stderr.write(`   Check: ~/.abtars/logs/bridge.log\n`);
+    process.stderr.write(`   Broken version preserved at: ${brokenDir}\n`);
+    return 2;
 
-    const { printHealthSummary } = await import('./health-check.js');
-    printHealthSummary(paths.home);
-
-    return 0;
   } finally {
     await release();
   }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+async function copyAbmind(stagedPath: string, repoRoot: string): Promise<void> {
+  const candidates = [
+    process.env['ABMIND_REPO'],
+    join(repoRoot, '..', 'abmind'),
+    join(process.env['HOME'] ?? '', 'abmind'),
+  ].filter(Boolean) as string[];
+
+  for (const src of candidates) {
+    const distDir = join(src, 'dist');
+    if (existsSync(distDir)) {
+      const dest = join(stagedPath, 'node_modules', 'abmind');
+      mkdirSync(dest, { recursive: true });
+      cpSync(distDir, join(dest, 'dist'), { recursive: true });
+      if (existsSync(join(src, 'package.json'))) cpSync(join(src, 'package.json'), join(dest, 'package.json'));
+      if (existsSync(join(src, 'prompts'))) cpSync(join(src, 'prompts'), join(dest, 'prompts'), { recursive: true });
+      process.stdout.write(`✓ abmind copied from ${src}\n`);
+      return;
+    }
+  }
+  process.stdout.write(`⚠ abmind source not found (checked: ${candidates.join(', ')}). Bridge may fail to start.\n`);
+}
+
+async function postSwapHousekeeping(
+  paths: ReturnType<typeof packagePaths>,
+  repoRoot: string,
+  _staged: { version: string; stagedPath: string },
+): Promise<void> {
+  // Refresh scripts
+  const { loadManifest } = await import('../install-manifest.js');
+  const installManifest = loadManifest(paths.app);
+  const repoScripts = join(repoRoot, 'scripts');
+  const destScripts = join(paths.home, 'scripts');
+  await mkdir(destScripts, { recursive: true });
+  const allScriptFiles = await readdir(repoScripts).catch(() => [] as string[]);
+  const matchesInclude = (name: string): boolean =>
+    installManifest.scripts.include.some((pattern: string) => name.endsWith(pattern.replace("*", "")));
+  const scriptFiles = allScriptFiles.filter(matchesInclude);
+  const isExecutable = (name: string): boolean => name.endsWith(installManifest.scripts.executable.replace("*", ""));
+
+  for (const name of scriptFiles) {
+    await copyFile(join(repoScripts, name), join(destScripts, name));
+    if (isExecutable(name)) await chmod(join(destScripts, name), 0o755);
+  }
+  process.stdout.write(`✓ scripts refreshed (${scriptFiles.length} files)\n`);
+
+  // Regenerate CLI bin wrappers
+  const { writeWrapper } = await import('./install.js');
+  await mkdir(paths.bin, { recursive: true });
+  for (const name of installManifest.cliWrappers) {
+    await writeWrapper(paths.bin, name, paths.app, false);
+  }
+  process.stdout.write(`✓ wrappers refreshed (${installManifest.cliWrappers.length} files)\n`);
+
+  // Sync core skills
+  const skillsCoreSrc = join(paths.app, "core", "skills");
+  const skillsCoreDst = join(paths.home, "skills", "core");
+  if (existsSync(skillsCoreSrc)) {
+    rmSync(skillsCoreDst, { recursive: true, force: true });
+    cpSync(skillsCoreSrc, skillsCoreDst, { recursive: true });
+    const files = readdirSync(skillsCoreDst, { recursive: true }) as string[];
+    const count = files.filter(f => f.endsWith("SKILL.md")).length;
+    process.stdout.write(`✓ skills/core synced (${count} skills)\n`);
+  }
+  for (const d of ["custom", "downloaded", "self"]) {
+    await mkdir(join(paths.home, "skills", d), { recursive: true });
+  }
+
+  // Seed missing config files
+  const releaseConfig = join(paths.app, "config");
+  const destConfig = join(paths.home, "config");
+  if (existsSync(releaseConfig)) {
+    for (const f of readdirSync(releaseConfig)) {
+      const src = join(releaseConfig, f);
+      if (f.endsWith('.example')) {
+        cpSync(src, join(destConfig, f));
+        const target = join(destConfig, f.replace('.example', ''));
+        if (!existsSync(target)) cpSync(src, target);
+      }
+    }
+    const defaultTransport = join(releaseConfig, 'transport.default.json');
+    if (existsSync(defaultTransport)) cpSync(defaultTransport, join(destConfig, 'transport.default.json'));
+  }
+
+  // Clear stale model demotions
+  const transportJson = join(paths.home, "config", "transport.json");
+  if (existsSync(transportJson)) {
+    try {
+      const tc = JSON.parse(readFileSync(transportJson, "utf-8"));
+      let cleared = false;
+      for (const agent of Object.values(tc.agents ?? {})) {
+        if ((agent as any).demoted) { delete (agent as any).demoted; delete (agent as any).demotedReason; delete (agent as any).demotedModel; cleared = true; }
+        for (const fb of (agent as any).fallbacks ?? []) {
+          if (fb.demoted) { delete fb.demoted; delete fb.demotedReason; delete fb.demotedModel; cleared = true; }
+        }
+      }
+      if (cleared) { const { writeFileSync } = await import("node:fs"); writeFileSync(transportJson, JSON.stringify(tc, null, 2) + "\n"); }
+    } catch { /* best effort */ }
+  }
+
+  // Run doctor
+  const doctorPath = join(paths.home, "scripts", "doctor.sh");
+  if (existsSync(doctorPath)) {
+    process.stdout.write("\n🩺 Health check...\n");
+    try {
+      const { execSync } = await import("node:child_process");
+      execSync(`bash "${doctorPath}" --fix`, { stdio: "inherit", timeout: 30_000 });
+    } catch (err) {
+      process.stderr.write(`⚠️ doctor --fix failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  }
+
+  // Ensure invariants
+  const { ensureInstallInvariants } = await import("../ensure-invariants.js");
+  const invariantResults = await ensureInstallInvariants(process.cwd(), paths.home);
+  if (invariantResults.length > 0) {
+    process.stdout.write(`✓ invariants: ${invariantResults.join(", ")}\n`);
+  }
+
+  void hashFile; // preserve import
+}
+
+async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<boolean> {
+  const manifest = await readManifest(paths.manifest);
+  const mode = manifest?.installMode;
+  if (!mode) {
+    process.stderr.write("❌ installMode not set in manifest.json. Run 'abtars install' first.\n");
+    return false;
+  }
+
+  if (mode === "supervised-daemon" || mode === "supervised") {
+    process.stdout.write("\n♻️ Restarting bridge via watchdog...\n");
+    const wdLock = join(paths.home, "watchdog.lock");
+    const wdPid = readJsonField(wdLock, "pid") as number | undefined;
+    if (wdPid && wdPid > 0) {
+      try {
+        process.kill(wdPid, "SIGUSR1");
+        process.stdout.write(`  USR1 sent to watchdog (PID ${wdPid})\n`);
+        return true;
+      } catch {
+        process.stdout.write(`⚠️ Could not signal watchdog (PID ${wdPid}).\n`);
+      }
+    }
+    // Fallback: cold restart
+    const { restart } = await import("./restart.js");
+    await restart({ cold: true }).catch((err: unknown) => {
+      process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    });
+    return true;
+  }
+
+  // Simple mode
+  process.stdout.write("\n♻️ Restarting bridge...\n");
+  const { restart } = await import("./restart.js");
+  await restart({ cold: true }).catch((err: unknown) => {
+    process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
+  });
+  return true;
+}
+
+function printDryRun(paths: ReturnType<typeof packagePaths>, repoRoot: string, opts: UpdateOptions): number {
+  const { spawnSync } = require('node:child_process') as typeof import('node:child_process');
+  const commit = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).stdout?.trim() ?? '?';
+  const branch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).stdout?.trim() ?? '?';
+  const wdLock = join(paths.home, "watchdog.lock");
+  const wdPid = readJsonField(wdLock, "pid") as number | undefined;
+
+  process.stdout.write(`
+Dry run — no changes will be made.
+  Source:       ${opts.source} (commit ${commit} on ${branch})
+  Staging to:   ${paths.appStaging}
+  Swap:         app/ → app.prev/, app.staging/ → app/
+  Config snap:  config/ → config/.pre-update/ (3-slot rotation)
+  Restart:      ${wdPid ? `USR1 to watchdog (PID ${wdPid})` : 'cold restart'}
+  Health:       poll bridge.lock for 60s
+  On failure:   auto-rollback (swap app/ ↔ app.prev/)
+`);
+  return 0;
+}
+
+async function checkForUpdates(home: string, opts: UpdateOptions): Promise<number> {
+  const repoRoot = opts.repoRoot ?? process.cwd();
+  if (!existsSync(join(repoRoot, '.git'))) {
+    process.stderr.write("Not a git repository. --check requires a git checkout.\n");
+    return 2;
+  }
+  const { spawnSync } = await import('node:child_process');
+  spawnSync('git', ['fetch', '--quiet'], { cwd: repoRoot });
+  const result = spawnSync('git', ['rev-list', '--count', 'HEAD..origin/dev'], { cwd: repoRoot, encoding: 'utf-8' });
+  const ahead = parseInt(result.stdout?.trim() ?? '0', 10);
+
+  const manifest = await readManifest(join(home, 'manifest.json'));
+  process.stdout.write(`Current: ${manifest?.version ?? 'unknown'} (deployed ${manifest?.activatedAt ?? 'never'})\n`);
+
+  if (ahead === 0) {
+    process.stdout.write(`Remote:  up to date\n`);
+    return 0;
+  }
+  process.stdout.write(`Remote:  dev is ${ahead} commit${ahead === 1 ? '' : 's'} ahead\n`);
+  process.stdout.write(`Action:  run 'abtars update' to apply\n`);
+  return 2; // exit 2 = behind (not error, informational — per AG1 review)
 }

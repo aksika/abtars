@@ -29,9 +29,8 @@ describe('deploy-lib/manifest', () => {
       packageLockHash: 'deadbeef',
       source: 'local',
       migrationsApplied: ['001-env-memory-to-config'],
-      priorReleases: [
-        { version: 'v1.2.2', commit: 'abc1233', activatedAt: '2026-04-01T00:00:00Z', packageLockHash: 'cafebabe' },
-      ],
+      previousVersion: 'v1.2.2',
+      previousCommit: 'abc1233',
     };
     await writeManifest(path, original);
     const round = await readManifest(path);
@@ -44,7 +43,8 @@ describe('deploy-lib/manifest', () => {
     expect(m.host).toBe('kp');
     expect(m.version).toBe('');
     expect(m.migrationsApplied).toHaveLength(0);
-    expect(m.priorReleases).toHaveLength(0);
+    expect(m.previousVersion).toBeNull();
+    expect(m.previousCommit).toBeNull();
   });
 
   it('written manifest is human-readable pretty JSON', async () => {
