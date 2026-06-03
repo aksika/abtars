@@ -46,7 +46,7 @@ On restart, the file is automatically encrypted. The plaintext value is availabl
 The bridge needs the passphrase to decrypt at boot:
 
 1. `ABMIND_PASSPHRASE` environment variable (systemd unit, launchd plist)
-2. macOS Keychain (set during `abtars passwd`)
+2. macOS Keychain (set during `abmind passwd`)
 3. Interactive prompt (only if TTY available)
 
 ## Cookie access
@@ -69,5 +69,5 @@ cookie_read({ name: "x-cookies" })
 
 | Command | Purpose |
 |---------|---------|
-| `abtars passwd` | Set or change passphrase, re-encrypts all secrets |
+| `abmind passwd` | Set or change passphrase, re-encrypts all secrets |
 | `abtars doctor` | Verify vault integrity + permissions |
