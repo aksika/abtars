@@ -30,17 +30,20 @@ if [ -f "$DB" ] && command -v sqlite3 &>/dev/null; then
   sqlite3 "$DB" ".backup '$DB_TMP'"
 fi
 
-# Zip backup: abtars runtime data
+# Zip backup: everything in ~/.abtars except binaries/runtime
 cd "$AB"
-zip -qr "$DEST/abtars-$DATE.zip" \
-  config/ secret/ skills/ tasks/ core/ state/ workspace/ \
+zip -qr "$DEST/abtars-$DATE.zip" . \
+  -x ".git/*" "current/*" "releases/*" "bin/*" "logs/*" "backup/*" "node_modules/*" \
+  -x "*.sock" "*.db-wal" "*.db-shm" \
   2>/dev/null || true
 
-# Add abmind memory/core + sleep reports
-if [ -d "$ABMIND/memory" ]; then
+# Add abmind: everything except raw DB and backup/
+if [ -d "$ABMIND" ]; then
   cd "$ABMIND"
-  zip -qr "$DEST/abtars-$DATE.zip" \
-    memory/core/ memory/sleep/ 2>/dev/null || true
+  zip -qr "$DEST/abtars-$DATE.zip" . \
+    -x "memory/memory.db" "backup/*" "lib/*" "node_modules/*" \
+    -x "*.sock" "*.db-wal" "*.db-shm" \
+    2>/dev/null || true
 fi
 
 # Add the WAL-safe DB copy
