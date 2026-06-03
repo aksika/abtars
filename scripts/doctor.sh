@@ -387,6 +387,9 @@ fi
 if $FIX_FULL && [ -f "$DB" ]; then
   sqlite3 "$DB" 'INSERT INTO messages_fts(messages_fts) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt messages_fts index"
   sqlite3 "$DB" 'INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt extracted_memories_fts index"
+  sqlite3 "$DB" 'INSERT INTO extracted_memories_original_fts(extracted_memories_original_fts) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt extracted_memories_original_fts index"
+  sqlite3 "$DB" 'INSERT INTO content_en_trigram(content_en_trigram) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt content_en_trigram index"
+  sqlite3 "$DB" 'INSERT INTO content_original_trigram(content_original_trigram) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt content_original_trigram index"
   sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);' 2>/dev/null && fix "WAL checkpoint truncate"
 fi
 

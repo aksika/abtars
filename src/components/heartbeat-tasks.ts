@@ -49,14 +49,15 @@ export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
   };
 }
 
-/** DB integrity check — runs PRAGMA integrity_check every ~1 hour. */
+/** DB integrity check — runs every ~1 hour (time-based, independent of tick interval). */
 export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTask {
-  let counter = 0;
+  let lastCheckAt = 0;
+  const INTERVAL_MS = 60 * 60 * 1000;
   return {
     name: "db-integrity",
     execute: async () => {
-      counter++;
-      if (counter % 72 !== 0) return;
+      if (Date.now() - lastCheckAt < INTERVAL_MS) return;
+      lastCheckAt = Date.now();
       if (!memory) return;
       const result = memory.maintenance.checkIntegrity();
       if (result !== "ok") {
