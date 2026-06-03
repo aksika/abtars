@@ -182,9 +182,9 @@ export async function update(opts: UpdateOptions): Promise<number> {
       } catch { /* best effort */ }
     }
 
-    // Refresh scripts from repo — manifest-driven
-    const { loadManifest } = await import('../install-manifest.js');
-    const installManifest = loadManifest(staged.stagedPath);
+    // Refresh scripts from repo — read manifest directly (avoid stale cache)
+    const installManifestPath = join(repoRoot, 'install-manifest.json');
+    const installManifest = JSON.parse(await readFile(installManifestPath, 'utf-8')) as { scripts: { include: string[]; executable: string }; services: any; cliWrappers: string[]; configSeeds: any };
     const repoScripts = join(repoRoot, 'scripts');
     const destScripts = join(paths.home, 'scripts');
     await mkdir(destScripts, { recursive: true });
