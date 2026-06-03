@@ -17,6 +17,14 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
     const text = ctx.text.trim();
     const lower = text.toLowerCase();
 
+    // Read-only commands bypass busy guard — produce independent messages (#766)
+    const firstWord = lower.split(/\s/)[0]!;
+    const READONLY = ["/memory", "/models", "/status", "/help", "/tasks", "/usage", "/sleep", "/sessions", "/whoami", "/model"];
+    if (READONLY.includes(firstWord)) {
+      await next();
+      return;
+    }
+
     // /stop or /ctrlc — hard interrupt
     if (lower === "/stop" || lower === "/ctrlc") {
       logInfo("busy-guard", `STOP interrupt for ${activeId}`);
