@@ -3,21 +3,18 @@
 #
 # Usage:
 #   doctor.sh              # diagnose only -- prints warnings, changes nothing
-#   doctor.sh --fix        # safe fixes (chmod, mkdir, stale locks, stale sleep locks)
-#   doctor.sh --fix-full   # all safe fixes + FTS rebuild, WAL checkpoint, git push check
+#   doctor.sh --fix        # safe fixes (chmod, mkdir, stale locks, watchdog install, delegate to abmind)
 set -uo pipefail
 
 AB="$HOME/.abtars"
 ABMIND="${ABMIND_HOME:-$HOME/.abmind}"
 DB="$ABMIND/memory/memory.db"
 FIX=false
-FIX_FULL=false
 WARNS=0
 FIXES=0
 
 case "${1:-}" in
-  --fix-full) FIX=true; FIX_FULL=true ;;
-  --fix)      FIX=true ;;
+  --fix|--fix) FIX=true ;;
 esac
 
 warn() { echo "[doctor] WARN: $1"; WARNS=$((WARNS + 1)); }
@@ -153,7 +150,7 @@ fi
 if [[ "$INSTALL_MODE" == "supervised" || "$INSTALL_MODE" == "supervised-daemon" ]]; then
 if [[ "$(uname)" == "Darwin" ]]; then
   if ! launchctl list 2>/dev/null | grep -q abtars.watchdog; then
-    if $FIX || $FIX_FULL; then
+    if $FIX; then
       PLIST_SRC="$(dirname "$0")/com.abtars.watchdog.plist"
       PLIST_DST="$HOME/Library/LaunchAgents/com.abtars.watchdog.plist"
       if [ -f "$PLIST_SRC" ]; then
@@ -163,12 +160,12 @@ if [[ "$(uname)" == "Darwin" ]]; then
         warn "watchdog LaunchAgent not loaded -- plist not found at $PLIST_SRC"
       fi
     else
-      warn "watchdog LaunchAgent not loaded -- run with --fix-full to install"
+      warn "watchdog LaunchAgent not loaded -- run with --fix to install"
     fi
   fi
 elif command -v systemctl &>/dev/null; then
   if ! systemctl --user is-enabled abtars-watchdog.service &>/dev/null 2>&1; then
-    if $FIX_FULL; then
+    if $FIX; then
       SVC_SRC="$(dirname "$0")/abtars-watchdog.service"
       SVC_DST="$HOME/.config/systemd/user/abtars-watchdog.service"
       if [ -f "$SVC_SRC" ]; then
@@ -180,7 +177,7 @@ elif command -v systemctl &>/dev/null; then
         warn "watchdog systemd unit not enabled -- service file not found at $SVC_SRC"
       fi
     else
-      warn "watchdog systemd unit not enabled -- run with --fix-full to install"
+      warn "watchdog systemd unit not enabled -- run with --fix to install"
     fi
   fi
 fi
@@ -190,7 +187,7 @@ fi # end supervised-only supervisor check
 # 1. Directory permissions (sensitive dirs should be 700)
 for d in "$AB/secret" "$AB/secret/cookies" "$ABMIND/memory"; do
   if [ -d "$d" ] && [ "$(file_mode "$d")" != "700" ]; then
-    if $FIX || $FIX_FULL; then
+    if $FIX; then
       chmod 700 "$d"; fix "$d permissions → 700"
     else
       warn "$d permissions not 700"
@@ -399,24 +396,13 @@ if $WD_ALIVE && [ -n "$WD_PID" ]; then
   fi
 fi
 
-# 13. Full fixes (--fix-full only)
-if $FIX_FULL && [ -f "$DB" ]; then
-  sqlite3 "$DB" 'INSERT INTO messages_fts(messages_fts) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt messages_fts index"
-  sqlite3 "$DB" 'INSERT INTO extracted_memories_fts(extracted_memories_fts) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt extracted_memories_fts index"
-  sqlite3 "$DB" 'INSERT INTO extracted_memories_original_fts(extracted_memories_original_fts) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt extracted_memories_original_fts index"
-  sqlite3 "$DB" 'INSERT INTO content_en_trigram(content_en_trigram) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt content_en_trigram index"
-  sqlite3 "$DB" 'INSERT INTO content_original_trigram(content_original_trigram) VALUES('"'"'rebuild'"'"');' 2>/dev/null && fix "rebuilt content_original_trigram index"
-  sqlite3 "$DB" 'PRAGMA wal_checkpoint(TRUNCATE);' 2>/dev/null && fix "WAL checkpoint truncate"
-fi
-
-if $FIX_FULL; then
-  cd "$AB"
-  if [ -d .git ]; then
-    if ! git remote get-url origin &>/dev/null; then
-      warn "git remote 'origin' missing -- backup push will fail"
-    elif ! timeout 5 git push --dry-run &>/dev/null; then
-      warn "git push would fail -- check upstream/auth"
-    fi
+# 13. Delegate DB health to abmind doctor
+if [ -d "$ABMIND" ] && command -v abmind &>/dev/null; then
+  echo "[doctor] Delegating DB health to abmind doctor..."
+  if $FIX; then
+    abmind doctor --fix 2>&1 | sed 's/^/  [abmind] /'
+  else
+    abmind doctor 2>&1 | sed 's/^/  [abmind] /'
   fi
 fi
 
@@ -494,7 +480,7 @@ check_perm() {
   actual=$(stat -c "%a" "$path" 2>/dev/null || stat -f "%Lp" "$path" 2>/dev/null)
   if [ "$actual" != "$expected" ]; then
     warn "$label is $actual — should be $expected"
-    if $FIX || $FIX_FULL; then
+    if $FIX; then
       chmod "$expected" "$path" && fix "$label → $expected"
     fi
   fi
@@ -512,7 +498,7 @@ for dir in "$AB/config" "$AB/secret"; do
     actual=$(stat -c "%a" "$f" 2>/dev/null || stat -f "%Lp" "$f" 2>/dev/null)
     if [ "$actual" != "600" ]; then
       warn "$(basename "$f") in $(basename "$dir")/ is $actual — should be 600"
-      if $FIX || $FIX_FULL; then
+      if $FIX; then
         chmod 600 "$f" && fix "$(basename "$f") → 600"
       fi
     fi
@@ -536,7 +522,7 @@ fi
 
 total_stale=$((stale_logs + stale_overflow + stale_reports + stale_media))
 if [ "$total_stale" -gt 0 ] || [ "$audit_size" -gt "$AUDIT_MAX_BYTES" ]; then
-  if $FIX || $FIX_FULL; then
+  if $FIX; then
     [ "$stale_logs" -gt 0 ] && find "$AB/logs" -type f -name "*.log" -mtime +"$LOGS_KEEP_DAYS" -delete && fix "deleted $stale_logs log file(s) older than ${LOGS_KEEP_DAYS}d"
     [ "$stale_overflow" -gt 0 ] && find "$AB/overflow" -type f -mtime +"$DATA_KEEP_DAYS" -delete && fix "deleted $stale_overflow overflow file(s) older than ${DATA_KEEP_DAYS}d"
     [ "$stale_reports" -gt 0 ] && find "$AB/reports" -type f -mtime +"$DATA_KEEP_DAYS" -delete && fix "deleted $stale_reports report file(s) older than ${DATA_KEEP_DAYS}d"
@@ -552,19 +538,19 @@ if [ "$total_stale" -gt 0 ] || [ "$audit_size" -gt "$AUDIT_MAX_BYTES" ]; then
 fi
 
 # Summary
-if $FIX_FULL && [ -f "$AB/logs/watchdog.log" ]; then
+if $FIX && [ -f "$AB/logs/watchdog.log" ]; then
   echo ""
   echo "[doctor] Last 10 lines of watchdog.log:"
   tail -10 "$AB/logs/watchdog.log" | sed 's/^/  /'
 fi
 
-if $FIX || $FIX_FULL; then
+if $FIX; then
   echo "[doctor] Done. $FIXES fixes applied, $WARNS warnings."
 else
   if [ "$WARNS" -eq 0 ]; then
     echo "[doctor] All clear."
   else
-    echo "[doctor] $WARNS warnings. Run with --fix or --fix-full to repair."
+    echo "[doctor] $WARNS warnings. Run with --fix to repair."
   fi
 fi
 
