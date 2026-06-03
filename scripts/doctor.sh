@@ -350,6 +350,22 @@ if [ "$KIRO_PROCS" -gt 1 ]; then
   fi
 fi
 
+# 14b. Orphaned gemini-cli processes
+GEMINI_PROCS=$(pgrep -f 'gemini.*--acp' 2>/dev/null | wc -l)
+if [ "$GEMINI_PROCS" -gt 1 ]; then
+  if $FIX; then
+    PIDS=$(pgrep -f 'gemini.*--acp' 2>/dev/null | sort -n)
+    NEWEST=$(echo "$PIDS" | tail -1)
+    for pid in $PIDS; do
+      if [ "$pid" != "$NEWEST" ]; then
+        kill "$pid" 2>/dev/null && fix "killed orphaned gemini-cli pid $pid"
+      fi
+    done
+  else
+    warn "$GEMINI_PROCS gemini-cli acp processes running -- likely orphans from previous bridge"
+  fi
+fi
+
 # 12b. Orphaned abtars-sleep processes
 SLEEP_PROCS=$(pgrep -f 'abtars-sleep' 2>/dev/null | wc -l)
 if [ "$SLEEP_PROCS" -gt 1 ]; then
