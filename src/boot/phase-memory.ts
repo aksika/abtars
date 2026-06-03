@@ -12,7 +12,7 @@
  * internal logger, not an abtars singleton).
  */
 
-import { logInfo, logWarn } from "../components/logger.js";
+import { logDebug, logInfo, logWarn } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { nullMemory } from "../components/null-memory.js";
 import { loadAbmind } from "../utils/abmind-lazy.js";
@@ -36,7 +36,7 @@ export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
     const memory = new mod.MemoryManager(ctx.memoryConfig);
     await memory.initialize();
     ctx.memory = memory;
-    logInfo("main", `🧠 Memory enabled (dir=${ctx.memoryConfig.memoryDir})`);
+    logDebug("main", `🧠 Memory enabled (dir=${ctx.memoryConfig.memoryDir})`);
     return "ran";
   } catch (err) {
     logWarn("main", `⚠️ Memory init failed: ${err instanceof Error ? err.message : String(err)}. Running without persistent memory.`);
