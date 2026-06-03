@@ -119,6 +119,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           defaultProvider: typeof flags.get('default-provider') === 'string' ? (flags.get('default-provider') as string) : undefined,
           defaultModel: typeof flags.get('default-model') === 'string' ? (flags.get('default-model') as string) : undefined,
           discordA2aChannel: typeof flags.get('discord-a2a-channel') === 'string' ? (flags.get('discord-a2a-channel') as string) : undefined,
+          userName: typeof flags.get('user-name') === 'string' ? (flags.get('user-name') as string) : undefined,
           force: flags.get('force') === true,
         });
       case 'status':

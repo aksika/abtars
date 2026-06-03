@@ -36,6 +36,7 @@ export interface OnboardOptions {
   readonly defaultProvider?: string;
   readonly defaultModel?: string;
   readonly discordA2aChannel?: string;
+  readonly userName?: string;
   readonly force: boolean;
 }
 
@@ -362,7 +363,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   }
   return {
     installMode: 'supervised',
-    userName: '',
+    userName: opts.userName ?? '',
     passphrase: '',
     telegramToken: opts.telegramToken ?? '',
     telegramChatId: opts.telegramChatId ?? '',
