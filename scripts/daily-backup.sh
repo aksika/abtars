@@ -33,7 +33,7 @@ fi
 # Zip backup: abtars runtime data
 cd "$AB"
 zip -qr "$DEST/abtars-$DATE.zip" \
-  config/ secret/ skills/ tasks/ reports/ finance/ core/ state/ workspace/ \
+  config/ secret/ skills/ tasks/ core/ state/ workspace/ \
   2>/dev/null || true
 
 # Add abmind memory/core + sleep reports
