@@ -26,6 +26,13 @@ process.on("uncaughtException", (err) => {
 });
 
 process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const isAcpRecoverable = (reason instanceof Error && reason.name === "AcpExitError")
+    || msg.includes("kiro-cli exited") || msg.includes("-32603") || msg.includes("AcpExit");
+  if (isAcpRecoverable) {
+    console.error(`[WARN] Suppressed ACP rejection (transport will reinit): ${msg}`);
+    return;
+  }
   console.error(`[FATAL] Unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : reason}`);
   process.exit(1);
 });
