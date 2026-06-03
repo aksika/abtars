@@ -5,8 +5,23 @@ AB="$HOME/.abtars"
 ABMIND="${ABMIND_HOME:-$HOME/.abmind}"
 DEST="$HOME/.backup-abtars"
 DATE=$(date +%Y%m%d)
+CONFIG_ONLY=false
+
+if [[ "${1:-}" == "--config" ]]; then
+  CONFIG_ONLY=true
+fi
 
 mkdir -p "$DEST"
+
+if $CONFIG_ONLY; then
+  # Minimal: config + secrets + tasks state only
+  cd "$AB"
+  zip -qr "$DEST/abtars-config-$DATE.zip" \
+    config/ secret/ state/tasks.json state/tasks.json.backup \
+    2>/dev/null || true
+  echo "✓ abtars-config-$DATE.zip (config-only)"
+  exit 0
+fi
 
 # WAL-safe memory.db backup via sqlite3
 DB="$ABMIND/memory/memory.db"
@@ -15,11 +30,11 @@ if [ -f "$DB" ] && command -v sqlite3 &>/dev/null; then
   sqlite3 "$DB" ".backup '$DB_TMP'"
 fi
 
-# Zip backup: abtars config/skills + abmind core/memory
+# Zip backup: abtars runtime data
 cd "$AB"
 zip -qr "$DEST/abtars-$DATE.zip" \
-  config/ secret/ skills/ prompts/ tasks/ topics/ reports/ finance/ core/ state/ \
-  -x "config/.env.skills" 2>/dev/null || true
+  config/ secret/ skills/ tasks/ reports/ finance/ core/ state/ workspace/ \
+  2>/dev/null || true
 
 # Add abmind memory/core + sleep reports
 if [ -d "$ABMIND/memory" ]; then
