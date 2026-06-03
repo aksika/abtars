@@ -425,6 +425,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
     'BED_TIME', 'WAKE_TIME', 'HEARTBEAT_INTERVAL_SEC', 'EMBEDDING_ENABLED', 'TRUST_MODE',
+    'TELEGRAM_ENABLED', 'DISCORD_ENABLED', 'IRC_ENABLED',
   ]);
   const keptLines: string[] = [];
   for (const line of existing.split('\n')) {
@@ -450,6 +451,9 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   newBlock.push(`EMBEDDING_ENABLED=${answers.embeddingEnabled ? 'true' : 'false'}`);
   newBlock.push(`SECURITY_MODE=${answers.securityMode}`);
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
+  newBlock.push(`TELEGRAM_ENABLED=${answers.telegramToken ? 'true' : 'false'}`);
+  newBlock.push(`DISCORD_ENABLED=${answers.discordBotToken ? 'true' : 'false'}`);
+  newBlock.push(`IRC_ENABLED=false`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
 }
