@@ -12,24 +12,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 
 const TAG = "task_store";
 
-const storePath = (): string => {
-  const newPath = join(abtarsHome(), "tasks", "tasks.json");
-  // One-time migration from old locations
-  if (!existsSync(newPath)) {
-    const oldPaths = [
-      join(abtarsHome(), "config", "tasks.json"),
-      join(abtarsHome(), "state", "tasks.json"),
-    ];
-    for (const old of oldPaths) {
-      if (existsSync(old)) {
-        mkdirSync(dirname(newPath), { recursive: true });
-        renameSync(old, newPath);
-        break;
-      }
-    }
-  }
-  return newPath;
-};
+const storePath = (): string => join(abtarsHome(), "tasks", "tasks.json");
 
 function readAll(): CronEntry[] {
   const p = storePath();
