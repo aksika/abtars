@@ -32,7 +32,9 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
   let sendTimer: NodeJS.Timeout | null = null;
   let buffer = "";
   let consecutiveFailures = 0;
+  let connectedAt = 0;
   const MAX_RETRIES = 5;
+  const STABILITY_MS = 30000;
 
   function connect(): void {
     if (stopped) return;
@@ -42,7 +44,7 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
     const onConnect = (): void => {
       logInfo(TAG, `Connected to ${opts.host}:${opts.port}`);
       reconnectDelay = 5000;
-      consecutiveFailures = 0;
+      connectedAt = Date.now();
       raw(`NICK ${opts.nick}`);
       raw(`USER ${opts.nick} 0 * :abtars`);
     };
@@ -60,6 +62,8 @@ export function createIrcClient(opts: IrcClientOptions): IrcClient {
       else logDebug(TAG, `Socket error (reconnecting): ${err.message}`);
     });
     socket.on("close", () => {
+      const lived = Date.now() - connectedAt;
+      if (lived >= STABILITY_MS) consecutiveFailures = 0;
       if (reconnectDelay <= 5000) logWarn(TAG, `Disconnected from ${opts.host}`);
       opts.onDisconnect?.();
       scheduleReconnect();
