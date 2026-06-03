@@ -7,7 +7,7 @@
  *   abtars-task list
  *   abtars-task remove <id>
  *
- * File: ~/.abtars/config/tasks.json
+ * File: ~/.abtars/tasks/tasks.json
  */
 
 import { localISO } from "../utils/local-time.js";

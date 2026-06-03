@@ -691,7 +691,7 @@ interface TaskTemplateEntry {
  */
 async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<void> {
   const { existsSync } = await import('node:fs');
-  const tasksJson = join(abtarsHome, 'config', 'tasks.json');
+  const tasksJson = join(abtarsHome, 'tasks', 'tasks.json');
   if (existsSync(tasksJson)) {
     process.stdout.write(`• tasks.json exists — skipping default-task seed\n`);
     return;

@@ -13,12 +13,20 @@ import { logAndSwallow } from "../log-and-swallow.js";
 const TAG = "task_store";
 
 const storePath = (): string => {
-  const newPath = join(abtarsHome(), "config", "tasks.json");
-  // One-time migration from old location
-  const oldPath = join(abtarsHome(), "state", "tasks.json");
-  if (!existsSync(newPath) && existsSync(oldPath)) {
-    mkdirSync(dirname(newPath), { recursive: true });
-    renameSync(oldPath, newPath);
+  const newPath = join(abtarsHome(), "tasks", "tasks.json");
+  // One-time migration from old locations
+  if (!existsSync(newPath)) {
+    const oldPaths = [
+      join(abtarsHome(), "config", "tasks.json"),
+      join(abtarsHome(), "state", "tasks.json"),
+    ];
+    for (const old of oldPaths) {
+      if (existsSync(old)) {
+        mkdirSync(dirname(newPath), { recursive: true });
+        renameSync(old, newPath);
+        break;
+      }
+    }
   }
   return newPath;
 };
