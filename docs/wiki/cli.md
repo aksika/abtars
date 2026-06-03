@@ -18,7 +18,8 @@ abtars logs
 abtars config
 abtars doctor     [<args passed to doctor.sh>...]
 abtars onboard    [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
-abtars passwd
+abtars daemon     install|uninstall|start|stop|restart|status
+abtars deps       install|list|check
 ```
 
 ## Commands
@@ -91,10 +92,6 @@ Interactive first-run wizard. Sets up Telegram bot token, chat ID, and initial c
 - `--telegram-chat-id` — owner chat ID
 - `--accept-risk` — acknowledge security implications
 
-### passwd
-
-Change or set the agent API password (used for peer authentication).
-
 ### logs
 
 Tails the current day's bridge log (`~/.abtars/logs/bridge-YYYY-MM-DD.log`). Ctrl+C to exit.
@@ -102,3 +99,26 @@ Tails the current day's bridge log (`~/.abtars/logs/bridge-YYYY-MM-DD.log`). Ctr
 ### config
 
 Shows the current `.env` configuration. Secret values (tokens, keys) are redacted.
+
+### daemon
+
+Manage the systemd/launchd service.
+
+| Subcommand | Description |
+|------------|-------------|
+| `daemon install` | Install and start the system service (requires sudo) |
+| `daemon uninstall` | Remove the service |
+| `daemon start` | Start the service |
+| `daemon stop` | Stop the service |
+| `daemon restart` | Restart the service |
+| `daemon status` | Show service state |
+
+### deps
+
+Manage optional runtime dependencies (jimp, pdf-parse, youtube-transcript).
+
+| Subcommand | Description |
+|------------|-------------|
+| `deps list` | List optional deps and install status |
+| `deps install` | Install all optional deps |
+| `deps check` | Check which are missing |
