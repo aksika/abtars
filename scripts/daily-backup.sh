@@ -14,10 +14,10 @@ fi
 mkdir -p "$DEST"
 
 if $CONFIG_ONLY; then
-  # Minimal: config + secrets + tasks state only
+  # Minimal: config + secrets only
   cd "$AB"
   zip -qr "$DEST/abtars-config-$DATE.zip" \
-    config/ secret/ state/tasks.json state/tasks.json.backup \
+    config/ secret/ \
     2>/dev/null || true
   echo "✓ abtars-config-$DATE.zip (config-only)"
   exit 0

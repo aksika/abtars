@@ -1,6 +1,6 @@
 /**
  * task-store.ts — JSON-backed task entry storage.
- * Replaces cron-db.ts (SQLite in memory.db) with ~/.abtars/state/tasks.json.
+ * File: ~/.abtars/config/tasks.json
  * Same API surface for callers.
  */
 
@@ -12,7 +12,16 @@ import { logAndSwallow } from "../log-and-swallow.js";
 
 const TAG = "task_store";
 
-const storePath = (): string => join(abtarsHome(), "state", "tasks.json");
+const storePath = (): string => {
+  const newPath = join(abtarsHome(), "config", "tasks.json");
+  // One-time migration from old location
+  const oldPath = join(abtarsHome(), "state", "tasks.json");
+  if (!existsSync(newPath) && existsSync(oldPath)) {
+    mkdirSync(dirname(newPath), { recursive: true });
+    renameSync(oldPath, newPath);
+  }
+  return newPath;
+};
 
 function readAll(): CronEntry[] {
   const p = storePath();
