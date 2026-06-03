@@ -122,9 +122,9 @@ export async function passwd(): Promise<number> {
     const stored = writeToKeyring(newPass);
 
     console.log(`✓ Done. ${dbCount} memories + ${fileCount} secrets re-encrypted.`);
-    console.log(`\nABMIND_KEY=${newKey.toString("hex")}`);
-    if (stored) console.log("✓ Passphrase stored in OS keyring.");
-    else console.log("Set ABMIND_KEY as OS env var for daemon mode.");
+    console.log(`\nKey saved to ${keyFile} (daemon uses this automatically).`);
+    if (stored) console.log("✓ Passphrase also stored in OS keyring.");
+    else console.log(`If running without disk access (containers, CI), export ABMIND_KEY=${newKey.toString("hex")} instead.`);
     return 0;
   } finally { rl.close(); }
 }

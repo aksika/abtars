@@ -205,7 +205,7 @@ export class SubagentRuntime {
     const resolvedType = sessionType || typeMap[agent];
     if (resolvedType && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
       const { buildSoulBundle } = await import("./soul-bundle.js");
-      const bundle = buildSoulBundle(sessionType);
+      const bundle = buildSoulBundle(resolvedType);
       if (bundle) (transport as any).setSystemPrompt(bundle);
     }
 
