@@ -18,7 +18,7 @@ fi
 # Zip backup: abtars config/skills + abmind core/memory
 cd "$AB"
 zip -qr "$DEST/abtars-$DATE.zip" \
-  config/ secret/ skills/ prompts/ tasks/ topics/ reports/ finance/ core/ \
+  config/ secret/ skills/ prompts/ tasks/ topics/ reports/ finance/ core/ state/ \
   -x "config/.env.skills" 2>/dev/null || true
 
 # Add abmind memory/core + sleep reports
