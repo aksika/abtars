@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+      - run: node esbuild.config.js
+
+      - name: Publish to npm (alpha)
+        run: npm publish --tag alpha
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  verify-install:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install from npm
+        run: npm install -g abtars@alpha abmind@alpha
+
+      - name: Verify CLI runs
+        run: abtars --help
+
+      - name: Verify install flow
+        run: |
+          abmind install --non-interactive --passphrase testpass --username ci
+          abtars install --mode=simple --force
+          abtars doctor || true
+
+      - name: Verify version matches
+        run: |
+          EXPECTED=$(npm view abtars@alpha version)
+          ACTUAL=$(node -e "console.log(require('$(npm root -g)/abtars/package.json').version)")
+          [ "$EXPECTED" = "$ACTUAL" ] && echo "✓ version $ACTUAL" || (echo "MISMATCH: npm=$EXPECTED installed=$ACTUAL" && exit 1)
