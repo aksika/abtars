@@ -20,15 +20,17 @@ jobs:
         with:
           repository: aksika/abmind
           ref: dev
-          path: ../abmind
+          path: .abmind-ci
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
 
-      - name: Build abmind
-        run: cd ../abmind && npm ci && npm run build
+      - name: Build abmind + link as sibling
+        run: |
+          cd .abmind-ci && npm ci && npm run build && cd ..
+          ln -s $GITHUB_WORKSPACE/.abmind-ci $GITHUB_WORKSPACE/../abmind
 
       - name: Install dependencies
         run: npm ci
