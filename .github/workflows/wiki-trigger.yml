@@ -11,8 +11,11 @@ jobs:
     steps:
       - name: Trigger pages rebuild
         run: |
-          curl -s -X POST \
+          HTTP_CODE=$(curl -s -o /tmp/dispatch-response.txt -w "%{http_code}" -X POST \
             "https://api.github.com/repos/aksika/aksika.github.io/dispatches" \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.WIKI_DISPATCH_TOKEN }}" \
-            -d '{"event_type":"wiki-updated","client_payload":{"source":"abtars"}}'
+            -d '{"event_type":"wiki-updated","client_payload":{"source":"abtars"}}')
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/dispatch-response.txt
+          if [ "$HTTP_CODE" != "204" ]; then exit 1; fi
