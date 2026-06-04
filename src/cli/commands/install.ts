@@ -322,9 +322,9 @@ export async function install(opts: InstallOptions): Promise<number> {
   }
   if (refused.length > 0) {
     process.stderr.write(`\nPATH symlink conflicts:\n  ${refused.join('\n  ')}\n`);
-    return 4;
+  } else {
+    process.stdout.write(`✓ PATH symlinks in ${userBinDir}\n`);
   }
-  process.stdout.write(`✓ PATH symlinks in ${userBinDir}\n`);
 
   // Warn if ~/.local/bin not on PATH
   if (!isPathOnPATH(userBinDir)) {
