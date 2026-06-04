@@ -20,23 +20,10 @@ Give this page to your favourite AI agent (Claude, Gemini, Codex, Kiro) and ask 
 
 Stable ≤ Alpha ≤ Dev.
 
-## One-liner install (recommended)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/aksika/abtars/main/scripts/install.sh | bash
-```
-
-Alpha channel:
-```bash
-curl -fsSL https://raw.githubusercontent.com/aksika/abtars/main/scripts/install.sh | CHANNEL=alpha bash
-```
-
-The script handles everything: Node.js detection, package install, memory setup, configuration, and prints the final command to start the daemon.
-
 ## Manual install (npm)
 
 ```bash
-npm install -g abtars abmind
+npm install -g abtars@alpha abmind@alpha
 abmind install
 abtars install
 abtars update
@@ -44,15 +31,10 @@ abtars onboard
 sudo $(which abtars) daemon install
 ```
 
-> **Alpha channel** (latest development builds):
-> ```bash
-> npm install -g abtars@alpha abmind@alpha
-> ```
-
 | Step | What happens |
 |------|-------------|
-| `npm install -g abtars abmind` | Installs CLI tools globally |
-| `abmind install` | Creates `~/.abmind/`, generates encryption key, initializes memory DB |
+| `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally (alpha channel) |
+| `abmind install` | Creates `~/.abmind/`, prompts for encryption passphrase, initializes memory DB |
 | `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
 | `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
 | `abtars onboard` | Interactive setup: Telegram token, model, user ID |
@@ -154,6 +136,18 @@ abtars doctor           # should show all green
 ```
 
 Send a message to your bot on Telegram — it should respond.
+
+## Migrating / Restoring
+
+To restore from a backup (e.g. new machine or after a wipe):
+
+```bash
+abtars restore ~/path/to/abtars-backup.zip
+abmind restore --input ~/path/to/abmind-backup.abm --passphrase "your-passphrase" --username "your-name"
+abtars restart --cold
+```
+
+See [Backup & Restore](./backup.md) for details.
 
 ## Updating
 
