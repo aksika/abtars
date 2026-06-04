@@ -1,65 +1,73 @@
 # Upgrading & Deploying
 
-## Linux / WSL
+## Linux / WSL (KP)
 
 ```bash
 cd ~/workspace/ab/abtars
 abtars update
 ```
 
-`abtars update` builds from source, stages the release, stops the old instance (including watchdog), and starts the new one.
+`abtars update` builds from source, stages into `app.staging/`, atomically swaps to `app/`, restarts, and health-verifies. Auto-rolls back if the bridge fails to start.
 
-**If watchdog respawns the old instance** (race condition during deploy):
-
-```bash
-abtars stop          # kills watchdog + bridge
-abtars update        # clean deploy
-```
-
-## macOS
+## macOS (Molty)
 
 ```bash
 cd ~/abmind && git pull --ff-only origin dev && npm run build
-cd ~/abtars && git fetch origin dev && git checkout <commit>
-node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public && cp -r agents bundle/agents
-abtars update --from-local
+cd ~/abtars && git pull --ff-only origin dev && abtars update --from-local
 ```
 
-**Important:** Use `git checkout <commit>` (moves HEAD) — NOT `git checkout <commit> -- .` (files only). The release version is derived from `git rev-parse --short HEAD`.
-
-**If the instance won't stop** (launchd supervision):
-
-```bash
-abtars stop --force
-```
-
-`--force` is required when running under launchd — it kills watchdog first, then bridge. Without it, launchd respawns immediately.
+**Important:** Use `git pull --ff-only` (not checkout of files). The release version is derived from `git rev-parse --short HEAD`.
 
 ## abmind-only changes
 
-If only abmind changed (no abtars changes):
-
-```bash
-cd ~/abmind && npm run build
-cd ~/abtars && abtars update --from-local
-```
-
-Or if running from source (Linux/WSL):
+`abtars update` always copies fresh abmind dist into `app/node_modules/abmind/`. Just rebuild abmind and re-run update:
 
 ```bash
 cd ~/workspace/ab/abmind && npm run build
-cd ~/workspace/ab/abtars && abtars update
+cd ~/workspace/ab/abtars && abtars update --from-local
 ```
 
 ## Verify after deploy
 
 ```bash
-cat ~/.abtars/manifest.json | python3 -c "import json,sys;print(json.load(sys.stdin).get('version','?'))"
+abtars status
 ```
 
-Should match the latest git commit short SHA. Also check:
+Shows: version, commit, bridge PID + health, sentinel status. Also check:
 
-1. All ✅ in dependency health output
+1. `✓ Bridge healthy` in update output
 2. Telegram polling started (check logs)
-3. No EADDRINUSE errors (old process lingering)
-4. Secrets still encrypted: `head -c 4 ~/.abtars/secret/TELEGRAM_BOT_TOKEN` → `ENC:`
+3. No EADDRINUSE errors
+
+## Rollback
+
+```bash
+abtars rollback
+```
+
+Swaps `app/` ↔ `app.prev/`, restarts, health-verifies. Always works — `app.prev/` is a full copy.
+
+## Dry run
+
+```bash
+abtars update --dry-run
+```
+
+Shows what would happen without building or mutating anything.
+
+## Check for updates
+
+```bash
+abtars update --check
+```
+
+Fetches remote, reports how many commits behind. Exit 0 = up-to-date, exit 2 = updates available.
+
+## If deploy fails
+
+Auto-rollback handles most cases. If both new and rolled-back versions fail:
+
+1. Check logs: `tail -50 ~/.abtars/logs/bridge.log`
+2. Restore config: `cp ~/.abtars/config/.pre-update/* ~/.abtars/config/`
+3. Manual start: `node ~/.abtars/app/bundle/abtars.js`
+4. Nuclear: `abtars stop --force && abtars update --from-local`
