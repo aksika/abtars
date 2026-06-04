@@ -23,7 +23,7 @@ Stable ≤ Alpha ≤ Dev.
 ## Manual install (npm)
 
 ```bash
-npm install -g abtars abmind
+npm install -g abtars@alpha abmind@alpha
 abmind install
 abtars install
 abtars update
@@ -31,14 +31,9 @@ abtars onboard
 sudo $(which abtars) daemon install
 ```
 
-> **Alpha channel** (latest development builds):
-> ```bash
-> npm install -g abtars@alpha abmind@alpha
-> ```
-
 | Step | What happens |
 |------|-------------|
-| `npm install -g abtars abmind` | Installs CLI tools globally |
+| `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally (alpha channel) |
 | `abmind install` | Creates `~/.abmind/`, prompts for encryption passphrase, initializes memory DB |
 | `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
 | `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
