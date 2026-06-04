@@ -14,6 +14,7 @@ class Abtars < Formula
 
   def post_install
     system bin/"abtars", "install", "--mode=simple"
+    system bin/"abtars", "update"
   end
 
   def caveats
