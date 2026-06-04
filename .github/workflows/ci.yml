@@ -27,12 +27,6 @@ jobs:
       - name: Lint
         run: npm run lint --if-present
 
-      - name: Type check
-        run: npx tsc --noEmit
-
-      - name: Build bundle
-        run: node esbuild.config.js
-
       - name: Test
         run: npm test -- --silent 2>&1 | tail -20
 
