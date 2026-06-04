@@ -29,31 +29,28 @@ abTARS (agent brain)
 ## Quick Start
 
 ```bash
-npm install -g abtars
-abtars init
+npm install -g abtars@alpha abmind@alpha
+abmind install
+abtars install
+abtars update
+abtars onboard
+sudo $(which abtars) daemon install
 ```
 
-The init wizard walks you through:
-1. Telegram bot token (from [@BotFather](https://t.me/BotFather))
-2. Model provider (kiro-cli, gemini-cli, ollama, or OpenRouter)
-3. Your user ID
-
-Then start:
-
-```bash
-abtars start
-```
+Full installation guide: **[docs/wiki/install.md](docs/wiki/install.md)**
 
 ## Documentation
 
-Full docs, configuration reference, and guides: **[Wiki](https://github.com/aksika/abtars/wiki)**
+Docs live in the repo at **[docs/wiki/](docs/wiki/)** — always up to date with the code.
 
-- [Installation](https://github.com/aksika/abtars/wiki/Installation)
-- [Configuration](https://github.com/aksika/abtars/wiki/Configuration)
-- [Commands](https://github.com/aksika/abtars/wiki/Commands)
+- [Installation](docs/wiki/install.md)
+- [Configuration](docs/wiki/commands.md)
+- [Commands](docs/wiki/cli.md)
 - [Memory System (abmind)](https://github.com/aksika/abmind)
-- [Skills & Extensions](https://github.com/aksika/abtars/wiki/Skills)
-- [Deployment & Watchdog](https://github.com/aksika/abtars/wiki/Deployment)
+- [Skills & Extensions](docs/wiki/skills.md)
+- [Deployment & Supervision](docs/wiki/supervision.md)
+
+> **Note:** The [aksika.github.io](https://aksika.github.io/abtars/) site may be outdated. Always refer to the docs in this repo.
 
 ## Supported Transports
 
