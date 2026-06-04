@@ -83,3 +83,4 @@ The daily backup script keeps 7 days of zip files and auto-deletes older ones. F
 Secrets in the backup zip remain encrypted at rest (AES-256-GCM, encrypted by `abmind install`). The zip itself is not encrypted — store it securely.
 <!-- rebuilt -->
 <!-- 1780584420 -->
+<!-- 1780585898 -->
