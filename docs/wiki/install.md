@@ -52,7 +52,7 @@ sudo $(which abtars) daemon install
 | Step | What happens |
 |------|-------------|
 | `npm install -g abtars abmind` | Installs CLI tools globally |
-| `abmind install` | Creates `~/.abmind/`, generates encryption key, initializes memory DB |
+| `abmind install` | Creates `~/.abmind/`, prompts for encryption passphrase, initializes memory DB |
 | `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
 | `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
 | `abtars onboard` | Interactive setup: Telegram token, model, user ID |
@@ -154,6 +154,18 @@ abtars doctor           # should show all green
 ```
 
 Send a message to your bot on Telegram — it should respond.
+
+## Migrating / Restoring
+
+To restore from a backup (e.g. new machine or after a wipe):
+
+```bash
+abtars restore ~/path/to/abtars-backup.zip
+abmind restore --input ~/path/to/abmind-backup.abm --passphrase "your-passphrase" --username "your-name"
+abtars restart --cold
+```
+
+See [Backup & Restore](./backup.md) for details.
 
 ## Updating
 
