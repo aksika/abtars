@@ -9,9 +9,10 @@ jobs:
   dispatch:
     runs-on: ubuntu-latest
     steps:
-      - uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.WIKI_DISPATCH_TOKEN }}
-          repository: aksika/aksika.github.io
-          event-type: wiki-updated
-          client-payload: '{"source": "abtars"}'
+      - name: Trigger pages rebuild
+        run: |
+          curl -s -X POST \
+            "https://api.github.com/repos/aksika/aksika.github.io/dispatches" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.WIKI_DISPATCH_TOKEN }}" \
+            -d '{"event_type":"wiki-updated","client_payload":{"source":"abtars"}}'
