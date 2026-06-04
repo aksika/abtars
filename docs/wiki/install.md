@@ -20,19 +20,6 @@ Give this page to your favourite AI agent (Claude, Gemini, Codex, Kiro) and ask 
 
 Stable ≤ Alpha ≤ Dev.
 
-## One-liner install (recommended)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/aksika/abtars/main/scripts/install.sh | bash
-```
-
-Alpha channel:
-```bash
-curl -fsSL https://raw.githubusercontent.com/aksika/abtars/main/scripts/install.sh | CHANNEL=alpha bash
-```
-
-The script handles everything: Node.js detection, package install, memory setup, configuration, and prints the final command to start the daemon.
-
 ## Manual install (npm)
 
 ```bash
