@@ -22,9 +22,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
 
       - name: Install dependencies
-        run: |
-          sed -i 's|"file:../abmind"|"*"|' package.json
-          npm ci
+        run: npm ci
 
       - name: Lint
         run: npm run lint --if-present
