@@ -1,4 +1,7 @@
 import { logInfo, logDebug } from "./logger.js";
+import { logAndSwallow } from "./log-and-swallow.js";
+
+const TAG = "stt";
 
 export type SttProvider = "groq";
 
@@ -10,6 +13,7 @@ export interface SttConfig {
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
 const DEFAULT_MODEL = "whisper-large-v3";
+export const LANGUAGE_HINT_PROMPT = process.env["STT_LANGUAGE_HINT"] || "";
 
 /**
  * Transcribe audio using Groq's OpenAI-compatible Whisper endpoint.
@@ -19,7 +23,7 @@ export async function transcribeAudio(
   audioBuffer: Buffer,
   filename: string,
   config: SttConfig,
-): Promise<string> {
+): Promise<{ text: string; language: string }> {
   const model = config.model || DEFAULT_MODEL;
   logInfo("stt", `Transcribing ${filename} (${audioBuffer.length} bytes) via ${config.provider}/${model}`);
 
@@ -27,6 +31,8 @@ export async function transcribeAudio(
   const blob = new Blob([audioBuffer], { type: "audio/ogg" });
   formData.append("file", blob, filename);
   formData.append("model", model);
+  if (LANGUAGE_HINT_PROMPT) formData.append("prompt", LANGUAGE_HINT_PROMPT);
+  formData.append("response_format", "verbose_json");
 
   const endpoint = GROQ_ENDPOINT;
 
@@ -39,18 +45,19 @@ export async function transcribeAudio(
   });
 
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
+    const text = await response.text().catch(err => { logAndSwallow(TAG, "read STT error body", err); return ""; });
     throw new Error(`STT failed (${response.status}): ${text}`);
   }
 
-  const json = (await response.json()) as { text?: string };
+  const json = (await response.json()) as { text?: string; language?: string };
   const transcript = json.text?.trim() ?? "";
+  const language = json.language?.trim() ?? "";
 
   if (!transcript) {
     logDebug("stt", "Empty transcript returned");
-    return "";
+    return { text: "", language };
   }
 
-  logInfo("stt", `Transcript (${transcript.length} chars): "${transcript.slice(0, 80)}"`);
-  return transcript;
+  logInfo("stt", `Transcript (${transcript.length} chars, lang=${language || "?"}): "${transcript.slice(0, 80)}"`);
+  return { text: transcript, language };
 }

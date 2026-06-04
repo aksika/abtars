@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { serialize, parse, buildRequest, resetRequestId, nextRequestId } from "./jsonrpc.js";
+import { serialize, parse, buildRequest, resetRequestId, nextRequestId } from "./transport/jsonrpc.js";
 import type { AcpRequest, AcpResponse, AcpNotification } from "../types/index.js";
 
 describe("jsonrpc", () => {

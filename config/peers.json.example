@@ -1,0 +1,12 @@
+{
+  "self": { "name": "my-agent" },
+  "peers": {
+    "example-peer": {
+      "host": "100.x.x.x",
+      "port": 3100,
+      "token": "replace-with-shared-secret"
+    }
+  },
+  "maxHops": 12,
+  "timeoutMs": 60000
+}

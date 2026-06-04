@@ -1,30 +1,60 @@
 {
-  "name": "agentbridge",
-  "version": "0.1.0",
+  "name": "abtars",
+  "version": "0.2.1-alpha.8",
   "description": "Standalone agent bridging Telegram to Kiro CLI via tmux/ACP",
   "type": "module",
-  "main": "dist/main.js",
+  "main": "bundle/abtars.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && rm -rf dist/components/dashboard/public && cp -r src/components/dashboard/public dist/components/dashboard/public && git log -1 --format='{\"hash\":\"%h\",\"date\":\"%ci\"}' > dist/build-info.json",
+    "bundle": "rm -rf bundle && cd ../abmind && npm run build && cd ../abtars && node esbuild.config.js && rm -rf bundle/public && cp -r src/components/dashboard/public bundle/public && cp -r agents bundle/agents",
     "dev": "node --import tsx src/main.ts",
     "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "check-imports": "bash -c '! grep -rE \"from \\\"abmind/|from '\\''abmind/\" src --include=*.ts | grep -vE \"abmind/deploy-lib\\\"|abmind/deploy-lib'\\''\"'",
     "test": "vitest --run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "node -e \"const p=require('./package.json');const d=JSON.stringify(p.dependencies||{});if(d.includes('file:')){console.error('ERROR: file: dependency found');process.exit(1)}\""
   },
   "engines": {
     "node": ">=22.0.0"
   },
-  "dependencies": {
-    "@andresaya/edge-tts": "^1.8.0",
-    "better-sqlite3": "^12.6.2",
-    "dotenv": "^16.4.7"
-  },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^22.10.0",
-    "fast-check": "^3.23.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
-    "vitest": "^2.1.0"
-  }
+    "@agentclientprotocol/sdk": "^0.14.1",
+    "@andresaya/edge-tts": "^1.8.0",
+    "@clack/prompts": "^1.2.0",
+    "@types/node": "^22.19.17",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/ws": "^8.18.1",
+    "abmind": "file:../abmind",
+    "cron-parser": "^5.5.0",
+    "discord.js": "^14.26.3",
+    "dotenv": "^16.6.1",
+    "esbuild": "0.25.4",
+    "fast-check": "^4.7.0",
+    "file-type": "^22.0.1",
+    "jimp": "1.6.0",
+    "patchright": "^1.59.4",
+    "pdf-parse": "^2.4.5",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5",
+    "ws": "^8.20.0",
+    "youtube-transcript": "^1.3.0"
+  },
+  "bin": {
+    "abtars": "bundle/abtars-cli.js",
+    "abtars-browser": "bundle/abtars-browser.js",
+    "abtars-restart": "bundle/abtars-restart.js"
+  },
+  "license": "Apache-2.0",
+  "files": [
+    "bundle/",
+    "core/",
+    "scripts/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "install-manifest.json",
+    "config/"
+  ]
 }

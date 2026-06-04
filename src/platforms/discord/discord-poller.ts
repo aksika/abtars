@@ -1,0 +1,112 @@
+import type { Message } from "discord.js";
+import type { DiscordInboundMessage } from "../../types/discord.js";
+import type { DiscordApi } from "./discord-api.js";
+import { logInfo, logDebug, logWarn } from "../../components/logger.js";
+
+const TAG = "DiscordPoller";
+
+/**
+ * Event-driven listener for Discord messages via the Gateway WebSocket.
+ * Mirrors TelegramPoller in lifecycle (start/stop) but uses discord.js
+ * event handlers instead of long-polling. Reconnection and heartbeat
+ * are handled by discord.js internally.
+ */
+export class DiscordPoller {
+  private readonly api: DiscordApi;
+  private readonly appId: string;
+  private readonly onMessage: (message: DiscordInboundMessage) => void | Promise<void>;
+  private started = false;
+
+  constructor(
+    api: DiscordApi,
+    appId: string,
+    onMessage: (message: DiscordInboundMessage) => void | Promise<void>,
+  ) {
+    this.api = api;
+    this.appId = appId;
+    this.onMessage = onMessage;
+  }
+
+  /** Connect to Gateway and start listening. */
+  async start(): Promise<void> {
+    if (this.started) return;
+    this.started = true;
+
+    await this.api.connect();
+
+    this.api.onMessage((raw: Message) => {
+      // Filter out self-messages (use appId from config, fallback to client user id)
+      const selfId = this.api.botUserId ?? this.appId;
+      if (raw.author.id === selfId) {
+        logDebug(TAG, `Ignoring self-message ${raw.id}`);
+        return;
+      }
+
+      const inbound = toDiscordInboundMessage(raw, this.appId);
+      logDebug(TAG, `Dispatching message ${inbound.id} from ${inbound.authorUsername}`);
+
+      try {
+        const result = this.onMessage(inbound);
+        if (result instanceof Promise) {
+          result.catch((err: unknown) => {
+            logWarn(TAG, `Error in message callback: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
+      } catch (err) {
+        logWarn(TAG, `Error in message callback: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+
+    logInfo(TAG, "Started — listening for Discord messages");
+  }
+
+  /** Disconnect from Gateway cleanly. */
+  stop(): void {
+    if (!this.started) return;
+    this.started = false;
+    this.api.disconnect();
+    logInfo(TAG, "Stopped");
+  }
+}
+
+/** Convert a raw discord.js Message to a DiscordInboundMessage. */
+function toDiscordInboundMessage(raw: Message, botId: string | null): DiscordInboundMessage {
+  const parentId = "parentId" in raw.channel ? (raw.channel.parentId ?? null) : null;
+  const channelName = "name" in raw.channel ? (raw.channel.name ?? null) : null;
+  // Check both discord.js parsed mentions AND raw content for the bot's mention tag
+  const mentionsBotId = botId
+    ? (raw.mentions.users.has(botId) || new RegExp(`<@!?${botId}>`).test(raw.content))
+    : false;
+
+  // #388 — role-mention detection. Look up the bot's own guild member and check
+  // if any of its role IDs appear in raw.mentions.roles. If the bot's member isn't
+  // cached yet (cold start, first message in a guild), stay safe by returning false —
+  // a missed role-mention is better than an accidental always-respond.
+  const botMember = raw.guild?.members.me ?? null;
+  const botRoleIds = botMember ? new Set([...botMember.roles.cache.keys()]) : new Set<string>();
+  const mentionsBotRole = botMember
+    ? [...raw.mentions.roles.keys()].some(rid => botRoleIds.has(rid))
+    : false;
+
+  logDebug(TAG, `mentionsBotId=${mentionsBotId} mentionsBotRole=${mentionsBotRole} (appId=${botId}, mentions=${[...raw.mentions.users.keys()].join(",")}, content=${raw.content.slice(0, 60)})`);
+  return {
+    id: raw.id,
+    channelId: raw.channelId,
+    parentChannelId: parentId,
+    channelName,
+    isDM: !raw.guildId,
+    authorId: raw.author.id,
+    authorUsername: raw.author.username,
+    authorIsBot: raw.author.bot ?? false,
+    content: raw.content,
+    timestamp: raw.createdTimestamp,
+    mentionsBotId,
+    mentionsBotRole,
+    mentionsEveryone: raw.mentions.everyone,
+    hasUserMentions: raw.mentions.users.size > 0,
+    replyReferenceMessageId: raw.reference?.messageId ?? null,
+    attachments: raw.attachments.size > 0
+      ? [...raw.attachments.values()].map(a => ({ url: a.url, filename: a.name ?? "file", contentType: a.contentType ?? undefined, size: a.size }))
+      : undefined,
+  };
+}

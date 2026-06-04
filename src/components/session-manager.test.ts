@@ -1,137 +1,303 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { SessionManager } from "./session-manager.js";
-import { MemoryManager } from "./memory-manager.js";
-import { MEMORY_CONFIG_DEFAULTS, type MemoryConfig } from "./memory-config.js";
-import type { AcpClient } from "./acp-client.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import { SessionManager, parseSessionType, typeLabel } from "./session-manager.js";
 
-function makeConfig(tmpDir: string, overrides: Partial<MemoryConfig> = {}): MemoryConfig {
-  return { ...MEMORY_CONFIG_DEFAULTS, memoryDir: tmpDir, ...overrides };
-}
-
-let sessionCounter = 0;
-function makeMockAcpClient(): AcpClient {
-  return {
-    createSession: vi.fn(async () => `acp-sess-${++sessionCounter}`),
-    cancelSession: vi.fn(async () => {}),
-  } as unknown as AcpClient;
-}
-
-describe("SessionManager + MemoryManager integration", () => {
-  let tmpDir: string;
-  let memory: MemoryManager;
-  let acpClient: AcpClient;
+describe("SessionManager", () => {
   let sm: SessionManager;
 
-  beforeEach(async () => {
-    sessionCounter = 0;
-    tmpDir = mkdtempSync(join(tmpdir(), "sm-int-"));
-    memory = new MemoryManager(makeConfig(tmpDir));
-    await memory.initialize();
-    acpClient = makeMockAcpClient();
-    sm = new SessionManager(acpClient, "/tmp/work", memory);
+  beforeEach(() => {
+    sm = new SessionManager(5);
   });
 
-  afterEach(() => {
-    memory.close();
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("getOrCreateSession persists session to memory", async () => {
-    const session = await sm.getOrCreateSession(42);
-    expect(session.telegramChatId).toBe(42);
-    expect(session.acpSessionId).toBe("acp-sess-1");
-
-    // Session should be in SQLite
-    const restored = memory.restoreSessions(999_999_999);
-    expect(restored).toHaveLength(1);
-    expect(restored[0]!.telegramChatId).toBe(42);
-    expect(restored[0]!.acpSessionId).toBe("acp-sess-1");
-  });
-
-  it("getOrCreateSession touches existing session in memory", async () => {
-    const session = await sm.getOrCreateSession(10);
-    const firstActivity = session.lastActivityAt;
-
-    // Wait a tick so timestamp differs
-    await new Promise((r) => setTimeout(r, 10));
-    await sm.getOrCreateSession(10);
-
-    const restored = memory.restoreSessions(999_999_999);
-    expect(restored).toHaveLength(1);
-    expect(restored[0]!.lastActivityAt).toBeGreaterThan(firstActivity);
-  });
-
-  it("resetSession deactivates session in memory", async () => {
-    await sm.getOrCreateSession(20);
-    await sm.resetSession(20);
-
-    // Old session should be deactivated, new one should be active
-    const restored = memory.restoreSessions(999_999_999);
-    // The new session from resetSession should be persisted
-    expect(restored).toHaveLength(1);
-    expect(restored[0]!.acpSessionId).toBe("acp-sess-2"); // new session
-  });
-
-  it("restoreFromMemory loads sessions from SQLite", async () => {
-    // Create sessions with first SessionManager
-    await sm.getOrCreateSession(100);
-    await sm.getOrCreateSession(200);
-
-    // Create a new SessionManager (simulating restart)
-    const sm2 = new SessionManager(acpClient, "/tmp/work", memory);
-    const count = await sm2.restoreFromMemory();
-
-    expect(count).toBe(2);
-    // Both sessions should be accessible
-    expect(sm2.getSession(100)).toBeDefined();
-    expect(sm2.getSession(200)).toBeDefined();
-    // They get new ACP session IDs (since ACP backend is fresh)
-    expect(sm2.getSession(100)!.acpSessionId).toBe("acp-sess-3");
-    expect(sm2.getSession(200)!.acpSessionId).toBe("acp-sess-4");
-  });
-
-  it("restoreFromMemory skips stale sessions", async () => {
-    // Persist a session with old lastActivityAt
-    memory.persistSession({
-      telegramChatId: 300,
-      acpSessionId: "old-sess",
-      isProcessing: false,
-      pendingRequestId: null,
-      createdAt: Date.now() - 48 * 3600_000,
-      lastActivityAt: Date.now() - 48 * 3600_000, // 48h ago
+  describe("createSession", () => {
+    it("creates session with type-stamped ID", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      expect(s.id).toMatch(/_A_\d+$/);
+      expect(s.type).toBe("A");
+      expect(s.isTransport).toBe(true);
+      expect(s.ended).toBe(false);
+      expect(s.paused).toBe(false);
     });
 
-    const sm2 = new SessionManager(acpClient, "/tmp/work", memory);
-    const count = await sm2.restoreFromMemory();
+    it("increments shortIndex monotonically", () => {
+      // First getOrCreateState creates index 1 (auto-main)
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      const s2 = sm.createSession("user1", "telegram", "A") as any;
+      expect(s2.shortIndex).toBe(s1.shortIndex + 1);
+    });
 
-    // 24h threshold in restoreFromMemory — 48h old session should be skipped
-    expect(count).toBe(0);
+    it("sets new session as active", () => {
+      sm.createSession("user1", "telegram", "A");
+      const s2 = sm.createSession("user1", "telegram", "A") as any;
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s2.id);
+    });
+
+    it("no motherId for user-created sessions", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      expect(s.motherId).toBeUndefined();
+    });
+
+    it("enforces max sessions limit", () => {
+      for (let i = 0; i < 5; i++) sm.createSession("user1", "telegram", "A");
+      const result = sm.createSession("user1", "telegram", "A");
+      expect(typeof result).toBe("string");
+      expect(result).toContain("Max sessions");
+    });
+
+    it("isolates users — different users have independent sessions", () => {
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      const s2 = sm.createSession("user2", "telegram", "A") as any;
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s1.id);
+      expect(sm.getActiveSessionId("user2", "telegram")).toBe(s2.id);
+    });
+
+    it("isolates platforms — same user different platforms are independent", () => {
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      const s2 = sm.createSession("user1", "discord", "A") as any;
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s1.id);
+      expect(sm.getActiveSessionId("user1", "discord")).toBe(s2.id);
+    });
   });
 
-  it("works without memory (null memory)", async () => {
-    const smNoMem = new SessionManager(acpClient, "/tmp/work");
-    const session = await smNoMem.getOrCreateSession(50);
-    expect(session.telegramChatId).toBe(50);
+  describe("createSubSession", () => {
+    it("sets motherId from active session", () => {
+      const parent = sm.createSession("user1", "telegram", "A") as any;
+      const child = sm.createSubSession("user1", "telegram", "C") as any;
+      expect(child.motherId).toBe(parent.id);
+    });
 
-    await smNoMem.resetSession(50);
-    const count = await smNoMem.restoreFromMemory();
-    expect(count).toBe(0);
+    it("isTransport is false for sub-sessions", () => {
+      sm.createSession("user1", "telegram", "A");
+      const child = sm.createSubSession("user1", "telegram", "B") as any;
+      expect(child.isTransport).toBe(false);
+    });
+
+    it("does not change active session", () => {
+      const parent = sm.createSession("user1", "telegram", "A") as any;
+      sm.createSubSession("user1", "telegram", "C");
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(parent.id);
+    });
+
+    it("respects max sessions limit", () => {
+      for (let i = 0; i < 5; i++) sm.createSession("user1", "telegram", "A");
+      const result = sm.createSubSession("user1", "telegram", "T");
+      expect(typeof result).toBe("string");
+    });
   });
 
-  it("handleCrash creates new session and persists it", async () => {
-    await sm.getOrCreateSession(60);
-    const msg = await sm.handleCrash(60);
+  describe("switchSession", () => {
+    it("switches active to target index", () => {
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      sm.createSession("user1", "telegram", "A");
+      sm.switchSession("user1", "telegram", s1.shortIndex);
+      expect(sm.getActiveSessionId("user1", "telegram")).toBe(s1.id);
+    });
 
-    expect(msg).toContain("new session");
-    const session = sm.getSession(60);
-    expect(session).toBeDefined();
+    it("returns error for non-existent index", () => {
+      sm.createSession("user1", "telegram", "A");
+      const result = sm.switchSession("user1", "telegram", 999);
+      expect(typeof result).toBe("string");
+      expect(result).toContain("not found");
+    });
 
-    const restored = memory.restoreSessions(999_999_999);
-    // Should have the new session persisted
-    const match = restored.find((s) => s.telegramChatId === 60);
-    expect(match).toBeDefined();
+    it("cannot switch to ended session", () => {
+      const s1 = sm.createSession("user1", "telegram", "A") as any;
+      sm.createSession("user1", "telegram", "A");
+      sm.endSession("user1", "telegram", s1.shortIndex);
+      const result = sm.switchSession("user1", "telegram", s1.shortIndex);
+      expect(typeof result).toBe("string");
+    });
+
+    it("cannot switch to sub-session (non-transport)", () => {
+      sm.createSession("user1", "telegram", "A");
+      const sub = sm.createSubSession("user1", "telegram", "C") as any;
+      const result = sm.switchSession("user1", "telegram", sub.shortIndex);
+      expect(typeof result).toBe("string");
+    });
+  });
+
+  describe("endSession", () => {
+    it("marks session ended", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      const ended = sm.endSession("user1", "telegram", s.shortIndex) as any;
+      expect(ended.ended).toBe(true);
+    });
+
+    it("auto-creates replacement when ending last Main", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.endSession("user1", "telegram", s.shortIndex);
+      // Should have a new active Main
+      const active = sm.getActiveSession("user1", "telegram");
+      expect(active.type).toBe("A");
+      expect(active.ended).toBe(false);
+      expect(active.id).not.toBe(s.id);
+    });
+
+    it("switches to another Main when ending active", () => {
+      // getOrCreateState auto-creates Main #1, createSession creates #2, #3
+      sm.createSession("user1", "telegram", "A");
+      const s3 = sm.createSession("user1", "telegram", "A") as any;
+      sm.endSession("user1", "telegram", s3.shortIndex);
+      // Should fall back to any alive Main (not s3)
+      const activeId = sm.getActiveSessionId("user1", "telegram");
+      expect(activeId).not.toBe(s3.id);
+    });
+
+    it("ended sessions don't appear in list", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.endSession("user1", "telegram", s.shortIndex);
+      const { sessions } = sm.listSessions("user1", "telegram");
+      expect(sessions.find(x => x.id === s.id)).toBeUndefined();
+    });
+  });
+
+  describe("killSession", () => {
+    it("marks session ended", () => {
+      sm.createSession("user1", "telegram", "A");
+      const s2 = sm.createSession("user1", "telegram", "A") as any;
+      const killed = sm.killSession("user1", "telegram", s2.shortIndex) as any;
+      expect(killed.ended).toBe(true);
+    });
+
+    it("auto-creates replacement when killing last Main", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.killSession("user1", "telegram", s.shortIndex);
+      const active = sm.getActiveSession("user1", "telegram");
+      expect(active.type).toBe("A");
+      expect(active.id).not.toBe(s.id);
+    });
+  });
+
+  describe("pauseSession / resumeSession", () => {
+    it("toggles paused flag", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.pauseSession("user1", "telegram", s.shortIndex);
+      expect(sm.getActiveSession("user1", "telegram").paused).toBe(true);
+      sm.resumeSession("user1", "telegram", s.shortIndex);
+      expect(sm.getActiveSession("user1", "telegram").paused).toBe(false);
+    });
+
+    it("pause returns error if already paused", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.pauseSession("user1", "telegram", s.shortIndex);
+      const result = sm.pauseSession("user1", "telegram", s.shortIndex);
+      expect(typeof result).toBe("string");
+      expect(result).toContain("already paused");
+    });
+
+    it("resume returns error if not paused", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      const result = sm.resumeSession("user1", "telegram", s.shortIndex);
+      expect(typeof result).toBe("string");
+      expect(result).toContain("not paused");
+    });
+  });
+
+  describe("expireAutoSessions", () => {
+    it("expires old sub-sessions", () => {
+      sm.createSession("user1", "telegram", "A");
+      const sub = sm.createSubSession("user1", "telegram", "C") as any;
+      // Backdate
+      sub.createdAt = Date.now() - 100_000;
+      const expired = sm.expireAutoSessions(50_000);
+      expect(expired).toHaveLength(1);
+      expect(expired[0]!.id).toBe(sub.id);
+      expect(sub.ended).toBe(true);
+    });
+
+    it("does not expire transport sessions", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      s.createdAt = Date.now() - 100_000;
+      const expired = sm.expireAutoSessions(50_000);
+      expect(expired).toHaveLength(0);
+    });
+
+    it("does not expire recent sub-sessions", () => {
+      sm.createSession("user1", "telegram", "A");
+      sm.createSubSession("user1", "telegram", "C");
+      const expired = sm.expireAutoSessions(50_000);
+      expect(expired).toHaveLength(0);
+    });
+  });
+
+  describe("getSessionById", () => {
+    it("finds session across platforms", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      expect(sm.getSessionById(s.id)?.id).toBe(s.id);
+    });
+
+    it("returns undefined for unknown ID", () => {
+      expect(sm.getSessionById("nonexistent")).toBeUndefined();
+    });
+  });
+
+  describe("clearPlatform / clearAll", () => {
+    it("clearPlatform removes one user+platform", () => {
+      sm.createSession("user1", "telegram", "A");
+      sm.createSession("user1", "discord", "A");
+      sm.clearPlatform("user1", "telegram");
+      // telegram gone, discord still there
+      const { sessions } = sm.listSessions("user1", "discord");
+      expect(sessions.length).toBeGreaterThan(0);
+    });
+
+    it("clearAll removes everything", () => {
+      sm.createSession("user1", "telegram", "A");
+      sm.createSession("user2", "discord", "A");
+      sm.clearAll();
+      // Fresh state — getActiveSessionId creates new
+      const id = sm.getActiveSessionId("user1", "telegram");
+      expect(id).toMatch(/_A_/);
+    });
+  });
+
+  describe("formatList", () => {
+    it("shows active marker", () => {
+      sm.createSession("user1", "telegram", "A");
+      const output = sm.formatList("user1", "telegram");
+      expect(output).toContain("*");
+      expect(output).toContain("Main");
+    });
+
+    it("shows paused marker", () => {
+      const s = sm.createSession("user1", "telegram", "A") as any;
+      sm.pauseSession("user1", "telegram", s.shortIndex);
+      const output = sm.formatList("user1", "telegram");
+      expect(output).toContain("⏸");
+    });
+
+    it("shows motherId lineage", () => {
+      sm.createSession("user1", "telegram", "A");
+      sm.createSubSession("user1", "telegram", "C");
+      const output = sm.formatList("user1", "telegram");
+      expect(output).toContain("←");
+    });
+  });
+
+  describe("auto-main on first access", () => {
+    it("getActiveSessionId creates Main session on first call", () => {
+      const id = sm.getActiveSessionId("newuser", "telegram");
+      expect(id).toMatch(/_A_01$/);
+    });
+  });
+});
+
+describe("parseSessionType", () => {
+  it("parses known types", () => {
+    expect(parseSessionType("browse")).toBe("B");
+    expect(parseSessionType("code")).toBe("C");
+    expect(parseSessionType("task")).toBe("T");
+  });
+
+  it("returns null for unknown", () => {
+    expect(parseSessionType("main")).toBeNull();
+    expect(parseSessionType("xyz")).toBeNull();
+  });
+});
+
+describe("typeLabel", () => {
+  it("returns human labels", () => {
+    expect(typeLabel("A")).toBe("Main");
+    expect(typeLabel("S")).toBe("System");
+    expect(typeLabel("P")).toBe("Peer");
   });
 });

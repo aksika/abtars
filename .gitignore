@@ -1,3 +1,5 @@
+.env*
+!.env*.example
 # Reference project — read only
 openclaw/
 
@@ -8,8 +10,6 @@ node_modules/
 dist/
 
 # Environment secrets
-.env
-.env.local
 
 # IDE
 .vscode/
@@ -21,5 +21,23 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Large binaries
+*.exe
+*.pdf
+
 # Kiro specs (local dev artifacts)
-.kiro/
+.kiro/*
+!.kiro/steering/
+docs/.obsidian/
+titok/
+secret/
+persona/tasks/
+.test-*
+backlog.db-wal
+backlog.db-shm
+# Test fixture dirs (created by vitest, cleaned in beforeEach)
+.test-sleep-trigger/
+backlog.db
+bundle/
+src/capabilities/_registry.generated.ts
+abtars-backup-*.zip

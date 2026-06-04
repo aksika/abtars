@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "abtars peers.json",
+  "type": "object",
+  "required": ["self", "peers"],
+  "properties": {
+    "self": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "signingKey": { "type": "string", "description": "Base64 Ed25519 private key for message signing" },
+        "udpPort": { "type": "number", "description": "UDP port for mDNS wake-up listener (default 5353)" }
+      }
+    },
+    "peers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["host", "port", "token"],
+        "properties": {
+          "host": { "type": "string" },
+          "port": { "type": "number" },
+          "token": { "type": "string" },
+          "pskSecret": { "type": "string", "description": "TLS-PSK shared secret" },
+          "mode": { "type": "string", "enum": ["plain", "signed"] },
+          "verifyKey": { "type": "string", "description": "Base64 Ed25519 public key for signature verification" },
+          "udpPort": { "type": "number" }
+        }
+      }
+    },
+    "maxHops": { "type": "number" },
+    "timeoutMs": { "type": "number" }
+  }
+}

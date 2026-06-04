@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { TmuxClient } from "./tmux-client.js";
+import { TmuxClient } from "./transport/tmux-client.js";
 import * as child_process from "node:child_process";
 
 vi.mock("node:child_process", () => ({

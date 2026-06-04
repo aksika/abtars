@@ -1,0 +1,24 @@
+[Unit]
+Description=Abtars (supervised-daemon)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{USER}}
+Group={{USER}}
+WorkingDirectory=/home/{{USER}}/.abtars
+ExecStart=/home/{{USER}}/.abtars/scripts/watchdog.sh
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PATH={{PATH}}
+Environment=ABTARS_HOME=/home/{{USER}}/.abtars
+Environment=ABMIND_HOME=/home/{{USER}}/.abmind
+Environment=SUPERVISION=systemd
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=abtars
+
+[Install]
+WantedBy=multi-user.target

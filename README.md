@@ -1,184 +1,84 @@
-# AgentBridge
+# abTARS
 
-A standalone Node.js agent that bridges Telegram to [Kiro](https://kiro.dev) CLI. Send messages to your Telegram bot, and Kiro does the coding work in your workspace.
+A personal AI agent that runs on your machine, talks to you via Telegram/Discord/IRC, and remembers everything. Use frontier models through existing subscriptions — no per-token billing.
 
-Supports two transport modes:
-- **tmux** (default, recommended) — runs kiro-cli in a tmux session, communicates via `send-keys` / `capture-pane`
-- **ACP** (experimental) — communicates via Agent Client Protocol (JSON-RPC 2.0 over stdio)
+## What it does
 
-No web server, no exposed ports, no webhooks. Outbound-only traffic to Telegram's API + local communication with kiro-cli.
+- **Always-on agent** — runs 24/7, responds on Telegram/Discord, executes tasks on schedule
+- **Persistent memory** — remembers conversations, learns preferences, extracts facts overnight
+- **Multi-model** — Claude, Gemini, OpenRouter (40+ models), ollama (local). Switch by changing config
+- **Self-healing** — 4-layer watchdog, auto model fallback, survives crashes and network drops
+- **Extensible** — skills system, MCP integration, agent-to-agent communication
 
 ```
-Telegram User ──► Telegram Bot API ──► Bridge ──► tmux session (kiro-cli)
-                                         │              │
-                                         ◄── responses ◄┘
+You (Telegram/Discord/IRC)
+  │
+  ▼
+abTARS (agent brain)
+  ├── Memory (abmind — persistent, searchable, encrypted)
+  ├── Personality (customizable identity + learned behavior)
+  ├── Tools (browse, recall, store, bash, MCP servers)
+  ├── Skills (hot-reloadable, self-authoring)
+  │
+  ├── kiro-cli     → Claude (AWS subscription)
+  ├── gemini-cli   → Gemini
+  ├── Codex / Claude Code → OpenAI / Anthropic
+  └── Direct API   → ollama, OpenRouter, any OpenAI-compatible
 ```
-
-## Prerequisites
-
-- **Node.js 22+**
-- **tmux** installed (`apt install tmux` or `brew install tmux`)
-- **Kiro CLI** installed and in your PATH — verify: `kiro-cli --version`
-- **A Telegram Bot** — created via [@BotFather](https://t.me/BotFather)
-- **Your Telegram User ID** — get it from [@userinfobot](https://t.me/userinfobot)
 
 ## Quick Start
 
-### 1. Clone and install
+```bash
+npm install -g abtars
+abtars init
+```
+
+The init wizard walks you through:
+1. Telegram bot token (from [@BotFather](https://t.me/BotFather))
+2. Model provider (kiro-cli, gemini-cli, ollama, or OpenRouter)
+3. Your user ID
+
+Then start:
 
 ```bash
-git clone <repo-url>
-cd agentbridge
-npm install
+abtars start
 ```
 
-### 2. Create a Telegram bot
+## Documentation
 
-1. Message [@BotFather](https://t.me/BotFather) on Telegram
-2. Send `/newbot` and follow the prompts
-3. Copy the bot token (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+Full docs, configuration reference, and guides: **[Wiki](https://github.com/aksika/abtars/wiki)**
 
-### 3. Get your Telegram user ID
+- [Installation](https://github.com/aksika/abtars/wiki/Installation)
+- [Configuration](https://github.com/aksika/abtars/wiki/Configuration)
+- [Commands](https://github.com/aksika/abtars/wiki/Commands)
+- [Memory System (abmind)](https://github.com/aksika/abmind)
+- [Skills & Extensions](https://github.com/aksika/abtars/wiki/Skills)
+- [Deployment & Watchdog](https://github.com/aksika/abtars/wiki/Deployment)
 
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
-2. It replies with your numeric user ID (e.g. `987654321`)
+## Supported Transports
 
-### 4. Configure
+| Transport | Provider | 
+|-----------|----------|
+| ACP | kiro-cli, gemini-cli, Codex, Claude Code |
+| Direct API | OpenRouter, ollama, any OpenAI-compatible endpoint |
+| Hooks | abmind hooks (standalone CLI agents) |
 
-```bash
-mkdir -p ~/.agentbridge
-cp .env.example ~/.agentbridge/.env
-```
+## Requirements
 
-Edit `~/.agentbridge/.env`:
+- Node.js 22+
+- A Telegram bot token
+- At least one model provider (kiro-cli, gemini-cli, ollama, OpenRouter, Codex, or Claude Code)
 
-```env
-TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
-ALLOWED_USER_IDS=987654321
-KIRO_TRANSPORT=tmux
-WORKING_DIR=/path/to/your/project
-TRUST_MODE=true
-```
-
-### 5. Start the tmux session
-
-```bash
-chmod +x scripts/tmux-session.sh
-./scripts/tmux-session.sh
-```
-
-This starts kiro-cli inside a tmux session named `kiro-bridge`. You can attach to it anytime with `tmux attach -t kiro-bridge`.
-
-### 6. Start the bridge
-
-```bash
-npm run build
-npm start
-```
-
-Or in dev mode (no build step):
-
-```bash
-npm run dev
-```
-
-## Usage
-
-Message your bot on Telegram:
-
-- **Any text** — forwarded to Kiro as a prompt
-- **`/new`** or **`/reset`** — start a fresh Kiro session
-- **`/status`** — check transport connection status
-
-## Transport Modes
-
-### tmux (default)
-
-Kiro CLI runs inside a persistent tmux session. The bridge sends your messages via `tmux send-keys` and reads Kiro's responses via `tmux capture-pane`.
-
-Pros: works today, battle-tested, survives disconnects
-Cons: output parsing is heuristic-based, no structured permission handling
-
-```env
-KIRO_TRANSPORT=tmux
-TMUX_SESSION=kiro-bridge
-TMUX_CAPTURE_DELAY_SEC=3
-TMUX_MAX_WAIT_SEC=300
-```
-
-### ACP (experimental)
-
-Communicates with `kiro-cli acp` via JSON-RPC 2.0 over stdio. Structured protocol with typed messages.
-
-Pros: real-time streaming, structured permission requests, clean API
-Cons: ACP protocol is young — currently has deserialization issues
-
-```env
-KIRO_TRANSPORT=acp
-KIRO_CLI_PATH=kiro-cli
-```
-
-## Configuration Reference
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `TELEGRAM_BOT_TOKEN` | yes | — | Bot token from @BotFather |
-| `ALLOWED_USER_IDS` | yes | — | Comma-separated Telegram user IDs |
-| `KIRO_TRANSPORT` | no | `tmux` | Transport: `tmux` or `acp` |
-| `KIRO_CLI_PATH` | no | `kiro-cli` | Path to kiro-cli binary |
-| `WORKING_DIR` | no | `.` | Directory where Kiro operates |
-| `TMUX_SESSION` | no | `kiro-bridge` | tmux session name (tmux transport) |
-| `TMUX_CAPTURE_DELAY_SEC` | no | `3` | Seconds before first output capture |
-| `TMUX_MAX_WAIT_SEC` | no | `300` | Max seconds to wait for Kiro response |
-| `TRUST_MODE` | no | `false` | Auto-approve Kiro actions |
-| `PERMISSION_TIMEOUT_MS` | no | `60000` | Permission prompt timeout (acp only) |
-| `LOG_LEVEL` | no | `low` | Logging: `off`, `low`, `debug` |
-
-All configuration is read from `~/.agentbridge/.env`. Logs are written to `~/.agentbridge/bridge.log`.
-
-## Security
-
-- Fail-closed: empty user whitelist = refuses to start
-- Silent rejection: unauthorized users get no response
-- Zero network surface: no HTTP server, no webhooks, no exposed ports
-- No API keys in code: all secrets in `.env`
-- No MCP: uses local communication only
+Optional: ollama + `nomic-embed-text` for memory embeddings.
 
 ## Development
 
 ```bash
-npm test              # Run tests
-npm run test:watch    # Watch mode
-npx tsc --noEmit      # Type-check
-npm run build         # Build
-```
-
-## Project Structure
-
-```
-src/
-├── main.ts                          # Entry point — transport selection + wiring
-├── types/
-│   ├── index.ts                     # Re-exports
-│   ├── config.ts                    # Config type with transport settings
-│   ├── session.ts, acp.ts, permission.ts, telegram.ts
-└── components/
-    ├── kiro-transport.ts            # IKiroTransport interface
-    ├── tmux-client.ts               # tmux transport implementation
-    ├── acp-client.ts                # ACP JSON-RPC client
-    ├── acp-transport.ts             # ACP transport adapter
-    ├── config.ts                    # .env loading and validation
-    ├── security-gate.ts             # User ID whitelist
-    ├── telegram-api.ts              # Telegram Bot API wrapper
-    ├── telegram-poller.ts           # Long-poll loop
-    ├── response-formatter.ts        # Response chunking
-    ├── jsonrpc.ts                   # JSON-RPC utilities (acp)
-    ├── session-manager.ts           # Session mapping (acp)
-    └── permission-handler.ts        # Permission flow (acp)
-scripts/
-    └── tmux-session.sh              # Start kiro-cli in tmux
+git clone https://github.com/aksika/abtars.git
+cd abtars && npm install && npm run build
+npm test
 ```
 
 ## License
 
-MIT
+Apache-2.0

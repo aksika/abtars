@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.abtars.daemon</string>
+  <key>UserName</key><string>{{USER}}</string>
+  <key>GroupName</key><string>{{GROUP}}</string>
+  <key>WorkingDirectory</key><string>/Users/{{USER}}/.abtars</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/{{USER}}/.abtars/scripts/watchdog.sh</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/{{USER}}/.abtars/logs/daemon.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/{{USER}}/.abtars/logs/daemon.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ABTARS_HOME</key><string>/Users/{{USER}}/.abtars</string>
+    <key>ABMIND_HOME</key><string>/Users/{{USER}}/.abmind</string>
+    <key>SUPERVISION</key><string>launchd</string>
+  </dict>
+</dict>
+</plist>

@@ -3,9 +3,22 @@ import { logInfo, logDebug, logWarn } from "./logger.js";
 
 export interface TtsConfig {
   voice: string;
+  voiceMap?: Record<string, string>; // lang code → voice name
 }
 
 const MAX_TTS_CHARS = 4000;
+
+const DEFAULT_VOICE_MAP: Record<string, string> = {
+  hu: "hu-HU-TamasNeural",
+  en: "en-US-AndrewMultilingualNeural",
+};
+
+/** Extract [lang:xx] tag from text, return { lang, text } */
+export function extractLangTag(text: string): { lang: string | null; text: string } {
+  const m = text.match(/^\[lang:(\w{2})\]\s*/i);
+  if (m) return { lang: m[1]!.toLowerCase(), text: text.slice(m[0].length) };
+  return { lang: null, text };
+}
 
 /**
  * Synthesize text to OGG Opus audio buffer using Microsoft Edge TTS.
@@ -15,22 +28,26 @@ export async function synthesizeSpeech(
   text: string,
   config: TtsConfig,
 ): Promise<Buffer | null> {
-  const cleaned = cleanForTts(text).trim();
+  const { lang, text: stripped } = extractLangTag(text);
+  const cleaned = cleanForTts(stripped).trim();
   if (!cleaned || cleaned.length < 5) {
     logDebug("tts", `Text too short for TTS (${cleaned.length} chars)`);
     return null;
   }
+
+  const voiceMap = { ...DEFAULT_VOICE_MAP, ...config.voiceMap };
+  const voice = (lang && voiceMap[lang]) || config.voice;
 
   // Truncate very long responses
   const input = cleaned.length > MAX_TTS_CHARS
     ? cleaned.slice(0, MAX_TTS_CHARS) + "... (truncated)"
     : cleaned;
 
-  logInfo("tts", `Synthesizing ${input.length} chars with voice ${config.voice}`);
+  logInfo("tts", `Synthesizing ${input.length} chars with voice ${voice}${lang ? ` (lang:${lang})` : ""}`);
 
   try {
     const tts = new EdgeTTS();
-    await tts.synthesize(input, config.voice, {
+    await tts.synthesize(input, voice, {
       rate: "+0%",
       pitch: "+0Hz",
       outputFormat: Constants.OUTPUT_FORMAT.WEBM_24KHZ_16BIT_MONO_OPUS,
@@ -50,9 +67,9 @@ export async function synthesizeSpeech(
   }
 }
 
-/** Strip reasoning, tool noise, HTML tags, and markdown for cleaner TTS output. */
-function cleanForTts(text: string): string {
-  return text
+/** Strip reasoning, tool noise, HTML tags, markdown, and emojis for cleaner TTS output. */
+export function cleanForTts(text: string): string {
+  let result = text
     // --- HTML tags ---
     .replace(/<br\s*\/?>/gi, "\n")                            // <br> → newline
     .replace(/<[^>]+>/g, "")                                  // strip all HTML tags
@@ -72,8 +89,18 @@ function cleanForTts(text: string): string {
     .replace(/[*_~]{1,3}/g, "")                               // bold/italic/strike
     .replace(/^#{1,6}\s+/gm, "")                              // headings
     .replace(/^[-*+]\s+/gm, "")                               // list markers
-    .replace(/^\d+\.\s+/gm, "")                               // numbered lists
-    // --- Cleanup ---
+    .replace(/^\d+\.\s+/gm, "");                              // numbered lists
+
+  // --- Emoji filtering ---
+  try {
+    result = result.replace(/\p{Extended_Pictographic}/gu, "");
+  } catch (err) {
+    logWarn("tts", `Emoji filter failed, using unfiltered text: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // --- Cleanup ---
+  return result
     .replace(/\n{3,}/g, "\n\n")                               // excess newlines
     .trim();
 }
+

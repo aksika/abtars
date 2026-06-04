@@ -1,0 +1,21 @@
+[Unit]
+Description=Abtars — AI agent bridge for Telegram/Discord
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=%h/.abtars
+ExecStart=%h/.abtars/scripts/abtars.sh
+Restart=always
+RestartSec=60
+Environment=NODE_ENV=production
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=abtars
+
+[Install]
+WantedBy=default.target

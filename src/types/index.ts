@@ -1,4 +1,4 @@
-export type { Config, KiroTransport } from "./config.js";
+export type { Config, AgentTransport, TelegramConfig, DiscordConfig, TransportConfig, VoiceConfig } from "./config.js";
 export { CONFIG_DEFAULTS } from "./config.js";
 
 export type { SessionState } from "./session.js";
@@ -28,10 +28,36 @@ export type {
 export type {
   MessageRecord,
   MemoryTier,
-  CompactedMemory,
-  StoredSession,
   SearchResult,
   VectorSearchResult,
   SearchOptions,
-  AssembledContext,
-} from "./memory.js";
+  ForgetResult,
+  ExtractedMemory,
+  MemorySearchParams,
+  MemorySearchResult,
+  HeartbeatTask,
+  InstantStoreParams,
+  InstantStoreResult,
+  EditMemoryParams,
+  EditMemoryResult,
+} from "abmind";
+
+export type {
+  DiscordInboundMessage,
+} from "./discord.js";
+
+export type {
+  Platform,
+  PlatformAdapter,
+  PlatformCapabilities,
+  InboundMessage,
+  SendOpts,
+} from "./platform.js";
+
+export type {
+  BrowserActionType,
+  BrowserAction,
+  BrowserToolResult,
+  PageElement,
+  BrowserSession,
+} from "./browser.js";
