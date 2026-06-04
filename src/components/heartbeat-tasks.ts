@@ -50,12 +50,16 @@ export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
 }
 
 /** DB integrity check — runs every ~1 hour (time-based, independent of tick interval). */
-export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTask {
+export function createDbIntegrityTask(memory: MemoryManager | null, sendSystemMessage?: (msg: string) => void): HeartbeatTask {
   let lastCheckAt = 0;
   const INTERVAL_MS = 60 * 60 * 1000;
+  const MAX_FAILURES = 5;
+  let consecutiveFailures = 0;
+  let escalated = false;
   return {
     name: "db-integrity",
     execute: async () => {
+      if (escalated) return;
       if (Date.now() - lastCheckAt < INTERVAL_MS) return;
       lastCheckAt = Date.now();
       if (!memory) return;
@@ -63,7 +67,20 @@ export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTa
       if (result !== "ok") {
         logError("db-integrity", `Memory DB integrity check failed: ${result}`);
         const { rebuilt } = memory.rebuildFtsIndexes();
-        if (rebuilt.length > 0) logInfo("db-integrity", `Auto-rebuilt FTS indexes: ${rebuilt.join(", ")}`);
+        if (rebuilt.length > 0) {
+          logInfo("db-integrity", `Auto-rebuilt FTS indexes: ${rebuilt.join(", ")}`);
+          consecutiveFailures = 0;
+        } else {
+          consecutiveFailures++;
+          if (consecutiveFailures >= MAX_FAILURES) {
+            escalated = true;
+            const msg = `⚠️ FTS corruption persists after ${MAX_FAILURES} rebuild attempts. Needs manual fix.`;
+            logError("db-integrity", msg);
+            sendSystemMessage?.(msg);
+          }
+        }
+      } else {
+        consecutiveFailures = 0;
       }
     },
   };
