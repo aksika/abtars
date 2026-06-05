@@ -165,6 +165,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
       source: 'local',
       previousVersion: prior?.version ?? null,
       previousCommit: prior?.commit ?? null,
+      installMode: prior?.installMode ?? 'supervised',
     });
     process.stdout.write(`✓ manifest updated\n`);
 
