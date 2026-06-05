@@ -2,16 +2,14 @@
  * abtars-rss — fetch RSS/Atom feeds, output JSON
  *
  * Usage:
- *   abtars-rss --feeds <path>                        # fetch feeds from JSON file
- *   abtars-rss --feeds <path> --watchlist <path>     # also add per-ticker feeds
+ *   abtars-rss --feeds <path>           # fetch feeds from JSON file
  *   abtars-rss --feeds <path> --hours 48
  *
  * Reads:  a feeds.json file (array of {url, name, keywords?})
- *         optional watchlist .md with ## Active section listing tickers
  * Writes: ~/.abtars/workspace/rss/<feedname>/<date>.json
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 
@@ -95,29 +93,13 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const feedsIdx = args.indexOf("--feeds");
   if (feedsIdx === -1 || !args[feedsIdx + 1]) {
-    console.error("Usage: abtars-rss --feeds <path.json> [--watchlist <path.md>] [--hours N]");
+    console.error("Usage: abtars-rss --feeds <path.json> [--hours N]");
     process.exit(1);
   }
   const feedsPath = args[feedsIdx + 1]!;
   const hours = parseInt(args.find((_, i, a) => a[i - 1] === "--hours") ?? "24", 10);
-  const watchlistIdx = args.indexOf("--watchlist");
-  const watchlistPath = watchlistIdx !== -1 ? args[watchlistIdx + 1] : undefined;
 
   const feeds: FeedConfig[] = JSON.parse(readFileSync(feedsPath, "utf-8"));
-
-  // Add per-ticker feeds from watchlist
-  if (watchlistPath && existsSync(watchlistPath)) {
-    const content = readFileSync(watchlistPath, "utf-8");
-    const section = content.match(/## Active\n([\s\S]*?)(?=\n## |$)/);
-    if (section?.[1]) {
-      for (const line of section[1].split("\n")) {
-        const m = line.match(/^- (\w+)/);
-        if (m?.[1]) {
-          feeds.push({ url: `https://seekingalpha.com/api/sa/combined/${m[1]}.xml`, name: `SeekingAlpha:${m[1]}` });
-        }
-      }
-    }
-  }
   const outDir = join(process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars"), "workspace", "rss");
 
   console.error(`Fetching ${feeds.length} feeds...`);
