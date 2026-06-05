@@ -344,6 +344,10 @@ while true; do
 
   age_sec=$(( (now - lock_hb) / 1000 ))
   if [[ "$KILL_ON_STALE" == "true" ]] && (( age_sec > STALE_SEC )); then
+    # Skip if update in progress — bridge will be restarted by update command
+    if [[ -f "$AB/state/update.sentinel" ]] && grep -q '"pending"' "$AB/state/update.sentinel" 2>/dev/null; then
+      continue
+    fi
     kill_bridge "heartbeat stale (${age_sec}s)"
     spawn_bridge "${BRIDGE_ARGS[@]}"
   fi
