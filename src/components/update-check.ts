@@ -1,6 +1,6 @@
 /**
- * update-check.ts — Check npm registry for newer abtars versions (#440, #588).
- * Single module: configurable TTL, notify cooldown, logger integration.
+ * update-check.ts — Check npm registry for newer abtars versions (#440, #588, #806).
+ * Once-per-release notification. No daily nagging. Env: UPDATE_NOTIFICATION=OFF to disable.
  */
 
 import { execFileSync } from "node:child_process";
@@ -9,12 +9,11 @@ import { join } from "node:path";
 import { abtarsHome } from "../paths.js";
 
 const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h
-const NOTIFY_COOLDOWN_MS = 24 * 60 * 60_000; // 1 per day
 
 interface CacheData {
   ts: number;
   latest: string;
-  lastNotifiedAt?: number;
+  lastNotifiedVersion?: string;
 }
 
 function cachePath(): string {
@@ -35,22 +34,38 @@ function writeCache(data: CacheData): void {
   try { writeFileSync(cachePath(), JSON.stringify(data), "utf-8"); } catch { /* non-critical */ }
 }
 
-function fetchLatest(pkg: string): string | null {
+/** Fetch the appropriate version from npm based on whether we're running a prerelease. */
+function fetchLatest(pkg: string, currentVersion: string): string | null {
   try {
+    // If running a prerelease, compare against alpha tag
+    if (currentVersion.includes("-alpha") || currentVersion.includes("-beta")) {
+      const raw = execFileSync("npm", ["view", pkg, "dist-tags", "--json"], { encoding: "utf-8", timeout: 10_000 }).trim();
+      const tags = JSON.parse(raw) as Record<string, string>;
+      return tags.alpha ?? tags.latest ?? null;
+    }
     return execFileSync("npm", ["view", pkg, "version"], { encoding: "utf-8", timeout: 10_000 }).trim();
   } catch {
     return null;
   }
 }
 
-/** True if a is newer than b (semver major.minor.patch). */
+/** True if a is newer than b. Handles prerelease: strips -alpha.N, compares base, then prerelease number. */
 function isNewer(a: string, b: string): boolean {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
+  const parseVer = (v: string): { parts: number[]; pre: number | null } => {
+    const [base, preStr] = v.split("-alpha.");
+    return { parts: (base ?? "").split(".").map(Number), pre: preStr != null ? Number(preStr) : null };
+  };
+  const va = parseVer(a);
+  const vb = parseVer(b);
+  // Compare base version
   for (let i = 0; i < 3; i++) {
-    if ((pa[i] ?? 0) > (pb[i] ?? 0)) return true;
-    if ((pa[i] ?? 0) < (pb[i] ?? 0)) return false;
+    if ((va.parts[i] ?? 0) > (vb.parts[i] ?? 0)) return true;
+    if ((va.parts[i] ?? 0) < (vb.parts[i] ?? 0)) return false;
   }
+  // Same base — compare prerelease (null = stable > any alpha)
+  if (va.pre === null && vb.pre !== null) return true; // stable > alpha
+  if (va.pre !== null && vb.pre === null) return false; // alpha < stable
+  if (va.pre !== null && vb.pre !== null) return va.pre > vb.pre;
   return false;
 }
 
@@ -63,21 +78,27 @@ export interface UpdateCheckResult {
 
 /**
  * Check if a newer version is available on npm.
- * Returns null if check is skipped (cached fresh / offline / npm not found).
+ * Returns null if check is skipped (cached fresh / offline / npm not found / notifications off).
  */
 export function checkForUpdate(pkg: string, currentVersion: string, opts?: { ttlMs?: number }): UpdateCheckResult | null {
+  // Env kill-switch
+  if (process.env.UPDATE_NOTIFICATION === "OFF") return null;
+
   const ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
   const cache = readCache(ttlMs);
-  const latest = cache?.latest ?? fetchLatest(pkg);
+  const latest = cache?.latest ?? fetchLatest(pkg, currentVersion);
   if (!latest) return null;
 
-  const now = Date.now();
   const updateAvailable = isNewer(latest, currentVersion);
-  const shouldNotify = updateAvailable && (!cache?.lastNotifiedAt || now - cache.lastNotifiedAt > NOTIFY_COOLDOWN_MS);
+  // Notify once per release: only if latest !== lastNotifiedVersion
+  const shouldNotify = updateAvailable && cache?.lastNotifiedVersion !== latest;
 
-  const newCache: CacheData = { ts: now, latest, lastNotifiedAt: shouldNotify ? now : cache?.lastNotifiedAt };
-  if (!cache) writeCache(newCache);
-  else if (shouldNotify) writeCache(newCache);
+  const newCache: CacheData = {
+    ts: Date.now(),
+    latest,
+    lastNotifiedVersion: shouldNotify ? latest : cache?.lastNotifiedVersion,
+  };
+  if (!cache || shouldNotify) writeCache(newCache);
 
   return { current: currentVersion, latest, updateAvailable, shouldNotify };
 }
