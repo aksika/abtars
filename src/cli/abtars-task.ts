@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * abtars-task — schedule time-based reminders and tasks.
  *

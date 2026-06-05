@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * abtars-rss — fetch RSS/Atom feeds, output JSON
  *
