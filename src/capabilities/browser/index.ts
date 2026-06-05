@@ -87,6 +87,10 @@ export function register(api: CapabilityApi): void {
     conn.on("error", () => {});
   });
 
+  spawnServer.on("error", (err: Error) => {
+    logError("browser", `⚠️ Browse-spawn IPC socket error — browser degraded: ${err.message}`);
+  });
+
   spawnServer.listen(spawnSocketPath, () => {
     logInfo("browser", `🔌 Browse spawn IPC listening on ${spawnSocketPath}`);
   });
