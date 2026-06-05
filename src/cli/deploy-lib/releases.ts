@@ -28,6 +28,22 @@ export function atomicSwap(appDir: string, _appPrevLegacy: string, appStagingDir
     rmSync(legacyPrev, { recursive: true, force: true });
   }
 
+  // Skip rotation if current app/ has same version as staging (no-op redeploy)
+  try {
+    const curPkg = join(appDir, "package.json");
+    const stagePkg = join(appStagingDir, "package.json");
+    if (existsSync(curPkg) && existsSync(stagePkg)) {
+      const curVer = JSON.parse(readFileSync(curPkg, "utf-8")).version;
+      const stageVer = JSON.parse(readFileSync(stagePkg, "utf-8")).version;
+      if (curVer && curVer === stageVer) {
+        // Same version — just replace app/ without rotating priors
+        rmSync(appDir, { recursive: true, force: true });
+        renameSync(appStagingDir, appDir);
+        return;
+      }
+    }
+  } catch { /* proceed with normal rotation if read fails */ }
+
   // Rotate: 3 → delete, 2 → 3, 1 → 2
   if (existsSync(prev3)) rmSync(prev3, { recursive: true, force: true });
   if (existsSync(prev2)) renameSync(prev2, prev3);
