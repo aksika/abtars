@@ -166,7 +166,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
       previousVersion: prior?.version ?? null,
       previousCommit: prior?.commit ?? null,
       installMode: prior?.installMode ?? 'supervised',
-      repoRoot: opts.fromLocal ? repoRoot : (prior as any)?.repoRoot ?? null,
+      repoRoot: opts.fromLocal && existsSync(join(repoRoot, '.git')) ? repoRoot : (prior as any)?.repoRoot ?? null,
     } as any);
     process.stdout.write(`✓ manifest updated\n`);
 
