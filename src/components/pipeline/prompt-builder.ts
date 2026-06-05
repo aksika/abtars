@@ -254,11 +254,15 @@ export function buildSessionStartPrompt(
     // Dead path — kept for type safety during transition
   } else {
     const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : undefined;
-    const ctx = abmind()?.buildSessionStartContext(memory, userId, maxContext, ctxOpts);
+    const ctxResult = abmind()?.buildSessionStartContext(memory, userId, maxContext, ctxOpts);
+    const ctx = ctxResult?.text ?? null;
     if (ctx) {
       contextParts.push(ctx);
-      logInfo(TAG, `Injected session-start context (${ctx.length} chars${isCodeSession ? ", Code mode" : ""})`);
-      logTrace(TAG, `session-start content: ${ctx}`);
+      const s = ctxResult!.stats;
+      const ctxPct = maxContext ? Math.round(ctx.length / maxContext * 100) : -1;
+      logInfo(TAG, `Session start: ${s.messages} messages + ${s.dailies} dailies (${(s.usedBytes / 1024).toFixed(1)}KB / ${(s.budget / 1024).toFixed(0)}KB budget, ${ctxPct}% ctx${isCodeSession ? ", Code" : ""})`);
+      logDebug(TAG, `Session context: ${s.messages} msgs, ${s.dailies} dailies, ${s.usedBytes}B / ${s.budget}B budget, ${ctxPct}% ctx`);
+      logTrace(TAG, `session-start content: ${ctx.slice(0, 500)}...`);
     }
 
     try {
