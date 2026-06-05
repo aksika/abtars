@@ -345,3 +345,76 @@ export async function handleWhoami(_text: string, ctx: CommandContext): Promise<
   }
   return true;
 }
+
+export async function handleMaintenance(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { existsSync } = await import("node:fs");
+  const { abtarsHome } = await import("../../paths.js");
+  const home = abtarsHome();
+  const arg = _text.replace(/^\/maintenance\s*/i, "").trim();
+
+  // /maintenance rollback <version>
+  if (arg.startsWith("rollback")) {
+    const targetVersion = arg.replace(/^rollback\s*/, "").trim();
+    if (!targetVersion) {
+      await ctx.reply("Usage: /maintenance rollback <version>\nUse /maintenance to see available versions.");
+      return true;
+    }
+
+    // Find which slot matches
+    let targetSlot: number | null = null;
+    for (let i = 1; i <= 3; i++) {
+      const pkgPath = join(home, `app.prev.${i}`, "package.json");
+      try {
+        const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+        if (ver === targetVersion) { targetSlot = i; break; }
+      } catch { /* slot empty */ }
+    }
+
+    if (!targetSlot) {
+      await ctx.reply(`❌ Version ${targetVersion} not found in rollback slots.`);
+      return true;
+    }
+
+    await ctx.reply(`⚠️ Rolling back to ${targetVersion} (slot ${targetSlot})...`);
+    try {
+      const { rollback } = await import("../../cli/commands/rollback.js");
+      await rollback({ to: targetSlot });
+      // Bridge will restart — this message may not arrive
+    } catch (err) {
+      await ctx.reply(`❌ Rollback failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  // /maintenance — show deployment info
+  const lines: string[] = ["🔧 Deployment"];
+
+  // Current version
+  try {
+    const pkg = JSON.parse(readFileSync(join(home, "app", "package.json"), "utf-8"));
+    const manifest = existsSync(join(home, "manifest.json"))
+      ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
+      : null;
+    const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
+    lines.push(`  Current: ${pkg.version} (deployed ${deployed})`);
+  } catch {
+    lines.push("  Current: unknown");
+  }
+
+  // Rollback slots
+  lines.push("  Rollback:");
+  for (let i = 1; i <= 3; i++) {
+    const pkgPath = join(home, `app.prev.${i}`, "package.json");
+    try {
+      const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+      lines.push(`    ${i}: ${ver}`);
+    } catch {
+      lines.push(`    ${i}: (empty)`);
+    }
+  }
+
+  lines.push("");
+  lines.push("  /maintenance rollback <version>");
+  await ctx.reply(lines.join("\n"));
+  return true;
+}
