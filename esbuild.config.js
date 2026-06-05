@@ -8,7 +8,7 @@
  */
 
 import esbuild from "esbuild";
-import { readdirSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readdirSync, existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -106,3 +106,8 @@ writeFileSync("bundle/meta.json", JSON.stringify(result.metafile, null, 2));
 const outputs = Object.keys(result.metafile.outputs);
 const totalBytes = Object.values(result.metafile.outputs).reduce((sum, o) => sum + o.bytes, 0);
 console.log(`\n✓ Bundle: ${outputs.length} files, ${(totalBytes / 1024 / 1024).toFixed(1)}MB total`);
+
+// Ensure CLI entry points are executable
+for (const f of ["bundle/abtars-cli.js", "bundle/abtars-sleep.js"]) {
+  try { chmodSync(f, 0o755); } catch { /* ignore if missing */ }
+}
