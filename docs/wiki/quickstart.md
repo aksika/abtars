@@ -23,6 +23,8 @@ The onboard wizard asks for:
 - Model provider (Kiro CLI, OpenRouter, ollama, etc.)
 - Agent name and passphrase (for memory encryption)
 
+> ⚠️ **SECURITY WARNING:** When creating your bot with @BotFather, **disable "Allow Groups"** and do NOT make it public. abTARS has access to your machine via `execute_bash`. If your bot is public, anyone who finds it can message it and potentially execute commands. The built-in `users.json` allowlist blocks unknown senders, but defense-in-depth means keeping the bot private at the Telegram level too. Set it to private, and only you should know the bot username.
+
 ## 3. Start
 
 ```bash
