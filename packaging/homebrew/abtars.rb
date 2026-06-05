@@ -1,8 +1,8 @@
 class Abtars < Formula
   desc "AI bridge — connect LLMs to Telegram, Discord, and more"
   homepage "https://github.com/aksika/abtars"
-  url "https://registry.npmjs.org/abtars/-/abtars-0.2.1-alpha.8.tgz"
-  sha256 "8d808e13a6b7061aece90a614e00ff44a715cdaa9aa6884ec881a16e478e92b5"
+  url "https://registry.npmjs.org/abtars/-/abtars-0.2.1-alpha.9.tgz"
+  sha256 "16cb5d618ffea60d1204537813999840eaba7c5c2ac6dfadbfe948ce67992182"
   license "Apache-2.0"
 
   depends_on "node@22"
