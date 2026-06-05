@@ -62,7 +62,7 @@ Usage:
   abtars uninstall [--yes]
   abtars update  [--source local|npm|github] [--from-local]
   abtars rollback [--to <version>]
-  abtars backup
+  abtars backup [--config] [--encrypt] [--output <dir>] [--prune-days N]
   abtars restore <file.zip|.7z>
   abtars doctor [<args passed to doctor.sh>...]
   abtars onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
@@ -99,7 +99,12 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'rollback':
         return await rollback();
       case 'backup':
-        return await backup(typeof flags.get('output') === 'string' ? (flags.get('output') as string) : undefined);
+        return await backup({
+          config: flags.get('config') === true,
+          encrypt: flags.get('encrypt') === true,
+          outputDir: typeof flags.get('output') === 'string' ? (flags.get('output') as string) : undefined,
+          pruneDays: typeof flags.get('prune-days') === 'string' ? Number(flags.get('prune-days')) : undefined,
+        });
       case 'restore': {
         const { restore } = await import('./commands/restore.js');
         return await restore(argv[1] ?? '');
