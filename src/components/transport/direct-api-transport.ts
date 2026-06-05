@@ -114,7 +114,7 @@ export class DirectApiTransport implements IKiroTransport {
         // Replace session messages with DB-backed context + system prompt
         session.messages = [
           { role: "system" as const, content: this.systemPrompt },
-          ...ctx.messages.map(m => ({ role: m.role as "user" | "assistant" | "tool", content: m.content })),
+          ...ctx.messages.map((m: { role: string; content: string }) => ({ role: m.role as "user" | "assistant" | "tool", content: m.content })),
         ];
         if (ctx.compacted) logDebug(TAG, `Context compacted for ${sessionKey}`);
       } catch (err) {

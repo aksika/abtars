@@ -122,7 +122,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     })();
 
     abmind()!.runSleepCycle({ runtime: opts.runtime, level })
-      .then((result) => {
+      .then((result: { ok: boolean; failCount: number }) => {
         running = false;
         progress = null;
         logInfo("sleep", `😴 Sleep finished (ok=${result.ok}, failCount=${result.failCount}, attempt ${attempts})`);
@@ -162,7 +162,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
           logInfo("sleep", `💤 Awaiting hardware sleep — ${quietTicks} quiet ticks (${hwSleepMin} min) required`);
         }
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         running = false;
         progress = null;
         writeSleepStatus("awake");

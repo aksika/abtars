@@ -166,8 +166,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
       previousVersion: prior?.version ?? null,
       previousCommit: prior?.commit ?? null,
       installMode: prior?.installMode ?? 'supervised',
-      repoRoot: opts.fromLocal ? repoRoot : (prior as Record<string, unknown>)?.repoRoot ?? null,
-    });
+      repoRoot: opts.fromLocal ? repoRoot : (prior as any)?.repoRoot ?? null,
+    } as any);
     process.stdout.write(`✓ manifest updated\n`);
 
     // ── Step 8: Restart bridge ──────────────────────────────────────────

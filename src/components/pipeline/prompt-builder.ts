@@ -130,7 +130,8 @@ export async function buildPrompt(
         });
         const TRIVIAL_TTL_MS = 36 * 60 * 60_000;
         const nowMs = Date.now();
-        const hits = recall.results.filter(h => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const hits = recall.results.filter((h: any) => {
           if (h.score <= 0.70) return false;
           // Stale trivial fact: old + no signal + weak match → filter
           if (h.memoryType === "fact" && h.score < 1.0 && h.createdAt && nowMs - h.createdAt > TRIVIAL_TTL_MS) {
@@ -139,7 +140,8 @@ export async function buildPrompt(
           return true;
         });
         if (hits.length > 0) {
-          const lines = hits.map(h => abmind()!.renderMemory({
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const lines = hits.map((h: any) => abmind()!.renderMemory({
             content_en: h.content,
             topic: h.topic ?? undefined,
             emotion_tags: h.emotionTags ?? undefined,
@@ -170,7 +172,7 @@ export async function buildPrompt(
     if (scanFn) {
       const scan = scanFn(text);
       if (!scan.safe) {
-        logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map(f => f.category).join(", ")}`);
+        logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map((f: { category: string }) => f.category).join(", ")}`);
       // Return a sentinel — caller checks and sends the block message
       return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined };
     }
