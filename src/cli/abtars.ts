@@ -63,7 +63,7 @@ Usage:
   abtars update  [--source local|npm|github] [--from-local]
   abtars rollback [--to <version>]
   abtars backup [--config] [--encrypt] [--output <dir>] [--prune-days N]
-  abtars restore <file.zip|.7z>
+  abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]
   abtars doctor [<args passed to doctor.sh>...]
   abtars onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   abtars restart [--cold]
@@ -107,7 +107,10 @@ export async function main(argv: readonly string[]): Promise<number> {
         });
       case 'restore': {
         const { restore } = await import('./commands/restore.js');
-        return await restore(argv[1] ?? '');
+        return await restore(argv[1] ?? '', {
+          config: flags.get('config') === true,
+          passphrase: typeof flags.get('passphrase') === 'string' ? (flags.get('passphrase') as string) : undefined,
+        });
       }
       case 'doctor':
         // Pass remaining --flags through to doctor.sh. Primitive pass-through:
