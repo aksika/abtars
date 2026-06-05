@@ -1,5 +1,6 @@
 /**
- * `abtars rollback` — swap app/ ↔ app.prev/, restart, health-verify.
+ * `abtars rollback` — swap app/ with a prior version, restart, health-verify.
+ * --to N (1-3, default 1) selects which prior to restore.
  */
 
 import { existsSync, renameSync, rmSync } from 'node:fs';
@@ -12,12 +13,26 @@ import {
   writeManifest,
 } from '../deploy-lib-import.js';
 
-export async function rollback(): Promise<number> {
+export async function rollback(opts?: { to?: number }): Promise<number> {
   const paths = packagePaths('abtars');
   const manifest = await readManifest(paths.manifest);
+  const slot = opts?.to ?? 1;
 
-  if (!existsSync(paths.appPrev)) {
-    process.stderr.write(`Nothing to roll back to (no app.prev/ found).\n`);
+  if (slot < 1 || slot > 3) {
+    process.stderr.write(`Invalid --to value: ${slot}. Must be 1-3.\n`);
+    return 2;
+  }
+
+  const prevDir = join(paths.home, `app.prev.${slot}`);
+
+  // Backward compat: check old app.prev/ if slot 1 and new format doesn't exist
+  const legacyPrev = paths.appPrev;
+  if (slot === 1 && !existsSync(prevDir) && existsSync(legacyPrev)) {
+    renameSync(legacyPrev, prevDir);
+  }
+
+  if (!existsSync(prevDir)) {
+    process.stderr.write(`Nothing to roll back to (no app.prev.${slot}/ found).\n`);
     return 2;
   }
 
@@ -28,13 +43,13 @@ export async function rollback(): Promise<number> {
 
   const release = await acquireLock(paths.lock, 'rollback');
   try {
-    // Swap: app/ → app.broken/, app.prev/ → app/
+    // Swap: app/ → app.broken/, app.prev.N/ → app/
     const brokenDir = join(paths.home, 'app.broken');
     rmSync(brokenDir, { recursive: true, force: true });
     renameSync(paths.app, brokenDir);
-    renameSync(paths.appPrev, paths.app);
+    renameSync(prevDir, paths.app);
     rmSync(brokenDir, { recursive: true, force: true });
-    process.stdout.write(`✓ rolled back: app.prev/ → app/\n`);
+    process.stdout.write(`✓ rolled back: app.prev.${slot}/ → app/\n`);
 
     // Update manifest (swap version ↔ previousVersion)
     if (manifest.previousVersion) {

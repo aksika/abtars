@@ -191,8 +191,8 @@ export async function update(opts: UpdateOptions): Promise<number> {
     // ── Step 10: Auto-rollback ──────────────────────────────────────────
     process.stderr.write(`❌ Bridge unhealthy after 60s. Auto-rolling back...\n`);
 
-    if (!existsSync(paths.appPrev)) {
-      process.stderr.write(`❌ No app.prev/ to roll back to. Manual intervention required.\n`);
+    if (!existsSync(paths.appPrev1)) {
+      process.stderr.write(`❌ No app.prev.1/ to roll back to. Manual intervention required.\n`);
       process.stderr.write(`   Check: ~/.abtars/logs/bridge.log\n`);
       return 2;
     }
@@ -202,7 +202,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     rmSync(brokenDir, { recursive: true, force: true });
     const { renameSync } = await import('node:fs');
     renameSync(paths.app, brokenDir);
-    renameSync(paths.appPrev, paths.app);
+    renameSync(paths.appPrev1, paths.app);
 
     // Restore manifest
     if (prior) {

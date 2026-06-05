@@ -11,18 +11,31 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /**
- * Atomic swap: app.staging/ → app/, old app/ → app.prev/.
- * Two renames (~instant). Caller must ensure app.staging/ is fully built.
+ * Atomic swap with 3-prior rotation.
+ * app.prev.3/ → delete, app.prev.2/ → .3, app.prev.1/ → .2, app/ → .prev.1, staging/ → app/
+ * Backward compat: migrates old app.prev/ → app.prev.1/ if found.
  */
-export function atomicSwap(appDir: string, appPrevDir: string, appStagingDir: string): void {
-  // Remove old prev
-  if (existsSync(appPrevDir)) {
-    rmSync(appPrevDir, { recursive: true, force: true });
+export function atomicSwap(appDir: string, _appPrevLegacy: string, appStagingDir: string): void {
+  const prev1 = appDir.replace(/\/app$/, '/app.prev.1');
+  const prev2 = appDir.replace(/\/app$/, '/app.prev.2');
+  const prev3 = appDir.replace(/\/app$/, '/app.prev.3');
+  const legacyPrev = _appPrevLegacy; // app.prev/ (old format)
+
+  // Migrate old app.prev/ → app.prev.1/ if exists
+  if (existsSync(legacyPrev) && !existsSync(prev1)) {
+    renameSync(legacyPrev, prev1);
+  } else if (existsSync(legacyPrev)) {
+    rmSync(legacyPrev, { recursive: true, force: true });
   }
-  // app/ → app.prev/
-  if (existsSync(appDir)) {
-    renameSync(appDir, appPrevDir);
-  }
+
+  // Rotate: 3 → delete, 2 → 3, 1 → 2
+  if (existsSync(prev3)) rmSync(prev3, { recursive: true, force: true });
+  if (existsSync(prev2)) renameSync(prev2, prev3);
+  if (existsSync(prev1)) renameSync(prev1, prev2);
+
+  // app/ → app.prev.1/
+  if (existsSync(appDir)) renameSync(appDir, prev1);
+
   // app.staging/ → app/
   renameSync(appStagingDir, appDir);
 }
