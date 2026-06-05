@@ -16,7 +16,7 @@ describe('deploy-lib/releases', () => {
     await rm(tmp, { recursive: true, force: true });
   });
 
-  it('atomicSwap moves staging to app and app to app.prev', () => {
+  it('atomicSwap moves staging to app and app to app.prev.1', () => {
     const app = join(tmp, 'app');
     const appPrev = join(tmp, 'app.prev');
     const appStaging = join(tmp, 'app.staging');
@@ -29,7 +29,7 @@ describe('deploy-lib/releases', () => {
     atomicSwap(app, appPrev, appStaging);
 
     expect(existsSync(join(app, 'new.txt'))).toBe(true);
-    expect(existsSync(join(appPrev, 'old.txt'))).toBe(true);
+    expect(existsSync(join(tmp, 'app.prev.1', 'old.txt'))).toBe(true);
     expect(existsSync(appStaging)).toBe(false);
   });
 
@@ -44,23 +44,57 @@ describe('deploy-lib/releases', () => {
     atomicSwap(app, appPrev, appStaging);
 
     expect(existsSync(join(app, 'first.txt'))).toBe(true);
-    expect(existsSync(appPrev)).toBe(false);
+    expect(existsSync(join(tmp, 'app.prev.1'))).toBe(false);
   });
 
-  it('atomicSwap removes old app.prev before swap', () => {
+  it('atomicSwap rotates 3 priors and deletes the 4th', () => {
+    const app = join(tmp, 'app');
+    const appPrev = join(tmp, 'app.prev');
+    const appStaging = join(tmp, 'app.staging');
+
+    // Simulate 4 deploys
+    for (let i = 1; i <= 4; i++) {
+      mkdirSync(join(tmp, 'app.staging'));
+      writeFileSync(join(tmp, 'app.staging', 'v.txt'), `v${i}`);
+      atomicSwap(app, appPrev, appStaging);
+    }
+
+    // Current is v4
+    expect(readFileSync(join(app, 'v.txt'), 'utf-8')).toBe('v4');
+    // prev.1 = v3, prev.2 = v2, prev.3 = v1
+    expect(readFileSync(join(tmp, 'app.prev.1', 'v.txt'), 'utf-8')).toBe('v3');
+    expect(readFileSync(join(tmp, 'app.prev.2', 'v.txt'), 'utf-8')).toBe('v2');
+    expect(readFileSync(join(tmp, 'app.prev.3', 'v.txt'), 'utf-8')).toBe('v1');
+
+    // 5th deploy prunes v1
+    mkdirSync(appStaging);
+    writeFileSync(join(appStaging, 'v.txt'), 'v5');
+    atomicSwap(app, appPrev, appStaging);
+
+    expect(readFileSync(join(app, 'v.txt'), 'utf-8')).toBe('v5');
+    expect(readFileSync(join(tmp, 'app.prev.1', 'v.txt'), 'utf-8')).toBe('v4');
+    expect(readFileSync(join(tmp, 'app.prev.2', 'v.txt'), 'utf-8')).toBe('v3');
+    expect(readFileSync(join(tmp, 'app.prev.3', 'v.txt'), 'utf-8')).toBe('v2');
+  });
+
+  it('atomicSwap migrates legacy app.prev/ to app.prev.1/', () => {
     const app = join(tmp, 'app');
     const appPrev = join(tmp, 'app.prev');
     const appStaging = join(tmp, 'app.staging');
 
     mkdirSync(app);
+    writeFileSync(join(app, 'current.txt'), 'current');
     mkdirSync(appPrev);
-    writeFileSync(join(appPrev, 'ancient.txt'), 'ancient');
+    writeFileSync(join(appPrev, 'legacy.txt'), 'legacy');
     mkdirSync(appStaging);
+    writeFileSync(join(appStaging, 'new.txt'), 'new');
 
     atomicSwap(app, appPrev, appStaging);
 
-    // ancient.txt gone, replaced by current app's content
-    expect(existsSync(join(appPrev, 'ancient.txt'))).toBe(false);
+    expect(existsSync(join(app, 'new.txt'))).toBe(true);
+    expect(existsSync(join(tmp, 'app.prev.1', 'current.txt'))).toBe(true);
+    expect(existsSync(join(tmp, 'app.prev.2', 'legacy.txt'))).toBe(true);
+    expect(existsSync(appPrev)).toBe(false);
   });
 
   it('configSnapshot creates 3-slot rotation', () => {
