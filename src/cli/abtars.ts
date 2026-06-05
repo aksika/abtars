@@ -77,6 +77,21 @@ Usage:
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
+  // Handle --version before parsing (it looks like a command to parseArgs)
+  if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const here = dirname(fileURLToPath(import.meta.url));
+    try {
+      const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf-8'));
+      process.stdout.write(`${pkg.version}\n`);
+    } catch {
+      process.stdout.write('unknown\n');
+    }
+    return 0;
+  }
+
   const { command, flags } = parseArgs(argv);
 
   try {
