@@ -126,7 +126,8 @@
     "abtars-browser",
     "abtars-restart",
     "abtars-task",
-    "abtars-tweet"
+    "abtars-tweet",
+    "abtars-todo"
   ],
   "postInstall": [
     {
