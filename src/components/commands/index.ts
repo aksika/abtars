@@ -15,7 +15,7 @@ import {
   handleMemory, handleNlm, handleWakeup,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
   handleHooks, handleMcp, handleUsers, handleUsage, handleOpenRouter, handleWhoami,
-  handleMaintenance,
+  handleSoftware,
 } from "./handlers.js";
 import { handleSession } from "./session-handler.js";
 
@@ -32,7 +32,8 @@ registerExact("/restart", handleRestart);
 registerExact("/full", handleFull);
 registerExact("/short", handleShort);
 registerExact("/healing", handleHealing);
-registerExact("/maintenance", handleMaintenance);
+registerExact("/software", handleSoftware);
+registerExact("/update", handleSoftware);
 registerExact("/facts", handleFacts);
 registerExact("/tasks", handleTasksList);
 registerExact("/task", handleTasksList);

@@ -346,21 +346,26 @@ export async function handleWhoami(_text: string, ctx: CommandContext): Promise<
   return true;
 }
 
-export async function handleMaintenance(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleSoftware(_text: string, ctx: CommandContext): Promise<boolean> {
   const { existsSync } = await import("node:fs");
   const { abtarsHome } = await import("../../paths.js");
   const home = abtarsHome();
-  const arg = _text.replace(/^\/maintenance\s*/i, "").trim();
+  const arg = _text.replace(/^\/(software|update)\s*/i, "").trim();
 
-  // /maintenance rollback <version>
+  // Master-only gate for destructive subcommands
+  const { loadUsers } = await import("../user-registry.js");
+  const user = loadUsers().byUserId.get(ctx.userId);
+  const isMaster = user?.role === "master";
+
+  // /software rollback <version>
   if (arg.startsWith("rollback")) {
+    if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
     const targetVersion = arg.replace(/^rollback\s*/, "").trim();
     if (!targetVersion) {
-      await ctx.reply("Usage: /maintenance rollback <version>\nUse /maintenance to see available versions.");
+      await ctx.reply("Usage: /software rollback <version>\nUse /software to see available versions.");
       return true;
     }
 
-    // Find which slot matches
     let targetSlot: number | null = null;
     for (let i = 1; i <= 3; i++) {
       const pkgPath = join(home, `app.prev.${i}`, "package.json");
@@ -375,31 +380,95 @@ export async function handleMaintenance(_text: string, ctx: CommandContext): Pro
       return true;
     }
 
-    await ctx.reply(`⚠️ Rolling back to ${targetVersion} (slot ${targetSlot})...`);
+    await ctx.reply(`⚠️ Rolling back to ${targetVersion}...`);
     try {
       const { rollback } = await import("../../cli/commands/rollback.js");
       await rollback({ to: targetSlot });
-      // Bridge will restart — this message may not arrive
     } catch (err) {
       await ctx.reply(`❌ Rollback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return true;
   }
 
-  // /maintenance — show deployment info
-  const lines: string[] = ["🔧 Deployment"];
+  // /software update [local]
+  if (arg === "update" || arg === "update local" || arg === "local" || arg === "") {
+    // /update with no args → treat as /software (show info)
+    if (arg === "" && _text.match(/^\/software\s*$/i)) {
+      // Fall through to info display below
+    } else if (arg === "update" || arg === "update local" || arg === "local") {
+      if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
+      const isLocal = arg.includes("local");
+      await ctx.reply(`⏳ Updating${isLocal ? " (local)" : " (npm)"}...`);
+      try {
+        const { spawnSync } = await import("node:child_process");
+        const args = ["update"];
+        if (isLocal) args.push("--from-local");
+        // Write restart reason so new bridge can report back
+        const { writeFileSync: wf } = await import("node:fs");
+        const reasonPath = join(home, ".last-restart-reason");
+        wf(reasonPath, `software-update`, "utf-8");
+        spawnSync("abtars", args, { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
+        // If we get here, bridge didn't restart (error path)
+        await ctx.reply("⚠️ Update completed but bridge did not restart. Run /restart.");
+      } catch (err) {
+        await ctx.reply(`❌ Update failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return true;
+    }
+  }
 
-  // Current version
+  // /software check — force-refresh npm registry
+  if (arg === "check") {
+    await ctx.reply("🔍 Checking npm registry...");
+    try {
+      const { spawnSync } = await import("node:child_process");
+      const abtarsLatest = spawnSync("npm", ["view", "abtars", "dist-tags", "--json"], { encoding: "utf-8", timeout: 10_000 });
+      const abmindLatest = spawnSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 10_000 });
+      const abt = abtarsLatest.status === 0 ? JSON.parse(abtarsLatest.stdout) : null;
+      const abm = abmindLatest.status === 0 ? JSON.parse(abmindLatest.stdout) : null;
+      const lines = ["📦 npm registry (fresh):"];
+      if (abt) lines.push(`  abtars: latest=${abt.latest ?? "?"} alpha=${abt.alpha ?? "?"}`);
+      if (abm) lines.push(`  abmind: latest=${abm.latest ?? "?"} alpha=${abm.alpha ?? "?"}`);
+      if (!abt && !abm) lines.push("  ⚠️ npm unreachable");
+      await ctx.reply(lines.join("\n"));
+    } catch {
+      await ctx.reply("❌ npm check failed (timeout or network error)");
+    }
+    return true;
+  }
+
+  // /software — show deployment info (default)
+  const lines: string[] = ["🔧 Software"];
+
+  // abtars version
   try {
     const pkg = JSON.parse(readFileSync(join(home, "app", "package.json"), "utf-8"));
     const manifest = existsSync(join(home, "manifest.json"))
       ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
       : null;
     const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
-    lines.push(`  Current: ${pkg.version} (deployed ${deployed})`);
+    lines.push(`  abtars: ${pkg.version} (deployed ${deployed})`);
   } catch {
-    lines.push("  Current: unknown");
+    lines.push("  abtars: unknown");
   }
+
+  // abmind version
+  const abmindHome = process.env["ABMIND_HOME"] ?? join(home, "..", ".abmind");
+  const abmindManifest = join(abmindHome, "manifest.json");
+  if (existsSync(abmindManifest)) {
+    try {
+      const m = JSON.parse(readFileSync(abmindManifest, "utf-8"));
+      const deployed = m.activatedAt ? new Date(m.activatedAt).toLocaleString() : "unknown";
+      lines.push(`  abmind: ${m.version ?? "?"} (deployed ${deployed})`);
+    } catch { lines.push("  abmind: installed (version unknown)"); }
+  }
+
+  // npm latest (cached from update-check)
+  try {
+    const { checkForUpdate } = await import("../update-check.js");
+    const abtResult = checkForUpdate("abtars", "0.0.0"); // force return latest
+    if (abtResult?.latest) lines.push(`  Latest stable: abtars@${abtResult.latest}`);
+  } catch { /* no cached data */ }
 
   // Rollback slots
   lines.push("  Rollback:");
@@ -414,7 +483,7 @@ export async function handleMaintenance(_text: string, ctx: CommandContext): Pro
   }
 
   lines.push("");
-  lines.push("  /maintenance rollback <version>");
+  lines.push("  /software check | update [local] | rollback <version>");
   await ctx.reply(lines.join("\n"));
   return true;
 }
