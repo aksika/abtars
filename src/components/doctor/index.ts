@@ -195,11 +195,23 @@ const probeFtsIntegrity: ProbeFn = async (_ctx) => {
   }
 };
 
+const probeAbmindCli: ProbeFn = async (_ctx) => {
+  const { spawnSync } = await import("node:child_process");
+  const start = Date.now();
+  const result = spawnSync("abmind", ["--version"], { encoding: "utf-8", timeout: 3000 });
+  if (result.status === 0) {
+    const ver = result.stdout?.trim() || "ok";
+    return { name: "abmind-cli", status: "ok", latencyMs: Date.now() - start, detail: `v${ver}` };
+  }
+  return { name: "abmind-cli", status: "failed", latencyMs: Date.now() - start, detail: "not on PATH — run: npm install -g abmind" };
+};
+
 const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   { fn: probeCoreFiles, timeout: 1000 },
   { fn: probeFtsIntegrity, timeout: 3000 },
   { fn: probeSecretPerms, timeout: 1000 },
   { fn: probeTlsIdentity, timeout: 2000 },
+  { fn: probeAbmindCli, timeout: 3000 },
   { fn: probeMemory, timeout: 5000 },
   { fn: probeTelegram, timeout: 5000 },
   { fn: probeDiscord, timeout: 5000 },

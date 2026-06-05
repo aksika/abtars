@@ -28,6 +28,7 @@ export async function handleDoctor(_text: string, ctx: CommandContext): Promise<
   const { getDoctorReport, renderDoctorText } = await import("../doctor/index.js");
   const force = arg === "force";
   const svcStates = ctx.registry?.getStates() ?? {};
+  await ctx.reply("🩺 Running diagnostics...");
   const report = await getDoctorReport({
     memory: ctx.memory,
     transport: ctx.transport,

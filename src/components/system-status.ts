@@ -187,9 +187,19 @@ export function renderStatusText(status: SystemStatus): string {
   );
 
   for (const s of status.subsystems) {
-    const icon = s.status === "ok" ? "✓" : s.status === "skipped" ? "○" : "✗";
+    let icon = s.status === "ok" ? "✓" : s.status === "skipped" ? "○" : "✗";
     const label = s.name.replace("phase", "").replace(/([A-Z])/g, " $1").trim().toLowerCase();
-    const detail = s.detail ? ` — ${s.detail}` : "";
+    let detail = s.detail ? ` — ${s.detail}` : "";
+
+    // #799: warn if memory is "ok" but abmind CLI unavailable (ACP transport only)
+    if (s.status === "ok" && (s.name === "phaseMemory" || s.name === "phaseMemoryIpc")) {
+      const abmindManifest = join(homedir(), ".abmind", "manifest.json");
+      if (!existsSync(abmindManifest) && status.transportType === "acp") {
+        icon = "⚠️";
+        if (s.name === "phaseMemory") detail = " — agent tools unavailable (install abmind)";
+      }
+    }
+
     lines.push(`  ${icon} ${label}${detail}`);
   }
 
