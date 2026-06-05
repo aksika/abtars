@@ -1,6 +1,6 @@
 # Backup & Restore
 
-abtars provides daily automated backups and manual restore for disaster recovery and machine migration.
+abtars provides automated backups and restore for disaster recovery and machine migration.
 
 ## Creating a backup
 
@@ -8,79 +8,142 @@ abtars provides daily automated backups and manual restore for disaster recovery
 abtars backup
 ```
 
-Output: `~/.backup-abtars/abtars-YYYYMMDD.zip`
+Output (in `~/.backup-abtars/`):
+- `abtars-YYYY-MM-DD.zip` — full system backup (config + data + abmind tree)
+- `abmind-YYYY-MM-DD.abm` — encrypted memory backup
 
-The daily backup script (`scripts/daily-backup.sh`) runs automatically via cron. Manual backups use the same format.
+### Modes
 
-### What's included
+| Command | What's backed up |
+|---------|-----------------|
+| `abtars backup` | Everything minus binaries + encrypted memory (.abm) |
+| `abtars backup --config` | Config dirs only (lightweight, no memory) |
 
-- `config/` — .env, transport.json, models.json, users.json, hooks.json, tasks/
-- `secret/` — encrypted API keys and tokens
-- `core/` — SOUL.md, user_profile.md, agent_notes.md
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--config` | Config-only mode (fast, small) |
+| `--encrypt` | Encrypt the zip using abmind.key (AES-256-GCM) |
+| `--output <dir>` | Custom output directory (default: `~/.backup-abtars/`) |
+| `--prune-days N` | Retention period in days (default: 7, 0 = no prune) |
+
+### Full backup includes
+
+Everything in `~/.abtars/` **except** binaries and runtime:
+- `config/` — transport.json, models.json, users.json, peers.json, IRC config
+- `secret/` — API keys and tokens
 - `skills/` — core, custom, self-created, downloaded
-- `agents/` — sub-agent rules
-- `prompts/` — prompt templates
-- `memory/` — daily summaries, retrospectives, sleep logs, topics
+- `core/` — prompts, personality, skills catalog
+- `agents/` — sub-agent definitions
+- `tasks/` — task definitions and scheduled entries
+- `state/` — runtime state
 - `workspace/` — agent working directory
+- `scripts/` — deploy scripts
 
-### What's NOT included
+Plus `~/.abmind/` tree (excluding raw DB) and a WAL-safe copy of `memory.db`.
 
-- `releases/` / `app/` — the runtime bundle (rebuilt on `abtars update`)
+### Full backup excludes
+
+- `releases/`, `current/`, `bin/`, `app/` — rebuilt by `abtars update`
 - `logs/` — ephemeral
-- `memory.db` — backed up separately via `abmind backup`
+- `node_modules/` — dependency cache
+- Runtime files: `*.sock`, `*.db-wal`, `*.db-shm`, `bridge.lock`, `watchdog.lock`
+
+### Config-only backup includes
+
+- `config/`, `secret/`, `tasks/`, `skills/`, `core/`, `agents/`
+
+No memory, no abmind, no workspace. Filename: `abtars-config-YYYY-MM-DD.zip`.
+
+### Encryption
+
+The `.abm` file is always encrypted (AES-256-GCM via abmind.key). The `.zip` is plaintext by default — use `--encrypt` to protect it:
+
+```bash
+abtars backup --encrypt
+```
+
+Requires `~/.abmind/secret/abmind.key` to exist (created during `abmind install`).
 
 ## Restoring from backup
 
 ```bash
-abtars restore <file.zip>
+abtars restore <file>
 ```
 
-Extracts the backup zip into `~/.abtars/`, restoring all config, secrets, skills, and memory files. Does not touch the release bundle — run `abtars update` after restore if needed.
+Auto-detects file type and does the right thing:
 
-### Typical recovery flow (new machine)
+| Input file | Behavior |
+|------------|----------|
+| `.zip` / `.7z` | Extract to `~/.abtars/` + find sibling `.abm` → restore memory too |
+| `.abm` | Delegate to `abmind restore --mode merge` |
+| `.enc` | Restore sibling `.abm` first (creates key) → decrypt → extract |
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--config` | Restore zip only, skip abmind memory |
+| `--passphrase <p>` | Passed to abmind restore (only needed on fresh machine without key file) |
+
+### Sibling detection
+
+Backup produces paired files: `abtars-2026-06-05.zip` + `abmind-2026-06-05.abm`. On restore, abtars finds the matching `.abm` by date in the same directory and restores both automatically.
+
+### Examples
 
 ```bash
+# Restore everything (same machine — key file exists)
+abtars restore ~/.backup-abtars/abtars-2026-06-05.zip
+
+# Config only (skip memory)
+abtars restore ~/.backup-abtars/abtars-config-2026-06-05.zip --config
+
+# Restore encrypted backup on fresh machine
+abtars restore ~/abtars-2026-06-05.zip.enc --passphrase "my-passphrase"
+
+# Restore just memory
+abtars restore ~/.backup-abtars/abmind-2026-06-05.abm
+```
+
+## Disaster recovery (fresh machine)
+
+```bash
+# 1. Install
 npm install -g abtars abmind
-abmind install --non-interactive --passphrase "your-passphrase" --username "your-name"
+abmind install --non-interactive --passphrase "your-passphrase"
 abtars install
 abtars update
-abtars restore ~/path/to/abtars-backup.zip
-abmind restore --input ~/path/to/abmind-backup.abm --passphrase "your-passphrase" --username "your-name"
+
+# 2. Restore
+abtars restore ~/path/to/abtars-2026-06-05.zip
+# ↑ automatically restores sibling .abm too (key recreated from passphrase during abmind install)
+
+# 3. Start
 abtars restart --cold
 ```
 
-### Typical recovery flow (same machine, wiped)
+## Same machine recovery (wiped data)
 
 ```bash
 abtars install --force
 abtars update
-abtars restore ~/.backup-abtars/abtars-YYYYMMDD.zip
+abtars restore ~/.backup-abtars/abtars-2026-06-05.zip
 abtars restart --cold
 ```
 
-## Memory backup (abmind)
-
-Memory lives in `abmind`, not `abtars`. Back up separately:
-
-```bash
-abmind backup --output ~/my-memory-backup.abm
-```
-
-Restore:
-
-```bash
-abmind restore --input ~/my-memory-backup.abm --passphrase "your-passphrase" --username "your-name"
-```
-
-See [abmind Backup & Restore](https://aksika.github.io/abmind/backup) for full docs.
-
 ## Retention
 
-The daily backup script keeps 7 days of zip files and auto-deletes older ones. For long-term retention, copy backups off-machine.
+Old backups are auto-pruned after 7 days (configurable with `--prune-days`). For long-term retention, copy backups off-machine or to cloud storage.
 
-## Encryption
+## Daily automation
 
-Secrets in the backup zip remain encrypted at rest (AES-256-GCM, encrypted by `abmind install`). The zip itself is not encrypted — store it securely.
-<!-- rebuilt -->
-<!-- 1780584420 -->
-<!-- 1780585898 -->
+The `scripts/daily-backup.sh` delegates to the CLI:
+
+```bash
+#!/usr/bin/env bash
+exec abtars backup "$@"
+```
+
+Schedule via cron or the bridge's built-in task system. No passphrase needed at runtime — the key file handles encryption.
