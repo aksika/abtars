@@ -4,8 +4,8 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import { readFileSync, readlinkSync, existsSync } from "node:fs";
-import { join, basename } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ServiceState } from "./service-registry.js";
 
@@ -40,13 +40,17 @@ export interface StatusContext {
 }
 
 export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus> {
-  // Version + commit from release symlink
+  // Version + commit from manifest.json
   let version = "?";
   let commit = "?";
   try {
-    const target = basename(readlinkSync(join(homedir(), ".abtars", "current")));
-    const dash = target.lastIndexOf("-");
-    if (dash > 0) { version = target.slice(0, dash); commit = target.slice(dash + 1); }
+    const manifest = JSON.parse(readFileSync(join(homedir(), ".abtars", "manifest.json"), "utf-8"));
+    if (manifest.version) {
+      const dash = manifest.version.lastIndexOf("-");
+      if (dash > 0) { version = manifest.version.slice(0, dash); commit = manifest.version.slice(dash + 1); }
+      else { version = manifest.version; }
+    }
+    if (manifest.commit) commit = manifest.commit;
   } catch (err) { logAndSwallow("system_status", "op", err); }
 
   // Model + transport
