@@ -7,6 +7,21 @@
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 ```
 
+**`abtars: Permission denied`** — npm global bin symlink lost execute permission:
+```bash
+# Check where abtars points
+ls -la $(which abtars)
+# Typically: ~/.nvm/versions/node/vXX/bin/abtars → ../lib/node_modules/abtars/bundle/abtars-cli.js
+
+# Fix permission on the target
+chmod +x $(readlink -f $(which abtars))
+```
+
+If the symlink is broken or npm globals are corrupted, bypass with node directly:
+```bash
+node ~/workspace/ab/abtars/bundle/abtars-cli.js update --from-local
+```
+
 **EADDRINUSE on start** — stale process holding the port:
 ```bash
 abtars stop --force
@@ -19,6 +34,31 @@ npm install -g abmind && abmind install && abtars restart
 ```
 
 Run `abtars doctor --fix` for automatic repair of common issues.
+
+### Node / npm install issues
+
+**`npm install -g abtars` fails with EACCES** — fix npm global directory:
+```bash
+mkdir -p ~/.npm-global
+npm config set prefix '~/.npm-global'
+echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+npm install -g abtars abmind
+```
+
+**Wrong node version** — abtars requires Node 20+:
+```bash
+node --version  # must be >= 20
+# If using nvm:
+nvm install 22 && nvm use 22
+npm install -g abtars abmind
+```
+
+**`abtars update` hangs or fails after npm reinstall** — the global bin may point to stale paths:
+```bash
+npm uninstall -g abtars && npm install -g abtars
+# Or bypass entirely for local dev:
+cd ~/workspace/ab/abtars && node bundle/abtars-cli.js update --from-local
+```
 
 ### macOS launchd
 
