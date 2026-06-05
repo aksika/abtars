@@ -114,13 +114,13 @@ function extractZip(archivePath: string, destDir: string): number {
     return 1;
   }
 
-  // Extract, excluding binary dirs
+  // Extract, excluding binary dirs + manifest (install state, not user data)
   let result;
   if (is7z) {
-    result = spawnSync("7z", ["x", `-o${destDir}`, "-aoa", "-xr!releases", "-xr!current", "-xr!bin", archivePath],
+    result = spawnSync("7z", ["x", `-o${destDir}`, "-aoa", "-xr!releases", "-xr!current", "-xr!bin", "-xr!manifest.json", archivePath],
       { encoding: "utf-8", stdio: "inherit" });
   } else {
-    result = spawnSync("unzip", ["-o", archivePath, "-d", destDir, "-x", "releases/*", "current/*", "bin/*"],
+    result = spawnSync("unzip", ["-o", archivePath, "-d", destDir, "-x", "releases/*", "current/*", "bin/*", "manifest.json"],
       { encoding: "utf-8", stdio: "inherit" });
   }
 
