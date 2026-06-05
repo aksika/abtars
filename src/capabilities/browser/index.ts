@@ -1,4 +1,4 @@
-import { logAndSwallow } from "../../components/log-and-swallow.js";
+import { logInfo, logWarn, logError } from "../../components/logger.js";
 import { getEnv } from "../../components/env-schema.js";
 /**
  * Browser capability — browse-spawn IPC + browse-checker heartbeat.
@@ -13,12 +13,11 @@ import { DomainAllowlist } from "./domain-allowlist.js";
 import { checkBrowseTasks, deliverBrowseResult } from "./browse-delivery.js";
 import { readPendingBrowse, writePendingBrowse } from "./abtars-browse.js";
 import type { PendingBrowseEntry } from "./abtars-browse.js";
-import { logInfo, logWarn } from "../../components/logger.js";
 import { abtarsHome } from "../../paths.js";
 import type { CapabilityApi } from "../capability.js";
 import * as net from "node:net";
 import { join } from "node:path";
-import { unlinkSync } from "node:fs";
+import { unlinkSync, mkdirSync, chmodSync } from "node:fs";
 
 export function register(api: CapabilityApi): void {
   const browserManager = new BrowserManager();
@@ -35,7 +34,10 @@ export function register(api: CapabilityApi): void {
 
   // Browse-spawn IPC — CLI sends task, bridge spawns via runtime
   const spawnSocketPath = join(abtarsHome(), "browser-socket", "browse-spawn.sock");
-  try { unlinkSync(spawnSocketPath); } catch (err) { logAndSwallow("index", "op", err); }
+  try {
+    mkdirSync(join(abtarsHome(), "browser-socket"), { recursive: true, mode: 0o700 });
+    try { unlinkSync(spawnSocketPath); } catch { /* doesn't exist — fine */ }
+    try { chmodSync(join(abtarsHome(), "browser-socket"), 0o700); } catch { /* best effort */ }
 
   const spawnServer = net.createServer((conn) => {
     let buf = "";
@@ -88,6 +90,9 @@ export function register(api: CapabilityApi): void {
   spawnServer.listen(spawnSocketPath, () => {
     logInfo("browser", `🔌 Browse spawn IPC listening on ${spawnSocketPath}`);
   });
+  } catch (err) {
+    logError("browser", `⚠️ Browse-spawn IPC failed — browser disabled: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   api.registerHeartbeatTask({
     name: "browse-checker",

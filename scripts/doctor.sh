@@ -207,6 +207,16 @@ while IFS= read -r f; do
   fi
 done < <(find "$AB" -name "*.lock" -not -path "*/sleep/*" -not -path "*/node_modules/*" -not -name "watchdog.lock" -mmin +60 2>/dev/null)
 
+# 2b. Stale Unix sockets (left by dead bridge process)
+for sock in "$AB/browser-socket/"*.sock "$AB/"*.sock "${ABMIND_HOME:-$HOME/.abmind}/"*.sock; do
+  [ -S "$sock" ] || continue
+  if $FIX; then
+    rm -f "$sock"; fix "removed stale socket $sock"
+  else
+    warn "stale socket: $sock"
+  fi
+done
+
 # 3. Stale sleep lock (older than 2 hours, no matching audit .md)
 for lockfile in "$ABMIND/memory/sleep"/sleep_*.lock; do
   [ -f "$lockfile" ] || continue
