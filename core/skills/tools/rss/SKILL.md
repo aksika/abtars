@@ -10,10 +10,11 @@ requires:
 ## Usage
 
 ```bash
-abtars-rss --feeds <path-to-feeds.json> [--hours N]
+abtars-rss --feeds <path-to-feeds.json> [--watchlist <path-to-watchlist.md>] [--hours N]
 ```
 
 - `--feeds` (required): path to a JSON file containing feed configs
+- `--watchlist` (optional): path to a markdown file with `## Active` section listing tickers (one per line as `- TICKER`). Generates Seeking Alpha feeds per ticker.
 - `--hours` (optional, default 24): only include items from the last N hours
 
 ## Feeds file format
