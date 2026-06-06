@@ -211,6 +211,14 @@ export async function handleInboundMessage(
       prompt = `${notes}\n\n---\n\n${prompt}`;
     }
 
+    // --- Auto-notify: inject task failures (#646) ---
+    const { drainTaskFailures } = await import("./tasks/task-failure-buffer.js");
+    const failures = drainTaskFailures();
+    if (failures.length > 0) {
+      const lines = failures.map(f => `[SYSTEM] Task "${f.taskName}" failed (exit ${f.exitCode}${f.error ? `: ${f.error}` : ""}). ${f.consecutiveFailures > 1 ? `${f.consecutiveFailures} consecutive failures.` : ""}`);
+      prompt = `${lines.join("\n")}\n\n${prompt}`;
+    }
+
     // --- Send to transport ---
     const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
     const agentSession = activeSession.agentSession;

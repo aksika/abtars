@@ -8,6 +8,7 @@
  */
 
 import { logAndSwallow } from "../log-and-swallow.js";
+import { addTaskFailure } from "./task-failure-buffer.js";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join, dirname, basename } from "node:path";
@@ -331,6 +332,7 @@ export class CronQueue {
         if (code !== 0) {
           scheduleRetry(entry, !!entry._retrying);
           if (!paused && code !== 2) this.tryInjectFailure(entry, `${status}\n${(output || "(no output)").slice(0, 500)}`);
+          addTaskFailure({ taskName: entry.title ?? entry.message.slice(0, 60), exitCode: code ?? 1, error: (output || "").slice(0, 100), timestamp: Date.now(), consecutiveFailures: entry.consecutiveFails ?? 1 });
         }
         if (!paused) {
           // Silent success: don't notify user when script exits 0 with no output
