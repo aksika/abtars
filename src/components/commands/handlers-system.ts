@@ -509,7 +509,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   }
 
   lines.push("");
-  lines.push("  /software check | update [build] | pull | rollback <version>");
+  lines.push("  /software update [pull] [build] | rollback");
   await ctx.reply(lines.join("\n"));
   return true;
 }
