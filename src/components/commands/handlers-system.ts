@@ -390,25 +390,43 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     return true;
   }
 
-  // /software update [local]
-  if (arg === "update" || arg === "update local" || arg === "local" || arg === "") {
+  // /software update [build|pull]
+  if (arg === "update" || arg === "update build" || arg === "build" ||
+      arg === "update pull" || arg === "pull" || arg === "") {
     // /update with no args → treat as /software (show info)
     if (arg === "" && _text.match(/^\/software\s*$/i)) {
       // Fall through to info display below
-    } else if (arg === "update" || arg === "update local" || arg === "local") {
+    } else if (arg === "update pull" || arg === "pull") {
       if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
-      const isLocal = arg.includes("local");
-      await ctx.reply(`⏳ Updating${isLocal ? " (local)" : " (npm)"}...`);
+      try {
+        const manifest = existsSync(join(home, "manifest.json"))
+          ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
+          : null;
+        const repoRoot = manifest?.repoRoot;
+        if (!repoRoot) { await ctx.reply("❌ No repoRoot in manifest. Use /update (npm) instead."); return true; }
+        const { spawnSync } = await import("node:child_process");
+        const r = spawnSync("git", ["-C", repoRoot, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+        if (r.status === 0) {
+          await ctx.reply(`✓ Pulled:\n${(r.stdout || "").trim().slice(0, 500)}`);
+        } else {
+          await ctx.reply(`❌ Pull failed:\n${(r.stderr || r.stdout || "").trim().slice(0, 300)}`);
+        }
+      } catch (err) {
+        await ctx.reply(`❌ Pull failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return true;
+    } else if (arg === "update" || arg === "update build" || arg === "build") {
+      if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
+      const isBuild = arg.includes("build");
+      await ctx.reply(`⏳ Updating${isBuild ? " (build)" : " (npm)"}...`);
       try {
         const { spawnSync } = await import("node:child_process");
         const args = ["update"];
-        if (isLocal) args.push("--from-local");
-        // Write restart reason so new bridge can report back
+        if (isBuild) args.push("--from-local");
         const { writeFileSync: wf } = await import("node:fs");
         const reasonPath = join(home, ".last-restart-reason");
         wf(reasonPath, `software-update`, "utf-8");
         spawnSync("abtars", args, { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
-        // If we get here, bridge didn't restart (error path)
         await ctx.reply("⚠️ Update completed but bridge did not restart. Run /restart.");
       } catch (err) {
         await ctx.reply(`❌ Update failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -448,6 +466,8 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       : null;
     const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
     lines.push(`  abtars: ${pkg.version} (deployed ${deployed})`);
+    if (manifest?.repoRoot) lines.push(`  source: local (${manifest.repoRoot})`);
+    else lines.push(`  source: npm`);
   } catch {
     lines.push("  abtars: unknown");
   }
@@ -483,7 +503,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   }
 
   lines.push("");
-  lines.push("  /software check | update [local] | rollback <version>");
+  lines.push("  /software check | update [build] | pull | rollback <version>");
   await ctx.reply(lines.join("\n"));
   return true;
 }
