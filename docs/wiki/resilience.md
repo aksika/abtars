@@ -118,11 +118,49 @@ Telegram polling uses exponential backoff with jitter. If the network drops:
 
 Once connectivity returns, polling resumes immediately. Messages sent during the outage are queued by Telegram and delivered on reconnection — nothing is lost.
 
-## Deploy Without Downtime
+## Deploy With Auto-Rollback
 
-`abtars update` stages the new release alongside the running one, then performs a quick restart. The bridge is down for under 2 seconds during the switch. The watchdog ensures it comes back up; doctor ensures it comes back healthy.
+`abtars update` stages new code into a separate directory, then atomically swaps it in. After restart, it verifies the bridge actually came back healthy. If not — automatic rollback.
 
-If a deploy introduces a crash, the circuit breaker catches it and the previous release remains staged for manual rollback.
+**The flow:**
+```
+Build → Stage → Atomic swap → Restart → Health probe (60s) → ✓ or rollback
+```
+
+**What happens on failure:**
+
+If the bridge doesn't produce a heartbeat within 60 seconds of restart:
+1. The new code is moved aside (`app.broken/`)
+2. The previous working version is restored (`app.prev.1/` → `app/`)
+3. Bridge restarts again from the known-good code
+4. If THAT also fails → stops and prints diagnostics
+
+You never end up with a dead bot from a bad deploy. The system either runs new code or automatically falls back to old code — within 90 seconds, no manual intervention.
+
+**Remote deploy (Telegram):**
+```
+/update pull          ← git pull latest code
+/update build         ← build + deploy + health verify + auto-rollback
+```
+
+**What You'll See on success:**
+```
+⏳ Updating (build)...
+✓ staged 0.2.1-alpha.10
+✓ atomic swap
+♻️ Restarting bridge...
+✓ Bridge healthy (PID 19735)
+```
+
+**What You'll See on failure (auto-rollback):**
+```
+⏳ Updating (build)...
+✓ staged 0.2.1-alpha.10
+✓ atomic swap
+♻️ Restarting bridge...
+❌ Bridge unhealthy after 60s. Auto-rolling back...
+✓ Rolled back to previous version.
+```
 
 ## What You'll See
 
