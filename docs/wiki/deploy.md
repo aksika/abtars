@@ -20,11 +20,11 @@ abtars restart --cold        # starts supervisor if dead
 ```
 /update              # from npm
 /update pull         # git pull latest (no build)
-/update build        # build + deploy from checkout
+/update deploy        # build + deploy from checkout
 /software            # versions, source, rollback slots
 ```
 
-Remote deploy flow: `/update pull` → `/update build`
+Remote deploy flow: `/update pull` → `/update deploy`
 
 ## What `abtars update` does
 
@@ -123,7 +123,7 @@ Recovery: `cp ~/.abtars/config/.pre-update/* ~/.abtars/config/`
 Via Telegram:
 ```
 /update pull          ← fetches latest
-/update build         ← builds + deploys + restarts
+/update deploy         ← builds + deploys + restarts
 ```
 
 Or via SSH/tmux:

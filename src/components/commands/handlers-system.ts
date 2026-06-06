@@ -390,8 +390,8 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     return true;
   }
 
-  // /software update [build|pull]
-  if (arg === "update" || arg === "update build" || arg === "build" ||
+  // /software update [deploy|pull]
+  if (arg === "update" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build" ||
       arg === "update pull" || arg === "pull" || arg === "") {
     // /update with no args → treat as /software (show info)
     if (arg === "" && _text.match(/^\/software\s*$/i)) {
@@ -427,7 +427,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         await ctx.reply(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return true;
-    } else if (arg === "update" || arg === "update build" || arg === "build") {
+    } else if (arg === "update" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build") {
       if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       try {
         const { spawnSync } = await import("node:child_process");
@@ -522,7 +522,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   }
 
   lines.push("");
-  lines.push("  /software update [pull] [build] | rollback");
+  lines.push("  /software update [pull] [deploy] | rollback");
   await ctx.reply(lines.join("\n"));
   return true;
 }

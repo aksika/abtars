@@ -6,10 +6,10 @@
 |---------|-------------|
 | `/update` | Update from npm (stable/alpha) |
 | `/update pull` | Git pull latest code (no build) |
-| `/update build` | Build + deploy from local git checkout |
+| `/update deploy` | Build + deploy from local git checkout |
 | `/software` | Show versions, source, rollback slots |
 
-Remote deploy flow: `/update pull` → `/update build`
+Remote deploy flow: `/update pull` → `/update deploy`
 
 ## Linux / WSL (KP)
 
@@ -25,7 +25,7 @@ abtars update
 From Telegram (remote):
 ```
 /update pull        ← fetches latest code
-/update build       ← builds + deploys + restarts
+/update deploy       ← builds + deploys + restarts
 ```
 
 Or via SSH:

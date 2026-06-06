@@ -140,7 +140,7 @@ You never end up with a dead bot from a bad deploy. The system either runs new c
 **Remote deploy (Telegram):**
 ```
 /update pull          ← git pull latest code
-/update build         ← build + deploy + health verify + auto-rollback
+/update deploy         ← build + deploy + health verify + auto-rollback
 ```
 
 **What You'll See on success:**
