@@ -15,7 +15,7 @@ import { formatReactionSignal, routeReaction } from "../../components/reactions.
 import { cleanResponse } from "../../components/clean-response.js";
 
 export const TELEGRAM_CAPABILITIES: PlatformCapabilities = { voice: true, reactions: true, typing: true, threads: true };
-import { emojiToScore } from "../../utils/emoji-score.js";
+import { emojiToScore, emojiToTag } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../../components/message-pipeline.js";
@@ -426,7 +426,8 @@ export class TelegramAdapter implements PlatformAdapter {
 
     if (isAuthorized && this.deps.memory) {
       const score = emojiToScore(emojis[0]!);
-      const updated = this.deps.memory.updateEmotionByPlatformId(loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master", reaction.message_id, score);
+      const tag = emojiToTag(emojis[0]!);
+      const updated = this.deps.memory.updateEmotionByPlatformId(loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master", reaction.message_id, score, tag);
       if (updated) logDebug(TAG, `Emotion score ${score} set on platform msg ${reaction.message_id}`);
     }
 
