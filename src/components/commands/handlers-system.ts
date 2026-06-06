@@ -424,13 +424,15 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       await ctx.reply(`⏳ Updating${isBuild ? " (build)" : " (npm)"}...`);
       try {
         const { spawnSync } = await import("node:child_process");
-        const args = ["update"];
-        if (isBuild) args.push("--from-local");
         const { writeFileSync: wf } = await import("node:fs");
         const reasonPath = join(home, ".last-restart-reason");
         wf(reasonPath, `software-update`, "utf-8");
-        const cwd = isBuild ? join(home, "src", "abtars") : undefined;
-        spawnSync("abtars", args, { encoding: "utf-8", stdio: "inherit", timeout: 120_000, cwd });
+        if (isBuild) {
+          const script = join(home, "src", "abtars", "scripts", "build-and-deploy.sh");
+          spawnSync("bash", [script], { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
+        } else {
+          spawnSync("abtars", ["update"], { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
+        }
         await ctx.reply("⚠️ Update completed but bridge did not restart. Run /restart.");
       } catch (err) {
         await ctx.reply(`❌ Update failed: ${err instanceof Error ? err.message : String(err)}`);
