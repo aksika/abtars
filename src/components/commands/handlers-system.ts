@@ -402,8 +402,13 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const manifest = existsSync(join(home, "manifest.json"))
           ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
           : null;
-        const repoRoot = manifest?.repoRoot;
-        if (!repoRoot) { await ctx.reply("❌ No repoRoot in manifest. Use /update (npm) instead."); return true; }
+        let repoRoot = manifest?.repoRoot;
+        if (!repoRoot) {
+          // Fallback: detect repo at common paths
+          const candidates = [join(homedir(), "abtars"), join(homedir(), "workspace", "ab", "abtars")];
+          repoRoot = candidates.find(p => existsSync(join(p, ".git")));
+          if (!repoRoot) { await ctx.reply("❌ No git repo found. Set repoRoot via /update build first."); return true; }
+        }
         const { spawnSync } = await import("node:child_process");
         const r = spawnSync("git", ["-C", repoRoot, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
         if (r.status === 0) {
