@@ -171,6 +171,10 @@ export async function update(opts: UpdateOptions): Promise<number> {
     process.stdout.write(`✓ manifest updated\n`);
 
     // ── Step 8: Restart bridge ──────────────────────────────────────────
+    if (process.env.NO_RESTART) {
+      process.stdout.write("Staged and swapped.\n");
+      return 0;
+    }
     const restartTimestamp = Date.now();
     const restarted = await restartBridge(paths);
 

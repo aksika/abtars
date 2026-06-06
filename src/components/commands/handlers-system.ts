@@ -397,45 +397,58 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     if (arg === "" && _text.match(/^\/software\s*$/i)) {
       // Fall through to info display below
     } else if (arg === "update pull" || arg === "pull") {
-      if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
+      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       try {
         const { spawnSync } = await import("node:child_process");
         const { mkdirSync } = await import("node:fs");
         const srcDir = join(home, "src", "abtars");
+        const abmindDir = join(home, "src", "abmind");
         if (!existsSync(join(srcDir, ".git"))) {
-          await ctx.reply("⏳ Cloning abtars repo...");
+          await ctx.reply("Cloning abtars repo...");
           mkdirSync(join(home, "src"), { recursive: true });
           const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
-          if (cl.status !== 0) { await ctx.reply(`❌ Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
+          if (cl.status !== 0) { await ctx.reply(`Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
         }
         const r = spawnSync("git", ["-C", srcDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-        if (r.status === 0) {
-          await ctx.reply(`✓ Pulled:\n${(r.stdout || "").trim().slice(0, 500)}`);
-        } else {
-          await ctx.reply(`❌ Pull failed:\n${(r.stderr || r.stdout || "").trim().slice(0, 300)}`);
+        if (r.status !== 0) { await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
+        let pulled = (r.stdout || "").trim().slice(0, 300);
+        // Pull + build abmind
+        if (existsSync(join(abmindDir, ".git"))) {
+          const ab = spawnSync("git", ["-C", abmindDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+          if (ab.status !== 0) { await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
+          const abBuild = spawnSync("npm", ["run", "build"], { cwd: abmindDir, encoding: "utf-8", timeout: 60_000 });
+          if (abBuild.status !== 0) { await ctx.reply(`abmind build failed:\n${(abBuild.stderr || abBuild.stdout || "").slice(0, 300)}`); return true; }
+          pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
         }
+        await ctx.reply(`Pulled:\n${pulled}`);
       } catch (err) {
-        await ctx.reply(`❌ Pull failed: ${err instanceof Error ? err.message : String(err)}`);
+        await ctx.reply(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return true;
     } else if (arg === "update" || arg === "update build" || arg === "build") {
-      if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
-      const isBuild = arg.includes("build");
-      await ctx.reply(`⏳ Updating${isBuild ? " (build)" : " (npm)"}...`);
+      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       try {
         const { spawnSync } = await import("node:child_process");
-        const { writeFileSync: wf } = await import("node:fs");
-        const reasonPath = join(home, ".last-restart-reason");
-        wf(reasonPath, `software-update`, "utf-8");
-        if (isBuild) {
-          const script = join(home, "src", "abtars", "scripts", "build-and-deploy.sh");
-          spawnSync("bash", [script], { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
-        } else {
-          spawnSync("abtars", ["update"], { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
+        const { readFileSync } = await import("node:fs");
+        const srcDir = join(home, "src", "abtars");
+        // Guard: reject if source matches deployed commit
+        const head = spawnSync("git", ["-C", srcDir, "rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).stdout.trim();
+        const manifestPath = join(home, "install-manifest.json");
+        const deployed = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf-8")).commit : "";
+        if (head && head === deployed) {
+          await ctx.reply("Already running this version. Run /update pull first.");
+          return true;
         }
-        await ctx.reply("⚠️ Update completed but bridge did not restart. Run /restart.");
+        await ctx.reply("Building...");
+        const script = join(srcDir, "scripts", "build-and-deploy.sh");
+        const r = spawnSync("bash", [script], { encoding: "utf-8", timeout: 120_000 });
+        if (r.status === 0) {
+          await ctx.reply("New version built and staged. Use /restart to activate.");
+        } else {
+          await ctx.reply(`Build failed:\n${(r.stderr || r.stdout || "").slice(0, 500)}`);
+        }
       } catch (err) {
-        await ctx.reply(`❌ Update failed: ${err instanceof Error ? err.message : String(err)}`);
+        await ctx.reply(`Build failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return true;
     }
