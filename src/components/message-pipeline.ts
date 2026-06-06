@@ -46,6 +46,17 @@ import { sanitizeOutbound } from "./sanitize-outbound.js";
 const TAG = "pipeline";
 const PRIMING_MAX = 8;
 
+// #824: Track which recalled memory IDs were active per agent message (for emoji feedback)
+// Map<platform_message_id, recalled_memory_ids[]> with 1h TTL
+const recalledIdsPerMessage = new Map<number, number[]>();
+const RECALL_MAP_TTL = 60 * 60_000;
+setInterval(() => { /* prune entries older than TTL — best-effort, no timestamp tracking needed for small maps */ if (recalledIdsPerMessage.size > 200) recalledIdsPerMessage.clear(); }, RECALL_MAP_TTL);
+
+/** Look up recalled memory IDs for a given platform message (for reaction-based feedback). */
+export function getRecalledIdsForMessage(platformMsgId: number): number[] | undefined {
+  return recalledIdsPerMessage.get(platformMsgId);
+}
+
 const STOPWORDS = new Set(["the","a","an","is","are","was","were","be","been",
   "have","has","had","do","does","did","will","would","could","should","can",
   "may","might","shall","it","its","this","that","what","how","when","where",
@@ -188,7 +199,7 @@ export async function handleInboundMessage(
     // No queueing needed
 
     // --- Build prompt ---
-    const { prompt: builtPrompt, imageContent } = await buildPrompt(msg, text, {
+    const { prompt: builtPrompt, imageContent, recalledHits } = await buildPrompt(msg, text, {
       memory, memoryConfig, sessions, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: !("agentLoop" in transport),
     }, registry);
@@ -465,6 +476,22 @@ export async function handleInboundMessage(
     const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
     updateBridgeLockField("lastPromptAt", Date.now());
+
+    // --- #824: Citation detection — did the agent use the recalled memories? ---
+    if (recalledHits && recalledHits.length > 0 && memory) {
+      try {
+        const { detectCitations } = await import("abmind");
+        const citedIds = detectCitations(userResponse, recalledHits);
+        if (citedIds.length > 0) memory.bumpCitedCount(citedIds);
+        logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
+        // Track recalledIds for emoji reaction feedback (1h TTL)
+        if (lastSentMsgId != null) {
+          recalledIdsPerMessage.set(Number(lastSentMsgId), recalledHits.map(h => h.id));
+        }
+      } catch (err) {
+        logDebug(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     // --- AfterMessage hook ---
     if (hasHooks("AfterMessage")) {

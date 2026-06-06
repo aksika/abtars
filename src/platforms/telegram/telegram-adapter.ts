@@ -429,6 +429,19 @@ export class TelegramAdapter implements PlatformAdapter {
       const tag = emojiToTag(emojis[0]!);
       const updated = this.deps.memory.updateEmotionByPlatformId(loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master", reaction.message_id, score, tag);
       if (updated) logDebug(TAG, `Emotion score ${score} set on platform msg ${reaction.message_id}`);
+
+      // #824: Emoji reaction as recall quality feedback
+      const { getRecalledIdsForMessage } = await import("../../components/message-pipeline.js");
+      const recalledIds = getRecalledIdsForMessage(reaction.message_id);
+      if (recalledIds && recalledIds.length > 0) {
+        if (score < 0) {
+          this.deps.memory.bumpRejectedCount(recalledIds);
+          logDebug(TAG, `Recall rejection: ${recalledIds.length} memories penalized (emoji ${emojis[0]})`);
+        } else if (score > 0) {
+          this.deps.memory.bumpCitedCount(recalledIds);
+          logDebug(TAG, `Recall confirmed: ${recalledIds.length} memories boosted (emoji ${emojis[0]})`);
+        }
+      }
     }
 
     if (route === "discard") {
