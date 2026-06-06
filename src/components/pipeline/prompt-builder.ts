@@ -99,7 +99,7 @@ export async function buildPrompt(
   const isSessionStart = entry.pendingStart || !entry.seen;
   logTrace(TAG, `session-state: key=${sessionKey} seen=${entry.seen} pendingStart=${entry.pendingStart} isSessionStart=${isSessionStart}`);
   if (isSessionStart && memory) {
-    prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey, deps.maxContext);
+    prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey, deps.maxContext, msg.platform);
   }
   entry.seen = true;
   entry.pendingStart = false;
@@ -189,6 +189,7 @@ export function buildSessionStartPrompt(
   userId: string,
   sessionKey?: string,
   maxContext?: number,
+  platform?: string,
 ): string {
   const contextParts: string[] = [];
 
@@ -247,6 +248,12 @@ export function buildSessionStartPrompt(
     } catch (err) { logAndSwallow("prompt_builder", "op", err); }
   } else {
     logInfo(TAG, `[CURRENT USER] skipped — no sessionKey`);
+  }
+
+  // Platform capabilities (#834 → #646)
+  if (platform) {
+    const CAPS: Record<string, string> = { telegram: "voice, reactions, typing, TTS, groups", discord: "reactions, typing, threads", irc: "text only" };
+    contextParts.push(`[SYSTEM] Platform: ${platform} (${CAPS[platform] ?? "unknown"})`);
   }
 
   const compSummary = null; // Legacy compaction removed — context engine handles summaries
