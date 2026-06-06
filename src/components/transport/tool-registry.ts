@@ -68,11 +68,23 @@ function isBridgeKillCommand(cmd: string): boolean {
 
 function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
   // Guardrails: command check
-  const { checkCommand } = require("../guardrails.js") as typeof import("../guardrails.js");
+  const { checkCommand, classifyCommand } = require("../guardrails.js") as typeof import("../guardrails.js");
   const cmdBlock = checkCommand(cmd);
   if (cmdBlock) {
     logWarn("tool-registry", `Guardrails blocked: ${cmd.slice(0, 200)}`);
     return Promise.resolve(JSON.stringify({ stderr: cmdBlock, exit_code: 126 }));
+  }
+
+  // Action gate: auth-required commands
+  const tier = classifyCommand(cmd);
+  if (tier === "auth-required" && _actionGate) {
+    return _actionGate.requestAuth("bash-auth", cmd).then((granted) => {
+      if (!granted) {
+        logWarn("tool-registry", `Auth denied for: ${cmd.slice(0, 200)}`);
+        return JSON.stringify({ stderr: "Command requires authorization. Master denied or timed out.", exit_code: 126 });
+      }
+      return executeBash(cmd, timeout, signal);
+    });
   }
 
   if (isBridgeSpawnCommand(cmd)) {
@@ -89,6 +101,10 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
       exit_code: 126,
     }));
   }
+  return executeBash(cmd, timeout, signal);
+}
+
+function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve) => {
     const child = execFile("bash", ["-c", cmd], { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       const result: Record<string, unknown> = {};
@@ -112,6 +128,13 @@ let memoryBackend: MemoryBackend | null = null;
 /** Wire in-process memory backend. Call once after memory init. */
 export function setMemoryBackend(backend: MemoryBackend | null): void {
   memoryBackend = backend;
+}
+
+let _actionGate: import("../action-gate.js").ActionGate | null = null;
+
+/** Wire action gate for auth-required commands. */
+export function setActionGate(gate: import("../action-gate.js").ActionGate | null): void {
+  _actionGate = gate;
 }
 
 let _peerActivityCb: ((msg: string) => void) | null = null;
