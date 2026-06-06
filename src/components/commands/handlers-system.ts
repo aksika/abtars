@@ -399,18 +399,16 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     } else if (arg === "update pull" || arg === "pull") {
       if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
       try {
-        const manifest = existsSync(join(home, "manifest.json"))
-          ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
-          : null;
-        let repoRoot = manifest?.repoRoot;
-        if (!repoRoot) {
-          // Fallback: detect repo at common paths
-          const candidates = [join(homedir(), "abtars"), join(homedir(), "workspace", "abtars")];
-          repoRoot = candidates.find(p => existsSync(join(p, ".git")));
-          if (!repoRoot) { await ctx.reply("❌ No git repo found. Set repoRoot via /update build first."); return true; }
-        }
         const { spawnSync } = await import("node:child_process");
-        const r = spawnSync("git", ["-C", repoRoot, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+        const { mkdirSync } = await import("node:fs");
+        const srcDir = join(home, "src", "abtars");
+        if (!existsSync(join(srcDir, ".git"))) {
+          await ctx.reply("⏳ Cloning abtars repo...");
+          mkdirSync(join(home, "src"), { recursive: true });
+          const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
+          if (cl.status !== 0) { await ctx.reply(`❌ Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
+        }
+        const r = spawnSync("git", ["-C", srcDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
         if (r.status === 0) {
           await ctx.reply(`✓ Pulled:\n${(r.stdout || "").trim().slice(0, 500)}`);
         } else {
@@ -431,7 +429,8 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { writeFileSync: wf } = await import("node:fs");
         const reasonPath = join(home, ".last-restart-reason");
         wf(reasonPath, `software-update`, "utf-8");
-        spawnSync("abtars", args, { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
+        const cwd = isBuild ? join(home, "src", "abtars") : undefined;
+        spawnSync("abtars", args, { encoding: "utf-8", stdio: "inherit", timeout: 120_000, cwd });
         await ctx.reply("⚠️ Update completed but bridge did not restart. Run /restart.");
       } catch (err) {
         await ctx.reply(`❌ Update failed: ${err instanceof Error ? err.message : String(err)}`);
