@@ -403,23 +403,25 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { mkdirSync } = await import("node:fs");
         const srcDir = join(home, "src", "abtars");
         const abmindDir = join(home, "src", "abmind");
+        logInfo("update", "Pull requested");
         if (!existsSync(join(srcDir, ".git"))) {
           await ctx.reply("Cloning abtars repo...");
           mkdirSync(join(home, "src"), { recursive: true });
           const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
-          if (cl.status !== 0) { await ctx.reply(`Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
+          if (cl.status !== 0) { logInfo("update", "Clone failed"); await ctx.reply(`Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
         }
         const r = spawnSync("git", ["-C", srcDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-        if (r.status !== 0) { await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
+        if (r.status !== 0) { logInfo("update", `Pull failed (abtars): ${(r.stderr || "").slice(0, 100)}`); await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
         let pulled = (r.stdout || "").trim().slice(0, 300);
         // Pull + build abmind
         if (existsSync(join(abmindDir, ".git"))) {
           const ab = spawnSync("git", ["-C", abmindDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-          if (ab.status !== 0) { await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
+          if (ab.status !== 0) { logInfo("update", `Pull failed (abmind): ${(ab.stderr || "").slice(0, 100)}`); await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
           const abBuild = spawnSync("npm", ["run", "build"], { cwd: abmindDir, encoding: "utf-8", timeout: 60_000 });
-          if (abBuild.status !== 0) { await ctx.reply(`abmind build failed:\n${(abBuild.stderr || abBuild.stdout || "").slice(0, 300)}`); return true; }
+          if (abBuild.status !== 0) { logInfo("update", `abmind build failed`); await ctx.reply(`abmind build failed:\n${(abBuild.stderr || abBuild.stdout || "").slice(0, 300)}`); return true; }
           pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
         }
+        logInfo("update", `Pull complete: ${pulled.slice(0, 100)}`);
         await ctx.reply(`Pulled:\n${pulled}`);
       } catch (err) {
         await ctx.reply(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -436,17 +438,15 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const manifestPath = join(home, "install-manifest.json");
         const deployed = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf-8")).commit : "";
         if (head && head === deployed) {
+          logInfo("update", `Build rejected — already running ${head}`);
           await ctx.reply("Already running this version. Run /update pull first.");
           return true;
         }
+        logInfo("update", `Build starting: ${deployed} → ${head}`);
         await ctx.reply("Building...");
         const script = join(srcDir, "scripts", "build-and-deploy.sh");
-        const r = spawnSync("bash", [script], { encoding: "utf-8", timeout: 120_000 });
-        if (r.status === 0) {
-          await ctx.reply("New version built and staged. Use /restart to activate.");
-        } else {
-          await ctx.reply(`Build failed:\n${(r.stderr || r.stdout || "").slice(0, 500)}`);
-        }
+        spawnSync("bash", [script], { encoding: "utf-8", timeout: 120_000 });
+        // Bridge restarts as part of the script — this line likely never reached
       } catch (err) {
         await ctx.reply(`Build failed: ${err instanceof Error ? err.message : String(err)}`);
       }
