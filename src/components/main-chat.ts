@@ -5,6 +5,7 @@
 
 import { getEnv } from "./env-schema.js";
 import { logWarn, logError } from "./logger.js";
+import { sanitizeOutbound } from "./sanitize-outbound.js";
 
 export interface SendOpts {
   threadId?: number;
@@ -36,7 +37,7 @@ export async function sendToMainChat(
     return { ok: false, reason: "adapter-missing" };
   }
   try {
-    await adapter.sendMessage(chatId, text, opts);
+    await adapter.sendMessage(chatId, sanitizeOutbound(text), opts);
     return { ok: true };
   } catch (err) {
     logError("main-chat", `send failed: ${err}`);
