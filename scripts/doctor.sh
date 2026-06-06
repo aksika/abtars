@@ -547,6 +547,30 @@ if [ "$total_stale" -gt 0 ] || [ "$audit_size" -gt "$AUDIT_MAX_BYTES" ]; then
   fi
 fi
 
+# ── Port availability ──────────────────────────────────────────────────────
+AGENT_API_PORT=$(grep -E '^AGENT_API_PORT=' "$AB/config/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "3100")
+WEB_PORT=$(grep -E '^WEB_PORT=' "$AB/config/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "3000")
+
+for PORT in $AGENT_API_PORT $WEB_PORT; do
+  PID=$(lsof -ti ":$PORT" 2>/dev/null || true)
+  if [ -n "$PID" ]; then
+    BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$AB/bridge.lock'))['pid'])" 2>/dev/null || echo "")
+    if [ "$PID" = "$BRIDGE_PID" ]; then
+      continue
+    fi
+    CMDLINE=$(ps -p "$PID" -o args= 2>/dev/null || true)
+    if echo "$CMDLINE" | grep -q "abtars\|\.abtars/app"; then
+      if $FIX; then
+        kill "$PID" 2>/dev/null && fix "killed stale abtars process $PID on port $PORT"
+      else
+        warn "port $PORT held by stale abtars process (PID $PID)"
+      fi
+    else
+      warn "port $PORT held by another process (PID $PID: ${CMDLINE:0:60}). Change port in .env or stop the service."
+    fi
+  fi
+done
+
 # Summary
 if $FIX && [ -f "$AB/logs/watchdog.log" ]; then
   echo ""
