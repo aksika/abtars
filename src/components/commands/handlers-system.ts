@@ -487,7 +487,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   try {
     const { checkForUpdate } = await import("../update-check.js");
     const abtResult = checkForUpdate("abtars", "0.0.0"); // force return latest
-    if (abtResult?.latest) lines.push(`  Latest stable: abtars@${abtResult.latest}`);
+    if (abtResult?.latest) lines.push(`  npm latest: abtars@${abtResult.latest}`);
   } catch { /* no cached data */ }
 
   // Rollback slots
