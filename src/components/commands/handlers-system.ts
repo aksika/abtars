@@ -405,7 +405,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         let repoRoot = manifest?.repoRoot;
         if (!repoRoot) {
           // Fallback: detect repo at common paths
-          const candidates = [join(homedir(), "abtars"), join(homedir(), "workspace", "ab", "abtars")];
+          const candidates = [join(homedir(), "abtars"), join(homedir(), "workspace", "abtars")];
           repoRoot = candidates.find(p => existsSync(join(p, ".git")));
           if (!repoRoot) { await ctx.reply("❌ No git repo found. Set repoRoot via /update build first."); return true; }
         }
