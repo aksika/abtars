@@ -41,6 +41,7 @@ export interface TelegramAdapterDeps {
   transport: IKiroTransport;
   memory: IMemorySystem | null;
   sessionManager: { getActiveSessionId(userId: string, platform: string): string };
+  actionGate?: { handleCallback(data: string): boolean } | null;
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -206,6 +207,11 @@ export class TelegramAdapter implements PlatformAdapter {
           } catch (err) {
             if (chatId) await this.api.sendMessage(chatId, `❌ Model switch failed: ${err instanceof Error ? err.message : String(err)}`);
           }
+        }
+      } else if (data.startsWith("auth:")) {
+        // ActionGate authorization callback
+        if (this.deps.actionGate?.handleCallback(data)) {
+          await this.api.sendMessage(chatId, "✓ Responded.");
         }
       }
       } catch (err) {

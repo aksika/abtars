@@ -10,7 +10,7 @@ import { getEnv } from "../components/env-schema.js";
 import { execSync } from "node:child_process";
 import { TmuxClient } from "../components/transport/tmux-client.js";
 import { createAgentTransport } from "../components/agent-registry.js";
-import { logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
+import { logDebug, logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -197,6 +197,16 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   }
 
   logInfo("main", "✅ Transport ready");
+
+  // Wire ActionGate for auth-required commands
+  const { join } = await import("node:path");
+  const { abtarsHome } = await import("../paths.js");
+  const { ActionGate } = await import("../components/action-gate.js");
+  const { setActionGate } = await import("../components/transport/tool-registry.js");
+  const authDir = join(abtarsHome(), "auth");
+  ctx.actionGate = new ActionGate(authDir);
+  setActionGate(ctx.actionGate);
+  logDebug("main", "🔒 ActionGate wired");
 
   if (resolved.provider.transport === "api" && (ctx.memory as any)?.available) {
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
