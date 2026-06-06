@@ -552,7 +552,11 @@ AGENT_API_PORT=$(grep -E '^AGENT_API_PORT=' "$AB/config/.env" 2>/dev/null | cut 
 WEB_PORT=$(grep -E '^WEB_PORT=' "$AB/config/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "3000")
 
 for PORT in $AGENT_API_PORT $WEB_PORT; do
-  PID=$(lsof -ti ":$PORT" 2>/dev/null || true)
+  if command -v ss &>/dev/null; then
+    PID=$(ss -tlnp "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
+  else
+    PID=$(lsof -ti ":$PORT" 2>/dev/null || true)
+  fi
   if [ -n "$PID" ]; then
     BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$AB/bridge.lock'))['pid'])" 2>/dev/null || echo "")
     if [ "$PID" = "$BRIDGE_PID" ]; then
