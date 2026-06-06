@@ -4,28 +4,27 @@ How code gets from source to a running bridge.
 
 ## Quick reference
 
+### CLI
+
 ```bash
-# Full deploy (build + stage + atomic swap + health-verified restart)
-abtars update
-
-# Build from working copy (skip git fetch staleness check)
-abtars update --from-local
-
-# Preview what would happen
-abtars update --dry-run
-
-# Check if updates available (no build, no lock)
-abtars update --check
-
-# Rollback to previous version
-abtars rollback
-
-# Restart without rebuild
-abtars restart
-
-# Cold restart (starts supervisor if dead)
-abtars restart --cold
+abtars update                # from npm (stable/alpha)
+abtars update --from-local   # build + deploy from local git checkout
+abtars update --dry-run      # preview, no mutations
+abtars rollback              # swap app/ ↔ app.prev/, restart
+abtars restart               # restart without rebuild
+abtars restart --cold        # starts supervisor if dead
 ```
+
+### Telegram
+
+```
+/update              # from npm
+/update pull         # git pull latest (no build)
+/update build        # build + deploy from checkout
+/software            # versions, source, rollback slots
+```
+
+Remote deploy flow: `/update pull` → `/update build`
 
 ## What `abtars update` does
 
@@ -121,8 +120,14 @@ Recovery: `cp ~/.abtars/config/.pre-update/* ~/.abtars/config/`
 
 ## Deploy to remote (Molty)
 
+Via Telegram:
+```
+/update pull          ← fetches latest
+/update build         ← builds + deploys + restarts
+```
+
+Or via SSH/tmux:
 ```bash
-# From WSL via tmux
 tmux send-keys -t remote 'cd ~/abmind && git pull --ff-only origin dev && npm run build && cd ~/abtars && git pull --ff-only origin dev && abtars update --from-local' Enter
 ```
 

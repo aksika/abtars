@@ -9,8 +9,8 @@
 
 import { logAndSwallow } from "../log-and-swallow.js";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { resolve, join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { abtarsHome } from "../../paths.js";
 import { logInfo, logWarn } from "../logger.js";
@@ -76,7 +76,7 @@ function todayStr(): string {
   return localDate();
 }
 
-/** Read task file, substitute {today}, return { prompt, dodPaths }. */
+/** Read task file, substitute {today}, glob associated _* files, return { prompt, dodPaths }. */
 function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } | null {
   const filePath = resolve(taskFile.replace(/^~/, homedir()));
   if (!existsSync(filePath)) { logWarn(TAG, `Task file not found: ${filePath}`); return null; }
@@ -85,14 +85,38 @@ function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } 
   const content = raw.replace(/\{today\}/g, today);
 
   const dodIdx = content.indexOf("## Definition of Done");
-  if (dodIdx === -1) return { prompt: content.trim(), dodPaths: [] };
+  let prompt: string;
+  let dodPaths: string[] = [];
+  if (dodIdx === -1) {
+    prompt = content.trim();
+  } else {
+    prompt = content.slice(0, dodIdx).trim();
+    const dodSection = content.slice(dodIdx);
+    dodPaths = dodSection.split("\n")
+      .filter(l => l.match(/^- /))
+      .map(l => l.replace(/^- /, "").trim())
+      .map(p => resolve(p.replace(/^~/, homedir())));
+  }
 
-  const prompt = content.slice(0, dodIdx).trim();
-  const dodSection = content.slice(dodIdx);
-  const dodPaths = dodSection.split("\n")
-    .filter(l => l.match(/^- /))
-    .map(l => l.replace(/^- /, "").trim())
-    .map(p => resolve(p.replace(/^~/, homedir())));
+  // Glob associated files: {taskname}_* in same directory (cap 10k chars total)
+  const dir = dirname(filePath);
+  const base = basename(filePath, ".md");
+  const associated = readdirSync(dir).filter(f => f.startsWith(base + "_")).sort();
+  if (associated.length > 0) {
+    let injected = "\n\n---\n## Associated files\n";
+    let totalChars = 0;
+    const CAP = 10_000;
+    for (const f of associated) {
+      const fc = readFileSync(join(dir, f), "utf-8");
+      if (totalChars + fc.length > CAP) {
+        injected += `\n[${f}]: (truncated — full file at ${join(dir, f)})\n`;
+        break;
+      }
+      injected += `\n### ${f}\n\`\`\`\n${fc}\n\`\`\`\n`;
+      totalChars += fc.length;
+    }
+    prompt += injected;
+  }
 
   return { prompt, dodPaths };
 }

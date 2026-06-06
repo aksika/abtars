@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * abtars-todo — persistent todo list CLI.
  *

@@ -4,8 +4,8 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import { readFileSync, readlinkSync, existsSync } from "node:fs";
-import { join, basename } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ServiceState } from "./service-registry.js";
 
@@ -40,13 +40,17 @@ export interface StatusContext {
 }
 
 export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus> {
-  // Version + commit from release symlink
+  // Version + commit from manifest.json
   let version = "?";
   let commit = "?";
   try {
-    const target = basename(readlinkSync(join(homedir(), ".abtars", "current")));
-    const dash = target.lastIndexOf("-");
-    if (dash > 0) { version = target.slice(0, dash); commit = target.slice(dash + 1); }
+    const manifest = JSON.parse(readFileSync(join(homedir(), ".abtars", "manifest.json"), "utf-8"));
+    if (manifest.version) {
+      const dash = manifest.version.lastIndexOf("-");
+      if (dash > 0) { version = manifest.version.slice(0, dash); commit = manifest.version.slice(dash + 1); }
+      else { version = manifest.version; }
+    }
+    if (manifest.commit) commit = manifest.commit;
   } catch (err) { logAndSwallow("system_status", "op", err); }
 
   // Model + transport
@@ -187,9 +191,19 @@ export function renderStatusText(status: SystemStatus): string {
   );
 
   for (const s of status.subsystems) {
-    const icon = s.status === "ok" ? "✓" : s.status === "skipped" ? "○" : "✗";
+    let icon = s.status === "ok" ? "✓" : s.status === "skipped" ? "○" : "✗";
     const label = s.name.replace("phase", "").replace(/([A-Z])/g, " $1").trim().toLowerCase();
-    const detail = s.detail ? ` — ${s.detail}` : "";
+    let detail = s.detail ? ` — ${s.detail}` : "";
+
+    // #799: warn if memory is "ok" but abmind CLI unavailable (ACP transport only)
+    if (s.status === "ok" && (s.name === "phaseMemory" || s.name === "phaseMemoryIpc")) {
+      const abmindManifest = join(homedir(), ".abmind", "manifest.json");
+      if (!existsSync(abmindManifest) && status.transportType === "acp") {
+        icon = "⚠️";
+        if (s.name === "phaseMemory") detail = " — agent tools unavailable (install abmind)";
+      }
+    }
+
     lines.push(`  ${icon} ${label}${detail}`);
   }
 

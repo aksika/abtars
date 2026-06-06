@@ -73,7 +73,8 @@ export class MemorySearchController {
       const webResults = result.results.map(hitToWebResult);
       const stageStatuses: Record<string, { status: string; hits: number; ms: number }> = {};
       for (const [name, stage] of Object.entries(result.stages)) {
-        stageStatuses[name] = { status: "ok", hits: stage.hits.length, ms: stage.ms };
+        const s = stage as { hits: unknown[]; ms: number };
+        stageStatuses[name] = { status: "ok", hits: s.hits.length, ms: s.ms };
       }
       const response: MemorySearchResponse = { results: webResults, layers: stageStatuses };
       return { status: 200, body: response };

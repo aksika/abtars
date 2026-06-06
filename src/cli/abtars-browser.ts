@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * abtars-browser — standalone CLI for agent-initiated browser control.
  *

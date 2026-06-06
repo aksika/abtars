@@ -79,7 +79,7 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
       const arcs = memory?.getEmotionalArcs() ?? [];
       if (arcs.length > 0) {
         const ARC_LABELS: Record<string, string> = { "↑": "user sentiment improving", "↓": "user sentiment worsening — be careful", "↕": "volatile — user feelings fluctuate", "→": "stable" };
-        const lines = arcs.map(a => `- ${a.topic}: ${a.arc} (${ARC_LABELS[a.arc] ?? "unknown"})`);
+        const lines = arcs.map((a: { topic: string; arc: string }) => `- ${a.topic}: ${a.arc} (${ARC_LABELS[a.arc] ?? "unknown"})`);
         parts.push(`[EMOTIONAL CONTEXT]\n${lines.join("\n")}`);
       }
     } catch (err) { logAndSwallow(TAG, "op", err); }

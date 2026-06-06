@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Standalone browser IPC server — runs inside Docker.
  * Starts BrowserManager + BrowserTool + IPC socket, then waits for SIGTERM.

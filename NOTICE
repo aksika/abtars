@@ -1,5 +1,5 @@
-AgentBridge
+abTARS
 Copyright 2026 aksika
 
-Standalone AI agent — Telegram/Discord bridge with persistent memory, sleep maintenance, and autonomous capabilities.
-https://github.com/aksika/agentbridge
+Standalone AI agent runtime — Telegram/Discord/IRC bridge with persistent memory, sleep maintenance, and autonomous capabilities.
+https://github.com/aksika/abtars

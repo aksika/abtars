@@ -23,6 +23,8 @@ The onboard wizard asks for:
 - Model provider (Kiro CLI, OpenRouter, ollama, etc.)
 - Agent name and passphrase (for memory encryption)
 
+> ⚠️ **SECURITY WARNING:** When creating your bot with @BotFather, keep it **private** (not searchable publicly). abTARS has access to your machine via `execute_bash`. If your bot is publicly discoverable, anyone can find and message it. The built-in `users.json` allowlist blocks unknown senders, but defense-in-depth means the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.
+
 ## 3. Start
 
 ```bash

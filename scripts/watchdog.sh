@@ -27,7 +27,7 @@ fi
 SUSPEND_GRACE="${SUSPEND_GRACE:-true}"
 STARTUP_TIMEOUT=$(( HB_SEC + POLL_SEC * 2 ))
 CIRCUIT_MAX=3
-CIRCUIT_WINDOW=300
+CIRCUIT_WINDOW=180
 MAX_LOG_BYTES=10485760
 
 BRIDGE_PID=""
@@ -123,10 +123,52 @@ circuit_check() {
 
 spawn_bridge() {
   if ! circuit_check; then
-    log "🚨 CIRCUIT BREAKER — ${CIRCUIT_MAX} restarts in ${CIRCUIT_WINDOW}s, stopping"
-    notify "🚨 Watchdog circuit breaker tripped — manual intervention needed"
-    rm -f "$WD_LOCK"
-    exit 1
+    # Auto-rollback attempt before giving up
+    local PREV="$AB/app.prev.1"
+    if [ -d "$PREV" ]; then
+      local ROLLED_VER
+      ROLLED_VER=$(python3 -c "import json; print(json.load(open('$PREV/package.json'))['version'])" 2>/dev/null || echo "unknown")
+      log "🔄 Circuit breaker — attempting auto-rollback to $ROLLED_VER..."
+      rm -rf "$AB/app.broken"
+      mv "$AB/app" "$AB/app.broken"
+      mv "$PREV" "$AB/app"
+      RESTART_TIMES=()  # Reset counter for the rollback attempt
+
+      # Try starting the rolled-back version
+      if [ -x "$AB/scripts/doctor.sh" ]; then
+        timeout 30 "$AB/scripts/doctor.sh" --fix >> "$AB/logs/launchd.log" 2>&1 || true
+      fi
+      rm -f "$LOCK"
+      if [ -f "$AB/config/.env" ]; then set -a; source "$AB/config/.env"; set +a; fi
+      log "Starting bridge (rollback): node app/bundle/abtars.js"
+      cd "$AB"
+      NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js >> "$AB/logs/launchd.log" 2>&1 &
+      BRIDGE_PID=""
+      for i in $(seq 1 15); do
+        sleep 2
+        if [ -f "$LOCK" ]; then
+          BRIDGE_PID=$(grep -o '"pid":[0-9]*' "$LOCK" | grep -o '[0-9]*' || echo "")
+          if [[ -n "$BRIDGE_PID" && "$BRIDGE_PID" != "0" ]]; then break; fi
+        fi
+      done
+
+      if [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
+        rm -rf "$AB/app.broken"
+        log "✓ Auto-rollback successful — running $ROLLED_VER (PID=$BRIDGE_PID)"
+        notify "⚠️ Auto-rolled back to $ROLLED_VER after crash loop (3 restarts in ${CIRCUIT_WINDOW}s)"
+        return 0
+      else
+        log "❌ Auto-rollback also failed"
+        notify "❌ Auto-rollback to $ROLLED_VER also failed. Manual intervention required."
+        rm -f "$WD_LOCK"
+        exit 1
+      fi
+    else
+      log "🚨 CIRCUIT BREAKER — ${CIRCUIT_MAX} restarts in ${CIRCUIT_WINDOW}s, no prior version available"
+      notify "🚨 Watchdog circuit breaker tripped — no rollback available, manual intervention needed"
+      rm -f "$WD_LOCK"
+      exit 1
+    fi
   fi
 
   # Health check before every spawn
@@ -302,6 +344,10 @@ while true; do
 
   age_sec=$(( (now - lock_hb) / 1000 ))
   if [[ "$KILL_ON_STALE" == "true" ]] && (( age_sec > STALE_SEC )); then
+    # Skip if update in progress — bridge will be restarted by update command
+    if [[ -f "$AB/state/update.sentinel" ]] && grep -q '"pending"' "$AB/state/update.sentinel" 2>/dev/null; then
+      continue
+    fi
     kill_bridge "heartbeat stale (${age_sec}s)"
     spawn_bridge "${BRIDGE_ARGS[@]}"
   fi

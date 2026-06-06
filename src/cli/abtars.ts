@@ -62,8 +62,8 @@ Usage:
   abtars uninstall [--yes]
   abtars update  [--source local|npm|github] [--from-local]
   abtars rollback [--to <version>]
-  abtars backup
-  abtars restore <file.zip|.7z>
+  abtars backup [--config] [--encrypt] [--output <dir>] [--prune-days N]
+  abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]
   abtars doctor [<args passed to doctor.sh>...]
   abtars onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   abtars restart [--cold]
@@ -77,6 +77,21 @@ Usage:
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
+  // Handle --version before parsing (it looks like a command to parseArgs)
+  if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const here = dirname(fileURLToPath(import.meta.url));
+    try {
+      const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf-8'));
+      process.stdout.write(`${pkg.version}\n`);
+    } catch {
+      process.stdout.write('unknown\n');
+    }
+    return 0;
+  }
+
   const { command, flags } = parseArgs(argv);
 
   try {
@@ -97,12 +112,20 @@ export async function main(argv: readonly string[]): Promise<number> {
           allowAbmindMismatch: flags.get('allow-abmind-mismatch') === true,
         });
       case 'rollback':
-        return await rollback();
+        return await rollback({ to: typeof flags.get('to') === 'string' ? Number(flags.get('to')) : undefined });
       case 'backup':
-        return await backup(typeof flags.get('output') === 'string' ? (flags.get('output') as string) : undefined);
+        return await backup({
+          config: flags.get('config') === true,
+          encrypt: flags.get('encrypt') === true,
+          outputDir: typeof flags.get('output') === 'string' ? (flags.get('output') as string) : undefined,
+          pruneDays: typeof flags.get('prune-days') === 'string' ? Number(flags.get('prune-days')) : undefined,
+        });
       case 'restore': {
         const { restore } = await import('./commands/restore.js');
-        return await restore(argv[1] ?? '');
+        return await restore(argv[1] ?? '', {
+          config: flags.get('config') === true,
+          passphrase: typeof flags.get('passphrase') === 'string' ? (flags.get('passphrase') as string) : undefined,
+        });
       }
       case 'doctor':
         // Pass remaining --flags through to doctor.sh. Primitive pass-through:

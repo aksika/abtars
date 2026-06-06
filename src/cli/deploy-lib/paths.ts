@@ -37,6 +37,9 @@ export interface PackagePaths {
   readonly config: string;
   readonly app: string;
   readonly appPrev: string;
+  readonly appPrev1: string;
+  readonly appPrev2: string;
+  readonly appPrev3: string;
   readonly appStaging: string;
   readonly bin: string;
   readonly manifest: string;
@@ -53,6 +56,9 @@ export function packagePaths(pkg: PackageName): PackagePaths {
     config: join(home, 'config'),
     app: join(home, 'app'),
     appPrev: join(home, 'app.prev'),
+    appPrev1: join(home, 'app.prev.1'),
+    appPrev2: join(home, 'app.prev.2'),
+    appPrev3: join(home, 'app.prev.3'),
     appStaging: join(home, 'app.staging'),
     bin: join(home, 'bin'),
     manifest: join(home, 'manifest.json'),

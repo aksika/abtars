@@ -74,7 +74,7 @@
     },
     {
       "source": "tasks.default.json",
-      "dest": "state/tasks.json"
+      "dest": "tasks/tasks.json"
     },
     {
       "source": "config/peers.json.example",
@@ -126,7 +126,8 @@
     "abtars-browser",
     "abtars-restart",
     "abtars-task",
-    "abtars-tweet"
+    "abtars-tweet",
+    "abtars-todo"
   ],
   "postInstall": [
     {

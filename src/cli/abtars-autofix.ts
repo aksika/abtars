@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * abtars-autofix — manage self-healer auto-fix rules.
  * Usage: abtars-autofix list|add|remove|test [options]

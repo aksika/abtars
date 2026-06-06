@@ -32,6 +32,8 @@ export interface Manifest {
   readonly previousCommit: string | null;
   /** Install mode: simple (manual), supervised (launchd/systemd user-scope), or supervised-daemon (system-scope). */
   readonly installMode?: 'simple' | 'supervised' | 'supervised-daemon';
+  /** Repo root path (set when source=local). Null for npm installs. */
+  readonly repoRoot?: string | null;
 }
 
 export async function readManifest(path: string): Promise<Manifest | null> {

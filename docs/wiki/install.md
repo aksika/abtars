@@ -121,7 +121,7 @@ abtars stop     # stop
 | OpenRouter | Direct API | API key in `~/.abtars/secret/OPENROUTER_API_KEY` |
 | Kiro CLI | ACP | `kiro-cli` installed, AWS account |
 | Gemini CLI | ACP | `gemini` installed, Google account |
-| Codex | ACP | `codex` installed |
+| Codex | Direct API | `codex` installed, OpenAI account |
 | Claude Code | ACP | `claude` installed |
 
 Configure in `~/.abtars/config/transport.json`. The onboard wizard sets this up interactively.
@@ -185,3 +185,7 @@ systemd=true
 ## Troubleshooting
 
 See [Health Check](./healthcheck.md) and [Troubleshooting](./troubleshooting.md).
+
+<!-- test 1780584552 -->
+
+<!-- force-1780586373 -->

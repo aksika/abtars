@@ -28,6 +28,7 @@ export async function handleDoctor(_text: string, ctx: CommandContext): Promise<
   const { getDoctorReport, renderDoctorText } = await import("../doctor/index.js");
   const force = arg === "force";
   const svcStates = ctx.registry?.getStates() ?? {};
+  await ctx.reply("🩺 Running diagnostics...");
   const report = await getDoctorReport({
     memory: ctx.memory,
     transport: ctx.transport,
@@ -342,5 +343,173 @@ export async function handleWhoami(_text: string, ctx: CommandContext): Promise<
   } else {
     await ctx.reply(`${ctx.userId ?? "unknown"} (unregistered)`);
   }
+  return true;
+}
+
+export async function handleSoftware(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { existsSync } = await import("node:fs");
+  const { abtarsHome } = await import("../../paths.js");
+  const home = abtarsHome();
+  const arg = _text.replace(/^\/(software|update)\s*/i, "").trim();
+
+  // Master-only gate for destructive subcommands
+  const { loadUsers } = await import("../user-registry.js");
+  const user = loadUsers().byUserId.get(ctx.userId);
+  const isMaster = user?.role === "master";
+
+  // /software rollback <version>
+  if (arg.startsWith("rollback")) {
+    if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
+    const targetVersion = arg.replace(/^rollback\s*/, "").trim();
+    if (!targetVersion) {
+      await ctx.reply("Usage: /software rollback <version>\nUse /software to see available versions.");
+      return true;
+    }
+
+    let targetSlot: number | null = null;
+    for (let i = 1; i <= 3; i++) {
+      const pkgPath = join(home, `app.prev.${i}`, "package.json");
+      try {
+        const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+        if (ver === targetVersion) { targetSlot = i; break; }
+      } catch { /* slot empty */ }
+    }
+
+    if (!targetSlot) {
+      await ctx.reply(`❌ Version ${targetVersion} not found in rollback slots.`);
+      return true;
+    }
+
+    await ctx.reply(`⚠️ Rolling back to ${targetVersion}...`);
+    try {
+      const { rollback } = await import("../../cli/commands/rollback.js");
+      await rollback({ to: targetSlot });
+    } catch (err) {
+      await ctx.reply(`❌ Rollback failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return true;
+  }
+
+  // /software update [build|pull]
+  if (arg === "update" || arg === "update build" || arg === "build" ||
+      arg === "update pull" || arg === "pull" || arg === "") {
+    // /update with no args → treat as /software (show info)
+    if (arg === "" && _text.match(/^\/software\s*$/i)) {
+      // Fall through to info display below
+    } else if (arg === "update pull" || arg === "pull") {
+      if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
+      try {
+        const { spawnSync } = await import("node:child_process");
+        const { mkdirSync } = await import("node:fs");
+        const srcDir = join(home, "src", "abtars");
+        if (!existsSync(join(srcDir, ".git"))) {
+          await ctx.reply("⏳ Cloning abtars repo...");
+          mkdirSync(join(home, "src"), { recursive: true });
+          const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
+          if (cl.status !== 0) { await ctx.reply(`❌ Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
+        }
+        const r = spawnSync("git", ["-C", srcDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+        if (r.status === 0) {
+          await ctx.reply(`✓ Pulled:\n${(r.stdout || "").trim().slice(0, 500)}`);
+        } else {
+          await ctx.reply(`❌ Pull failed:\n${(r.stderr || r.stdout || "").trim().slice(0, 300)}`);
+        }
+      } catch (err) {
+        await ctx.reply(`❌ Pull failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return true;
+    } else if (arg === "update" || arg === "update build" || arg === "build") {
+      if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
+      const isBuild = arg.includes("build");
+      await ctx.reply(`⏳ Updating${isBuild ? " (build)" : " (npm)"}...`);
+      try {
+        const { spawnSync } = await import("node:child_process");
+        const { writeFileSync: wf } = await import("node:fs");
+        const reasonPath = join(home, ".last-restart-reason");
+        wf(reasonPath, `software-update`, "utf-8");
+        if (isBuild) {
+          const script = join(home, "src", "abtars", "scripts", "build-and-deploy.sh");
+          spawnSync("bash", [script], { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
+        } else {
+          spawnSync("abtars", ["update"], { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
+        }
+        await ctx.reply("⚠️ Update completed but bridge did not restart. Run /restart.");
+      } catch (err) {
+        await ctx.reply(`❌ Update failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return true;
+    }
+  }
+
+  // /software check — force-refresh npm registry
+  if (arg === "check") {
+    await ctx.reply("🔍 Checking npm registry...");
+    try {
+      const { spawnSync } = await import("node:child_process");
+      const abtarsLatest = spawnSync("npm", ["view", "abtars", "dist-tags", "--json"], { encoding: "utf-8", timeout: 10_000 });
+      const abmindLatest = spawnSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 10_000 });
+      const abt = abtarsLatest.status === 0 ? JSON.parse(abtarsLatest.stdout) : null;
+      const abm = abmindLatest.status === 0 ? JSON.parse(abmindLatest.stdout) : null;
+      const lines = ["📦 npm registry (fresh):"];
+      if (abt) lines.push(`  abtars: latest=${abt.latest ?? "?"} alpha=${abt.alpha ?? "?"}`);
+      if (abm) lines.push(`  abmind: latest=${abm.latest ?? "?"} alpha=${abm.alpha ?? "?"}`);
+      if (!abt && !abm) lines.push("  ⚠️ npm unreachable");
+      await ctx.reply(lines.join("\n"));
+    } catch {
+      await ctx.reply("❌ npm check failed (timeout or network error)");
+    }
+    return true;
+  }
+
+  // /software — show deployment info (default)
+  const lines: string[] = ["🔧 Software"];
+
+  // abtars version
+  try {
+    const pkg = JSON.parse(readFileSync(join(home, "app", "package.json"), "utf-8"));
+    const manifest = existsSync(join(home, "manifest.json"))
+      ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
+      : null;
+    const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
+    lines.push(`  abtars: ${pkg.version} (deployed ${deployed})`);
+    if (manifest?.repoRoot) lines.push(`  source: local (${manifest.repoRoot})`);
+    else lines.push(`  source: npm`);
+  } catch {
+    lines.push("  abtars: unknown");
+  }
+
+  // abmind version
+  const abmindHome = process.env["ABMIND_HOME"] ?? join(home, "..", ".abmind");
+  const abmindManifest = join(abmindHome, "manifest.json");
+  if (existsSync(abmindManifest)) {
+    try {
+      const m = JSON.parse(readFileSync(abmindManifest, "utf-8"));
+      const deployed = m.activatedAt ? new Date(m.activatedAt).toLocaleString() : "unknown";
+      lines.push(`  abmind: ${m.version ?? "?"} (deployed ${deployed})`);
+    } catch { lines.push("  abmind: installed (version unknown)"); }
+  }
+
+  // npm latest (cached from update-check)
+  try {
+    const { checkForUpdate } = await import("../update-check.js");
+    const abtResult = checkForUpdate("abtars", "0.0.0"); // force return latest
+    if (abtResult?.latest) lines.push(`  npm latest: abtars@${abtResult.latest}`);
+  } catch { /* no cached data */ }
+
+  // Rollback slots
+  lines.push("  Rollback:");
+  for (let i = 1; i <= 3; i++) {
+    const pkgPath = join(home, `app.prev.${i}`, "package.json");
+    try {
+      const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+      lines.push(`    ${i}: ${ver}`);
+    } catch {
+      lines.push(`    ${i}: (empty)`);
+    }
+  }
+
+  lines.push("");
+  lines.push("  /software update [pull] [build] | rollback");
+  await ctx.reply(lines.join("\n"));
   return true;
 }
