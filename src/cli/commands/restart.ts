@@ -82,24 +82,45 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
   const bridgeAlive = bridgePid != null && bridgePid > 0 && pidAlive(bridgePid);
 
   if (cold) {
-    // Under supervised-daemon, cold restart requires sudo — refuse and print instructions
     const manifestPath = join(home, "manifest.json");
     const installMode = readJsonField(manifestPath, "installMode") as string | undefined;
     if (!installMode) {
       process.stderr.write("❌ installMode not set in manifest.json. Run 'abtars install' first.\n");
       return 1;
     }
-    if (installMode === "supervised-daemon") {
-      const platform = process.platform;
-      if (platform === "darwin") {
-        process.stderr.write(`Cold restart under supervised-daemon requires sudo:\n  sudo -k launchctl kickstart -k system/com.abtars.daemon\n`);
-      } else {
-        process.stderr.write(`Cold restart under supervised-daemon requires sudo:\n  sudo -k systemctl restart abtars\n`);
+
+    // Supervised mode: stop watchdog+bridge cleanly, start fresh. No USR1 race (#841).
+    if (installMode === "supervised-daemon" || installMode === "supervised") {
+      const { execSync } = await import("node:child_process");
+      const wdLock = join(home, "watchdog.lock");
+      const wdPid = readJsonField(wdLock, "pid") as number | undefined;
+      process.stdout.write(`🛑 Stopping supervisor${wdPid ? ` (PID ${wdPid})` : ""}...\n`);
+      try {
+        execSync("abtars stop --force", { stdio: "pipe", timeout: 30_000 });
+      } catch { /* may already be stopped */ }
+      process.stdout.write(`✅ Supervisor stopped\n♻️ Starting fresh...\n`);
+      try {
+        execSync("abtars start", { stdio: "pipe", timeout: 30_000 });
+      } catch (err) {
+        process.stderr.write(`❌ Start failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        return 1;
       }
-      return 1;
+      // Wait for bridge.lock to confirm new PIDs
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        const newPid = readJsonField(lockFile, "pid") as number | undefined;
+        if (newPid && newPid > 0 && pidAlive(newPid)) {
+          const newWdPid = readJsonField(wdLock, "pid") as number | undefined;
+          process.stdout.write(`✅ Bridge running (PID ${newPid})\n`);
+          process.stdout.write(`✅ Supervisor running (PID ${newWdPid ?? "?"})\n`);
+          return 0;
+        }
+      }
+      process.stderr.write(`⚠️ Bridge started but health not confirmed within 30s.\n`);
+      return 0;
     }
 
-    // Run doctor before spawning
+    // Simple (unsupervised) mode: kill bridge, spawn fresh
     const doctorPath = join(home, "scripts", "doctor.sh");
     if (existsSync(doctorPath)) {
       process.stdout.write("🩺 Health check...\n");
@@ -113,10 +134,9 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
 
     if (bridgeAlive) await killBridge(bridgePid!);
     killPortHolder(3100);
-    // Clear stale restart requests so the new bridge doesn't restart again (#731)
     const { updateBridgeLockField } = await import("../../components/transport/bridge-lock-transport.js");
     updateBridgeLockField("restartRequested", null);
-    const argv: string[] = []; // #534: env is SSoT — no CLI args needed
+    const argv: string[] = [];
     return spawnLauncher(home, argv);
   }
 

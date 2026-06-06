@@ -22,10 +22,6 @@ import {
 } from '../deploy-lib-import.js';
 import { showHintOnce } from '../../components/hints.js';
 
-function readJsonField(file: string, field: string): unknown {
-  try { return JSON.parse(readFileSync(file, 'utf-8'))[field]; } catch { return undefined; }
-}
-
 export interface UpdateOptions {
   readonly source: SourceName;
   readonly fromLocal: boolean;
@@ -354,58 +350,24 @@ async function postSwapHousekeeping(
   void hashFile; // preserve import
 }
 
-async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<boolean> {
-  const manifest = await readManifest(paths.manifest);
-  const mode = manifest?.installMode;
-  if (!mode) {
-    process.stderr.write("❌ installMode not set in manifest.json. Run 'abtars install' first.\n");
-    return false;
-  }
-
-  if (mode === "supervised-daemon" || mode === "supervised") {
-    process.stdout.write("\n♻️ Restarting bridge via watchdog...\n");
-    const wdLock = join(paths.home, "watchdog.lock");
-    const wdPid = readJsonField(wdLock, "pid") as number | undefined;
-    if (wdPid && wdPid > 0) {
-      try {
-        process.kill(wdPid, "SIGUSR1");
-        process.stdout.write(`  USR1 sent to watchdog (PID ${wdPid})\n`);
-        return true;
-      } catch {
-        process.stdout.write(`⚠️ Could not signal watchdog (PID ${wdPid}).\n`);
-      }
-    }
-    // Fallback: cold restart
-    const { restart } = await import("./restart.js");
-    await restart({ cold: true }).catch((err: unknown) => {
-      process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
-    });
-    return true;
-  }
-
-  // Simple mode
+async function restartBridge(_paths: ReturnType<typeof packagePaths>): Promise<boolean> {
   process.stdout.write("\n♻️ Restarting bridge...\n");
   const { restart } = await import("./restart.js");
-  await restart({ cold: true }).catch((err: unknown) => {
-    process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
-  });
-  return true;
+  const code = await restart({ cold: true });
+  return code === 0;
 }
 
 function printDryRun(paths: ReturnType<typeof packagePaths>, repoRoot: string, opts: UpdateOptions): number {
   const { spawnSync } = require('node:child_process') as typeof import('node:child_process');
   const commit = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).stdout?.trim() ?? '?';
   const branch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).stdout?.trim() ?? '?';
-  const wdLock = join(paths.home, "watchdog.lock");
-  const wdPid = readJsonField(wdLock, "pid") as number | undefined;
-
   process.stdout.write(`
 Dry run — no changes will be made.
   Source:       ${opts.source} (commit ${commit} on ${branch})
   Staging to:   ${paths.appStaging}
   Swap:         app/ → app.prev/, app.staging/ → app/
   Config snap:  config/ → config/.pre-update/ (3-slot rotation)
-  Restart:      ${wdPid ? `USR1 to watchdog (PID ${wdPid})` : 'cold restart'}
+  Restart:      stop supervisor + start fresh
   Health:       poll bridge.lock for 60s
   On failure:   auto-rollback (swap app/ ↔ app.prev/)
 `);
