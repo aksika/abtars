@@ -1,5 +1,16 @@
 # Upgrading & Deploying
 
+## Telegram commands
+
+| Command | What it does |
+|---------|-------------|
+| `/update` | Update from npm (stable/alpha) |
+| `/update pull` | Git pull latest code (no build) |
+| `/update build` | Build + deploy from local git checkout |
+| `/software` | Show versions, source, rollback slots |
+
+Remote deploy flow: `/update pull` → `/update build`
+
 ## Linux / WSL (KP)
 
 ```bash
@@ -11,12 +22,17 @@ abtars update
 
 ## macOS (Molty)
 
+From Telegram (remote):
+```
+/update pull        ← fetches latest code
+/update build       ← builds + deploys + restarts
+```
+
+Or via SSH:
 ```bash
 cd ~/abmind && git pull --ff-only origin dev && npm run build
 cd ~/abtars && git pull --ff-only origin dev && abtars update --from-local
 ```
-
-**Important:** Use `git pull --ff-only` (not checkout of files). The release version is derived from `git rev-parse --short HEAD`.
 
 ## abmind-only changes
 
@@ -33,7 +49,9 @@ cd ~/workspace/ab/abtars && abtars update --from-local
 abtars status
 ```
 
-Shows: version, commit, bridge PID + health, sentinel status. Also check:
+Or via Telegram: `/status`, `/software`
+
+Shows: version, commit, bridge PID + health, source (npm or local + repo path). Also check:
 
 1. `✓ Bridge healthy` in update output
 2. Telegram polling started (check logs)
@@ -54,14 +72,6 @@ abtars update --dry-run
 ```
 
 Shows what would happen without building or mutating anything.
-
-## Check for updates
-
-```bash
-abtars update --check
-```
-
-Fetches remote, reports how many commits behind. Exit 0 = up-to-date, exit 2 = updates available.
 
 ## If deploy fails
 
