@@ -373,6 +373,12 @@ export async function handleInboundMessage(
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
+    // #869: strip <thinking> blocks unless user opted in via /reasoning show
+    const reasoningSession = transport.getActiveSession?.();
+    if (!reasoningSession?.showReasoning) {
+      userResponse = userResponse.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "");
+    }
+
     // --- Secret redaction (belt-and-suspenders for #436) ---
     for (const [key, val] of Object.entries(process.env)) {
       if (key.startsWith("SECRET_") && val && userResponse.includes(val)) {

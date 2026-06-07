@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, cpSync } from 'node:fs';
 import { copyFile, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hashFile } from '../deploy-lib-import.js';
@@ -150,8 +150,12 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         runCmd('npm', ['install', '--no-audit', '--no-fund'], repoRoot);
       }
 
-      // Bundle mode (esbuild) — the only supported mode now
-      runCmd('npm', ['run', 'bundle'], repoRoot);
+      // Bundle mode (esbuild) — build directly, skip npm run bundle (it requires ../abmind)
+      runCmd('node', ['esbuild.config.js'], repoRoot);
+      const publicSrc = join(repoRoot, 'src', 'components', 'dashboard', 'public');
+      if (existsSync(publicSrc)) cpSync(publicSrc, join(repoRoot, 'bundle', 'public'), { recursive: true });
+      const agentsSrc = join(repoRoot, 'agents');
+      if (existsSync(agentsSrc)) cpSync(agentsSrc, join(repoRoot, 'bundle', 'agents'), { recursive: true });
 
       const stagedPath = ctx.stagingDir;
       await rm(stagedPath, { recursive: true, force: true });

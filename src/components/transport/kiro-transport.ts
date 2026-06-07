@@ -49,6 +49,9 @@ export interface IKiroTransport {
   /** Transport-specific slash commands (e.g. /usage for kiro, /stats for gemini). */
   readonly transportCommands: string[];
 
+  /** Get the active ConversationSession (DirectApi only). */
+  getActiveSession?(): import("./conversation-session.js").ConversationSession | null;
+
   /** Execute a transport-specific command. Returns output text. */
   executeCommand?(cmd: string): Promise<string>;
 

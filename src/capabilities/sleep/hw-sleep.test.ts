@@ -31,6 +31,10 @@ vi.mock("../../components/transport/bridge-lock-transport.js", () => ({
   readAndClearForceSleep: vi.fn(() => null),
 }));
 
+vi.mock("../../components/system-event-buffer.js", () => ({
+  bufferSystemEvent: vi.fn(),
+}));
+
 vi.mock("abmind", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("abmind");
   return {
@@ -79,7 +83,7 @@ async function armHwSleep(opts: Required<Pick<SleepOpts, "sleepHour" | "sleepAud
   handle.spawn();
 
   // Flush microtasks so the mocked Promise chain fires (running=false, _awaitingHwSleep=true).
-  for (let i = 0; i < 3; i++) await Promise.resolve();
+  for (let i = 0; i < 20; i++) await Promise.resolve();
 
   if (!prevTimers) vi.useRealTimers();
 

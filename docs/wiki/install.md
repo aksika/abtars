@@ -35,6 +35,19 @@ Stable ≤ Alpha ≤ Dev.
 
 ## Manual install (npm)
 
+### Stable
+
+```bash
+npm install -g abtars abmind
+abmind install
+abtars install
+abtars update
+abtars onboard
+sudo $(which abtars) daemon install
+```
+
+### Alpha (recommended)
+
 ```bash
 npm install -g abtars@alpha abmind@alpha
 abmind install
@@ -44,9 +57,20 @@ abtars onboard
 sudo $(which abtars) daemon install
 ```
 
+### Git (development, build from source)
+
+```bash
+git clone git@github.com:aksika/abtars.git
+git clone git@github.com:aksika/abmind.git
+cd abmind && npm install && npm run build && cd ..
+cd abtars && npm install && abtars update --from-local
+abtars onboard
+sudo $(which abtars) daemon install
+```
+
 | Step | What happens |
 |------|-------------|
-| `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally (alpha channel) |
+| `npm install -g abtars abmind` | Installs CLI tools globally (stable channel) |
 | `abmind install` | Creates `~/.abmind/`, prompts for encryption passphrase, initializes memory DB |
 | `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
 | `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
@@ -164,9 +188,27 @@ See [Backup & Restore](./backup.md) for details.
 
 ## Updating
 
+### npm (stable or alpha)
+
 ```bash
 npm update -g abtars abmind
 abtars update
+```
+
+### Git (via Telegram)
+
+From Telegram chat with your bot:
+
+```
+/update pull    — pulls latest code
+/update deploy  — builds, stages, restarts bridge
+```
+
+### Git (manual CLI)
+
+```bash
+cd ~/path/to/abtars
+bash scripts/deploy.sh
 ```
 
 ## Platform-specific notes

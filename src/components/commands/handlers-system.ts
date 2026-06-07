@@ -339,9 +339,9 @@ export async function handleWhoami(_text: string, ctx: CommandContext): Promise<
   const user = ctx.userId ? reg.byUserId.get(ctx.userId) : undefined;
   if (user) {
     const clearance = CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`;
-    await ctx.reply(`${user.displayName ?? user.userId} (${user.role}, ${clearance} clearance)`);
+    await ctx.reply(`${user.displayName ?? user.userId} (${user.role})\nClearance: ${clearance}\nchatId: ${ctx.chatId}`);
   } else {
-    await ctx.reply(`${ctx.userId ?? "unknown"} (unregistered)`);
+    await ctx.reply(`${ctx.userId ?? "unknown"} (unregistered)\nchatId: ${ctx.chatId}`);
   }
   return true;
 }
@@ -410,13 +410,13 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
           const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
           if (cl.status !== 0) { logInfo("update", "Clone failed"); await ctx.reply(`Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
         }
-        spawnSync("git", ["-C", srcDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
-        const r = spawnSync("git", ["-C", srcDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+        spawnSync("git", ["-C", srcDir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+        const r = spawnSync("git", ["-C", srcDir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
         if (r.status !== 0) { await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
         let pulled = `Pulled:\n${(r.stdout || "").trim().slice(0, 300)}`;
         if (existsSync(join(abmindDir, ".git"))) {
-          spawnSync("git", ["-C", abmindDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
-          const ab = spawnSync("git", ["-C", abmindDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+          spawnSync("git", ["-C", abmindDir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+          const ab = spawnSync("git", ["-C", abmindDir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
           if (ab.status !== 0) { await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
           pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
         }
@@ -457,7 +457,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return true;
-    } else if (arg === "update") {
+    } else if (arg === "update" || arg === "npm" || arg === "update npm") {
       if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       logInfo("update", "npm update starting");
       await ctx.reply("Updating from npm...");
@@ -529,7 +529,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { execFileSync } = await import("node:child_process");
         const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
         const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === pkg.version ? "✓" : "⚠️"}`);
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === pkg.version || pkg.version.startsWith(latest) ? "✓" : "⚠️"}`);
       } catch { /* timeout or offline — skip */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
   } else if (existsSync(abmindManifest)) {
@@ -542,7 +542,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { execFileSync } = await import("node:child_process");
         const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
         const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === m.version ? "✓" : "⚠️"}`);
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === m.version || m.version.startsWith(latest) ? "✓" : "⚠️"}`);
       } catch { /* timeout or offline — skip */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
   } else {
@@ -563,7 +563,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   }
 
   lines.push("");
-  lines.push("  /software update [pull|deploy] | update (npm) | rollback");
+  lines.push("  /update [pull|deploy|npm] | /software rollback <version>");
   await ctx.reply(lines.join("\n"));
   return true;
 }

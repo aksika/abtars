@@ -30,7 +30,7 @@ const ABMIND_EXCLUDE = [
 ];
 
 // Config mode: include only these from ~/.abtars/
-const CONFIG_DIRS = ["config", "secret", "tasks", "skills", "core", "agents"];
+const CONFIG_DIRS = ["config", "secret", "tasks", "skills", "core", "agents", "kanban"];
 
 export interface BackupOpts {
   config?: boolean;
