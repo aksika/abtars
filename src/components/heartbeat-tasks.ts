@@ -192,3 +192,58 @@ export function createAuditRotationTask(): HeartbeatTask {
     },
   };
 }
+
+export interface KanbanDeliveryDeps {
+  sendSystemMessage: (prompt: string) => Promise<void>;
+  sendDocument: (chatId: string, filePath: string, caption: string) => Promise<void>;
+  chatId: () => string;
+}
+
+/** #857: Kanban delivery — picks up completed cards and delivers via agent pipeline. */
+export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTask {
+  return {
+    name: "kanban-delivery",
+    execute: async () => {
+      try {
+        const { kanbanPending, kanbanSetDelivering, kanbanMarkDelivered, kanbanDeliveryFailed } = await import("./tasks/kanban-board.js");
+        const pending = kanbanPending();
+        if (pending.length === 0) return;
+
+        for (const card of pending) {
+          kanbanSetDelivering(card.id);
+          try {
+            await deps.sendSystemMessage(
+              `[SYSTEM] [TASK COMPLETE] Your task "${card.title}" is done. ` +
+              `Announce completion briefly and tell the user to see the attached file. ` +
+              `Do not reproduce the full content.\n\nSummary for your memory: ${card.result_summary ?? "(no summary)"}`
+            );
+            if (card.result_path) {
+              await deps.sendDocument(deps.chatId(), card.result_path, `📄 ${card.title}`);
+            }
+            kanbanMarkDelivered(card.id);
+          } catch (err) {
+            kanbanDeliveryFailed(card.id);
+            logError(TAG, `Kanban delivery failed for card ${card.id}: ${err}`);
+          }
+        }
+      } catch (err) { logAndSwallow(TAG, "kanban-delivery", err); }
+    },
+  };
+}
+
+/** #857: Kanban cleanup — purge delivered cards older than 7 days. */
+export function createKanbanCleanupTask(): HeartbeatTask {
+  let counter = 0;
+  return {
+    name: "kanban-cleanup",
+    execute: async () => {
+      counter++;
+      if (counter % 72 !== 0) return; // ~hourly
+      try {
+        const { kanbanCleanup } = await import("./tasks/kanban-board.js");
+        const purged = kanbanCleanup(7);
+        if (purged > 0) logInfo(TAG, `Kanban: purged ${purged} delivered cards > 7d`);
+      } catch (err) { logAndSwallow(TAG, "kanban-cleanup", err); }
+    },
+  };
+}
