@@ -26,23 +26,33 @@ echo "Building abtars..."
 (cd "$SRC_DIR" && node esbuild.config.js)
 rm -rf "$SRC_DIR/bundle/public" && cp -r "$SRC_DIR/src/components/dashboard/public" "$SRC_DIR/bundle/public"
 
-# 4. Stop watchdog + bridge (prevents respawn during swap)
+# 4. Stop bridge (kill watchdog only if NOT managed by launchd)
 echo "Stopping..."
-pkill -f "watchdog.sh" 2>/dev/null || true
-sleep 1
-if [ -f "$HOME_DIR/bridge.lock" ]; then
-  BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$HOME_DIR/bridge.lock'))['pid'])" 2>/dev/null || true)
-  [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
+if launchctl list 2>/dev/null | grep -q abtars; then
+  # launchd manages watchdog — just kill the bridge, watchdog will respawn after swap
+  if [ -f "$HOME_DIR/bridge.lock" ]; then
+    BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$HOME_DIR/bridge.lock'))['pid'])" 2>/dev/null || true)
+    [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
+  fi
+else
+  # No launchd — kill watchdog + bridge, we restart watchdog at the end
+  pkill -f "watchdog.sh" 2>/dev/null || true
+  sleep 1
+  if [ -f "$HOME_DIR/bridge.lock" ]; then
+    BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$HOME_DIR/bridge.lock'))['pid'])" 2>/dev/null || true)
+    [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
+  fi
 fi
 sleep 2
 
 # 5. Atomic swap (no gap where app/ is missing)
 echo "Deploying..."
 rm -rf "$HOME_DIR/app.staging"
-cp -r "$SRC_DIR/bundle" "$HOME_DIR/app.staging"
-mkdir -p "$HOME_DIR/app.staging/node_modules/abmind"
-cp -r "$ABMIND_SRC/dist" "$HOME_DIR/app.staging/node_modules/abmind/"
-cp "$ABMIND_SRC/package.json" "$HOME_DIR/app.staging/node_modules/abmind/"
+mkdir -p "$HOME_DIR/app.staging/bundle"
+cp -r "$SRC_DIR/bundle/"* "$HOME_DIR/app.staging/bundle/"
+mkdir -p "$HOME_DIR/app.staging/bundle/node_modules/abmind"
+cp -r "$ABMIND_SRC/dist" "$HOME_DIR/app.staging/bundle/node_modules/abmind/"
+cp "$ABMIND_SRC/package.json" "$HOME_DIR/app.staging/bundle/node_modules/abmind/"
 rm -rf "$HOME_DIR/app.prev"
 [ -d "$HOME_DIR/app" ] && mv "$HOME_DIR/app" "$HOME_DIR/app.prev"
 mv "$HOME_DIR/app.staging" "$HOME_DIR/app"
@@ -53,11 +63,11 @@ echo "{\"version\":\"emergency-$COMMIT\",\"commit\":\"$COMMIT\",\"activatedAt\":
 
 # 7. Restart (mode-dependent)
 echo "Restarting..."
-if [ -f "$HOME_DIR/scripts/watchdog.sh" ]; then
+if launchctl list 2>/dev/null | grep -q abtars; then
+  echo "LaunchAgent manages watchdog — it will restart the bridge."
+elif [ -f "$HOME_DIR/scripts/watchdog.sh" ]; then
   nohup bash "$HOME_DIR/scripts/watchdog.sh" >> "$HOME_DIR/logs/watchdog.log" 2>&1 &
   echo "Watchdog restarted (PID $!) — it will start the bridge."
-elif launchctl list 2>/dev/null | grep -q abtars; then
-  echo "LaunchAgent will restart the bridge."
 else
   nohup node "$HOME_DIR/app/bundle/abtars.js" >> "$HOME_DIR/logs/bridge.log" 2>&1 &
   echo $! > "$HOME_DIR/bridge.pid"
