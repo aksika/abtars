@@ -12,6 +12,15 @@ export NODE_ENV=development
 
 exec > "$LOG" 2>&1
 
+# Ensure source is at remote HEAD (survives force-pushes)
+echo "=== syncing source ==="
+cd "$ABTARS_SRC"
+git fetch origin dev && git reset --hard origin/dev
+if [ -d "$ABMIND_SRC/.git" ]; then
+  cd "$ABMIND_SRC"
+  git fetch origin dev && git reset --hard origin/dev
+fi
+
 # Build abmind (if repo exists)
 if [ -d "$ABMIND_SRC/.git" ]; then
   echo "=== abmind: npm ci ==="
