@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readlinkSync } from "node:fs";
+import { readlinkSync, readFileSync } from "node:fs";
 import { initBridgeLock } from "./components/transport/bridge-lock-transport.js";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
@@ -129,7 +129,14 @@ export async function startBridge(): Promise<number> {
     const target = basename(readlinkSync(join(homedir(), ".abtars", "current")));
     const dash = target.lastIndexOf("-");
     if (dash > 0) { ctx.version = target.slice(0, dash); ctx.commit = target.slice(dash + 1); }
-  } catch (err) { /* dev mode — no release symlink */ }
+  } catch { /* no symlink — try install-manifest.json */ }
+  if (ctx.version === "?" || ctx.commit === "?") {
+    try {
+      const manifest = JSON.parse(readFileSync(join(homedir(), ".abtars", "install-manifest.json"), "utf-8"));
+      if (manifest.version) ctx.version = manifest.version;
+      if (manifest.commit) ctx.commit = manifest.commit;
+    } catch { /* no manifest either */ }
+  }
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
   initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}-${ctx.commit}`, argv: process.argv.slice(2) });
