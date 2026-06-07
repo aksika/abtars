@@ -436,6 +436,14 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
           await ctx.reply("No source repo. Run /update pull first.");
           return true;
         }
+        // Guard: skip if already running this commit
+        const { getDeployedVersion } = await import("../../paths.js");
+        const head = spawnSync("git", ["-C", srcDir, "rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).stdout.trim();
+        const running = getDeployedVersion();
+        if (head && (running.version.includes(head) || running.commit === head)) {
+          await ctx.reply(`Already running ${head}. Nothing to deploy.`);
+          return true;
+        }
         logInfo("update", `Deploy starting`);
         await ctx.reply("⚙️ Deploying...");
 
