@@ -18,9 +18,10 @@ import { sendToMainChat } from "../components/main-chat.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
 async function sendBackOnline(ctx: BootCtx): Promise<boolean> {
+  const version = ctx.commit && ctx.commit !== "?" ? `v${ctx.version}-${ctx.commit}` : ctx.version;
   const result = await sendToMainChat(
     { telegram: ctx.telegramAdapter, discord: ctx.discordAdapter },
-    "🔄 Back online.",
+    `🔄 Back online. ${version} (PID ${process.pid})`,
   );
   if (result.ok) logInfo("main", "Startup: Back online notification sent");
   return result.ok;
