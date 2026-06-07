@@ -412,23 +412,16 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         }
         spawnSync("git", ["-C", srcDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
         const r = spawnSync("git", ["-C", srcDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-        if (r.status !== 0) { logInfo("update", `Pull failed (abtars): ${(r.stderr || "").slice(0, 100)}`); await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
-        let pulled = (r.stdout || "").trim().slice(0, 300);
-        // Pull + build abmind
+        if (r.status !== 0) { await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
+        let pulled = `Pulled:\n${(r.stdout || "").trim().slice(0, 300)}`;
         if (existsSync(join(abmindDir, ".git"))) {
           spawnSync("git", ["-C", abmindDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
           const ab = spawnSync("git", ["-C", abmindDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-          if (ab.status !== 0) { logInfo("update", `Pull failed (abmind): ${(ab.stderr || "").slice(0, 100)}`); await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
-          const abBuild = spawnSync("npm", ["run", "build"], { cwd: abmindDir, encoding: "utf-8", timeout: 60_000 });
-          if (abBuild.status !== 0) { logInfo("update", `abmind build failed`); await ctx.reply(`abmind build failed:\n${(abBuild.stderr || abBuild.stdout || "").slice(0, 300)}`); return true; }
-          pulled += `\nabmind: built ✓`;
+          if (ab.status !== 0) { await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
+          pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
         }
-        // Build abtars bundle
-        const esbuild = spawnSync("node", ["esbuild.config.js"], { cwd: srcDir, encoding: "utf-8", timeout: 60_000 });
-        if (esbuild.status !== 0) { logInfo("update", `abtars build failed`); await ctx.reply(`abtars build failed:\n${(esbuild.stderr || esbuild.stdout || "").slice(0, 300)}`); return true; }
-        pulled += `\nabtars: built ✓`;
-        logInfo("update", `Pull complete: ${pulled.slice(0, 100)}`);
-        await ctx.reply(`✓ Pulled + built:\n${pulled}\n\nReady to deploy: /update deploy`);
+        logInfo("update", `Pull complete`);
+        await ctx.reply(`${pulled}\n\nReady to deploy: /update deploy`);
       } catch (err) {
         await ctx.reply(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -436,14 +429,31 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     } else if (arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build") {
       if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       try {
-        const { spawn } = await import("node:child_process");
+        const { spawnSync, spawn } = await import("node:child_process");
         const srcDir = join(home, "src", "abtars");
-        if (!existsSync(join(srcDir, "bundle", "abtars-cli.js"))) {
-          await ctx.reply("No bundle found. Run /update pull first.");
+        const abmindDir = join(home, "src", "abmind");
+        if (!existsSync(join(srcDir, ".git"))) {
+          await ctx.reply("No source repo. Run /update pull first.");
           return true;
         }
-        logInfo("update", `Deploy starting via fresh CLI`);
-        await ctx.reply("⚙️ Deploying (health-verified, auto-rollback)...");
+        logInfo("update", `Deploy starting`);
+        await ctx.reply("⚙️ Deploying...");
+
+        // Build abmind first (if repo exists)
+        if (existsSync(join(abmindDir, ".git"))) {
+          const abInstall = spawnSync("npm", ["install", "--no-audit", "--no-fund"], { cwd: abmindDir, encoding: "utf-8", timeout: 120_000 });
+          if (abInstall.status !== 0) { await ctx.reply(`abmind npm install failed:\n${(abInstall.stderr || "").slice(0, 300)}`); return true; }
+          const abBuild = spawnSync("npm", ["run", "build"], { cwd: abmindDir, encoding: "utf-8", timeout: 60_000 });
+          if (abBuild.status !== 0) { await ctx.reply(`abmind build failed:\n${(abBuild.stderr || abBuild.stdout || "").slice(0, 300)}`); return true; }
+        }
+
+        // Install abtars deps + build bundle
+        const install = spawnSync("npm", ["install", "--no-audit", "--no-fund"], { cwd: srcDir, encoding: "utf-8", timeout: 120_000 });
+        if (install.status !== 0) { await ctx.reply(`npm install failed:\n${(install.stderr || "").slice(0, 300)}`); return true; }
+        const build = spawnSync("node", ["esbuild.config.js"], { cwd: srcDir, encoding: "utf-8", timeout: 60_000 });
+        if (build.status !== 0) { await ctx.reply(`Build failed:\n${(build.stderr || build.stdout || "").slice(0, 300)}`); return true; }
+
+        // Spawn fresh CLI for deploy (uses latest deploy logic)
         spawn("node", ["bundle/abtars-cli.js", "update", "--from-local"], {
           cwd: srcDir,
           detached: true,
