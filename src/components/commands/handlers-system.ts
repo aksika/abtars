@@ -488,14 +488,18 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
 
   // abtars version
   try {
-    const pkg = JSON.parse(readFileSync(join(home, "app", "package.json"), "utf-8"));
-    const manifest = existsSync(join(home, "manifest.json"))
-      ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
+    const manifest = existsSync(join(home, "install-manifest.json"))
+      ? JSON.parse(readFileSync(join(home, "install-manifest.json"), "utf-8"))
       : null;
-    const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
-    lines.push(`  abtars: ${pkg.version} (deployed ${deployed})`);
-    if (manifest?.repoRoot) lines.push(`  source: local (${manifest.repoRoot})`);
-    else lines.push(`  source: npm`);
+    if (manifest) {
+      const version = manifest.version ?? "?";
+      const commit = manifest.commit ?? "";
+      const deployed = manifest.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
+      lines.push(`  abtars: ${version}${commit ? "-" + commit : ""} (deployed ${deployed})`);
+      lines.push(`  source: ${manifest.source === "local" ? `local (${manifest.repoRoot ?? ""})` : "npm"}`);
+    } else {
+      lines.push("  abtars: unknown");
+    }
   } catch {
     lines.push("  abtars: unknown");
   }
