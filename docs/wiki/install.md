@@ -35,7 +35,7 @@ Stable ≤ Alpha ≤ Dev.
 
 ## Manual install (npm)
 
-### Stable (recommended)
+### Stable
 
 ```bash
 npm install -g abtars abmind
@@ -46,7 +46,7 @@ abtars onboard
 sudo $(which abtars) daemon install
 ```
 
-### Alpha (latest features, may have bugs)
+### Alpha (recommended)
 
 ```bash
 npm install -g abtars@alpha abmind@alpha
@@ -188,9 +188,27 @@ See [Backup & Restore](./backup.md) for details.
 
 ## Updating
 
+### npm (stable or alpha)
+
 ```bash
 npm update -g abtars abmind
 abtars update
+```
+
+### Git (via Telegram)
+
+From Telegram chat with your bot:
+
+```
+/update pull    — pulls latest code
+/update deploy  — builds, stages, restarts bridge
+```
+
+### Git (manual CLI)
+
+```bash
+cd ~/path/to/abtars
+bash scripts/deploy.sh
 ```
 
 ## Platform-specific notes
