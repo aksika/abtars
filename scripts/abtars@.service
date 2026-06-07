@@ -10,7 +10,6 @@ WorkingDirectory=%h/.abtars
 ExecStart=%h/.abtars/scripts/abtars.sh
 Restart=always
 RestartSec=60
-Environment=NODE_ENV=production
 
 # Logging
 StandardOutput=journal
