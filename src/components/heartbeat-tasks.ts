@@ -50,7 +50,7 @@ export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
 }
 
 /** DB integrity check — runs every ~1 hour (time-based, independent of tick interval). */
-export function createDbIntegrityTask(memory: MemoryManager | null, sendSystemMessage?: (msg: string) => void): HeartbeatTask {
+export function createDbIntegrityTask(memory: MemoryManager | null): HeartbeatTask {
   let lastCheckAt = 0;
   const INTERVAL_MS = 60 * 60 * 1000;
   const MAX_FAILURES = 5;
@@ -76,7 +76,8 @@ export function createDbIntegrityTask(memory: MemoryManager | null, sendSystemMe
             escalated = true;
             const msg = `⚠️ FTS corruption persists after ${MAX_FAILURES} rebuild attempts. Needs manual fix.`;
             logError("db-integrity", msg);
-            sendSystemMessage?.(msg);
+            const { bufferSystemEvent } = await import("./system-event-buffer.js");
+            bufferSystemEvent(msg);
           }
         }
       } else {

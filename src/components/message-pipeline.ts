@@ -230,6 +230,13 @@ export async function handleInboundMessage(
       prompt = `${lines.join("\n")}\n\n${prompt}`;
     }
 
+    // --- Auto-notify: inject buffered system events (#844) ---
+    const { drainSystemEvents } = await import("./system-event-buffer.js");
+    const events = drainSystemEvents();
+    if (events.length > 0) {
+      prompt = `${events.map(e => `[SYSTEM] ${e}`).join("\n")}\n\n${prompt}`;
+    }
+
     // --- Send to transport ---
     const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
     const agentSession = activeSession.agentSession;
