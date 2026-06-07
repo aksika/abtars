@@ -326,3 +326,23 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
   await ctx.reply(lines.join("\n"));
   return true;
 }
+
+export async function handleReasoning(text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = text.replace(/^\/(reasoning)\s*/i, "").trim().toLowerCase();
+  const session = ctx.transport.getActiveSession?.();
+  if (!session) { await ctx.reply("No active session."); return true; }
+
+  if (arg === "show" || arg === "on") {
+    session.showReasoning = true;
+    await ctx.reply("Reasoning display: on");
+  } else if (arg === "hide" || arg === "off") {
+    session.showReasoning = false;
+    await ctx.reply("Reasoning display: off");
+  } else if (["none", "low", "medium", "high"].includes(arg)) {
+    session.reasoningEffort = arg === "none" ? null : arg as "low" | "medium" | "high";
+    await ctx.reply(`Reasoning effort: ${arg}`);
+  } else {
+    await ctx.reply(`Reasoning: effort=${session.reasoningEffort ?? "default"}, display=${session.showReasoning ? "show" : "hide"}`);
+  }
+  return true;
+}
