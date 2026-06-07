@@ -1,7 +1,6 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { logInfo, logWarn } from "../../components/logger.js";
 import { getEnv } from "../../components/env-schema.js";
-import { chromium } from "patchright";
 import type { Browser, BrowserContext, Page } from "patchright";
 import { execFileSync } from "node:child_process";
 import type { BrowserSession } from "../../types/browser.js";
@@ -119,6 +118,7 @@ export class BrowserManager {
   }
 
   private async _launchPatchright(): Promise<Browser> {
+    const { chromium } = await import("patchright");
     const headed = getEnv().browserHeaded;
     const args = headed ? [] : ["--headless=new"];
     if (getEnv().browserNoSandbox) args.push("--no-sandbox");
