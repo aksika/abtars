@@ -457,7 +457,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return true;
-    } else if (arg === "update") {
+    } else if (arg === "update" || arg === "npm" || arg === "update npm") {
       if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       logInfo("update", "npm update starting");
       await ctx.reply("Updating from npm...");
@@ -529,7 +529,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { execFileSync } = await import("node:child_process");
         const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
         const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === pkg.version ? "✓" : "⚠️"}`);
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === pkg.version || pkg.version.startsWith(latest) ? "✓" : "⚠️"}`);
       } catch { /* timeout or offline — skip */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
   } else if (existsSync(abmindManifest)) {
@@ -542,7 +542,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const { execFileSync } = await import("node:child_process");
         const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
         const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
-        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === m.version ? "✓" : "⚠️"}`);
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === m.version || m.version.startsWith(latest) ? "✓" : "⚠️"}`);
       } catch { /* timeout or offline — skip */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
   } else {
