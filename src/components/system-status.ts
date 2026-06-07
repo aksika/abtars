@@ -40,18 +40,11 @@ export interface StatusContext {
 }
 
 export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus> {
-  // Version + commit from manifest.json
-  let version = "?";
-  let commit = "?";
-  try {
-    const manifest = JSON.parse(readFileSync(join(homedir(), ".abtars", "manifest.json"), "utf-8"));
-    if (manifest.version) {
-      const dash = manifest.version.lastIndexOf("-");
-      if (dash > 0) { version = manifest.version.slice(0, dash); commit = manifest.version.slice(dash + 1); }
-      else { version = manifest.version; }
-    }
-    if (manifest.commit) commit = manifest.commit;
-  } catch (err) { logAndSwallow("system_status", "op", err); }
+  // Version + commit from manifest.json (single source of truth)
+  const { getDeployedVersion } = await import("../paths.js");
+  const deployed = getDeployedVersion();
+  const version = deployed.version;
+  const commit = deployed.commit || "?";
 
   // Model + transport
   let model = "unknown";

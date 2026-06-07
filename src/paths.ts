@@ -1,10 +1,18 @@
 import { resolve, join, relative } from "node:path";
 import { homedir } from "node:os";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 
 /** Base directory for all Abtars runtime data. Override with ABTARS_HOME env var. */
 export function abtarsHome(): string {
   return process.env.ABTARS_HOME ?? resolve(homedir(), ".abtars");
+}
+
+/** Single source of truth for deployed version. Reads ~/.abtars/manifest.json. */
+export function getDeployedVersion(): { version: string; commit: string } {
+  try {
+    const manifest = JSON.parse(readFileSync(join(abtarsHome(), "manifest.json"), "utf-8"));
+    return { version: manifest.version ?? "?", commit: manifest.commit ?? "" };
+  } catch { return { version: "?", commit: "" }; }
 }
 
 // ── Lazy directory creation ─────────────────────────────────────────────────

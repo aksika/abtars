@@ -486,20 +486,16 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   // /software — show deployment info (default)
   const lines: string[] = ["🔧 Software"];
 
-  // abtars version
+  // abtars version (single source of truth: getDeployedVersion)
   try {
-    const manifest = existsSync(join(home, "install-manifest.json"))
-      ? JSON.parse(readFileSync(join(home, "install-manifest.json"), "utf-8"))
+    const { getDeployedVersion } = await import("../../paths.js");
+    const ver = getDeployedVersion();
+    const manifest = existsSync(join(home, "manifest.json"))
+      ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
       : null;
-    if (manifest) {
-      const version = manifest.version ?? "?";
-      const commit = manifest.commit ?? "";
-      const deployed = manifest.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
-      lines.push(`  abtars: ${version}${commit ? "-" + commit : ""} (deployed ${deployed})`);
-      lines.push(`  source: ${manifest.source === "local" ? `local (${manifest.repoRoot ?? ""})` : "npm"}`);
-    } else {
-      lines.push("  abtars: unknown");
-    }
+    const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
+    lines.push(`  abtars: ${ver.version}${ver.commit ? "-" + ver.commit : ""} (deployed ${deployed})`);
+    if (manifest?.source) lines.push(`  source: ${manifest.source === "local" ? `local (${manifest.repoRoot ?? ""})` : "npm"}`);
   } catch {
     lines.push("  abtars: unknown");
   }
