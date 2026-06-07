@@ -17,7 +17,7 @@ export class TransportStateError extends Error {
 const VALID_TRANSITIONS: Record<TransportState, TransportState[]> = {
   idle: ["prompting", "reinitializing", "destroyed"],
   prompting: ["idle", "tool-active", "reinitializing", "destroyed"],
-  "tool-active": ["prompting", "reinitializing", "destroyed"],
+  "tool-active": ["prompting", "idle", "reinitializing", "destroyed"],
   reinitializing: ["idle", "stalled", "destroyed"],
   stalled: ["idle", "destroyed"], // only manual /restart recovers
   destroyed: [], // terminal

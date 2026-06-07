@@ -589,8 +589,10 @@ export class AcpTransport implements IKiroTransport {
       const dur = Math.round((now - this.toolMeta!.startedAt) / 1000);
       logWarn(this.tag, `[transport-health] Tool "${title}" hung ${dur}s — interrupting`);
       this._watchdogLastActionAt = now;
-      await this.sendInterrupt();
       this.toolMeta = null;
+      // Force idle BEFORE interrupt — so promptCompleted during cancel is a no-op (#870)
+      if (this.sm.state === "tool-active") this.sm.transition("idle", "toolTimeout");
+      await this.sendInterrupt();
       if (!this._watchdogL1Done) {
         await this.sendPrompt(this.lastSessionKey, `[SYSTEM] Your tool call "${title}" was interrupted after ${dur} seconds. Try a different approach.`);
         this._watchdogL1Done = true;
