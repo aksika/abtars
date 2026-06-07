@@ -98,10 +98,13 @@ export function createUpdateCheckTask(notify: (msg: string) => void): HeartbeatT
       const { join } = await import("node:path");
       const { abtarsHome } = await import("../paths.js");
       let version = "0.0.0";
+      let source = "npm";
       try {
         const m = JSON.parse(readFileSync(join(abtarsHome(), "manifest.json"), "utf-8"));
         version = m.version ?? "0.0.0";
+        source = m.source ?? "npm";
       } catch (err) { logAndSwallow(TAG, "read manifest.json", err); }
+      if (source === "local") return; // git deploys are always ahead of npm
       const result = checkForUpdate("abtars", version);
       if (result?.shouldNotify) {
         notify(`⚡ Update available: ${result.current} → ${result.latest}. Run: abtars update`);
