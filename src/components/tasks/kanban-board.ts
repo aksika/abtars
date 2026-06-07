@@ -126,12 +126,23 @@ export function kanbanDeliveryFailed(id: number): void {
   }
 }
 
-export function kanbanList(status?: string): KanbanCard[] {
-  if (status === "*") {
+export function kanbanList(filter?: string, filterKey?: string): KanbanCard[] {
+  if (filter === "*") {
     return db().prepare(`SELECT * FROM kanban_board ORDER BY created_at DESC LIMIT 50`).all() as KanbanCard[];
   }
-  if (status) {
-    return db().prepare(`SELECT * FROM kanban_board WHERE status = ? ORDER BY created_at DESC LIMIT 50`).all(status) as KanbanCard[];
+  if (filter && filterKey) {
+    if (filterKey === "labels") {
+      // LIKE match for comma-separated labels
+      return db().prepare(`SELECT * FROM kanban_board WHERE labels LIKE ? ORDER BY created_at DESC LIMIT 50`).all(`%${filter}%`) as KanbanCard[];
+    }
+    const allowed = new Set(["status", "source", "priority", "type"]);
+    if (allowed.has(filterKey)) {
+      return db().prepare(`SELECT * FROM kanban_board WHERE ${filterKey} = ? ORDER BY created_at DESC LIMIT 50`).all(filter) as KanbanCard[];
+    }
+  }
+  if (filter) {
+    // Bare word = status filter
+    return db().prepare(`SELECT * FROM kanban_board WHERE status = ? ORDER BY created_at DESC LIMIT 50`).all(filter) as KanbanCard[];
   }
   return db().prepare(`SELECT * FROM kanban_board WHERE status NOT IN ('delivered') ORDER BY status = 'running' DESC, priority = 'CRITICAL' DESC, created_at DESC LIMIT 50`).all() as KanbanCard[];
 }

@@ -122,7 +122,8 @@ export async function handleKanban(text: string, ctx: CommandContext): Promise<b
 
     // Parse filter: "all", "status=done", "source=cron", "priority=HIGH", "labels=finance"
     const ALLOWED_FILTERS = new Set(["status", "source", "priority", "labels", "type"]);
-    let status: string | undefined;
+    let filterVal: string | undefined;
+    let filterKey: string | undefined;
     let showAll = false;
 
     if (arg === "all") {
@@ -133,14 +134,14 @@ export async function handleKanban(text: string, ctx: CommandContext): Promise<b
         await ctx.reply(`❌ Invalid filter. Use: /kanban [all | status=X | source=X | priority=X | labels=X | type=X]`);
         return true;
       }
-      // Whitelist values — no raw SQL
-      status = val.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
+      filterKey = key;
+      filterVal = val.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
     } else if (arg) {
-      // Treat bare word as status filter
-      status = arg.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
+      // Bare word = status filter
+      filterVal = arg.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
     }
 
-    const cards = showAll ? kanbanList("*") : kanbanList(status);
+    const cards = showAll ? kanbanList("*") : kanbanList(filterVal, filterKey);
     if (cards.length === 0) {
       await ctx.reply("📋 Kanban board is empty.");
       return true;
