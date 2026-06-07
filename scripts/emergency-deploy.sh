@@ -17,44 +17,61 @@ git -C "$ABMIND_SRC" pull --ff-only origin dev
 
 # 2. Build abmind
 echo "Building abmind..."
-[ -d "$ABMIND_SRC/node_modules" ] || (cd "$ABMIND_SRC" && npm install --omit=dev --silent)
+[ -d "$ABMIND_SRC/node_modules" ] || (cd "$ABMIND_SRC" && npm install --silent)
 (cd "$ABMIND_SRC" && npm run build --silent)
 
 # 3. Build abtars bundle
 echo "Building abtars..."
-[ -d "$SRC_DIR/node_modules" ] || (cd "$SRC_DIR" && npm install --omit=dev --silent)
+[ -d "$SRC_DIR/node_modules" ] || (cd "$SRC_DIR" && npm install --silent)
 (cd "$SRC_DIR" && node esbuild.config.js)
 rm -rf "$SRC_DIR/bundle/public" && cp -r "$SRC_DIR/src/components/dashboard/public" "$SRC_DIR/bundle/public"
 
-# 4. Atomic swap
-echo "Deploying..."
-rm -rf "$HOME_DIR/app.prev"
-[ -d "$HOME_DIR/app" ] && mv "$HOME_DIR/app" "$HOME_DIR/app.prev"
-cp -r "$SRC_DIR/bundle" "$HOME_DIR/app"
-# Copy abmind into bundle
-mkdir -p "$HOME_DIR/app/node_modules/abmind"
-cp -r "$ABMIND_SRC/dist" "$HOME_DIR/app/node_modules/abmind/"
-cp "$ABMIND_SRC/package.json" "$HOME_DIR/app/node_modules/abmind/"
-
-# 5. Restart bridge (mode-dependent)
-echo "Restarting..."
-PID_FILE="$HOME_DIR/bridge.pid"
-[ -f "$PID_FILE" ] && kill "$(cat "$PID_FILE")" 2>/dev/null || true
+# 4. Stop watchdog + bridge (prevents respawn during swap)
+echo "Stopping..."
+pkill -f "watchdog.sh" 2>/dev/null || true
+sleep 1
+if [ -f "$HOME_DIR/bridge.lock" ]; then
+  BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$HOME_DIR/bridge.lock'))['pid'])" 2>/dev/null || true)
+  [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
+fi
 sleep 2
 
-if pgrep -f "watchdog.sh" >/dev/null 2>&1; then
-  echo "Watchdog detected — it will restart the bridge."
+# 5. Atomic swap (no gap where app/ is missing)
+echo "Deploying..."
+rm -rf "$HOME_DIR/app.staging"
+cp -r "$SRC_DIR/bundle" "$HOME_DIR/app.staging"
+mkdir -p "$HOME_DIR/app.staging/node_modules/abmind"
+cp -r "$ABMIND_SRC/dist" "$HOME_DIR/app.staging/node_modules/abmind/"
+cp "$ABMIND_SRC/package.json" "$HOME_DIR/app.staging/node_modules/abmind/"
+rm -rf "$HOME_DIR/app.prev"
+[ -d "$HOME_DIR/app" ] && mv "$HOME_DIR/app" "$HOME_DIR/app.prev"
+mv "$HOME_DIR/app.staging" "$HOME_DIR/app"
+
+# 6. Write minimal manifest
+COMMIT=$(git -C "$SRC_DIR" rev-parse --short HEAD)
+echo "{\"version\":\"emergency-$COMMIT\",\"commit\":\"$COMMIT\",\"activatedAt\":\"$(date -Iseconds)\",\"source\":\"emergency\"}" > "$HOME_DIR/install-manifest.json"
+
+# 7. Restart (mode-dependent)
+echo "Restarting..."
+if [ -f "$HOME_DIR/scripts/watchdog.sh" ]; then
+  nohup bash "$HOME_DIR/scripts/watchdog.sh" >> "$HOME_DIR/logs/watchdog.log" 2>&1 &
+  echo "Watchdog restarted (PID $!) — it will start the bridge."
 elif launchctl list 2>/dev/null | grep -q abtars; then
-  echo "LaunchAgent detected — it will restart the bridge."
+  echo "LaunchAgent will restart the bridge."
 else
-  echo "No supervisor — starting with nohup."
   nohup node "$HOME_DIR/app/bundle/abtars.js" >> "$HOME_DIR/logs/bridge.log" 2>&1 &
-  echo $! > "$PID_FILE"
+  echo $! > "$HOME_DIR/bridge.pid"
+  echo "Bridge started (PID $!)."
 fi
 
 sleep 5
-if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "Bridge running (PID $(cat "$PID_FILE"))"
+if [ -f "$HOME_DIR/bridge.lock" ]; then
+  RUNNING=$(python3 -c "import json; print(json.load(open('$HOME_DIR/bridge.lock'))['pid'])" 2>/dev/null || true)
+  if [ -n "$RUNNING" ] && kill -0 "$RUNNING" 2>/dev/null; then
+    echo "Bridge running (PID $RUNNING)"
+  else
+    echo "WARNING: bridge not running — check logs"
+  fi
 else
-  echo "WARNING: bridge not running — check logs"
+  echo "WARNING: no bridge.lock yet — check logs"
 fi
