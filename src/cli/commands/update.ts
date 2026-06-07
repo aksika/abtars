@@ -10,7 +10,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { copyFile, mkdir, chmod, readdir } from 'node:fs/promises';
-import { rmSync, cpSync, readdirSync, mkdirSync } from 'node:fs';
+import { rmSync, cpSync, readdirSync, mkdirSync, copyFileSync } from 'node:fs';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import { makeNpmSource } from '../update-sources/npm.js';
 import type { SourceName } from '../update-sources/types.js';
@@ -186,6 +186,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     if (health.healthy) {
       writeSentinel(paths.home, { ...sentinelData, status: 'success' });
       process.stdout.write(`✓ Bridge healthy (PID ${health.pid}, tick at ${new Date(health.heartbeat!).toISOString()})\n`);
+      await syncAssets(paths.home, staged.stagedPath);
       return 0;
     }
 
@@ -445,4 +446,57 @@ async function checkForUpdates(home: string, opts: UpdateOptions): Promise<numbe
   process.stdout.write(`Remote:  dev is ${ahead} commit${ahead === 1 ? '' : 's'} ahead\n`);
   process.stdout.write(`Action:  run 'abtars update' to apply\n`);
   return 2; // exit 2 = behind (not error, informational — per AG1 review)
+}
+
+/** Sync bundled assets to runtime paths after successful deploy (#875). */
+async function syncAssets(home: string, stagedPath: string): Promise<void> {
+  const abmindBundle = join(home, 'app', 'bundle', 'node_modules', 'abmind');
+  const abmindHome = process.env['ABMIND_HOME'] ?? join(process.env['HOME'] ?? '', '.abmind');
+
+  // abmind templates → ~/.abmind/memory/core/
+  const coreDir = join(abmindHome, 'memory', 'core');
+  mkdirSync(coreDir, { recursive: true });
+  const mtSrc = join(abmindBundle, 'dist', 'core', 'memory-tools.md');
+  if (existsSync(mtSrc)) copyFileSync(mtSrc, join(coreDir, 'memory-tools.md'));
+  for (const file of ['core_facts.md', 'agent_notes.md']) {
+    const src = join(abmindBundle, 'templates', 'core', file);
+    if (!existsSync(src)) continue;
+    const live = join(coreDir, file);
+    if (!existsSync(live)) {
+      copyFileSync(src, live);
+    } else {
+      copyFileSync(src, join(coreDir, file.replace('.md', '.template.md')));
+    }
+  }
+
+  // abmind prompts/sleep/ → ~/.abmind/prompts/sleep/
+  const sleepSrc = join(abmindBundle, 'prompts', 'sleep');
+  if (existsSync(sleepSrc)) {
+    const sleepDst = join(abmindHome, 'prompts', 'sleep');
+    mkdirSync(sleepDst, { recursive: true });
+    for (const f of readdirSync(sleepSrc)) {
+      copyFileSync(join(sleepSrc, f), join(sleepDst, f));
+    }
+  }
+
+  // abtars core/skills/ → ~/.abtars/skills/core/
+  const skillsSrc = join(home, 'app', 'core', 'skills');
+  if (existsSync(skillsSrc)) {
+    const skillsDst = join(home, 'skills', 'core');
+    mkdirSync(skillsDst, { recursive: true });
+    cpSync(skillsSrc, skillsDst, { recursive: true });
+  }
+
+  // abtars agents/default.md → ~/.abtars/agents/
+  const agentSrc = join(home, 'app', 'bundle', 'agents', 'default.md');
+  if (existsSync(agentSrc)) {
+    const agentDst = join(home, 'agents');
+    mkdirSync(agentDst, { recursive: true });
+    const live = join(agentDst, 'default.md');
+    if (!existsSync(live)) {
+      copyFileSync(agentSrc, live);
+    } else {
+      copyFileSync(agentSrc, join(agentDst, 'default.template.md'));
+    }
+  }
 }
