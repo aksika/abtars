@@ -18,6 +18,7 @@ import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt, readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./task-store.js";
 import { recordRun } from "./task-checker.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail } from "./kanban-board.js";
 import type { CronEntry } from "../../cli/abtars-task.js";
 import { localDate } from "../../utils/date.js";
 
@@ -386,6 +387,10 @@ export class CronQueue {
     // and calls processNext() again while we're awaiting the dynamic import.
     this.setCurrent(entry, 0, "agent");
 
+    // Kanban board: track this task
+    const boardId = kanbanEnqueue(entry.message, "cron", entry.id);
+    kanbanRunning(boardId);
+
     // Set $WORKSPACE for agent tool execution — all output goes here
     const workspace = join(abtarsHome(), "workspace", entry.id);
     mkdirSync(workspace, { recursive: true });
@@ -433,6 +438,13 @@ export class CronQueue {
         const resultPath = writeResultFile(entry.id, cleaned);
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
+        // Kanban board: mark complete or failed
+        if (exitCode === 0) {
+          kanbanComplete(boardId, resultPath, summary);
+        } else {
+          kanbanFail(boardId, `${summary}${dodResult}`);
+        }
+
         recordRunToFile(entry.id, exitCode);
         if (exitCode === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
         const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
@@ -448,6 +460,7 @@ export class CronQueue {
       })
       .catch((err) => {
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
+        kanbanFail(boardId, err instanceof Error ? err.message : String(err));
         recordRunToFile(entry.id, 1);
         const paused = this.checkAutoPause(entry, 1, err instanceof Error ? err.message : String(err));
         scheduleRetry(entry, !!entry._retrying);

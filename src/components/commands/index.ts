@@ -10,7 +10,7 @@ import {
   handleNewReset, handleCompact,
   handleStatus, handleDoctor, handleStop, handleWait, handleRestart,
   handleFull, handleShort, handleHealing, handleFacts,
-  handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause,
+  handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban,
   handleEmergencyAlias, handleModels, handleHeartbeat, handleReasoning,
   handleMemory, handleNlm, handleWakeup,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
@@ -38,6 +38,7 @@ registerExact("/facts", handleFacts);
 registerExact("/tasks", handleTasksList);
 registerExact("/task", handleTasksList);
 registerExact("/cron", handleTasksList);
+registerExact("/kanban", handleKanban);
 registerExact("/memory", handleMemory);
 registerExact("/heartbeat", handleHeartbeat);
 registerExact("/models", handleModels);
