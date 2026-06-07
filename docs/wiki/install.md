@@ -6,6 +6,19 @@
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather)) or Discord bot token
 - At least one model provider (ollama, OpenRouter, Kiro CLI, Gemini CLI, Codex, or Claude Code)
 
+### Model requirements
+
+abTARS can run with any LLM that supports the OpenAI chat completions API format, including local models via ollama.
+
+| | Minimum | Recommended |
+|---|---|---|
+| **Context window** | 32K tokens | 128K+ tokens |
+| **Model quality** | Any instruction-following model | State-of-the-art (GPT-4o, Claude, Gemini Pro, DeepSeek V3+) |
+
+**Context window:** abTARS works with 32K context models (including small local models), but the experience degrades quickly with tool use. The soul bundle, tool definitions, and session history consume ~20% of a 32K window at startup, leaving limited room for conversation. With 128K+ models, the agent can hold long conversations with heavy tool use without losing context.
+
+**Model quality and security:** abTARS injects persona instructions, memory context, and tool schemas into the system prompt. Weaker models may leak internal instructions to users, follow injected instructions from user messages, or fail to respect classification boundaries. For deployments where prompt injection resistance matters, use state-of-the-art frontier models — they have significantly better instruction-following and are harder to manipulate.
+
 ## Agent install
 
 Give this page to your favourite AI agent (Claude, Gemini, Codex, Kiro) and ask it to install abTARS for you. It has all the information it needs right here. 😉
