@@ -410,11 +410,13 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
           const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
           if (cl.status !== 0) { logInfo("update", "Clone failed"); await ctx.reply(`Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
         }
+        spawnSync("git", ["-C", srcDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
         const r = spawnSync("git", ["-C", srcDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
         if (r.status !== 0) { logInfo("update", `Pull failed (abtars): ${(r.stderr || "").slice(0, 100)}`); await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
         let pulled = (r.stdout || "").trim().slice(0, 300);
         // Pull + build abmind
         if (existsSync(join(abmindDir, ".git"))) {
+          spawnSync("git", ["-C", abmindDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
           const ab = spawnSync("git", ["-C", abmindDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
           if (ab.status !== 0) { logInfo("update", `Pull failed (abmind): ${(ab.stderr || "").slice(0, 100)}`); await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
           const abBuild = spawnSync("npm", ["run", "build"], { cwd: abmindDir, encoding: "utf-8", timeout: 60_000 });

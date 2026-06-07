@@ -11,8 +11,10 @@ echo "=== Emergency deploy ==="
 
 # 1. Pull both repos
 echo "Pulling abtars..."
+git -C "$SRC_DIR" checkout -- package-lock.json 2>/dev/null || true
 git -C "$SRC_DIR" pull --ff-only origin dev
 echo "Pulling abmind..."
+git -C "$ABMIND_SRC" checkout -- package-lock.json 2>/dev/null || true
 git -C "$ABMIND_SRC" pull --ff-only origin dev
 
 # 2. Build abmind
