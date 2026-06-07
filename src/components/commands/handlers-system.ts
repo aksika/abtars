@@ -442,7 +442,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
           await ctx.reply("Already running this version. Run /update pull first.");
           return true;
         }
-        const script = join(srcDir, "scripts", "emergency-deploy.sh");
+        const script = join(srcDir, "scripts", "deploy.sh");
         if (!existsSync(script)) { await ctx.reply("Deploy script missing."); return true; }
         logInfo("update", `Deploy starting: ${deployed} → ${head}`);
         await ctx.reply("Deploying...");
