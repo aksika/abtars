@@ -107,6 +107,7 @@ export async function buildPrompt(
 
   // Record user message to memory
   const userRole = registry.byUserId.get(userId)?.role;
+  logTrace(TAG, `recordMessage gate: memory=${!!memory} userId=${userId} userRole=${userRole}`);
   if (memory && userRole !== "guest") {
     const numericMsgId = typeof msg.messageId === "number" ? msg.messageId : undefined;
     memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId: numericMsgId });
