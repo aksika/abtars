@@ -216,6 +216,9 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     setMemoryBackend(backend);
     logInfo("main", "🧠 In-process memory wired to tool registry");
 
+    // #843: Wire memory to transport for session hydration on restart
+    (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).memoryBackend = ctx.memory!;
+
     // Wire context engine for automatic compaction
     const db = ctx.memory!.getDb?.() ?? ctx.memory!.getDatabase?.();
     if (db && resolved.contextWindow >= 128000) {
