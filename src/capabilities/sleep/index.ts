@@ -122,7 +122,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     })();
 
     abmind()!.runSleepCycle({ runtime: opts.runtime, level })
-      .then((result: { ok: boolean; failCount: number }) => {
+      .then(async (result: { ok: boolean; failCount: number }) => {
         running = false;
         progress = null;
         logInfo("sleep", `😴 Sleep finished (ok=${result.ok}, failCount=${result.failCount}, attempt ${attempts})`);
