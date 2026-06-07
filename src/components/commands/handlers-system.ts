@@ -427,10 +427,10 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         await ctx.reply(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return true;
-    } else if (arg === "update" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build") {
+    } else if (arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build") {
       if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       try {
-        const { spawnSync } = await import("node:child_process");
+        const { spawnSync, spawn } = await import("node:child_process");
         const { readFileSync } = await import("node:fs");
         const srcDir = join(home, "src", "abtars");
         // Guard: reject if source matches deployed commit
@@ -438,18 +438,25 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const manifestPath = join(home, "install-manifest.json");
         const deployed = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf-8")).commit : "";
         if (head && head === deployed) {
-          logInfo("update", `Build rejected — already running ${head}`);
+          logInfo("update", `Deploy rejected — already running ${head}`);
           await ctx.reply("Already running this version. Run /update pull first.");
           return true;
         }
-        logInfo("update", `Build starting: ${deployed} → ${head}`);
-        await ctx.reply("Building...");
-        const script = join(srcDir, "scripts", "build-and-deploy.sh");
-        spawnSync("bash", [script], { encoding: "utf-8", timeout: 120_000 });
-        // Bridge restarts as part of the script — this line likely never reached
+        const script = join(srcDir, "scripts", "emergency-deploy.sh");
+        if (!existsSync(script)) { await ctx.reply("Deploy script missing."); return true; }
+        logInfo("update", `Deploy starting: ${deployed} → ${head}`);
+        await ctx.reply("Deploying...");
+        spawn("bash", [script], { detached: true, stdio: "ignore" }).unref();
       } catch (err) {
-        await ctx.reply(`Build failed: ${err instanceof Error ? err.message : String(err)}`);
+        await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
       }
+      return true;
+    } else if (arg === "update") {
+      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
+      logInfo("update", "npm update starting");
+      await ctx.reply("Updating from npm...");
+      const { spawn } = await import("node:child_process");
+      spawn("abtars", ["update", "--source", "npm"], { detached: true, stdio: "ignore" }).unref();
       return true;
     }
   }
@@ -522,7 +529,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   }
 
   lines.push("");
-  lines.push("  /software update [pull] [deploy] | rollback");
+  lines.push("  /software update [pull] [deploy] | update (npm) | rollback");
   await ctx.reply(lines.join("\n"));
   return true;
 }
