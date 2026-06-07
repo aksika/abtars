@@ -437,7 +437,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         const srcDir = join(home, "src", "abtars");
         // Guard: reject if source matches deployed commit
         const head = spawnSync("git", ["-C", srcDir, "rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).stdout.trim();
-        const manifestPath = join(home, "install-manifest.json");
+        const manifestPath = join(home, "manifest.json");
         const deployed = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf-8")).commit : "";
         if (head && head === deployed) {
           logInfo("update", `Deploy rejected — already running ${head}`);

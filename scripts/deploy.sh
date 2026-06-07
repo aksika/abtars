@@ -35,6 +35,8 @@ if launchctl list 2>/dev/null | grep -q abtars; then
   if [ -f "$HOME_DIR/bridge.lock" ]; then
     BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$HOME_DIR/bridge.lock'))['pid'])" 2>/dev/null || true)
     [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
+    sleep 3
+    [ -n "$BRIDGE_PID" ] && kill -0 "$BRIDGE_PID" 2>/dev/null && kill -9 "$BRIDGE_PID" 2>/dev/null || true
   fi
 else
   # No launchd — kill watchdog + bridge, we restart watchdog at the end
@@ -43,6 +45,8 @@ else
   if [ -f "$HOME_DIR/bridge.lock" ]; then
     BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$HOME_DIR/bridge.lock'))['pid'])" 2>/dev/null || true)
     [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
+    sleep 3
+    [ -n "$BRIDGE_PID" ] && kill -0 "$BRIDGE_PID" 2>/dev/null && kill -9 "$BRIDGE_PID" 2>/dev/null || true
   fi
 fi
 sleep 2
@@ -63,7 +67,7 @@ mv "$HOME_DIR/app.staging" "$HOME_DIR/app"
 # 6. Write minimal manifest
 COMMIT=$(git -C "$SRC_DIR" rev-parse --short HEAD)
 VERSION=$(node -p "require('$SRC_DIR/package.json').version" 2>/dev/null || echo "0.0.0")
-echo "{\"version\":\"$VERSION\",\"commit\":\"$COMMIT\",\"activatedAt\":\"$(date -Iseconds)\",\"source\":\"local\"}" > "$HOME_DIR/install-manifest.json"
+echo "{\"version\":\"$VERSION\",\"commit\":\"$COMMIT\",\"activatedAt\":\"$(date -Iseconds)\",\"source\":\"local\"}" > "$HOME_DIR/manifest.json"
 
 # 7. Restart (mode-dependent)
 echo "Restarting..."
