@@ -243,11 +243,14 @@ async function copyAbmind(stagedPath: string, repoRoot: string): Promise<void> {
   for (const src of candidates) {
     const distDir = join(src, 'dist');
     if (existsSync(distDir)) {
-      const dest = join(stagedPath, 'node_modules', 'abmind');
-      mkdirSync(dest, { recursive: true });
-      cpSync(distDir, join(dest, 'dist'), { recursive: true });
-      if (existsSync(join(src, 'package.json'))) cpSync(join(src, 'package.json'), join(dest, 'package.json'));
-      if (existsSync(join(src, 'prompts'))) cpSync(join(src, 'prompts'), join(dest, 'prompts'), { recursive: true });
+      // Copy into both app/node_modules/ and app/bundle/node_modules/ for resolution
+      for (const base of [stagedPath, join(stagedPath, 'bundle')]) {
+        const dest = join(base, 'node_modules', 'abmind');
+        mkdirSync(dest, { recursive: true });
+        cpSync(distDir, join(dest, 'dist'), { recursive: true });
+        if (existsSync(join(src, 'package.json'))) cpSync(join(src, 'package.json'), join(dest, 'package.json'));
+        if (existsSync(join(src, 'prompts'))) cpSync(join(src, 'prompts'), join(dest, 'prompts'), { recursive: true });
+      }
       process.stdout.write(`✓ abmind copied from ${src}\n`);
       return;
     }
