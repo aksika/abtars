@@ -8,7 +8,7 @@
 
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { copyFile, mkdir, chmod, readdir } from 'node:fs/promises';
 import { rmSync, cpSync, readdirSync, mkdirSync } from 'node:fs';
 import { makeLocalBuildSource } from '../update-sources/local.js';
@@ -252,6 +252,14 @@ async function copyAbmind(stagedPath: string, repoRoot: string): Promise<void> {
       // Remove stale parent-level copy if it exists (cleanup from older deploys)
       const stalePath = join(stagedPath, 'node_modules', 'abmind');
       if (existsSync(stalePath)) rmSync(stalePath, { recursive: true });
+      // Update ~/.abmind/manifest.json with deployed version
+      try {
+        const pkg = JSON.parse(readFileSync(join(dest, 'package.json'), 'utf-8'));
+        const abmindHome = process.env['ABMIND_HOME'] ?? join(process.env['HOME'] ?? '', '.abmind');
+        mkdirSync(abmindHome, { recursive: true });
+        const manifest = { version: pkg.version, activatedAt: new Date().toISOString(), source: 'local' };
+        writeFileSync(join(abmindHome, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+      } catch { /* non-fatal — display only */ }
       process.stdout.write(`✓ abmind copied from ${src}\n`);
       return;
     }
