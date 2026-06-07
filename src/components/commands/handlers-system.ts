@@ -421,10 +421,14 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
           if (ab.status !== 0) { logInfo("update", `Pull failed (abmind): ${(ab.stderr || "").slice(0, 100)}`); await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
           const abBuild = spawnSync("npm", ["run", "build"], { cwd: abmindDir, encoding: "utf-8", timeout: 60_000 });
           if (abBuild.status !== 0) { logInfo("update", `abmind build failed`); await ctx.reply(`abmind build failed:\n${(abBuild.stderr || abBuild.stdout || "").slice(0, 300)}`); return true; }
-          pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
+          pulled += `\nabmind: built ✓`;
         }
+        // Build abtars bundle
+        const esbuild = spawnSync("node", ["esbuild.config.js"], { cwd: srcDir, encoding: "utf-8", timeout: 60_000 });
+        if (esbuild.status !== 0) { logInfo("update", `abtars build failed`); await ctx.reply(`abtars build failed:\n${(esbuild.stderr || esbuild.stdout || "").slice(0, 300)}`); return true; }
+        pulled += `\nabtars: built ✓`;
         logInfo("update", `Pull complete: ${pulled.slice(0, 100)}`);
-        await ctx.reply(`Pulled:\n${pulled}`);
+        await ctx.reply(`✓ Pulled + built:\n${pulled}\n\nReady to deploy: /update deploy`);
       } catch (err) {
         await ctx.reply(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -432,23 +436,19 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     } else if (arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build") {
       if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       try {
-        const { spawnSync, spawn } = await import("node:child_process");
-        const { readFileSync } = await import("node:fs");
+        const { spawn } = await import("node:child_process");
         const srcDir = join(home, "src", "abtars");
-        // Guard: reject if source matches deployed commit
-        const head = spawnSync("git", ["-C", srcDir, "rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).stdout.trim();
-        const manifestPath = join(home, "manifest.json");
-        const deployed = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf-8")).commit : "";
-        if (head && head === deployed) {
-          logInfo("update", `Deploy rejected — already running ${head}`);
-          await ctx.reply("Already running this version. Run /update pull first.");
+        if (!existsSync(join(srcDir, "bundle", "abtars-cli.js"))) {
+          await ctx.reply("No bundle found. Run /update pull first.");
           return true;
         }
-        const script = join(srcDir, "scripts", "deploy.sh");
-        if (!existsSync(script)) { await ctx.reply("Deploy script missing."); return true; }
-        logInfo("update", `Deploy starting: ${deployed} → ${head}`);
-        await ctx.reply("Deploying...");
-        spawn("bash", [script], { detached: true, stdio: "ignore" }).unref();
+        logInfo("update", `Deploy starting via fresh CLI`);
+        await ctx.reply("⚙️ Deploying (health-verified, auto-rollback)...");
+        spawn("node", ["bundle/abtars-cli.js", "update", "--from-local"], {
+          cwd: srcDir,
+          detached: true,
+          stdio: "ignore",
+        }).unref();
       } catch (err) {
         await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
       }
