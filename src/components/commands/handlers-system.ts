@@ -504,7 +504,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
       : null;
     const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
-    lines.push(`  abtars: ${ver.version}${ver.commit ? "-" + ver.commit : ""} (deployed ${deployed})`);
+    lines.push(`  abtars: ${ver.version}${ver.commit && !ver.version.includes(ver.commit) ? "-" + ver.commit : ""} (deployed ${deployed})`);
     if (manifest?.source) lines.push(`  source: ${manifest.source === "local" ? "local" : "npm"}`);
     try {
       const { checkForUpdate } = await import("../update-check.js");
@@ -517,9 +517,26 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
 
   // abmind block
   lines.push("");
+  // Try deployed copy first (always up to date), fall back to ~/.abmind/manifest.json
+  const abmindBundlePkg = join(home, "app", "bundle", "node_modules", "abmind", "package.json");
+  const abmindAppPkg = join(home, "app", "node_modules", "abmind", "package.json");
   const abmindHome = process.env["ABMIND_HOME"] ?? join(home, "..", ".abmind");
   const abmindManifest = join(abmindHome, "manifest.json");
-  if (existsSync(abmindManifest)) {
+  const abmindPkgPath = existsSync(abmindBundlePkg) ? abmindBundlePkg : existsSync(abmindAppPkg) ? abmindAppPkg : null;
+  if (abmindPkgPath) {
+    try {
+      const pkg = JSON.parse(readFileSync(abmindPkgPath, "utf-8"));
+      const manifest = existsSync(abmindManifest) ? JSON.parse(readFileSync(abmindManifest, "utf-8")) : null;
+      const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
+      lines.push(`  abmind: ${pkg.version ?? "?"} (deployed ${deployed})`);
+      lines.push(`  source: local`);
+      try {
+        const { checkForUpdate } = await import("../update-check.js");
+        const r = checkForUpdate("abmind", pkg.version ?? "0.0.0");
+        if (r?.latest) lines.push(`  npm latest: abmind@${r.latest} ${r.updateAvailable ? "⚠️" : "✓"}`);
+      } catch { /* no cached data */ }
+    } catch { lines.push("  abmind: installed (version unknown)"); }
+  } else if (existsSync(abmindManifest)) {
     try {
       const m = JSON.parse(readFileSync(abmindManifest, "utf-8"));
       const deployed = m.activatedAt ? new Date(m.activatedAt).toLocaleString() : "unknown";
