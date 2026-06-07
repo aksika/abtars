@@ -12,6 +12,11 @@ import type { InstantStoreParams } from "../../types/index.js";
 import { logWarn, redactSecrets } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { checkTool, checkPath, auditDeny, type SandboxPolicy } from "../tool-sandbox.js";
+import { loadUsers } from "../user-registry.js";
+
+function getMasterUserId(): string {
+  return loadUsers().users.find(u => u.role === "master")?.userId ?? "aksika";
+}
 
 const TAG = "tool_registry";
 
@@ -185,7 +190,7 @@ const memoryStoreTool: ToolDefinition = {
     if (memoryBackend) {
       try {
         const params: InstantStoreParams = {
-          userId: context?.userId ?? "master",
+          userId: context?.userId ?? getMasterUserId(),
           contentEn: args["translated"] ?? "",
           contentOriginal: args["original"] ?? args["translated"] ?? "",
           memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
@@ -203,7 +208,7 @@ const memoryStoreTool: ToolDefinition = {
             memoryBackend.rebuildFtsIndexes();
             logWarn("tool-registry", "FTS corruption detected — rebuilt indexes, retrying store");
             const params: InstantStoreParams = {
-              userId: context?.userId ?? "master",
+              userId: context?.userId ?? getMasterUserId(),
               contentEn: args["translated"] ?? "",
               contentOriginal: args["original"] ?? args["translated"] ?? "",
               memoryType: (args["type"] ?? "fact") as InstantStoreParams["memoryType"],
@@ -244,7 +249,7 @@ const memoryRecallTool: ToolDefinition = {
         const result = await memoryBackend.recall({
           translated: [args["query"] ?? ""],
           original: args["query"] ?? "",
-          userId: context?.userId ?? "master",
+          userId: context?.userId ?? getMasterUserId(),
           limit: parseInt(args["limit"] ?? "10", 10),
         });
         return JSON.stringify(result);
