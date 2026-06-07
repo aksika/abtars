@@ -28,12 +28,33 @@ const WRITE_BLOCKED = [
 ];
 
 const BLOCKED_COMMAND_PREFIXES = [
-  "sudo ",
-  "npm publish",
-  "git push ",
-  "chmod 777",
   "rm -rf /",
 ];
+
+const AUTH_REQUIRED_PATTERNS = [
+  /\brm\s+(-[a-z]*f[a-z]*r|-[a-z]*r[a-z]*f)\b/i,
+  /\bgit\s+(reset\s+--hard|push\s+--force|clean\s+-f|branch\s+-D)/i,
+  /\bDROP\s+(TABLE|DATABASE)\b/i,
+  /\bTRUNCATE\s/i,
+  /\bkill\s+(-9|--signal\s+(KILL|9))/i,
+  /\bsudo\b/,
+  /\bchmod\s+777\b/,
+  /\bDELETE\s+FROM\s+\w+\s*;/i,
+];
+
+export type CommandTier = "block" | "auth-required" | "allow";
+
+/** Classify a command into block / auth-required / allow. */
+export function classifyCommand(cmd: string): CommandTier {
+  const trimmed = cmd.trim();
+  for (const prefix of BLOCKED_COMMAND_PREFIXES) {
+    if (trimmed.toLowerCase().startsWith(prefix.toLowerCase())) return "block";
+  }
+  for (const re of AUTH_REQUIRED_PATTERNS) {
+    if (re.test(trimmed)) return "auth-required";
+  }
+  return "allow";
+}
 
 export type SecurityMode = "off" | "guardrails" | "sandbox";
 
@@ -73,14 +94,11 @@ export function checkPath(path: string, mode: "read" | "write"): string | null {
 export function checkCommand(cmd: string): string | null {
   if (!isGuardrailsActive()) return null;
 
-  const trimmed = cmd.trim().toLowerCase();
-
-  for (const prefix of BLOCKED_COMMAND_PREFIXES) {
-    if (trimmed.startsWith(prefix.toLowerCase())) {
-      logWarn(TAG, `Blocked command: ${cmd.slice(0, 100)}`);
-      return `Command blocked by guardrails: matches '${prefix.trim()}'`;
-    }
+  const tier = classifyCommand(cmd);
+  if (tier === "block") {
+    logWarn(TAG, `Blocked command: ${cmd.slice(0, 100)}`);
+    return `Command blocked by guardrails: ${cmd.slice(0, 60)}`;
   }
-
+  // "auth-required" is handled by action-gate at a higher level — not blocked here
   return null;
 }

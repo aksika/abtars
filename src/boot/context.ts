@@ -92,6 +92,7 @@ export interface BootCtx {
   selfHealerTask: { enabled: boolean } | null;
   dashboardServer: IDashboardSlot | null;
   agentApiServer: AgentApiServer | null;
+  actionGate: any;
   mcpDaemonStarted: boolean;
 
   // ── Callbacks (closures set by phases for cross-phase use) ────────────
@@ -162,6 +163,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     selfHealerTask: null,
     dashboardServer: null,
     agentApiServer: null,
+    actionGate: null,
     mcpDaemonStarted: false,
 
     // Callbacks

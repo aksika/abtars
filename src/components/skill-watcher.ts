@@ -37,17 +37,25 @@ interface SkillsConfig {
   entries?: Record<string, { apiKey?: string; env?: Record<string, string> }>;
 }
 
+export interface SkillInfo { name: string; group: string; skipped?: string }
+
 export class SkillWatcher implements ISkillSlot {
   /** Per-instance cache of `which <bin>` results. Avoids repeated execFileSync on heartbeat ticks (#369). */
   private binaryCache = new Map<string, boolean>();
+  /** Cached skill list from last generateCatalog() call. */
+  private _skillCache: SkillInfo[] = [];
 
   constructor(private skillsDir: string, private catalogPath: string) {}
+
+  /** Get cached skill info (populated after generateCatalog). */
+  get skills(): readonly SkillInfo[] { return this._skillCache; }
 
   /** Generate skills_catalog.md from all skill files. Called on startup + when skills change. */
   generateCatalog(): number {
     const files = this.scanMdFiles(this.skillsDir);
     const entries: string[] = [];
     const skipped: string[] = [];
+    const cache: SkillInfo[] = [];
     const skillsCfg = this.loadSkillsConfig();
     for (const filepath of files) {
       const header = this.parseSkillHeader(filepath);
@@ -63,13 +71,16 @@ export class SkillWatcher implements ISkillSlot {
           if (!process.env[k]) process.env[k] = v;
         }
       }
+      const group = this.getSourceDir(filepath).split("/")[0] ?? "core";
       if (header.requires) {
         const { eligible, missing } = this.checkEligibility(header.requires);
         if (!eligible) {
           skipped.push(`${header.name} (missing: ${missing.join(", ")})`);
+          cache.push({ name: header.name, group, skipped: missing.join(", ") });
           continue;
         }
       }
+      cache.push({ name: header.name, group });
       entries.push(`- [${this.getSourceDir(filepath)}] ${header.name}: ${header.description}`);
     }
     const guidance = [
@@ -87,6 +98,7 @@ export class SkillWatcher implements ISkillSlot {
     } catch (err) {
       logWarn(TAG, `Failed to write skills_catalog.md: ${err instanceof Error ? err.message : String(err)}`);
     }
+    this._skillCache = cache;
     return entries.length;
   }
 

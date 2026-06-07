@@ -12,12 +12,27 @@
  * internal logger, not an abtars singleton).
  */
 
-import { logDebug, logInfo, logWarn } from "../components/logger.js";
+import { logDebug, logInfo, logWarn, logError } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { nullMemory } from "../components/null-memory.js";
 import { loadAbmind } from "../utils/abmind-lazy.js";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 export async function phaseMemory(ctx: BootCtx): Promise<PhaseResult> {
+  // #864: Detect duplicate abmind — dual instances cause silent DB corruption
+  const home = process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars");
+  const abmindPaths = [
+    join(home, "app", "node_modules", "abmind", "package.json"),
+    join(home, "app", "bundle", "node_modules", "abmind", "package.json"),
+  ];
+  const existing = abmindPaths.filter(p => existsSync(p));
+  if (existing.length > 1) {
+    logError("boot", `FATAL: duplicate abmind at ${existing.map(p => p.replace("/package.json", "")).join(" + ")}. Delete one to prevent dual DB connections. Refusing to start.`);
+    process.exit(1);
+  }
+
   const mod = await loadAbmind();
 
   if (!mod) {

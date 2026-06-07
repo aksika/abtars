@@ -24,7 +24,7 @@ export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
       const { TelegramAdapter } = await import("../platforms/telegram/telegram-adapter.js");
       const adapter = new TelegramAdapter(
         { botToken: config.telegram.botToken, allowedUserIds: config.telegram.allowedUserIds, pollTimeoutS: config.telegram.pollTimeoutS },
-        { pipeline: pipelineDeps, conversationBuffer, transport, memory, sessionManager: ctx.sessionManager },
+        { pipeline: pipelineDeps, conversationBuffer, transport, memory, sessionManager: ctx.sessionManager, actionGate: ctx.actionGate },
       );
       ctx.telegramAdapter = adapter;
       platformAdapters.set("telegram", adapter);
@@ -48,6 +48,19 @@ export async function phasePlatforms(ctx: BootCtx): Promise<PhaseResult> {
       if (mainChatId && ctx.telegramAdapter) {
         const { setSendDocument } = await import("../components/transport/tool-registry.js");
         setSendDocument((path, caption) => ctx.telegramAdapter!.sendDocument(String(mainChatId), path, caption));
+
+        // Wire ActionGate Telegram notification
+        if (ctx.actionGate) {
+          const api = (ctx.telegramAdapter as any).api;
+          const chatId = String(mainChatId);
+          ctx.actionGate.setNotify(async (text: string, buttons: Array<{ text: string; data: string }>) => {
+            const opts: any = {};
+            if (buttons.length > 0) {
+              opts.reply_markup = { inline_keyboard: [buttons.map(b => ({ text: b.text, callback_data: b.data }))] };
+            }
+            await api.sendMessage(chatId, text, opts);
+          });
+        }
       }
     } else if (result.retryingInBackground) {
       logWarn("main", `Telegram failed to start: ${result.error} — retrying in background`);

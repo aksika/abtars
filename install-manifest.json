@@ -1,6 +1,7 @@
 {
   "manifestVersion": 2,
   "directories": [
+    "auth",
     {
       "path": "config",
       "mode": "0700"

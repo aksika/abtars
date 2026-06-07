@@ -37,6 +37,7 @@ export interface BuildPromptResult {
   prompt: string;
   isSessionStart: boolean;
   imageContent?: { mime: string; base64: string; path: string };
+  recalledHits?: Array<{ id: number; contentEn: string }>;
 }
 
 export async function buildPrompt(
@@ -99,19 +100,21 @@ export async function buildPrompt(
   const isSessionStart = entry.pendingStart || !entry.seen;
   logTrace(TAG, `session-state: key=${sessionKey} seen=${entry.seen} pendingStart=${entry.pendingStart} isSessionStart=${isSessionStart}`);
   if (isSessionStart && memory) {
-    prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey, deps.maxContext);
+    prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey, deps.maxContext, msg.platform);
   }
   entry.seen = true;
   entry.pendingStart = false;
 
   // Record user message to memory
   const userRole = registry.byUserId.get(userId)?.role;
+  logTrace(TAG, `recordMessage gate: memory=${!!memory} userId=${userId} userRole=${userRole}`);
   if (memory && userRole !== "guest") {
     const numericMsgId = typeof msg.messageId === "number" ? msg.messageId : undefined;
     memory.recordMessage({ role: "user", content: text, timestamp: Date.now(), userId, sessionId: sessionKey, platformMessageId: numericMsgId });
   }
 
   // --- Active recall ---
+  let recalledHits: Array<{ id: number; contentEn: string }> | undefined;
   if (getEnv().activeMemory && memory) {
     const userEntry = registry.byUserId.get(userId);
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
@@ -152,6 +155,9 @@ export async function buildPrompt(
           }));
           const block = `[MEMORY CONTEXT — auto-recalled, do not repeat verbatim]\n${lines.join("\n")}\n[/MEMORY CONTEXT]\n\n`;
           prompt = block + prompt;
+          // #824: track recalled hits for citation detection
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          recalledHits = hits.filter((h: any) => h.id != null).map((h: any) => ({ id: h.id as number, contentEn: h.content as string }));
           logDebug(TAG, `Active recall: ${hits.length} hits, ${block.length} chars, ${Math.round(performance.now() - t0)}ms`);
           logTrace(TAG, `recall content: ${block}`);
         }
@@ -174,12 +180,12 @@ export async function buildPrompt(
       if (!scan.safe) {
         logInfo(TAG, `Injection blocked from ${userId}: ${scan.flags.map((f: { category: string }) => f.category).join(", ")}`);
       // Return a sentinel — caller checks and sends the block message
-      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined };
+      return { prompt: "__INJECTION_BLOCKED__", isSessionStart, imageContent: undefined, recalledHits: undefined };
     }
     }
   }
 
-  return { prompt, isSessionStart, imageContent };
+  return { prompt, isSessionStart, imageContent, recalledHits };
 }
 
 /** Single path for session-start injection: SOUL + memory wake-up + context + user identity + restart reason. */
@@ -189,6 +195,7 @@ export function buildSessionStartPrompt(
   userId: string,
   sessionKey?: string,
   maxContext?: number,
+  platform?: string,
 ): string {
   const contextParts: string[] = [];
 
@@ -249,11 +256,17 @@ export function buildSessionStartPrompt(
     logInfo(TAG, `[CURRENT USER] skipped — no sessionKey`);
   }
 
+  // Platform capabilities (#834 → #646)
+  if (platform) {
+    const CAPS: Record<string, string> = { telegram: "voice, reactions, typing, TTS, groups", discord: "reactions, typing, threads", irc: "text only" };
+    contextParts.push(`[SYSTEM] Platform: ${platform} (${CAPS[platform] ?? "unknown"})`);
+  }
+
   const compSummary = null; // Legacy compaction removed — context engine handles summaries
   if (compSummary && sessionKey) {
     // Dead path — kept for type safety during transition
   } else {
-    const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : undefined;
+    const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : (maxContext && maxContext >= 64000 ? { skipMessages: true } : undefined);
     const ctxResult = abmind()?.buildSessionStartContext(memory, userId, maxContext, ctxOpts);
     const ctx = ctxResult?.text ?? null;
     if (ctx) {

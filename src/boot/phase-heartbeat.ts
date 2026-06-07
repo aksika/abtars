@@ -169,7 +169,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     cronBusy: () => cronQueue.currentJob !== null || cronQueue.pending > 0,
   }));
 
-  heartbeat.registerTask(createDbIntegrityTask(memory, sendSystemMessage));
+  heartbeat.registerTask(createDbIntegrityTask(memory));
 
   // #613: skill usage stats flush + trash pruning
   heartbeat.registerTask(createSkillStatsFlushTask());

@@ -46,6 +46,17 @@ import { sanitizeOutbound } from "./sanitize-outbound.js";
 const TAG = "pipeline";
 const PRIMING_MAX = 8;
 
+// #824: Track which recalled memory IDs were active per agent message (for emoji feedback)
+// Map<platform_message_id, recalled_memory_ids[]> with 1h TTL
+const recalledIdsPerMessage = new Map<number, number[]>();
+const RECALL_MAP_TTL = 60 * 60_000;
+setInterval(() => { /* prune entries older than TTL — best-effort, no timestamp tracking needed for small maps */ if (recalledIdsPerMessage.size > 200) recalledIdsPerMessage.clear(); }, RECALL_MAP_TTL);
+
+/** Look up recalled memory IDs for a given platform message (for reaction-based feedback). */
+export function getRecalledIdsForMessage(platformMsgId: number): number[] | undefined {
+  return recalledIdsPerMessage.get(platformMsgId);
+}
+
 const STOPWORDS = new Set(["the","a","an","is","are","was","were","be","been",
   "have","has","had","do","does","did","will","would","could","should","can",
   "may","might","shall","it","its","this","that","what","how","when","where",
@@ -188,7 +199,7 @@ export async function handleInboundMessage(
     // No queueing needed
 
     // --- Build prompt ---
-    const { prompt: builtPrompt, imageContent } = await buildPrompt(msg, text, {
+    const { prompt: builtPrompt, imageContent, recalledHits } = await buildPrompt(msg, text, {
       memory, memoryConfig, sessions, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: !("agentLoop" in transport),
     }, registry);
@@ -209,6 +220,21 @@ export async function handleInboundMessage(
         return `[SYSTEM] Background session ${c.sessionId} ${c.status}\nGoal: ${c.goal}\nResult: ${c.result}${cost}`;
       }).join("\n\n");
       prompt = `${notes}\n\n---\n\n${prompt}`;
+    }
+
+    // --- Auto-notify: inject task failures (#646) ---
+    const { drainTaskFailures } = await import("./tasks/task-failure-buffer.js");
+    const failures = drainTaskFailures();
+    if (failures.length > 0) {
+      const lines = failures.map(f => `[SYSTEM] Task "${f.taskName}" failed (exit ${f.exitCode}${f.error ? `: ${f.error}` : ""}). ${f.consecutiveFailures > 1 ? `${f.consecutiveFailures} consecutive failures.` : ""}`);
+      prompt = `${lines.join("\n")}\n\n${prompt}`;
+    }
+
+    // --- Auto-notify: inject buffered system events (#844) ---
+    const { drainSystemEvents } = await import("./system-event-buffer.js");
+    const events = drainSystemEvents();
+    if (events.length > 0) {
+      prompt = `${events.map(e => `[SYSTEM] ${e}`).join("\n")}\n\n${prompt}`;
     }
 
     // --- Send to transport ---
@@ -458,6 +484,22 @@ export async function handleInboundMessage(
     logInfo(TAG, `→ [${msg.platform}] Response delivered${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
     updateBridgeLockField("lastPromptAt", Date.now());
 
+    // --- #824: Citation detection — did the agent use the recalled memories? ---
+    if (recalledHits && recalledHits.length > 0 && memory) {
+      try {
+        const { detectCitations } = await import("abmind");
+        const citedIds = detectCitations(userResponse, recalledHits);
+        if (citedIds.length > 0) memory.bumpCitedCount(citedIds);
+        logDebug(TAG, `Citation: ${citedIds.length}/${recalledHits.length} recalled memories cited`);
+        // Track recalledIds for emoji reaction feedback (1h TTL)
+        if (lastSentMsgId != null) {
+          recalledIdsPerMessage.set(Number(lastSentMsgId), recalledHits.map(h => h.id));
+        }
+      } catch (err) {
+        logDebug(TAG, `Citation detection failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     // --- AfterMessage hook ---
     if (hasHooks("AfterMessage")) {
       fireHook("AfterMessage", {
@@ -543,6 +585,7 @@ export async function startSession(
   const response = await transport.sendPrompt(sessionKey, prompt, undefined, userId);
   if (response?.trim() && response.trim() !== "[NO_REPLY]" && response.trim() !== "(no response)") {
     await sendResponse(response);
+    memory.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), userId, sessionId: sessionKey });
   }
 }
 

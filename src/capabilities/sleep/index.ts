@@ -122,7 +122,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
     })();
 
     abmind()!.runSleepCycle({ runtime: opts.runtime, level })
-      .then((result: { ok: boolean; failCount: number }) => {
+      .then(async (result: { ok: boolean; failCount: number }) => {
         running = false;
         progress = null;
         logInfo("sleep", `😴 Sleep finished (ok=${result.ok}, failCount=${result.failCount}, attempt ${attempts})`);
@@ -148,9 +148,9 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
         const dreamReport = buildDreamReport();
         const sleepNote = hwEnabled ? ` Hardware sleep in ~${hwSleepMin} minutes if no activity.` : "";
 
-        if (opts.sendSystemMessage) {
-          opts.sendSystemMessage(`${dreamReport}${sleepNote}`).catch(err => logAndSwallow(TAG, "sendSystemMessage dream report", err));
-        }
+        // #844: buffer silently — don't trigger model response
+        const { bufferSystemEvent } = await import("../../components/system-event-buffer.js");
+        bufferSystemEvent(`${dreamReport}${sleepNote}`);
 
         if (hwEnabled) {
           _awaitingHwSleep = true;

@@ -168,17 +168,37 @@ async function reconcilePathLink(
 
 export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
   const bundleFile = name === 'abtars' ? 'abtars-cli.js' : `${name}.js`;
-  const target = join(currentLink, 'bundle', bundleFile);
-  // Fallback: pre-bundle dist/ layout (tsc build) for installs that haven't migrated yet.
-  const distFile = name === 'abtars' ? 'abtars.js' : `${name}.js`;
-  const fallback = join(currentLink, 'dist', 'cli', distFile);
-  const content = `#!/usr/bin/env bash
+  const home = currentLink.replace(/\/current$/, '');
+  let content: string;
+
+  if (name === 'abmind') {
+    // #863: abmind resolves from bundle, source, or npm global — no current/ symlink
+    content = `#!/usr/bin/env bash
+# Resolve abmind CLI — no ~/.abmind/current dependency (#863)
+BUNDLE_CLI="$HOME/.abtars/app/bundle/node_modules/abmind/dist/cli/abmind.js"
+SRC_CLI="$HOME/.abtars/src/abmind/dist/cli/abmind.js"
+GLOBAL_CLI="$(npm root -g 2>/dev/null)/abmind/dist/cli/abmind.js"
+if [ -f "$BUNDLE_CLI" ]; then
+  exec node "$BUNDLE_CLI" "$@"
+elif [ -f "$SRC_CLI" ]; then
+  exec node "$SRC_CLI" "$@"
+elif [ -f "$GLOBAL_CLI" ]; then
+  exec node "$GLOBAL_CLI" "$@"
+else
+  echo "abmind: not found. Install via npm or deploy via abtars update." >&2
+  exit 1
+fi
+`;
+  } else {
+    const target = join(currentLink, 'bundle', bundleFile);
+    const distFile = name === 'abtars' ? 'abtars.js' : `${name}.js`;
+    const fallback = join(currentLink, 'dist', 'cli', distFile);
+    content = `#!/usr/bin/env bash
 if [ -f "${target}" ]; then
   exec node "${target}" "$@"
 elif [ -f "${fallback}" ]; then
   exec node "${fallback}" "$@"
 else
-  # No local release — fall through to npm global binary
   GLOBAL_BIN="$(npm root -g 2>/dev/null)/abtars/bundle/${bundleFile}"
   if [ -f "$GLOBAL_BIN" ]; then
     exec node "$GLOBAL_BIN" "$@"
@@ -187,9 +207,10 @@ else
   exit 1
 fi
 `;
+  }
   const path = join(binDir, name);
   if (dryRun) {
-    process.stdout.write(`[dry-run] write wrapper ${path} -> node ${target} (fallback: ${fallback})\n`);
+    process.stdout.write(`[dry-run] write wrapper ${path}\n`);
     return;
   }
   await writeFile(path, content, { mode: 0o755 });

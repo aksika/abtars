@@ -390,53 +390,79 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     return true;
   }
 
-  // /software update [build|pull]
-  if (arg === "update" || arg === "update build" || arg === "build" ||
+  // /software update [deploy|pull]
+  if (arg === "update" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build" ||
       arg === "update pull" || arg === "pull" || arg === "") {
     // /update with no args → treat as /software (show info)
     if (arg === "" && _text.match(/^\/software\s*$/i)) {
       // Fall through to info display below
     } else if (arg === "update pull" || arg === "pull") {
-      if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
+      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       try {
         const { spawnSync } = await import("node:child_process");
         const { mkdirSync } = await import("node:fs");
         const srcDir = join(home, "src", "abtars");
+        const abmindDir = join(home, "src", "abmind");
+        logInfo("update", "Pull requested");
         if (!existsSync(join(srcDir, ".git"))) {
-          await ctx.reply("⏳ Cloning abtars repo...");
+          await ctx.reply("Cloning abtars repo...");
           mkdirSync(join(home, "src"), { recursive: true });
           const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
-          if (cl.status !== 0) { await ctx.reply(`❌ Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
+          if (cl.status !== 0) { logInfo("update", "Clone failed"); await ctx.reply(`Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
         }
+        spawnSync("git", ["-C", srcDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
         const r = spawnSync("git", ["-C", srcDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-        if (r.status === 0) {
-          await ctx.reply(`✓ Pulled:\n${(r.stdout || "").trim().slice(0, 500)}`);
-        } else {
-          await ctx.reply(`❌ Pull failed:\n${(r.stderr || r.stdout || "").trim().slice(0, 300)}`);
+        if (r.status !== 0) { await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
+        let pulled = `Pulled:\n${(r.stdout || "").trim().slice(0, 300)}`;
+        if (existsSync(join(abmindDir, ".git"))) {
+          spawnSync("git", ["-C", abmindDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
+          const ab = spawnSync("git", ["-C", abmindDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+          if (ab.status !== 0) { await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
+          pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
         }
+        logInfo("update", `Pull complete`);
+        await ctx.reply(`${pulled}\n\nReady to deploy: /update deploy`);
       } catch (err) {
-        await ctx.reply(`❌ Pull failed: ${err instanceof Error ? err.message : String(err)}`);
+        await ctx.reply(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return true;
-    } else if (arg === "update" || arg === "update build" || arg === "build") {
-      if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
-      const isBuild = arg.includes("build");
-      await ctx.reply(`⏳ Updating${isBuild ? " (build)" : " (npm)"}...`);
+    } else if (arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build") {
+      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       try {
-        const { spawnSync } = await import("node:child_process");
-        const { writeFileSync: wf } = await import("node:fs");
-        const reasonPath = join(home, ".last-restart-reason");
-        wf(reasonPath, `software-update`, "utf-8");
-        if (isBuild) {
-          const script = join(home, "src", "abtars", "scripts", "build-and-deploy.sh");
-          spawnSync("bash", [script], { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
-        } else {
-          spawnSync("abtars", ["update"], { encoding: "utf-8", stdio: "inherit", timeout: 120_000 });
+        const { spawnSync, spawn } = await import("node:child_process");
+        const srcDir = join(home, "src", "abtars");
+        const abmindDir = join(home, "src", "abmind");
+        if (!existsSync(join(srcDir, ".git"))) {
+          await ctx.reply("No source repo. Run /update pull first.");
+          return true;
         }
-        await ctx.reply("⚠️ Update completed but bridge did not restart. Run /restart.");
+        // Guard: skip if already running this commit
+        const { getDeployedVersion } = await import("../../paths.js");
+        const head = spawnSync("git", ["-C", srcDir, "rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).stdout.trim();
+        const running = getDeployedVersion();
+        if (head && (running.version.includes(head) || running.commit === head)) {
+          await ctx.reply(`Already running ${head}. Nothing to deploy.`);
+          return true;
+        }
+        logInfo("update", `Deploy starting (non-blocking)`);
+        await ctx.reply("⚙️ Deploying (building in background)...");
+
+        // Spawn build-and-deploy.sh detached — bridge stays responsive (#871)
+        const script = join(srcDir, "scripts", "build-and-deploy.sh");
+        spawn("bash", [script, srcDir, abmindDir], {
+          detached: true,
+          stdio: "ignore",
+        }).unref();
       } catch (err) {
-        await ctx.reply(`❌ Update failed: ${err instanceof Error ? err.message : String(err)}`);
+        await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
       }
+      return true;
+    } else if (arg === "update") {
+      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
+      logInfo("update", "npm update starting");
+      await ctx.reply("Updating from npm...");
+      const { spawn } = await import("node:child_process");
+      spawn("abtars", ["update", "--source", "npm"], { detached: true, stdio: "ignore" }).unref();
       return true;
     }
   }
@@ -464,39 +490,67 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   // /software — show deployment info (default)
   const lines: string[] = ["🔧 Software"];
 
-  // abtars version
+  // abtars block
   try {
-    const pkg = JSON.parse(readFileSync(join(home, "app", "package.json"), "utf-8"));
+    const { getDeployedVersion } = await import("../../paths.js");
+    const ver = getDeployedVersion();
     const manifest = existsSync(join(home, "manifest.json"))
       ? JSON.parse(readFileSync(join(home, "manifest.json"), "utf-8"))
       : null;
     const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
-    lines.push(`  abtars: ${pkg.version} (deployed ${deployed})`);
-    if (manifest?.repoRoot) lines.push(`  source: local (${manifest.repoRoot})`);
-    else lines.push(`  source: npm`);
+    lines.push(`  abtars: ${ver.version}${ver.commit && !ver.version.includes(ver.commit) ? "-" + ver.commit : ""} (deployed ${deployed})`);
+    if (manifest?.source) lines.push(`  source: ${manifest.source === "local" ? "local" : "npm"}`);
+    try {
+      const { execFileSync } = await import("node:child_process");
+      const raw = execFileSync("npm", ["view", "abtars", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
+      const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
+      if (latest) lines.push(`  npm latest: abtars@${latest} ${latest === ver.version || ver.version.startsWith(latest) ? "✓" : "⚠️"}`);
+    } catch { /* timeout or offline — skip */ }
   } catch {
     lines.push("  abtars: unknown");
   }
 
-  // abmind version
+  // abmind block
+  lines.push("");
+  // Try deployed copy first (always up to date), fall back to ~/.abmind/manifest.json
+  const abmindBundlePkg = join(home, "app", "bundle", "node_modules", "abmind", "package.json");
+  const abmindAppPkg = join(home, "app", "node_modules", "abmind", "package.json");
   const abmindHome = process.env["ABMIND_HOME"] ?? join(home, "..", ".abmind");
   const abmindManifest = join(abmindHome, "manifest.json");
-  if (existsSync(abmindManifest)) {
+  const abmindPkgPath = existsSync(abmindBundlePkg) ? abmindBundlePkg : existsSync(abmindAppPkg) ? abmindAppPkg : null;
+  if (abmindPkgPath) {
+    try {
+      const pkg = JSON.parse(readFileSync(abmindPkgPath, "utf-8"));
+      const manifest = existsSync(abmindManifest) ? JSON.parse(readFileSync(abmindManifest, "utf-8")) : null;
+      const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
+      lines.push(`  abmind: ${pkg.version ?? "?"} (deployed ${deployed})`);
+      lines.push(`  source: local`);
+      try {
+        const { execFileSync } = await import("node:child_process");
+        const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
+        const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === pkg.version ? "✓" : "⚠️"}`);
+      } catch { /* timeout or offline — skip */ }
+    } catch { lines.push("  abmind: installed (version unknown)"); }
+  } else if (existsSync(abmindManifest)) {
     try {
       const m = JSON.parse(readFileSync(abmindManifest, "utf-8"));
       const deployed = m.activatedAt ? new Date(m.activatedAt).toLocaleString() : "unknown";
       lines.push(`  abmind: ${m.version ?? "?"} (deployed ${deployed})`);
+      lines.push(`  source: npm`);
+      try {
+        const { execFileSync } = await import("node:child_process");
+        const raw = execFileSync("npm", ["view", "abmind", "dist-tags", "--json"], { encoding: "utf-8", timeout: 5000 });
+        const latest = JSON.parse(raw).alpha ?? JSON.parse(raw).latest;
+        if (latest) lines.push(`  npm latest: abmind@${latest} ${latest === m.version ? "✓" : "⚠️"}`);
+      } catch { /* timeout or offline — skip */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
+  } else {
+    lines.push("  abmind: not installed");
   }
 
-  // npm latest (cached from update-check)
-  try {
-    const { checkForUpdate } = await import("../update-check.js");
-    const abtResult = checkForUpdate("abtars", "0.0.0"); // force return latest
-    if (abtResult?.latest) lines.push(`  npm latest: abtars@${abtResult.latest}`);
-  } catch { /* no cached data */ }
-
   // Rollback slots
+  lines.push("");
   lines.push("  Rollback:");
   for (let i = 1; i <= 3; i++) {
     const pkgPath = join(home, `app.prev.${i}`, "package.json");
@@ -509,7 +563,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   }
 
   lines.push("");
-  lines.push("  /software update [pull] [build] | rollback");
+  lines.push("  /software update [pull|deploy] | update (npm) | rollback");
   await ctx.reply(lines.join("\n"));
   return true;
 }

@@ -25,6 +25,19 @@ export async function phaseMemoryIpc(ctx: BootCtx): Promise<PhaseResult> {
   const ipcBackend = new SqliteBackend(ctx.memoryConfig);
   await ipcBackend.initialize();
   const memoryIpc = new MemoryIpcServer(ipcBackend);
+
+  // Wire ActionGate for auth-request IPC calls from external CLI
+  if (ctx.actionGate) {
+    memoryIpc.setUnknownMethodHandler(async (method: string, params: unknown) => {
+      if (method === "auth-request" && ctx.actionGate) {
+        const { category, detail } = params as { category: string; detail: string };
+        const granted = await ctx.actionGate.requestAuth(category, detail || "");
+        return { granted };
+      }
+      throw new Error(`Unknown method: ${method}`);
+    });
+  }
+
   await memoryIpc.start();
   return "ran";
 }

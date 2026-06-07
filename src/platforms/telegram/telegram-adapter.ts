@@ -15,7 +15,7 @@ import { formatReactionSignal, routeReaction } from "../../components/reactions.
 import { cleanResponse } from "../../components/clean-response.js";
 
 export const TELEGRAM_CAPABILITIES: PlatformCapabilities = { voice: true, reactions: true, typing: true, threads: true };
-import { emojiToScore } from "../../utils/emoji-score.js";
+import { emojiToScore, emojiToTag } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logError, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../../components/message-pipeline.js";
@@ -41,6 +41,7 @@ export interface TelegramAdapterDeps {
   transport: IKiroTransport;
   memory: IMemorySystem | null;
   sessionManager: { getActiveSessionId(userId: string, platform: string): string };
+  actionGate?: { handleCallback(data: string): boolean } | null;
 }
 
 export class TelegramAdapter implements PlatformAdapter {
@@ -206,6 +207,11 @@ export class TelegramAdapter implements PlatformAdapter {
           } catch (err) {
             if (chatId) await this.api.sendMessage(chatId, `❌ Model switch failed: ${err instanceof Error ? err.message : String(err)}`);
           }
+        }
+      } else if (data.startsWith("auth:")) {
+        // ActionGate authorization callback
+        if (this.deps.actionGate?.handleCallback(data)) {
+          await this.api.sendMessage(chatId, "✓ Responded.");
         }
       }
       } catch (err) {
@@ -426,8 +432,22 @@ export class TelegramAdapter implements PlatformAdapter {
 
     if (isAuthorized && this.deps.memory) {
       const score = emojiToScore(emojis[0]!);
-      const updated = this.deps.memory.updateEmotionByPlatformId(loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master", reaction.message_id, score);
+      const tag = emojiToTag(emojis[0]!);
+      const updated = this.deps.memory.updateEmotionByPlatformId(loadUsers().byPlatformId.get(`telegram:${chatId}`)?.userId ?? "master", reaction.message_id, score, tag);
       if (updated) logDebug(TAG, `Emotion score ${score} set on platform msg ${reaction.message_id}`);
+
+      // #824: Emoji reaction as recall quality feedback
+      const { getRecalledIdsForMessage } = await import("../../components/message-pipeline.js");
+      const recalledIds = getRecalledIdsForMessage(reaction.message_id);
+      if (recalledIds && recalledIds.length > 0) {
+        if (score < 0) {
+          this.deps.memory.bumpRejectedCount(recalledIds);
+          logDebug(TAG, `Recall rejection: ${recalledIds.length} memories penalized (emoji ${emojis[0]})`);
+        } else if (score > 0) {
+          this.deps.memory.bumpCitedCount(recalledIds);
+          logDebug(TAG, `Recall confirmed: ${recalledIds.length} memories boosted (emoji ${emojis[0]})`);
+        }
+      }
     }
 
     if (route === "discard") {

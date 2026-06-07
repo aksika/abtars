@@ -10,7 +10,7 @@ import { getEnv } from "../components/env-schema.js";
 import { execSync } from "node:child_process";
 import { TmuxClient } from "../components/transport/tmux-client.js";
 import { createAgentTransport } from "../components/agent-registry.js";
-import { logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
+import { logDebug, logInfo, logWarn, logError, isLogLevel } from "../components/logger.js";
 import { loadUsers } from "../components/user-registry.js";
 import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -198,13 +198,38 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   logInfo("main", "✅ Transport ready");
 
+  // Wire ActionGate for auth-required commands
+  const { join } = await import("node:path");
+  const { abtarsHome } = await import("../paths.js");
+  const { ActionGate } = await import("../components/action-gate.js");
+  const { setActionGate } = await import("../components/transport/tool-registry.js");
+  const authDir = join(abtarsHome(), "auth");
+  ctx.actionGate = new ActionGate(authDir);
+  setActionGate(ctx.actionGate);
+  logDebug("main", "🔒 ActionGate wired");
+
   if (resolved.provider.transport === "api" && (ctx.memory as any)?.available) {
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
-    const { SqliteBackend } = await import("abmind");
-    const backend = new SqliteBackend(memoryConfig);
-    await backend.initialize();
-    setMemoryBackend(backend);
-    logInfo("main", "🧠 In-process memory wired to tool registry");
+    // #860: Use the SAME MemoryManager instance — don't create a second SqliteBackend.
+    // Two separate DB connections to the same WAL-mode file corrupt each other's handles.
+    const mm = ctx.memory!;
+    const backend = {
+      initialize: async () => {},
+      close: () => {},
+      instantStore: (p: any) => mm.editor.instantStore(p),
+      editMemory: (p: any) => mm.editor.editMemory(p),
+      reclassifyMemory: (id: number, level: number, uo: boolean) => { mm.editor.reclassifyMemory(id, level, uo); return Promise.resolve(); },
+      adjustRelevance: (id: number, delta: number) => { mm.editor.adjustRelevance(id, delta); return Promise.resolve(); },
+      mergeMemories: (a: number, b: number) => mm.editor.mergeMemories(a, b),
+      cascadeDelete: (ids: number[], uid: string) => mm.editor.cascadeDelete(ids, uid),
+      recall: (p: any) => mm.recallSearch(p),
+      rebuildFtsIndexes: () => mm.rebuildFtsIndexes(),
+    };
+    setMemoryBackend(backend as any);
+    logInfo("main", "🧠 In-process memory wired to tool registry (shared handle)");
+
+    // #843: Wire memory to transport for session hydration on restart
+    (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).memoryBackend = ctx.memory!;
 
     // Wire context engine for automatic compaction
     const db = ctx.memory!.getDb?.() ?? ctx.memory!.getDatabase?.();

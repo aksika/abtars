@@ -13,7 +13,7 @@ import { ResponseFormatter } from "../../components/response-formatter.js";
 import { formatReactionSignal } from "../../components/reactions.js";
 
 export const DISCORD_CAPABILITIES: PlatformCapabilities = { voice: false, reactions: true, typing: true, threads: true };
-import { emojiToScore } from "../../utils/emoji-score.js";
+import { emojiToScore, emojiToTag } from "../../utils/emoji-score.js";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { getEnv } from "../../components/env-schema.js";
@@ -344,8 +344,9 @@ export class DiscordAdapter implements PlatformAdapter {
     // Emotion scoring on authorized reactions
     if (isAuthorized && this.deps.memory) {
       const score = emojiToScore(emoji);
+      const tag = emojiToTag(emoji);
       const resolvedUserId = loadUsers().byPlatformId.get("discord:" + user.id)?.userId ?? "unknown";
-      const updated = this.deps.memory.updateEmotionByPlatformId(resolvedUserId, messageId, score);
+      const updated = this.deps.memory.updateEmotionByPlatformId(resolvedUserId, messageId, score, tag);
       if (updated) logDebug(TAG, `Emotion score ${score} set on msg ${reaction.message.id}`);
     }
 

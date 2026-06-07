@@ -1,8 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readlinkSync } from "node:fs";
 import { initBridgeLock } from "./components/transport/bridge-lock-transport.js";
-import { join, basename } from "node:path";
-import { homedir } from "node:os";
 
 import { logInfo, logWarn, logError } from "./components/logger.js";
 import type { BootCtx } from "./boot/context.js";
@@ -124,15 +121,13 @@ export async function startBridge(): Promise<number> {
     }
   }
 
-  // Populate version/commit from release symlink (e.g. "0.1.0-f9c4d38")
-  try {
-    const target = basename(readlinkSync(join(homedir(), ".abtars", "current")));
-    const dash = target.lastIndexOf("-");
-    if (dash > 0) { ctx.version = target.slice(0, dash); ctx.commit = target.slice(dash + 1); }
-  } catch (err) { /* dev mode — no release symlink */ }
+  // Populate version/commit from manifest.json
+  const deployed = (await import("./paths.js")).getDeployedVersion();
+  ctx.version = deployed.version;
+  ctx.commit = deployed.commit;
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
-  initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}-${ctx.commit}`, argv: process.argv.slice(2) });
+  initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2) });
 
   const bridge = new Bridge(ctx);
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;

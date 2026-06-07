@@ -64,24 +64,27 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
 }
 
 export async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
-  const base = join(abtarsHome(), "skills");
-  const groups = ["core", "personal", "auto", "downloaded"] as const;
-  const sections: string[] = [];
-  let total = 0;
-  for (const group of groups) {
-    const dir = join(base, group);
-    try {
-      const files = readdirSync(dir, { recursive: true })
-        .map(f => String(f))
-        .filter(f => f.endsWith(".md") && !f.endsWith("TOOLS.md"))
-        .sort();
-      if (files.length > 0) {
-        total += files.length;
-        sections.push(`${group} (${files.length}):\n${files.map(f => `  • ${f.replace(/\.md$/, "")}`).join("\n")}`);
-      }
-    } catch (err) { logAndSwallow("command_handlers", "op", err); }
+  const { getSkillCache } = await import("../../capabilities/hotskills/index.js");
+  const skills = getSkillCache();
+  if (skills.length === 0) { await ctx.reply("📚 No skills loaded."); return true; }
+
+  const active = skills.filter(s => !s.skipped);
+  const skipped = skills.filter(s => s.skipped);
+  const groups = new Map<string, typeof skills>();
+  for (const s of skills) {
+    const list = groups.get(s.group) ?? [];
+    list.push(s);
+    groups.set(s.group, list);
   }
-  await ctx.reply(total > 0 ? `📚 Skills (${total}):\n\n${sections.join("\n\n")}` : "📚 No skills found.");
+
+  const header = `📚 Skills: ${active.length} active${skipped.length ? `, ${skipped.length} skipped` : ""}`;
+  const sections: string[] = [];
+  for (const [group, items] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const lines = items.map(s => s.skipped ? `  ✗ ${s.name} (${s.skipped})` : `  ✓ ${s.name}`);
+    sections.push(`${group} (${items.length}):\n${lines.join("\n")}`);
+  }
+
+  await ctx.reply(`${header}\n\n${sections.join("\n\n")}`);
   return true;
 }
 
@@ -169,7 +172,14 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/reset — Reload transport + fresh session",
     "/reset default — Restore transport.default.json + fresh session",
     "/compact — Compact context window (summarize + fresh session)",
-    "/status — Bridge status, transport, heartbeat",
+    "/status — Operational health (PID, uptime, platforms, context)",
+    "/software — Version info, deploy date, npm check, rollback",
+    "/software update [pull|deploy] — Pull & build from git",
+    "/software update npm — Update from npm registry",
+    "/software rollback <version> — Roll back to previous version",
+    "/update — Alias for /software update pull",
+    "/model — Model configuration (provider, context, fallbacks)",
+    "/model set <name> — Switch model",
     "/doctor — Deep probe all subsystems",
     "/doctor fix — Run safe auto-repairs",
     "/doctor fix-full — Full repair (+ FTS rebuild, WAL checkpoint)",
@@ -178,41 +188,29 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/stop, /ctrlc — Stop current response",
     "/memory — Memory storage statistics",
     "/heartbeat — Heartbeat diagnostics (tasks, last tick)",
-    "/models — Model, transport & agent status",
+    "/models — Model, transport & agent status (legacy)",
     "/models change — Switch model/provider (any agent)",
     "/models quick <model> — Instant switch on same provider",
-    "/models list [provider] — List providers or models on a provider",
-    "/models restore — Undo last model/provider switch",
-    "/models default — Factory reset (transport.default.json)",
-    "/models emergency — 🚨 Activate paid hailMary model (manual)",
-    "/emergency — Shortcut for /models emergency",
-    "/models health reset — Reset model health buckets",
+    "/emergency — 🚨 Activate paid hailMary model",
     "/tasks — Scheduled tasks",
     "/tasks log <id> — Last 5 runs for a task",
     "/task run <id> — Manually fire a task",
-    "/task pause <id> — Pause a task",
-    "/task resume <id> — Resume a paused task",
+    "/task pause <id> — Pause / /task resume <id> — Resume",
     "/facts — Core knowledge (user profile + agent notes)",
-    "/skills — List loaded skills",
+    "/skills — List active/skipped skills",
     "/session — List sessions",
     "/session new [browse|code|task] — New session",
-    "/session <#> — Switch session",
-    "/session end [#] — End session (keep messages)",
-    "/session kill <#> — Kill session (wipe messages)",
-    "/default — Switch back to default agent",
+    "/session <#> — Switch / /session end [#] — End / /session kill <#> — Kill",
     "/nlm — Knowledge base (list/create/sources/query)",
-    "/restart — Restart CLI session",
-    "/wakeup — Wake Mac from sleep (cancel hw_sleep)",
-    "/sleep — Sleep status",
-    "/sleep resume — Retry failed sleep steps",
-    "/sleep now — Full fresh sleep cycle",
-    "/skill reload — Regenerate skills catalog",
+    "/restart — Restart bridge",
+    "/wakeup — Wake Mac from sleep",
+    "/sleep — Sleep status / /sleep resume / /sleep now",
+    "/whoami — Your user info & clearance",
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");
   }
   cmds.push("/help — Show this help");
-  cmds.push("/skills — List available skills");
   await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
   return true;
 }
