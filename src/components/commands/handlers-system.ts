@@ -563,7 +563,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   }
 
   lines.push("");
-  lines.push("  /software update [pull|deploy] | update (npm) | rollback");
+  lines.push("  /update [pull|deploy|npm] | /software rollback <version>");
   await ctx.reply(lines.join("\n"));
   return true;
 }
