@@ -258,7 +258,11 @@ async function copyAbmind(stagedPath: string, repoRoot: string): Promise<void> {
         const pkg = JSON.parse(readFileSync(join(dest, 'package.json'), 'utf-8'));
         const abmindHome = process.env['ABMIND_HOME'] ?? join(process.env['HOME'] ?? '', '.abmind');
         mkdirSync(abmindHome, { recursive: true });
-        const manifest = { version: pkg.version, activatedAt: new Date().toISOString(), source: 'local' };
+        const { spawnSync } = await import('node:child_process');
+        const gitResult = spawnSync('git', ['-C', src, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf-8' });
+        const commit = gitResult.status === 0 ? gitResult.stdout.trim() : '';
+        const version = commit ? `${pkg.version}-${commit}` : pkg.version;
+        const manifest = { version, activatedAt: new Date().toISOString(), source: 'local' };
         writeFileSync(join(abmindHome, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
       } catch { /* non-fatal — display only */ }
       process.stdout.write(`✓ abmind copied from ${src}\n`);
