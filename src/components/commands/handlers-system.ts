@@ -456,7 +456,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         }
 
         // Install abtars deps + build bundle
-        const install = spawnSync("npm", ["install", "--no-audit", "--no-fund"], { cwd: srcDir, encoding: "utf-8", timeout: 120_000 });
+        const install = spawnSync("npm", ["install", "--include=dev", "--no-audit", "--no-fund"], { cwd: srcDir, encoding: "utf-8", timeout: 120_000 });
         if (install.status !== 0) { await ctx.reply(`npm install failed:\n${(install.stderr || "").slice(0, 300)}`); return true; }
         const build = spawnSync("node", ["esbuild.config.js"], { cwd: srcDir, encoding: "utf-8", timeout: 60_000 });
         if (build.status !== 0) { await ctx.reply(`Build failed:\n${(build.stderr || build.stdout || "").slice(0, 300)}`); return true; }
