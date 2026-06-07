@@ -35,6 +35,19 @@ Stable ≤ Alpha ≤ Dev.
 
 ## Manual install (npm)
 
+### Stable (recommended)
+
+```bash
+npm install -g abtars abmind
+abmind install
+abtars install
+abtars update
+abtars onboard
+sudo $(which abtars) daemon install
+```
+
+### Alpha (latest features, may have bugs)
+
 ```bash
 npm install -g abtars@alpha abmind@alpha
 abmind install
@@ -44,9 +57,20 @@ abtars onboard
 sudo $(which abtars) daemon install
 ```
 
+### Git (development, build from source)
+
+```bash
+git clone git@github.com:aksika/abtars.git
+git clone git@github.com:aksika/abmind.git
+cd abmind && npm install && npm run build && cd ..
+cd abtars && npm install && abtars update --from-local
+abtars onboard
+sudo $(which abtars) daemon install
+```
+
 | Step | What happens |
 |------|-------------|
-| `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally (alpha channel) |
+| `npm install -g abtars abmind` | Installs CLI tools globally (stable channel) |
 | `abmind install` | Creates `~/.abmind/`, prompts for encryption passphrase, initializes memory DB |
 | `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
 | `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
