@@ -134,6 +134,7 @@ abtars stop     # stop
 ~/.abtars/
 ├── config/          # .env, transport.json, models.json, users.json
 ├── secret/          # API keys (encrypted at rest)
+├── kanban/          # kanban.db — task board (work tracking)
 ├── current/         # symlink → active release
 ├── releases/        # versioned bundles
 ├── logs/            # bridge-YYYY-MM-DD.log
