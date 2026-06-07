@@ -210,11 +210,23 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   if (resolved.provider.transport === "api" && (ctx.memory as any)?.available) {
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");
-    const { SqliteBackend } = await import("abmind");
-    const backend = new SqliteBackend(memoryConfig);
-    await backend.initialize();
-    setMemoryBackend(backend);
-    logInfo("main", "🧠 In-process memory wired to tool registry");
+    // #860: Use the SAME MemoryManager instance — don't create a second SqliteBackend.
+    // Two separate DB connections to the same WAL-mode file corrupt each other's handles.
+    const mm = ctx.memory!;
+    const backend = {
+      initialize: async () => {},
+      close: () => {},
+      instantStore: (p: any) => mm.editor.instantStore(p),
+      editMemory: (p: any) => mm.editor.editMemory(p),
+      reclassifyMemory: (id: number, level: number, uo: boolean) => { mm.editor.reclassifyMemory(id, level, uo); return Promise.resolve(); },
+      adjustRelevance: (id: number, delta: number) => { mm.editor.adjustRelevance(id, delta); return Promise.resolve(); },
+      mergeMemories: (a: number, b: number) => mm.editor.mergeMemories(a, b),
+      cascadeDelete: (ids: number[], uid: string) => mm.editor.cascadeDelete(ids, uid),
+      recall: (p: any) => mm.recallSearch(p),
+      rebuildFtsIndexes: () => mm.rebuildFtsIndexes(),
+    };
+    setMemoryBackend(backend as any);
+    logInfo("main", "🧠 In-process memory wired to tool registry (shared handle)");
 
     // #843: Wire memory to transport for session hydration on restart
     (transport as import("../components/transport/direct-api-transport.js").DirectApiTransport).memoryBackend = ctx.memory!;
