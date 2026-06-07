@@ -410,13 +410,13 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
           const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
           if (cl.status !== 0) { logInfo("update", "Clone failed"); await ctx.reply(`Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
         }
-        spawnSync("git", ["-C", srcDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
-        const r = spawnSync("git", ["-C", srcDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+        spawnSync("git", ["-C", srcDir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+        const r = spawnSync("git", ["-C", srcDir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
         if (r.status !== 0) { await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
         let pulled = `Pulled:\n${(r.stdout || "").trim().slice(0, 300)}`;
         if (existsSync(join(abmindDir, ".git"))) {
-          spawnSync("git", ["-C", abmindDir, "checkout", "--", "package-lock.json"], { encoding: "utf-8" });
-          const ab = spawnSync("git", ["-C", abmindDir, "pull", "--ff-only", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+          spawnSync("git", ["-C", abmindDir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+          const ab = spawnSync("git", ["-C", abmindDir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
           if (ab.status !== 0) { await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
           pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
         }
