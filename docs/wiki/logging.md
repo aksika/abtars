@@ -2,15 +2,19 @@
 
 ## Log Levels
 
-| Level | When to use | What you'll see |
-|-------|-------------|-----------------|
-| `error` | Something is broken and needs attention | Missing secrets, capability load failures, delivery failures |
-| `warn` | Degraded but recovered | Fallback model activated, edit failed (sent as new message), retry succeeded |
-| `info` | Normal operations | Boot phases, message delivery, tool calls, deploys |
-| `debug` | Detailed flow | Prompt routing, session resolution, token counts |
-| `trace` | Everything including swallowed errors | Every silent catch, failed probes, harmless timeouts |
+Set via `LOG_LEVEL` in `~/.abtars/config/.env`. Default: `low`.
 
-Set via `LOG_LEVEL` in `.env`. Default: `info`.
+| Level | What you'll see |
+|-------|-----------------|
+| `off` | Silent — nothing logged |
+| `low` | Info + warnings + errors: boot phases, message delivery, tool calls, deploys, fallback activations, failures |
+| `debug` | Low + verbose: prompt routing, session resolution, token counts, recall content, full payloads |
+| `trace` | Debug + swallowed errors: every silent catch, failed probes, harmless timeouts |
+
+```bash
+# In ~/.abtars/config/.env
+LOG_LEVEL=debug
+```
 
 ## TRACE level
 
