@@ -206,6 +206,7 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
     "/wakeup — Wake Mac from sleep",
     "/sleep — Sleep status / /sleep resume / /sleep now",
     "/whoami — Your user info & clearance",
+    "/reasoning — Reasoning effort (low/medium/high/none) + show/hide thinking",
   ];
   if (ctx.platform === "telegram") {
     cmds.push("/full — Raw output, TTS disabled", "/short — Clean responses (default)", "/healing — Toggle self-healer on/off");
