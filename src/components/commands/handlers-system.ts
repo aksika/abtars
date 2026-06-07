@@ -444,26 +444,12 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
           await ctx.reply(`Already running ${head}. Nothing to deploy.`);
           return true;
         }
-        logInfo("update", `Deploy starting`);
-        await ctx.reply("⚙️ Deploying...");
+        logInfo("update", `Deploy starting (non-blocking)`);
+        await ctx.reply("⚙️ Deploying (building in background)...");
 
-        // Build abmind first (if repo exists)
-        if (existsSync(join(abmindDir, ".git"))) {
-          const abInstall = spawnSync("npm", ["ci"], { cwd: abmindDir, encoding: "utf-8", timeout: 300_000 });
-          if (abInstall.status !== 0) { await ctx.reply(`abmind npm ci failed:\n${(abInstall.stderr || "").slice(0, 300)}`); return true; }
-          const abBuild = spawnSync("npm", ["run", "build"], { cwd: abmindDir, encoding: "utf-8", timeout: 60_000 });
-          if (abBuild.status !== 0) { await ctx.reply(`abmind build failed:\n${(abBuild.stderr || abBuild.stdout || "").slice(0, 300)}`); return true; }
-        }
-
-        // Install abtars deps + build bundle
-        const install = spawnSync("npm", ["ci"], { cwd: srcDir, encoding: "utf-8", timeout: 300_000 });
-        if (install.status !== 0) { await ctx.reply(`npm install failed:\n${(install.stderr || "").slice(0, 300)}`); return true; }
-        const build = spawnSync("node", ["esbuild.config.js"], { cwd: srcDir, encoding: "utf-8", timeout: 60_000 });
-        if (build.status !== 0) { await ctx.reply(`Build failed:\n${(build.stderr || build.stdout || "").slice(0, 300)}`); return true; }
-
-        // Spawn fresh CLI for deploy (uses latest deploy logic)
-        spawn("node", ["bundle/abtars-cli.js", "update", "--from-local"], {
-          cwd: srcDir,
+        // Spawn build-and-deploy.sh detached — bridge stays responsive (#871)
+        const script = join(srcDir, "scripts", "build-and-deploy.sh");
+        spawn("bash", [script, srcDir, abmindDir], {
           detached: true,
           stdio: "ignore",
         }).unref();
