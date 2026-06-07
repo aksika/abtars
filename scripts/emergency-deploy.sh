@@ -59,7 +59,8 @@ mv "$HOME_DIR/app.staging" "$HOME_DIR/app"
 
 # 6. Write minimal manifest
 COMMIT=$(git -C "$SRC_DIR" rev-parse --short HEAD)
-echo "{\"version\":\"emergency-$COMMIT\",\"commit\":\"$COMMIT\",\"activatedAt\":\"$(date -Iseconds)\",\"source\":\"emergency\"}" > "$HOME_DIR/install-manifest.json"
+VERSION=$(node -p "require('$SRC_DIR/package.json').version" 2>/dev/null || echo "0.0.0")
+echo "{\"version\":\"$VERSION\",\"commit\":\"$COMMIT\",\"activatedAt\":\"$(date -Iseconds)\",\"source\":\"local\"}" > "$HOME_DIR/install-manifest.json"
 
 # 7. Restart (mode-dependent)
 echo "Restarting..."
