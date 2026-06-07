@@ -64,24 +64,27 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
 }
 
 export async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
-  const base = join(abtarsHome(), "skills");
-  const groups = ["core", "personal", "auto", "downloaded"] as const;
-  const sections: string[] = [];
-  let total = 0;
-  for (const group of groups) {
-    const dir = join(base, group);
-    try {
-      const files = readdirSync(dir, { recursive: true })
-        .map(f => String(f))
-        .filter(f => f.endsWith(".md") && !f.endsWith("TOOLS.md"))
-        .sort();
-      if (files.length > 0) {
-        total += files.length;
-        sections.push(`${group} (${files.length}):\n${files.map(f => `  • ${f.replace(/\.md$/, "")}`).join("\n")}`);
-      }
-    } catch (err) { logAndSwallow("command_handlers", "op", err); }
+  const { getSkillCache } = await import("../../capabilities/hotskills/index.js");
+  const skills = getSkillCache();
+  if (skills.length === 0) { await ctx.reply("📚 No skills loaded."); return true; }
+
+  const active = skills.filter(s => !s.skipped);
+  const skipped = skills.filter(s => s.skipped);
+  const groups = new Map<string, typeof skills>();
+  for (const s of skills) {
+    const list = groups.get(s.group) ?? [];
+    list.push(s);
+    groups.set(s.group, list);
   }
-  await ctx.reply(total > 0 ? `📚 Skills (${total}):\n\n${sections.join("\n\n")}` : "📚 No skills found.");
+
+  const header = `📚 Skills: ${active.length} active${skipped.length ? `, ${skipped.length} skipped` : ""}`;
+  const sections: string[] = [];
+  for (const [group, items] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const lines = items.map(s => s.skipped ? `  ✗ ${s.name} (${s.skipped})` : `  ✓ ${s.name}`);
+    sections.push(`${group} (${items.length}):\n${lines.join("\n")}`);
+  }
+
+  await ctx.reply(`${header}\n\n${sections.join("\n\n")}`);
   return true;
 }
 

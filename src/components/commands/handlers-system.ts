@@ -486,7 +486,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   // /software — show deployment info (default)
   const lines: string[] = ["🔧 Software"];
 
-  // abtars version (single source of truth: getDeployedVersion)
+  // abtars block
   try {
     const { getDeployedVersion } = await import("../../paths.js");
     const ver = getDeployedVersion();
@@ -495,12 +495,18 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       : null;
     const deployed = manifest?.activatedAt ? new Date(manifest.activatedAt).toLocaleString() : "unknown";
     lines.push(`  abtars: ${ver.version}${ver.commit ? "-" + ver.commit : ""} (deployed ${deployed})`);
-    if (manifest?.source) lines.push(`  source: ${manifest.source === "local" ? `local (${manifest.repoRoot ?? ""})` : "npm"}`);
+    if (manifest?.source) lines.push(`  source: ${manifest.source === "local" ? "local" : "npm"}`);
+    try {
+      const { checkForUpdate } = await import("../update-check.js");
+      const r = checkForUpdate("abtars", ver.version);
+      if (r?.latest) lines.push(`  npm latest: abtars@${r.latest} ${r.updateAvailable ? "⚠️" : "✓"}`);
+    } catch { /* no cached data */ }
   } catch {
     lines.push("  abtars: unknown");
   }
 
-  // abmind version
+  // abmind block
+  lines.push("");
   const abmindHome = process.env["ABMIND_HOME"] ?? join(home, "..", ".abmind");
   const abmindManifest = join(abmindHome, "manifest.json");
   if (existsSync(abmindManifest)) {
@@ -508,17 +514,19 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       const m = JSON.parse(readFileSync(abmindManifest, "utf-8"));
       const deployed = m.activatedAt ? new Date(m.activatedAt).toLocaleString() : "unknown";
       lines.push(`  abmind: ${m.version ?? "?"} (deployed ${deployed})`);
+      lines.push(`  source: npm`);
+      try {
+        const { checkForUpdate } = await import("../update-check.js");
+        const r = checkForUpdate("abmind", m.version ?? "0.0.0");
+        if (r?.latest) lines.push(`  npm latest: abmind@${r.latest} ${r.updateAvailable ? "⚠️" : "✓"}`);
+      } catch { /* no cached data */ }
     } catch { lines.push("  abmind: installed (version unknown)"); }
+  } else {
+    lines.push("  abmind: not installed");
   }
 
-  // npm latest (cached from update-check)
-  try {
-    const { checkForUpdate } = await import("../update-check.js");
-    const abtResult = checkForUpdate("abtars", "0.0.0"); // force return latest
-    if (abtResult?.latest) lines.push(`  npm latest: abtars@${abtResult.latest}`);
-  } catch { /* no cached data */ }
-
   // Rollback slots
+  lines.push("");
   lines.push("  Rollback:");
   for (let i = 1; i <= 3; i++) {
     const pkgPath = join(home, `app.prev.${i}`, "package.json");
@@ -531,7 +539,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   }
 
   lines.push("");
-  lines.push("  /software update [pull] [deploy] | update (npm) | rollback");
+  lines.push("  /software update [pull|deploy] | update (npm) | rollback");
   await ctx.reply(lines.join("\n"));
   return true;
 }

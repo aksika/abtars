@@ -25,6 +25,8 @@ export interface SystemStatus {
   transportProvider: string;
   transportReady: boolean;
   uptimeMs: number;
+  contextPercent: number;
+  sleepStatus: string | null;
   subsystems: SubsystemHealth[];
   tasks: { recurring: number; pending: number; paused: number };
   lastBackup: string | null;
@@ -119,6 +121,20 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
     if (bk.length > 0) lastBackup = bk[bk.length - 1] ?? null;
   } catch (err) { logAndSwallow("system_status", "op", err); }
 
+  // Context percent from bridge.lock
+  let contextPercent = -1;
+  try {
+    const lock = JSON.parse(readFileSync(ctx.bridgeLockPath, "utf-8"));
+    if (typeof lock.contextPercent === "number") contextPercent = lock.contextPercent;
+  } catch { /* ignore */ }
+
+  // Sleep status
+  let sleepStatus: string | null = null;
+  try {
+    const lock = JSON.parse(readFileSync(ctx.bridgeLockPath, "utf-8"));
+    sleepStatus = lock.sleepStatus ?? null;
+  } catch { /* ignore */ }
+
   return {
     version,
     commit,
@@ -127,6 +143,8 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
     transportProvider,
     transportReady: ctx.transport?.isReady ?? false,
     uptimeMs: Date.now() - ctx.startedAt,
+    contextPercent,
+    sleepStatus,
     subsystems,
     tasks,
     lastBackup,
@@ -146,57 +164,56 @@ function phaseToService(phaseName: string): string | null {
 /** Render SystemStatus as plain text for Telegram/Discord /status command. */
 export function renderStatusText(status: SystemStatus): string {
   const uptime = formatUptime(status.uptimeMs);
+  const name = process.env["AGENT_NAME"] ?? process.env["BOT_NAME"] ?? "abtars";
   const lines: string[] = [
-    `abTARS v${status.version} (${status.commit})`,
+    `😊 ${name} — online`,
+    `  PID ${process.pid} (up ${uptime})`,
   ];
 
-  // abmind version
+  // Watchdog
   try {
-    const abmindManifest = join(homedir(), ".abmind", "manifest.json");
-    if (existsSync(abmindManifest)) {
-      const m = JSON.parse(readFileSync(abmindManifest, "utf-8"));
-      const ver = m.version?.replace(/-[a-f0-9]{7,}$/, "") || null;
-      const commit = m.commit?.slice(0, 7) ?? "";
-      if (ver) {
-        lines.push(`abmind v${ver}${commit ? ` (${commit})` : ""}`);
-      } else {
-        lines.push("abmind: installed (version unknown)");
-      }
-    } else {
-      lines.push("abmind: not installed");
-    }
-  } catch (err) { logAndSwallow(TAG, "read abmind manifest", err); }
+    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
+    const wdPid = execFileSync("pgrep", ["-f", "watchdog.sh"], { encoding: "utf-8", timeout: 2000 }).trim().split("\n")[0];
+    if (wdPid) lines.push(`  Watchdog: PID ${wdPid} (bash)`);
+    else lines.push("  Watchdog: not running");
+  } catch { lines.push("  Watchdog: not detected"); }
 
-  // Update check (#440)
+  // Platforms
+  const platforms = status.subsystems.find(s => s.name === "phasePlatforms");
+  if (platforms?.detail) lines.push(`  Platforms: ${platforms.detail}`);
+
+  // Model + context
+  lines.push(`  Model: ${status.model.split("/").pop() ?? status.model}`);
+  if (status.contextPercent >= 0) lines.push(`  Context: ${status.contextPercent}%`);
+
+  // Last prompt
   try {
-    const { checkForUpdate } = require("./update-check.js") as typeof import("./update-check.js");
-    const result = checkForUpdate("abtars", status.version);
-    if (result?.updateAvailable) {
-      lines.push(`📦 Update available: ${result.current} → ${result.latest}`);
+    const lock = JSON.parse(readFileSync(join(homedir(), ".abtars", "bridge.lock"), "utf-8"));
+    if (lock.lastPromptAt) {
+      const ago = Math.round((Date.now() - lock.lastPromptAt) / 1000);
+      lines.push(`  Last prompt: ${ago < 60 ? `${ago}s ago` : `${Math.round(ago / 60)}m ago`}`);
     }
-  } catch (err) { logAndSwallow(TAG, "update check", err); }
+  } catch { /* no lock */ }
 
-  lines.push(
-    `🤖 Model: ${status.model}`,
-    `⏱️ Uptime: ${uptime}`,
-    "",
-    "🏥 Subsystems:",
-  );
+  // Sleep
+  if (status.sleepStatus) lines.push(`  Sleep: ${status.sleepStatus}`);
+
+  // Skills
+  try {
+    const { getSkillCache } = require("../capabilities/hotskills/index.js") as typeof import("../capabilities/hotskills/index.js");
+    const skills = getSkillCache();
+    if (skills.length > 0) {
+      const active = skills.filter(s => !s.skipped).length;
+      lines.push(`  Skills: ${active} active`);
+    }
+  } catch { /* hotskills not loaded */ }
+
+  lines.push("", "🏥 Subsystems:");
 
   for (const s of status.subsystems) {
-    let icon = s.status === "ok" ? "✓" : s.status === "skipped" ? "○" : "✗";
+    const icon = s.status === "ok" ? "✓" : s.status === "skipped" ? "○" : "✗";
     const label = s.name.replace("phase", "").replace(/([A-Z])/g, " $1").trim().toLowerCase();
-    let detail = s.detail ? ` — ${s.detail}` : "";
-
-    // #799: warn if memory is "ok" but abmind CLI unavailable (ACP transport only)
-    if (s.status === "ok" && (s.name === "phaseMemory" || s.name === "phaseMemoryIpc")) {
-      const abmindManifest = join(homedir(), ".abmind", "manifest.json");
-      if (!existsSync(abmindManifest) && status.transportType === "acp") {
-        icon = "⚠️";
-        if (s.name === "phaseMemory") detail = " — agent tools unavailable (install abmind)";
-      }
-    }
-
+    const detail = s.detail ? ` — ${s.detail}` : "";
     lines.push(`  ${icon} ${label}${detail}`);
   }
 
