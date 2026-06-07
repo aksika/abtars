@@ -30,7 +30,7 @@ import {
   writeRestartReason, readAndClearRestartRequested, readBridgeLockField, updateBridgeLockField, writeSleepStatus,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
-import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask, createSkillStatsFlushTask, createSkillTrashPruneTask } from "../components/heartbeat-tasks.js";
+import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask, createSkillStatsFlushTask, createSkillTrashPruneTask, createKanbanDeliveryTask, createKanbanCleanupTask } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
@@ -174,6 +174,18 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   // #613: skill usage stats flush + trash pruning
   heartbeat.registerTask(createSkillStatsFlushTask());
   heartbeat.registerTask(createSkillTrashPruneTask());
+
+  // #857: kanban board — deliver completed cards + cleanup old ones
+  const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
+  heartbeat.registerTask(createKanbanDeliveryTask({
+    sendSystemMessage,
+    sendDocument: async (chatId, filePath, caption) => {
+      if (!ctx.telegramAdapter) return;
+      await ctx.telegramAdapter.sendDocument(chatId, filePath, caption);
+    },
+    chatId: () => String(masterChatId),
+  }));
+  heartbeat.registerTask(createKanbanCleanupTask());
 
   // #440: update check (npm registry, notify if newer version)
   heartbeat.registerTask(createUpdateCheckTask((msg) => {

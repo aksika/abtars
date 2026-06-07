@@ -126,6 +126,10 @@
     "abtars",
     "abtars-browser",
     "abtars-restart",
+<<<<<<< HEAD
+=======
+    "abtars-rss",
+>>>>>>> dev
     "abtars-task",
     "abtars-tweet",
     "abtars-todo"

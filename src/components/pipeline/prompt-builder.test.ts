@@ -16,11 +16,11 @@ vi.mock("../user-registry.js", () => ({
 }));
 vi.mock("abmind", () => ({
   renderMemory: vi.fn((m) => `[memory] ${m.content_en}`),
-  buildSessionStartContext: vi.fn(() => "Session context: last active 2h ago"),
+  buildSessionStartContext: vi.fn(() => ({ text: "Session context: last active 2h ago", stats: { messages: 5, dailies: 1, usedBytes: 500, budget: 4000 } })),
 }));
 vi.mock("../../utils/abmind-lazy.js", () => ({
   abmind: () => ({
-    buildSessionStartContext: () => "Session context: last active 2h ago",
+    buildSessionStartContext: () => ({ text: "Session context: last active 2h ago", stats: { messages: 5, dailies: 1, usedBytes: 500, budget: 4000 } }),
     renderMemory: (m: any) => `[memory] ${m.content_en}`,
   }),
   loadAbmind: async () => ({}),

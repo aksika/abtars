@@ -34,5 +34,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "wakeup", description: "Wake Mac from sleep" },
   { name: "sleep", description: "Sleep status / resume / now" },
   { name: "whoami", description: "Your user info & clearance" },
+  { name: "reasoning", description: "Reasoning effort & thinking display" },
+  { name: "kanban", description: "Kanban board" },
   { name: "help", description: "Show all commands" },
 ];

@@ -456,6 +456,15 @@ export class DirectApiTransport implements IKiroTransport {
         body.thinking = { type: "enabled", budget_tokens: this.config.thinking.default };
       }
     }
+    // #869: session-level reasoning override (from /reasoning command)
+    if (session.reasoningEffort) {
+      const BUDGET_MAP: Record<string, number> = { low: 1024, medium: 4096, high: 16384 };
+      if (this.config.apiFormat === "anthropic") {
+        body.thinking = { type: "enabled", budget_tokens: BUDGET_MAP[session.reasoningEffort] ?? 4096 };
+      } else {
+        body.reasoning_effort = session.reasoningEffort;
+      }
+    }
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.activeApiKey) headers["Authorization"] = `Bearer ${this.activeApiKey}`;
@@ -576,6 +585,7 @@ export class DirectApiTransport implements IKiroTransport {
   get isReady(): boolean { return true; }
   get contextPercent(): number { return this._contextPercent; }
   get answerOnly(): string { return this._lastAnswer; }
+  getActiveSession(): ConversationSession | null { return this.sessions.get(this._activeSessionKey) ?? null; }
   get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
 
   /** Hot-swap the active model. Takes effect on next API call. */

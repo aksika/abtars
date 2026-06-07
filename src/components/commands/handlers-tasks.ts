@@ -114,3 +114,46 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
   }
   return true;
 }
+
+export async function handleKanban(text: string, ctx: CommandContext): Promise<boolean> {
+  try {
+    const { kanbanList } = await import("../tasks/kanban-board.js");
+    const arg = text.replace(/^\/kanban\s*/, "").trim();
+
+    // Parse filter: "all", "status=done", "source=cron", "priority=HIGH", "labels=finance"
+    const ALLOWED_FILTERS = new Set(["status", "source", "priority", "labels", "type"]);
+    let filterVal: string | undefined;
+    let filterKey: string | undefined;
+    let showAll = false;
+
+    if (arg === "all") {
+      showAll = true;
+    } else if (arg && arg.includes("=")) {
+      const [key, val] = arg.split("=", 2);
+      if (!key || !val || !ALLOWED_FILTERS.has(key)) {
+        await ctx.reply(`❌ Invalid filter. Use: /kanban [all | status=X | source=X | priority=X | labels=X | type=X]`);
+        return true;
+      }
+      filterKey = key;
+      filterVal = val.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
+    } else if (arg) {
+      // Bare word = status filter
+      filterVal = arg.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
+    }
+
+    const cards = showAll ? kanbanList("*") : kanbanList(filterVal, filterKey);
+    if (cards.length === 0) {
+      await ctx.reply("📋 Kanban board is empty.");
+      return true;
+    }
+    const lines = cards.map((c: { id: number; title: string; status: string; source: string; priority: string; due_at: string | null }) => {
+      const icon = c.status === "delivered" ? "✅" : c.status === "done" ? "📬" : c.status === "running" ? "⏳" : c.status === "failed" ? "❌" : "📥";
+      const due = c.due_at ? ` due:${c.due_at.slice(0, 10)}` : "";
+      return `${icon} #${c.id} ${c.title} (${c.source}/${c.priority})${due}`;
+    });
+    await ctx.reply(`📋 Kanban Board (${cards.length}):\n${lines.join("\n")}`);
+  } catch (err) {
+    await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return true;
+}

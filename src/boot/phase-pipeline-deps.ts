@@ -82,28 +82,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   ctx.cronQueue = cronQueue;
 
   // cronCallback closes over ctx — reads telegramAdapter lazily (set in phase-platforms)
-  const cronCallback: TaskCompleteCallback = (chatId, message, result, dodFiles) => {
-    if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
-    const adapter = ctx.telegramAdapter;
-
-    adapter.sendMessage(String(chatId), sanitizeOutbound(result)).catch(err => {
-      logWarn("main", `Cron task TG report failed: ${err}`);
-    });
-
-    if (dodFiles?.length) {
-      for (const file of dodFiles) {
-        adapter.sendDocument(String(chatId), file, message.slice(0, 1024)).catch(err => {
-          logWarn("main", `Cron task TG sendDocument failed: ${err}`);
-        });
-      }
-    }
-
-    // #662: inject task result into agent context
-    import("../components/system-message.js").then(({ sendSystemMessage }) => {
-      const summary = result.length > 500 ? result.slice(0, 500) + "…" : result;
-      const status = result.length > 4000 ? "truncated" : "complete";
-      sendSystemMessage(`[SYSTEM] [TASK RESULT] Task "${message}" — ${status}.\nOutput: ${summary}`).catch(err => logWarn("main", `Task result injection failed: ${err}`));
-    }).catch(() => {});
+  const cronCallback: TaskCompleteCallback = (_chatId, _message, _result, _dodFiles) => {
+    // #857: delivery handled by kanban board poll in heartbeat-tasks.
+    // Board was already updated by task-queue (kanbanComplete/kanbanFail).
+    // Main agent picks up done cards and delivers on next interaction.
   };
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)

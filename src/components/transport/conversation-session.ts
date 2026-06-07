@@ -24,6 +24,8 @@ export type ToolCall = {
 export class ConversationSession {
   messages: ChatMessage[] = [];
   totalPromptTokens = 0;
+  reasoningEffort: "low" | "medium" | "high" | null = null;
+  showReasoning = false;
   private readonly maxContext: number;
 
   constructor(systemPrompt: string, maxContext: number) {
@@ -64,6 +66,8 @@ export class ConversationSession {
   reset(systemPrompt: string): void {
     this.messages = [{ role: "system", content: systemPrompt }];
     this.totalPromptTokens = 0;
+    this.reasoningEffort = null;
+    this.showReasoning = false;
   }
 
   /** Roll back to last user message — remove everything after it for clean fallback. */
