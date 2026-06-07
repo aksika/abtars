@@ -16,22 +16,22 @@ interface CacheData {
   lastNotifiedVersion?: string;
 }
 
-function cachePath(): string {
+function cachePath(pkg?: string): string {
   const dir = join(abtarsHome(), "state");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  return join(dir, "update-check.json");
+  return join(dir, pkg ? `update-check-${pkg}.json` : "update-check.json");
 }
 
-function readCache(ttlMs: number): CacheData | null {
+function readCache(ttlMs: number, pkg?: string): CacheData | null {
   try {
-    const data = JSON.parse(readFileSync(cachePath(), "utf-8")) as CacheData;
+    const data = JSON.parse(readFileSync(cachePath(pkg), "utf-8")) as CacheData;
     if (Date.now() - data.ts < ttlMs) return data;
   } catch { /* missing or corrupt */ }
   return null;
 }
 
-function writeCache(data: CacheData): void {
-  try { writeFileSync(cachePath(), JSON.stringify(data), "utf-8"); } catch { /* non-critical */ }
+function writeCache(data: CacheData, pkg?: string): void {
+  try { writeFileSync(cachePath(pkg), JSON.stringify(data), "utf-8"); } catch { /* non-critical */ }
 }
 
 /** Fetch the appropriate version from npm based on whether we're running a prerelease. */
@@ -85,7 +85,7 @@ export function checkForUpdate(pkg: string, currentVersion: string, opts?: { ttl
   if (process.env.UPDATE_NOTIFICATION === "OFF") return null;
 
   const ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
-  const cache = readCache(ttlMs);
+  const cache = readCache(ttlMs, pkg);
   const latest = cache?.latest ?? fetchLatest(pkg, currentVersion);
   if (!latest) return null;
 
@@ -98,7 +98,7 @@ export function checkForUpdate(pkg: string, currentVersion: string, opts?: { ttl
     latest,
     lastNotifiedVersion: shouldNotify ? latest : cache?.lastNotifiedVersion,
   };
-  if (!cache || shouldNotify) writeCache(newCache);
+  if (!cache || shouldNotify) writeCache(newCache, pkg);
 
   return { current: currentVersion, latest, updateAvailable, shouldNotify };
 }
