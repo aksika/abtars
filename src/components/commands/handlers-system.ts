@@ -339,9 +339,9 @@ export async function handleWhoami(_text: string, ctx: CommandContext): Promise<
   const user = ctx.userId ? reg.byUserId.get(ctx.userId) : undefined;
   if (user) {
     const clearance = CLASS_NAMES[user.maxClass] ?? `class ${user.maxClass}`;
-    await ctx.reply(`${user.displayName ?? user.userId} (${user.role}, ${clearance} clearance)`);
+    await ctx.reply(`${user.displayName ?? user.userId} (${user.role})\nClearance: ${clearance}\nchatId: ${ctx.chatId}`);
   } else {
-    await ctx.reply(`${ctx.userId ?? "unknown"} (unregistered)`);
+    await ctx.reply(`${ctx.userId ?? "unknown"} (unregistered)\nchatId: ${ctx.chatId}`);
   }
   return true;
 }
