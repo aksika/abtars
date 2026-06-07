@@ -585,6 +585,7 @@ export async function startSession(
   const response = await transport.sendPrompt(sessionKey, prompt, undefined, userId);
   if (response?.trim() && response.trim() !== "[NO_REPLY]" && response.trim() !== "(no response)") {
     await sendResponse(response);
+    memory.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), userId, sessionId: sessionKey });
   }
 }
 
