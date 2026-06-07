@@ -127,6 +127,9 @@ export function kanbanDeliveryFailed(id: number): void {
 }
 
 export function kanbanList(status?: string): KanbanCard[] {
+  if (status === "*") {
+    return db().prepare(`SELECT * FROM kanban_board ORDER BY created_at DESC LIMIT 50`).all() as KanbanCard[];
+  }
   if (status) {
     return db().prepare(`SELECT * FROM kanban_board WHERE status = ? ORDER BY created_at DESC LIMIT 50`).all(status) as KanbanCard[];
   }

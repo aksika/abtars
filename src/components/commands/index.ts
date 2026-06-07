@@ -39,6 +39,7 @@ registerExact("/tasks", handleTasksList);
 registerExact("/task", handleTasksList);
 registerExact("/cron", handleTasksList);
 registerExact("/kanban", handleKanban);
+registerPrefix("/kanban ", handleKanban);
 registerExact("/memory", handleMemory);
 registerExact("/heartbeat", handleHeartbeat);
 registerExact("/models", handleModels);

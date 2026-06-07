@@ -115,10 +115,32 @@ export async function handleTaskPause(text: string, ctx: CommandContext): Promis
   return true;
 }
 
-export async function handleKanban(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleKanban(text: string, ctx: CommandContext): Promise<boolean> {
   try {
     const { kanbanList } = await import("../tasks/kanban-board.js");
-    const cards = kanbanList();
+    const arg = text.replace(/^\/kanban\s*/, "").trim();
+
+    // Parse filter: "all", "status=done", "source=cron", "priority=HIGH", "labels=finance"
+    const ALLOWED_FILTERS = new Set(["status", "source", "priority", "labels", "type"]);
+    let status: string | undefined;
+    let showAll = false;
+
+    if (arg === "all") {
+      showAll = true;
+    } else if (arg && arg.includes("=")) {
+      const [key, val] = arg.split("=", 2);
+      if (!key || !val || !ALLOWED_FILTERS.has(key)) {
+        await ctx.reply(`❌ Invalid filter. Use: /kanban [all | status=X | source=X | priority=X | labels=X | type=X]`);
+        return true;
+      }
+      // Whitelist values — no raw SQL
+      status = val.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
+    } else if (arg) {
+      // Treat bare word as status filter
+      status = arg.replace(/[^a-zA-Z0-9_,-]/g, "").slice(0, 30);
+    }
+
+    const cards = showAll ? kanbanList("*") : kanbanList(status);
     if (cards.length === 0) {
       await ctx.reply("📋 Kanban board is empty.");
       return true;
@@ -128,7 +150,7 @@ export async function handleKanban(_text: string, ctx: CommandContext): Promise<
       const due = c.due_at ? ` due:${c.due_at.slice(0, 10)}` : "";
       return `${icon} #${c.id} ${c.title} (${c.source}/${c.priority})${due}`;
     });
-    await ctx.reply(`📋 Kanban Board:\n${lines.join("\n")}`);
+    await ctx.reply(`📋 Kanban Board (${cards.length}):\n${lines.join("\n")}`);
   } catch (err) {
     await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
   }
