@@ -13,7 +13,8 @@ describe("ModelHealthRegistry", () => {
   it("skips after enough errors", () => {
     reg.recordError("kimi", "ep1", "transient");
     reg.recordError("kimi", "ep1", "transient");
-    reg.recordError("kimi", "ep1", "transient"); // 0.1+0.2+0.4 = 0.7
+    reg.recordError("kimi", "ep1", "transient");
+    reg.recordError("kimi", "ep1", "transient"); // 0.1+0.2+0.4+0.8 > 0.7
     expect(reg.shouldSkip("kimi", "ep1")).toBe(true);
   });
 
