@@ -56,6 +56,7 @@ cp "$ABMIND_SRC/package.json" "$HOME_DIR/app.staging/bundle/node_modules/abmind/
 rm -rf "$HOME_DIR/app.prev"
 [ -d "$HOME_DIR/app" ] && mv "$HOME_DIR/app" "$HOME_DIR/app.prev"
 mv "$HOME_DIR/app.staging" "$HOME_DIR/app"
+[ -d "$HOME_DIR/app.prev/bundle/node_modules" ] && mv "$HOME_DIR/app.prev/bundle/node_modules" "$HOME_DIR/app/bundle/node_modules"
 
 # 6. Write minimal manifest
 COMMIT=$(git -C "$SRC_DIR" rev-parse --short HEAD)
