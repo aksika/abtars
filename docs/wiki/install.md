@@ -35,47 +35,57 @@ Stable ≤ Alpha ≤ Dev.
 
 ## Manual install (npm)
 
-### Stable
+### Linux / WSL
 
 ```bash
-npm install -g abtars abmind
-abmind install
-abtars install
-abtars update
-abtars onboard
-sudo $(which abtars) daemon install
-```
+# Prerequisites
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
 
-### Alpha (recommended)
-
-```bash
+# Install
 npm install -g abtars@alpha abmind@alpha
 abmind install
 abtars install
 abtars update
 abtars onboard
+
+# Start (supervised — systemd)
 sudo $(which abtars) daemon install
 ```
 
-### Git (development, build from source)
+### macOS
 
 ```bash
-git clone git@github.com:aksika/abtars.git
-git clone git@github.com:aksika/abmind.git
-cd abmind && npm install && npm run build && cd ..
-cd abtars && npm install && abtars update --from-local
+# Prerequisites
+brew install node
+
+# Install
+npm install -g abtars@alpha abmind@alpha
+abmind install
+abtars install
+abtars update
 abtars onboard
-sudo $(which abtars) daemon install
+
+# Start (supervised — launchd)
+abtars daemon install
 ```
+
+### Simple start (no daemon, either platform)
+
+```bash
+abtars start
+```
+
+No auto-restart on crash. Good for testing.
 
 | Step | What happens |
 |------|-------------|
-| `npm install -g abtars abmind` | Installs CLI tools globally (stable channel) |
+| `npm install -g abtars@alpha abmind@alpha` | Installs CLI tools globally (alpha channel) |
 | `abmind install` | Creates `~/.abmind/`, prompts for encryption passphrase, initializes memory DB |
 | `abtars install` | Creates `~/.abtars/` skeleton (config, scripts, skills) |
 | `abtars update` | Stages the release (copies bundle to `~/.abtars/releases/`) |
 | `abtars onboard` | Interactive setup: Telegram token, model, user ID |
-| `sudo ... daemon install` | Registers systemd service, starts the bridge |
+| `daemon install` | Registers OS service, starts the bridge with watchdog |
 
 After `daemon install`, the bridge is running and responding to messages. No separate restart needed.
 
@@ -83,13 +93,15 @@ After `daemon install`, the bridge is running and responding to messages. No sep
 
 ```bash
 git clone https://github.com/aksika/abtars.git
-cd abtars
-npm install
-npm run bundle
-abtars install
-abtars update --from-local
+git clone https://github.com/aksika/abmind.git
+cd abmind && npm install && npm run build && cd ..
+cd abtars && npm install && abtars update --from-local
 abtars onboard
+
+# Linux/WSL:
 sudo $(which abtars) daemon install
+# macOS:
+abtars daemon install
 ```
 
 To update after pulling new commits:
@@ -114,18 +126,23 @@ What memory adds:
 
 ## Daemon management
 
+### Linux / WSL (systemd)
+
 ```bash
-abtars daemon status      # show service state
+sudo systemctl status abtars     # show service state
 sudo systemctl stop abtars       # stop
 sudo systemctl start abtars      # start
 sudo systemctl restart abtars    # restart
 sudo $(which abtars) daemon uninstall   # remove the service
 ```
 
-For development (no daemon):
+### macOS (launchd)
+
 ```bash
-abtars start    # direct start, foreground watchdog
-abtars stop     # stop
+abtars daemon status             # show service state
+abtars stop --force              # stop (kills watchdog first)
+abtars start                     # start
+abtars daemon uninstall          # remove the service
 ```
 
 ## What gets created

@@ -1,78 +1,62 @@
 # Quick Start
 
-Steps only. For detailed explanations, see [Installation](./install.md).
+New to abTARS? This page walks you through what you need and what to decide before installing.
 
-## 1. Choose your mode
+Experienced? Jump straight to [Installation](./install.md) for the full technical steps.
 
-| Mode | Command | What it does |
-|------|---------|-------------|
-| **Supervised (recommended)** | `abtars daemon install` | Installs OS service (launchd on macOS, systemd on Linux). Auto-restarts on crash, survives reboot, 4-layer watchdog. |
-| **Simple** | `abtars start` | Launches the bridge in the background. No auto-restart on crash. |
+## What you'll need
 
-## 2. Prerequisites: Node.js 22+
+1. **A computer that stays on** — Mac mini, NUC, old laptop, cloud VM, WSL on your desktop. abTARS runs 24/7 on your hardware.
 
-**macOS (Homebrew):**
-```bash
-brew install node
-```
+2. **Node.js 22+** — the runtime. Install via [Homebrew](https://brew.sh) (macOS) or [NodeSource](https://github.com/nodesource/distributions) (Linux/WSL).
 
-**Ubuntu / WSL:**
-```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt install -y nodejs
-```
+3. **A Telegram bot token** — create one via [@BotFather](https://t.me/BotFather) on Telegram. This is how you'll talk to your agent.
 
-## 3. Install
+4. **A model provider** — at least one of:
+   - **ollama** (free, runs locally — good for privacy)
+   - **OpenRouter** (paid, access to all frontier models)
+   - **Kiro CLI / Gemini CLI / Claude Code** (if you already use one)
 
-```bash
-npm install -g abtars@alpha abmind@alpha
-```
+## Decisions to make
 
-Alpha builds ship frequently with the latest features. For stable releases: `npm install -g abtars abmind`
+### How should it run?
 
-## 4. Setup
+| Mode | What it means |
+|------|--------------|
+| **Supervised (recommended)** | Installs as an OS service. Auto-restarts on crash, survives reboots, watchdog monitors health. Your agent is always on. |
+| **Simple** | Runs in the background. If it crashes, you restart manually. Good for trying things out. |
 
-```bash
-abtars install
-abtars update
-abtars onboard
-```
+### Which model?
 
-The onboard wizard asks for:
-- Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- Model provider (Kiro CLI, OpenRouter, ollama, etc.)
-- Agent name and passphrase (for memory encryption)
+Any model works. For the best experience:
+- **128K+ context window** — smaller models lose context fast with tool use
+- **Frontier quality** (GPT-4o, Claude, Gemini Pro) — better at following instructions, harder to manipulate
+- **Local models via ollama** — fully private, no API costs, but weaker on complex tasks
 
-> ⚠️ **SECURITY WARNING:** When creating your bot with @BotFather, keep it **private** (not searchable publicly). abTARS has access to your machine via `execute_bash`. If your bot is publicly discoverable, anyone can find and message it. The built-in `users.json` allowlist blocks unknown senders, but defense-in-depth means the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.
+You can switch models anytime via `/model` in Telegram. No reinstall needed.
 
-## 5. Start
+## Let your AI install it for you
 
-**Supervised (recommended):**
-```bash
-# macOS (launchd — no sudo needed):
-abtars daemon install
+If you use an agentic coding tool (Kiro, Claude Code, Gemini CLI, Cursor, Copilot), just give it the [Installation page](./install.md) and ask it to install abTARS for you. It has all the information it needs — prerequisites, commands, platform-specific steps.
 
-# Linux (systemd — needs sudo):
-sudo $(which abtars) daemon install
-```
+> "Install abTARS on this machine following the install guide. Use alpha channel, supervised mode."
 
-**Simple:**
-```bash
-abtars start
-```
+That's it. Your AI colleague handles the rest.
 
-Done. Your bot is live on Telegram.
+## Manual install
 
-## 6. Verify
+Follow [Installation](./install.md) — it has step-by-step instructions for both Linux/WSL and macOS.
+
+## After install
+
+### Verify it works
 
 ```bash
 abtars status       # should show bridge: ● running
 abtars doctor       # should show all green
 ```
 
-Send a message to your bot — it should respond.
-
-## Post-install cheat sheet
+Send a message to your bot on Telegram — it should respond.
 
 ### Telegram commands
 
@@ -82,12 +66,11 @@ Send a message to your bot — it should respond.
 | `/model` | Switch model/provider on the fly |
 | `/new` | Start a fresh conversation session |
 | `/sleep` | Trigger sleep + memory consolidation |
-| `/restart` | Restart the bridge |
 | `/help` | Full command list |
 
 ### Customize personality
 
-Edit `~/.abmind/memory/core/SOUL.md` — defines who your agent is: name, personality, language, tone.
+Edit `~/.abmind/memory/core/SOUL.md` — this defines who your agent is: name, personality, language, tone. Make it yours.
 
 ### Updating
 
@@ -96,35 +79,14 @@ npm update -g abtars@alpha abmind@alpha
 abtars update
 ```
 
-### Stop / restart
-
-```bash
-abtars stop         # stop
-abtars start        # start again
-```
-
 ### Something broke?
 
 ```bash
 abtars doctor --fix
-tail -20 ~/.abtars/logs/bridge-$(date +%F).log
 ```
 
 See [Health Check](./healthcheck.md) for more.
 
-### Where is everything?
+## Security
 
-```
-~/.abtars/
-├── config/          .env, transport.json, models.json, users.json
-├── secret/          API keys (encrypted at rest)
-├── logs/            Daily log files
-├── skills/          core/, self/, custom/
-├── releases/        Versioned deployments
-└── current → releases/<version>
-
-~/.abmind/
-├── memory/core/     SOUL.md, agent_notes.md, user_profile.md
-├── memory/memory.db SQLite memory database
-└── secret/          Encryption key
-```
+> ⚠️ When creating your bot with @BotFather, keep it **private** (not searchable publicly). abTARS has access to your machine via tools. The built-in allowlist blocks unknown senders, but the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.
