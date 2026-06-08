@@ -9,7 +9,12 @@ const exactCommands: Record<string, CommandHandler> = {};
 const prefixCommands: Array<{ prefix: string; handler: CommandHandler }> = [];
 const KNOWN_COMMANDS = new Set<string>();
 
-const NON_MASTER_COMMANDS = new Set(["/new", "/reset", "/stop", "/ctrlc", "/status", "/help", "/whoami"]);
+const NON_MASTER_COMMANDS = new Set([
+  "/status", "/help", "/whoami", "/doctor", "/software", "/update",
+  "/models", "/model", "/skills", "/facts", "/tasks", "/task", "/cron",
+  "/usage", "/openrouter", "/session", "/hooks", "/memory", "/kanban",
+  "/heartbeat", "/new", "/reset", "/stop", "/ctrlc",
+]);
 
 export function registerExact(name: string, handler: CommandHandler): void {
   exactCommands[name] = handler;
@@ -55,6 +60,12 @@ export async function handleCommand(text: string, ctx: CommandContext): Promise<
   if (text.startsWith("/") && /^\/\w+/.test(text) && !text.startsWith("//")) {
     const cmd = text.split(/\s/)[0]!;
     if (!KNOWN_COMMANDS.has(cmd)) {
+      // Fuzzy match: auto-execute if Levenshtein ≤ 2
+      const match = fuzzyMatch(cmd);
+      if (match) {
+        const corrected = text.replace(cmd, match);
+        return handleCommand(corrected, ctx);
+      }
       await ctx.reply(`❓ Unknown command: ${cmd}\nType /help for available commands.`);
       return true;
     }
@@ -113,4 +124,29 @@ export function killWakeInhibit(): void {
 
 export function setWakeInhibitPid(pid: number): void {
   _wakeInhibitPid = pid;
+}
+
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  const d: number[] = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    let prev = i - 1;
+    d[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const tmp = d[j]!;
+      d[j] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, d[j]!, d[j - 1]!);
+      prev = tmp;
+    }
+  }
+  return d[n]!;
+}
+
+function fuzzyMatch(cmd: string): string | null {
+  let best: string | null = null;
+  let bestDist = 3; // threshold: ≤ 2
+  for (const known of KNOWN_COMMANDS) {
+    const dist = levenshtein(cmd, known);
+    if (dist < bestDist) { best = known; bestDist = dist; }
+  }
+  return best;
 }
