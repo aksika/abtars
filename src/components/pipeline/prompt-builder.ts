@@ -215,6 +215,7 @@ export function buildSessionStartPrompt(
       const type = typeMap[sessionType] ?? sessionType;
       const index = parseInt(parts[2]!, 10);
       contextParts.push(`[SESSION] #${index} (${type})`);
+      logInfo(TAG, `Injected session identity: #${index} (${type})`);
     }
   }
 
@@ -260,6 +261,7 @@ export function buildSessionStartPrompt(
   if (platform) {
     const CAPS: Record<string, string> = { telegram: "voice, reactions, typing, TTS, groups", discord: "reactions, typing, threads", irc: "text only" };
     contextParts.push(`[SYSTEM] Platform: ${platform} (${CAPS[platform] ?? "unknown"})`);
+    logInfo(TAG, `Injected platform: ${platform}`);
   }
 
   // Runtime identity (#879) — prevent agent misidentifying itself
@@ -302,7 +304,7 @@ export function buildSessionStartPrompt(
         // #646 — system status (skip for Code sessions)
         if (sessionKey && !sessionKey.includes("_C_")) {
           const status = abmind()!.buildStatusBlock(memory);
-          if (status) contextParts.push(status);
+          if (status) { contextParts.push(status); logInfo(TAG, `Injected system status (${status.length} chars)`); }
         }
       }
     } catch (err) { logAndSwallow("prompt_builder", "op", err); }
@@ -314,6 +316,7 @@ export function buildSessionStartPrompt(
 
   const result = contextBlock + prompt;
   logTrace(TAG, `session-start assembled: ${contextParts.length} parts, context=${contextBlock.length} chars, prompt=${prompt.length} chars, total=${result.length} chars`);
+  logTrace(TAG, `session-start injections:\n${contextParts.filter(p => p.startsWith("[")).map(p => "  " + p.slice(0, 120)).join("\n")}`);
   if (result.length < 5000) {
     logInfo(TAG, `Session-start prompt suspiciously small (${result.length} chars) — SOUL may be missing`);
   }
