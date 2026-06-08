@@ -272,7 +272,7 @@ export async function getDoctorReport(ctx: DoctorCtx, opts?: { force?: boolean }
 }
 
 export function renderDoctorText(report: DoctorReport): string {
-  const icon = (s: ProbeResult["status"]): string => s === "ok" ? "✓" : s === "failed" ? "✗" : "⏭";
+  const icon = (s: ProbeResult["status"]): string => s === "ok" ? "✓" : s === "failed" ? "✗" : "~";
   const lines = report.results.map(r => {
     const detail = r.detail ? ` — ${r.detail}` : "";
     const ms = r.latencyMs > 0 ? ` (${r.latencyMs}ms)` : "";
