@@ -5,10 +5,10 @@ Steps only. For detailed explanations, see [Installation](./install.md).
 ## 1. Install
 
 ```bash
-npm install -g abtars abmind
+npm install -g abtars@alpha abmind@alpha
 ```
 
-Requires Node.js 22+. For alpha builds: `npm install -g abtars@alpha abmind@alpha`
+Requires Node.js 22+. Alpha builds ship frequently with the latest features. For stable releases: `npm install -g abtars abmind`
 
 ## 2. Setup
 
@@ -28,10 +28,16 @@ The onboard wizard asks for:
 ## 3. Start
 
 ```bash
-sudo $(which abtars) daemon install
+abtars start
 ```
 
-Done. Your bot is live on Telegram.
+Done. Your bot is live on Telegram. Runs in the foreground — press Ctrl+C to stop.
+
+To run as a background service (auto-restart, survives reboot):
+
+```bash
+abtars daemon install
+```
 
 ## 4. Verify
 
@@ -62,15 +68,15 @@ Edit `~/.abmind/memory/core/SOUL.md` — defines who your agent is: name, person
 ### Updating
 
 ```bash
-npm update -g abtars abmind
+npm update -g abtars@alpha abmind@alpha
 abtars update
 ```
 
 ### Stop / restart
 
 ```bash
-sudo systemctl stop abtars      # stop
-sudo systemctl restart abtars   # restart
+abtars stop         # stop (foreground: just Ctrl+C)
+abtars start        # start again
 ```
 
 ### Something broke?
