@@ -262,6 +262,10 @@ export function buildSessionStartPrompt(
     contextParts.push(`[SYSTEM] Platform: ${platform} (${CAPS[platform] ?? "unknown"})`);
   }
 
+  // Runtime identity (#879) — prevent agent misidentifying itself
+  const transportType = getEnv().defaultTransport === "acp" ? "ACP" : "Direct API";
+  contextParts.push(`[SYSTEM] Runtime: abtars bridge (${transportType}). All registered bridge tools are available.`);
+
   const compSummary = null; // Legacy compaction removed — context engine handles summaries
   if (compSummary && sessionKey) {
     // Dead path — kept for type safety during transition
