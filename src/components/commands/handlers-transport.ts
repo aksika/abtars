@@ -346,3 +346,14 @@ export async function handleReasoning(text: string, ctx: CommandContext): Promis
   }
   return true;
 }
+
+export async function handleContinue(_text: string, ctx: CommandContext): Promise<boolean> {
+  const response = await ctx.transport.sendPrompt(
+    ctx.sessionKey,
+    "[SYSTEM] Something went wrong during your previous response. Continue from where you left off.",
+    undefined,
+    ctx.userId,
+  );
+  if (response) await ctx.reply(response);
+  return true;
+}
