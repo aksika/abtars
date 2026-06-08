@@ -78,6 +78,7 @@ const probeHeartbeat: ProbeFn = async (ctx) => {
   if (!ctx.memory || typeof ctx.memory.getCronInfo !== "function") return { name: "heartbeat", status: "skipped", latencyMs: 0 };
   try {
     const info = ctx.memory.getCronInfo();
+    if (!info) return { name: "heartbeat", status: "skipped", latencyMs: Date.now() - start, detail: "no cron info" };
     const running = info.heartbeatRunning;
     return { name: "heartbeat", status: running ? "ok" : "failed", latencyMs: Date.now() - start, detail: running ? `interval ${info.intervalMs}ms` : "not running" };
   } catch (err) {
