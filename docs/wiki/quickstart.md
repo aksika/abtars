@@ -2,9 +2,14 @@
 
 Steps only. For detailed explanations, see [Installation](./install.md).
 
-## 1. Install
+## 1. Choose your mode
 
-### Prerequisites: Node.js 22+
+| Mode | Command | What it does |
+|------|---------|-------------|
+| **Supervised (recommended)** | `abtars daemon install` | Installs OS service (launchd on macOS, systemd on Linux). Auto-restarts on crash, survives reboot, 4-layer watchdog. |
+| **Simple** | `abtars start` | Launches the bridge in the background. No auto-restart on crash. |
+
+## 2. Prerequisites: Node.js 22+
 
 **macOS (Homebrew):**
 ```bash
@@ -17,7 +22,7 @@ curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
 
-### Install abtars + abmind
+## 3. Install
 
 ```bash
 npm install -g abtars@alpha abmind@alpha
@@ -25,7 +30,7 @@ npm install -g abtars@alpha abmind@alpha
 
 Alpha builds ship frequently with the latest features. For stable releases: `npm install -g abtars abmind`
 
-## 2. Setup
+## 4. Setup
 
 ```bash
 abtars install
@@ -40,21 +45,25 @@ The onboard wizard asks for:
 
 > ⚠️ **SECURITY WARNING:** When creating your bot with @BotFather, keep it **private** (not searchable publicly). abTARS has access to your machine via `execute_bash`. If your bot is publicly discoverable, anyone can find and message it. The built-in `users.json` allowlist blocks unknown senders, but defense-in-depth means the bot should not be discoverable in the first place. Only people who know the exact bot username should be able to reach it.
 
-## 3. Start
+## 5. Start
 
+**Supervised (recommended):**
+```bash
+# macOS (launchd — no sudo needed):
+abtars daemon install
+
+# Linux (systemd — needs sudo):
+sudo $(which abtars) daemon install
+```
+
+**Simple:**
 ```bash
 abtars start
 ```
 
-Done. Your bot is live on Telegram. Runs in the foreground — press Ctrl+C to stop.
+Done. Your bot is live on Telegram.
 
-To run as a background service (auto-restart, survives reboot):
-
-```bash
-abtars daemon install
-```
-
-## 4. Verify
+## 6. Verify
 
 ```bash
 abtars status       # should show bridge: ● running
@@ -90,7 +99,7 @@ abtars update
 ### Stop / restart
 
 ```bash
-abtars stop         # stop (foreground: just Ctrl+C)
+abtars stop         # stop
 abtars start        # start again
 ```
 
