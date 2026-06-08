@@ -208,18 +208,22 @@ const probeAbmindCli: ProbeFn = async (_ctx) => {
 };
 
 const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
+  // Static file checks
   { fn: probeCoreFiles, timeout: 1000 },
-  { fn: probeFtsIntegrity, timeout: 3000 },
   { fn: probeSecretPerms, timeout: 1000 },
   { fn: probeTlsIdentity, timeout: 2000 },
+  { fn: probeFtsIntegrity, timeout: 3000 },
+  // Memory
   { fn: probeAbmindCli, timeout: 3000 },
   { fn: probeMemory, timeout: 5000 },
+  { fn: probeHeartbeat, timeout: 2000 },
+  // Transport + platforms
+  { fn: probeTransport, timeout: 10000 },
   { fn: probeTelegram, timeout: 5000 },
   { fn: probeDiscord, timeout: 5000 },
-  { fn: probeHeartbeat, timeout: 2000 },
-  { fn: probeDashboard, timeout: 5000 },
+  // Infra
   { fn: probeOllama, timeout: 5000 },
-  { fn: probeTransport, timeout: 10000 }, // last — most expensive
+  { fn: probeDashboard, timeout: 5000 },
 ];
 
 let lastReport: { report: DoctorReport; generatedAt: number } | null = null;
