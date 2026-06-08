@@ -419,6 +419,15 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
           const ab = spawnSync("git", ["-C", abmindDir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
           if (ab.status !== 0) { await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
           pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
+        } else {
+          mkdirSync(join(home, "src"), { recursive: true });
+          const cl = spawnSync("git", ["clone", "git@github.com:aksika/abmind.git", abmindDir], { encoding: "utf-8", timeout: 60_000 });
+          if (cl.status === 0) {
+            spawnSync("git", ["-C", abmindDir, "checkout", "dev"], { encoding: "utf-8" });
+            pulled += `\nabmind: cloned`;
+          } else {
+            pulled += `\nabmind: clone failed (non-fatal)`;
+          }
         }
         logInfo("update", `Pull complete`);
         await ctx.reply(`${pulled}\n\nReady to deploy: /update deploy`);
@@ -464,6 +473,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         spawn("bash", [script, srcDir, abmindDir], {
           detached: true,
           stdio: "ignore",
+          env: { ...process.env, ABMIND_REPO: abmindDir },
         }).unref();
       } catch (err) {
         await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
