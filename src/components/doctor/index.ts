@@ -214,6 +214,23 @@ const probeAbmindCli: ProbeFn = async (_ctx) => {
   return { name: "abmind-cli", status: "failed", latencyMs: Date.now() - start, detail: "not on PATH — run: npm install -g abmind" };
 };
 
+const probeAgentApi: ProbeFn = async (_ctx) => {
+  const start = Date.now();
+  const { existsSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { abtarsHome } = await import("../../paths.js");
+  const peersPath = join(abtarsHome(), "config", "peers.json");
+  if (!existsSync(peersPath)) return { name: "agent api", status: "skipped", latencyMs: Date.now() - start, detail: "no peers.json" };
+  try {
+    const raw = JSON.parse(readFileSync(peersPath, "utf-8"));
+    const peerCount = Object.keys(raw.peers ?? {}).length;
+    if (peerCount === 0) return { name: "agent api", status: "failed", latencyMs: Date.now() - start, detail: "peers.json empty" };
+    return { name: "agent api", status: "ok", latencyMs: Date.now() - start, detail: `${peerCount} peer(s)` };
+  } catch {
+    return { name: "agent api", status: "failed", latencyMs: Date.now() - start, detail: "peers.json invalid" };
+  }
+};
+
 const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   // Static file checks
   { fn: probeCoreFiles, timeout: 1000 },
@@ -232,6 +249,7 @@ const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   // Infra
   { fn: probeOllama, timeout: 5000 },
   { fn: probeDashboard, timeout: 5000 },
+  { fn: probeAgentApi, timeout: 1000 },
 ];
 
 let lastReport: { report: DoctorReport; generatedAt: number } | null = null;
