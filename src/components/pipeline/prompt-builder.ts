@@ -262,6 +262,13 @@ export function buildSessionStartPrompt(
     contextParts.push(`[SYSTEM] Platform: ${platform} (${CAPS[platform] ?? "unknown"})`);
   }
 
+  // Tool awareness — agent knows what's callable (#646)
+  try {
+    const { getToolDefinitions } = require("../transport/tool-registry.js");
+    const toolNames = getToolDefinitions().map((t: { name: string }) => t.name).join(", ");
+    contextParts.push(`[SYSTEM] You are the full abtars bridge. Available tools: ${toolNames}`);
+  } catch { /* tool registry not ready */ }
+
   const compSummary = null; // Legacy compaction removed — context engine handles summaries
   if (compSummary && sessionKey) {
     // Dead path — kept for type safety during transition
