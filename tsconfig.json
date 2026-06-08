@@ -8,6 +8,10 @@
         ],
         "outDir": "dist",
         "rootDir": "src",
+        "baseUrl": ".",
+        "paths": {
+            "abmind": ["../abmind/dist/src/index.d.ts"]
+        },
         "strict": true,
         "esModuleInterop": true,
         "skipLibCheck": true,
