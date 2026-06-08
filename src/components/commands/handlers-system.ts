@@ -34,6 +34,7 @@ export async function handleDoctor(_text: string, ctx: CommandContext): Promise<
     transport: ctx.transport,
     telegramRunning: svcStates.telegram?.running ?? false,
     discordRunning: svcStates.discord?.running ?? false,
+    ircRunning: svcStates.irc?.running ?? false,
     phaseHealth: ctx.phaseHealth,
   }, { force });
   await ctx.reply(renderDoctorText(report));

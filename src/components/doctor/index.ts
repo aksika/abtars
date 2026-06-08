@@ -27,6 +27,7 @@ export interface DoctorCtx {
   transport?: { sendPrompt: (key: string, msg: string) => Promise<string> } | null;
   telegramRunning?: boolean;
   discordRunning?: boolean;
+  ircRunning?: boolean;
   config?: { webPort?: number } | null;
   phaseHealth?: Map<string, { status: "ok" | "failed" | "skipped"; error?: string }>;
 }
@@ -71,6 +72,12 @@ const probeDiscord: ProbeFn = async (ctx) => {
   const start = Date.now();
   if (!ctx.discordRunning) return { name: "discord", status: "skipped", latencyMs: 0, detail: "not configured" };
   return { name: "discord", status: "ok", latencyMs: Date.now() - start, detail: "running" };
+};
+
+const probeIrc: ProbeFn = async (ctx) => {
+  const start = Date.now();
+  if (!ctx.ircRunning) return { name: "irc", status: "skipped", latencyMs: 0, detail: "not configured" };
+  return { name: "irc", status: "ok", latencyMs: Date.now() - start, detail: "running" };
 };
 
 const probeHeartbeat: ProbeFn = async (ctx) => {
@@ -221,6 +228,7 @@ const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   { fn: probeTransport, timeout: 10000 },
   { fn: probeTelegram, timeout: 5000 },
   { fn: probeDiscord, timeout: 5000 },
+  { fn: probeIrc, timeout: 5000 },
   // Infra
   { fn: probeOllama, timeout: 5000 },
   { fn: probeDashboard, timeout: 5000 },
