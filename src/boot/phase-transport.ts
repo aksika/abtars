@@ -47,8 +47,24 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   let transport: IKiroTransport;
 
   const { resolveAgent, getEnvFallback, loadTransport, resolveHailMary, clearTransportCache, validateProviderReady } = await import("../components/transport-config.js");
+  const { existsSync, renameSync } = await import("node:fs");
+  const { join: pathJoin } = await import("node:path");
   clearTransportCache();  // always re-read (picks up /models change writes)
-  const tc = loadTransport();
+  let tc = loadTransport();
+
+  // Recovery: if transport.json missing/corrupt, try transport.old.json
+  if (!tc) {
+    const configDir = pathJoin(getEnv().abtarsHome, "config");
+    const primary = pathJoin(configDir, "transport.json");
+    const old = pathJoin(configDir, "transport.old.json");
+    if (existsSync(old)) {
+      logDebug("main", "transport.json missing/corrupt — recovering from transport.old.json");
+      renameSync(old, primary);
+      clearTransportCache();
+      tc = loadTransport();
+    }
+  }
+
   const prof = tc ? resolveAgent("professor", tc) : null;
 
   const hm = resolveHailMary(tc);
@@ -63,39 +79,60 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     ctx.hailMary = null;
   }
 
-  let resolved = prof ?? (() => {
-    const fb = getEnvFallback();
-    logWarn("main", `⚠️ Using .env fallback: ${fb.model} via ${fb.providerName}`);
-    return { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
-  })();
+  let resolved: typeof prof = null;
 
-  // #367 — validate the resolved provider BEFORE destroying the existing transport.
-  // If validation fails and an old transport is up, keep it; surface the error.
-  // If no old transport (boot time), try .env fallback.
-  const validation = validateProviderReady(resolved.providerName, resolved.provider, getEnv());
-  if (!validation.ok) {
-    const errMsg = `transport.json configures '${resolved.providerName}' but ${validation.reason}. Fix: ${validation.fix}`;
-    if (ctx.transport) {
-      // Existing transport still good — keep it. Don't destroy.
-      logError("main", `${errMsg} — keeping existing transport up (skipping rebuild)`);
-      return "ran";
+  if (!tc) {
+    // No transport.json and no .old.json — emergency mode from .env
+    const fb = getEnvFallback();
+    const fbValidation = validateProviderReady(fb.providerName, fb.provider, getEnv());
+    if (!fbValidation.ok) {
+      throw new Error(`No transport.json, no backup, and .env emergency model also invalid: ${fbValidation.reason}`);
     }
-    // Boot-time: try falling back to .env if we weren't already using it
-    if (prof) {
-      const fb = getEnvFallback();
-      logError("main", `${errMsg} — falling back to .env config (${fb.model} via ${fb.providerName})`);
-      resolved = { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
-      // Validate fallback too — if even .env is broken, let the original error bubble
-      const fbValidation = validateProviderReady(resolved.providerName, resolved.provider, getEnv());
-      if (!fbValidation.ok) {
-        logError("main", `.env fallback '${resolved.providerName}' also invalid: ${fbValidation.reason}`);
-        throw new Error(`${errMsg} (and .env fallback is also invalid: ${fbValidation.reason})`);
-      }
+    logWarn("main", `⚠️ No transport.json — emergency mode: ${fb.model} via ${fb.providerName}`);
+    resolved = { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
+    // Notify user (deferred — transport not yet built)
+    setTimeout(() => {
+      import("../components/notification.js").then(({ sendNotification }) =>
+        sendNotification(ctx, `⚠️ transport.json missing, no backup. Running emergency model: ${fb.model}. Fix: /update deploy`))
+        .catch(() => {});
+    }, 10_000);
+  } else {
+    // transport.json valid — walk primary + fb chain
+    const validation = validateProviderReady(prof!.providerName, prof!.provider, getEnv());
+    if (validation.ok) {
+      logDebug("main", `Model init OK: ${prof!.model} via ${prof!.providerName}`);
+      resolved = prof;
     } else {
-      // Already on .env fallback path and it's invalid — hard error
-      throw new Error(errMsg);
+      logDebug("main", `Model init failed: ${prof!.model} — ${validation.reason}`);
+      logWarn("main", `${prof!.model}: ${validation.reason} — trying fallbacks`);
+      // Walk fallback chain
+      for (const fb of prof!.fallbacks) {
+        const fbResolved = resolveAgent("_fb", { ...tc!, agents: { ...tc!.agents, _fb: { model: fb.model, provider: fb.provider } } });
+        if (!fbResolved) continue;
+        const fbVal = validateProviderReady(fbResolved.providerName, fbResolved.provider, getEnv());
+        if (fbVal.ok) {
+          logDebug("main", `Fallback init OK: ${fbResolved.model} via ${fbResolved.providerName}`);
+          resolved = fbResolved;
+          break;
+        }
+        logDebug("main", `Fallback init failed: ${fbResolved.model} — ${fbVal.reason}`);
+        logWarn("main", `${fbResolved.model}: ${fbVal.reason} — trying next`);
+      }
+    }
+
+    if (!resolved) {
+      // ALL configured models failed — hard error (boot) or keep existing (reset)
+      const tried = [prof!.model, ...prof!.fallbacks.map(f => f.model)].join(", ");
+      if (ctx.transport) {
+        logError("main", `All models failed init (${tried}) — keeping existing transport up`);
+        return "ran";
+      }
+      throw new Error(`All configured models failed init (${tried}). Fix transport.json or use /emergency`);
     }
   }
+
+  // #367 — if existing transport is up and new config rebuild needed, keep old on error
+  // (This path is only hit via /reset rebuild, not boot)
 
   // Destroy old (if any) — now that we know the new config is valid
   if (ctx.transport) {
