@@ -21,12 +21,62 @@ abTARS includes a built-in encrypted vault for API keys, tokens, and session coo
 ## Adding a secret
 
 ```bash
-echo "sk-or-abc123..." > ~/.abtars/secret/OPENROUTER_API_KEY
+echo -n "sk-or-abc123..." > ~/.abtars/secret/OPENROUTER_API_KEY
 chmod 600 ~/.abtars/secret/OPENROUTER_API_KEY
-abtars stop && abtars start
+abtars stop --force && abtars start
 ```
 
 On restart, the file is automatically encrypted. The plaintext value is available in memory only. That's it — no `.env` entry needed.
+
+> **Use `echo -n`** (no trailing newline). Some APIs reject keys with `\n` appended.
+
+> **Full process restart required.** Secrets load at process boot (module init). The Telegram `/restart` command reinits the pipeline in-process but does NOT reload secrets. Always use `abtars stop --force && abtars start` (or the watchdog restart) for new keys.
+
+## Adding a new provider
+
+1. Write the API key:
+   ```bash
+   echo -n "nvapi-abc123..." > ~/.abtars/secret/NVIDIA_API_KEY
+   chmod 600 ~/.abtars/secret/NVIDIA_API_KEY
+   ```
+
+2. Add the provider to `~/.abtars/config/transport.json`:
+   ```json
+   "nvidia": {
+     "transport": "api",
+     "endpoint": "https://integrate.api.nvidia.com/v1",
+     "apiKeyEnv": "NVIDIA_API_KEY"
+   }
+   ```
+
+3. Add the model to `~/.abtars/config/models.json`:
+   ```json
+   "nvidia/nemotron-3-ultra-550b-a55b": {
+     "contextWindow": 131072,
+     "maxOutput": 16384,
+     "rank": 1,
+     "cost": { "input": 0.0, "output": 0.0 },
+     "transports": ["nvidia"]
+   }
+   ```
+
+4. Restart the bridge:
+   ```bash
+   abtars stop --force && abtars start
+   ```
+
+5. Switch to the model:
+   ```
+   /model nvidia/nemotron-3-ultra-550b-a55b
+   ```
+
+The `apiKeyEnv` field tells the bridge which filename in `~/.abtars/secret/` to read. The filename must match exactly (no extension).
+
+## Don't put keys in .env
+
+The bridge auto-migrates secrets from `.env` to `secret/` on boot (keys ending in `_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`, `_API_ID`). This works but adds confusion — the key disappears from `.env` and appears encrypted in `secret/`. Write directly to `secret/` to skip the migration step.
+
+If you already put a key in `.env`, the next boot migrates it automatically. No action needed.
 
 ## What makes it a vault
 
