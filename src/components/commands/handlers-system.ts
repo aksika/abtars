@@ -454,6 +454,11 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         }
         await ctx.reply("⚙️ Deploying (building in background)...");
 
+        // Write deploy state (#878)
+        const logFile = `deploy-${new Date().toISOString().replace(/[:.]/g, "").slice(0, 15)}.log`;
+        const { writeFileSync: wfs } = await import("node:fs");
+        wfs(join(home, "deploy.state"), JSON.stringify({ status: "running", startedAt: new Date().toISOString(), logFile }) + "\n");
+
         // Spawn build-and-deploy.sh detached — bridge stays responsive (#871)
         const script = join(srcDir, "scripts", "build-and-deploy.sh");
         spawn("bash", [script, srcDir, abmindDir], {
@@ -568,6 +573,20 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       lines.push(`    ${i}: (empty)`);
     }
   }
+
+  // Deploy state (#878)
+  try {
+    const stateRaw = readFileSync(join(home, "deploy.state"), "utf-8");
+    const ds = JSON.parse(stateRaw);
+    if (ds.status === "running") {
+      const ago = Math.round((Date.now() - new Date(ds.startedAt).getTime()) / 60_000);
+      lines.push(`\n  🔄 Deploy in progress (${ago}min ago)`);
+    } else if (ds.status === "failed") {
+      lines.push(`\n  ❌ Last deploy failed: ${ds.error}\n     Log: ~/.abtars/logs/${ds.logFile}`);
+    } else if (ds.status === "partial") {
+      lines.push(`\n  ⚠️ Last deploy incomplete: missing ${ds.missing?.join(", ")}`);
+    }
+  } catch { /* no state file = normal */ }
 
   lines.push("");
   lines.push("  /update [pull|deploy|npm] | /software rollback <version>");

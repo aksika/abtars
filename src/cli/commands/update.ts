@@ -186,6 +186,9 @@ export async function update(opts: UpdateOptions): Promise<number> {
     if (health.healthy) {
       writeSentinel(paths.home, { ...sentinelData, status: 'success' });
       process.stdout.write(`✓ Bridge healthy (PID ${health.pid}, tick at ${new Date(health.heartbeat!).toISOString()})\n`);
+      // Deploy state: success (#878)
+      const stateFile = join(paths.home, "deploy.state");
+      writeFileSync(stateFile, JSON.stringify({ status: "success", completedAt: new Date().toISOString(), version: staged.version }) + "\n");
       await syncAssets(paths.home, staged.stagedPath);
       return 0;
     }
