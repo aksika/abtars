@@ -1,91 +1,102 @@
-# Agent Swarm — Background Delegation
+# Agent Swarm
 
-## What it is
+Tell your agent one thing. It mobilizes an army.
 
-The main agent can spawn independent background sessions that work on tasks asynchronously. The user keeps chatting normally while background workers handle complex tasks in parallel.
+## What is it?
+
+Agent Swarm lets your abtars agent delegate work to parallel workers — locally (subagent sessions) or remotely (other abtars instances on different machines). The main agent acts as a team leader: it decomposes goals, assigns tasks, tracks progress on a kanban board, and delivers results when everything is done.
+
+You stay in one conversation. The swarm works in the background.
 
 ## How it works
 
-1. Model decides a task should run in the background
-2. Calls `spawn_session(type: "code", goal: "refactor auth module")`
-3. A background worker starts with its own conversation context and tools
-4. Model responds to the user immediately — no blocking
-5. When the worker finishes, the result appears in the model's context on the next turn
-6. Model incorporates the result into its response
-
-## Tools available to the model
-
-| Tool | Purpose |
-|------|---------|
-| `spawn_session(type, goal, context?)` | Start a background worker. Returns task_id. |
-| `check_session(task_id)` | Check status: running / done / failed / terminated |
-| `send_to_session(task_id, message)` | Send follow-up instruction to a running child |
-| `terminate_session(task_id)` | Stop a running background session |
-
-## Session types
-
-- **code** — coding tasks (uses coding model/prompt)
-- **browse** — web research (uses browser tools)
-- **task** — general tasks
-
-## Lineage
-
-Every spawned session has a `motherId` pointing to the session that created it. Visible in `/session` list as `← #1`.
-
-## Pause / Resume
-
-Users can pause any session:
-- `/session pause [#]` — cooperative interrupt (finishes current tool call, then stops)
-- `/session resume [#]` — continues from where it left off
-
-## Limits
-
-- Concurrent sessions governed by MAX_SESSIONS env (default: 10)
-- 10 minute timeout per session
-- Children cannot interact with the user directly
-- No nested delegation (depth = 1)
-
-## Activation
-
-Set `ENABLE_ASYNC_DELEGATION=true` in `~/.abtars/.env`. Without it, the tools are not registered and the feature is invisible.
-
-## Auto-notify
-
-When a background session completes, the result is automatically injected into the parent's context on the next user message:
-
 ```
-[Background session 1747563282_C_03 done]
-Goal: refactor auth module to use JWT
-Result: Refactored auth.ts, middleware.ts, types.ts. All tests pass.
+You: "Prepare my weekly investment report"
+
+Main agent (orchestrator):
+  ├── Worker A: fetch market data        (Molty — fast internet)
+  ├── Worker B: analyze portfolio         (KP — has broker API)
+  ├── Worker C: check news sentiment      (Molty — has RSS tools)
+  │
+  │   [all run in parallel on different hardware]
+  │
+  ├── Verifier: check outputs are coherent
+  ├── Synthesizer: write final report
+  │
+  └── Delivers: "Your report is ready 📄" + attached file
 ```
 
-The model sees this and can tell the user about it naturally.
+3 minutes (parallel) vs 15 minutes (sequential). You did nothing after the first message.
 
-## Architecture diagram
+## Key concepts
+
+### Orchestrator & workers
+
+The main agent is the **orchestrator**. It can spawn **workers** — either local subagent sessions (same machine, cheap model) or remote peers (different hardware, specialized tools).
+
+Workers run with isolated context (no parent history leaking) and restricted tools (can't re-delegate by default).
+
+### Kanban board
+
+Every task lands on the [kanban board](/abtars/kanban). The orchestrator and workers both write to it. You see the full picture via `/kanban`:
 
 ```
-┌─────────────────────────────────────────────┐
-│  Main Agent (session A_01)                  │
-│                                             │
-│  ┌─ spawn_session("code", "refactor") ──┐  │
-│  │                                       │  │
-│  │  Background Worker (C_03)             │  │
-│  │  - Own ConversationSession            │  │
-│  │  - Own tool loop                      │  │
-│  │  - motherId: A_01                     │  │
-│  │  - Writes to CompletionBuffer on done │  │
-│  └───────────────────────────────────────┘  │
-│                                             │
-│  CompletionBuffer ──→ auto-notify on next   │
-│                       user message          │
-└─────────────────────────────────────────────┘
+~ #1 research-ai-news (agent/HIGH)
+~ #2 fetch-stock-data (agent/HIGH)
+✓ #3 check-twitter (agent/MEDIUM) 260609:0803
+- #4 verify-outputs (agent/HIGH) blocked
+- #5 write-report (agent/HIGH) blocked
 ```
 
-## Related tickets
+### DAG dependencies
 
-- #510 — Session management (foundation)
-- #539 — Interrupt + active registry
-- #570 — Async delegation tools (the feature)
-- #576 — Parent→child instruction injection
-- #526 — File-based observable messaging (future upgrade)
-- epic08 — Coordination epic
+Tasks can depend on other tasks. A verifier won't start until all workers finish. A synthesizer won't start until the verifier approves. Work flows forward — no cycles.
+
+### Cross-host delegation
+
+Your abtars instances on different machines become specialized workers:
+- One has GPU access (local models, fast inference)
+- One has API keys for specific services
+- One is always-on (Mac mini in a closet)
+
+The orchestrator picks the right peer for each subtask based on what tools it has.
+
+## Use cases
+
+**Research & reports** — "What happened in AI this week?" → parallel workers scan Twitter, RSS, HN, arXiv. Verifier deduplicates. Synthesizer writes a digest.
+
+**Multi-step personal tasks** — "Book a restaurant, check weather, plan the route" → three workers in parallel, merged into one answer.
+
+**Distributed monitoring** — KP detects an issue, delegates the fix to Molty (which has the right access). No human coordination.
+
+**Autonomous daily routine** — Morning: finance check + news scan + weather report. All parallel. Delivered as one message when you wake up.
+
+## What you see
+
+Your conversation stays clean. The agent says "I'm working on it" and the next thing you see is the result — with the file attached. Check `/kanban` anytime to see progress.
+
+## Commands
+
+| Command | What it does |
+|---------|-------------|
+| `/kanban` | Show active work (all sources) |
+| `/kanban all` | Include delivered items |
+| `/tasks` | Cron scheduler (different from kanban) |
+
+## Configuration
+
+No configuration needed for local delegation — it works out of the box.
+
+For cross-host delegation: set up [peer-to-peer](/abtars/peers) connections between your abtars instances. Once peers can talk, delegation flows automatically.
+
+## Cost awareness
+
+Each worker consumes tokens independently. Budget caps prevent runaway spending — set a max per task, and the orchestrator aborts if exceeded. Check spend via `/kanban` cost breakdown.
+
+## Technical details
+
+- Local workers: `SubagentRuntime` in isolated sessions
+- Remote workers: A2A REST API (`/v1/tasks` endpoints)
+- State: SQLite kanban board (survives restarts)
+- Auth: existing peer JWT tokens
+- Depth: flat by default (no recursive delegation storms)
