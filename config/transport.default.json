@@ -9,7 +9,8 @@
     "kiro":        { "transport": "acp", "cli": "kiro-cli" },
     "gemini":      { "transport": "acp", "cli": "gemini" },
     "ollama":      { "transport": "api", "endpoint": "http://localhost:11434/v1" },
-    "openrouter":  { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" }
+    "openrouter":  { "transport": "api", "endpoint": "https://openrouter.ai/api/v1", "apiKeyEnv": "OPENROUTER_API_KEY" },
+    "nvidia":      { "transport": "api", "endpoint": "https://integrate.api.nvidia.com/v1", "apiKeyEnv": "NVIDIA_API_KEY" }
   },
   "transportDefaults": {
     "tmux": { "session": "kiro-bridge", "captureDelaySec": 3, "maxWaitSec": 300 },

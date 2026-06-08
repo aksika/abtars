@@ -225,5 +225,19 @@
     "transports": [
       "openrouter"
     ]
+  },
+  "nvidia/nemotron-3-ultra-550b-a55b": {
+    "contextWindow": 131072,
+    "maxOutput": 16384,
+    "rank": 1,
+    "cost": {
+      "input": 0.0,
+      "output": 0.0
+    },
+    "transports": [
+      "nvidia"
+    ],
+    "description": "Nvidia Nemotron Ultra 550B MoE (55B active). Reasoning-capable.",
+    "validatedAt": "2026-06-08"
   }
 }
