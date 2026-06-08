@@ -11,7 +11,7 @@ const KNOWN_COMMANDS = new Set<string>();
 
 const NON_MASTER_COMMANDS = new Set([
   "/status", "/help", "/whoami", "/doctor", "/software", "/update",
-  "/models", "/model", "/skills", "/facts", "/tasks", "/task", "/cron",
+  "/models", "/model", "/skills", "/skill", "/facts", "/tasks", "/task",
   "/usage", "/openrouter", "/session", "/hooks", "/memory", "/kanban",
   "/heartbeat", "/new", "/reset", "/stop", "/ctrlc",
 ]);
