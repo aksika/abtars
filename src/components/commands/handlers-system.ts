@@ -473,7 +473,6 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         spawn("bash", [script, srcDir, abmindDir], {
           detached: true,
           stdio: "ignore",
-          env: { ...process.env, ABMIND_REPO: abmindDir },
         }).unref();
       } catch (err) {
         await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -238,6 +238,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function copyAbmind(stagedPath: string, repoRoot: string): Promise<void> {
+  if ((process.env['MEMORY'] ?? 'auto') === 'none') return;
   const candidates = [
     process.env['ABMIND_REPO'],
     join(repoRoot, '..', 'abmind'),
