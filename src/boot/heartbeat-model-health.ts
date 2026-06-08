@@ -48,7 +48,7 @@ export function createModelHealthTask(ctx: BootCtx): { task: HeartbeatTask; runN
             method: "POST",
             headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
             body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-            signal: AbortSignal.timeout(10_000),
+            signal: AbortSignal.timeout(30_000),
           });
           if (!res.ok) {
             warnings.push(`⚠️ ${model} — ${res.status} ${res.statusText} (affects ${agentNames.join(", ")})`);
