@@ -264,7 +264,9 @@ export function buildSessionStartPrompt(
 
   // Runtime identity (#879) — prevent agent misidentifying itself
   const transportType = getEnv().defaultTransport === "acp" ? "ACP" : "Direct API";
-  contextParts.push(`[SYSTEM] Runtime: abtars bridge (${transportType}). All registered bridge tools are available.`);
+  const runtimeLine = `[SYSTEM] Runtime: abtars bridge (${transportType}). All registered bridge tools are available.`;
+  contextParts.push(runtimeLine);
+  logInfo(TAG, `Injected runtime identity: ${transportType}`);
 
   const compSummary = null; // Legacy compaction removed — context engine handles summaries
   if (compSummary && sessionKey) {
