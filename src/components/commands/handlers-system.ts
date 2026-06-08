@@ -401,35 +401,38 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       try {
         const { spawnSync } = await import("node:child_process");
-        const { mkdirSync } = await import("node:fs");
+        const { mkdirSync, rmSync: rms } = await import("node:fs");
         const srcDir = join(home, "src", "abtars");
         const abmindDir = join(home, "src", "abmind");
         logInfo("update", "Pull requested");
-        if (!existsSync(join(srcDir, ".git"))) {
-          await ctx.reply("Cloning abtars repo...");
+
+        const pullOrReclone = (dir: string, repo: string): { ok: boolean; msg: string } => {
           mkdirSync(join(home, "src"), { recursive: true });
-          const cl = spawnSync("git", ["clone", "git@github.com:aksika/abtars.git", srcDir], { encoding: "utf-8", timeout: 60_000 });
-          if (cl.status !== 0) { logInfo("update", "Clone failed"); await ctx.reply(`Clone failed:\n${(cl.stderr || "").trim().slice(0, 300)}`); return true; }
-        }
-        spawnSync("git", ["-C", srcDir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-        const r = spawnSync("git", ["-C", srcDir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
-        if (r.status !== 0) { await ctx.reply(`Pull failed (abtars):\n${(r.stderr || "").trim().slice(0, 300)}`); return true; }
-        let pulled = `Pulled:\n${(r.stdout || "").trim().slice(0, 300)}`;
-        if (existsSync(join(abmindDir, ".git"))) {
-          spawnSync("git", ["-C", abmindDir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-          const ab = spawnSync("git", ["-C", abmindDir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
-          if (ab.status !== 0) { await ctx.reply(`Pull failed (abmind):\n${(ab.stderr || "").trim().slice(0, 300)}`); return true; }
-          pulled += `\nabmind: ${(ab.stdout || "").trim().slice(0, 200)}`;
-        } else {
-          mkdirSync(join(home, "src"), { recursive: true });
-          const cl = spawnSync("git", ["clone", "git@github.com:aksika/abmind.git", abmindDir], { encoding: "utf-8", timeout: 60_000 });
-          if (cl.status === 0) {
-            spawnSync("git", ["-C", abmindDir, "checkout", "dev"], { encoding: "utf-8" });
-            pulled += `\nabmind: cloned`;
-          } else {
-            pulled += `\nabmind: clone failed (non-fatal)`;
+          // Try fetch+reset if .git exists
+          if (existsSync(join(dir, ".git"))) {
+            spawnSync("git", ["-C", dir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+            const r = spawnSync("git", ["-C", dir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
+            const hasConflicts = spawnSync("git", ["-C", dir, "grep", "-q", "^<<<<<<<"], { encoding: "utf-8" }).status === 0;
+            if (r.status === 0 && !hasConflicts) {
+              return { ok: true, msg: (r.stdout || "").trim().slice(0, 300) };
+            }
+            // Failed or conflicts — nuke and reclone
+            logInfo("update", `${dir}: reset failed or conflicts — recloning`);
+            rms(dir, { recursive: true, force: true });
           }
-        }
+          // Clone fresh
+          const cl = spawnSync("git", ["clone", "-b", "dev", repo, dir], { encoding: "utf-8", timeout: 60_000 });
+          if (cl.status === 0) return { ok: true, msg: "cloned fresh" };
+          return { ok: false, msg: (cl.stderr || "").trim().slice(0, 300) };
+        };
+
+        const abtarsResult = pullOrReclone(srcDir, "git@github.com:aksika/abtars.git");
+        if (!abtarsResult.ok) { await ctx.reply(`Pull failed (abtars):\n${abtarsResult.msg}`); return true; }
+        let pulled = `Pulled:\n${abtarsResult.msg}`;
+
+        const abmindResult = pullOrReclone(abmindDir, "git@github.com:aksika/abmind.git");
+        pulled += `\nabmind: ${abmindResult.msg}`;
+
         logInfo("update", `Pull complete`);
         await ctx.reply(`${pulled}\n\nReady to deploy: /update deploy`);
       } catch (err) {
