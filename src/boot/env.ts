@@ -67,13 +67,13 @@ for (const envPath of ENV_FILES) {
 // Load secrets from ~/.abtars/secret/ — decrypt + auto-encrypt plaintext + load into process.env
 import { createDecipheriv, createCipheriv, randomBytes, hkdfSync } from "node:crypto";
 
-if (existsSync(secretDir)) {
+export function reloadSecrets(): void {
+  if (!existsSync(secretDir)) return;
   let purposeKey: Buffer | null = null;
 
   function getPurposeKey(): Buffer | null {
     if (purposeKey) return purposeKey;
     try {
-      // Read master key directly from file (no abmind import needed in bundle)
       const abmindHome = process.env["ABMIND_HOME"] ?? resolve(homedir(), ".abmind");
       const keyFile = resolve(abmindHome, "secret", "abmind.key");
       if (!existsSync(keyFile)) return null;
@@ -106,7 +106,6 @@ if (existsSync(secretDir)) {
     return "ENC:" + Buffer.concat([Buffer.from([0x01]), iv, enc, c.getAuthTag()]).toString("base64");
   }
 
-  // Tokens that should stay readable (not encrypted) — localhost convenience tokens
   const SKIP_ENCRYPT = new Set(["WEB_AUTH_TOKEN"]);
 
   for (const file of readdirSync(secretDir)) {
@@ -126,19 +125,20 @@ if (existsSync(secretDir)) {
       if (!value) continue;
     } else {
       value = raw;
-      // Auto-encrypt plaintext in place (skip tokens that need to stay readable)
       if (!SKIP_ENCRYPT.has(file)) {
         const encrypted = encryptFile(value);
         if (encrypted) { try { writeFileSync(fullPath, encrypted, { mode: 0o600 }); } catch { /* leave plaintext */ } }
       }
     }
 
-    // No extension → env var. Has extension → tool access only.
     if (!file.includes(".")) {
       process.env[file] = value;
     }
   }
 }
+
+// Run on initial boot
+reloadSecrets();
 
 // Remove legacy <secret> lines from .env (they're redundant now)
 try {

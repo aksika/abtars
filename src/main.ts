@@ -13,6 +13,7 @@
 
 import "./boot/env.js";
 process.umask(0o077); // #441: all runtime files 600, dirs 700
+import { reloadSecrets } from "./boot/env.js";
 import { initEnv, _resetEnv } from "./components/env-schema.js";
 import { startBridge } from "./bridge-app.js";
 import { logInfo } from "./components/logger.js";
@@ -49,6 +50,7 @@ process.on("unhandledRejection", (reason) => {
     if (code !== 0) process.exit(code);
     logInfo("main", "♻️ Bridge restart requested — restarting...");
     _resetEnv();
+    reloadSecrets();
     resetAbmindCache();
     initEnv();
   }

@@ -85,6 +85,12 @@ export async function handleStop(_text: string, ctx: CommandContext): Promise<bo
 }
 
 export async function handleRestart(_text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = _text.replace(/^\/restart\s*/i, "").trim().toLowerCase();
+  if (arg === "cold") {
+    await ctx.reply("🧊 Cold restart (process exit → supervisor respawn)...");
+    setTimeout(() => process.exit(0), 500);
+    return true;
+  }
   await ctx.reply("♻️ Restarting bridge...");
   setTimeout(() => ctx.requestShutdown?.(0), 500);
   return true;
