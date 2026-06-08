@@ -457,7 +457,7 @@ async function checkForUpdates(home: string, opts: UpdateOptions): Promise<numbe
 }
 
 /** Sync bundled assets to runtime paths after successful deploy (#875). */
-async function syncAssets(home: string, stagedPath: string): Promise<void> {
+async function syncAssets(home: string, _stagedPath: string): Promise<void> {
   const abmindBundle = join(home, 'app', 'bundle', 'node_modules', 'abmind');
   const abmindHome = process.env['ABMIND_HOME'] ?? join(process.env['HOME'] ?? '', '.abmind');
 

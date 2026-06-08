@@ -4,12 +4,10 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ServiceState } from "./service-registry.js";
-
-const TAG = "system_status";
 
 export interface SubsystemHealth {
   name: string;

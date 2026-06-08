@@ -1,8 +1,5 @@
 import { execAsync } from "./exec-async.js";
-import { readdirSync} from "node:fs";
-import { join } from "node:path";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { abtarsHome } from "../../paths.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd_admin";
@@ -70,7 +67,7 @@ export async function handleSkills(_text: string, ctx: CommandContext): Promise<
 
   const active = skills.filter(s => !s.skipped);
   const skipped = skills.filter(s => s.skipped);
-  const groups = new Map<string, typeof skills>();
+  const groups = new Map<string, Array<typeof skills[number]>>();
   for (const s of skills) {
     const list = groups.get(s.group) ?? [];
     list.push(s);

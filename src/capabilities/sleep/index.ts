@@ -17,8 +17,6 @@ import type { SleepRuntime } from "abmind";
 import { logInfo, logWarn, logDebug } from "../../components/logger.js";
 import { readEnv, readEnvWithDefault } from "../../components/env.js";
 
-const TAG = "sleep";
-
 export interface SleepOpts {
   sleepHour: number;
   sleepAuditDir: string;

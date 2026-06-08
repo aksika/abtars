@@ -168,7 +168,6 @@ async function reconcilePathLink(
 
 export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
   const bundleFile = name === 'abtars' ? 'abtars-cli.js' : `${name}.js`;
-  const home = currentLink.replace(/\/current$/, '');
   let content: string;
 
   if (name === 'abmind') {

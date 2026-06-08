@@ -459,7 +459,7 @@ export class DirectApiTransport implements IKiroTransport {
     // #869: session-level reasoning override (from /reasoning command)
     if (session.reasoningEffort) {
       const BUDGET_MAP: Record<string, number> = { low: 1024, medium: 4096, high: 16384 };
-      if (this.config.apiFormat === "anthropic") {
+      if ((this.config.apiFormat as string) === "anthropic") {
         body.thinking = { type: "enabled", budget_tokens: BUDGET_MAP[session.reasoningEffort] ?? 4096 };
       } else {
         body.reasoning_effort = session.reasoningEffort;

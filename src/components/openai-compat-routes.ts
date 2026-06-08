@@ -99,7 +99,7 @@ export async function handleEmbeddings(
   }
 
   const inputs = Array.isArray(req.input) ? req.input : [req.input];
-  const vectors: Array<number[] | null> = await provider.batchEmbed(inputs);
+  const vectors: Array<number[] | null> = (await provider.batchEmbed(inputs)).map(v => v ? Array.from(v) : null);
 
   // Any null in vectors means the provider failed for that input — fail the whole request per OpenAI convention
   if (vectors.some(v => v === null)) {

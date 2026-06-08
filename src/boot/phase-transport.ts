@@ -42,7 +42,7 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
  *   - In either case: bridge stays alive in degraded mode rather than crash-looping
  */
 export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
-  const { config, memoryConfig } = ctx;
+  const { config } = ctx;
 
   let transport: IKiroTransport;
 

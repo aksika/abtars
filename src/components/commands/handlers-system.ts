@@ -459,7 +459,6 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         }
         logInfo("update", `Deploy starting (non-blocking)`);
         // Pre-flight: check for merge conflict markers in source
-        const conflictCheck = spawnSync("git", ["-C", srcDir, "diff", "--check", "HEAD"], { encoding: "utf-8", timeout: 10_000 });
         const markers = spawnSync("git", ["-C", srcDir, "grep", "-l", "^<<<<<<<"], { encoding: "utf-8", timeout: 10_000 });
         if (markers.stdout.trim()) {
           const files = markers.stdout.trim().split("\n").join(", ");
@@ -483,7 +482,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return true;
-    } else if (arg === "update" || arg === "npm" || arg === "update npm") {
+    } else if ((arg as string) === "npm" || (arg as string) === "update npm") {
       if (!isMaster) { await ctx.reply("Requires master role."); return true; }
       logInfo("update", "npm update starting");
       await ctx.reply("Updating from npm...");
