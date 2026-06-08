@@ -4,11 +4,26 @@ Steps only. For detailed explanations, see [Installation](./install.md).
 
 ## 1. Install
 
+### Prerequisites: Node.js 22+
+
+**macOS (Homebrew):**
+```bash
+brew install node
+```
+
+**Ubuntu / WSL:**
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+### Install abtars + abmind
+
 ```bash
 npm install -g abtars@alpha abmind@alpha
 ```
 
-Requires Node.js 22+. Alpha builds ship frequently with the latest features. For stable releases: `npm install -g abtars abmind`
+Alpha builds ship frequently with the latest features. For stable releases: `npm install -g abtars abmind`
 
 ## 2. Setup
 
