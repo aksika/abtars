@@ -164,7 +164,7 @@ export function renderStatusText(status: SystemStatus): string {
   const uptime = formatUptime(status.uptimeMs);
   const name = process.env["AGENT_NAME"] ?? process.env["BOT_NAME"] ?? "abtars";
   const lines: string[] = [
-    `|abTARS| — online 😊`,
+    `abTARS™ — online 😊`,
     `  PID ${process.pid} (up ${uptime})`,
   ];
 
