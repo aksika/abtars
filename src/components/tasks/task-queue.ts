@@ -388,7 +388,7 @@ export class CronQueue {
     this.setCurrent(entry, 0, "agent");
 
     // Kanban board: track this task
-    const boardId = kanbanEnqueue(entry.message, "task", entry.id);
+    const boardId = kanbanEnqueue(entry.id, "task", entry.id);
     kanbanRunning(boardId);
 
     // Set $WORKSPACE for agent tool execution — all output goes here
