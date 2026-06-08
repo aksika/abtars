@@ -133,7 +133,7 @@ const probeCoreFiles: ProbeFn = async (_ctx) => {
   const { join } = await import("node:path");
   const { homedir } = await import("node:os");
   const start = Date.now();
-  const memDir = process.env["ABMIND_MEMORY_DIR"] || join(homedir(), ".abmind", "memory");
+  const memDir = join(process.env["ABMIND_HOME"] ?? join(homedir(), ".abmind"), "memory");
   const abmindCore = join(memDir, "core");
   const required = ["SOUL.md", "user_profile.md", "agent_notes.md", "memory-tools.md", "core_facts.md"];
   const missing = required.filter(f => !existsSync(join(abmindCore, f)));
@@ -183,7 +183,7 @@ const probeFtsIntegrity: ProbeFn = async (_ctx) => {
   const { execSync } = await import("node:child_process");
   const start = Date.now();
   try {
-    const dbPath = join(process.env["ABMIND_MEMORY_DIR"] || join(homedir(), ".abmind", "memory"), "memory.db");
+    const dbPath = join(process.env["ABMIND_HOME"] ?? join(homedir(), ".abmind"), "memory", "memory.db");
     const tables = ["extracted_memories_fts", "content_en_trigram", "content_original_trigram"];
     const rebuilt: string[] = [];
     for (const t of tables) {
