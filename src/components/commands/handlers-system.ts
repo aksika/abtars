@@ -456,9 +456,10 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         }
         logInfo("update", `Deploy starting (non-blocking)`);
         // Pre-flight: check for merge conflict markers in source
-        const conflictCheck = spawnSync("grep", ["-rl", "<<<<<<< ", srcDir, "--include=*.ts", "--include=*.json", "--include=*.sh"], { encoding: "utf-8", timeout: 10_000 });
-        if (conflictCheck.stdout.trim()) {
-          const files = conflictCheck.stdout.trim().split("\n").map(f => f.replace(srcDir + "/", "")).join(", ");
+        const conflictCheck = spawnSync("git", ["-C", srcDir, "diff", "--check", "HEAD"], { encoding: "utf-8", timeout: 10_000 });
+        const markers = spawnSync("git", ["-C", srcDir, "grep", "-l", "^<<<<<<<"], { encoding: "utf-8", timeout: 10_000 });
+        if (markers.stdout.trim()) {
+          const files = markers.stdout.trim().split("\n").join(", ");
           await ctx.reply(`⚠️ Conflict markers found in source — refusing to deploy.\nFiles: ${files}\nRepo has a broken commit. Notify dev team.`);
           return true;
         }
