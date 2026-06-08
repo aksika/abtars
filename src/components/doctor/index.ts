@@ -252,23 +252,6 @@ export async function getDoctorReport(ctx: DoctorCtx, opts?: { force?: boolean }
 
   const totalMs = Date.now() - start;
 
-  // #440 — version staleness check
-  try {
-    const { checkForUpdate } = await import("../update-check.js");
-    const { readlinkSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { homedir } = await import("node:os");
-    const target = readlinkSync(join(homedir(), ".abtars", "current")).split("/").pop() ?? "";
-    const dash = target.lastIndexOf("-");
-    const version = dash > 0 ? target.slice(0, dash) : "unknown";
-    const result = checkForUpdate("abtars", version);
-    if (result?.updateAvailable) {
-      results.push({ name: "update-available", status: "failed", latencyMs: 0, detail: `update: ${result.current} → ${result.latest} available` });
-    } else if (result) {
-      results.push({ name: "version", status: "ok", latencyMs: 0, detail: `${result.current} (latest)` });
-    }
-  } catch (err) { logAndSwallow(TAG, "version check", err); }
-
   const report: DoctorReport = { results, totalMs, cached: false };
   lastReport = { report, generatedAt: now };
   logInfo("doctor", `Probes complete: ${results.filter(r => r.status === "ok").length}/${results.length} ok (${totalMs}ms)`);
