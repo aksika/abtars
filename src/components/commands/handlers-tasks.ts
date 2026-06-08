@@ -147,7 +147,7 @@ export async function handleKanban(text: string, ctx: CommandContext): Promise<b
       return true;
     }
     const lines = cards.map((c: { id: number; title: string; status: string; source: string; priority: string; due_at: string | null; delivered_at: string | null }) => {
-      const icon = c.status === "delivered" ? "✅" : c.status === "done" ? "📬" : c.status === "running" ? "⏳" : c.status === "failed" ? "❌" : "📥";
+      const icon = c.status === "delivered" ? "✓" : c.status === "done" ? "+" : c.status === "running" ? "~" : c.status === "failed" ? "✗" : "-";
       const due = c.due_at ? ` due:${c.due_at.slice(0, 10)}` : "";
       const doneAt = c.delivered_at ? ` ${c.delivered_at.slice(2, 10).replace(/-/g, "")}:${c.delivered_at.slice(11, 16).replace(":", "")}` : "";
       return `${icon} #${c.id} ${c.title} (${c.source}/${c.priority})${doneAt}${due}`;
