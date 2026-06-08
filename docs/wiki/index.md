@@ -1,27 +1,8 @@
 # abTARS
 
-**Autonomous AI bridge — your agent, your hardware, your rules.**
+**A Personal Agentic Framework** — your agent, your hardware, your rules.
 
-abTARS connects AI models to messaging platforms (Telegram, Discord, IRC) and runs them autonomously with scheduled tasks, multi-provider fallback, persistent memory via abmind, and peer-to-peer agent communication.
-
-## What it does
-
-- Receives messages from Telegram, Discord, or IRC
-- Routes them through a configurable model (local ollama, OpenRouter, Kiro CLI, Gemini CLI)
-- Manages conversation sessions, context windows, and streaming responses
-- Runs scheduled tasks (cron), sleep cycles, and health monitoring
-- Falls back automatically when a model is unavailable
-- Communicates with other abTARS instances via peer-to-peer A2A protocol
-
-## Quick start
-
-```bash
-git clone git@github.com:aksika/abtars.git
-cd abtars && npm install && npm run build
-node dist/cli/abtars.js install
-abtars update
-abtars start
-```
+Self-hosted AI agents that run autonomously on your own infrastructure. Connect any model to Telegram, Discord, or IRC with persistent memory, scheduled tasks, multi-provider fallback, and peer-to-peer communication.
 
 ## Features
 
