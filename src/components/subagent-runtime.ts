@@ -67,6 +67,7 @@ export class SubagentRuntime {
   private _registry: ModelHealthRegistry | null = null;
   private _mainTransport: IKiroTransport | null = null;
   private _sessionManager: import("./session-manager.js").SessionManager | null = null;
+  private _sandboxEnabled = false;
 
   /** Set shared model health registry (from boot ctx). */
   setRegistry(registry: ModelHealthRegistry): void { this._registry = registry; }
@@ -76,6 +77,9 @@ export class SubagentRuntime {
 
   /** Set session manager for auto-spawn sub-session creation (#510). */
   setSessionManager(mgr: import("./session-manager.js").SessionManager): void { this._sessionManager = mgr; }
+
+  /** Enable Docker sandbox for W/B/C sessions (#478). */
+  setSandboxEnabled(enabled: boolean): void { this._sandboxEnabled = enabled; }
 
   /** Send a prompt to a named agent and get the response. */
   async complete(agent: AgentName, prompt: string, opts?: AgentOpts): Promise<string> {
@@ -193,6 +197,18 @@ export class SubagentRuntime {
   }
 
   private async createAgent(agent: AgentName, sessionType?: import("./session-manager.js").SessionType): Promise<CachedAgent> {
+    const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
+    const resolvedType = sessionType || typeMap[agent];
+    const sandboxTypes = new Set(["B", "C", "W"]);
+
+    // #478: Route to Docker container for sandboxed session types
+    if (this._sandboxEnabled && resolvedType && sandboxTypes.has(resolvedType)) {
+      const { logInfo } = await import("./logger.js");
+      logInfo("subagent", `Sandbox spawn: ${agent} (type=${resolvedType}) → Docker container`);
+      // TODO (#478-integration): spawn container, connect socket, return proxy transport
+      // For now, fall through to in-process (container-side agent code not yet implemented)
+    }
+
     const { createSubagentTransport } = await import("./agent-registry.js");
     const role = AGENT_TO_ROLE[agent];
     const mainModel = this._mainTransport && "currentModel" in this._mainTransport
@@ -201,8 +217,6 @@ export class SubagentRuntime {
     const { transport, model } = await createSubagentTransport(role, this._registry ?? undefined, mainModel);
 
     // Inject session-type-appropriate SOUL bundle (#744)
-    const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
-    const resolvedType = sessionType || typeMap[agent];
     if (resolvedType && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
       const { buildSoulBundle } = await import("./soul-bundle.js");
       const bundle = buildSoulBundle(resolvedType);

@@ -237,6 +237,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   }
   ctx.runtime.setMainTransport(transport);
   ctx.runtime.setSessionManager(ctx.sessionManager);
+  if (ctx.sandboxEnabled) ctx.runtime.setSandboxEnabled(true);
 
   // Wire async delegation tools (#570)
   if (getEnv().enableAsyncDelegation) {

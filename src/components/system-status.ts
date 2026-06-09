@@ -207,6 +207,15 @@ export function renderStatusText(status: SystemStatus): string {
     }
   } catch { /* hotskills not loaded */ }
 
+  // #478: Sandbox status
+  try {
+    const { getActiveSandboxes } = require("./sandbox-runtime.js") as typeof import("./sandbox-runtime.js");
+    const sandboxes = getActiveSandboxes();
+    if (sandboxes.size > 0) {
+      lines.push(`  🐳 Sandboxes: ${sandboxes.size} active`);
+    }
+  } catch { /* sandbox-runtime not loaded */ }
+
   lines.push("", "🏥 Subsystems:");
 
   for (const s of status.subsystems) {
