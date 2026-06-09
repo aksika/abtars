@@ -75,29 +75,36 @@ function db(): SqliteDb {
   return _db;
 }
 
+import { nerve } from "../nerve.js";
+
 export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string }): number {
   const stmt = db().prepare(
     `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null);
-  return Number(result.lastInsertRowid);
+  const id = Number(result.lastInsertRowid);
+  nerve.fire("card:queued", id);
+  return id;
 }
 
 export function kanbanRunning(id: number): void {
   db().prepare(`UPDATE kanban_board SET status = 'running', updated_at = datetime('now') WHERE id = ?`).run(id);
+  nerve.fire("card:running", id);
 }
 
 export function kanbanComplete(id: number, resultPath: string | null, summary: string): void {
   db().prepare(
     `UPDATE kanban_board SET status = 'done', result_path = ?, result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(resultPath, summary.slice(0, 500), id);
+  nerve.fire("card:done", id);
 }
 
 export function kanbanFail(id: number, error: string): void {
   db().prepare(
     `UPDATE kanban_board SET status = 'failed', error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(error.slice(0, 1000), id);
+  nerve.fire("card:failed", id);
 }
 
 export function kanbanPending(): KanbanCard[] {
@@ -114,6 +121,7 @@ export function kanbanMarkDelivered(id: number): void {
   db().prepare(
     `UPDATE kanban_board SET status = 'delivered', delivered_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(id);
+  nerve.fire("card:delivered", id);
 }
 
 export function kanbanDeliveryFailed(id: number): void {
