@@ -149,6 +149,7 @@ export class SessionManager {
     const target = state.sessions.find(s => s.shortIndex === index && !s.ended && s.isTransport);
     if (!target) return `Session #${index} not found or not switchable.`;
     state.activeIndex = target.shortIndex;
+    this.scheduleSave();
     return target;
   }
 
@@ -235,6 +236,7 @@ export class SessionManager {
     if (!target) return `Session #${targetIdx} not found.`;
     if (target.paused) return `Session #${targetIdx} is already paused.`;
     target.paused = true;
+    this.scheduleSave();
     return target;
   }
 
@@ -246,6 +248,7 @@ export class SessionManager {
     if (!target) return `Session #${targetIdx} not found.`;
     if (!target.paused) return `Session #${targetIdx} is not paused.`;
     target.paused = false;
+    this.scheduleSave();
     return target;
   }
 
@@ -267,6 +270,7 @@ export class SessionManager {
   /** Clear all sessions for a platform (transport destruction). */
   clearPlatform(userId: string, platform: Platform): void {
     this.states.delete(this.stateKey(userId, platform));
+    this.scheduleSave();
   }
 
   /** Clear everything (bridge restart). */
