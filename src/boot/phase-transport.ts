@@ -23,6 +23,17 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   await buildTransport(ctx);
 
+  // Sandbox detection (#478)
+  if (getEnv().securityMode === "sandbox") {
+    const { dockerAvailable } = await import("../components/sandbox-runtime.js");
+    if (dockerAvailable()) {
+      ctx.sandboxEnabled = true;
+      logInfo("main", "🐳 Sandbox mode active — W/B/C sessions will run in Docker containers");
+    } else {
+      logWarn("main", "SECURITY_MODE=sandbox but Docker not available — falling back to guardrails");
+    }
+  }
+
   // Initialize context-window-start for all known users
   if (memoryConfig.memoryEnabled) {
     const reg = loadUsers();
