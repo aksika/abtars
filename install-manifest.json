@@ -74,6 +74,10 @@
       "dest": "config/users.json"
     },
     {
+      "source": "templates/sha-policy.json",
+      "dest": "config/sha-policy.json"
+    },
+    {
       "source": "tasks.default.json",
       "dest": "tasks/tasks.json"
     },

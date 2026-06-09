@@ -1,0 +1,8 @@
+{
+  "_comment": "SHA fault policy — changes apply after restart or /doctor fix",
+  "faults": {
+    "missing-dep": { "action": "disable-capability", "cooldown": 604800, "maxRetries": 1 },
+    "db-corruption": { "action": "run-doctor-fix", "cooldown": 86400, "maxRetries": 3 },
+    "irc-flap": { "action": "disable-capability", "cooldown": 604800, "maxRetries": 5 }
+  }
+}

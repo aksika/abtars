@@ -36,9 +36,13 @@ export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
     for (const { name, load } of individualCaps) {
       if (disabled.has(name)) continue;
       try {
+        const { shouldAttempt } = await import("../components/sha-tracker.js");
+        if (!shouldAttempt("missing-dep", name)) { logDebug("capabilities", `Skipped "${name}": SHA cooldown active`); continue; }
         const mod = await load();
         staticCaps.push({ name, module: mod });
       } catch (e) {
+        const { recordResult } = await import("../components/sha-tracker.js");
+        recordResult("missing-dep", name, false, e instanceof Error ? e.message : String(e));
         logWarn("capabilities", `Skipped "${name}": ${e instanceof Error ? e.message : String(e)}`);
       }
     }
