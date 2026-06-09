@@ -8,6 +8,10 @@
 
 import type { Platform } from "../types/platform.js";
 import type { SubagentRuntime, AgentSession, AgentName } from "./subagent-runtime.js";
+import { writeFileSync, readFileSync, existsSync, renameSync } from "node:fs";
+import { join } from "node:path";
+import { abtarsHome } from "../paths.js";
+import { logInfo, logWarn } from "./logger.js";
 
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S";
 
@@ -122,6 +126,7 @@ export class SessionManager {
     }
     const session = this.allocateSession(state, type, true);
     state.activeIndex = session.shortIndex;
+    this.scheduleSave();
     return session;
   }
 
@@ -133,7 +138,9 @@ export class SessionManager {
       return `Max sessions reached — auto-spawn skipped.`;
     }
     const active = state.sessions.find(s => s.shortIndex === state.activeIndex && !s.ended);
-    return this.allocateSession(state, type, false, active?.id);
+    const result = this.allocateSession(state, type, false, active?.id);
+    this.scheduleSave();
+    return result;
   }
 
   /** Switch active transport session. Returns session or error. */
@@ -158,6 +165,7 @@ export class SessionManager {
       target.ended = true;
       const newMain = this.allocateSession(state, "A", true);
       state.activeIndex = newMain.shortIndex;
+      this.scheduleSave();
       return target;
     }
 
@@ -167,6 +175,7 @@ export class SessionManager {
       const main = state.sessions.find(s => s.type === "A" && !s.ended);
       state.activeIndex = main?.shortIndex ?? 1;
     }
+    this.scheduleSave();
     return target;
   }
 
@@ -182,23 +191,24 @@ export class SessionManager {
       if (otherMain) {
         state.activeIndex = otherMain.shortIndex;
       } else {
-        // Last Main — kill it but auto-spawn replacement
         target.ended = true;
         const newMain = this.allocateSession(state, "A", true);
         state.activeIndex = newMain.shortIndex;
+        this.scheduleSave();
         return target;
       }
     } else {
-      // Killing non-active last Main — still auto-spawn replacement
       const aliveMains = state.sessions.filter(s => s.type === "A" && !s.ended);
       if (target.type === "A" && aliveMains.length <= 1) {
         target.ended = true;
         this.allocateSession(state, "A", true);
+        this.scheduleSave();
         return target;
       }
     }
 
     target.ended = true;
+    this.scheduleSave();
     return target;
   }
 
@@ -262,6 +272,69 @@ export class SessionManager {
   /** Clear everything (bridge restart). */
   clearAll(): void {
     this.states.clear();
+  }
+
+  // ── Persistence (#540) ──────────────────────────────────────────────────
+
+  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private scheduleSave(): void {
+    if (this._saveTimer) return;
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.persist();
+    }, 2000);
+    this._saveTimer.unref();
+  }
+
+  /** Write session state to ~/.abtars/sessions.json (atomic). */
+  persist(): void {
+    const data: Record<string, { sessions: Array<Omit<ManagedSession, "agentSession">>; activeIndex: number; nextIndex: number }> = {};
+    for (const [key, state] of this.states) {
+      data[key] = {
+        sessions: state.sessions.map(({ agentSession: _, ...rest }) => rest),
+        activeIndex: state.activeIndex,
+        nextIndex: state.nextIndex,
+      };
+    }
+    const p = join(abtarsHome(), "sessions.json");
+    const tmp = p + ".tmp";
+    try {
+      writeFileSync(tmp, JSON.stringify(data), "utf-8");
+      renameSync(tmp, p);
+    } catch { /* best effort */ }
+  }
+
+  /** Restore session state from disk. Call at boot before pipeline starts. */
+  restore(): void {
+    const p = join(abtarsHome(), "sessions.json");
+    if (!existsSync(p)) return;
+    try {
+      const raw = JSON.parse(readFileSync(p, "utf-8"));
+      const now = Date.now();
+      const ONE_HOUR = 3600_000;
+      const SEVEN_DAYS = 7 * 24 * ONE_HOUR;
+
+      for (const [key, state] of Object.entries(raw) as [string, any][]) {
+        if (!state?.sessions || !Array.isArray(state.sessions)) continue;
+        const pruned: ManagedSession[] = state.sessions.filter((s: any) => {
+          const age = now - (s.createdAt ?? 0);
+          if (s.ended && age > ONE_HOUR) return false;
+          if (!s.ended && age > SEVEN_DAYS) return false;
+          return true;
+        });
+        if (pruned.length === 0) continue;
+        this.states.set(key, {
+          sessions: pruned,
+          activeIndex: state.activeIndex ?? 1,
+          nextIndex: state.nextIndex ?? pruned.length + 1,
+        });
+      }
+      const total = [...this.states.values()].reduce((n, s) => n + s.sessions.length, 0);
+      logInfo("session-mgr", `Restored ${total} sessions from disk`);
+    } catch (err) {
+      logWarn("session-mgr", `Failed to restore sessions.json: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** Format session list for display. */

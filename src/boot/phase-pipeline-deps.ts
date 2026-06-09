@@ -105,6 +105,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   if (db) setSecretGetDb(db as any);
 
   // Wire session manager to runtime for agent session creation (#521)
+  ctx.sessionManager.restore(); // #540: restore persisted sessions before pipeline starts
   ctx.sessionManager.setRuntime(ctx.runtime);
 
   // Build pipelineDeps. References ctx fields; later phases mutate ctx.sleepHandle /
