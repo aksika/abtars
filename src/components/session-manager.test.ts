@@ -1,11 +1,35 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { SessionManager, parseSessionType, typeLabel } from "./session-manager.js";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+let tmpHome = join(tmpdir(), `sm-test-init-${Date.now()}`);
+mkdirSync(tmpHome, { recursive: true });
+
+vi.mock("../paths.js", () => ({
+  abtarsHome: () => tmpHome,
+}));
+
+vi.mock("./logger.js", () => ({
+  logInfo: () => {},
+  logWarn: () => {},
+  logDebug: () => {},
+  logTrace: () => {},
+}));
+
+const { SessionManager, parseSessionType, typeLabel } = await import("./session-manager.js");
 
 describe("SessionManager", () => {
   let sm: SessionManager;
 
   beforeEach(() => {
+    tmpHome = join(tmpdir(), `sm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(tmpHome, { recursive: true });
     sm = new SessionManager(5);
+  });
+
+  afterEach(() => {
+    try { rmSync(tmpHome, { recursive: true }); } catch { /* */ }
   });
 
   describe("createSession", () => {
@@ -277,6 +301,72 @@ describe("SessionManager", () => {
     it("getActiveSessionId creates Main session on first call", () => {
       const id = sm.getActiveSessionId("newuser", "telegram");
       expect(id).toMatch(/_A_01$/);
+    });
+  });
+
+  describe("persist / restore (#540)", () => {
+    it("persist writes sessions.json", () => {
+      sm.createSession("user1", "telegram", "C");
+      sm.persist();
+      const p = join(tmpHome, "sessions.json");
+      expect(existsSync(p)).toBe(true);
+      const data = JSON.parse(readFileSync(p, "utf-8"));
+      expect(data["user1:telegram"]).toBeDefined();
+      expect(data["user1:telegram"].sessions.length).toBeGreaterThan(1);
+    });
+
+    it("restore loads sessions from disk", () => {
+      sm.createSession("user1", "telegram", "C");
+      sm.persist();
+
+      const sm2 = new SessionManager(5);
+      sm2.restore();
+      const { sessions } = sm2.listSessions("user1", "telegram");
+      expect(sessions.some(s => s.type === "C")).toBe(true);
+    });
+
+    it("restore prunes ended sessions older than 1h", () => {
+      sm.createSession("user1", "telegram", "C");
+      sm.persist();
+      // Manually age the ended session
+      const p = join(tmpHome, "sessions.json");
+      const data = JSON.parse(readFileSync(p, "utf-8"));
+      const state = data["user1:telegram"];
+      const codeSess = state.sessions.find((s: any) => s.type === "C");
+      codeSess.ended = true;
+      codeSess.createdAt = Date.now() - 2 * 3600_000; // 2h ago
+      writeFileSync(p, JSON.stringify(data));
+
+      const sm2 = new SessionManager(5);
+      sm2.restore();
+      const { sessions } = sm2.listSessions("user1", "telegram");
+      expect(sessions.every(s => s.type !== "C")).toBe(true);
+    });
+
+    it("restore handles missing file gracefully", () => {
+      const sm2 = new SessionManager(5);
+      sm2.restore(); // no crash
+      const id = sm2.getActiveSessionId("user1", "telegram");
+      expect(id).toMatch(/_A_01$/);
+    });
+
+    it("restore handles corrupt file gracefully", () => {
+      writeFileSync(join(tmpHome, "sessions.json"), "NOT JSON{{{");
+      const sm2 = new SessionManager(5);
+      sm2.restore(); // no crash
+      const id = sm2.getActiveSessionId("user1", "telegram");
+      expect(id).toMatch(/_A_01$/);
+    });
+
+    it("nextIndex continues from persisted value", () => {
+      sm.createSession("user1", "telegram", "C");
+      sm.createSession("user1", "telegram", "B");
+      sm.persist();
+
+      const sm2 = new SessionManager(5);
+      sm2.restore();
+      const newSess = sm2.createSession("user1", "telegram", "T");
+      expect(typeof newSess !== "string" && newSess.shortIndex).toBeGreaterThan(3);
     });
   });
 });
