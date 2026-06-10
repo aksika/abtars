@@ -270,6 +270,16 @@ async function copyAbmind(stagedPath: string, repoRoot: string): Promise<void> {
         writeFileSync(join(abmindHome, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
       } catch { /* non-fatal — display only */ }
       process.stdout.write(`✓ abmind copied from ${src}\n`);
+
+      // #920: Refresh global abmind CLI to match deployed version
+      try {
+        const { spawnSync } = await import('node:child_process');
+        const linkResult = spawnSync('npm', ['link'], { cwd: src, stdio: 'pipe', timeout: 30_000 });
+        if (linkResult.status === 0) {
+          process.stdout.write(`✓ abmind CLI linked (global binary refreshed)\n`);
+        }
+      } catch { /* non-fatal — CLI may be stale but bridge works */ }
+
       return;
     }
   }
