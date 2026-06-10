@@ -8,20 +8,20 @@ import { existsSync, rmSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 
 function list(): number {
-  process.stdout.write("Optional dependencies:\n\n");
-  for (const [name, dep] of Object.entries(OPTIONAL_DEPS)) {
-    const installed = dep.packages.every(p => isInstalled(p));
-    const icon = installed ? "✓" : "○";
-    process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label} (${dep.packages.join(", ")})\n`);
-  }
-
-  process.stdout.write("\nSystem dependencies:\n\n");
+  process.stdout.write("System dependencies:\n\n");
   for (const [name, dep] of Object.entries(SYSTEM_DEPS)) {
     if (dep.platform && dep.platform !== (process.platform === "darwin" ? "darwin" : "linux")) continue;
     const installed = spawnSync("which", [dep.bin], { stdio: "pipe" }).status === 0;
     const icon = installed ? "✓" : "○";
     const hint = installed ? "" : `  → ${dep.installHint}`;
     process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label}${hint}\n`);
+  }
+
+  process.stdout.write("\nOptional dependencies:\n\n");
+  for (const [name, dep] of Object.entries(OPTIONAL_DEPS)) {
+    const installed = dep.packages.every(p => isInstalled(p));
+    const icon = installed ? "✓" : "○";
+    process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label} (${dep.packages.join(", ")})\n`);
   }
 
   process.stdout.write(`\nInstall: abtars deps install <name|all>\nRemove:  abtars deps remove <name>\n`);
