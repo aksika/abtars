@@ -316,17 +316,24 @@ export class SessionManager {
     try {
       const raw = JSON.parse(readFileSync(p, "utf-8"));
       const now = Date.now();
-      const ONE_HOUR = 3600_000;
-      const SEVEN_DAYS = 7 * 24 * ONE_HOUR;
+      const RECENT_MS = 15 * 60_000; // 15 minutes — only restore sessions active near restart
 
       for (const [key, state] of Object.entries(raw) as [string, any][]) {
         if (!state?.sessions || !Array.isArray(state.sessions)) continue;
         const pruned: ManagedSession[] = state.sessions.filter((s: any) => {
+          if (s.ended) return false; // never restore ended sessions
           const age = now - (s.createdAt ?? 0);
-          if (s.ended && age > ONE_HOUR) return false;
-          if (!s.ended && age > SEVEN_DAYS) return false;
-          return true;
+          if (age < RECENT_MS) return true; // recently created
+          // Keep if last activity was recent (use createdAt as proxy — no lastActive persisted)
+          return false;
         });
+        // Always keep the most recent Main (A) if none survived
+        if (!pruned.some(s => s.type === "A")) {
+          const lastMain = [...(state.sessions as ManagedSession[])]
+            .filter(s => s.type === "A" && !s.ended)
+            .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+          if (lastMain) pruned.push(lastMain);
+        }
         if (pruned.length === 0) continue;
         const activeIdx = state.activeIndex ?? 1;
         const hasActive = pruned.some(s => s.shortIndex === activeIdx && !s.ended);
