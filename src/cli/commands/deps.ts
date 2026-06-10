@@ -82,8 +82,20 @@ export async function deps(args: string[]): Promise<number> {
     case "list": return list();
     case "install": return install(args.slice(1));
     case "remove": return remove(args.slice(1));
+    case "update": return update();
     default:
-      process.stderr.write(`Unknown: abtars deps ${sub}\nUsage: abtars deps [list|install|remove]\n`);
+      process.stderr.write(`Unknown: abtars deps ${sub}\nUsage: abtars deps [list|install|remove|update]\n`);
       return 1;
   }
+}
+
+function update(): number {
+  process.stdout.write("Updating all npm dependencies...\n");
+  const result = spawnSync("npm", ["update"], { cwd: join(abtarsHome(), "src", "abtars"), stdio: "inherit", encoding: "utf-8" });
+  if (result.status !== 0) {
+    process.stderr.write("npm update failed\n");
+    return 1;
+  }
+  process.stdout.write("✓ Dependencies updated\n");
+  return 0;
 }
