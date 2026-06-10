@@ -25,12 +25,12 @@ const TYPE_IDENTITY: Record<SessionType, string | null> = {
   B: "I am a browse agent. I fetch web content and return results. No memory access.",
   C: "I am a coding agent. I write and fix code. Be concise.",
   T: "I am a task agent. I execute scheduled tasks. Write all output to $WORKSPACE.",
-  S: "I am the self-healing agent. I diagnose and fix system failures. If unfixable, state: Requires human intervention.",
+  S: null, // reserved — not actively used
   P: "I am responding to a peer agent request. Be precise and technical.",
-  O: null, // Orchestrator uses full soul bundle + orchestration tools
-  W: "I am a worker agent. I execute one specific task assigned by the Orchestrator. Write output to $WORKSPACE.",
-  D: "I am the sleep agent. I process the day's conversations into lasting memories.",
-  H: "I am the healer agent. I scan logs for recurring failures and attempt fixes.",
+  O: null, // Orchestrator — dedicated prompt loaded separately
+  W: null, // Worker — dedicated prompt file (core/prompts/worker.md)
+  D: null, // Dreamy — sleep prompt loaded separately
+  H: "I am the Healer. I diagnose and fix system failures. If unfixable, state: Requires human intervention.",
 };
 
 function buildModelInstructions(): string {
@@ -92,6 +92,10 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
       const registry = loadUsers();
       if (registry.users.length > 0) parts.push(buildUsersBlock(registry));
     } catch (err) { logAndSwallow(TAG, "op", err); }
+  } else if (type === "W") {
+    // Worker: dedicated prompt file only — no skills, no core facts
+    const workerPrompt = readOr(join(HOST_CORE_DIR, "prompts", "worker.md"));
+    if (workerPrompt) parts.push(workerPrompt);
   } else {
     // Lightweight bundle: identity + core facts + skills
     const identity = TYPE_IDENTITY[type];
