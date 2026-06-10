@@ -226,7 +226,7 @@ export class TelegramAdapter implements PlatformAdapter {
       return;
     }
 
-    const message = update.message;
+    const message = update.message ?? (update.edited_message?.text?.startsWith("/") ? update.edited_message : undefined);
     if (!message?.from) return;
 
     const hasText = Boolean(message.text);
