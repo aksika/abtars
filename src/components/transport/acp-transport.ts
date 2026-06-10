@@ -160,6 +160,9 @@ export class AcpTransport implements IKiroTransport {
       delete cleanEnv.Q_TERM;
       this._rawClient = new AcpRawClient(this.cliPath, args, cleanEnv, this.workingDir, (method, params) => {
         logDebug(this.tag, `[ext] ${method}`);
+        if (method === "session/update") {
+          this.handleSessionUpdate(params as any);
+        }
       });
       this._rawClient.spawn();
       this._rawClient.setOnExit((code, signal) => {
@@ -414,6 +417,7 @@ export class AcpTransport implements IKiroTransport {
 
     // #924: raw mode — use raw client directly
     if (this._rawMode && this._rawClient) {
+      this.responseChunks.set(sid, []);
       const result = await this._rawClient.prompt({ sessionId: sid, prompt: [{ type: "text", text: message }] });
       this._promptSuccessCount++;
       return result;
