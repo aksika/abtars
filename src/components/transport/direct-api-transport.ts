@@ -110,17 +110,6 @@ export class DirectApiTransport implements IKiroTransport {
     this._activeSessionKey = sessionKey;
     this._activeUserId = userId || "master";
 
-    // #843: Hydrate session from DB on first use (only system prompt present = fresh after restart)
-    if (session.messages.length === 1 && this.memoryBackend && !this.contextOrchestrator && this.config.maxContext >= 64000) {
-      const sixHoursAgo = Date.now() - 6 * 60 * 60_000;
-      const recent = this.memoryBackend.getRecentConversation(userId || "master", sixHoursAgo, 16);
-      for (const msg of recent) {
-        if (msg.role === "user") session.addUser(msg.content);
-        else if (msg.role === "assistant") session.addAssistant(msg.content);
-      }
-      if (recent.length > 0) logInfo(TAG, `Hydrated session with ${recent.length} messages from DB`);
-    }
-
     // If context orchestrator is active, rebuild messages from DB
     if (this.contextOrchestrator) {
       try {
