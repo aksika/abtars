@@ -342,7 +342,7 @@ export class DirectApiTransport implements IKiroTransport {
       // Budget-aware backoff on 0→0 token response (#732)
       if (!answer && usage && usage.prompt_tokens === 0) {
         const elapsed = Date.now() - loopStart;
-        const remaining = (this._timeoutOverrideMs ?? 60_000) - elapsed;
+        const remaining = (this._timeoutOverrideMs ?? getEnv().modelApiTimeoutMs) - elapsed;
         const retryDelay = 5000 + (zeroTokenRetries * 3000);
         if (remaining > retryDelay + 5000) {
           zeroTokenRetries++;

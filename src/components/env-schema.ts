@@ -46,7 +46,7 @@ const SCHEMA: readonly EnvVarDef[] = [
 
   // ── Transport timeouts ──
   { env: "PROMPT_TIMEOUT_SEC", type: "int", default: "180", description: "ACP prompt timeout (seconds)" },
-  { env: "MODEL_API_TIMEOUT_SEC", type: "int", default: "120", description: "Direct API model timeout (seconds)" },
+  { env: "MODEL_API_TIMEOUT_SEC", type: "int", default: "30", description: "Direct API model timeout (seconds)" },
   { env: "WATCHDOG_TOOL_TIMEOUT_SEC", type: "int", default: "180", description: "Watchdog tool call timeout (seconds)" },
   { env: "WATCHDOG_SILENT_SEC", type: "int", default: "300", description: "Watchdog silent timeout (seconds)" },
   { env: "WATCHDOG_ENDLESS_SEC", type: "int", default: "600", description: "Watchdog endless loop timeout (seconds)" },
