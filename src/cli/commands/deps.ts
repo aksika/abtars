@@ -1,7 +1,8 @@
 /**
  * `abtars deps` — manage optional dependencies.
  */
-import { OPTIONAL_DEPS, isInstalled, installPackages } from "../../utils/lazy-require.js";
+import { OPTIONAL_DEPS, SYSTEM_DEPS, isInstalled, installPackages } from "../../utils/lazy-require.js";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { existsSync, rmSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
@@ -13,6 +14,16 @@ function list(): number {
     const icon = installed ? "✓" : "○";
     process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label} (${dep.packages.join(", ")})\n`);
   }
+
+  process.stdout.write("\nSystem dependencies:\n\n");
+  for (const [name, dep] of Object.entries(SYSTEM_DEPS)) {
+    if (dep.platform && dep.platform !== (process.platform === "darwin" ? "darwin" : "linux")) continue;
+    const installed = spawnSync("which", [dep.bin], { stdio: "pipe" }).status === 0;
+    const icon = installed ? "✓" : "○";
+    const hint = installed ? "" : `  → ${dep.installHint}`;
+    process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label}${hint}\n`);
+  }
+
   process.stdout.write(`\nInstall: abtars deps install <name>\nRemove:  abtars deps remove <name>\n`);
   return 0;
 }
