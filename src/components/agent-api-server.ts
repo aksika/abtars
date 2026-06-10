@@ -140,13 +140,13 @@ export class AgentApiServer {
     return new Promise((resolve) => this.server.close(() => resolve()));
   }
 
-  /** Get or create a dedicated agent session for A2A. */
+  /** Get or create a dedicated agent session for A2A. Routes through Spin (#894). */
   private async ensureAgentSession(): Promise<AgentSession> {
     if (this.agentSession?.isReady) {
       this.resetIdleTimer();
       return this.agentSession;
     }
-    this.agentSession = await this.runtime.session("coding");
+    this.agentSession = await this.runtime.session("professor");
     this.resetIdleTimer();
     return this.agentSession;
   }
@@ -233,6 +233,19 @@ export class AgentApiServer {
       if (this.requireBearer(req, res) === null) return;
       this.handleV1Embeddings(req, res).catch((err) => {
         logWarn(TAG, `/v1/embeddings error: ${err instanceof Error ? err.message : String(err)}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" })
+            .end(JSON.stringify(openaiError("Internal server error", "server_error")));
+        }
+      });
+      return;
+    }
+    // #894 — /v1/tasks: async task delegation (fire-and-forget, returns cardId)
+    if (url === "/v1/tasks" && method === "POST") {
+      const caller = this.requireBearer(req, res);
+      if (caller === null) return;
+      this.handleV1Tasks(req, res, caller).catch((err) => {
+        logWarn(TAG, `/v1/tasks error: ${err instanceof Error ? err.message : String(err)}`);
         if (!res.headersSent) {
           res.writeHead(500, { "Content-Type": "application/json" })
             .end(JSON.stringify(openaiError("Internal server error", "server_error")));
@@ -480,6 +493,41 @@ export class AgentApiServer {
     }
     const result = await v1HandleEmbeddings(body, this.memory);
     writeResult(res, result);
+  }
+
+  /** #894 — /v1/tasks: async delegation. Returns 202 + cardId immediately. */
+  private async handleV1Tasks(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
+    let body: { goal?: string; priority?: string; context?: string };
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch (err) {
+      logAndSwallow(TAG, "JSON.parse tasks body", err);
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Invalid JSON body", "invalid_request_error", "invalid_body")));
+      return;
+    }
+
+    const goal = body.goal;
+    if (!goal || typeof goal !== "string") {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Missing 'goal' field", "invalid_request_error", "missing_field")));
+      return;
+    }
+
+    const { spin } = await import("./spin.js");
+    const cardId = spin.dispatch({
+      type: "O",
+      goal: body.context ? `${goal}\n\nContext: ${body.context}` : goal,
+      source: "peer",
+      priority: body.priority ?? "MEDIUM",
+      deliveryMode: "silent",
+    });
+
+    logInfo(TAG, `A2A task from ${caller}: card #${cardId} "${goal.slice(0, 60)}"`);
+    this.onPeerActivity?.(`📋 A2A task from ${caller}: "${goal.slice(0, 60)}" → card #${cardId}`);
+
+    res.writeHead(202, { "Content-Type": "application/json" })
+      .end(JSON.stringify({ task_id: cardId, status: "queued" }));
   }
 
 }
