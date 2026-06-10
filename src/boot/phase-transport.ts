@@ -216,7 +216,15 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     }, policy);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
-    try { execSync("pkill -f 'kiro-cli.*acp.*professor' 2>/dev/null || true", { timeout: 3000 }); } catch (err) { logAndSwallow("phase_transport", "op", err); }
+    // Kill stale ACP processes from previous run (#921)
+    const { readAndClearAcpPids } = await import("../components/transport/bridge-lock-transport.js");
+    const stalePids = readAndClearAcpPids();
+    for (const pid of stalePids) {
+      try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
+    }
+    if (stalePids.length) logDebug("main", `Killed ${stalePids.length} stale ACP process(es)`);
+    // Fallback: pattern-based kill for defense-in-depth
+    try { execSync("pkill -f 'kiro-cli-chat.*acp.*--agent' 2>/dev/null; true", { timeout: 3000 }); } catch { /* best effort */ }
     logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
     transport = createAgentTransport("professor", {
       cliPath: resolved.provider.cli ?? config.transport.agentCliPath,

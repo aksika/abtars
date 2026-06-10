@@ -12,6 +12,20 @@ import { localISO } from "../../utils/local-time.js";
 
 export type SleepStatus = "awake" | "sleeping" | "hw_sleep";
 
+/** Add an ACP child PID to bridge.lock tracking. */
+export function trackAcpPid(pid: number): void {
+  const pids = readBridgeLockField<number[]>("acpPids") ?? [];
+  pids.push(pid);
+  updateBridgeLockField("acpPids", pids);
+}
+
+/** Read and clear stale ACP PIDs from bridge.lock. */
+export function readAndClearAcpPids(): number[] {
+  const pids = readBridgeLockField<number[]>("acpPids") ?? [];
+  if (pids.length) updateBridgeLockField("acpPids", []);
+  return pids;
+}
+
 /** Read lastPromptAt from bridge.lock. Returns 0 if missing/unreadable. */
 export function readLastPromptAt(): number {
   try {

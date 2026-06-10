@@ -159,6 +159,11 @@ export class AcpTransport implements IKiroTransport {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
+    // Track child PID for cleanup on next boot (#921)
+    if (this.agent.pid) {
+      import("./bridge-lock-transport.js").then(({ trackAcpPid }) => trackAcpPid(this.agent!.pid!)).catch(() => {});
+    }
+
     if (!this.agent.stdin || !this.agent.stdout) {
       throw new Error("Failed to create ACP stdio pipes");
     }
