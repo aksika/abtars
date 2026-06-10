@@ -24,11 +24,11 @@ exec > "$LOG" 2>&1
 
 # Build abmind (if repo exists)
 if [ -d "$ABMIND_SRC/.git" ]; then
-  PHASE="npm-ci-abmind"
-  echo "=== abmind: npm ci ==="
+  PHASE="npm-update-abmind"
+  echo "=== abmind: npm update ==="
   cd "$ABMIND_SRC"
-  if ! npm ci; then
-    echo "FAILED: abmind npm ci"
+  if ! npm update; then
+    echo "FAILED: abmind npm update"
     rm -rf node_modules
     exit 1
   fi
@@ -38,17 +38,14 @@ if [ -d "$ABMIND_SRC/.git" ]; then
 fi
 
 # Build abtars
-PHASE="npm-ci-abtars"
-echo "=== abtars: npm ci ==="
+PHASE="npm-update-abtars"
+echo "=== abtars: npm update ==="
 cd "$ABTARS_SRC"
-if ! npm ci; then
-  echo "FAILED: abtars npm ci"
+if ! npm update; then
+  echo "FAILED: abtars npm update"
   rm -rf node_modules
   exit 1
 fi
-PHASE="sdk-update"
-echo "=== abtars: update ACP SDK ==="
-npm update @agentclientprotocol/sdk 2>&1 | tail -2 || true
 PHASE="esbuild"
 echo "=== abtars: esbuild ==="
 node esbuild.config.js || { echo "FAILED: esbuild"; exit 1; }
