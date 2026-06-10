@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { logInfo } from "./logger.js";
+import { logDebug } from "./logger.js";
 
 const TAG = "nerve";
 
@@ -7,7 +7,7 @@ export type NerveEvent = "card:queued" | "card:running" | "card:done" | "card:fa
 
 class Nerve extends EventEmitter {
   fire(event: NerveEvent, cardId: number, meta?: Record<string, unknown>): void {
-    logInfo(TAG, `${event} card:${cardId}`);
+    logDebug(TAG, `${event} card:${cardId}`);
     this.emit(event, cardId, meta);
   }
 }

@@ -4,7 +4,7 @@
  * Fire-and-forget: dispatch returns cardId immediately, session runs autonomously.
  */
 
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logTrace } from "./logger.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanList } from "./tasks/kanban-board.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
 import type { SessionType } from "./session-manager.js";
@@ -57,11 +57,13 @@ export class Spin {
 
     this.markRunning(request.type, cardId);
     kanbanRunning(cardId);
+    logTrace(TAG, `dispatch ${request.type} card:${cardId} source=${request.source} goal="${request.goal.slice(0, 80)}"`);
 
     const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
     this.execute(request, cardId, timeout)
       .then((result) => {
+        logTrace(TAG, `done ${request.type} card:${cardId} result=${result.length} chars`);
         kanbanComplete(cardId, null, result.slice(0, 500));
       })
       .catch((err) => {
@@ -121,6 +123,7 @@ export class Spin {
   private canDispatch(type: SessionType, _cardId: number): boolean {
     const max = MAX_CONCURRENT[type] ?? 5;
     const active = this.running.get(type)?.size ?? 0;
+    logTrace(TAG, `gate ${type}: active=${active} max=${max}`);
     return active < max;
   }
 
@@ -141,6 +144,7 @@ export class Spin {
                       "task";
 
     logInfo(TAG, `▶ ${request.type} card:${cardId} agent=${agentName}`);
+    logTrace(TAG, `execute card:${cardId} timeout=${Math.round(timeoutMs / 1000)}s goal="${request.goal.slice(0, 120)}"`);
 
     const timer = setTimeout(() => {
       logWarn(TAG, `⏱️ ${request.type} card:${cardId} timed out (${Math.round(timeoutMs / 60000)}min)`);
