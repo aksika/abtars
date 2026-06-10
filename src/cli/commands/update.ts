@@ -190,6 +190,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
       const stateFile = join(paths.home, "deploy.state");
       writeFileSync(stateFile, JSON.stringify({ status: "success", completedAt: new Date().toISOString(), version: staged.version }) + "\n");
       await syncAssets(paths.home, staged.stagedPath);
+      await refreshBinaries(paths.home);
       return 0;
     }
 
@@ -517,4 +518,27 @@ async function syncAssets(home: string, _stagedPath: string): Promise<void> {
       copyFileSync(agentSrc, join(agentDst, 'default.template.md'));
     }
   }
+}
+
+/** #925: Overwrite abtars + abmind binaries at their current PATH location. */
+async function refreshBinaries(home: string): Promise<void> {
+  const { execSync } = await import("node:child_process");
+  const { dirname, join: pjoin } = await import("node:path");
+  const { mkdirSync } = await import("node:fs");
+  const { homedir } = await import("node:os");
+  const { writeWrapper } = await import("./install.js");
+  const appDir = pjoin(home, "app");
+
+  for (const name of ["abtars", "abmind"] as const) {
+    let targetDir: string;
+    try {
+      const current = execSync(`which ${name} 2>/dev/null`, { encoding: "utf-8" }).trim();
+      targetDir = current ? dirname(current) : pjoin(homedir(), ".local", "bin");
+    } catch {
+      targetDir = pjoin(homedir(), ".local", "bin");
+    }
+    mkdirSync(targetDir, { recursive: true });
+    await writeWrapper(targetDir, name, appDir, false);
+  }
+  process.stdout.write(`✓ CLI binaries refreshed in PATH\n`);
 }
