@@ -168,12 +168,13 @@ async function reconcilePathLink(
 
 export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
   const bundleFile = name === 'abtars' ? 'abtars-cli.js' : `${name}.js`;
+  // #912: ensure node is in PATH on macOS (homebrew) and Linux (.local/bin)
+  const pathPreamble = `export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"\n`;
   let content: string;
 
   if (name === 'abmind') {
-    // #863: abmind resolves from bundle, source, or npm global — no current/ symlink
     content = `#!/usr/bin/env bash
-# Resolve abmind CLI — no ~/.abmind/current dependency (#863)
+${pathPreamble}# Resolve abmind CLI — no ~/.abmind/current dependency (#863)
 BUNDLE_CLI="$HOME/.abtars/app/bundle/node_modules/abmind/dist/cli/abmind.js"
 SRC_CLI="$HOME/.abtars/src/abmind/dist/cli/abmind.js"
 GLOBAL_CLI="$(npm root -g 2>/dev/null)/abmind/dist/cli/abmind.js"
@@ -193,7 +194,7 @@ fi
     const distFile = name === 'abtars' ? 'abtars.js' : `${name}.js`;
     const fallback = join(currentLink, 'dist', 'cli', distFile);
     content = `#!/usr/bin/env bash
-if [ -f "${target}" ]; then
+${pathPreamble}if [ -f "${target}" ]; then
   exec node "${target}" "$@"
 elif [ -f "${fallback}" ]; then
   exec node "${fallback}" "$@"
