@@ -96,6 +96,7 @@ git clone https://github.com/aksika/abtars.git
 git clone https://github.com/aksika/abmind.git
 cd abmind && npm install && npm run build && cd ..
 cd abtars && npm install && abtars update --from-local
+abtars deps install all
 abtars onboard
 
 # Linux/WSL:
@@ -103,6 +104,16 @@ sudo $(which abtars) daemon install
 # macOS:
 abtars daemon install
 ```
+
+### Optional dependencies
+
+```bash
+abtars deps list              # show what's available + status
+abtars deps install all       # install/update all npm packages (browser, pdf, youtube, image)
+abtars deps install browser   # install individual package
+```
+
+External binaries (bwrap, lightpanda, ollama, docker) require manual install — `abtars deps list` shows instructions.
 
 To update after pulling new commits:
 
