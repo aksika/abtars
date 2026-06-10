@@ -74,7 +74,7 @@ export class AcpTransport implements IKiroTransport {
   private sessions = new Map<string, string>(); // sessionKey → acpSessionId
   private responseChunks = new Map<string, string[]>(); // sessionId → chunks
   private lastContextPercent = -1;
-  private _rawMode = false;
+  private static _rawMode = false;
   private _rawClient: import("./acp-raw-client.js").AcpRawClient | null = null;
   private _promptSuccessCount = 0;
 
@@ -152,7 +152,7 @@ export class AcpTransport implements IKiroTransport {
     this.onReinit?.();
 
     // #924: If raw mode active, use raw pipe client instead of SDK
-    if (this._rawMode) {
+    if (AcpTransport._rawMode) {
       const { AcpRawClient } = await import("./acp-raw-client.js");
       let args: string[];
       if (this.extraCliArgs) { args = [...this.extraCliArgs]; }
@@ -419,7 +419,7 @@ export class AcpTransport implements IKiroTransport {
     let sid = sessionId;
 
     // #924: raw mode — use raw client directly
-    if (this._rawMode && this._rawClient) {
+    if (AcpTransport._rawMode && this._rawClient) {
       this.responseChunks.set(sid, []);
       const result = await this._rawClient.prompt({ sessionId: sid, prompt: [{ type: "text", text: message }] });
       this._promptSuccessCount++;
@@ -461,12 +461,12 @@ export class AcpTransport implements IKiroTransport {
         const elapsed = Date.now() - (this.lastActivityAt || 0);
         if (this._promptSuccessCount === 0 && elapsed < 5000 && (msg.includes("connection closed") || msg.includes("exited before"))) {
           logWarn(this.tag, `SDK failed on first prompt (${elapsed}ms) — switching to raw pipe mode`);
-          this._rawMode = true;
+          AcpTransport._rawMode = true;
           this.client = null;
           this.sessions.clear();
-          // Don't retry here — let it fail. Next message will trigger fresh session start with SOUL.
           await this.initialize();
-          throw err; // propagate so pipeline marks session for re-start
+          sid = await this.getOrCreateSession(this.lastSessionKey);
+          return this.promptWithRetry(sid, message, 0);
         }
 
         if (code === -32603 && msg.includes("No session found")) {
@@ -507,7 +507,7 @@ export class AcpTransport implements IKiroTransport {
 
   async sendInterrupt(): Promise<void> {
     // Raw mode: kill the CLI process (no cancel RPC available)
-    if (this._rawMode && this._rawClient) {
+    if (AcpTransport._rawMode && this._rawClient) {
       this._rawClient.destroy();
       this._rawClient = null;
       if (this.sm.state !== "idle") this.sm.transition("idle", "interrupt");
@@ -641,7 +641,7 @@ export class AcpTransport implements IKiroTransport {
     const existing = this.sessions.get(sessionKey);
     if (existing) return existing;
 
-    if (this._rawMode && this._rawClient) {
+    if (AcpTransport._rawMode && this._rawClient) {
       const session = await this._rawClient.newSession({ cwd: this.workingDir, mcpServers: [] });
       this.sessions.set(sessionKey, session.sessionId);
       logInfo(this.tag, `Created session ${session.sessionId} for ${sessionKey} [raw]`);
