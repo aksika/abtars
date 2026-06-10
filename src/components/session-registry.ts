@@ -8,7 +8,6 @@ import type { PlatformAdapter } from "../types/platform.js";
 export interface QueuedMessage {
   msg: InboundMessage;
   adapter: PlatformAdapter;
-  queuedAt: number;
 }
 
 export interface SessionEntry {

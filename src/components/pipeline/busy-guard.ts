@@ -62,7 +62,7 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
       entry.queue.splice(0, dropped);
       logWarn("busy-guard", `Queue overflow for ${activeId} — dropped ${dropped} oldest message(s)`);
     }
-    entry.queue.push({ msg, adapter, queuedAt: Date.now() });
+    entry.queue.push({ msg, adapter });
     logDebug("busy-guard", `Queued "${ctx.text.slice(0, 40)}" for ${activeId} (${entry.queue.length} pending)`);
     if (!ctx.deferReply) {
       if (entry.compacting) {

@@ -247,6 +247,18 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   }
 
   ctx.transport = transport;
+  // Flush message queues on reinit — model lost context
+  if ("onReinit" in transport) {
+    (transport as any).onReinit = () => {
+      for (const key of ctx.sessions.keys()) {
+        const entry = ctx.sessions.get(key);
+        if (entry && entry.queue.length) {
+          logWarn("transport", `Reinit: flushing ${entry.queue.length} queued message(s)`);
+          entry.queue.length = 0;
+        }
+      }
+    };
+  }
   ctx.modelName = resolved.model;
   ctx.modelProvider = resolved.providerName;
   ctx.fallbackChain = resolved.fallbacks.map((f: { model: string }) => f.model);

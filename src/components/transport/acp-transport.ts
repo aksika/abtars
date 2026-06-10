@@ -81,6 +81,8 @@ export class AcpTransport implements IKiroTransport {
   /** Optional callback for streaming intermediate responses. */
   onIntermediateResponse?: (text: string) => void;
   onToolCallStart?: (toolName: string) => void;
+  /** Fired on reinit — pipeline uses this to flush stale queues. */
+  onReinit?: () => void;
 
   /** Context window usage percentage from Kiro metadata. */
   get contextPercent(): number {
@@ -147,6 +149,7 @@ export class AcpTransport implements IKiroTransport {
 
   async initialize(): Promise<void> {
     this.sessions.clear(); // Fresh CLI instance = all old session IDs are stale
+    this.onReinit?.();
 
     // #924: If raw mode active, use raw pipe client instead of SDK
     if (this._rawMode) {
