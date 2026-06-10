@@ -72,6 +72,7 @@ Usage:
   abtars status
   abtars logs
   abtars config
+  abtars deps [list|install|remove]
 `,
   );
 }
