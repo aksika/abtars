@@ -8,7 +8,7 @@ import { existsSync, rmSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 
 function list(): number {
-  process.stdout.write("System dependencies:\n\n");
+  process.stdout.write("External binaries:\n\n");
   for (const [name, dep] of Object.entries(SYSTEM_DEPS)) {
     if (dep.platform && dep.platform !== (process.platform === "darwin" ? "darwin" : "linux")) continue;
     const installed = spawnSync("which", [dep.bin], { stdio: "pipe" }).status === 0;
@@ -17,7 +17,7 @@ function list(): number {
     process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label}${hint}\n`);
   }
 
-  process.stdout.write("\nOptional dependencies:\n\n");
+  process.stdout.write("\nNpm packages (auto-installable):\n\n");
   for (const [name, dep] of Object.entries(OPTIONAL_DEPS)) {
     const installed = dep.packages.every(p => isInstalled(p));
     const icon = installed ? "✓" : "○";
