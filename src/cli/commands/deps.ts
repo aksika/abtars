@@ -41,10 +41,10 @@ function install(names: string[]): number {
       return 1;
     }
     if (dep.packages.every(p => isInstalled(p))) {
-      process.stdout.write(`✓ ${name} already installed\n`);
-      continue;
+      process.stdout.write(`→ Updating ${dep.label}...\n`);
+    } else {
+      process.stdout.write(`→ Installing ${dep.label} (${dep.packages.join(", ")})...\n`);
     }
-    process.stdout.write(`→ Installing ${dep.label} (${dep.packages.join(", ")})...\n`);
     try {
       installPackages(dep.packages);
       if (dep.postInstall) {
