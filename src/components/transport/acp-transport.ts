@@ -359,6 +359,7 @@ export class AcpTransport implements IKiroTransport {
   }
 
   private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
+    let sid = sessionId;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       // #329: abort immediately if model is known-dead (flag set during handshake)
       if (this._modelNotFound) {
@@ -378,7 +379,7 @@ export class AcpTransport implements IKiroTransport {
         });
         const result = await Promise.race([
           this.client.prompt({
-            sessionId,
+            sid,
             prompt: [{ type: "text", text: message }],
           }).finally(() => clearInterval(timeoutTimer)),
           timeoutPromise,
@@ -386,7 +387,18 @@ export class AcpTransport implements IKiroTransport {
         return result;
       } catch (err: unknown) {
         const code = (err as { code?: number }).code;
-        if (code === -32603 && attempt < maxRetries) {
+        const msg = (err as { message?: string }).message ?? "";
+        if (code === -32603 && msg.includes("No session found")) {
+          // Session expired — invalidate and recreate on next attempt
+          const key = [...this.sessions.entries()].find(([, v]) => v === sid)?.[0];
+          if (key) this.sessions.delete(key);
+          logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
+          if (attempt < maxRetries) {
+            sid = await this.getOrCreateSession(this.lastSessionKey);
+            this.responseChunks.set(sessionId, []);
+            continue;
+          }
+        } else if (code === -32603 && attempt < maxRetries) {
           logWarn(this.tag, `Transient error (code ${code}), retry ${attempt + 1}/${maxRetries}`);
           this.responseChunks.set(sessionId, []); // reset chunks for retry
           await new Promise(r => setTimeout(r, 2000));
