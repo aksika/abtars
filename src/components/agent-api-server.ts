@@ -253,6 +253,18 @@ export class AgentApiServer {
       });
       return;
     }
+    // #894 — GET /v1/tasks/:id — poll task status
+    if (url.startsWith("/v1/tasks/") && method === "GET") {
+      if (this.requireBearer(req, res) === null) return;
+      this.handleV1TaskStatus(url, res);
+      return;
+    }
+    // #894 — DELETE /v1/tasks/:id — cancel task
+    if (url.startsWith("/v1/tasks/") && method === "DELETE") {
+      if (this.requireBearer(req, res) === null) return;
+      this.handleV1TaskCancel(url, res);
+      return;
+    }
 
     res.writeHead(404).end();
   }
@@ -528,6 +540,40 @@ export class AgentApiServer {
 
     res.writeHead(202, { "Content-Type": "application/json" })
       .end(JSON.stringify({ task_id: cardId, status: "queued" }));
+  }
+
+  /** #894 — GET /v1/tasks/:id — poll task status + result. */
+  private handleV1TaskStatus(url: string, res: ServerResponse): void {
+    const id = parseInt(url.slice("/v1/tasks/".length), 10);
+    if (isNaN(id)) {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Invalid task ID", "invalid_request_error", "invalid_id")));
+      return;
+    }
+    const { kanbanList } = require("./tasks/kanban-board.js") as typeof import("./tasks/kanban-board.js");
+    const cards = kanbanList("*").filter(c => c.id === id);
+    if (cards.length === 0) {
+      res.writeHead(404, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Task not found", "not_found", "task_not_found")));
+      return;
+    }
+    const card = cards[0]!;
+    res.writeHead(200, { "Content-Type": "application/json" })
+      .end(JSON.stringify({ task_id: card.id, status: card.status, result_summary: card.result_summary, result_path: card.result_path, error: card.error }));
+  }
+
+  /** #894 — DELETE /v1/tasks/:id — cancel a task. */
+  private handleV1TaskCancel(url: string, res: ServerResponse): void {
+    const id = parseInt(url.slice("/v1/tasks/".length), 10);
+    if (isNaN(id)) {
+      res.writeHead(400, { "Content-Type": "application/json" })
+        .end(JSON.stringify(openaiError("Invalid task ID", "invalid_request_error", "invalid_id")));
+      return;
+    }
+    const { kanbanFail } = require("./tasks/kanban-board.js") as typeof import("./tasks/kanban-board.js");
+    kanbanFail(id, "Cancelled by peer");
+    res.writeHead(200, { "Content-Type": "application/json" })
+      .end(JSON.stringify({ task_id: id, status: "cancelled" }));
   }
 
 }
