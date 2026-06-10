@@ -184,16 +184,23 @@ const probeFtsIntegrity: ProbeFn = async (_ctx) => {
   const start = Date.now();
   try {
     const dbPath = join(process.env["ABMIND_HOME"] ?? join(homedir(), ".abmind"), "memory", "memory.db");
-    const tables = ["extracted_memories_fts", "content_en_trigram", "content_original_trigram"];
+    const missing: string[] = [];
+    const REQUIRED = ["messages_fts", "extracted_memories_fts", "embeddings"];
+    for (const t of REQUIRED) {
+      const exists = execSync(`sqlite3 "${dbPath}" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t}'"`, { stdio: "pipe", timeout: 2000, encoding: "utf-8" }).trim();
+      if (!exists) missing.push(t);
+    }
+    if (missing.length > 0) return { name: "fts-integrity", status: "failed", latencyMs: Date.now() - start, detail: `missing: ${missing.join(", ")}` };
+    // Integrity check on FTS tables
     const rebuilt: string[] = [];
-    for (const t of tables) {
+    for (const t of ["messages_fts", "extracted_memories_fts"]) {
       try {
         execSync(`sqlite3 "${dbPath}" "INSERT INTO ${t}(${t}) VALUES('integrity-check')"`, { stdio: "pipe", timeout: 2000 });
       } catch {
         try {
           execSync(`sqlite3 "${dbPath}" "INSERT INTO ${t}(${t}) VALUES('rebuild')"`, { stdio: "pipe", timeout: 5000 });
           rebuilt.push(t);
-        } catch { /* table may not exist */ }
+        } catch { /* rebuild failed — already reported as existing */ }
       }
     }
     if (rebuilt.length > 0) return { name: "fts-integrity", status: "ok", latencyMs: Date.now() - start, detail: `rebuilt: ${rebuilt.join(", ")}` };
