@@ -19,7 +19,7 @@
 import { readEntry as cronReadEntry } from "../components/tasks/task-store.js";
 import { CronQueue } from "../components/tasks/task-queue.js";
 import { IdleSave } from "../components/idle-save.js";
-import { logWarn } from "../components/logger.js";
+import { logWarn, logInfo } from "../components/logger.js";
 import { loadTransport, resolveAgent } from "../components/transport-config.js";
 import { updateCtxStart } from "./ctx-start.js";
 import type { BootCtx, PhaseResult } from "./context.js";
@@ -105,12 +105,19 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   if (db) setSecretGetDb(db as any);
 
   // Wire session manager to runtime for agent session creation (#521)
-  ctx.sessionManager.restore(); // #540: restore persisted sessions before pipeline starts
   ctx.sessionManager.setRuntime(ctx.runtime);
 
   // #894: Wire Spin to runtime
   const { spin } = await import("../components/spin.js");
   spin.setRuntime(ctx.runtime);
+
+  // #540: Resume Orc if it was active before crash
+  const { readBridgeLockField } = await import("../components/transport/bridge-lock-transport.js");
+  const orcCard = readBridgeLockField<number>("orc_active");
+  if (orcCard) {
+    logInfo("boot", `Orc was active (card #${orcCard}) — resuming`);
+    spin.dispatch({ type: "O", goal: "Resume: reconcile kanban state for your active project", source: "agent", cardId: orcCard });
+  }
 
   // Build pipelineDeps. References ctx fields; later phases mutate ctx.sleepHandle /
   // pipelineDeps.loadedCapabilities / pipelineDeps.selfHealerTask in place.

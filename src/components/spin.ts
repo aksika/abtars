@@ -143,6 +143,12 @@ export class Spin {
                       request.type === "B" ? "browsie" :
                       "task";
 
+    // #540: track Orc active state in bridge.lock for crash recovery
+    if (request.type === "O") {
+      const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
+      updateBridgeLockField("orc_active", cardId);
+    }
+
     logInfo(TAG, `▶ ${request.type} card:${cardId} agent=${agentName}`);
     logTrace(TAG, `execute card:${cardId} timeout=${Math.round(timeoutMs / 1000)}s goal="${request.goal.slice(0, 120)}"`);
 
@@ -163,6 +169,10 @@ export class Spin {
       return result || "(no output)";
     } finally {
       clearTimeout(timer);
+      if (request.type === "O") {
+        const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
+        updateBridgeLockField("orc_active", null);
+      }
     }
   }
 }

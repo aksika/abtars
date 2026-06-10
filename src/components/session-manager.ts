@@ -8,10 +8,6 @@
 
 import type { Platform } from "../types/platform.js";
 import type { SubagentRuntime, AgentSession, AgentName } from "./subagent-runtime.js";
-import { writeFileSync, readFileSync, existsSync, renameSync } from "node:fs";
-import { join } from "node:path";
-import { abtarsHome } from "../paths.js";
-import { logInfo, logWarn } from "./logger.js";
 
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H";
 
@@ -126,7 +122,6 @@ export class SessionManager {
     }
     const session = this.allocateSession(state, type, true);
     state.activeIndex = session.shortIndex;
-    this.scheduleSave();
     return session;
   }
 
@@ -139,7 +134,6 @@ export class SessionManager {
     }
     const active = state.sessions.find(s => s.shortIndex === state.activeIndex && !s.ended);
     const result = this.allocateSession(state, type, false, active?.id);
-    this.scheduleSave();
     return result;
   }
 
@@ -149,7 +143,6 @@ export class SessionManager {
     const target = state.sessions.find(s => s.shortIndex === index && !s.ended && s.isTransport);
     if (!target) return `Session #${index} not found or not switchable.`;
     state.activeIndex = target.shortIndex;
-    this.scheduleSave();
     return target;
   }
 
@@ -166,7 +159,6 @@ export class SessionManager {
       target.ended = true;
       const newMain = this.allocateSession(state, "A", true);
       state.activeIndex = newMain.shortIndex;
-      this.scheduleSave();
       return target;
     }
 
@@ -176,7 +168,6 @@ export class SessionManager {
       const main = state.sessions.find(s => s.type === "A" && !s.ended);
       state.activeIndex = main?.shortIndex ?? 1;
     }
-    this.scheduleSave();
     return target;
   }
 
@@ -195,7 +186,6 @@ export class SessionManager {
         target.ended = true;
         const newMain = this.allocateSession(state, "A", true);
         state.activeIndex = newMain.shortIndex;
-        this.scheduleSave();
         return target;
       }
     } else {
@@ -203,13 +193,11 @@ export class SessionManager {
       if (target.type === "A" && aliveMains.length <= 1) {
         target.ended = true;
         this.allocateSession(state, "A", true);
-        this.scheduleSave();
         return target;
       }
     }
 
     target.ended = true;
-    this.scheduleSave();
     return target;
   }
 
@@ -236,7 +224,6 @@ export class SessionManager {
     if (!target) return `Session #${targetIdx} not found.`;
     if (target.paused) return `Session #${targetIdx} is already paused.`;
     target.paused = true;
-    this.scheduleSave();
     return target;
   }
 
@@ -248,7 +235,6 @@ export class SessionManager {
     if (!target) return `Session #${targetIdx} not found.`;
     if (!target.paused) return `Session #${targetIdx} is not paused.`;
     target.paused = false;
-    this.scheduleSave();
     return target;
   }
 
@@ -270,90 +256,11 @@ export class SessionManager {
   /** Clear all sessions for a platform (transport destruction). */
   clearPlatform(userId: string, platform: Platform): void {
     this.states.delete(this.stateKey(userId, platform));
-    this.scheduleSave();
   }
 
   /** Clear everything (bridge restart). */
   clearAll(): void {
     this.states.clear();
-  }
-
-  // ── Persistence (#540) ──────────────────────────────────────────────────
-
-  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
-
-  private scheduleSave(): void {
-    if (this._saveTimer) return;
-    this._saveTimer = setTimeout(() => {
-      this._saveTimer = null;
-      this.persist();
-    }, 2000);
-    this._saveTimer.unref();
-  }
-
-  /** Write session state to ~/.abtars/sessions.json (atomic). */
-  persist(): void {
-    const data: Record<string, { sessions: Array<Omit<ManagedSession, "agentSession">>; activeIndex: number; nextIndex: number }> = {};
-    for (const [key, state] of this.states) {
-      data[key] = {
-        sessions: state.sessions.map(({ agentSession: _, ...rest }) => rest),
-        activeIndex: state.activeIndex,
-        nextIndex: state.nextIndex,
-      };
-    }
-    const p = join(abtarsHome(), "sessions.json");
-    const tmp = p + ".tmp";
-    try {
-      writeFileSync(tmp, JSON.stringify(data), "utf-8");
-      renameSync(tmp, p);
-    } catch { /* best effort */ }
-  }
-
-  /** Restore session state from disk. Call at boot before pipeline starts. */
-  restore(): void {
-    const p = join(abtarsHome(), "sessions.json");
-    if (!existsSync(p)) return;
-    try {
-      const raw = JSON.parse(readFileSync(p, "utf-8"));
-      const now = Date.now();
-      const RECENT_MS = 15 * 60_000; // 15 minutes — only restore sessions active near restart
-
-      for (const [key, state] of Object.entries(raw) as [string, any][]) {
-        if (!state?.sessions || !Array.isArray(state.sessions)) continue;
-        const pruned: ManagedSession[] = state.sessions.filter((s: any) => {
-          if (s.ended) return false; // never restore ended sessions
-          const age = now - (s.createdAt ?? 0);
-          if (age < RECENT_MS) return true; // recently created
-          // Keep if last activity was recent (use createdAt as proxy — no lastActive persisted)
-          return false;
-        });
-        // Always keep the most recent Main (A) if none survived
-        if (!pruned.some(s => s.type === "A")) {
-          const lastMain = [...(state.sessions as ManagedSession[])]
-            .filter(s => s.type === "A" && !s.ended)
-            .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
-          if (lastMain) pruned.push(lastMain);
-        }
-        if (pruned.length === 0) continue;
-        const activeIdx = state.activeIndex ?? 1;
-        const hasActive = pruned.some(s => s.shortIndex === activeIdx && !s.ended);
-        const restoredState: PlatformState = {
-          sessions: pruned,
-          activeIndex: hasActive ? activeIdx : (pruned.find(s => !s.ended)?.shortIndex ?? 1),
-          nextIndex: state.nextIndex ?? pruned.length + 1,
-        };
-        // Ensure at least one Main session exists
-        if (!pruned.some(s => s.type === "A" && !s.ended)) {
-          const main = this.allocateSession(restoredState, "A", true);
-          restoredState.activeIndex = main.shortIndex;
-        }
-        this.states.set(key, restoredState);
-      }
-      const total = [...this.states.values()].reduce((n, s) => n + s.sessions.length, 0);
-      logInfo("session-mgr", `Restored ${total} sessions from disk`);
-    } catch (err) {
-      logWarn("session-mgr", `Failed to restore sessions.json: ${err instanceof Error ? err.message : String(err)}`);
-    }
   }
 
   /** Format session list for display. */
