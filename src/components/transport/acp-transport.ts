@@ -503,6 +503,17 @@ export class AcpTransport implements IKiroTransport {
   }
 
   async sendInterrupt(): Promise<void> {
+    // Raw mode: kill the CLI process (no cancel RPC available)
+    if (this._rawMode && this._rawClient) {
+      this._rawClient.destroy();
+      this._rawClient = null;
+      if (this.sm.state !== "idle") this.sm.transition("idle", "interrupt");
+      this.toolMeta = null;
+      logInfo(this.tag, "Interrupt: killed raw CLI process");
+      // Reinitialize for next prompt
+      await this.initialize();
+      return;
+    }
     // Cancel all active sessions
     if (!this.client) return;
     for (const sessionId of this.sessions.values()) {
