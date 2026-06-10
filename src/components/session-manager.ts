@@ -328,11 +328,19 @@ export class SessionManager {
           return true;
         });
         if (pruned.length === 0) continue;
-        this.states.set(key, {
+        const activeIdx = state.activeIndex ?? 1;
+        const hasActive = pruned.some(s => s.shortIndex === activeIdx && !s.ended);
+        const restoredState: PlatformState = {
           sessions: pruned,
-          activeIndex: state.activeIndex ?? 1,
+          activeIndex: hasActive ? activeIdx : (pruned.find(s => !s.ended)?.shortIndex ?? 1),
           nextIndex: state.nextIndex ?? pruned.length + 1,
-        });
+        };
+        // Ensure at least one Main session exists
+        if (!pruned.some(s => s.type === "A" && !s.ended)) {
+          const main = this.allocateSession(restoredState, "A", true);
+          restoredState.activeIndex = main.shortIndex;
+        }
+        this.states.set(key, restoredState);
       }
       const total = [...this.states.values()].reduce((n, s) => n + s.sessions.length, 0);
       logInfo("session-mgr", `Restored ${total} sessions from disk`);
