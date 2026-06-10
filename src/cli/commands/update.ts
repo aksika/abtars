@@ -328,6 +328,17 @@ async function postSwapHousekeeping(
     const count = files.filter(f => f.endsWith("SKILL.md")).length;
     process.stdout.write(`✓ skills/core synced (${count} skills)\n`);
   }
+
+  // Sync core/prompts → ~/.abtars/core/prompts/
+  const promptsSrc = join(paths.app, "core", "prompts");
+  const promptsDst = join(paths.home, "core", "prompts");
+  if (existsSync(promptsSrc)) {
+    mkdirSync(promptsDst, { recursive: true });
+    for (const f of readdirSync(promptsSrc).filter(f => f.endsWith(".md"))) {
+      copyFileSync(join(promptsSrc, f), join(promptsDst, f));
+    }
+  }
+
   for (const d of ["custom", "downloaded", "self"]) {
     await mkdir(join(paths.home, "skills", d), { recursive: true });
   }
