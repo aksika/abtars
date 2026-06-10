@@ -74,6 +74,9 @@ export class AcpTransport implements IKiroTransport {
   private sessions = new Map<string, string>(); // sessionKey → acpSessionId
   private responseChunks = new Map<string, string[]>(); // sessionId → chunks
   private lastContextPercent = -1;
+  private _rawMode = false;
+  private _rawClient: import("./acp-raw-client.js").AcpRawClient | null = null;
+  private _promptSuccessCount = 0;
 
   /** Optional callback for streaming intermediate responses. */
   onIntermediateResponse?: (text: string) => void;
@@ -143,6 +146,36 @@ export class AcpTransport implements IKiroTransport {
   private readonly tag: string;
 
   async initialize(): Promise<void> {
+    // #924: If raw mode active, use raw pipe client instead of SDK
+    if (this._rawMode) {
+      const { AcpRawClient } = await import("./acp-raw-client.js");
+      let args: string[];
+      if (this.extraCliArgs) { args = [...this.extraCliArgs]; }
+      else { args = ["acp", "--agent", this.agentName]; }
+      const cleanEnv = { ...process.env };
+      delete cleanEnv.KIRO_SESSION_ID;
+      delete cleanEnv.QTERM_SESSION_ID;
+      delete cleanEnv.Q_TERM;
+      this._rawClient = new AcpRawClient(this.cliPath, args, cleanEnv, this.workingDir, (method, params) => {
+        logDebug(this.tag, `[ext] ${method}`);
+      });
+      this._rawClient.spawn();
+      this._rawClient.setOnExit((code, signal) => {
+        logWarn(this.tag, `[raw] CLI exited (code=${code}, signal=${signal})`);
+        this.sm.childExited();
+        if (this.sm.state === "reinitializing" && this.autoReinit) {
+          logWarn(this.tag, "Unexpected exit (raw mode) — auto-reinitializing in 5s");
+          setTimeout(() => {
+            this.initialize().then(() => this.sm.reinitSucceeded()).catch(e => { logError(this.tag, "Auto-reinit failed", e); this.sm.reinitFailed(); });
+          }, 5000);
+        }
+      });
+      const result = await this._rawClient.initialize();
+      this._promptSuccessCount = 0;
+      logInfo(this.tag, `ACP initialized [raw mode] (agent: ${result.agentInfo.name})`);
+      return;
+    }
+
     // Ensure kiro agent config has the correct model from transport.json
     if (this.modelId) {
       ensureAgentConfig(this.agentName, this.modelId);
@@ -376,6 +409,14 @@ export class AcpTransport implements IKiroTransport {
 
   private async promptWithRetry(sessionId: string, message: string, maxRetries = 2): Promise<{ stopReason: string }> {
     let sid = sessionId;
+
+    // #924: raw mode — use raw client directly
+    if (this._rawMode && this._rawClient) {
+      const result = await this._rawClient.prompt({ sessionId: sid, prompt: [{ type: "text", text: message }] });
+      this._promptSuccessCount++;
+      return result;
+    }
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       // #329: abort immediately if model is known-dead (flag set during handshake)
       if (this._modelNotFound) {
@@ -384,6 +425,7 @@ export class AcpTransport implements IKiroTransport {
       try {
         if (!this.client) throw new Error("ACP not initialized");
         this.lastActivityAt = Date.now();
+        const promptStartedAt = Date.now();
         let timeoutTimer: ReturnType<typeof setInterval> | undefined;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutTimer = setInterval(() => {
@@ -400,12 +442,25 @@ export class AcpTransport implements IKiroTransport {
           }).finally(() => clearInterval(timeoutTimer)),
           timeoutPromise,
         ]);
+        this._promptSuccessCount++;
         return result;
       } catch (err: unknown) {
         const code = (err as { code?: number }).code;
         const msg = (err as { message?: string }).message ?? "";
+
+        // #924: Detect SDK connection failure on first prompt → switch to raw mode
+        const elapsed = Date.now() - (this.lastActivityAt || 0);
+        if (this._promptSuccessCount === 0 && elapsed < 5000 && (msg.includes("connection closed") || msg.includes("exited before"))) {
+          logWarn(this.tag, `SDK failed on first prompt (${elapsed}ms) — switching to raw pipe mode`);
+          this._rawMode = true;
+          this.client = null;
+          await this.initialize();
+          // Recreate session on raw client
+          sid = await this.getOrCreateSession(this.lastSessionKey);
+          return this.promptWithRetry(sid, message, 0);
+        }
+
         if (code === -32603 && msg.includes("No session found")) {
-          // Session expired — invalidate and recreate on next attempt
           const key = [...this.sessions.entries()].find(([, v]) => v === sid)?.[0];
           if (key) this.sessions.delete(key);
           logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
@@ -565,6 +620,13 @@ export class AcpTransport implements IKiroTransport {
   private async getOrCreateSession(sessionKey: string): Promise<string> {
     const existing = this.sessions.get(sessionKey);
     if (existing) return existing;
+
+    if (this._rawMode && this._rawClient) {
+      const session = await this._rawClient.newSession({ cwd: this.workingDir, mcpServers: [] });
+      this.sessions.set(sessionKey, session.sessionId);
+      logInfo(this.tag, `Created session ${session.sessionId} for ${sessionKey} [raw]`);
+      return session.sessionId;
+    }
 
     if (!this.client) throw new Error("ACP not initialized");
 
