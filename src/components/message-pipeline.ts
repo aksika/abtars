@@ -573,8 +573,10 @@ export async function handleInboundMessage(
     if (entry?.queue.length) {
       const next = entry.queue.shift()!;
       const age = Date.now() - next.queuedAt;
-      if (age > 30_000) {
-        logWarn(TAG, `Dropping stale queued message for ${activeSessionId} (age: ${Math.round(age / 1000)}s)`);
+      const text = next.msg.text ?? "";
+      const maxAge = text.length < 15 ? 30_000 : 180_000;
+      if (age > maxAge) {
+        logWarn(TAG, `Dropping stale queued message for ${activeSessionId} (age: ${Math.round(age / 1000)}s, len: ${text.length})`);
       } else {
         logInfo(TAG, `Draining queued message for ${activeSessionId} (${entry.queue.length} remaining)`);
         handleInboundMessage(next.msg, next.adapter, deps).catch(e => logError(TAG, "Queue drain error", e));
