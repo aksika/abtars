@@ -46,6 +46,9 @@ if ! npm ci; then
   rm -rf node_modules
   exit 1
 fi
+PHASE="sdk-update"
+echo "=== abtars: update ACP SDK ==="
+npm update @agentclientprotocol/sdk 2>&1 | tail -2 || true
 PHASE="esbuild"
 echo "=== abtars: esbuild ==="
 node esbuild.config.js || { echo "FAILED: esbuild"; exit 1; }
