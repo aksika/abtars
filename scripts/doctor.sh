@@ -561,7 +561,7 @@ if [ "$BRIDGE_COUNT" -gt 1 ]; then
     done
   fi
 elif [ "$BRIDGE_COUNT" -eq 1 ]; then
-  ok "bridge processes: 1"
+  : # single bridge — healthy
 fi
 
 # ── Port availability ──────────────────────────────────────────────────────
