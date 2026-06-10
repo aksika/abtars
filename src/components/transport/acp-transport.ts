@@ -454,8 +454,8 @@ export class AcpTransport implements IKiroTransport {
           logWarn(this.tag, `SDK failed on first prompt (${elapsed}ms) — switching to raw pipe mode`);
           this._rawMode = true;
           this.client = null;
+          this.sessions.clear();
           await this.initialize();
-          // Recreate session on raw client
           sid = await this.getOrCreateSession(this.lastSessionKey);
           return this.promptWithRetry(sid, message, 0);
         }
