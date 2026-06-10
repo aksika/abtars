@@ -251,6 +251,8 @@ export class CronQueue {
 
     if (entry.executor === "script") {
       this.runScript(entry, job.onComplete);
+    } else if (entry.executor === "orc") {
+      this.runOrc(entry);
     } else {
       this.runAgent(entry, job.onComplete, job.manual);
     }
@@ -304,6 +306,19 @@ export class CronQueue {
     }
     writeEntry(entry);
     return false;
+  }
+
+  private runOrc(entry: CronEntry): void {
+    logInfo(TAG, `▶ Orc: "${entry.message.slice(0, 60)}"`);
+    import("../spin.js").then(({ spin }) => {
+      spin.dispatch({ type: "O", goal: entry.message, source: "task", priority: entry.priority ?? "MEDIUM", deliveryMode: "announce" });
+      this.clearCurrent();
+      this.processNext();
+    }).catch((err) => {
+      logWarn(TAG, `Orc dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.clearCurrent();
+      this.processNext();
+    });
   }
 
   private runScript(entry: CronEntry, onComplete?: TaskCompleteCallback): void {

@@ -21,7 +21,7 @@ export interface CronEntry {
   message: string;
   chatId: number;
   type: "reminder" | "task";
-  executor?: "agent" | "script";
+  executor?: "agent" | "script" | "orc";
   schedule?: string;
   catchUp?: number;  // hours: max delay after fireAt before skipping to next. 0 = no catch-up (default).
   priority?: "high" | "medium" | "low";
@@ -100,7 +100,7 @@ function add(args: string[]): void {
   if (type !== "reminder" && type !== "task") { console.log(JSON.stringify({ ok: false, error: "--type must be reminder or task" })); process.exit(1); }
 
   const executor = (parsed.executor ?? "agent") as NonNullable<CronEntry["executor"]>;
-  if (executor !== "agent" && executor !== "script") { console.log(JSON.stringify({ ok: false, error: "--executor must be agent or script" })); process.exit(1); }
+  if (executor !== "agent" && executor !== "script" && executor !== "orc") { console.log(JSON.stringify({ ok: false, error: "--executor must be agent, script, or orc" })); process.exit(1); }
 
   const entry: CronEntry = {
     id: randomBytes(3).toString("hex"),
