@@ -152,7 +152,11 @@ export class Spin {
     }, timeoutMs);
 
     try {
-      const result = await this.runtime.complete(agentName, request.goal, {
+      const { buildSoulBundle } = await import("./soul-bundle.js");
+      const bundle = buildSoulBundle(request.type);
+      const fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
+
+      const result = await this.runtime.complete(agentName, fullPrompt, {
         timeoutMs,
         session: "fresh",
       });
