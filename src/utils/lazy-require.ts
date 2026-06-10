@@ -12,10 +12,11 @@ const TAG = "deps";
 export interface OptionalDep {
   readonly packages: readonly string[];
   readonly label: string;
+  readonly postInstall?: string;
 }
 
 export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
-  browser: { packages: ["patchright"], label: "Browser automation" },
+  browser: { packages: ["patchright"], label: "Browser automation", postInstall: "patchright install chromium" },
   pdf: { packages: ["pdf-parse"], label: "PDF reading" },
   youtube: { packages: ["youtube-transcript"], label: "YouTube transcripts" },
   image: { packages: ["jimp"], label: "Image processing" },

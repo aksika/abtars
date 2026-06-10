@@ -47,6 +47,11 @@ function install(names: string[]): number {
     process.stdout.write(`→ Installing ${dep.label} (${dep.packages.join(", ")})...\n`);
     try {
       installPackages(dep.packages);
+      if (dep.postInstall) {
+        process.stdout.write(`→ Running post-install: ${dep.postInstall}\n`);
+        const libNm = join(abtarsHome(), "lib", "node_modules");
+        spawnSync("npx", ["--prefix", join(abtarsHome(), "lib"), ...dep.postInstall.split(" ")], { stdio: "inherit", cwd: libNm });
+      }
       process.stdout.write(`✓ ${name} installed\n`);
     } catch (err) {
       process.stderr.write(`✗ ${name} failed: ${err instanceof Error ? err.message : String(err)}\n`);
