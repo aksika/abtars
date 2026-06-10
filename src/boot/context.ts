@@ -94,6 +94,7 @@ export interface BootCtx {
   agentApiServer: AgentApiServer | null;
   actionGate: any;
   sandboxEnabled: boolean;
+  seatbeltActive: boolean;
   mcpDaemonStarted: boolean;
 
   // ── Callbacks (closures set by phases for cross-phase use) ────────────
@@ -166,6 +167,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     agentApiServer: null,
     actionGate: null,
     sandboxEnabled: false,
+    seatbeltActive: false,
     mcpDaemonStarted: false,
 
     // Callbacks

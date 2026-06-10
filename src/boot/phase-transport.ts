@@ -34,6 +34,17 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
     }
   }
 
+  // Seatbelt detection (#906)
+  if (getEnv().securityMode === "seatbelt") {
+    const { isAvailable, mechanismName } = await import("../components/seatbelt/index.js");
+    if (isAvailable()) {
+      ctx.seatbeltActive = true;
+      logInfo("main", `🛡️ Seatbelt active — bash commands sandboxed via ${mechanismName()}`);
+    } else {
+      logWarn("main", `SECURITY_MODE=seatbelt but ${mechanismName()} not available — falling back to guardrails`);
+    }
+  }
+
   // Initialize context-window-start for all known users
   if (memoryConfig.memoryEnabled) {
     const reg = loadUsers();
@@ -256,6 +267,16 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   ctx.actionGate = new ActionGate(authDir);
   setActionGate(ctx.actionGate);
   logDebug("main", "🔒 ActionGate wired");
+
+  // #906: Wire seatbelt into tool-registry
+  if (ctx.seatbeltActive) {
+    const { setSeatbelt } = await import("../components/transport/tool-registry.js");
+    const { getPolicy } = await import("../components/seatbelt/index.js");
+    const home = abtarsHome();
+    const policy = getPolicy("A", join(home, "workspace"), home); // Main session policy
+    setSeatbelt(true, policy);
+    logDebug("main", "🛡️ Seatbelt wired to tool-registry");
+  }
 
   if (resolved.provider.transport === "api" && (ctx.memory as any)?.available) {
     const { setMemoryBackend } = await import("../components/transport/tool-registry.js");

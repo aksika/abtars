@@ -584,6 +584,15 @@ if grep -qE "^SECURITY_MODE=sandbox" "$AB/config/.env" 2>/dev/null; then
   fi
 fi
 
+# Seatbelt availability check (#906)
+if grep -qE "^SECURITY_MODE=seatbelt" "$AB/config/.env" 2>/dev/null; then
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    command -v sandbox-exec &>/dev/null && ok "seatbelt" "sandbox-exec available" || warn "seatbelt" "sandbox-exec not found"
+  else
+    command -v bwrap &>/dev/null && ok "seatbelt" "bwrap available" || warn "seatbelt" "bwrap not found (apt install bubblewrap)"
+  fi
+fi
+
 # Summary
 if $FIX && [ -f "$AB/logs/watchdog.log" ]; then
   echo ""

@@ -109,9 +109,31 @@ function runBash(cmd: string, timeout = BASH_TIMEOUT_MS, signal?: AbortSignal): 
   return executeBash(cmd, timeout, signal);
 }
 
+let _seatbeltActive = false;
+let _seatbeltPolicy: import("../seatbelt/policy.js").SeatbeltPolicy | null = null;
+
+/** Wire seatbelt for OS-level command sandboxing (#906). */
+export function setSeatbelt(active: boolean, policy?: import("../seatbelt/policy.js").SeatbeltPolicy): void {
+  _seatbeltActive = active;
+  _seatbeltPolicy = policy ?? null;
+}
+
 function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve) => {
-    const child = execFile("bash", ["-c", cmd], { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    let bin = "bash";
+    let args = ["-c", cmd];
+
+    // #906: Wrap in OS sandbox if seatbelt active and command needs sandboxing
+    if (_seatbeltActive && _seatbeltPolicy) {
+      const { shouldSandbox, wrapCommand } = require("../seatbelt/index.js") as typeof import("../seatbelt/index.js");
+      if (shouldSandbox(cmd)) {
+        const wrapped = wrapCommand(cmd, _seatbeltPolicy);
+        bin = wrapped.bin;
+        args = wrapped.args;
+      }
+    }
+
+    const child = execFile(bin, args, { timeout, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       const result: Record<string, unknown> = {};
       if (stdout) result["stdout"] = stdout.slice(0, 50_000);
       if (stderr) result["stderr"] = stderr.slice(0, 10_000);
