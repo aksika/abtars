@@ -35,6 +35,8 @@ export interface KanbanCard {
   updated_at: string;
   completed_at: string | null;
   delivered_at: string | null;
+  max_tokens: number | null;
+  tokens_used: number | null;
 }
 
 let _db: SqliteDb | null = null;
@@ -71,6 +73,9 @@ function db(): SqliteDb {
       completed_at TEXT,
       delivered_at TEXT
     )`);
+    // Migrations — safe to re-run (silently skip if column exists)
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
   }
   return _db;
 }
@@ -178,4 +183,12 @@ export function kanbanGetCard(id: number): KanbanCard | undefined {
 
 export function kanbanGetChildren(parentId: number): KanbanCard[] {
   return db().prepare(`SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id`).all(parentId) as KanbanCard[];
+}
+
+export function kanbanAddTokens(id: number, tokens: number): void {
+  db().prepare(`UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now') WHERE id = ?`).run(tokens, id);
+  const card = kanbanGetCard(id);
+  if (card?.parent_id) {
+    db().prepare(`UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now') WHERE id = ?`).run(tokens, card.parent_id);
+  }
 }

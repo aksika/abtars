@@ -51,6 +51,12 @@ function reconcileProject(projectId: number): void {
     return;
   }
 
+  // Circuit breaker: token budget
+  if (project.max_tokens && (project.tokens_used ?? 0) >= project.max_tokens) {
+    abortProject(projectId, children, `budget exceeded (${project.tokens_used}/${project.max_tokens} tokens)`);
+    return;
+  }
+
   // Circuit breaker: too many workers
   if (children.length > MAX_WORKERS) {
     abortProject(projectId, children, `too many workers (${children.length})`);

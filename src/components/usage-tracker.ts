@@ -14,6 +14,10 @@ export interface UsageEntry {
 
 let buffer: UsageEntry[] = [];
 let usagePath = "";
+let _totalTokens = 0;
+
+/** Cumulative token counter (input + output). Monotonically increasing. */
+export function getTotalTokens(): number { return _totalTokens; }
 
 export function initUsageTracker(home: string): void {
   const stateDir = join(home, "state");
@@ -22,6 +26,7 @@ export function initUsageTracker(home: string): void {
 }
 
 export function recordUsage(model: string, inputTokens: number, outputTokens: number): void {
+  _totalTokens += inputTokens + outputTokens;
   if (!usagePath) return;
   buffer.push({ ts: Date.now(), model, in: inputTokens, out: outputTokens });
   if (buffer.length >= 100) flushUsage();

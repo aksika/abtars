@@ -159,13 +159,20 @@ export class Spin {
 
     try {
       const { buildSoulBundle } = await import("./soul-bundle.js");
+      const { getTotalTokens } = await import("./usage-tracker.js");
       const bundle = buildSoulBundle(request.type);
       const fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
 
+      const tokensBefore = getTotalTokens();
       const result = await this.runtime.complete(agentName, fullPrompt, {
         timeoutMs,
         session: "fresh",
       });
+      const tokensUsed = getTotalTokens() - tokensBefore;
+      if (tokensUsed > 0) {
+        const { kanbanAddTokens } = await import("./tasks/kanban-board.js");
+        kanbanAddTokens(cardId, tokensUsed);
+      }
       return result || "(no output)";
     } finally {
       clearTimeout(timer);
