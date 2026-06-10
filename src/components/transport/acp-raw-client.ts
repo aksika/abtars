@@ -75,9 +75,11 @@ export class AcpRawClient {
   private request<T = unknown>(method: string, params: Record<string, unknown>): Promise<T> {
     if (!this.child?.stdin?.writable) return Promise.reject(new Error("CLI not running"));
     const id = this.nextId++;
+    const payload = JSON.stringify({ jsonrpc: "2.0", method, params, id });
+    logDebug(TAG, `→ ${method} (id=${id}, ${payload.length} bytes)`);
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.child!.stdin!.write(JSON.stringify({ jsonrpc: "2.0", method, params, id }) + "\n");
+      this.child!.stdin!.write(payload + "\n");
     });
   }
 

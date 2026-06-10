@@ -71,6 +71,10 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<PhaseResul
         logInfo("main", "✅ Startup session ready");
       }).catch(async (err) => {
         logWarn("main", `Startup greeting failed (attempt 1): ${err instanceof Error ? err.message : String(err)}`);
+        // Reset session state so next user message triggers fresh SOUL injection
+        const e = ctx.sessions.getOrCreate(activeSessionId);
+        e.seen = false;
+        e.pendingStart = true;
         // #328: retry once after 60s (model may still be loading after deploy)
         await new Promise(r => setTimeout(r, 60_000));
         try {
@@ -89,6 +93,9 @@ export async function phaseStartupNotification(ctx: BootCtx): Promise<PhaseResul
           logInfo("main", "✅ Startup session ready (retry succeeded)");
         } catch (retryErr) {
           logWarn("main", `Startup greeting retry failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
+          const e2 = ctx.sessions.getOrCreate(activeSessionId);
+          e2.seen = false;
+          e2.pendingStart = true;
         }
       }).finally(() => {
         ctx.sessions.getOrCreate(activeSessionId).busy = false;

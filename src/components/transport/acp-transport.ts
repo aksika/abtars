@@ -457,9 +457,9 @@ export class AcpTransport implements IKiroTransport {
           this._rawMode = true;
           this.client = null;
           this.sessions.clear();
+          // Don't retry here — let it fail. Next message will trigger fresh session start with SOUL.
           await this.initialize();
-          sid = await this.getOrCreateSession(this.lastSessionKey);
-          return this.promptWithRetry(sid, message, 0);
+          throw err; // propagate so pipeline marks session for re-start
         }
 
         if (code === -32603 && msg.includes("No session found")) {
