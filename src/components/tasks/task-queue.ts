@@ -18,7 +18,7 @@ import { logInfo, logWarn } from "../logger.js";
 import { readLastPromptAt, readBridgeLockField } from "../transport/bridge-lock-transport.js";
 import { recordRun as dbRecordRun, readEntry, writeEntry } from "./task-store.js";
 import { recordRun } from "./task-checker.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail } from "./kanban-board.js";
+import { kanbanComplete, kanbanFail } from "./kanban-board.js";
 import type { CronEntry } from "../../cli/abtars-task.js";
 import { localDate } from "../../utils/date.js";
 
@@ -387,26 +387,21 @@ export class CronQueue {
     // and calls processNext() again while we're awaiting the dynamic import.
     this.setCurrent(entry, 0, "agent");
 
-    // Kanban board: track this task
-    const boardId = kanbanEnqueue(entry.id, "task", entry.id);
-    kanbanRunning(boardId);
-
+    // Kanban board: track this task (Spin handles card lifecycle)
     // Set $WORKSPACE for agent tool execution — all output goes here
     const workspace = join(abtarsHome(), "workspace", entry.id);
     mkdirSync(workspace, { recursive: true });
     process.env["WORKSPACE"] = workspace;
 
-    const { SubagentRuntime } = await import("../subagent-runtime.js");
-    const runtime = new SubagentRuntime();
+    const { spin } = await import("../spin.js");
 
-    // 30-min hard timeout (starts at execution, not enqueue)
+    // 30-min hard timeout
     this.timeout = setTimeout(() => {
-      logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min) — shutting down runtime`);
-      runtime.shutdown();
+      logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min)`);
     }, AGENT_TIMEOUT_MS);
 
-    runtime.complete("task", prompt)
-      .then((response) => {
+    spin.dispatchAwait({ type: "T", goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM" })
+      .then(({ cardId: boardId, result: response }) => {
         // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
         // extract just the meaningful content. This happens when the model echoes its last
         // tool result instead of synthesizing a human-readable response.
@@ -458,7 +453,8 @@ export class CronQueue {
           onComplete?.(entry.chatId, entry.message, `${icon} ${summary}${dodResult}`, producedFiles.length > 0 ? producedFiles : undefined);
         }
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
+        const boardId = 0; // card already tracked by Spin
         logWarn(TAG, `Agent failed: ${err instanceof Error ? err.message : String(err)}`);
         kanbanFail(boardId, err instanceof Error ? err.message : String(err));
         recordRunToFile(entry.id, 1);
@@ -471,7 +467,6 @@ export class CronQueue {
         }
       })
       .finally(() => {
-        runtime.shutdown();
         this.clearCurrent();
         this.processNext();
       });

@@ -108,6 +108,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   ctx.sessionManager.restore(); // #540: restore persisted sessions before pipeline starts
   ctx.sessionManager.setRuntime(ctx.runtime);
 
+  // #894: Wire Spin to runtime
+  const { spin } = await import("../components/spin.js");
+  spin.setRuntime(ctx.runtime);
+
   // Build pipelineDeps. References ctx fields; later phases mutate ctx.sleepHandle /
   // pipelineDeps.loadedCapabilities / pipelineDeps.selfHealerTask in place.
   const pipelineDeps: PipelineDeps = {

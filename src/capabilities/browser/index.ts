@@ -1,4 +1,4 @@
-import { logInfo, logWarn, logError } from "../../components/logger.js";
+import { logInfo, logError } from "../../components/logger.js";
 import { getEnv } from "../../components/env-schema.js";
 /**
  * Browser capability — browse-spawn IPC + browse-checker heartbeat.
@@ -61,22 +61,27 @@ export function register(api: CapabilityApi): void {
         entries.push(entry);
         writePendingBrowse(entries);
 
-        // Fire-and-forget via runtime
-        api.runtime.spawn("browsie", prompt, {
-          timeoutMs,
-          onComplete: (_id: string, result: string) => {
-            deliverBrowseResult(entry, result);
-            const remaining = readPendingBrowse().filter(e => e.taskId !== taskId);
-            writePendingBrowse(remaining);
-          },
-          onError: (_id: string, err: Error) => {
-            logWarn("browser", `Browsie spawn failed for ${taskId}: ${err.message}`);
-            deliverBrowseResult(entry, `Browse task failed: ${err.message}`);
-            const remaining = readPendingBrowse().filter(e => e.taskId !== taskId);
-            writePendingBrowse(remaining);
-          },
-        }).then(({ taskId: spawnId }) => {
-          conn.write(JSON.stringify({ ok: true, taskId, spawnId, status: "spawned" }) + "\n");
+        // Fire-and-forget via Spin
+        import("../../components/spin.js").then(({ spin: s }) => {
+          const cardId = s.dispatch({ type: "B", goal: prompt, source: "agent", timeoutMs: timeoutMs });
+          conn.write(JSON.stringify({ ok: true, taskId, spawnId: `spin-${cardId}`, status: "spawned" }) + "\n");
+
+          // Track for browse-checker delivery
+          const checkDone = setInterval(() => {
+            import("../../components/tasks/kanban-board.js").then(({ kanbanList: kl }) => {
+              const cards = kl("*").filter((c: { id: number }) => c.id === cardId);
+              const card = cards[0];
+              if (!card || (card.status !== "done" && card.status !== "failed")) return;
+              clearInterval(checkDone);
+              if (card.status === "done") {
+                deliverBrowseResult(entry, card.result_summary ?? "(no output)");
+              } else {
+                deliverBrowseResult(entry, `Browse task failed: ${card.error ?? "unknown"}`);
+              }
+              const remaining = readPendingBrowse().filter(e => e.taskId !== taskId);
+              writePendingBrowse(remaining);
+            });
+          }, 5000);
         }).catch((err) => {
           conn.write(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }) + "\n");
         });

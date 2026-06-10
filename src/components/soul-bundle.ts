@@ -27,6 +27,10 @@ const TYPE_IDENTITY: Record<SessionType, string | null> = {
   T: "I am a task agent. I execute scheduled tasks. Write all output to $WORKSPACE.",
   S: "I am the self-healing agent. I diagnose and fix system failures. If unfixable, state: Requires human intervention.",
   P: "I am responding to a peer agent request. Be precise and technical.",
+  O: null, // Orchestrator uses full soul bundle + orchestration tools
+  W: "I am a worker agent. I execute one specific task assigned by the Orchestrator. Write output to $WORKSPACE.",
+  D: "I am the sleep agent. I process the day's conversations into lasting memories.",
+  H: "I am the healer agent. I scan logs for recurring failures and attempt fixes.",
 };
 
 function buildModelInstructions(): string {
