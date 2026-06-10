@@ -2,15 +2,17 @@
  * spin.ts — Session lifecycle orchestrator (#894).
  * Single gateway for all non-Main session creation.
  * Fire-and-forget: dispatch returns cardId immediately, session runs autonomously.
+ * Orc (O) is persistent with idle timeout (#932).
  */
 
 import { logInfo, logWarn, logTrace } from "./logger.js";
 import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanList } from "./tasks/kanban-board.js";
-import type { SubagentRuntime } from "./subagent-runtime.js";
-import type { SessionType } from "./session-manager.js";
+import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
+import type { SessionManager, SessionType } from "./session-manager.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
 
 const TAG = "spin";
+const ORC_IDLE_MS = (parseInt(process.env["ORC_IDLE_TIMEOUT_SEC"] ?? "1200", 10)) * 1000; // default 20min
 
 export interface SpinRequest {
   type: SessionType;
@@ -34,10 +36,17 @@ const MAX_CONCURRENT: Partial<Record<SessionType, number>> = {
 export class Spin {
   private running = new Map<SessionType, Set<number>>(); // type → active cardIds
   private runtime: SubagentRuntime | null = null;
+  private sessionManager: SessionManager | null = null;
 
-  setRuntime(runtime: SubagentRuntime): void {
-    this.runtime = runtime;
-  }
+  // Persistent Orc session (#932)
+  private orcSession: AgentSession | null = null;
+  private orcIdleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
+  setSessionManager(sm: SessionManager): void { this.sessionManager = sm; }
+
+  /** Get the live Orc session (for user attach / message routing). */
+  getOrcSession(): AgentSession | null { return this.orcSession?.isReady ? this.orcSession : null; }
 
   /**
    * Dispatch a session. Fire-and-forget.
@@ -61,6 +70,15 @@ export class Spin {
 
     const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+    // Register session for /session visibility
+    if (this.sessionManager) {
+      if (request.type === "O") {
+        this.sessionManager.createSession("master", "telegram", "O");
+      } else {
+        this.sessionManager.createSubSession("master", "telegram", request.type);
+      }
+    }
+
     this.execute(request, cardId, timeout)
       .then((result) => {
         logTrace(TAG, `done ${request.type} card:${cardId} result=${result.length} chars`);
@@ -73,6 +91,10 @@ export class Spin {
       })
       .finally(() => {
         this.markDone(request.type, cardId);
+        // End non-Orc sessions (Orc stays persistent)
+        if (request.type !== "O" && this.sessionManager) {
+          this.sessionManager.endSession("master", "telegram");
+        }
         this.drainQueued();
       });
 
@@ -93,12 +115,17 @@ export class Spin {
     this.markRunning(request.type, cardId);
     kanbanRunning(cardId);
 
+    if (this.sessionManager) {
+      this.sessionManager.createSubSession("master", "telegram", request.type);
+    }
+
     const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     try {
       const result = await this.execute(request, cardId, timeout);
       return { cardId, result };
     } finally {
       this.markDone(request.type, cardId);
+      if (this.sessionManager) this.sessionManager.endSession("master", "telegram");
       this.drainQueued();
     }
   }
@@ -108,6 +135,45 @@ export class Spin {
     if (request.type === "O") throw new Error("Cannot nest orchestrators");
     return this.dispatch({ ...request, type: "W", parentCardId });
   }
+
+  // ── Persistent Orc (#932) ──────────────────────────────────────────────
+
+  private async getOrCreateOrc(): Promise<AgentSession> {
+    this.resetOrcIdle();
+    if (this.orcSession?.isReady) return this.orcSession;
+    logInfo(TAG, "Spawning persistent Orc session");
+    this.orcSession = await this.runtime!.session("browsie");
+    return this.orcSession;
+  }
+
+  private resetOrcIdle(): void {
+    if (this.orcIdleTimer) clearTimeout(this.orcIdleTimer);
+    this.orcIdleTimer = setTimeout(() => this.destroyOrc(), ORC_IDLE_MS);
+    (this.orcIdleTimer as NodeJS.Timeout).unref();
+  }
+
+  private async destroyOrc(): Promise<void> {
+    logInfo(TAG, "Orc idle timeout — destroying session");
+    if (this.orcSession) {
+      await this.orcSession.destroy();
+      this.orcSession = null;
+    }
+    if (this.sessionManager) this.sessionManager.endSession("master", "telegram");
+    if (this.orcIdleTimer) { clearTimeout(this.orcIdleTimer); this.orcIdleTimer = null; }
+  }
+
+  /** Send a user message to Orc (when user is attached to O session). */
+  async sendUserToOrc(message: string): Promise<string | null> {
+    const orc = this.getOrcSession();
+    if (!orc) return null;
+    this.resetOrcIdle();
+    logTrace(TAG, `[USER→Orc] "${message.slice(0, 100)}"`);
+    const response = await orc.sendPrompt("orc:user", `[USER] ${message}`);
+    logTrace(TAG, `[Orc→USER] "${response.slice(0, 100)}"`);
+    return response;
+  }
+
+  // ── Internal ───────────────────────────────────────────────────────────
 
   /** Check queued cards and dispatch any that fit concurrency limits. */
   private drainQueued(): void {
@@ -139,15 +205,13 @@ export class Spin {
   private async execute(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
     if (!this.runtime) throw new Error("Spin: runtime not set");
 
-    const agentName = request.type === "O" ? "professor" :
-                      request.type === "B" ? "browsie" :
-                      "task";
-
-    // #540: track Orc active state in bridge.lock for crash recovery
+    // #932: Orc uses persistent session
     if (request.type === "O") {
-      const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
-      updateBridgeLockField("orc_active", cardId);
+      return this.executeOrc(request, cardId, timeoutMs);
     }
+
+    // All non-Orc: browsie model, fire-and-forget
+    const agentName = "browsie";
 
     logInfo(TAG, `▶ ${request.type} card:${cardId} agent=${agentName}`);
     logTrace(TAG, `execute card:${cardId} timeout=${Math.round(timeoutMs / 1000)}s goal="${request.goal.slice(0, 120)}"`);
@@ -159,34 +223,64 @@ export class Spin {
 
     try {
       const { buildSoulBundle } = await import("./soul-bundle.js");
-      const { getTotalTokens } = await import("./usage-tracker.js");
       const bundle = buildSoulBundle(request.type);
-      let fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
+      const fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
 
-      // #907: Inject buffered worker notifications for Orc
-      if (request.type === "O") {
-        const { drainOrcNotifications } = await import("./spin-notifications.js");
-        const notifications = drainOrcNotifications(cardId);
-        if (notifications.length) fullPrompt = notifications.join("\n") + "\n\n" + fullPrompt;
-      }
-
-      const tokensBefore = getTotalTokens();
       const result = await this.runtime.complete(agentName, fullPrompt, {
         timeoutMs,
         session: "fresh",
       });
-      const tokensUsed = getTotalTokens() - tokensBefore;
-      if (tokensUsed > 0) {
-        const { kanbanAddTokens } = await import("./tasks/kanban-board.js");
-        kanbanAddTokens(cardId, tokensUsed);
-      }
       return result || "(no output)";
     } finally {
       clearTimeout(timer);
-      if (request.type === "O") {
-        const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
-        updateBridgeLockField("orc_active", null);
+    }
+  }
+
+  /** Execute via persistent Orc session. */
+  private async executeOrc(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
+    const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
+    updateBridgeLockField("orc_active", cardId);
+
+    const orc = await this.getOrCreateOrc();
+
+    // Clear context if session was previously used (new project)
+    if (orc && "hasAssistantMessages" in orc && typeof (orc as any).hasAssistantMessages === "function") {
+      if ((orc as any).hasAssistantMessages()) {
+        logInfo(TAG, "Orc: new project — clearing prior context");
+        if ("resetContext" in orc && typeof (orc as any).resetContext === "function") {
+          (orc as any).resetContext();
+        }
       }
+    }
+
+    logInfo(TAG, `▶ O card:${cardId} (persistent Orc)`);
+    logTrace(TAG, `orc execute card:${cardId} timeout=${Math.round(timeoutMs / 1000)}s goal="${request.goal.slice(0, 120)}"`);
+
+    const timer = setTimeout(() => {
+      logWarn(TAG, `⏱️ O card:${cardId} timed out (${Math.round(timeoutMs / 60000)}min)`);
+    }, timeoutMs);
+
+    try {
+      const { buildSoulBundle } = await import("./soul-bundle.js");
+      const bundle = buildSoulBundle("O");
+      let fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
+
+      // #907: Inject buffered worker notifications
+      const { drainOrcNotifications } = await import("./spin-notifications.js");
+      const notifications = drainOrcNotifications(cardId);
+      if (notifications.length) {
+        logTrace(TAG, `orc: injecting ${notifications.length} worker notifications`);
+        fullPrompt = notifications.join("\n") + "\n\n" + fullPrompt;
+      }
+
+      logTrace(TAG, `orc prompt: "${fullPrompt.slice(0, 200)}"`);
+      const result = await orc.sendPrompt("orc:project", fullPrompt);
+      logTrace(TAG, `orc result: "${result.slice(0, 100)}" (${result.length} chars)`);
+      return result || "(no output)";
+    } finally {
+      clearTimeout(timer);
+      updateBridgeLockField("orc_active", null);
+      // Don't destroy Orc — stays alive for follow-ups. Idle timer handles cleanup.
     }
   }
 }

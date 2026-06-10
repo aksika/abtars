@@ -110,6 +110,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // #894: Wire Spin to runtime
   const { spin } = await import("../components/spin.js");
   spin.setRuntime(ctx.runtime);
+  spin.setSessionManager(ctx.sessionManager);
 
   // #907: Register Nerve notification listeners for Orc
   await import("../components/spin-notifications.js");
