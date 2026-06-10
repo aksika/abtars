@@ -171,3 +171,11 @@ export function kanbanCleanup(olderThanDays = 7): number {
   ).run(olderThanDays);
   return result.changes;
 }
+
+export function kanbanGetCard(id: number): KanbanCard | undefined {
+  return db().prepare(`SELECT * FROM kanban_board WHERE id = ?`).get(id) as KanbanCard | undefined;
+}
+
+export function kanbanGetChildren(parentId: number): KanbanCard[] {
+  return db().prepare(`SELECT * FROM kanban_board WHERE parent_id = ? ORDER BY id`).all(parentId) as KanbanCard[];
+}

@@ -187,6 +187,9 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   }));
   heartbeat.registerTask(createKanbanCleanupTask());
 
+  // #896: Orc reconciliation loop — self-healing via Nerve events
+  import("../components/reconciler.js").then(({ startReconciler }) => startReconciler()).catch(err => logAndSwallow(TAG, "reconciler", err));
+
   // #440: update check (npm registry, notify if newer version)
   heartbeat.registerTask(createUpdateCheckTask((msg) => {
     import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(err => logAndSwallow(TAG, "sendNotification update-check", err));
