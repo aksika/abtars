@@ -111,6 +111,9 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const { spin } = await import("../components/spin.js");
   spin.setRuntime(ctx.runtime);
 
+  // #907: Register Nerve notification listeners for Orc
+  await import("../components/spin-notifications.js");
+
   // #540: Resume Orc if it was active before crash
   const { readBridgeLockField } = await import("../components/transport/bridge-lock-transport.js");
   const orcCard = readBridgeLockField<number>("orc_active");

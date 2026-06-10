@@ -161,7 +161,14 @@ export class Spin {
       const { buildSoulBundle } = await import("./soul-bundle.js");
       const { getTotalTokens } = await import("./usage-tracker.js");
       const bundle = buildSoulBundle(request.type);
-      const fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
+      let fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
+
+      // #907: Inject buffered worker notifications for Orc
+      if (request.type === "O") {
+        const { drainOrcNotifications } = await import("./spin-notifications.js");
+        const notifications = drainOrcNotifications(cardId);
+        if (notifications.length) fullPrompt = notifications.join("\n") + "\n\n" + fullPrompt;
+      }
 
       const tokensBefore = getTotalTokens();
       const result = await this.runtime.complete(agentName, fullPrompt, {

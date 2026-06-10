@@ -76,6 +76,7 @@ function db(): SqliteDb {
     // Migrations — safe to re-run (silently skip if column exists)
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
   }
   return _db;
 }
@@ -191,4 +192,21 @@ export function kanbanAddTokens(id: number, tokens: number): void {
   if (card?.parent_id) {
     db().prepare(`UPDATE kanban_board SET tokens_used = COALESCE(tokens_used, 0) + ?, updated_at = datetime('now') WHERE id = ?`).run(tokens, card.parent_id);
   }
+}
+
+// #907: Worker progress — 30s debounce per card
+const _progressTimers = new Map<number, ReturnType<typeof setTimeout>>();
+const _progressPending = new Map<number, Record<string, unknown>>();
+
+export function kanbanProgress(id: number, data: { toolUseCount?: number; tokenCount?: number; lastTool?: string; summary?: string }): void {
+  _progressPending.set(id, data);
+  if (_progressTimers.has(id)) return;
+  _progressTimers.set(id, setTimeout(() => {
+    _progressTimers.delete(id);
+    const pending = _progressPending.get(id);
+    if (pending) {
+      db().prepare(`UPDATE kanban_board SET progress = ?, updated_at = datetime('now') WHERE id = ?`).run(JSON.stringify(pending), id);
+      _progressPending.delete(id);
+    }
+  }, 30_000));
 }
