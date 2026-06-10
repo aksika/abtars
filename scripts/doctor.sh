@@ -547,6 +547,23 @@ if [ "$total_stale" -gt 0 ] || [ "$audit_size" -gt "$AUDIT_MAX_BYTES" ]; then
   fi
 fi
 
+# ── Duplicate bridge detection (#923) ──────────────────────────────────────────
+BRIDGE_PIDS=$(pgrep -f "node.*bundle/abtars.js" 2>/dev/null | sort -n)
+BRIDGE_COUNT=$(echo "$BRIDGE_PIDS" | grep -c . 2>/dev/null || echo 0)
+if [ "$BRIDGE_COUNT" -gt 1 ]; then
+  warn "DUPLICATE BRIDGES: $BRIDGE_COUNT processes (PIDs: $(echo $BRIDGE_PIDS | tr '\n' ' '))"
+  if $FIX; then
+    LOCK_PID=$(json_field "$AB/bridge.lock" pid 0 2>/dev/null)
+    for P in $BRIDGE_PIDS; do
+      if [ "$P" != "$LOCK_PID" ]; then
+        kill "$P" 2>/dev/null && fix "killed duplicate bridge PID $P (keeping $LOCK_PID)"
+      fi
+    done
+  fi
+elif [ "$BRIDGE_COUNT" -eq 1 ]; then
+  ok "bridge processes: 1"
+fi
+
 # ── Port availability ──────────────────────────────────────────────────────
 AGENT_API_PORT=$(grep -E '^AGENT_API_PORT=' "$AB/config/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "3100")
 WEB_PORT=$(grep -E '^WEB_PORT=' "$AB/config/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "3000")

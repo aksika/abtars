@@ -89,8 +89,17 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
 
   // 1) Unload supervisor service (prevent respawn) then kill watchdog
   if (force && process.platform === "darwin") {
-    try { execFileSync("launchctl", ["bootout", `gui/${process.getuid!()}`, join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist")], { timeout: 5000 }); }
+    const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
+    const uid = `gui/${process.getuid!()}`;
+    try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000 }); }
     catch { /* already unloaded or not present */ }
+    // #923: Verify bootout stuck — launchd may have already respawned
+    try {
+      await new Promise(r => setTimeout(r, 1000));
+      execFileSync("launchctl", ["print", `${uid}/com.abtars.watchdog`], { timeout: 3000, stdio: "pipe" });
+      // Still loaded — retry bootout
+      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000 }); } catch {}
+    } catch { /* not loaded = success */ }
   }
 
   const wdPid = readJsonField(watchdogLock, "pid") as number | undefined;

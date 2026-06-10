@@ -11,14 +11,16 @@ function pidAlive(pid: number): boolean {
 
 export async function start(): Promise<number> {
   const home = abtarsHome();
-  const pidFile = join(home, "bridge.pid");
+  const lockFile = join(home, "bridge.lock");
 
-  if (existsSync(pidFile)) {
-    const pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
-    if (!isNaN(pid) && pidAlive(pid)) {
-      process.stdout.write(`Bridge already running (pid ${pid}).\n`);
-      return 0;
-    }
+  if (existsSync(lockFile)) {
+    try {
+      const lock = JSON.parse(readFileSync(lockFile, "utf-8"));
+      if (lock.pid && pidAlive(lock.pid)) {
+        process.stdout.write(`Bridge already running (pid ${lock.pid}).\n`);
+        return 0;
+      }
+    } catch { /* corrupt lock — proceed with start */ }
   }
 
   const { restart } = await import("./restart.js");
