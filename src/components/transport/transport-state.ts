@@ -79,6 +79,7 @@ export class TransportStateMachine {
 
   reinitSucceeded(): void {
     this._reinitFailures = 0;
+    if (this._state === "idle") return; // already recovered
     this.transition("idle", "reinitSucceeded");
   }
 
