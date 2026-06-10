@@ -204,6 +204,12 @@ export class AcpTransport implements IKiroTransport {
     const output = Readable.toWeb(this.agent.stdout) as unknown as ReadableStream<Uint8Array>;
     const stream = ndJsonStream(input, output);
 
+    // #7554 workaround: kiro-cli interprets idle stdin as EOF. Periodic empty writes keep pipe alive.
+    const stdinKeepAlive = setInterval(() => {
+      if (this.agent?.stdin?.writable) this.agent.stdin.write("");
+    }, 1000);
+    thisProcess.on("exit", () => clearInterval(stdinKeepAlive));
+
     this.client = new ClientSideConnection(
       () => ({
         sessionUpdate: async (params: SessionNotification) => {
