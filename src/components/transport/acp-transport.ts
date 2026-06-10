@@ -154,9 +154,14 @@ export class AcpTransport implements IKiroTransport {
     } else {
       args = ["acp", "--agent", this.agentName];
     }
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.KIRO_SESSION_ID;
+    delete cleanEnv.QTERM_SESSION_ID;
+    delete cleanEnv.Q_TERM;
     this.agent = spawn(this.cliPath, args, {
       cwd: this.workingDir,
       stdio: ["pipe", "pipe", "pipe"],
+      env: cleanEnv,
     });
 
     // Track child PID for cleanup on next boot (#921)
