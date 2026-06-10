@@ -146,6 +146,8 @@ export class AcpTransport implements IKiroTransport {
   private readonly tag: string;
 
   async initialize(): Promise<void> {
+    this.sessions.clear(); // Fresh CLI instance = all old session IDs are stale
+
     // #924: If raw mode active, use raw pipe client instead of SDK
     if (this._rawMode) {
       const { AcpRawClient } = await import("./acp-raw-client.js");
