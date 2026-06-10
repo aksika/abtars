@@ -24,16 +24,17 @@ function list(): number {
     process.stdout.write(`  ${icon} ${name.padEnd(12)} ${dep.label}${hint}\n`);
   }
 
-  process.stdout.write(`\nInstall: abtars deps install <name>\nRemove:  abtars deps remove <name>\n`);
+  process.stdout.write(`\nInstall: abtars deps install <name|all>\nRemove:  abtars deps remove <name>\n`);
   return 0;
 }
 
 function install(names: string[]): number {
   if (names.length === 0) {
-    process.stderr.write("Usage: abtars deps install <name> [<name>...]\nRun 'abtars deps list' to see available.\n");
+    process.stderr.write("Usage: abtars deps install <name|all> [<name>...]\nRun 'abtars deps list' to see available.\n");
     return 1;
   }
-  for (const name of names) {
+  const targets = names.includes("all") ? Object.keys(OPTIONAL_DEPS) : names;
+  for (const name of targets) {
     const dep = OPTIONAL_DEPS[name];
     if (!dep) {
       process.stderr.write(`Unknown dep: ${name}. Run 'abtars deps list'.\n`);
