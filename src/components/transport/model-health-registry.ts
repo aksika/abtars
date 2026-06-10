@@ -7,7 +7,7 @@
  * Missing fields fall back to hardcoded defaults.
  */
 
-export type ErrorKind = "rate_limit" | "auth" | "transient" | "weak" | "empty" | "truncated";
+export type ErrorKind = "rate_limit" | "credits" | "auth" | "transient" | "weak" | "empty" | "truncated";
 export type ModelStatus = "healthy" | "degraded" | "exhausted" | "auth_failed";
 
 export interface HealthPolicyConfig {
@@ -134,6 +134,7 @@ export class ModelHealthRegistry {
         break;
       }
       case "rate_limit":
+      case "credits":
         b.level = Math.min(1.0, b.level + this.rateLimitFill);
         if (retryAfterMs && retryAfterMs > 0) b.cooldownUntil = now + retryAfterMs;
         break;
@@ -182,6 +183,7 @@ export class ModelHealthRegistry {
 
 /** Classify HTTP status to error kind. */
 export function classifyError(status: number, message?: string): ErrorKind {
+  if (status === 402 && message?.includes("credits")) return "credits";
   if (status === 429 || status === 402) return "rate_limit";
   if (status === 404 && message && /image input|No endpoints found/i.test(message)) return "transient";
   if (status === 401 || status === 403 || status === 404) return "auth";
