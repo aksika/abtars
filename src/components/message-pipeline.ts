@@ -167,6 +167,20 @@ export async function handleInboundMessage(
     }
   }
 
+  // --- #936: Resolve session via Spin (sets per-user transport + delivery mode) ---
+  const { spin } = await import("./spin.js");
+  try {
+    const userSession = await spin.resolveSession(msg.userId, msg.platform, ctx.chatId);
+    if (userSession.state === "ready") {
+      ctx.transport = userSession.transport;
+      ctx.delivery = userSession.delivery;
+    }
+  } catch (err) {
+    // Session limit or creation failure — let message fall through to deps.transport (master's)
+    // Only log, don't block. For master this never fires (already registered).
+    logWarn(TAG, `resolveSession failed for ${msg.userId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // --- Core transport/response handling (will become middleware incrementally) ---
   const {
     memory, memoryConfig,
@@ -386,6 +400,30 @@ export async function handleInboundMessage(
         userResponse = userResponse.replaceAll(val, `[REDACTED:$${key}]`);
         logWarn(TAG, `Redacted leaked secret $${key} from response`);
       }
+    }
+
+    // --- #936: Simple delivery (non-master sessions) ---
+    if (ctx.delivery === "simple") {
+      if (!userResponse && noReply) return;
+      if (userResponse) {
+        const chunks = adapter.chunkResponse(userResponse);
+        for (const chunk of chunks) {
+          const clean = chunk.replace(/\[TOPICS:\s*.+?\]/gi, "").replace(/\[REACT:.+?\]/gi, "").trim();
+          if (clean) await retrySend(() => adapter.sendMessage(channelId, clean, { threadId: msg.threadId }));
+        }
+      }
+      // Record assistant response to memory
+      if (memory && registry.byUserId.get(userId)?.role !== "guest") {
+        memory.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp: Date.now(), userId, sessionId: activeSessionId });
+      }
+      if (isVoice && ttsConfig && adapter.sendVoice) {
+        try {
+          const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
+          if (audio) await adapter.sendVoice(channelId, audio, { threadId: msg.threadId });
+        } catch (err) { logAndSwallow(TAG, "TTS", err); }
+      }
+      logInfo(TAG, `→ [${msg.platform}] Simple delivery (${userResponse.length} chars)`);
+      return;
     }
 
     // --- Empty response ---

@@ -30,7 +30,7 @@ import {
   writeRestartReason, readAndClearRestartRequested, readBridgeLockField, updateBridgeLockField, writeSleepStatus,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
-import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask, createSkillStatsFlushTask, createSkillTrashPruneTask, createKanbanDeliveryTask, createKanbanCleanupTask } from "../components/heartbeat-tasks.js";
+import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask, createSkillStatsFlushTask, createSkillTrashPruneTask, createKanbanDeliveryTask, createKanbanCleanupTask, createUserSessionExpiryTask } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
@@ -186,6 +186,9 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     chatId: () => String(masterChatId),
   }));
   heartbeat.registerTask(createKanbanCleanupTask());
+
+  // #936: Expire idle user sessions
+  heartbeat.registerTask(createUserSessionExpiryTask());
 
   // #896: Orc reconciliation loop — self-healing via Nerve events
   import("../components/reconciler.js").then(({ startReconciler }) => startReconciler()).catch(err => logAndSwallow(TAG, "reconciler", err));

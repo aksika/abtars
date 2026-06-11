@@ -231,6 +231,24 @@ export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTas
   };
 }
 
+/** #936: Expire idle user sessions managed by Spin. */
+export function createUserSessionExpiryTask(): HeartbeatTask {
+  return {
+    name: "user-session-expiry",
+    execute: async () => {
+      const { spin } = await import("./spin.js");
+      const now = Date.now();
+      for (const session of spin.userSessions.values()) {
+        if (session.idleTimeoutMs === Infinity) continue;
+        if (session.state !== "ready") continue;
+        if (now - session.lastActiveAt > session.idleTimeoutMs) {
+          spin.destroySession(session.userId);
+        }
+      }
+    },
+  };
+}
+
 /** #857: Kanban cleanup — purge delivered cards older than 7 days. */
 export function createKanbanCleanupTask(): HeartbeatTask {
   let counter = 0;

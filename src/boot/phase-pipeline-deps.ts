@@ -112,6 +112,22 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   spin.setRuntime(ctx.runtime);
   spin.setSessionManager(ctx.sessionManager);
 
+  // #936: Register master session in Spin
+  const { loadUsers } = await import("../components/user-registry.js");
+  const registry = loadUsers();
+  const masterUser = registry.users.find(u => u.role === "master");
+  if (masterUser && transport) {
+    const masterChatId = masterUser.platforms.telegram ?? masterUser.platforms.discord;
+    if (masterChatId) {
+      spin.registerMasterSession({
+        userId: masterUser.userId,
+        chatId: typeof masterChatId === "number" ? masterChatId : parseInt(String(masterChatId), 10),
+        platform: masterUser.platforms.telegram ? "telegram" : "discord",
+        transport,
+      });
+    }
+  }
+
   // #907: Register Nerve notification listeners for Orc
   await import("../components/spin-notifications.js");
 

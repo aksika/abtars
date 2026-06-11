@@ -1,7 +1,8 @@
 /**
- * spin.ts — Session lifecycle orchestrator (#894).
- * Single gateway for all non-Main session creation.
- * Fire-and-forget: dispatch returns cardId immediately, session runs autonomously.
+ * spin.ts — Session lifecycle orchestrator (#894, #936).
+ * Single gateway for ALL session creation — interactive (A) and non-interactive (T/B/C/O/W/D/H).
+ * Resolves which transport handles each inbound message.
+ * Fire-and-forget dispatch for background sessions.
  * Orc (O) is persistent with idle timeout (#932).
  */
 
@@ -10,9 +11,30 @@ import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanList } 
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { SessionManager, SessionType } from "./session-manager.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
+import type { IKiroTransport } from "./transport/kiro-transport.js";
+import { loadUsers } from "./user-registry.js";
 
 const TAG = "spin";
 const ORC_IDLE_MS = (parseInt(process.env["ORC_IDLE_TIMEOUT_SEC"] ?? "1200", 10)) * 1000; // default 20min
+const USER_SESSION_IDLE_MS = parseInt(process.env["USER_SESSION_IDLE_MS"] ?? "7200000", 10); // 2h
+const GUEST_SESSION_IDLE_MS = parseInt(process.env["GUEST_SESSION_IDLE_MS"] ?? "1800000", 10); // 30min
+const MAX_USER_SESSIONS = parseInt(process.env["MAX_USER_SESSIONS"] ?? "3", 10);
+const SESSION_CREATE_TIMEOUT_MS = 30_000;
+
+// ── Interactive session management (#936) ────────────────────────────────────
+
+export interface ManagedUserSession {
+  userId: string;
+  chatId: number;
+  platform: string;
+  transport: IKiroTransport;
+  delivery: "streaming" | "simple";
+  idleTimeoutMs: number;
+  createdAt: number;
+  lastActiveAt: number;
+  state: "creating" | "ready" | "dead";
+  pendingMessages: Array<{ text: string; resolve: (r: string) => void; reject: (e: Error) => void }>;
+}
 
 export interface SpinRequest {
   type: SessionType;
@@ -42,11 +64,115 @@ export class Spin {
   private orcSession: AgentSession | null = null;
   private orcIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // #936: Per-user interactive sessions
+  readonly userSessions = new Map<string, ManagedUserSession>(); // userId → session
+
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
   setSessionManager(sm: SessionManager): void { this.sessionManager = sm; }
 
   /** Get the live Orc session (for user attach / message routing). */
   getOrcSession(): AgentSession | null { return this.orcSession?.isReady ? this.orcSession : null; }
+
+  // ── Interactive session lifecycle (#936) ─────────────────────────────────
+
+  /** Register the master's session at boot (wraps existing main transport). */
+  registerMasterSession(opts: { userId: string; chatId: number; platform: string; transport: IKiroTransport }): void {
+    const session: ManagedUserSession = {
+      userId: opts.userId,
+      chatId: opts.chatId,
+      platform: opts.platform,
+      transport: opts.transport,
+      delivery: "streaming",
+      idleTimeoutMs: Infinity,
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      state: "ready",
+      pendingMessages: [],
+    };
+    this.userSessions.set(opts.userId, session);
+    logInfo(TAG, `Master session registered: ${opts.userId} (${opts.platform}:${opts.chatId})`);
+  }
+
+  /** Resolve or create a session for any user. Returns the session (may be in 'creating' state). */
+  async resolveSession(userId: string, platform: string, chatId: number): Promise<ManagedUserSession> {
+    const existing = this.userSessions.get(userId);
+    if (existing && existing.state !== "dead") {
+      existing.lastActiveAt = Date.now();
+      return existing;
+    }
+
+    // Check capacity
+    const activeCount = [...this.userSessions.values()].filter(s => s.state !== "dead" && s.idleTimeoutMs !== Infinity).length;
+    if (activeCount >= MAX_USER_SESSIONS) {
+      throw new Error(`Session limit reached (${MAX_USER_SESSIONS}). Try again later.`);
+    }
+
+    // Create new session
+    const registry = loadUsers();
+    const user = registry.byUserId.get(userId);
+    const role = user?.role ?? "guest";
+    const idleTimeoutMs = role === "master" ? Infinity : role === "guest" ? GUEST_SESSION_IDLE_MS : USER_SESSION_IDLE_MS;
+
+    const session: ManagedUserSession = {
+      userId,
+      chatId,
+      platform,
+      transport: null as unknown as IKiroTransport, // set after creation
+      delivery: "simple",
+      idleTimeoutMs,
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      state: "creating",
+      pendingMessages: [],
+    };
+    this.userSessions.set(userId, session);
+    logInfo(TAG, `Creating session for ${userId} (${role}, idle=${idleTimeoutMs}ms)`);
+
+    try {
+      const agentSession = await Promise.race([
+        this.runtime!.session("professor", userId),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
+      ]);
+      session.transport = agentSession.transport!;
+      session.state = "ready";
+      logInfo(TAG, `Session ready: ${userId}`);
+
+      // Drain pending messages
+      for (const pending of session.pendingMessages) {
+        try {
+          const response = await session.transport.sendPrompt(`${userId}:msg`, pending.text, undefined, userId);
+          pending.resolve(response);
+        } catch (err) {
+          pending.reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
+      session.pendingMessages = [];
+    } catch (err) {
+      session.state = "dead";
+      this.userSessions.delete(userId);
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarn(TAG, `Session creation failed for ${userId}: ${msg}`);
+      // Reject pending
+      for (const pending of session.pendingMessages) {
+        pending.reject(new Error(`Session unavailable: ${msg}`));
+      }
+      throw err;
+    }
+
+    return session;
+  }
+
+  /** Destroy a user session (idle timeout, error, manual). */
+  destroySession(userId: string): void {
+    const session = this.userSessions.get(userId);
+    if (!session || session.state === "dead") return;
+    if (session.idleTimeoutMs === Infinity) return; // never kill master
+
+    session.state = "dead";
+    try { session.transport.destroy(); } catch {}
+    this.userSessions.delete(userId);
+    logInfo(TAG, `Session destroyed: ${userId}`);
+  }
 
   /**
    * Dispatch a session. Fire-and-forget.
