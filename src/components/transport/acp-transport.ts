@@ -98,6 +98,7 @@ export class AcpTransport implements IKiroTransport {
   get intermediateDeliveredText(): string { return ""; }
 
   get isConnected(): boolean {
+    if (AcpTransport._rawMode) return this._rawClient?.alive ?? false;
     return this.agent !== null && this.client !== null;
   }
 
@@ -150,6 +151,12 @@ export class AcpTransport implements IKiroTransport {
   async initialize(): Promise<void> {
     this.sessions.clear(); // Fresh CLI instance = all old session IDs are stale
     this.onReinit?.();
+
+    // Kill previous CLI process if dead/disconnected (prevent orphan accumulation)
+    if (this._rawClient && !this._rawClient.alive) {
+      try { this._rawClient.destroy(); } catch {}
+      this._rawClient = null as any;
+    }
 
     // #924: If raw mode active, use raw pipe client instead of SDK
     if (AcpTransport._rawMode) {
@@ -310,7 +317,7 @@ export class AcpTransport implements IKiroTransport {
   private _processDeadRetries = 0;
 
   async sendPrompt(sessionKey: string, message: string, _image?: { mime: string; base64: string }, _userId?: string): Promise<string> {
-    if (!this.client) {
+    if (!this.client && !(AcpTransport._rawMode && this._rawClient?.alive)) {
       logWarn(this.tag, "ACP client dead — reinitializing");
       await Promise.race([
         this.initialize(),
