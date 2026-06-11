@@ -8,6 +8,7 @@
 
 import type { PlatformAdapter, InboundMessage } from "../../types/platform.js";
 import type { PipelineDeps } from "../message-pipeline.js";
+import type { IKiroTransport } from "../transport/kiro-transport.js";
 import type { Reply } from "../commands/types.js";
 import { sanitizeOutbound } from "../sanitize-outbound.js";
 
@@ -38,6 +39,10 @@ export interface MessageContext {
   intermediateDelivered?: boolean;
   /** ID of the streaming message (for edit-in-place). */
   streamMsgId?: number;
+  /** Resolved transport for this message (defaults to deps.transport, overridden by Spin per-user). */
+  transport: IKiroTransport;
+  /** Delivery mode for this session. */
+  delivery: "streaming" | "simple";
 }
 
 /** A middleware function in the message pipeline. */
@@ -76,5 +81,7 @@ export function createMessageContext(
     userId,
     reply,
     handled: false,
+    transport: deps.transport,
+    delivery: "streaming",
   };
 }

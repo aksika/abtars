@@ -169,11 +169,12 @@ export async function handleInboundMessage(
 
   // --- Core transport/response handling (will become middleware incrementally) ---
   const {
-    transport, memory, memoryConfig,
+    memory, memoryConfig,
     idleSave, conversationBuffer,
     ttsConfig,
     sessions,
   } = deps;
+  const transport = ctx.transport;
 
   const { channelId, isVoice } = msg;
   const chatId = ctx.chatId;

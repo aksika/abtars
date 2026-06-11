@@ -116,14 +116,15 @@ export class SubagentRuntime {
   }
 
   /** Get a persistent session handle for multi-turn callers. */
-  async session(agent: AgentName): Promise<AgentSession> {
-    const cached = this.cache.get(agent) ?? await this.createAgent(agent);
+  async session(agent: AgentName, key?: string): Promise<AgentSession> {
+    const cacheKey = key ? `${agent}:${key}` : agent;
+    const cached = this.cache.get(cacheKey as AgentName) ?? await this.createAgent(agent, undefined, cacheKey);
     return {
       sendPrompt: (sessionKey: string, prompt: string) => cached.transport.sendPrompt(sessionKey, prompt),
       destroy: async () => {
         try { cached.transport.destroy(); } catch (err) { logAndSwallow("subagent_runtime", "op", err); }
-        this.cache.delete(agent);
-        logInfo(TAG, `${agent} session destroyed`);
+        this.cache.delete(cacheKey as AgentName);
+        logInfo(TAG, `${cacheKey} session destroyed`);
       },
       get isReady() { return cached.transport.isReady; },
       get transport() { return cached.transport; },
@@ -196,7 +197,7 @@ export class SubagentRuntime {
     return true;
   }
 
-  private async createAgent(agent: AgentName, sessionType?: import("./session-manager.js").SessionType): Promise<CachedAgent> {
+  private async createAgent(agent: AgentName, sessionType?: import("./session-manager.js").SessionType, cacheKey?: string): Promise<CachedAgent> {
     const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
     const resolvedType = sessionType || typeMap[agent];
     const sandboxTypes = new Set(["B", "C", "W"]);
@@ -223,9 +224,9 @@ export class SubagentRuntime {
       if (bundle) (transport as any).setSystemPrompt(bundle);
     }
 
-    const sessionKey = `system:${agent}`;
+    const sessionKey = `system:${cacheKey ?? agent}`;
     const entry: CachedAgent = { transport, model, sessionKey };
-    this.cache.set(agent, entry);
+    this.cache.set((cacheKey ?? agent) as AgentName, entry);
     (await import("./transport/tool-registry.js")).resetStoreCounter();
     return entry;
   }
