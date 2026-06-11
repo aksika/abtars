@@ -181,7 +181,7 @@ export const terminateSessionTool: ToolDefinition = {
 
     if (entry.sessionId && _sessionManager) {
       const managed = _sessionManager.getSessionById(entry.sessionId);
-      if (managed) managed.paused = true;
+      if (managed) managed.status = "paused";
     }
 
     addCompletion({

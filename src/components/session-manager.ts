@@ -12,15 +12,48 @@ import type { SubagentRuntime, AgentSession, AgentName } from "./subagent-runtim
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H";
 
 export interface ManagedSession {
-  id: string;           // "1747563282_A_01"
-  shortIndex: number;   // 1, 2, 3...
-  type: SessionType;    // A=Main, B=Browse, C=Code, T=Task
-  createdAt: number;    // epoch ms
-  isTransport: boolean; // true = has own ConversationSession, false = storage tag only
-  ended: boolean;       // gracefully ended (messages kept)
-  paused: boolean;      // cooperative interrupt — agent loop stops between tool calls
-  motherId?: string;    // session ID of the session that spawned this one (lineage)
-  agentSession?: import("./subagent-runtime.js").AgentSession; // sub-transport for C/B/T
+  id: string;                    // "1749563282_A_01" — encodes type + createdAt + index
+  userId: string;
+  platform: string;
+  chatId: number;
+  threadId?: number | string;    // TG topic, Discord thread
+
+  // Transport
+  transport?: import("./transport/kiro-transport.js").IKiroTransport;
+  delivery: "streaming" | "simple";
+  model?: string;                // "claude-opus-4.6"
+  provider?: string;             // "kiro", "openrouter"
+
+  // Lifecycle
+  status: "creating" | "ready" | "paused" | "ended";
+  idleTimeoutMs: number;
+  lastActiveAt: number;
+  motherId?: string;             // parent session (Orc-spawned)
+  name?: string;                 // human label, alphanumeric max 20
+
+  // Context
+  workingDir?: string;           // CWD for tool execution
+  contextPercent?: number;       // last known ctx%
+
+  // Metrics
+  messageCount: number;
+  tokenCount: number;
+  toolCallCount: number;
+
+  // Legacy compat (derived — kept for existing code that reads them)
+  shortIndex: number;
+  isTransport: boolean;
+  agentSession?: import("./subagent-runtime.js").AgentSession;
+}
+
+/** Derive type from session ID. */
+export function sessionType(session: ManagedSession): SessionType {
+  return (session.id.split("_")[1] ?? "A") as SessionType;
+}
+
+/** Derive createdAt from session ID. */
+export function sessionCreatedAt(session: ManagedSession): number {
+  return parseInt(session.id.split("_")[0], 10) * 1000;
 }
 
 interface PlatformState {
@@ -68,24 +101,31 @@ export class SessionManager {
       state = { sessions: [], activeIndex: 1, nextIndex: 1 };
       this.states.set(key, state);
       // Create initial main session
-      const main = this.allocateSession(state, "A", true);
+      const main = this.allocateSession(state, "A", true, userId, platform, undefined);
       state.activeIndex = main.shortIndex;
     }
     return state;
   }
 
-  private allocateSession(state: PlatformState, type: SessionType, isTransport: boolean, motherId?: string): ManagedSession {
+  private allocateSession(state: PlatformState, type: SessionType, isTransport: boolean, userId: string, platform: string, motherId?: string): ManagedSession {
     const idx = state.nextIndex++;
     const ts = Math.floor(Date.now() / 1000);
     const session: ManagedSession = {
       id: `${ts}_${type}_${String(idx).padStart(2, "0")}`,
-      shortIndex: idx,
-      type,
-      createdAt: Date.now(),
-      isTransport,
-      ended: false,
-      paused: false,
+      userId,
+      platform,
+      chatId: 0, // set by caller or resolveSession
+      delivery: "simple",
+      status: "creating",
+      idleTimeoutMs: 7200000, // default 2h, overridden by Spin for master
+      lastActiveAt: Date.now(),
       motherId,
+      messageCount: 0,
+      tokenCount: 0,
+      toolCallCount: 0,
+      // Legacy compat
+      shortIndex: idx,
+      isTransport,
     };
     state.sessions.push(session);
     return session;
@@ -94,19 +134,19 @@ export class SessionManager {
   /** Get or create the initial main session. Returns its session ID. */
   getActiveSessionId(userId: string, platform: Platform): string {
     const state = this.getOrCreateState(userId, platform);
-    const active = state.sessions.find(s => s.shortIndex === state.activeIndex && !s.ended);
+    const active = state.sessions.find(s => s.shortIndex === state.activeIndex && s.status !== "ended");
     return active?.id ?? state.sessions[0]!.id;
   }
 
   /** Get the active session entry. */
   getActiveSession(userId: string, platform: Platform): ManagedSession {
     const state = this.getOrCreateState(userId, platform);
-    return state.sessions.find(s => s.shortIndex === state.activeIndex && !s.ended) ?? state.sessions[0]!;
+    return state.sessions.find(s => s.shortIndex === state.activeIndex && s.status !== "ended") ?? state.sessions[0]!;
   }
 
   /** Initialize agent session for non-Main types. Returns the AgentSession or null. */
   async initAgentSession(session: ManagedSession): Promise<AgentSession | null> {
-    const agentName = TYPE_AGENT[session.type];
+    const agentName = TYPE_AGENT[sessionType(session)];
     if (!agentName || !this.runtime) return null;
     if (session.agentSession) return session.agentSession;
     session.agentSession = await this.runtime.session(agentName);
@@ -116,11 +156,11 @@ export class SessionManager {
   /** Create a new transport session. Returns the session or error string. */
   createSession(userId: string, platform: Platform, type: SessionType): ManagedSession | string {
     const state = this.getOrCreateState(userId, platform);
-    const alive = state.sessions.filter(s => !s.ended);
+    const alive = state.sessions.filter(s => s.status !== "ended");
     if (alive.length >= this.maxSessions) {
       return `Max sessions reached (${this.maxSessions}). End or kill a session first.`;
     }
-    const session = this.allocateSession(state, type, true);
+    const session = this.allocateSession(state, type, true, userId, platform);
     state.activeIndex = session.shortIndex;
     return session;
   }
@@ -128,19 +168,19 @@ export class SessionManager {
   /** Create a sub-session ID for auto-spawn (storage tag only, no transport switch). */
   createSubSession(userId: string, platform: Platform, type: SessionType): ManagedSession | string {
     const state = this.getOrCreateState(userId, platform);
-    const alive = state.sessions.filter(s => !s.ended);
+    const alive = state.sessions.filter(s => s.status !== "ended");
     if (alive.length >= this.maxSessions) {
       return `Max sessions reached — auto-spawn skipped.`;
     }
-    const active = state.sessions.find(s => s.shortIndex === state.activeIndex && !s.ended);
-    const result = this.allocateSession(state, type, false, active?.id);
+    const active = state.sessions.find(s => s.shortIndex === state.activeIndex && s.status !== "ended");
+    const result = this.allocateSession(state, type, false, userId, platform, active?.id);
     return result;
   }
 
   /** Switch active transport session. Returns session or error. */
   switchSession(userId: string, platform: Platform, index: number): ManagedSession | string {
     const state = this.getOrCreateState(userId, platform);
-    const target = state.sessions.find(s => s.shortIndex === index && !s.ended && s.isTransport);
+    const target = state.sessions.find(s => s.shortIndex === index && s.status !== "ended" && s.isTransport);
     if (!target) return `Session #${index} not found or not switchable.`;
     state.activeIndex = target.shortIndex;
     return target;
@@ -150,22 +190,22 @@ export class SessionManager {
   endSession(userId: string, platform: Platform, index?: number): ManagedSession | string {
     const state = this.getOrCreateState(userId, platform);
     const targetIdx = index ?? state.activeIndex;
-    const target = state.sessions.find(s => s.shortIndex === targetIdx && !s.ended);
+    const target = state.sessions.find(s => s.shortIndex === targetIdx && s.status !== "ended");
     if (!target) return `Session #${targetIdx} not found.`;
 
     // If ending the last Main session, create a replacement
-    const aliveMains = state.sessions.filter(s => s.type === "A" && !s.ended);
-    if (target.type === "A" && aliveMains.length <= 1) {
-      target.ended = true;
-      const newMain = this.allocateSession(state, "A", true);
+    const aliveMains = state.sessions.filter(s => sessionType(s) === "A" && s.status !== "ended");
+    if (sessionType(target) === "A" && aliveMains.length <= 1) {
+      target.status = "ended";
+      const newMain = this.allocateSession(state, "A", true, userId, platform);
       state.activeIndex = newMain.shortIndex;
       return target;
     }
 
-    target.ended = true;
+    target.status = "ended";
     // If ending active, switch to main
     if (state.activeIndex === targetIdx) {
-      const main = state.sessions.find(s => s.type === "A" && !s.ended);
+      const main = state.sessions.find(s => sessionType(s) === "A" && s.status !== "ended");
       state.activeIndex = main?.shortIndex ?? 1;
     }
     return target;
@@ -174,37 +214,37 @@ export class SessionManager {
   /** Kill a session (wipe messages). Returns killed session or error. */
   killSession(userId: string, platform: Platform, index: number): ManagedSession | string {
     const state = this.getOrCreateState(userId, platform);
-    const target = state.sessions.find(s => s.shortIndex === index && !s.ended);
+    const target = state.sessions.find(s => s.shortIndex === index && s.status !== "ended");
     if (!target) return `Session #${index} not found.`;
 
     // If killing active, switch to main first
     if (state.activeIndex === index) {
-      const otherMain = state.sessions.find(s => s.type === "A" && !s.ended && s.shortIndex !== index);
+      const otherMain = state.sessions.find(s => sessionType(s) === "A" && s.status !== "ended" && s.shortIndex !== index);
       if (otherMain) {
         state.activeIndex = otherMain.shortIndex;
       } else {
-        target.ended = true;
-        const newMain = this.allocateSession(state, "A", true);
+        target.status = "ended";
+        const newMain = this.allocateSession(state, "A", true, userId, platform);
         state.activeIndex = newMain.shortIndex;
         return target;
       }
     } else {
-      const aliveMains = state.sessions.filter(s => s.type === "A" && !s.ended);
-      if (target.type === "A" && aliveMains.length <= 1) {
-        target.ended = true;
-        this.allocateSession(state, "A", true);
+      const aliveMains = state.sessions.filter(s => sessionType(s) === "A" && s.status !== "ended");
+      if (sessionType(target) === "A" && aliveMains.length <= 1) {
+        target.status = "ended";
+        this.allocateSession(state, "A", true, userId, platform);
         return target;
       }
     }
 
-    target.ended = true;
+    target.status = "ended";
     return target;
   }
 
   /** List all sessions for a user+platform. */
   listSessions(userId: string, platform: Platform): { sessions: ManagedSession[]; activeIndex: number } {
     const state = this.getOrCreateState(userId, platform);
-    return { sessions: state.sessions.filter(s => !s.ended), activeIndex: state.activeIndex };
+    return { sessions: state.sessions.filter(s => s.status !== "ended"), activeIndex: state.activeIndex };
   }
 
   /** Find a session by ID across all platforms. */
@@ -220,10 +260,10 @@ export class SessionManager {
   pauseSession(userId: string, platform: Platform, index?: number): ManagedSession | string {
     const state = this.getOrCreateState(userId, platform);
     const targetIdx = index ?? state.activeIndex;
-    const target = state.sessions.find(s => s.shortIndex === targetIdx && !s.ended);
+    const target = state.sessions.find(s => s.shortIndex === targetIdx && s.status !== "ended");
     if (!target) return `Session #${targetIdx} not found.`;
-    if (target.paused) return `Session #${targetIdx} is already paused.`;
-    target.paused = true;
+    if (target.status === "paused") return `Session #${targetIdx} is already paused.`;
+    target.status = "paused";
     return target;
   }
 
@@ -231,10 +271,10 @@ export class SessionManager {
   resumeSession(userId: string, platform: Platform, index?: number): ManagedSession | string {
     const state = this.getOrCreateState(userId, platform);
     const targetIdx = index ?? state.activeIndex;
-    const target = state.sessions.find(s => s.shortIndex === targetIdx && !s.ended);
+    const target = state.sessions.find(s => s.shortIndex === targetIdx && s.status !== "ended");
     if (!target) return `Session #${targetIdx} not found.`;
-    if (!target.paused) return `Session #${targetIdx} is not paused.`;
-    target.paused = false;
+    if (target.status !== "paused") return `Session #${targetIdx} is not paused.`;
+    target.status = "ready";
     return target;
   }
 
@@ -244,8 +284,8 @@ export class SessionManager {
     const cutoff = Date.now() - timeoutMs;
     for (const state of this.states.values()) {
       for (const s of state.sessions) {
-        if (!s.ended && !s.isTransport && s.createdAt < cutoff) {
-          s.ended = true;
+        if (s.status !== "ended" && !s.isTransport && s.lastActiveAt < cutoff) {
+          s.status = "ended";
           expired.push(s);
         }
       }
@@ -256,6 +296,17 @@ export class SessionManager {
   /** Clear all sessions for a platform (transport destruction). */
   clearPlatform(userId: string, platform: Platform): void {
     this.states.delete(this.stateKey(userId, platform));
+  }
+
+  /** List all sessions across all users/platforms (for heartbeat expiry). */
+  listAllSessions(): ManagedSession[] {
+    const all: ManagedSession[] = [];
+    for (const state of this.states.values()) {
+      for (const s of state.sessions) {
+        if (s.status !== "ended") all.push(s);
+      }
+    }
+    return all;
   }
 
   /** Clear everything (bridge restart). */
@@ -270,10 +321,10 @@ export class SessionManager {
     const lines = sessions.map(s => {
       const marker = s.shortIndex === activeIndex ? " *" : "";
       const transport = s.isTransport ? "" : " (sub)";
-      const paused = s.paused ? " ⏸" : "";
+      const paused = s.status === "paused" ? " ⏸" : "";
       const mother = s.motherId ? ` ← #${this.getSessionById(s.motherId)?.shortIndex ?? "?"}` : "";
-      const time = new Date(s.createdAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-      return `#${s.shortIndex} ${typeLabel(s.type)}${transport}${mother} — ${time}${paused}${marker}`;
+      const time = new Date(sessionCreatedAt(s)).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+      return `#${s.shortIndex} ${typeLabel(sessionType(s))}${transport}${mother} — ${time}${paused}${marker}`;
     });
     return lines.join("\n");
   }

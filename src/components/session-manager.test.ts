@@ -36,10 +36,10 @@ describe("SessionManager", () => {
     it("creates session with type-stamped ID", () => {
       const s = sm.createSession("user1", "telegram", "A") as any;
       expect(s.id).toMatch(/_A_\d+$/);
-      expect(s.type).toBe("A");
+      expect(s.id.split("_")[1]).toBe("A");
       expect(s.isTransport).toBe(true);
-      expect(s.ended).toBe(false);
-      expect(s.paused).toBe(false);
+      expect(s.status).not.toBe("ended");
+      expect(s.status).not.toBe("paused");
     });
 
     it("increments shortIndex monotonically", () => {
@@ -143,7 +143,7 @@ describe("SessionManager", () => {
     it("marks session ended", () => {
       const s = sm.createSession("user1", "telegram", "A") as any;
       const ended = sm.endSession("user1", "telegram", s.shortIndex) as any;
-      expect(ended.ended).toBe(true);
+      expect(ended.status).toBe("ended");
     });
 
     it("auto-creates replacement when ending last Main", () => {
@@ -151,8 +151,8 @@ describe("SessionManager", () => {
       sm.endSession("user1", "telegram", s.shortIndex);
       // Should have a new active Main
       const active = sm.getActiveSession("user1", "telegram");
-      expect(active.type).toBe("A");
-      expect(active.ended).toBe(false);
+      expect(active.id.split("_")[1]).toBe("A");
+      expect(active.status).not.toBe("ended");
       expect(active.id).not.toBe(s.id);
     });
 
@@ -179,14 +179,14 @@ describe("SessionManager", () => {
       sm.createSession("user1", "telegram", "A");
       const s2 = sm.createSession("user1", "telegram", "A") as any;
       const killed = sm.killSession("user1", "telegram", s2.shortIndex) as any;
-      expect(killed.ended).toBe(true);
+      expect(killed.status).toBe("ended");
     });
 
     it("auto-creates replacement when killing last Main", () => {
       const s = sm.createSession("user1", "telegram", "A") as any;
       sm.killSession("user1", "telegram", s.shortIndex);
       const active = sm.getActiveSession("user1", "telegram");
-      expect(active.type).toBe("A");
+      expect(active.id.split("_")[1]).toBe("A");
       expect(active.id).not.toBe(s.id);
     });
   });
@@ -195,9 +195,9 @@ describe("SessionManager", () => {
     it("toggles paused flag", () => {
       const s = sm.createSession("user1", "telegram", "A") as any;
       sm.pauseSession("user1", "telegram", s.shortIndex);
-      expect(sm.getActiveSession("user1", "telegram").paused).toBe(true);
+      expect(sm.getActiveSession("user1", "telegram").status).toBe("paused");
       sm.resumeSession("user1", "telegram", s.shortIndex);
-      expect(sm.getActiveSession("user1", "telegram").paused).toBe(false);
+      expect(sm.getActiveSession("user1", "telegram").status).toBe("ready");
     });
 
     it("pause returns error if already paused", () => {
@@ -221,11 +221,11 @@ describe("SessionManager", () => {
       sm.createSession("user1", "telegram", "A");
       const sub = sm.createSubSession("user1", "telegram", "C") as any;
       // Backdate
-      sub.createdAt = Date.now() - 100_000;
+      sub.lastActiveAt = Date.now() - 100_000;
       const expired = sm.expireAutoSessions(50_000);
       expect(expired).toHaveLength(1);
       expect(expired[0]!.id).toBe(sub.id);
-      expect(sub.ended).toBe(true);
+      expect(sub.status).toBe("ended");
     });
 
     it("does not expire transport sessions", () => {

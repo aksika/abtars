@@ -39,6 +39,7 @@ import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt, buildSessionStartPrompt } from "./pipeline/prompt-builder.js";
+import { sessionType } from "./session-manager.js";
 
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";
@@ -255,7 +256,7 @@ export async function handleInboundMessage(
     // --- Send to transport ---
     const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
     const agentSession = activeSession.agentSession;
-    logDebug(TAG, `Route: session=${activeSessionId} type=${activeSession.type} agentSession=${agentSession ? "yes" : "no"}`);
+    logDebug(TAG, `Route: session=${activeSessionId} type=${sessionType(activeSession)} agentSession=${agentSession ? "yes" : "no"}`);
 
     // #681: attach sandbox policy (owner for now — peer/guest in #678)
     if ("sandboxPolicy" in transport) {
@@ -264,7 +265,7 @@ export async function handleInboundMessage(
     }
     // Wire cooperative pause check (#539) — agent loop checks this between tool calls
     if ("isPaused" in transport) {
-      (transport as any).isPaused = () => activeSession.paused;
+      (transport as any).isPaused = () => activeSession.status === "paused";
     }
 
     // Wire /wait steer injection (#655) — agent loop drains this between tool rounds
