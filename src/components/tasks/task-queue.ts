@@ -398,6 +398,30 @@ export class CronQueue {
 
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
 
+    // #936 Phase 2: Route to user session via injectGreeting if targetUserId is set
+    if (entry.targetUserId) {
+      this.setCurrent(entry, 0, "agent");
+      try {
+        const { spin } = await import("../spin.js");
+        const response = await spin.injectGreeting(entry.targetUserId, prompt);
+        if (response) {
+          recordRunToFile(entry.id, 0);
+          recordRun(entry, 0);
+          logInfo(TAG, `✅ Greeting delivered to ${entry.targetUserId}`);
+        } else {
+          recordRunToFile(entry.id, 1);
+          logWarn(TAG, `Greeting failed for ${entry.targetUserId}`);
+        }
+      } catch (err) {
+        recordRunToFile(entry.id, 1);
+        logWarn(TAG, `Greeting error: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        this.clearCurrent();
+        this.processNext();
+      }
+      return;
+    }
+
     // Set current BEFORE any await — prevents race where enqueue() sees _current=null
     // and calls processNext() again while we're awaiting the dynamic import.
     this.setCurrent(entry, 0, "agent");

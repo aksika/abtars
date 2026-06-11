@@ -26,6 +26,7 @@ export interface CronEntry {
   catchUp?: number;  // hours: max delay after fireAt before skipping to next. 0 = no catch-up (default).
   priority?: "high" | "medium" | "low";
   taskFile?: string;
+  targetUserId?: string; // #936: route task output to this user's session via spin.injectGreeting()
   paused?: boolean;
   maxRunsPerDay?: number;
   consecutiveFails?: number;

@@ -174,6 +174,31 @@ export class Spin {
     logInfo(TAG, `Session destroyed: ${userId}`);
   }
 
+  /** Inject a greeting/prompt into a user's session. Creates session if needed. */
+  async injectGreeting(userId: string, prompt: string): Promise<string | null> {
+    const registry = loadUsers();
+    const user = registry.byUserId.get(userId);
+    if (!user) { logWarn(TAG, `injectGreeting: unknown user ${userId}`); return null; }
+    const chatId = user.platforms.telegram ?? user.platforms.discord;
+    if (!chatId) { logWarn(TAG, `injectGreeting: no chatId for ${userId}`); return null; }
+    const platform = user.platforms.telegram ? "telegram" : "discord";
+    const numericChatId = typeof chatId === "number" ? chatId : parseInt(String(chatId), 10);
+
+    try {
+      const session = await this.resolveSession(userId, platform, numericChatId);
+      if (session.state !== "ready") {
+        logWarn(TAG, `injectGreeting: session not ready for ${userId}`);
+        return null;
+      }
+      const response = await session.transport.sendPrompt(`${userId}:greeting`, prompt, undefined, userId);
+      logInfo(TAG, `Greeting delivered to ${userId} (${response.length} chars)`);
+      return response;
+    } catch (err) {
+      logWarn(TAG, `injectGreeting failed for ${userId}: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
   /**
    * Dispatch a session. Fire-and-forget.
    * Returns cardId immediately. Session runs autonomously.
