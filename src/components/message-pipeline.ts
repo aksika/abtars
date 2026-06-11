@@ -172,13 +172,11 @@ export async function handleInboundMessage(
   const { spin } = await import("./spin.js");
   try {
     const userSession = await spin.resolveSession(msg.userId, msg.platform, ctx.chatId);
-    if (userSession.state === "ready") {
+    if (userSession.status === "ready" && userSession.transport) {
       ctx.transport = userSession.transport;
       ctx.delivery = userSession.delivery;
     }
   } catch (err) {
-    // Session limit or creation failure — let message fall through to deps.transport (master's)
-    // Only log, don't block. For master this never fires (already registered).
     logWarn(TAG, `resolveSession failed for ${msg.userId}: ${err instanceof Error ? err.message : String(err)}`);
   }
 

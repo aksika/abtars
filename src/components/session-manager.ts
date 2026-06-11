@@ -116,7 +116,7 @@ export class SessionManager {
       platform,
       chatId: 0, // set by caller or resolveSession
       delivery: "simple",
-      status: "creating",
+      status: "ready",  // metadata only until Spin attaches transport
       idleTimeoutMs: 7200000, // default 2h, overridden by Spin for master
       lastActiveAt: Date.now(),
       motherId,

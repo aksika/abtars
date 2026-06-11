@@ -23,18 +23,7 @@ const SESSION_CREATE_TIMEOUT_MS = 30_000;
 
 // ── Interactive session management (#936) ────────────────────────────────────
 
-export interface ManagedUserSession {
-  userId: string;
-  chatId: number;
-  platform: string;
-  transport: IKiroTransport;
-  delivery: "streaming" | "simple";
-  idleTimeoutMs: number;
-  createdAt: number;
-  lastActiveAt: number;
-  state: "creating" | "ready" | "dead";
-  pendingMessages: Array<{ text: string; resolve: (r: string) => void; reject: (e: Error) => void }>;
-}
+// ── Interactive session management (#936 + #938) ────────────────────────────────────
 
 export interface SpinRequest {
   type: SessionType;
@@ -64,69 +53,57 @@ export class Spin {
   private orcSession: AgentSession | null = null;
   private orcIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // #936: Per-user interactive sessions
-  readonly userSessions = new Map<string, ManagedUserSession>(); // userId → session
-
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
   setSessionManager(sm: SessionManager): void { this.sessionManager = sm; }
 
   /** Get the live Orc session (for user attach / message routing). */
   getOrcSession(): AgentSession | null { return this.orcSession?.isReady ? this.orcSession : null; }
 
-  // ── Interactive session lifecycle (#936) ─────────────────────────────────
+  // ── Interactive session lifecycle (#936 + #938) ──────────────────────────
 
-  /** Register the master's session at boot (wraps existing main transport). */
+  /** Register the master's transport at boot on their active SessionManager session. */
   registerMasterSession(opts: { userId: string; chatId: number; platform: string; transport: IKiroTransport }): void {
-    const session: ManagedUserSession = {
-      userId: opts.userId,
-      chatId: opts.chatId,
-      platform: opts.platform,
-      transport: opts.transport,
-      delivery: "streaming",
-      idleTimeoutMs: Infinity,
-      createdAt: Date.now(),
-      lastActiveAt: Date.now(),
-      state: "ready",
-      pendingMessages: [],
-    };
-    this.userSessions.set(opts.userId, session);
+    if (!this.sessionManager) return;
+    const session = this.sessionManager.getActiveSession(opts.userId, opts.platform as any);
+    session.transport = opts.transport;
+    session.delivery = "streaming";
+    session.idleTimeoutMs = Infinity;
+    session.chatId = opts.chatId;
+    session.userId = opts.userId;
+    session.platform = opts.platform;
+    session.status = "ready";
+    session.lastActiveAt = Date.now();
     logInfo(TAG, `Master session registered: ${opts.userId} (${opts.platform}:${opts.chatId})`);
   }
 
-  /** Resolve or create a session for any user. Returns the session (may be in 'creating' state). */
-  async resolveSession(userId: string, platform: string, chatId: number): Promise<ManagedUserSession> {
-    const existing = this.userSessions.get(userId);
-    if (existing && existing.state !== "dead") {
-      existing.lastActiveAt = Date.now();
-      return existing;
+  /** Resolve the active session for a user. Attaches transport if needed. */
+  async resolveSession(userId: string, platform: string, chatId: number): Promise<import("./session-manager.js").ManagedSession> {
+    if (!this.sessionManager) throw new Error("Spin: sessionManager not set");
+    const session = this.sessionManager.getActiveSession(userId, platform as any);
+
+    // Already has transport → reuse
+    if (session.transport) {
+      session.lastActiveAt = Date.now();
+      return session;
     }
 
-    // Check capacity
-    const activeCount = [...this.userSessions.values()].filter(s => s.state !== "dead" && s.idleTimeoutMs !== Infinity).length;
-    if (activeCount >= MAX_USER_SESSIONS) {
-      throw new Error(`Session limit reached (${MAX_USER_SESSIONS}). Try again later.`);
+    // Already ended — recreate will happen via SessionManager on /session new
+    if (session.status === "ended") {
+      throw new Error("Session ended — use /session new");
     }
 
-    // Create new session
+    // Need to create transport
+    session.status = "creating";
+    session.chatId = chatId;
+    session.userId = userId;
+    session.platform = platform;
     const registry = loadUsers();
     const user = registry.byUserId.get(userId);
     const role = user?.role ?? "guest";
-    const idleTimeoutMs = role === "master" ? Infinity : role === "guest" ? GUEST_SESSION_IDLE_MS : USER_SESSION_IDLE_MS;
+    session.idleTimeoutMs = role === "master" ? Infinity : role === "guest" ? GUEST_SESSION_IDLE_MS : USER_SESSION_IDLE_MS;
+    session.delivery = role === "master" ? "streaming" : "simple";
 
-    const session: ManagedUserSession = {
-      userId,
-      chatId,
-      platform,
-      transport: null as unknown as IKiroTransport, // set after creation
-      delivery: "simple",
-      idleTimeoutMs,
-      createdAt: Date.now(),
-      lastActiveAt: Date.now(),
-      state: "creating",
-      pendingMessages: [],
-    };
-    this.userSessions.set(userId, session);
-    logInfo(TAG, `Creating session for ${userId} (${role}, idle=${idleTimeoutMs}ms)`);
+    logInfo(TAG, `Creating transport for ${userId} (${role}, idle=${session.idleTimeoutMs}ms)`);
 
     try {
       const agentSession = await Promise.race([
@@ -134,44 +111,33 @@ export class Spin {
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
       ]);
       session.transport = agentSession.transport!;
-      session.state = "ready";
-      logInfo(TAG, `Session ready: ${userId}`);
-
-      // Drain pending messages
-      for (const pending of session.pendingMessages) {
-        try {
-          const response = await session.transport.sendPrompt(`${userId}:msg`, pending.text, undefined, userId);
-          pending.resolve(response);
-        } catch (err) {
-          pending.reject(err instanceof Error ? err : new Error(String(err)));
-        }
-      }
-      session.pendingMessages = [];
+      session.status = "ready";
+      session.lastActiveAt = Date.now();
+      logInfo(TAG, `Session ready: ${userId} id=${session.id}`);
+      return session;
     } catch (err) {
-      session.state = "dead";
-      this.userSessions.delete(userId);
+      session.status = "ended";
       const msg = err instanceof Error ? err.message : String(err);
       logWarn(TAG, `Session creation failed for ${userId}: ${msg}`);
-      // Reject pending
-      for (const pending of session.pendingMessages) {
-        pending.reject(new Error(`Session unavailable: ${msg}`));
-      }
       throw err;
     }
-
-    return session;
   }
 
-  /** Destroy a user session (idle timeout, error, manual). */
-  destroySession(userId: string): void {
-    const session = this.userSessions.get(userId);
-    if (!session || session.state === "dead") return;
-    if (session.idleTimeoutMs === Infinity) return; // never kill master
-
-    session.state = "dead";
-    try { session.transport.destroy(); } catch {}
-    this.userSessions.delete(userId);
-    logInfo(TAG, `Session destroyed: ${userId}`);
+  /** Destroy a specific session's transport (idle timeout, error, manual). */
+  destroySession(userId: string, sessionId?: string): void {
+    if (!this.sessionManager) return;
+    const sessions = this.sessionManager.listAllSessions();
+    for (const s of sessions) {
+      if (s.userId !== userId) continue;
+      if (sessionId && s.id !== sessionId) continue;
+      if (s.idleTimeoutMs === Infinity) continue; // never kill master primary
+      if (s.transport) {
+        try { s.transport.destroy(); } catch {}
+        s.transport = undefined;
+      }
+      s.status = "ended";
+      logInfo(TAG, `Session destroyed: ${userId} id=${s.id}`);
+    }
   }
 
   /** Inject a greeting/prompt into a user's session. Creates session if needed. */
@@ -186,10 +152,7 @@ export class Spin {
 
     try {
       const session = await this.resolveSession(userId, platform, numericChatId);
-      if (session.state !== "ready") {
-        logWarn(TAG, `injectGreeting: session not ready for ${userId}`);
-        return null;
-      }
+      if (!session.transport) { logWarn(TAG, `injectGreeting: no transport for ${userId}`); return null; }
       const response = await session.transport.sendPrompt(`${userId}:greeting`, prompt, undefined, userId);
       logInfo(TAG, `Greeting delivered to ${userId} (${response.length} chars)`);
       return response;
