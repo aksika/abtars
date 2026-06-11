@@ -312,7 +312,10 @@ export class AcpTransport implements IKiroTransport {
   async sendPrompt(sessionKey: string, message: string, _image?: { mime: string; base64: string }, _userId?: string): Promise<string> {
     if (!this.client) {
       logWarn(this.tag, "ACP client dead — reinitializing");
-      await this.initialize();
+      await Promise.race([
+        this.initialize(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("ACP reinit timed out (15s)")), 15_000)),
+      ]);
     }
 
     // Layer 2 (#671): queue concurrent prompts instead of crashing
