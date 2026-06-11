@@ -27,6 +27,7 @@ export interface CronEntry {
   priority?: "high" | "medium" | "low";
   taskFile?: string;
   targetUserId?: string; // #936: route task output to this user's session via spin.injectGreeting()
+  agent?: string; // #935: session type — professor, browsie, coding, dreamy
   paused?: boolean;
   maxRunsPerDay?: number;
   consecutiveFails?: number;

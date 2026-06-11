@@ -439,7 +439,11 @@ export class CronQueue {
       logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min)`);
     }, AGENT_TIMEOUT_MS);
 
-    spin.dispatchAwait({ type: "T", goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM" })
+    // #935: map agent field to session type
+    const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
+    const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../session-manager.js").SessionType;
+
+    spin.dispatchAwait({ type: sessionType, goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM" })
       .then(({ cardId: boardId, result: response }) => {
         // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
         // extract just the meaningful content. This happens when the model echoes its last
