@@ -306,7 +306,8 @@ export class AcpTransport implements IKiroTransport {
     }
   }
 
-  private _pendingPrompt: { sessionKey: string; message: string } | undefined;
+  private _pendingPrompt?: { sessionKey: string; message: string; resolve: (r: string) => void; reject: (e: Error) => void };
+  private _processDeadRetries = 0;
 
   async sendPrompt(sessionKey: string, message: string, _image?: { mime: string; base64: string }, _userId?: string): Promise<string> {
     if (!this.client) {
@@ -317,8 +318,9 @@ export class AcpTransport implements IKiroTransport {
     // Layer 2 (#671): queue concurrent prompts instead of crashing
     if (this.sm.state !== "idle") {
       logWarn(this.tag, `Concurrent prompt while ${this.sm.state} — queuing for after completion`);
-      this._pendingPrompt = { sessionKey, message };
-      return "";
+      return new Promise<string>((resolve, reject) => {
+        this._pendingPrompt = { sessionKey, message, resolve, reject };
+      });
     }
 
     this._toolCallsSucceeded = 0;
@@ -369,14 +371,20 @@ export class AcpTransport implements IKiroTransport {
       }).catch(err => logAndSwallow(TAG, "import hook-system", err));
       this.sm.promptCompleted();
 
-      // Drain queued concurrent prompt (#671 Layer 2)
-      if (this._pendingPrompt) {
-        const pending = this._pendingPrompt;
-        this._pendingPrompt = undefined;
-        logInfo(this.tag, `Draining queued prompt after completion`);
-        queueMicrotask(() => { this.sendPrompt(pending.sessionKey, pending.message).catch(err => logAndSwallow(TAG, "drain pending prompt", err)); });
-      }
+      // Drain queued concurrent prompt (#671 Layer 2, #930 fix)
+      this.drainPending();
     }
+  }
+
+  /** Drain queued concurrent prompt — resolve its Promise via a fresh sendPrompt. */
+  private drainPending(): void {
+    if (!this._pendingPrompt) return;
+    const pending = this._pendingPrompt;
+    this._pendingPrompt = undefined;
+    logInfo(this.tag, `Draining queued prompt`);
+    this.sendPrompt(pending.sessionKey, pending.message)
+      .then(r => pending.resolve(r))
+      .catch(e => pending.reject(e instanceof Error ? e : new Error(String(e))));
   }
 
   private readonly _promptTimeoutMs = getEnv().promptTimeoutSec * 1000; // default 3 min
@@ -685,13 +693,30 @@ export class AcpTransport implements IKiroTransport {
 
     // Process dead
     if (!this.isConnected) {
-      logWarn(this.tag, `[transport-health] Process dead — reinit + re-send`);
+      this._processDeadRetries++;
+      if (this._processDeadRetries > 3) {
+        logWarn(this.tag, `[transport-health] Process dead after 3 retries — dropping poisoned prompt, forcing idle`);
+        this._processDeadRetries = 0;
+        this.lastPromptText = "";
+        this.lastSuccessAt = Date.now(); // suppress further health checks until next real prompt
+        if (this.sm.state !== "idle" && this.sm.state !== "destroyed") {
+          this.sm.transition("idle", "processDeadMaxRetries");
+        }
+        // Reject + drain pending so user's message gets a fresh attempt
+        if (this._pendingPrompt) {
+          this._pendingPrompt.reject(new Error("Transport unavailable after 3 retries"));
+          this._pendingPrompt = undefined;
+        }
+        return;
+      }
+      logWarn(this.tag, `[transport-health] Process dead (attempt ${this._processDeadRetries}/3) — reinit + re-send`);
       this._watchdogLastActionAt = now;
       writeRestartReason("watchdog: process dead");
       await this.initialize();
       if (this.lastPromptText) await this.sendPrompt(this.lastSessionKey, this.lastPromptText);
       return;
     }
+    this._processDeadRetries = 0;
 
     // Tool hung
     if (this.toolMeta && now - this.toolMeta!.startedAt > this._toolTimeout) {
