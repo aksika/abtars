@@ -30,7 +30,7 @@ interface PlatformState {
 }
 
 const TYPE_LABELS: Record<SessionType, string> = { A: "Main", B: "Browse", C: "Code", T: "Task", P: "Peer", S: "System", O: "Orc", W: "Worker", D: "Dreamy", H: "Healer" };
-const TYPE_AGENT: Partial<Record<SessionType, AgentName>> = { C: "coding", B: "browsie", P: "coding", S: "coding", T: "task", O: "professor", W: "task" };
+const TYPE_AGENT: Partial<Record<SessionType, AgentName>> = { A: "professor", C: "coding", B: "browsie", D: "dreamy", O: "professor", T: "professor", W: "browsie", H: "browsie" };
 
 export function typeLabel(t: SessionType): string { return TYPE_LABELS[t]; }
 
