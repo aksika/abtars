@@ -190,7 +190,19 @@ const probeFtsIntegrity: ProbeFn = async (_ctx) => {
       const exists = execSync(`sqlite3 "${dbPath}" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t}'"`, { stdio: "pipe", timeout: 2000, encoding: "utf-8" }).trim();
       if (!exists) missing.push(t);
     }
-    if (missing.length > 0) return { name: "fts-integrity", status: "failed", latencyMs: Date.now() - start, detail: `missing: ${missing.join(", ")}` };
+    if (missing.length > 0) {
+      // Auto-rebuild embeddings if SHA policy allows
+      if (missing.includes("embeddings")) {
+        const { shouldAttempt, recordResult } = await import("../sha-tracker.js");
+        if (shouldAttempt("db-corruption", "embeddings")) {
+          const { spawn } = await import("node:child_process");
+          const child = spawn("abmind", ["embed", "--reset"], { detached: true, stdio: "ignore" });
+          child.unref();
+          child.on("exit", (code) => recordResult("db-corruption", "embeddings", code === 0, code ? `exit ${code}` : undefined));
+        }
+      }
+      return { name: "fts-integrity", status: "failed", latencyMs: Date.now() - start, detail: `missing: ${missing.join(", ")}` };
+    }
     // Integrity check on FTS tables
     const rebuilt: string[] = [];
     for (const t of ["messages_fts", "extracted_memories_fts"]) {

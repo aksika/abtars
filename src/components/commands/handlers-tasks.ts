@@ -150,9 +150,19 @@ export async function handleKanban(text: string, ctx: CommandContext): Promise<b
       const icon = c.status === "delivered" ? "✓" : c.status === "done" ? "+" : c.status === "running" ? "~" : c.status === "failed" ? "✗" : "-";
       const due = c.due_at ? ` due:${c.due_at.slice(0, 10)}` : "";
       const doneAt = c.delivered_at ? ` ${c.delivered_at.slice(2, 10).replace(/-/g, "")}:${c.delivered_at.slice(11, 16).replace(":", "")}` : "";
-      return `${icon} #${c.id} ${c.title} (${c.source}/${c.priority})${doneAt}${due}`;
+      const title = c.title.length > 20 ? c.title.slice(0, 17) + "…" : c.title;
+      return `${icon} #${c.id} ${title} (${c.source}/${c.priority})${doneAt}${due}`;
     });
-    await ctx.reply(`📋 Kanban Board (${cards.length}):\n${lines.join("\n")}`);
+    const header = `📋 Kanban Board (${cards.length}):\n`;
+    let body = "";
+    for (const line of lines) {
+      if (header.length + body.length + line.length + 1 > 3900) {
+        body += `\n… +${cards.length - body.split("\n").length} more`;
+        break;
+      }
+      body += (body ? "\n" : "") + line;
+    }
+    await ctx.reply(header + body);
   } catch (err) {
     await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
   }
