@@ -1,9 +1,9 @@
 /**
- * spin-types.ts — Types and helpers for the Spin session system (#943).
+ * spin-types.ts — Types and helpers for the Spin session system (#943, #953).
  * Importable by any module that needs ManagedSession or SessionType without pulling in the full Spin class.
  */
 
-import type { AgentSession, AgentName } from "./subagent-runtime.js";
+import type { AgentName } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
 
@@ -24,6 +24,7 @@ export interface ManagedSession {
   pid?: number;
 
   // Lifecycle
+  active: boolean;               // true = current session for this userId+platform
   status: "creating" | "ready" | "paused" | "ended";
   idleTimeoutMs: number;
   lastActiveAt: number;
@@ -42,10 +43,8 @@ export interface ManagedSession {
   // Session event log (last 5 events)
   log: string[];
 
-  // Legacy compat
+  // Display
   shortIndex: number;
-  isTransport: boolean;
-  agentSession?: AgentSession;
 }
 
 export interface SpinRequest {

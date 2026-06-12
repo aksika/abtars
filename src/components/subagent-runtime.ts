@@ -142,13 +142,6 @@ export class SubagentRuntime {
     const abort = new AbortController();
     this.activeSpawns.set(taskId, { abort, startedAt: Date.now() });
 
-    // Create sub-session for visibility in /session list (#510)
-    if (this._sessionManager) {
-      const typeMap: Partial<Record<AgentName, import("./spin-types.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
-      const sessionType = typeMap[agent];
-      if (sessionType) this._sessionManager.createSubSession("master", "telegram", sessionType);
-    }
-
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
     const timer = setTimeout(() => abort.abort(), timeoutMs);
 

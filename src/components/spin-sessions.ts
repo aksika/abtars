@@ -1,18 +1,10 @@
 /**
- * spin-sessions.ts — Session CRUD: create/end/switch/list/format (#943).
- * Pure data manipulation on a sessions Map. No async, no transports.
- * Separately testable. Used by Spin class.
+ * spin-sessions.ts — Session CRUD on a flat Map<id, ManagedSession> (#953).
+ * No PlatformState, no bucketing. Filter/find on the one map.
  */
 
 import type { ManagedSession, SessionType } from "./spin-types.js";
 import { sessionType, sessionCreatedAt, typeLabel } from "./spin-types.js";
-import type { Platform } from "../types/platform.js";
-
-export interface PlatformState {
-  sessions: ManagedSession[];
-  activeIndex: number;
-  nextIndex: number;
-}
 
 const MAX_LOG = 5;
 
@@ -21,143 +13,128 @@ export function pushLog(session: ManagedSession, event: string): void {
   if (session.log.length > MAX_LOG) session.log.shift();
 }
 
-export function stateKey(userId: string, platform: string): string {
-  return `${userId}:${platform}`;
-}
-
-export function getOrCreateState(states: Map<string, PlatformState>, userId: string, platform: string): PlatformState {
-  const key = stateKey(userId, platform);
-  let state = states.get(key);
-  if (!state) {
-    state = { sessions: [], activeIndex: 1, nextIndex: 1 };
-    states.set(key, state);
-    const main = allocateSession(state, "A", true, userId, platform, 0);
-    state.activeIndex = main.shortIndex;
-  }
-  return state;
-}
-
 export function allocateSession(
-  state: PlatformState, type: SessionType, isTransport: boolean,
-  userId: string, platform: string, chatId: number, motherId?: string,
-): ManagedSession {
-  const idx = state.nextIndex++;
+  sessions: Map<string, ManagedSession>, nextIndex: number,
+  type: SessionType, userId: string, platform: string, chatId: number,
+  opts?: { active?: boolean; motherId?: string },
+): { session: ManagedSession; nextIndex: number } {
+  const idx = nextIndex + 1;
   const ts = Math.floor(Date.now() / 1000);
   const session: ManagedSession = {
     id: `${ts}_${type}_${String(idx).padStart(2, "0")}`,
     userId, platform, chatId,
     delivery: "simple",
+    active: opts?.active ?? false,
     status: "ready",
     idleTimeoutMs: 7200000,
     lastActiveAt: Date.now(),
-    motherId,
+    motherId: opts?.motherId,
     messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [],
     shortIndex: idx,
-    isTransport,
   };
-  state.sessions.push(session);
+  sessions.set(session.id, session);
   pushLog(session, "created");
-  return session;
+  return { session, nextIndex: idx };
 }
 
-export function getActiveSession(states: Map<string, PlatformState>, userId: string, platform: string): ManagedSession {
-  const state = getOrCreateState(states, userId, platform);
-  return state.sessions.find(s => s.shortIndex === state.activeIndex && s.status !== "ended") ?? state.sessions[0]!;
-}
-
-export function getActiveSessionId(states: Map<string, PlatformState>, userId: string, platform: string): string {
-  return getActiveSession(states, userId, platform).id;
+export function getActiveSession(sessions: Map<string, ManagedSession>, userId: string, platform: string): ManagedSession | undefined {
+  for (const s of sessions.values()) {
+    if (s.userId === userId && s.platform === platform && s.active && s.status !== "ended") return s;
+  }
+  return undefined;
 }
 
 export function createSession(
-  states: Map<string, PlatformState>, userId: string, platform: string, type: SessionType, maxSessions: number,
-): ManagedSession | string {
-  const state = getOrCreateState(states, userId, platform);
-  const alive = state.sessions.filter(s => s.status !== "ended");
+  sessions: Map<string, ManagedSession>, nextIndex: number,
+  userId: string, platform: string, type: SessionType, chatId: number, maxSessions: number,
+): { session: ManagedSession; nextIndex: number } | string {
+  const alive = [...sessions.values()].filter(s => s.status !== "ended");
   if (alive.length >= maxSessions) return `Max sessions reached (${maxSessions}). End or kill a session first.`;
-  const session = allocateSession(state, type, true, userId, platform, 0);
-  state.activeIndex = session.shortIndex;
-  return session;
+
+  // Deactivate current active
+  const cur = getActiveSession(sessions, userId, platform);
+  if (cur) cur.active = false;
+
+  const result = allocateSession(sessions, nextIndex, type, userId, platform, chatId, { active: true });
+  return result;
 }
 
 export function createSubSession(
-  states: Map<string, PlatformState>, userId: string, platform: string, type: SessionType, maxSessions: number,
-): ManagedSession | string {
-  const state = getOrCreateState(states, userId, platform);
-  const alive = state.sessions.filter(s => s.status !== "ended");
+  sessions: Map<string, ManagedSession>, nextIndex: number,
+  userId: string, platform: string, type: SessionType, chatId: number, maxSessions: number,
+): { session: ManagedSession; nextIndex: number } | string {
+  const alive = [...sessions.values()].filter(s => s.status !== "ended");
   if (alive.length >= maxSessions) return `Max sessions reached — auto-spawn skipped.`;
-  const active = state.sessions.find(s => s.shortIndex === state.activeIndex && s.status !== "ended");
-  return allocateSession(state, type, false, userId, platform, 0, active?.id);
+
+  const active = getActiveSession(sessions, userId, platform);
+  return allocateSession(sessions, nextIndex, type, userId, platform, chatId, { active: false, motherId: active?.id });
 }
 
-export function switchSession(states: Map<string, PlatformState>, userId: string, platform: string, index: number): ManagedSession | string {
-  const state = getOrCreateState(states, userId, platform);
-  const target = state.sessions.find(s => s.shortIndex === index && s.status !== "ended" && s.isTransport);
+export function switchSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index: number): ManagedSession | string {
+  const target = [...sessions.values()].find(s => s.shortIndex === index && s.status !== "ended" && s.userId === userId);
   if (!target) return `Session #${index} not found or not switchable.`;
-  state.activeIndex = target.shortIndex;
+  const cur = getActiveSession(sessions, userId, platform);
+  if (cur) cur.active = false;
+  target.active = true;
   return target;
 }
 
-export function endSession(states: Map<string, PlatformState>, userId: string, platform: string, index?: number): ManagedSession | string {
-  const state = getOrCreateState(states, userId, platform);
-  const targetIdx = index ?? state.activeIndex;
-  const target = state.sessions.find(s => s.shortIndex === targetIdx && s.status !== "ended");
+export function endSession(sessions: Map<string, ManagedSession>, nextIndex: number, userId: string, platform: string, index?: number): { ended: ManagedSession; nextIndex: number } | string {
+  const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
+  if (!targetIdx) return `No active session found.`;
+  const target = [...sessions.values()].find(s => s.shortIndex === targetIdx && s.status !== "ended" && s.userId === userId);
   if (!target) return `Session #${targetIdx} not found.`;
 
-  const aliveMains = state.sessions.filter(s => sessionType(s) === "A" && s.status !== "ended");
-  if (sessionType(target) === "A" && aliveMains.length <= 1) {
-    target.status = "ended";
-    pushLog(target, "ended");
-    const newMain = allocateSession(state, "A", true, userId, platform, target.chatId);
-    state.activeIndex = newMain.shortIndex;
-    return target;
-  }
+  const aliveMains = [...sessions.values()].filter(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
 
   target.status = "ended";
+  target.active = false;
   pushLog(target, "ended");
-  if (state.activeIndex === targetIdx) {
-    const main = state.sessions.find(s => sessionType(s) === "A" && s.status !== "ended");
-    state.activeIndex = main?.shortIndex ?? 1;
+
+  // If ended the last Main, create a replacement
+  if (sessionType(target) === "A" && aliveMains.length <= 1) {
+    const result = allocateSession(sessions, nextIndex, "A", userId, platform, target.chatId, { active: true });
+    return { ended: target, nextIndex: result.nextIndex };
   }
-  return target;
+
+  // If ended the active session, activate first available Main
+  if (index === undefined || target.active) {
+    const main = [...sessions.values()].find(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
+    if (main) main.active = true;
+  }
+
+  return { ended: target, nextIndex };
 }
 
-export function killSession(states: Map<string, PlatformState>, userId: string, platform: string, index: number): ManagedSession | string {
-  const state = getOrCreateState(states, userId, platform);
-  const target = state.sessions.find(s => s.shortIndex === index && s.status !== "ended");
+export function killSession(sessions: Map<string, ManagedSession>, nextIndex: number, userId: string, platform: string, index: number): { killed: ManagedSession; nextIndex: number } | string {
+  const target = [...sessions.values()].find(s => s.shortIndex === index && s.status !== "ended" && s.userId === userId);
   if (!target) return `Session #${index} not found.`;
 
-  if (state.activeIndex === index) {
-    const otherMain = state.sessions.find(s => sessionType(s) === "A" && s.status !== "ended" && s.shortIndex !== index);
-    if (otherMain) {
-      state.activeIndex = otherMain.shortIndex;
-    } else {
-      target.status = "ended";
-      pushLog(target, "killed");
-      const newMain = allocateSession(state, "A", true, userId, platform, target.chatId);
-      state.activeIndex = newMain.shortIndex;
-      return target;
-    }
-  } else {
-    const aliveMains = state.sessions.filter(s => sessionType(s) === "A" && s.status !== "ended");
-    if (sessionType(target) === "A" && aliveMains.length <= 1) {
-      target.status = "ended";
-      pushLog(target, "killed");
-      allocateSession(state, "A", true, userId, platform, target.chatId);
-      return target;
-    }
+  target.status = "ended";
+  target.active = false;
+  pushLog(target, "killed");
+
+  // If killed a Main and it was the last, create replacement
+  const aliveMains = [...sessions.values()].filter(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
+  if (sessionType(target) === "A" && aliveMains.length === 0) {
+    const result = allocateSession(sessions, nextIndex, "A", userId, platform, target.chatId, { active: true });
+    return { killed: target, nextIndex: result.nextIndex };
   }
 
-  target.status = "ended";
-  pushLog(target, "killed");
-  return target;
+  // If killed the active, activate a Main
+  if (!getActiveSession(sessions, userId, platform)) {
+    const main = [...sessions.values()].find(s => sessionType(s) === "A" && s.status !== "ended" && s.userId === userId);
+    if (main) main.active = true;
+  }
+
+  return { killed: target, nextIndex };
 }
 
-export function pauseSession(states: Map<string, PlatformState>, userId: string, platform: string, index?: number): ManagedSession | string {
-  const state = getOrCreateState(states, userId, platform);
-  const targetIdx = index ?? state.activeIndex;
-  const target = state.sessions.find(s => s.shortIndex === targetIdx && s.status !== "ended");
+export function pauseSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index?: number): ManagedSession | string {
+  const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
+  if (!targetIdx) return `No active session found.`;
+  const target = [...sessions.values()].find(s => s.shortIndex === targetIdx && s.status !== "ended" && s.userId === userId);
   if (!target) return `Session #${targetIdx} not found.`;
   if (target.status === "paused") return `Session #${targetIdx} is already paused.`;
   target.status = "paused";
@@ -165,10 +142,10 @@ export function pauseSession(states: Map<string, PlatformState>, userId: string,
   return target;
 }
 
-export function resumeSession(states: Map<string, PlatformState>, userId: string, platform: string, index?: number): ManagedSession | string {
-  const state = getOrCreateState(states, userId, platform);
-  const targetIdx = index ?? state.activeIndex;
-  const target = state.sessions.find(s => s.shortIndex === targetIdx && s.status !== "ended");
+export function resumeSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index?: number): ManagedSession | string {
+  const targetIdx = index ?? getActiveSession(sessions, userId, platform)?.shortIndex;
+  if (!targetIdx) return `No active session found.`;
+  const target = [...sessions.values()].find(s => s.shortIndex === targetIdx && s.status !== "ended" && s.userId === userId);
   if (!target) return `Session #${targetIdx} not found.`;
   if (target.status !== "paused") return `Session #${targetIdx} is not paused.`;
   target.status = "ready";
@@ -176,38 +153,30 @@ export function resumeSession(states: Map<string, PlatformState>, userId: string
   return target;
 }
 
-export function listSessions(states: Map<string, PlatformState>, userId: string, platform: string): { sessions: ManagedSession[]; activeIndex: number } {
-  const state = getOrCreateState(states, userId, platform);
-  return { sessions: state.sessions.filter(s => s.status !== "ended"), activeIndex: state.activeIndex };
+export function listSessions(sessions: Map<string, ManagedSession>, userId: string, platform: string): ManagedSession[] {
+  return [...sessions.values()].filter(s => s.userId === userId && s.platform === platform && s.status !== "ended");
 }
 
-export function listAllSessions(states: Map<string, PlatformState>): ManagedSession[] {
-  const all: ManagedSession[] = [];
-  for (const state of states.values()) {
-    for (const s of state.sessions) if (s.status !== "ended") all.push(s);
-  }
-  return all;
+export function listAllSessions(sessions: Map<string, ManagedSession>): ManagedSession[] {
+  return [...sessions.values()].filter(s => s.status !== "ended");
 }
 
-export function getSessionById(states: Map<string, PlatformState>, sessionId: string): ManagedSession | undefined {
-  for (const state of states.values()) {
-    const found = state.sessions.find(s => s.id === sessionId);
-    if (found) return found;
-  }
-  return undefined;
+export function getSessionById(sessions: Map<string, ManagedSession>, sessionId: string): ManagedSession | undefined {
+  return sessions.get(sessionId);
 }
 
-export function formatList(states: Map<string, PlatformState>, userId: string, platform: string): string {
-  const { sessions, activeIndex } = listSessions(states, userId, platform);
-  if (sessions.length === 0) return "No active sessions.";
-  return sessions.map(s => {
-    const marker = s.shortIndex === activeIndex ? " *" : "";
-    const sub = s.isTransport ? "" : " (sub)";
+export function formatList(sessions: Map<string, ManagedSession>, userId: string, platform: string): string {
+  const list = listSessions(sessions, userId, platform);
+  if (list.length === 0) return "No active sessions.";
+  return list.map(s => {
+    const marker = s.active ? " *" : "";
+    const bg = !s.active && sessionType(s) !== "A" ? " (bg)" : "";
     const paused = s.status === "paused" ? " ⏸" : "";
     const model = s.model ? ` ${s.model}` : "";
+    const nm = s.name ? ` "${s.name}"` : "";
     const time = new Date(sessionCreatedAt(s)).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
     const idle = Math.round((Date.now() - s.lastActiveAt) / 60000);
     const metrics = s.messageCount ? ` | ${s.messageCount} msgs` : "";
-    return `#${s.shortIndex} ${typeLabel(sessionType(s))}${sub}${model} — ${time}${paused}${marker} | idle ${idle}m${metrics}`;
+    return `#${s.shortIndex} ${typeLabel(sessionType(s))}${nm}${bg}${model} — ${time}${paused}${marker} | idle ${idle}m${metrics}`;
   }).join("\n");
 }

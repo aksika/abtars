@@ -1,22 +1,18 @@
 /**
- * spin.ts — Unified session router (#943).
- * Single gateway for ALL sessions: interactive (A) and background (T/B/C/O/W/D/H).
- * Owns the sessions map, transport creation, routing, dispatch, lifecycle.
- * Replaces SessionManager + system-message.ts + phase-startup-notification.ts.
+ * spin.ts — Unified session router (#943, #953).
+ * Single flat Map<sessionId, ManagedSession>. No bucketing. No PlatformState.
  */
 
 import { logInfo, logWarn, logTrace } from "./logger.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanList, kanbanAddTokens } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanList } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
-import { sessionType, typeAgent, typeLabel } from "./spin-types.js";
-import type { PlatformState } from "./spin-sessions.js";
+import { sessionType, typeAgent } from "./spin-types.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog } from "./spin-sessions.js";
 
-// Re-export types for consumers
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
 
@@ -33,73 +29,95 @@ const MAX_CONCURRENT: Partial<Record<SessionType, number>> = {
 };
 
 export class Spin {
-  private readonly states = new Map<string, PlatformState>();
+  private sessions = new Map<string, ManagedSession>();
+  private nextIndex = 0;
   private running = new Map<SessionType, Set<number>>();
   private runtime: SubagentRuntime | null = null;
-
-  // Persistent Orc
   private orcSession: AgentSession | null = null;
   private orcIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
 
-  // ── Session CRUD (thin wrappers over spin-sessions.ts) ─────────────────
+  // ── Session CRUD ───────────────────────────────────────────────────────
 
   getActiveSession(userId: string, platform: string): ManagedSession {
-    return Sessions.getActiveSession(this.states, userId, platform);
+    let s = Sessions.getActiveSession(this.sessions, userId, platform);
+    if (!s) {
+      // Auto-create initial Main session
+      const r = Sessions.allocateSession(this.sessions, this.nextIndex, "A", userId, platform, 0, { active: true });
+      this.nextIndex = r.nextIndex;
+      s = r.session;
+    }
+    return s;
   }
 
   getActiveSessionId(userId: string, platform: string): string {
-    return Sessions.getActiveSessionId(this.states, userId, platform);
+    return this.getActiveSession(userId, platform).id;
   }
 
   createSession(userId: string, platform: string, type: SessionType): ManagedSession | string {
-    return Sessions.createSession(this.states, userId, platform, type, MAX_TOTAL_SESSIONS);
+    // Ensure a Main session exists before creating additional ones
+    this.getActiveSession(userId, platform);
+    const r = Sessions.createSession(this.sessions, this.nextIndex, userId, platform, type, 0, MAX_TOTAL_SESSIONS);
+    if (typeof r === "string") return r;
+    this.nextIndex = r.nextIndex;
+    return r.session;
   }
 
   createSubSession(userId: string, platform: string, type: SessionType): ManagedSession | string {
-    return Sessions.createSubSession(this.states, userId, platform, type, MAX_TOTAL_SESSIONS);
+    const r = Sessions.createSubSession(this.sessions, this.nextIndex, userId, platform, type, 0, MAX_TOTAL_SESSIONS);
+    if (typeof r === "string") return r;
+    this.nextIndex = r.nextIndex;
+    return r.session;
   }
 
   switchSession(userId: string, platform: string, index: number): ManagedSession | string {
-    return Sessions.switchSession(this.states, userId, platform, index);
+    return Sessions.switchSession(this.sessions, userId, platform, index);
   }
 
   endSession(userId: string, platform: string, index?: number): ManagedSession | string {
-    return Sessions.endSession(this.states, userId, platform, index);
+    const r = Sessions.endSession(this.sessions, this.nextIndex, userId, platform, index);
+    if (typeof r === "string") return r;
+    this.nextIndex = r.nextIndex;
+    return r.ended;
   }
 
   killSession(userId: string, platform: string, index: number): ManagedSession | string {
-    return Sessions.killSession(this.states, userId, platform, index);
+    const r = Sessions.killSession(this.sessions, this.nextIndex, userId, platform, index);
+    if (typeof r === "string") return r;
+    this.nextIndex = r.nextIndex;
+    return r.killed;
   }
 
   pauseSession(userId: string, platform: string, index?: number): ManagedSession | string {
-    return Sessions.pauseSession(this.states, userId, platform, index);
+    return Sessions.pauseSession(this.sessions, userId, platform, index);
   }
 
   resumeSession(userId: string, platform: string, index?: number): ManagedSession | string {
-    return Sessions.resumeSession(this.states, userId, platform, index);
+    return Sessions.resumeSession(this.sessions, userId, platform, index);
   }
 
   listSessions(userId: string, platform: string): { sessions: ManagedSession[]; activeIndex: number } {
-    return Sessions.listSessions(this.states, userId, platform);
+    const list = Sessions.listSessions(this.sessions, userId, platform);
+    const active = list.find(s => s.active);
+    return { sessions: list, activeIndex: active?.shortIndex ?? 0 };
   }
 
   listAllSessions(): ManagedSession[] {
-    return Sessions.listAllSessions(this.states);
+    return Sessions.listAllSessions(this.sessions);
   }
 
   getSessionById(sessionId: string): ManagedSession | undefined {
-    return Sessions.getSessionById(this.states, sessionId);
+    return this.sessions.get(sessionId);
   }
 
   formatList(userId: string, platform: string): string {
-    return Sessions.formatList(this.states, userId, platform);
+    return Sessions.formatList(this.sessions, userId, platform);
   }
 
-  clearAll(): void { this.states.clear(); }
+  clearAll(): void { this.sessions.clear(); this.nextIndex = 0; }
 
-  // ── Interactive session lifecycle (#936) ────────────────────────────────
+  // ── Interactive session lifecycle ──────────────────────────────────────
 
   registerMasterSession(opts: { userId: string; chatId: number; platform: string; transport: IKiroTransport }): void {
     const session = this.getActiveSession(opts.userId, opts.platform);
@@ -107,8 +125,6 @@ export class Spin {
     session.delivery = "streaming";
     session.idleTimeoutMs = Infinity;
     session.chatId = opts.chatId;
-    session.userId = opts.userId;
-    session.platform = opts.platform;
     session.status = "ready";
     session.lastActiveAt = Date.now();
     const t = opts.transport as any;
@@ -126,14 +142,11 @@ export class Spin {
     }
     if (session.status === "ended") throw new Error("Session ended — use /session new");
 
-    // Check global cap
     const total = this.listAllSessions().filter(s => s.transport).length;
     if (total >= MAX_TOTAL_SESSIONS) throw new Error("System busy, try again in a few minutes.");
 
     session.status = "creating";
     session.chatId = chatId;
-    session.userId = userId;
-    session.platform = platform;
     const registry = loadUsers();
     const user = registry.byUserId.get(userId);
     const role = user?.role ?? "guest";
@@ -149,7 +162,6 @@ export class Spin {
         new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Session creation timed out")), SESSION_CREATE_TIMEOUT_MS)),
       ]);
       session.transport = agentSession.transport!;
-      session.agentSession = agentSession;
       session.status = "ready";
       session.lastActiveAt = Date.now();
       const t = session.transport as any;
@@ -166,43 +178,31 @@ export class Spin {
   }
 
   destroySession(userId: string, sessionId?: string): void {
-    const sessions = this.listAllSessions();
-    for (const s of sessions) {
+    for (const s of this.sessions.values()) {
       if (s.userId !== userId) continue;
       if (sessionId && s.id !== sessionId) continue;
-      if (s.idleTimeoutMs === Infinity) continue; // never kill master primary
-      if (s.transport) {
-        try { s.transport.destroy(); } catch {}
-        s.transport = undefined;
-      }
-      if (s.agentSession) {
-        try { s.agentSession.destroy(); } catch {}
-        s.agentSession = undefined;
-      }
+      if (s.idleTimeoutMs === Infinity) continue;
+      if (s.transport) { try { s.transport.destroy(); } catch {} s.transport = undefined; }
       s.status = "ended";
+      s.active = false;
       pushLog(s, "destroyed");
       logInfo(TAG, `Session destroyed: ${userId} id=${s.id}`);
     }
   }
 
-  /** Destroy all sessions (bridge shutdown). */
   destroyAll(): void {
-    for (const s of this.listAllSessions()) {
+    for (const s of this.sessions.values()) {
       if (s.transport) { try { s.transport.destroy(); } catch {} }
-      if (s.agentSession) { try { s.agentSession.destroy(); } catch {} }
     }
     if (this.orcSession) { try { this.orcSession.destroy(); } catch {} this.orcSession = null; }
     if (this.orcIdleTimer) { clearTimeout(this.orcIdleTimer); this.orcIdleTimer = null; }
-    this.states.clear();
+    this.sessions.clear();
+    this.nextIndex = 0;
     logInfo(TAG, "All sessions destroyed (shutdown)");
   }
 
-  // ── inject() — unified prompt injection (#943) ─────────────────────────
+  // ── inject() ───────────────────────────────────────────────────────────
 
-  /**
-   * Inject a prompt into a user's session.
-   * @param deliver true = send response to user (greeting). false = fire-and-forget (system msg).
-   */
   async inject(userId: string, prompt: string, opts?: { deliver?: boolean }): Promise<string | null> {
     const registry = loadUsers();
     const user = registry.byUserId.get(userId);
@@ -226,12 +226,11 @@ export class Spin {
     }
   }
 
-  /** Backwards-compat alias. */
   async injectGreeting(userId: string, prompt: string): Promise<string | null> {
     return this.inject(userId, prompt, { deliver: true });
   }
 
-  // ── Orc session (#932) ─────────────────────────────────────────────────
+  // ── Orc ────────────────────────────────────────────────────────────────
 
   getOrcSession(): AgentSession | null { return this.orcSession?.isReady ? this.orcSession : null; }
 
@@ -239,9 +238,7 @@ export class Spin {
     const orc = this.getOrcSession();
     if (!orc) return null;
     this.resetOrcIdle();
-    logTrace(TAG, `[USER→Orc] "${message.slice(0, 100)}"`);
     const response = await orc.sendPrompt("orc:user", `[USER] ${message}`);
-    logTrace(TAG, `[Orc→USER] "${response.slice(0, 100)}"`);
     return response;
   }
 
@@ -265,15 +262,13 @@ export class Spin {
     if (this.orcIdleTimer) { clearTimeout(this.orcIdleTimer); this.orcIdleTimer = null; }
   }
 
-  // ── Dispatch (background sessions) ─────────────────────────────────────
+  // ── Dispatch ───────────────────────────────────────────────────────────
 
   dispatch(request: SpinRequest): number {
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
-      priority: request.priority ?? "MEDIUM",
-      type: request.type,
-      parent_id: request.parentCardId,
-      deliveryMode: request.deliveryMode,
+      priority: request.priority ?? "MEDIUM", type: request.type,
+      parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
     });
 
     if (!this.canDispatch(request.type, cardId)) {
@@ -283,29 +278,19 @@ export class Spin {
 
     this.markRunning(request.type, cardId);
     kanbanRunning(cardId);
-    logTrace(TAG, `dispatch ${request.type} card:${cardId} source=${request.source}`);
 
-    const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-
-    // Register as visible session
     const masterUserId = loadUsers().users.find(u => u.role === "master")?.userId ?? "master";
     const sub = this.createSubSession(masterUserId, "telegram", request.type);
     const session = typeof sub === "string" ? undefined : sub;
     if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatch card:${cardId}`); }
 
+    const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.execute(request, cardId, timeout)
-      .then(result => {
-        logTrace(TAG, `done ${request.type} card:${cardId} result=${result.length} chars`);
-        kanbanComplete(cardId, null, result.slice(0, 500));
-      })
-      .catch(err => {
-        const msg = err instanceof Error ? err.message : String(err);
-        logWarn(TAG, `${request.type} card:${cardId} failed: ${msg}`);
-        kanbanFail(cardId, msg.slice(0, 1000));
-      })
+      .then(result => { kanbanComplete(cardId, null, result.slice(0, 500)); })
+      .catch(err => { kanbanFail(cardId, (err instanceof Error ? err.message : String(err)).slice(0, 1000)); })
       .finally(() => {
         this.markDone(request.type, cardId);
-        if (session) { session.status = "ended"; pushLog(session, "completed"); }
+        if (session) { session.status = "ended"; session.active = false; pushLog(session, "completed"); }
         this.drainQueued();
       });
 
@@ -315,10 +300,8 @@ export class Spin {
   async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
-      priority: request.priority ?? "MEDIUM",
-      type: request.type,
-      parent_id: request.parentCardId,
-      deliveryMode: request.deliveryMode,
+      priority: request.priority ?? "MEDIUM", type: request.type,
+      parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
     });
 
     this.markRunning(request.type, cardId);
@@ -335,7 +318,7 @@ export class Spin {
       return { cardId, result };
     } finally {
       this.markDone(request.type, cardId);
-      if (session) { session.status = "ended"; pushLog(session, "completed"); }
+      if (session) { session.status = "ended"; session.active = false; pushLog(session, "completed"); }
       this.drainQueued();
     }
   }
@@ -359,8 +342,7 @@ export class Spin {
 
   private canDispatch(type: SessionType, _cardId: number): boolean {
     const max = MAX_CONCURRENT[type] ?? 5;
-    const active = this.running.get(type)?.size ?? 0;
-    return active < max;
+    return (this.running.get(type)?.size ?? 0) < max;
   }
 
   private markRunning(type: SessionType, cardId: number): void {
@@ -374,14 +356,13 @@ export class Spin {
 
   private async execute(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
     if (!this.runtime) throw new Error("Spin: runtime not set");
-
     if (request.type === "O") return this.executeOrc(request, cardId, timeoutMs);
 
     const agentName = typeAgent(request.type);
     logInfo(TAG, `▶ ${request.type} card:${cardId} agent=${agentName}`);
 
     const timer = setTimeout(() => {
-      logWarn(TAG, `⏱️ ${request.type} card:${cardId} timed out (${Math.round(timeoutMs / 60000)}min)`);
+      logWarn(TAG, `⏱️ ${request.type} card:${cardId} timed out`);
       this.runtime?.interruptSpawn(`spin-${cardId}`);
     }, timeoutMs);
 
@@ -389,50 +370,27 @@ export class Spin {
       const { buildSoulBundle } = await import("./soul-bundle.js");
       const bundle = buildSoulBundle(request.type);
       const fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
-      const result = await this.runtime.complete(agentName, fullPrompt, { timeoutMs, session: "fresh" });
-
-      // #889: Report token usage to kanban
-      const usage = this.runtime.lastUsage;
-      if (usage && (usage.input + usage.output) > 0) {
-        kanbanAddTokens(cardId, usage.input + usage.output);
-      }
-
-      return result || "(no output)";
-    } finally {
-      clearTimeout(timer);
-    }
+      return (await this.runtime.complete(agentName, fullPrompt, { timeoutMs, session: "fresh" })) || "(no output)";
+    } finally { clearTimeout(timer); }
   }
 
   private async executeOrc(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
     const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
     updateBridgeLockField("orc_active", cardId);
-
     const orc = await this.getOrCreateOrc();
     logInfo(TAG, `▶ O card:${cardId} (persistent Orc)`);
 
-    const timer = setTimeout(() => {
-      logWarn(TAG, `⏱️ O card:${cardId} timed out (${Math.round(timeoutMs / 60000)}min)`);
-    }, timeoutMs);
-
+    const timer = setTimeout(() => { logWarn(TAG, `⏱️ O card:${cardId} timed out`); }, timeoutMs);
     try {
       const { buildSoulBundle } = await import("./soul-bundle.js");
       const bundle = buildSoulBundle("O");
       let fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
-
       const { drainOrcNotifications } = await import("./spin-notifications.js");
       const notifications = drainOrcNotifications(cardId);
-      if (notifications.length) {
-        fullPrompt = notifications.join("\n") + "\n\n" + fullPrompt;
-      }
-
-      const result = await orc.sendPrompt("orc:project", fullPrompt);
-      return result || "(no output)";
-    } finally {
-      clearTimeout(timer);
-      updateBridgeLockField("orc_active", null);
-    }
+      if (notifications.length) fullPrompt = notifications.join("\n") + "\n\n" + fullPrompt;
+      return (await orc.sendPrompt("orc:project", fullPrompt)) || "(no output)";
+    } finally { clearTimeout(timer); updateBridgeLockField("orc_active", null); }
   }
 }
 
-/** Singleton instance. */
 export const spin = new Spin();

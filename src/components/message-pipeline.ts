@@ -253,17 +253,17 @@ export async function handleInboundMessage(
 
     // --- Send to transport ---
     const activeSession = deps.sessionManager.getActiveSession(userId, msg.platform);
-    const agentSession = activeSession.agentSession;
-    logDebug(TAG, `Route: session=${activeSessionId} type=${sessionType(activeSession)} agentSession=${agentSession ? "yes" : "no"}`);
+    const sessionTransport = activeSession.transport ?? transport;
+    logDebug(TAG, `Route: session=${activeSessionId} type=${sessionType(activeSession)} transport=${activeSession.transport ? "session" : "main"}`);
 
     // #681: attach sandbox policy (owner for now — peer/guest in #678)
-    if ("sandboxPolicy" in transport) {
+    if ("sandboxPolicy" in sessionTransport) {
       const { buildPolicy } = await import("./tool-sandbox.js");
-      (transport as any).sandboxPolicy = buildPolicy("owner");
+      (sessionTransport as any).sandboxPolicy = buildPolicy("owner");
     }
     // Wire cooperative pause check (#539) — agent loop checks this between tool calls
-    if ("isPaused" in transport) {
-      (transport as any).isPaused = () => activeSession.status === "paused";
+    if ("isPaused" in sessionTransport) {
+      (sessionTransport as any).isPaused = () => activeSession.status === "paused";
     }
 
     // Wire /wait steer injection (#655) — agent loop drains this between tool rounds
@@ -277,9 +277,7 @@ export async function handleInboundMessage(
       };
     }
 
-    const responsePromise = agentSession
-      ? agentSession.sendPrompt(activeSessionId, prompt, imageContent)
-      : transport.sendPrompt(activeSessionId, prompt, imageContent, userId);
+    const responsePromise = sessionTransport.sendPrompt(activeSessionId, prompt, imageContent, userId);
 
     // --- Typing + reaction ---
     if (!isVoice && adapter.setReaction && msg.messageId) {
