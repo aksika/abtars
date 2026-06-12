@@ -318,6 +318,11 @@ export class DirectApiTransport implements IKiroTransport {
         for (const tc of toolCalls) {
           if (signal.aborted) throw new Error("Aborted");
           this._lastActivityAt = Date.now();
+
+          // #948: drain /wait between batched tool calls
+          const mid = this.getPendingInstruction?.();
+          if (mid) session.addUser(mid);
+
           this.onToolCallStart?.(tc.function.name ?? "tool");
 
           let args: Record<string, string>;
