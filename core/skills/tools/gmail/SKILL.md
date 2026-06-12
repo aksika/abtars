@@ -1,12 +1,19 @@
 ---
 name: gmail
 description: Read and manage Gmail via gws-cli
-user-invocable: false
+requires:
+  bins: [gws-cli]
 ---
 
 # Gmail Access
 
 Read, search, and manage emails using `gws-cli gmail`. Auth is pre-configured.
+
+## Triggers
+
+- User says "check email", "any new emails?", "check my inbox"
+- Cron task fires for scheduled email check
+- User asks about a specific email or sender
 
 ## Commands
 
@@ -31,14 +38,16 @@ gws-cli gmail mark-unread MSG_ID
 
 Standard Gmail operators: `from:`, `to:`, `subject:`, `is:unread`, `newer_than:1d`, `has:attachment`, `label:`, `after:2026/03/01`.
 
-## When checking emails
+## Workflow: checking emails
 
 1. `gws-cli gmail list -q "is:unread" -n 20`
-2. For each unread email: `gws-cli gmail read <id>`, then send a SHORT summary to the user as a separate message (one message per email)
-3. Summary format: **From:** / **Subject:** / 1-2 sentence gist
-4. Do NOT create files, reports, or .md documents — deliver summaries directly in chat
+2. For each unread email: `gws-cli gmail read <id>`
+3. Send a SHORT summary to the user (one message per email)
+4. Summary format: **From:** / **Subject:** / 1-2 sentence gist
 5. After summarizing, mark as read: `gws-cli gmail mark-read <id>`
+6. Do NOT create files, reports, or .md documents — deliver summaries directly in chat
 
 ## Rules
 - Never delete or trash emails without explicit user request
 - If no unread emails, do not send any message — stay silent
+- This is the ONLY gmail skill — do not create sub-skills for check/read/mark separately
