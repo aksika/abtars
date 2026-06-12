@@ -187,6 +187,60 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     },
   };
   ctx.pipelineDeps = pipelineDeps;
+
+  // #944 Step C: Wire full message handler on already-connected platforms
+  const { handleInboundMessage } = await import("../components/message-pipeline.js");
+  if (ctx.telegramAdapter) {
+    ctx.telegramAdapter.setMessageHandler({ pipeline: pipelineDeps, conversationBuffer: ctx.conversationBuffer, transport, memory: ctx.memory, sessionManager: ctx.sessionManager, actionGate: ctx.actionGate });
+    logInfo("boot", "Telegram: full pipeline wired");
+  }
+  if (ctx.discordAdapter) {
+    ctx.discordAdapter.setMessageHandler({ pipeline: pipelineDeps, transport, memory: ctx.memory, conversationBuffer: ctx.conversationBuffer });
+    logInfo("boot", "Discord: full pipeline wired");
+  }
+  for (const [name, adapter] of ctx.platformAdapters) {
+    if (name === "irc" && "setMessageHandler" in adapter) {
+      (adapter as any).setMessageHandler((msg: any) => handleInboundMessage(msg, adapter, pipelineDeps));
+      logInfo("boot", "IRC: full pipeline wired");
+    }
+  }
+
+  // Drain recovery queue — messages that arrived before pipeline was ready
+  const recoveryQueue = (ctx as any)._recoveryQueue as Array<{ msg: any; adapter: any }> | undefined;
+  if (recoveryQueue?.length) {
+    logInfo("boot", `Draining ${recoveryQueue.length} queued message(s) from recovery handler`);
+    for (const { msg, adapter } of recoveryQueue) {
+      handleInboundMessage(msg, adapter, pipelineDeps).catch(err => logWarn("boot", `Drain error: ${err}`));
+    }
+    recoveryQueue.length = 0;
+  }
+
+  // Wire send_document tool + ActionGate (moved from phase-platforms)
+  if (ctx.telegramAdapter) {
+    const mainChatId = config.mainChatId;
+    if (mainChatId) {
+      const { setSendDocument } = await import("../components/transport/tool-registry.js");
+      setSendDocument((path, caption) => ctx.telegramAdapter!.sendDocument(String(mainChatId), path, caption));
+      if (ctx.actionGate) {
+        const api = (ctx.telegramAdapter as any).api;
+        const chatId = String(mainChatId);
+        ctx.actionGate.setNotify(async (text: string, buttons: Array<{ text: string; data: string }>) => {
+          const opts: any = {};
+          if (buttons.length > 0) {
+            opts.reply_markup = { inline_keyboard: [buttons.map((b: any) => ({ text: b.text, callback_data: b.data }))] };
+          }
+          await api.sendMessage(chatId, text, opts);
+        });
+      }
+    }
+  }
+  // Wire IRC send tool
+  const ircAdapter = ctx.platformAdapters.get("irc");
+  if (ircAdapter) {
+    const { setIrcSend } = await import("../components/transport/tool-registry.js");
+    setIrcSend((channel, message) => { ircAdapter.sendMessage(channel, message); });
+  }
+
   return "ran";
 }
 

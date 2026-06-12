@@ -277,6 +277,12 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
         const { sendToMainChat } = await import("../components/main-chat.js");
         await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `🔄 Back online. ${version}`);
         logInfo("main", "Startup: Back online notification sent");
+        // #944: degraded-mode warning if any subsystem failed
+        const failed = [...ctx.phaseHealth].filter(([, h]) => h.status === "failed" || h.status === "skipped");
+        if (failed.length > 0) {
+          const lines = failed.map(([name, h]) => `  ${h.status === "failed" ? "✗" : "»"} ${name}${h.error ? `: ${h.error}` : ""}`);
+          await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `⚠️ Degraded boot (${failed.length} subsystem${failed.length > 1 ? "s" : ""} down):\n${lines.join("\n")}`);
+        }
       } catch (err) { logWarn("main", `Back online notification failed: ${err instanceof Error ? err.message : String(err)}`); }
     }, 3000);
     // Startup greeting via spin.inject — retry once if first attempt fails (SDK→raw race)
