@@ -96,6 +96,12 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
     // Worker: dedicated prompt file only — no skills, no core facts
     const workerPrompt = readOr(join(HOST_CORE_DIR, "prompts", "worker.md"));
     if (workerPrompt) parts.push(workerPrompt);
+  } else if (type === "O") {
+    // Orc: dedicated prompt file + core facts
+    const orcPrompt = readOr(join(HOST_CORE_DIR, "prompts", "orc.md"));
+    if (orcPrompt) parts.push(orcPrompt);
+    const coreFacts = readOr(join(HOST_CORE_DIR, "core_facts.md"));
+    if (coreFacts) parts.push(coreFacts);
   } else {
     // Lightweight bundle: identity + core facts + skills
     const identity = TYPE_IDENTITY[type];
