@@ -288,7 +288,8 @@ export class Spin {
     const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
     // Register as visible session
-    const sub = this.createSubSession("master", "telegram", request.type);
+    const masterUserId = loadUsers().users.find(u => u.role === "master")?.userId ?? "master";
+    const sub = this.createSubSession(masterUserId, "telegram", request.type);
     const session = typeof sub === "string" ? undefined : sub;
     if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatch card:${cardId}`); }
 
@@ -323,7 +324,8 @@ export class Spin {
     this.markRunning(request.type, cardId);
     kanbanRunning(cardId);
 
-    const sub = this.createSubSession("master", "telegram", request.type);
+    const masterUserId = loadUsers().users.find(u => u.role === "master")?.userId ?? "master";
+    const sub = this.createSubSession(masterUserId, "telegram", request.type);
     const session = typeof sub === "string" ? undefined : sub;
     if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatchAwait card:${cardId}`); }
 
