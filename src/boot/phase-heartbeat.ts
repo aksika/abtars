@@ -12,8 +12,8 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
  * - sendSystemMessage via spin.inject()
  * - In-proc watchdog setInterval (WD_THRESHOLD_MS = hbInterval × 3)
  * - Capability-registered commands + heartbeat tasks
+ * - Nerve card:done subscription for instant kanban delivery
  * - heartbeat.start() + memory.setHeartbeat()
- * - checkBrowseTasks once on startup
  *
  * Must run after phase-platforms (tasks read ctx.telegramAdapter lazily via closures).
  * Must run after phase-pipeline-deps (selfHealerTask mutates pipelineDeps in place).
@@ -187,6 +187,26 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     },
     chatId: () => String(masterChatId),
   }));
+
+  // #900: Nerve-driven instant delivery — fires on card:done without waiting for heartbeat tick
+  import("../components/nerve.js").then(({ nerve }) => {
+    nerve.on("card:done", async (cardId: number) => {
+      try {
+        const { kanbanPending, kanbanSetDelivering, kanbanMarkDelivered } = await import("../components/tasks/kanban-board.js");
+        const pending = kanbanPending();
+        const card = pending.find((c: { id: number }) => c.id === cardId);
+        if (!card) return; // already delivered or silent
+        if (card.delivery_mode === "silent") { kanbanMarkDelivered(card.id); return; }
+        kanbanSetDelivering(card.id);
+        if (ctx.telegramAdapter) {
+          await ctx.telegramAdapter.sendMessage(String(masterChatId), `✅ "${card.title}" complete.\n${card.result_summary ?? ""}`);
+          if (card.result_path) await ctx.telegramAdapter.sendDocument(String(masterChatId), card.result_path, `📄 ${card.title}`);
+        }
+        kanbanMarkDelivered(card.id);
+      } catch (err) { logAndSwallow(TAG, "nerve:card:done delivery", err); }
+    });
+  }).catch(err => logAndSwallow(TAG, "nerve import", err));
+
   heartbeat.registerTask(createKanbanCleanupTask());
 
   // #936: Expire idle user sessions
@@ -243,9 +263,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   // #318: fire model-health immediately at boot (don't wait for first tick)
   queueMicrotask(() => { runModelHealth().catch(err => logAndSwallow(TAG, "runModelHealth boot", err)); });
 
-  // checkBrowseTasks once on startup, then heartbeat.start
-  const { checkBrowseTasks } = await import("../capabilities/browser/browse-delivery.js");
-  checkBrowseTasks();
+  // heartbeat.start
   heartbeat.start();
   memory?.setHeartbeat(heartbeat);
   logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
