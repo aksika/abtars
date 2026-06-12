@@ -80,13 +80,12 @@ export class Bridge {
   }
 }
 
+import { bootGraph } from "./boot/boot-graph.js";
+import { BOOT_NODES } from "./boot/boot-nodes.js";
+
 /**
- * Boot phase sequence. Each phase receives the BootCtx and populates
- * fields used by later phases. Order must not change without updating
- * the boot log expectations and phase-order.test.ts.
- *
- * Phases that need the Bridge instance (phase-platforms, phase-shutdown)
- * receive it as a second arg via the dispatcher in startBridge().
+ * Boot phase sequence — retained for phase-order.test.ts compatibility.
+ * The actual dispatcher is bootGraph() which uses BOOT_NODES.
  */
 export const BOOT_PHASES = [
   phaseConfig,
@@ -131,27 +130,19 @@ export async function startBridge(): Promise<number> {
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;
   ctx.requestShutdownWithCode = (code: number) => bridge.requestShutdown(code);
 
-  // All other phases — universal try/catch, no phase can crash the bridge (#331)
-  for (const phase of BOOT_PHASES.slice(1)) {
+  // Run boot graph — all phases execute in dependency order (#944)
+  await bootGraph(BOOT_NODES, ctx);
+
+  // phaseShutdown is special (needs Bridge instance) — run after graph
+  {
     const t = Date.now();
     try {
-      let result: import("./boot/context.js").PhaseResult;
-      if (phase === phaseShutdown) {
-        result = await phaseShutdown(ctx, bridge);
-      } else {
-        result = await (phase as (ctx: BootCtx) => Promise<import("./boot/context.js").PhaseResult>)(ctx);
-      }
-      if (!ctx.phaseHealth.has(phase.name)) {
-        ctx.phaseHealth.set(phase.name, { status: result === "skipped" ? "skipped" : "ok" });
-      }
-      if (result === "skipped") {
-        logInfo("boot", `⊘ ${phase.name} (skipped)`);
-      } else {
-        logInfo("boot", `✓ ${phase.name} (${Date.now() - t}ms)`);
-      }
+      const result = await phaseShutdown(ctx, bridge);
+      ctx.phaseHealth.set(phaseShutdown.name, { status: result === "skipped" ? "skipped" : "ok" });
+      logInfo("boot", `✓ ${phaseShutdown.name} (${Date.now() - t}ms)`);
     } catch (err) {
-      ctx.phaseHealth.set(phase.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
-      logError("boot", `✗ ${phase.name} failed — continuing without it`, err);
+      ctx.phaseHealth.set(phaseShutdown.name, { status: "failed", error: err instanceof Error ? err.message : String(err) });
+      logError("boot", `✗ ${phaseShutdown.name} failed`, err);
     }
   }
 
