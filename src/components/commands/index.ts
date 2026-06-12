@@ -32,6 +32,7 @@ registerExact("/restart", handleRestart);
 registerExact("/full", handleFull);
 registerExact("/short", handleShort);
 registerExact("/healing", handleHealing);
+registerPrefix("/healing ", handleHealing);
 registerExact("/software", handleSoftware);
 registerExact("/update", handleSoftware);
 registerExact("/facts", handleFacts);

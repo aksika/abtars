@@ -64,10 +64,10 @@ describe("sha-tracker", () => {
     expect(shouldAttempt("irc-flap", "default")).toBe(true);
   });
 
-  it("returns true when policy file missing (graceful)", async () => {
+  it("returns false when policy file missing (circuit breaker)", async () => {
     rmSync(join(tempHome, "config", "sha-policy.json"));
     const { shouldAttempt, reload } = await getTracker();
     reload();
-    expect(shouldAttempt("missing-dep", "browser")).toBe(true);
+    expect(shouldAttempt("missing-dep", "browser")).toBe(false);
   });
 });

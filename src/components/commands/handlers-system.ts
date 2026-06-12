@@ -128,22 +128,59 @@ export async function handleHeartbeat(_text: string, ctx: CommandContext): Promi
 }
 
 export async function handleHealing(text: string, ctx: CommandContext): Promise<boolean> {
-  if (!ctx.selfHealerTask) { await ctx.reply("🩺 Self-healer not available."); return true; }
-  const arg = text.replace(/^\/healing\s*/, "").trim().toLowerCase();
-  if (arg === "on") {
-    ctx.selfHealerTask.enabled = true;
-  } else if (arg === "off") {
-    ctx.selfHealerTask.enabled = false;
-  } else if (arg === "reset") {
-    ctx.selfHealerTask.resetCircuitBreaker?.();
-    await ctx.reply("🩺 Circuit breaker reset — all paused rules re-enabled.");
+  const arg = text.replace(/^\/healing\s*/, "").trim();
+  const cmd = arg.toLowerCase().split(/\s+/)[0] ?? "";
+
+  if (cmd === "on") {
+    if (ctx.selfHealerTask) ctx.selfHealerTask.enabled = true;
+    await ctx.reply("🩺 Self-healing: ON");
+    logInfo(TAG, "Self-healer ON by user");
     return true;
   }
-  const status = ctx.selfHealerTask.enabled ? "ON" : "OFF";
-  const paused = ctx.selfHealerTask.pausedRules?.() ?? 0;
-  const pausedText = paused > 0 ? ` (${paused} rule${paused > 1 ? "s" : ""} paused)` : "";
-  await ctx.reply(`🩺 Self-healing: ${status}${pausedText}`);
-  if (arg === "on" || arg === "off") logInfo(TAG, `Self-healer ${status} by user`);
+  if (cmd === "off") {
+    if (ctx.selfHealerTask) ctx.selfHealerTask.enabled = false;
+    await ctx.reply("🩺 Self-healing: OFF");
+    logInfo(TAG, "Self-healer OFF by user");
+    return true;
+  }
+  if (cmd === "reset") {
+    const { resetAutofixState } = await import("../sha-tracker.js");
+    resetAutofixState();
+    await ctx.reply("🩺 Autofix state reset — all suppressed faults re-enabled.");
+    return true;
+  }
+  if (cmd === "list") {
+    const { loadFixes } = await import("../sha-tracker.js");
+    const fixes = loadFixes();
+    if (fixes.length === 0) { await ctx.reply("🩺 No fix rules configured."); return true; }
+    const lines = fixes.map(f => {
+      const v = f.verified === false ? " ⚠️unverified" : "";
+      const src = f.createdAt ? " (self)" : " (core)";
+      return `• "${f.pattern.slice(0, 30)}" → ${f.command[0]}${src}${v}`;
+    });
+    await ctx.reply(`🩺 Fix rules (${fixes.length}):\n${lines.join("\n")}`);
+    return true;
+  }
+  if (cmd === "approve") {
+    const pattern = arg.slice(8).trim();
+    if (!pattern) { await ctx.reply("Usage: /healing approve <pattern>"); return true; }
+    const { approveFix } = await import("../sha-tracker.js");
+    const ok = approveFix(pattern);
+    await ctx.reply(ok ? `✓ Approved: "${pattern}"` : `❌ Pattern not found in self-rules.`);
+    return true;
+  }
+  if (cmd === "disable") {
+    const pattern = arg.slice(8).trim();
+    if (!pattern) { await ctx.reply("Usage: /healing disable <pattern>"); return true; }
+    const { disableFix } = await import("../sha-tracker.js");
+    const ok = disableFix(pattern);
+    await ctx.reply(ok ? `✓ Disabled: "${pattern}"` : `❌ Pattern not found in self-rules.`);
+    return true;
+  }
+
+  // Default: show status
+  const status = ctx.selfHealerTask?.enabled ? "ON" : "OFF";
+  await ctx.reply(`🩺 Self-healing: ${status}\nCommands: /healing [on|off|list|reset|approve|disable]`);
   return true;
 }
 

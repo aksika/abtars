@@ -1,21 +1,27 @@
-import { logAndSwallow } from "./log-and-swallow.js";
-import { getEnv } from "./env-schema.js";
-import { localISO } from "../utils/local-time.js";
 /**
- * Self-healer heartbeat task — scans bridge log for ERROR lines.
- * Auto-fix tier: spawns coding subagent with bounded instruction (from auto-fix.json).
- * Notify tier: sends TG notification to user with occurrence count.
+ * Self-healer heartbeat task — scans bridge log for ERROR lines (#954).
+ *
+ * Two-state dispatch:
+ * 1. Known fault (pattern in sha-policy fixes) → wired command[], no LLM
+ * 2. Unknown fault (no matching rule) → one-shot agent via Spin (if SELFHEAL_ENABLED)
+ *
+ * All gating via sha-tracker. No inline state.
  */
 
 import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { logInfo, logWarn } from "./logger.js";
 import { getLogFile } from "./logger.js";
 import { abtarsHome } from "../paths.js";
+import { logAndSwallow } from "./log-and-swallow.js";
+import { getEnv } from "./env-schema.js";
+import { localISO } from "../utils/local-time.js";
+import { loadFixes, shouldAttempt, recordResult } from "./sha-tracker.js";
+import type { FixRule } from "./sha-tracker.js";
 import type { HeartbeatTask } from "abmind";
 import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
 
-/** Errors to completely ignore (not actionable). */
 const BLACKLIST = [
   "-32603", "Transient error", "fetch failed",
   "[self-healer]", "[watchdog]", "[db-integrity]",
@@ -25,37 +31,6 @@ const BLACKLIST = [
   "Tool args", "Normalized",
 ];
 
-interface AutoFixRule {
-  pattern: string;
-  instruction: string;
-  cooldownMin: number;
-  enabled: boolean;
-}
-
-function loadAutoFixRules(): AutoFixRule[] {
-  try {
-    const p = join(abtarsHome(), "config", "auto-fix.json");
-    const rules = JSON.parse(readFileSync(p, "utf-8")) as AutoFixRule[];
-    return rules.filter(r => r.enabled && r.pattern && r.instruction);
-  } catch { return []; }
-}
-
-const NOTIFY_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2h
-const MAX_NOTIFICATIONS_PER_DAY = 12;
-
-interface ErrorState {
-  lastNotifiedAt: number;
-  count: number;
-  failCount: number;
-  lastFailAt: number;
-}
-
-const CIRCUIT_BREAKER_MAX = 3;
-const CIRCUIT_BREAKER_RESET_MS = 24 * 60 * 60 * 1000; // 24h
-
-let notificationsToday = 0;
-let notificationDayStart = 0;
-
 function logAutoFix(message: string): void {
   const dir = join(abtarsHome(), "logs");
   try { mkdirSync(dir, { recursive: true }); } catch (err) { logAndSwallow("self_healer", "op", err); }
@@ -63,52 +38,40 @@ function logAutoFix(message: string): void {
   appendFileSync(join(dir, `autofix-${date}.log`), `${localISO()} ${message}\n`);
 }
 
+function notify(adapter: TelegramAdapter, chatId: string, msg: string): void {
+  try { adapter.sendNotification(chatId, msg); } catch {}
+}
+
 export function createSelfHealerTask(
   getTelegramAdapter: () => TelegramAdapter | null,
   allowedUserIds: Set<number>,
-): HeartbeatTask & { enabled: boolean; resetCircuitBreaker?: () => void; pausedRules?: () => number } {
+): HeartbeatTask & { enabled: boolean } {
   let lastTs = localISO();
   let bridgeStartTs = "";
-  const errorStates = new Map<string, ErrorState>();
   let enabled = getEnv().selfhealEnabled;
-  let autoFixRunning = false;
+  let agentRunning = false;
+  const dryRun = process.env["SELFHEAL_DRY_RUN"] === "true";
 
-  const task: HeartbeatTask & { enabled: boolean; resetCircuitBreaker?: () => void; pausedRules?: () => number } = {
+  const task: HeartbeatTask & { enabled: boolean } = {
     name: "self-healer",
     get enabled() { return enabled; },
     set enabled(v: boolean) { enabled = v; },
-    resetCircuitBreaker() {
-      for (const s of errorStates.values()) { s.failCount = 0; }
-    },
-    pausedRules() {
-      const now = Date.now();
-      let count = 0;
-      for (const s of errorStates.values()) {
-        if (s.failCount >= CIRCUIT_BREAKER_MAX && now - s.lastFailAt < CIRCUIT_BREAKER_RESET_MS) count++;
-      }
-      return count;
-    },
     execute: async () => {
       if (!enabled) return;
       const logFile = getLogFile();
       try {
         const content = readFileSync(logFile, "utf-8");
         const lines = content.split("\n");
-        const now = Date.now();
-        const rules = loadAutoFixRules();
+        const fixes = loadFixes();
 
-        // Find latest BRIDGE START marker — ignore errors before it
         if (!bridgeStartTs) {
           for (let i = lines.length - 1; i >= 0; i--) {
-            if (lines[i]!.includes("BRIDGE START")) {
-              bridgeStartTs = lines[i]!.slice(0, 23);
-              break;
-            }
+            if (lines[i]!.includes("BRIDGE START")) { bridgeStartTs = lines[i]!.slice(0, 23); break; }
           }
         }
 
         const adapter = getTelegramAdapter();
-        const chatId = [...allowedUserIds][0];
+        const chatId = String([...allowedUserIds][0] ?? "");
         if (!adapter || !chatId) return;
 
         for (let i = lines.length - 1; i >= 0; i--) {
@@ -124,66 +87,18 @@ export function createSelfHealerTask(
           if (!match) continue;
           const errorKey = `${match[1]}:${match[2]!.slice(0, 80)}`;
 
-          const state = errorStates.get(errorKey) ?? { lastNotifiedAt: 0, count: 0, failCount: 0, lastFailAt: 0 };
-          state.count++;
-          errorStates.set(errorKey, state);
-
-          // Check auto-fix rules
-          const rule = rules.find(r => line.includes(r.pattern));
-          if (rule && !autoFixRunning) {
-            const cooldownMs = rule.cooldownMin * 60 * 1000;
-            if (now - state.lastNotifiedAt < cooldownMs) continue;
-            // Circuit breaker: skip if too many consecutive failures
-            if (state.failCount >= CIRCUIT_BREAKER_MAX && now - state.lastFailAt < CIRCUIT_BREAKER_RESET_MS) continue;
-            state.lastNotifiedAt = now;
-
-            // Spawn coding subagent in background
-            autoFixRunning = true;
-            logInfo("self-healer", `Auto-fix: spawning coding subagent for "${rule.pattern}"`);
-            logAutoFix(`START: ${rule.pattern} → ${rule.instruction}`);
-
-            (async () => {
-              const timeout = setTimeout(() => { autoFixRunning = false; }, 5 * 60 * 1000);
-              try {
-                const { SubagentRuntime } = await import("./subagent-runtime.js");
-                const runtime = new SubagentRuntime();
-                const result = await runtime.complete("coding", rule.instruction);
-                await runtime.shutdown();
-                const summary = (result || "(no output)").slice(0, 200);
-                logAutoFix(`DONE: ${rule.pattern} → ${summary}`);
-                adapter.sendNotification(String(chatId), `🔧 Auto-fix: ${rule.pattern}\n${summary}`);
-                logInfo("self-healer", `Auto-fix done: ${rule.pattern}`);
-                state.failCount = 0; // success resets circuit breaker
-              } catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                state.failCount++;
-                state.lastFailAt = Date.now();
-                logWarn("self-healer", `Auto-fix failed (${state.failCount}/${CIRCUIT_BREAKER_MAX}): ${msg}`);
-                logAutoFix(`FAILED: ${rule.pattern} → ${msg}`);
-                if (state.failCount >= CIRCUIT_BREAKER_MAX) {
-                  adapter.sendNotification(String(chatId), `⚠️ Auto-fix paused for "${rule.pattern}" (${CIRCUIT_BREAKER_MAX} failures). /healing reset to re-enable.`);
-                } else {
-                  adapter.sendNotification(String(chatId), `⚠️ Auto-fix failed for "${rule.pattern}": ${msg.slice(0, 100)}`);
-                }
-              } finally {
-                clearTimeout(timeout);
-                autoFixRunning = false;
-              }
-            })();
+          // Try to match a wired fix rule
+          const rule = fixes.find(f => line.includes(f.pattern));
+          if (rule) {
+            handleKnownFault(rule, errorKey, adapter, chatId, dryRun);
             continue;
           }
 
-          // Notify tier
-          if (now - state.lastNotifiedAt < NOTIFY_COOLDOWN_MS) continue;
-          const dayStart = new Date().setHours(0, 0, 0, 0);
-          if (dayStart !== notificationDayStart) { notificationsToday = 0; notificationDayStart = dayStart; }
-          if (notificationsToday >= MAX_NOTIFICATIONS_PER_DAY) continue;
-          state.lastNotifiedAt = now;
-          notificationsToday++;
-          const summary = match[2]!.slice(0, 120);
-          const countText = state.count > 1 ? ` (${state.count}x in last hour)` : "";
-          adapter.sendNotification(String(chatId), `⚠️ [${match[1]}] ${summary}${countText}`);
-          logInfo("self-healer", `Notified user: ${errorKey.slice(0, 60)} (${state.count}x)`);
+          // Unknown fault — agent path (one-shot)
+          if (!agentRunning) {
+            handleUnknownFault(line, errorKey, adapter, chatId, () => { agentRunning = false; });
+            if (!agentRunning) agentRunning = true; // set after dispatch
+          }
         }
 
         // Advance watermark
@@ -191,13 +106,66 @@ export function createSelfHealerTask(
           const lastLine = lines[lines.length - 2] ?? "";
           if (lastLine.length >= 23) lastTs = lastLine.slice(0, 23);
         }
-
-        // Cleanup old states
-        for (const [key, s] of errorStates) {
-          if (now - s.lastNotifiedAt > NOTIFY_COOLDOWN_MS * 2) errorStates.delete(key);
-        }
       } catch (err) { logAndSwallow("self_healer", "op", err); }
     },
   };
   return task;
+}
+
+function handleKnownFault(rule: FixRule, errorKey: string, adapter: TelegramAdapter, chatId: string, dryRun: boolean): void {
+  if (!shouldAttempt("autofix-known", rule.pattern)) return;
+
+  if (dryRun) {
+    logInfo("self-healer", `[DRY-RUN] Would run: ${rule.command.join(" ")}`);
+    return;
+  }
+
+  logInfo("self-healer", `Wired fix: ${rule.command.join(" ")} (pattern: "${rule.pattern}")`);
+  logAutoFix(`WIRED START: ${rule.pattern} → ${rule.command.join(" ")}`);
+
+  const child = spawn(rule.command[0]!, rule.command.slice(1), { stdio: "ignore" });
+  child.on("exit", (code) => {
+    const ok = code === 0;
+    recordResult("autofix-known", rule.pattern, ok, ok ? undefined : `exit ${code}`);
+    logAutoFix(`WIRED ${ok ? "OK" : "FAIL"}: ${rule.pattern} (exit ${code})`);
+
+    if (!ok) {
+      // Check if we hit maxRetries — notify user
+      if (!shouldAttempt("autofix-known", rule.pattern)) {
+        notify(adapter, chatId, `⚠️ Wired fix failed 3x for "${rule.pattern}" — suppressed 24h. Manual intervention needed.`);
+      }
+    } else if (rule.verified === false) {
+      // Unverified self-rule first success — notify
+      notify(adapter, chatId, `🔧 Self-fix ran: "${rule.pattern}" → ${rule.command.join(" ")} ✓\nRun /healing approve ${rule.pattern.slice(0, 20)} to silence.`);
+    }
+  });
+}
+
+function handleUnknownFault(errorLine: string, errorKey: string, adapter: TelegramAdapter, chatId: string, onDone: () => void): void {
+  if (!shouldAttempt("autofix-unknown", errorKey)) return;
+
+  logInfo("self-healer", `Unknown fault — dispatching agent: ${errorKey.slice(0, 60)}`);
+  logAutoFix(`AGENT START: ${errorKey}`);
+
+  const prompt = `A runtime error occurred:\n"${errorLine.slice(0, 500)}"\n\nDiagnose and fix it. After fixing:\n1. Report what you did (1 paragraph)\n2. If this error is likely to recur and you found a deterministic fix, write a wired rule to ~/.abtars/config/sha-policy-self.json so it's handled automatically next time.\n   Format: {"pattern": "...", "command": [...], "cooldownMin": 30}\n   If the error was a one-off or no reliable automated fix exists, skip this step.`;
+
+  const timeout = setTimeout(() => { onDone(); }, 5 * 60_000);
+
+  (async () => {
+    try {
+      const { spin } = await import("./spin.js");
+      const { result } = await spin.dispatchAwait({ type: "H", goal: prompt, title: `SHA: ${errorKey.slice(0, 20)}`, source: "agent" });
+      recordResult("autofix-unknown", errorKey, true);
+      logAutoFix(`AGENT OK: ${errorKey} → ${result.slice(0, 200)}`);
+      notify(adapter, chatId, `🧠 SHA agent fixed: ${errorKey.slice(0, 40)}\n${result.slice(0, 300)}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      recordResult("autofix-unknown", errorKey, false, msg);
+      logAutoFix(`AGENT FAIL: ${errorKey} → ${msg}`);
+      notify(adapter, chatId, `⚠️ SHA agent failed: ${errorKey.slice(0, 40)}\n${msg.slice(0, 200)}`);
+    } finally {
+      clearTimeout(timeout);
+      onDone();
+    }
+  })();
 }

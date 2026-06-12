@@ -1,21 +1,20 @@
 /**
- * abtars-autofix — manage self-healer auto-fix rules.
- * Usage: abtars-autofix list|add|remove|test [options]
+ * abtars-autofix — manage self-healer fix rules (reads from sha-policy).
+ * Usage: abtars-autofix list|test [options]
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const AB_HOME = process.env["ABTARS_HOME"] || join(process.env["HOME"] || "~", ".abtars");
-const RULES_PATH = join(AB_HOME, "config", "auto-fix.json");
 
-interface Rule { pattern: string; instruction: string; cooldownMin: number; enabled: boolean }
+interface FixRule { pattern: string; command: string[]; cooldownMin: number; verified?: boolean; createdAt?: string }
+interface PolicyFile { fixes?: FixRule[] }
 
-function load(): Rule[] {
-  try { return JSON.parse(readFileSync(RULES_PATH, "utf-8")); } catch { return []; }
-}
-
-function save(rules: Rule[]): void {
-  writeFileSync(RULES_PATH, JSON.stringify(rules, null, 2) + "\n", "utf-8");
+function loadAll(): FixRule[] {
+  const core: FixRule[] = (() => { try { return (JSON.parse(readFileSync(join(AB_HOME, "config", "sha-policy.json"), "utf-8")) as PolicyFile).fixes ?? []; } catch { return []; } })();
+  const self: FixRule[] = (() => { try { return (JSON.parse(readFileSync(join(AB_HOME, "config", "sha-policy-self.json"), "utf-8")) as PolicyFile).fixes ?? []; } catch { return []; } })();
+  const corePatterns = new Set(core.map(f => f.pattern));
+  return [...core, ...self.filter(f => !corePatterns.has(f.pattern))];
 }
 
 const args = process.argv.slice(2);
@@ -27,33 +26,13 @@ function getArg(name: string): string | undefined {
 }
 
 if (cmd === "list") {
-  const rules = load();
-  if (rules.length === 0) { console.log("No auto-fix rules."); process.exit(0); }
+  const rules = loadAll();
+  if (rules.length === 0) { console.log("No fix rules."); process.exit(0); }
   for (const r of rules) {
-    const status = r.enabled ? "✅" : "⏸";
-    console.log(`${status} "${r.pattern}" → ${r.instruction.slice(0, 80)} (${r.cooldownMin}min)`);
+    const src = r.createdAt ? "(self)" : "(core)";
+    const v = r.verified === false ? " ⚠️unverified" : "";
+    console.log(`• "${r.pattern}" → ${r.command.join(" ")} (${r.cooldownMin}min) ${src}${v}`);
   }
-} else if (cmd === "add") {
-  const pattern = getArg("pattern");
-  const instruction = getArg("instruction");
-  const cooldown = parseInt(getArg("cooldown") ?? "30", 10);
-  if (!pattern || !instruction) { console.error("Usage: abtars-autofix add --pattern <p> --instruction <i> [--cooldown <min>]"); process.exit(1); }
-  if (pattern.length > 200) { console.error("Pattern too long (max 200 chars)"); process.exit(1); }
-  if (instruction.length > 500) { console.error("Instruction too long (max 500 chars)"); process.exit(1); }
-  if (cooldown < 5) { console.error("Cooldown must be >= 5 minutes"); process.exit(1); }
-  const rules = load();
-  if (rules.some(r => r.pattern === pattern)) { console.error(`Duplicate pattern: "${pattern}"`); process.exit(1); }
-  rules.push({ pattern, instruction, cooldownMin: cooldown, enabled: true });
-  save(rules);
-  console.log(`Added: "${pattern}"`);
-} else if (cmd === "remove") {
-  const pattern = getArg("pattern");
-  if (!pattern) { console.error("Usage: abtars-autofix remove --pattern <p>"); process.exit(1); }
-  const rules = load();
-  const filtered = rules.filter(r => r.pattern !== pattern);
-  if (filtered.length === rules.length) { console.error(`Pattern not found: "${pattern}"`); process.exit(1); }
-  save(filtered);
-  console.log(`Removed: "${pattern}"`);
 } else if (cmd === "test") {
   const pattern = getArg("pattern");
   if (!pattern) { console.error("Usage: abtars-autofix test --pattern <p>"); process.exit(1); }
@@ -70,9 +49,8 @@ if (cmd === "list") {
     }
   } catch { console.log("No log file for today."); }
 } else {
-  console.log("Usage: abtars-autofix <list|add|remove|test> [options]");
-  console.log("  list                          Show all rules");
-  console.log("  add --pattern <p> --instruction <i> [--cooldown <min>]");
-  console.log("  remove --pattern <p>");
-  console.log("  test --pattern <p>            Dry-run: show matching log lines");
+  console.log("Usage: abtars-autofix <list|test> [options]");
+  console.log("  list                Show all fix rules (core + self)");
+  console.log("  test --pattern <p>  Dry-run: show matching log lines");
+  console.log("\nManage rules via /healing commands in chat or edit sha-policy-self.json directly.");
 }
