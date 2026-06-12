@@ -79,6 +79,8 @@ function db(): SqliteDb {
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'silent'`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN retry_count INTEGER DEFAULT 0`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
   }
   return _db;
 }
@@ -114,6 +116,25 @@ export function kanbanFail(id: number, error: string): void {
     `UPDATE kanban_board SET status = 'failed', error = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
   ).run(error.slice(0, 1000), id);
   nerve.fire("card:failed", id);
+}
+
+const MAX_RETRIES = 3;
+
+/** Fail with retry logic — exponential backoff (10s→20s→40s, cap 5min). After MAX_RETRIES → permanent fail. */
+export function kanbanRetryOrFail(id: number, error: string): "retrying" | "failed" {
+  const card = db().prepare("SELECT retry_count FROM kanban_board WHERE id = ?").get(id) as { retry_count: number } | undefined;
+  const retryCount = (card?.retry_count ?? 0) + 1;
+  if (retryCount > MAX_RETRIES) {
+    kanbanFail(id, `${error} (after ${MAX_RETRIES} retries)`);
+    return "failed";
+  }
+  const backoffMs = Math.min(10_000 * Math.pow(2, retryCount - 1), 300_000);
+  const nextRetryAt = new Date(Date.now() + backoffMs).toISOString();
+  db().prepare(
+    `UPDATE kanban_board SET status = 'queued', retry_count = ?, next_retry_at = ?, error = ?, updated_at = datetime('now') WHERE id = ?`
+  ).run(retryCount, nextRetryAt, error.slice(0, 1000), id);
+  nerve.fire("card:queued", id);
+  return "retrying";
 }
 
 export function kanbanPending(): KanbanCard[] {

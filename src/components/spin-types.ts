@@ -49,6 +49,7 @@ export interface ManagedSession {
 
 export interface SpinRequest {
   type: SessionType;
+  agent?: import("./subagent-runtime.js").AgentName; // override typeAgent() default
   goal: string;
   title?: string;
   source: "task" | "user" | "agent" | "peer";

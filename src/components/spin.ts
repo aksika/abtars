@@ -4,7 +4,7 @@
  */
 
 import { logInfo, logWarn, logTrace } from "./logger.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanList } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
@@ -287,7 +287,11 @@ export class Spin {
     const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.execute(request, cardId, timeout)
       .then(result => { kanbanComplete(cardId, null, result.slice(0, 500)); })
-      .catch(err => { kanbanFail(cardId, (err instanceof Error ? err.message : String(err)).slice(0, 1000)); })
+      .catch(err => {
+        const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
+        logWarn(TAG, `${request.type} card:${cardId} failed: ${msg}`);
+        kanbanRetryOrFail(cardId, msg);
+      })
       .finally(() => {
         this.markDone(request.type, cardId);
         if (session) { session.status = "ended"; session.active = false; pushLog(session, "completed"); }
@@ -332,7 +336,10 @@ export class Spin {
 
   private drainQueued(): void {
     const queued = kanbanList("queued");
+    const now = new Date().toISOString();
     for (const card of queued) {
+      // #897: respect retry backoff
+      if ((card as any).next_retry_at && (card as any).next_retry_at > now) continue;
       const type = (card.type as SessionType) ?? "T";
       if (this.canDispatch(type, card.id)) {
         this.dispatch({ type, goal: card.title, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id });
@@ -358,13 +365,24 @@ export class Spin {
     if (!this.runtime) throw new Error("Spin: runtime not set");
     if (request.type === "O") return this.executeOrc(request, cardId, timeoutMs);
 
-    const agentName = typeAgent(request.type);
+    const agentName = request.agent ?? typeAgent(request.type);
     logInfo(TAG, `▶ ${request.type} card:${cardId} agent=${agentName}`);
+
+    const staleMs = parseInt(process.env["WORKER_STALE_MS"] ?? "300000", 10);
+    let lastActivityAt = Date.now();
 
     const timer = setTimeout(() => {
       logWarn(TAG, `⏱️ ${request.type} card:${cardId} timed out`);
       this.runtime?.interruptSpawn(`spin-${cardId}`);
     }, timeoutMs);
+
+    const staleCheck = setInterval(() => {
+      if (Date.now() - lastActivityAt > staleMs) {
+        clearInterval(staleCheck);
+        logWarn(TAG, `⏱️ ${request.type} card:${cardId} stale (no activity ${staleMs / 1000}s)`);
+        this.runtime?.interruptSpawn(`spin-${cardId}`);
+      }
+    }, 60_000);
 
     try {
       const { buildSoulBundle } = await import("./soul-bundle.js");
@@ -384,7 +402,7 @@ export class Spin {
       }
 
       return (await this.runtime.complete(agentName, fullPrompt, { timeoutMs, session: "fresh" })) || "(no output)";
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); clearInterval(staleCheck); }
   }
 
   private async executeOrc(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
