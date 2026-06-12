@@ -32,7 +32,7 @@ import { phaseAgentApi } from "./phase-agent-api.js";
  *                agentApi                    sleep
  */
 export const BOOT_NODES: BootNode[] = [
-  { name: "heartbeat",    deps: [],                          optional: false, run: phaseHeartbeat },
+  { name: "heartbeat",    deps: ["pipelineDeps"],              optional: false, run: phaseHeartbeat },
   { name: "platforms",    deps: [],                          optional: true,  run: phasePlatformsConnect },
   { name: "transport",    deps: [],                          optional: true,  run: phaseTransport },
   { name: "memory",       deps: [],                          optional: true,  run: phaseMemory },
