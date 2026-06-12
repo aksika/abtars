@@ -52,7 +52,7 @@ export class TelegramAdapter implements PlatformAdapter {
   private readonly securityGate: SecurityGate;
   private readonly formatter = new ResponseFormatter();
   private readonly config: TelegramAdapterConfig;
-  private readonly deps: TelegramAdapterDeps;
+  private deps: TelegramAdapterDeps;
   private poller: TelegramPoller | null = null;
   private botUsername = "";
   _pendingSlot: string | undefined;
@@ -64,6 +64,9 @@ export class TelegramAdapter implements PlatformAdapter {
     this.config = config;
     this.deps = deps;
   }
+
+  /** Late-bind: replace pipeline deps after construction (used by graph boot). */
+  setMessageHandler(deps: TelegramAdapterDeps): void { this.deps = deps; }
 
   /** Send a system notification to a chat (fire-and-forget). */
   sendNotification(chatId: string, text: string): void {

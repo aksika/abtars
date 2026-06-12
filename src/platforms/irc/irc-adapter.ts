@@ -26,6 +26,9 @@ export class IrcAdapter implements PlatformAdapter {
     this.deps = deps;
   }
 
+  /** Late-bind: replace onMessage callback after construction (used by graph boot). */
+  setMessageHandler(onMessage: (msg: InboundMessage) => void): void { this.deps = { onMessage }; }
+
   async start(): Promise<void> {
     for (const server of this.config.servers) {
       const channels = Object.keys(server.channels);

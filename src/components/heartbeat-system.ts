@@ -28,8 +28,18 @@ export class HeartbeatSystem implements ITaskSlot {
   private running = false;
   private lastTickAt = 0;
   private readonly taskStatuses = new Map<string, TaskStatus>();
+  private _cronQueue: { enqueue: (entry: any, cb: any) => void } | null = null;
+  private _notify: ((chatId: string, text: string) => void) | null = null;
 
   constructor(private config: HeartbeatConfig) {}
+
+  /** Late-bind: attach cronQueue after construction (used by graph boot). */
+  setCronQueue(queue: { enqueue: (entry: any, cb: any) => void }): void { this._cronQueue = queue; }
+  get cronQueue() { return this._cronQueue; }
+
+  /** Late-bind: attach notification sender after construction (used by graph boot). */
+  setNotify(fn: (chatId: string, text: string) => void): void { this._notify = fn; }
+  get notify() { return this._notify; }
 
   /** Register a task to run on each heartbeat tick. */
   registerTask(task: HeartbeatTask): void {

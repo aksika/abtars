@@ -47,7 +47,7 @@ export class DiscordAdapter implements PlatformAdapter {
   private readonly securityGate: SecurityGate;
   private readonly formatter = new ResponseFormatter();
   private readonly config: DiscordAdapterConfig;
-  private readonly deps: DiscordAdapterDeps;
+  private deps: DiscordAdapterDeps;
   private poller: DiscordPoller | null = null;
 
   constructor(config: DiscordAdapterConfig, deps: DiscordAdapterDeps) {
@@ -56,6 +56,9 @@ export class DiscordAdapter implements PlatformAdapter {
     this.config = config;
     this.deps = deps;
   }
+
+  /** Late-bind: replace pipeline deps after construction (used by graph boot). */
+  setMessageHandler(deps: DiscordAdapterDeps): void { this.deps = deps; }
 
   async start(): Promise<void> {
     this.poller = new DiscordPoller(this.api, this.config.appId, (m) => this.handleMessage(m));
