@@ -47,24 +47,34 @@ export function readEntries(): CronEntry[] {
 }
 
 interface AddArgs {
+  id?: string;
   at?: string;
   message?: string;
   chatId?: string;
   type?: string;
   executor?: string;
   schedule?: string;
+  title?: string;
+  taskFile?: string;
+  agent?: string;
+  targetUserId?: string;
 }
 
 function parseAddArgs(args: string[]): AddArgs {
   const parsed: AddArgs = {};
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
+      case "--id": parsed.id = args[++i] ?? ""; break;
       case "--at": parsed.at = args[++i] ?? ""; break;
       case "--message": parsed.message = args[++i] ?? ""; break;
       case "--chat-id": parsed.chatId = args[++i] ?? ""; break;
       case "--type": parsed.type = args[++i] ?? ""; break;
       case "--executor": parsed.executor = args[++i] ?? ""; break;
       case "--schedule": parsed.schedule = args[++i] ?? ""; break;
+      case "--title": parsed.title = args[++i] ?? ""; break;
+      case "--task-file": parsed.taskFile = args[++i] ?? ""; break;
+      case "--agent": parsed.agent = args[++i] ?? ""; break;
+      case "--target-user": parsed.targetUserId = args[++i] ?? ""; break;
     }
   }
   return parsed;
@@ -105,13 +115,17 @@ function add(args: string[]): void {
   if (executor !== "agent" && executor !== "script" && executor !== "orc") { console.log(JSON.stringify({ ok: false, error: "--executor must be agent, script, or orc" })); process.exit(1); }
 
   const entry: CronEntry = {
-    id: randomBytes(3).toString("hex"),
+    id: parsed.id || randomBytes(3).toString("hex"),
+    title: parsed.title,
     fireAt: fireAt!,
     message: parsed.message,
     chatId,
     type,
     executor,
     ...(schedule ? { schedule } : {}),
+    ...(parsed.taskFile ? { taskFile: parsed.taskFile } : {}),
+    ...(parsed.agent ? { agent: parsed.agent } : {}),
+    ...(parsed.targetUserId ? { targetUserId: parsed.targetUserId } : {}),
     fired: false,
     createdAt: Date.now(),
   };
