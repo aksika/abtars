@@ -422,6 +422,10 @@ export async function handleInboundMessage(
         } catch (err) { logAndSwallow(TAG, "TTS", err); }
       }
       logInfo(TAG, `→ [${msg.platform}] Simple delivery (${userResponse.length} chars)`);
+      // #938: Update session metrics
+      activeSession.messageCount = (activeSession.messageCount ?? 0) + 1;
+      activeSession.contextPercent = transport.contextPercent >= 0 ? transport.contextPercent : undefined;
+      activeSession.toolCallCount = (activeSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
       return;
     }
 
@@ -527,6 +531,11 @@ export async function handleInboundMessage(
     const ctxAfter = transport.contextPercent;
     logInfo(TAG, `→ [${msg.platform}] Response delivered${ctxAfter >= 0 ? ` (ctx: ${ctxAfter}%)` : ""}`);
     updateBridgeLockField("lastPromptAt", Date.now());
+
+    // #938: Update session metrics
+    activeSession.messageCount = (activeSession.messageCount ?? 0) + 1;
+    activeSession.contextPercent = ctxAfter >= 0 ? ctxAfter : undefined;
+    activeSession.toolCallCount = (activeSession.toolCallCount ?? 0) + (transport.toolCallsSucceeded ?? 0);
 
     // --- #824: Citation detection — did the agent use the recalled memories? ---
     if (recalledHits && recalledHits.length > 0 && memory) {

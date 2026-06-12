@@ -23,6 +23,7 @@ export interface ManagedSession {
   delivery: "streaming" | "simple";
   model?: string;                // "claude-opus-4.6"
   provider?: string;             // "kiro", "openrouter"
+  pid?: number;                  // OS process ID of CLI transport
 
   // Lifecycle
   status: "creating" | "ready" | "paused" | "ended";

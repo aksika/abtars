@@ -73,7 +73,9 @@ export class Spin {
     session.platform = opts.platform;
     session.status = "ready";
     session.lastActiveAt = Date.now();
-    logInfo(TAG, `Master session registered: ${opts.userId} (${opts.platform}:${opts.chatId})`);
+    const t = opts.transport as any;
+    session.pid = t?._rawClient?.pid ?? t?.agent?.pid ?? undefined;
+    logInfo(TAG, `Master session registered: ${opts.userId} (${opts.platform}:${opts.chatId}${session.pid ? ` pid=${session.pid}` : ""})`);
   }
 
   /** Resolve the active session for a user. Attaches transport if needed. */
@@ -113,7 +115,10 @@ export class Spin {
       session.transport = agentSession.transport!;
       session.status = "ready";
       session.lastActiveAt = Date.now();
-      logInfo(TAG, `Session ready: ${userId} id=${session.id}`);
+      // Extract PID from underlying CLI process if available
+      const t = session.transport as any;
+      session.pid = t?._rawClient?.pid ?? t?.agent?.pid ?? undefined;
+      logInfo(TAG, `Session ready: ${userId} id=${session.id}${session.pid ? ` pid=${session.pid}` : ""}`);
       return session;
     } catch (err) {
       session.status = "ended";
