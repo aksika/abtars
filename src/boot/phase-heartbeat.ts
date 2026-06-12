@@ -179,6 +179,10 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
   heartbeat.registerTask(createKanbanDeliveryTask({
     sendSystemMessage,
+    sendMessage: async (chatId, text) => {
+      if (!ctx.telegramAdapter) return;
+      await ctx.telegramAdapter.sendMessage(chatId, text);
+    },
     sendDocument: async (chatId, filePath, caption) => {
       if (!ctx.telegramAdapter) return;
       await ctx.telegramAdapter.sendDocument(chatId, filePath, caption);

@@ -28,6 +28,7 @@ const SESSION_CREATE_TIMEOUT_MS = 30_000;
 export interface SpinRequest {
   type: SessionType;
   goal: string;
+  title?: string;
   source: "task" | "user" | "agent" | "peer";
   cardId?: number;
   parentCardId?: number;
@@ -172,10 +173,12 @@ export class Spin {
    * Returns cardId immediately. Session runs autonomously.
    */
   dispatch(request: SpinRequest): number {
-    const cardId = request.cardId ?? kanbanEnqueue(request.goal, request.source, undefined, {
+    const cardTitle = request.title ?? request.goal.slice(0, 80);
+    const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM",
       type: request.type,
       parent_id: request.parentCardId,
+      deliveryMode: request.deliveryMode,
     });
 
     if (!this.canDispatch(request.type, cardId)) {
@@ -225,10 +228,12 @@ export class Spin {
    * Caller owns kanban completion/failure updates.
    */
   async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
-    const cardId = request.cardId ?? kanbanEnqueue(request.goal, request.source, undefined, {
+    const cardTitle = request.title ?? request.goal.slice(0, 80);
+    const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM",
       type: request.type,
       parent_id: request.parentCardId,
+      deliveryMode: request.deliveryMode,
     });
 
     this.markRunning(request.type, cardId);

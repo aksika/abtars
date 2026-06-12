@@ -37,6 +37,7 @@ export interface KanbanCard {
   delivered_at: string | null;
   max_tokens: number | null;
   tokens_used: number | null;
+  delivery_mode: string;
 }
 
 let _db: SqliteDb | null = null;
@@ -77,18 +78,20 @@ function db(): SqliteDb {
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN max_tokens INTEGER`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN tokens_used INTEGER DEFAULT 0`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN progress TEXT`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'silent'`); } catch {}
   }
   return _db;
 }
 
 import { nerve } from "../nerve.js";
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string }): number {
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "announce" }): number {
+  const mode = opts?.deliveryMode ?? (source === "user" ? "announce" : "silent");
   const stmt = db().prepare(
-    `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes, delivery_mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null);
+  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, mode);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;

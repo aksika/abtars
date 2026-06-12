@@ -195,11 +195,12 @@ export function createAuditRotationTask(): HeartbeatTask {
 
 export interface KanbanDeliveryDeps {
   sendSystemMessage: (prompt: string) => Promise<void>;
+  sendMessage: (chatId: string, text: string) => Promise<void>;
   sendDocument: (chatId: string, filePath: string, caption: string) => Promise<void>;
   chatId: () => string;
 }
 
-/** #857: Kanban delivery — picks up completed cards and delivers via agent pipeline. */
+/** #857/#934: Kanban delivery — routes based on delivery_mode. */
 export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTask {
   return {
     name: "kanban-delivery",
@@ -210,13 +211,19 @@ export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTas
         if (pending.length === 0) return;
 
         for (const card of pending) {
+          if (card.delivery_mode === "silent") {
+            kanbanMarkDelivered(card.id);
+            continue;
+          }
           kanbanSetDelivering(card.id);
           try {
-            await deps.sendSystemMessage(
-              `[SYSTEM] [TASK COMPLETE] Your task "${card.title}" is done. ` +
-              `Announce completion briefly and tell the user to see the attached file. ` +
-              `Do not reproduce the full content.\n\nSummary for your memory: ${card.result_summary ?? "(no summary)"}`
-            );
+            if (card.type === "O") {
+              await deps.sendSystemMessage(
+                `[TASK COMPLETE] Project "${card.title}" done.\nSummary: ${card.result_summary ?? "(no summary)"}\nAnnounce completion briefly.`
+              );
+            } else {
+              await deps.sendMessage(deps.chatId(), `✅ "${card.title}" complete.\n${card.result_summary ?? ""}`);
+            }
             if (card.result_path) {
               await deps.sendDocument(deps.chatId(), card.result_path, `📄 ${card.title}`);
             }
