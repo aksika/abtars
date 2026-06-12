@@ -97,6 +97,14 @@ function checkStaleness(repoRoot: string, allowStale: boolean): { commit: string
     );
   }
 
+  // Enforce dev branch for deployments
+  if (branch !== 'dev') {
+    throw new LocalBuildError(
+      `Current branch is '${branch}', but deployments must come from 'dev'.`,
+      `Run 'git checkout dev && git pull', or pass --from-local to override.`,
+    );
+  }
+
   return { commit, branch };
 }
 
