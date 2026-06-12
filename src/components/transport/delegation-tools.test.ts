@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock SubagentRuntime and SessionManager before importing
 vi.mock("../subagent-runtime.js", () => ({ SubagentRuntime: vi.fn() }));
-vi.mock("../session-manager.js", () => ({ SessionManager: vi.fn() }));
+vi.mock("../spin.js", () => ({ spin: { createSubSession: vi.fn(), getSessionById: vi.fn() } }));
 vi.mock("../completion-buffer.js", () => ({
   addCompletion: vi.fn(),
   drainCompletions: vi.fn(() => []),

@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Spin } from "./spin.js";
-import { SessionManager } from "./session-manager.js";
 import { setUserRegistryOverride, type UserRegistry, type UserEntry } from "./user-registry.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 
@@ -32,13 +31,11 @@ function mockTransport(): IKiroTransport {
   } as unknown as IKiroTransport;
 }
 
-describe("Spin — interactive session management (#936 + #938)", () => {
+describe("Spin — unified session router (#943)", () => {
   let spin: Spin;
-  let sm: SessionManager;
 
   beforeEach(() => {
     spin = new Spin();
-    sm = new SessionManager();
     const mockRuntime = {
       session: vi.fn().mockResolvedValue({
         sendPrompt: vi.fn().mockResolvedValue("agent response"),
@@ -48,7 +45,6 @@ describe("Spin — interactive session management (#936 + #938)", () => {
       }),
     };
     spin.setRuntime(mockRuntime as any);
-    spin.setSessionManager(sm);
     setUserRegistryOverride(makeRegistry([
       makeUser("aksika", "master", 111),
       makeUser("adrika", "user", 222),
@@ -61,11 +57,11 @@ describe("Spin — interactive session management (#936 + #938)", () => {
   });
 
   describe("registerMasterSession", () => {
-    it("sets transport and delivery on the active SessionManager session", () => {
+    it("sets transport and delivery on the active session", () => {
       const transport = mockTransport();
       spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport });
 
-      const session = sm.getActiveSession("aksika", "telegram");
+      const session = spin.getActiveSession("aksika", "telegram");
       expect(session.transport).toBe(transport);
       expect(session.delivery).toBe("streaming");
       expect(session.idleTimeoutMs).toBe(Infinity);
@@ -115,29 +111,52 @@ describe("Spin — interactive session management (#936 + #938)", () => {
       spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport });
 
       spin.destroySession("aksika");
-      const session = sm.getActiveSession("aksika", "telegram");
-      expect(session.transport).toBe(transport); // still there
+      const session = spin.getActiveSession("aksika", "telegram");
+      expect(session.transport).toBe(transport);
     });
   });
 
-  describe("injectGreeting", () => {
+  describe("inject", () => {
     it("returns null for unknown user", async () => {
-      const result = await spin.injectGreeting("nobody", "hello");
+      const result = await spin.inject("nobody", "hello");
       expect(result).toBeNull();
     });
 
     it("creates session and delivers greeting for known user", async () => {
-      const result = await spin.injectGreeting("adrika", "Good morning!");
+      const result = await spin.inject("adrika", "Good morning!");
       expect(result).toBeDefined();
     });
 
     it("reuses existing session", async () => {
       await spin.resolveSession("adrika", "telegram", 222);
-      const session = sm.getActiveSession("adrika", "telegram");
+      const session = spin.getActiveSession("adrika", "telegram");
       const transportBefore = session.transport;
 
-      await spin.injectGreeting("adrika", "Hello again!");
-      expect(session.transport).toBe(transportBefore); // same transport
+      await spin.inject("adrika", "Hello again!");
+      expect(session.transport).toBe(transportBefore);
+    });
+
+    it("returns null when deliver=false", async () => {
+      const result = await spin.inject("adrika", "system msg", { deliver: false });
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("session CRUD", () => {
+    it("creates and lists sessions", () => {
+      const result = spin.createSession("aksika", "telegram", "C");
+      expect(typeof result).not.toBe("string");
+      const sessions = spin.listSessions("aksika", "telegram");
+      expect(sessions.sessions.length).toBe(2); // Main + Code
+    });
+
+    it("destroyAll cleans everything", async () => {
+      const transport = mockTransport();
+      spin.registerMasterSession({ userId: "aksika", chatId: 111, platform: "telegram", transport });
+      await spin.resolveSession("adrika", "telegram", 222);
+
+      spin.destroyAll();
+      expect(spin.listAllSessions()).toHaveLength(0);
     });
   });
 });

@@ -26,7 +26,7 @@ export interface BuildPromptDeps {
   memory: MemoryManager | null;
   memoryConfig: { memoryEnabled: boolean; memoryDir: string };
   sessions: SessionRegistry;
-  sessionManager: import("../session-manager.js").SessionManager;
+  sessionManager: import("../spin.js").Spin;
   conversationBuffer: ConversationBuffer;
   contextPercent: number;
   maxContext?: number;

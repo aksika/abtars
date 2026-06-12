@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { handleCommand, type CommandContext } from "./commands/index.js";
-import { SessionManager } from "./session-manager.js";
+import { Spin } from "./spin.js";
+const SessionManager = Spin;
 import { SessionRegistry } from "./session-registry.js";
 import { setUserRegistryOverride } from "./user-registry.js";
 import type { CodingMode } from "./coding-mode.js";

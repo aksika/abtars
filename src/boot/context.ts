@@ -24,7 +24,7 @@ import type { AgentApiServer } from "../components/agent-api-server.js";
 import type { PlatformAdapter } from "../types/platform.js";
 import { SessionRegistry as SessionRegistryClass } from "../components/session-registry.js";
 import type { SessionRegistry } from "../components/session-registry.js";
-import { SessionManager as SessionManagerClass } from "../components/session-manager.js";
+import { Spin, spin as spinInstance } from "../components/spin.js";
 import { getEnv } from "../components/env-schema.js";
 import type { ModelHealthRegistry } from "../components/transport/model-health-registry.js";
 import type { SttConfig } from "../components/stt.js";
@@ -81,7 +81,7 @@ export interface BootCtx {
 
   // ── Session state ──
   sessions: SessionRegistry;
-  sessionManager: import("../components/session-manager.js").SessionManager;
+  sessionManager: import("../components/spin.js").Spin;
 
   // ── Subsystems ────────────────────────────────────────────────────────
   capabilities: CapabilityRegistry;
@@ -154,7 +154,7 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
 
     // Session state
     sessions: new SessionRegistryClass(),
-    sessionManager: new SessionManagerClass(getEnv().maxSessions),
+    sessionManager: spinInstance,
 
     // Subsystems
     capabilities: createCapabilityRegistry(),

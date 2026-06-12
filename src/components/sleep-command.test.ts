@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SessionRegistry } from "./session-registry.js";
-import { SessionManager } from "./session-manager.js";
+import { Spin } from "./spin.js";
+const SessionManager = Spin;
 
 vi.mock("node:child_process", () => ({
   execFile: vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {

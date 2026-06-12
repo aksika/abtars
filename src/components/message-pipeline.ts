@@ -39,7 +39,7 @@ import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt, buildSessionStartPrompt } from "./pipeline/prompt-builder.js";
-import { sessionType } from "./session-manager.js";
+import { sessionType } from "./spin-types.js";
 
 import { getEnv } from "./env-schema.js";
 import { sanitizeOutbound } from "./sanitize-outbound.js";
@@ -122,7 +122,7 @@ export interface VoiceDeps {
 /** Pipeline dependencies — composed from focused interfaces. */
 export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
   sessions: SessionRegistry;
-  sessionManager: import("./session-manager.js").SessionManager;
+  sessionManager: import("./spin.js").Spin;
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
   requestShutdown?: (code?: number) => void;

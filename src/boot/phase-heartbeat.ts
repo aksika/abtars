@@ -9,7 +9,7 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
  * - Task registrations: tasks (cron dispatch), reminder-injector, idle-compact,
  *   age-check (daily cycle), db-integrity, transport-health, restart-check,
  *   self-healer, model-health
- * - initSystemMessage singleton wire
+ * - sendSystemMessage via spin.inject()
  * - In-proc watchdog setInterval (WD_THRESHOLD_MS = hbInterval × 3)
  * - Capability-registered commands + heartbeat tasks
  * - heartbeat.start() + memory.setHeartbeat()
@@ -19,7 +19,6 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
  * Must run after phase-pipeline-deps (selfHealerTask mutates pipelineDeps in place).
  *
  * Populates ctx: heartbeat, selfHealerTask.
- * Owns singletons: system-message._sender (via initSystemMessage).
  *   message-pipeline.resetIdleCompactFlag is set indirectly via createIdleCompactTask.
  */
 
@@ -137,14 +136,13 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     }));
   }
 
-  // System message sender — singleton: system-message._sender
-  const { initSystemMessage, sendSystemMessage } = await import("../components/system-message.js");
+  // System message sender — uses spin.inject() (#943)
+  const { spin } = await import("../components/spin.js");
   const masterUser = loadUsers().users.find(u => u.role === "master");
   const masterUserId = masterUser?.userId ?? "master";
-  initSystemMessage(async (prompt: string) => {
+  const sendSystemMessage = async (prompt: string): Promise<void> => {
     try {
-      const activeId = ctx.sessionManager.getActiveSessionId(masterUserId, "telegram");
-      const response = await transport.sendPrompt(activeId, `[SYSTEM] ${prompt}`, undefined, masterUserId);
+      const response = await spin.inject(masterUserId, `[SYSTEM] ${prompt}`, { deliver: true });
       if (response) {
         const { sendNotification } = await import("../components/notification.js");
         sendNotification(ctx, response);
@@ -152,7 +150,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     } catch (err) {
       logWarn("main", `System message failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  });
+  };
 
   // Daily cycle: spawn Dreamy after BED_TIME + quiet ticks
   heartbeat.registerTask(createAgeCheckTask({

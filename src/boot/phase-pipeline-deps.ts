@@ -104,13 +104,9 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   const db = ctx.memory?.getDb();
   if (db) setSecretGetDb(db as any);
 
-  // Wire session manager to runtime for agent session creation (#521)
-  ctx.sessionManager.setRuntime(ctx.runtime);
-
-  // #894: Wire Spin to runtime
+  // #894: Wire Spin (which IS the session manager now) to runtime
   const { spin } = await import("../components/spin.js");
   spin.setRuntime(ctx.runtime);
-  spin.setSessionManager(ctx.sessionManager);
 
   // #936: Register master session in Spin
   const { loadUsers } = await import("../components/user-registry.js");

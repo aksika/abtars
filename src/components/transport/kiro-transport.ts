@@ -66,4 +66,7 @@ export interface IKiroTransport {
 
   /** Temporarily override model API timeout for next call(s). null resets to default. */
   setTimeoutOverride?(ms: number | null): void;
+
+  /** Token usage from last completed prompt. Returns {input, output} or null if unavailable. */
+  lastUsage?(): { input: number; output: number } | null;
 }

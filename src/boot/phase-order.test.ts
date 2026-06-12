@@ -16,7 +16,6 @@ const EXPECTED_PHASE_ORDER = [
   "phasePipelineDeps",
   "phasePlatforms",
   "phaseCapabilities",
-  "phaseStartupNotification",
   "phaseHeartbeat",
   "phaseSleep",
   "phaseDashboard",
@@ -25,7 +24,7 @@ const EXPECTED_PHASE_ORDER = [
 ] as const;
 
 describe("BOOT_PHASES", () => {
-  test("has exactly 13 phases", () => {
+  test("has exactly 12 phases", () => {
     expect(BOOT_PHASES).toHaveLength(EXPECTED_PHASE_ORDER.length);
   });
 

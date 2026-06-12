@@ -273,7 +273,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   // Wire async delegation tools (#570)
   if (getEnv().enableAsyncDelegation) {
     const { setDelegationDeps } = await import("../components/transport/delegation-tools.js");
-    setDelegationDeps(ctx.runtime, ctx.sessionManager);
+    setDelegationDeps(ctx.runtime);
   }
 
   logInfo("main", "✅ Transport ready");

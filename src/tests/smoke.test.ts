@@ -4,7 +4,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SessionRegistry } from "../components/session-registry.js";
-import { SessionManager } from "../components/session-manager.js";
+import { Spin } from "../components/spin.js";
+const SessionManager = Spin;
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

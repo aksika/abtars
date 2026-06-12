@@ -11,7 +11,6 @@ import { phaseMemoryIpc } from "./boot/phase-memory-ipc.js";
 import { phasePipelineDeps } from "./boot/phase-pipeline-deps.js";
 import { phasePlatforms } from "./boot/phase-platforms.js";
 import { phaseCapabilities } from "./boot/phase-capabilities.js";
-import { phaseStartupNotification } from "./boot/phase-startup-notification.js";
 import { phaseHeartbeat } from "./boot/phase-heartbeat.js";
 import { phaseSleep } from "./boot/phase-sleep.js";
 import { phaseDashboard } from "./boot/phase-dashboard.js";
@@ -97,7 +96,6 @@ export const BOOT_PHASES = [
   phasePipelineDeps,
   phasePlatforms,
   phaseCapabilities,
-  phaseStartupNotification,
   phaseHeartbeat,
   phaseSleep,
   phaseDashboard,

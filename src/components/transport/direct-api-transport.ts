@@ -49,6 +49,7 @@ export class DirectApiTransport implements IKiroTransport {
   private activeApiKey?: string;
   private activeModel: string;
   private _lastPromptTokens = 0;
+  private _lastCompletionTokens = 0;
   private _activeSessionKey = "";
   private _activeUserId = "master";
 
@@ -292,6 +293,7 @@ export class DirectApiTransport implements IKiroTransport {
         session.updateTokens(usage.prompt_tokens);
         this._contextPercent = session.contextPercent;
         this._lastPromptTokens = usage.prompt_tokens;
+        this._lastCompletionTokens = usage.completion_tokens ?? 0;
         this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
         logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
         recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0);
@@ -576,6 +578,12 @@ export class DirectApiTransport implements IKiroTransport {
   get answerOnly(): string { return this._lastAnswer; }
   getActiveSession(): ConversationSession | null { return this.sessions.get(this._activeSessionKey) ?? null; }
   get toolCallsSucceeded(): number { return this._toolCallsSucceeded; }
+
+  lastUsage(): { input: number; output: number } | null {
+    return this._lastPromptTokens || this._lastCompletionTokens
+      ? { input: this._lastPromptTokens, output: this._lastCompletionTokens }
+      : null;
+  }
 
   /** Hot-swap the active model. Takes effect on next API call. */
   setModel(model: string): void {

@@ -3,7 +3,7 @@
  */
 import { logInfo } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { parseSessionType, typeLabel } from "../session-manager.js";
+import { parseSessionType, typeLabel, sessionType } from "../spin-types.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd:session";
@@ -27,9 +27,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     }
     const result = ctx.sessionManager.createSession(ctx.userId, ctx.platform, type);
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
-    // Init agent session for non-Main types (coding, browse)
-    await ctx.sessionManager.initAgentSession(result);
-    await ctx.reply(`✅ Session #${result.shortIndex} (${typeLabel(result.type)}) created.`);
+    await ctx.reply(`✅ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) created.`);
     logInfo(TAG, `New session ${result.id} for ${ctx.userId}`);
     return true;
   }
@@ -41,7 +39,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     if (indexStr && isNaN(index!)) { await ctx.reply("Usage: /session end [#]"); return true; }
     const result = ctx.sessionManager.endSession(ctx.userId, ctx.platform, index);
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
-    await ctx.reply(`✅ Session #${result.shortIndex} (${typeLabel(result.type)}) ended.`);
+    await ctx.reply(`✅ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) ended.`);
     logInfo(TAG, `Ended session ${result.id}`);
     return true;
   }
@@ -60,7 +58,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
         if (db) db.prepare("DELETE FROM messages WHERE session_id = ?").run(result.id);
       } catch (err) { logAndSwallow(TAG, "delete session messages", err); }
     }
-    await ctx.reply(`🗑️ Session #${result.shortIndex} (${typeLabel(result.type)}) killed.`);
+    await ctx.reply(`🗑️ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) killed.`);
     logInfo(TAG, `Killed session ${result.id}`);
     return true;
   }
@@ -72,7 +70,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     if (indexStr && isNaN(index!)) { await ctx.reply("Usage: /session pause [#]"); return true; }
     const result = ctx.sessionManager.pauseSession(ctx.userId, ctx.platform, index);
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
-    await ctx.reply(`⏸ Session #${result.shortIndex} (${typeLabel(result.type)}) paused.`);
+    await ctx.reply(`⏸ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) paused.`);
     logInfo(TAG, `Paused session ${result.id}`);
     return true;
   }
@@ -84,7 +82,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     if (indexStr && isNaN(index!)) { await ctx.reply("Usage: /session resume [#]"); return true; }
     const result = ctx.sessionManager.resumeSession(ctx.userId, ctx.platform, index);
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
-    await ctx.reply(`▶️ Session #${result.shortIndex} (${typeLabel(result.type)}) resumed.`);
+    await ctx.reply(`▶️ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) resumed.`);
     logInfo(TAG, `Resumed session ${result.id}`);
     return true;
   }
@@ -94,7 +92,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
   if (!isNaN(index)) {
     const result = ctx.sessionManager.switchSession(ctx.userId, ctx.platform, index);
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
-    await ctx.reply(`🔀 Switched to session #${result.shortIndex} (${typeLabel(result.type)}).`);
+    await ctx.reply(`🔀 Switched to session #${result.shortIndex} (${typeLabel(sessionType(result))}).`);
     logInfo(TAG, `Switched to session ${result.id}`);
     return true;
   }

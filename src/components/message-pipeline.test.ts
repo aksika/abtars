@@ -10,7 +10,8 @@ const MASTER_REGISTRY: UserRegistry = {
 import { handleInboundMessage, type PipelineDeps } from "./message-pipeline.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
-import { SessionManager } from "./session-manager.js";
+import { Spin } from "./spin.js";
+const SessionManager = Spin;
 
 function mockTransport(): IKiroTransport {
   return {

@@ -10,7 +10,7 @@ import { logInfo, logDebug, logWarn } from "./logger.js";
 import { abtarsHome } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
 import type { MemoryManager } from "abmind";
-import type { SessionType } from "./session-manager.js";
+import type { SessionType } from "./spin-types.js";
 
 const TAG = "soul-bundle";
 const HOST_CORE_DIR = join(abtarsHome(), "core");

@@ -23,7 +23,7 @@ export interface AgentOpts {
   /** Override model API timeout for this call (ms). */
   timeoutMs?: number;
   /** Override session type (default: derived from agent name). */
-  sessionType?: import("./session-manager.js").SessionType;
+  sessionType?: import("./spin-types.js").SessionType;
 }
 
 /** Persistent transport handle for multi-turn callers. */
@@ -66,7 +66,11 @@ export class SubagentRuntime {
   private readonly activeSpawns = new Map<string, { abort: AbortController; startedAt: number }>();
   private _registry: ModelHealthRegistry | null = null;
   private _mainTransport: IKiroTransport | null = null;
-  private _sessionManager: import("./session-manager.js").SessionManager | null = null;
+  private _lastUsage: { input: number; output: number } | null = null;
+
+  /** Token usage from last complete() call. */
+  get lastUsage(): { input: number; output: number } | null { return this._lastUsage; }
+  private _sessionManager: import("./spin.js").Spin | null = null;
   private _sandboxEnabled = false;
 
   /** Set shared model health registry (from boot ctx). */
@@ -76,7 +80,7 @@ export class SubagentRuntime {
   setMainTransport(transport: IKiroTransport): void { this._mainTransport = transport; }
 
   /** Set session manager for auto-spawn sub-session creation (#510). */
-  setSessionManager(mgr: import("./session-manager.js").SessionManager): void { this._sessionManager = mgr; }
+  setSessionManager(mgr: import("./spin.js").Spin): void { this._sessionManager = mgr; }
 
   /** Enable Docker sandbox for W/B/C sessions (#478). */
   setSandboxEnabled(enabled: boolean): void { this._sandboxEnabled = enabled; }
@@ -102,6 +106,7 @@ export class SubagentRuntime {
     try {
       const response = await transport.sendPrompt(sessionKey, prompt);
       const elapsed = Date.now() - start;
+      this._lastUsage = transport.lastUsage?.() ?? null;
       logInfo(TAG, `${agent} complete: ${prompt.length}ch → ${response?.length ?? 0}ch (${elapsed}ms, ${model})`);
       return response ?? "";
     } catch (err) {
@@ -139,7 +144,7 @@ export class SubagentRuntime {
 
     // Create sub-session for visibility in /session list (#510)
     if (this._sessionManager) {
-      const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
+      const typeMap: Partial<Record<AgentName, import("./spin-types.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
       const sessionType = typeMap[agent];
       if (sessionType) this._sessionManager.createSubSession("master", "telegram", sessionType);
     }
@@ -197,8 +202,8 @@ export class SubagentRuntime {
     return true;
   }
 
-  private async createAgent(agent: AgentName, sessionType?: import("./session-manager.js").SessionType, cacheKey?: string): Promise<CachedAgent> {
-    const typeMap: Partial<Record<AgentName, import("./session-manager.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
+  private async createAgent(agent: AgentName, sessionType?: import("./spin-types.js").SessionType, cacheKey?: string): Promise<CachedAgent> {
+    const typeMap: Partial<Record<AgentName, import("./spin-types.js").SessionType>> = { browsie: "B", coding: "C", task: "T" };
     const resolvedType = sessionType || typeMap[agent];
     const sandboxTypes = new Set(["B", "C", "W"]);
 

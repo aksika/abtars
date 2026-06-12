@@ -439,9 +439,9 @@ export class CronQueue {
       logWarn(TAG, `⏱️ Agent "${entry.id}" timed out (30min)`);
     }, AGENT_TIMEOUT_MS);
 
-    // #935: map agent field to session type (canonical task routing — distinct from TYPE_AGENT in session-manager which maps type→model-role)
+    // #935: map agent field to session type (canonical task routing — distinct from TYPE_AGENT in spin-types which maps type→model-role)
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
-    const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../session-manager.js").SessionType;
+    const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../spin-types.js").SessionType;
 
     spin.dispatchAwait({ type: sessionType, title: entry.title ?? entry.message.slice(0, 80), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM" })
       .then(({ cardId: boardId, result: response }) => {
