@@ -7,7 +7,6 @@
  */
 
 import type { BootNode } from "./boot-graph.js";
-import { phaseConfig } from "./phase-config.js";
 import { phaseMemory } from "./phase-memory.js";
 import { phaseTransport } from "./phase-transport.js";
 import { phaseMemoryIpc } from "./phase-memory-ipc.js";
@@ -33,11 +32,10 @@ import { phaseAgentApi } from "./phase-agent-api.js";
  *                agentApi                    sleep
  */
 export const BOOT_NODES: BootNode[] = [
-  { name: "config",       deps: [],                          optional: false, run: phaseConfig },
-  { name: "heartbeat",    deps: ["config"],                  optional: false, run: phaseHeartbeat },
-  { name: "platforms",    deps: ["config"],                  optional: true,  run: phasePlatformsConnect },
-  { name: "transport",    deps: ["config"],                  optional: true,  run: phaseTransport },
-  { name: "memory",       deps: ["config"],                  optional: true,  run: phaseMemory },
+  { name: "heartbeat",    deps: [],                          optional: false, run: phaseHeartbeat },
+  { name: "platforms",    deps: [],                          optional: true,  run: phasePlatformsConnect },
+  { name: "transport",    deps: [],                          optional: true,  run: phaseTransport },
+  { name: "memory",       deps: [],                          optional: true,  run: phaseMemory },
   { name: "pipelineDeps", deps: ["transport", "platforms"],  optionalDeps: ["memory"], optional: false, run: phasePipelineDeps },
   { name: "capabilities", deps: ["transport"],               optionalDeps: ["memory"], optional: true,  run: phaseCapabilities },
   { name: "memoryIpc",    deps: ["memory", "transport"],     optional: true,  run: phaseMemoryIpc },

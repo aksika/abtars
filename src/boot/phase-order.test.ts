@@ -32,20 +32,21 @@ describe("Boot graph integrity", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
-  test("config node has no deps (root)", () => {
-    const config = BOOT_NODES.find(n => n.name === "config");
-    expect(config).toBeDefined();
-    expect(config!.deps).toHaveLength(0);
+  test("all root nodes have no deps", () => {
+    const roots = BOOT_NODES.filter(n => n.deps.length === 0);
+    expect(roots.length).toBeGreaterThan(0);
   });
 
-  test("config is required (not optional)", () => {
-    const config = BOOT_NODES.find(n => n.name === "config");
-    expect(config!.optional).toBe(false);
+  test("heartbeat is required (not optional)", () => {
+    const hb = BOOT_NODES.find(n => n.name === "heartbeat");
+    expect(hb).toBeDefined();
+    expect(hb!.optional).toBe(false);
   });
 
   test("BOOT_PHASES compat — contains all graph node names plus shutdown", () => {
     // BOOT_PHASES includes phaseShutdown + legacy phasePlatforms (not in graph)
+    // Config is handled explicitly in startBridge, not in the graph
     expect(BOOT_PHASES.length).toBeGreaterThanOrEqual(BOOT_NODES.length + 1);
-    expect(BOOT_NODES).toHaveLength(11);
+    expect(BOOT_NODES).toHaveLength(10);
   });
 });
