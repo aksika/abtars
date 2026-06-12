@@ -241,6 +241,47 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     setIrcSend((channel, message) => { ircAdapter.sendMessage(channel, message); });
   }
 
+  // #944: "Back online" notification — fires here because platforms are now wired
+  if (ctx.telegramAdapter || ctx.discordAdapter) {
+    const version = ctx.commit && ctx.commit !== "?" && !ctx.version.includes(ctx.commit)
+      ? `v${ctx.version}-${ctx.commit}` : `v${ctx.version}`;
+    setTimeout(async () => {
+      try {
+        const { sendToMainChat } = await import("../components/main-chat.js");
+        await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `🔄 Back online. ${version}`);
+        logInfo("main", "Startup: Back online notification sent");
+        // Degraded-mode warning if any subsystem failed
+        const failed = [...ctx.phaseHealth].filter(([, h]) => h.status === "failed" || h.status === "skipped");
+        if (failed.length > 0) {
+          const lines = failed.map(([name, h]) => `  ${h.status === "failed" ? "✗" : "»"} ${name}${h.error ? `: ${h.error}` : ""}`);
+          await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `⚠️ Degraded boot (${failed.length} subsystem${failed.length > 1 ? "s" : ""} down):\n${lines.join("\n")}`);
+        }
+      } catch (err) { logWarn("main", `Back online notification failed: ${err}`); }
+    }, 3000);
+    // Startup greeting via spin.inject
+    setTimeout(async () => {
+      if (!ctx.telegramAdapter) return;
+      const greetPrompt = "You just came online. Output ONLY a personalized greeting message.";
+      const deliver = async (): Promise<boolean> => {
+        const response = await spin.inject(masterUser?.userId ?? "master", greetPrompt, { deliver: true });
+        if (response && ctx.telegramAdapter) {
+          const { cleanResponse } = await import("../components/clean-response.js");
+          const { text: clean } = cleanResponse(response);
+          if (clean) await ctx.telegramAdapter.sendMessage(String(config.mainChatId), clean);
+          return true;
+        }
+        return false;
+      };
+      try {
+        if (await deliver()) { logInfo("main", "✅ Startup greeting delivered"); return; }
+        logWarn("main", "Startup greeting attempt 1 returned null — retrying in 5s");
+        await new Promise(r => setTimeout(r, 5000));
+        if (await deliver()) { logInfo("main", "✅ Startup greeting delivered (retry)"); }
+        else { logWarn("main", "Startup greeting retry also returned null"); }
+      } catch (err) { logWarn("main", `Startup greeting failed: ${err}`); }
+    }, 10_000);
+  }
+
   return "ran";
 }
 
