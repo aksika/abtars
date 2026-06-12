@@ -151,12 +151,18 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
   }
   if (cmd === "list") {
     const { loadFixes } = await import("../sha-tracker.js");
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
     const fixes = loadFixes();
     if (fixes.length === 0) { await ctx.reply("🩺 No fix rules configured."); return true; }
+    let state: Record<string, { totalRuns?: number }> = {};
+    try { state = JSON.parse(readFileSync(join(process.env["ABTARS_HOME"] || join(process.env["HOME"] || "~", ".abtars"), "state", "sha-state.json"), "utf-8")); } catch {}
     const lines = fixes.map(f => {
-      const v = f.verified === false ? " ⚠️unverified" : "";
-      const src = f.createdAt ? " (self)" : " (core)";
-      return `• "${f.pattern.slice(0, 30)}" → ${f.command[0]}${src}${v}`;
+      const v = f.verified === false ? " ⚠️" : "";
+      const src = f.createdAt ? "(self)" : "(core)";
+      const runs = state[`autofix-known:${f.pattern}`]?.totalRuns ?? 0;
+      const runsText = runs > 0 ? ` [${runs}x]` : "";
+      return `• "${f.pattern.slice(0, 20)}" → ${f.command[0]} ${src}${v}${runsText}`;
     });
     await ctx.reply(`🩺 Fix rules (${fixes.length}):\n${lines.join("\n")}`);
     return true;

@@ -34,6 +34,8 @@ interface FaultState {
   attempts: number;
   result: "failed" | "ok";
   error?: string;
+  totalRuns: number;
+  lastRunAt: string;
 }
 
 interface PolicyFile {
@@ -139,19 +141,23 @@ export function recordResult(faultId: string, scope: string, ok: boolean, error?
   const key = `${faultId}:${scope}`;
   const state = loadState();
   const entry = state[key];
+  const now = new Date().toISOString();
+  const totalRuns = (entry?.totalRuns ?? 0) + 1;
 
   if (ok) {
-    delete state[key];
+    state[key] = { lastAttempt: now, attempts: 0, result: "ok", totalRuns, lastRunAt: now };
   } else {
     state[key] = {
-      lastAttempt: new Date().toISOString(),
+      lastAttempt: now,
       attempts: (entry?.attempts ?? 0) + 1,
       result: "failed",
       error,
+      totalRuns,
+      lastRunAt: now,
     };
   }
   saveState(state);
-  logDebug(TAG, `${key}: ${ok ? "ok (reset)" : `failed (attempt ${state[key]?.attempts})`}`);
+  logDebug(TAG, `${key}: ${ok ? "ok" : `failed (attempt ${state[key]?.attempts})`} [total: ${totalRuns}]`);
 }
 
 /** Write a new fix rule to sha-policy-self.json */
