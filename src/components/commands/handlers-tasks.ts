@@ -168,3 +168,47 @@ export async function handleKanban(text: string, ctx: CommandContext): Promise<b
   }
   return true;
 }
+
+/** /channel command — master visibility into agent discussions (#891). */
+export async function handleChannel(text: string, ctx: CommandContext): Promise<boolean> {
+  const args = text.replace(/^\/channel\s*/i, "").trim();
+
+  const { channelRead, channelPost } = await import("../tasks/kanban-channel.js");
+
+  // /channel (no args) — list active channels
+  if (!args) {
+    const { kanbanList } = await import("../tasks/kanban-board.js");
+    const active = kanbanList("running");
+    if (active.length === 0) { await ctx.reply("No active channels."); return true; }
+    const lines = active.map((c: any) => {
+      const msgs = channelRead(c.id);
+      return `#${c.id} "${c.title}" — ${msgs.length} msg${msgs.length !== 1 ? "s" : ""}`;
+    });
+    await ctx.reply(`📡 Active channels:\n${lines.join("\n")}`);
+    return true;
+  }
+
+  // /channel <card_id> [message] or /channel <card_id> @Worker msg
+  const match = args.match(/^(\d+)\s*(.*)?$/);
+  if (!match) { await ctx.reply("Usage: /channel [card_id] [message]"); return true; }
+
+  const cardId = parseInt(match[1]!, 10);
+  const rest = (match[2] ?? "").trim();
+
+  // /channel <card_id> — show discussion
+  if (!rest) {
+    const msgs = channelRead(cardId);
+    if (msgs.length === 0) { await ctx.reply(`Channel #${cardId}: empty.`); return true; }
+    const lines = msgs.map(m => `[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${m.message}`);
+    await ctx.reply(`📡 Channel #${cardId} (${msgs.length} msgs):\n${lines.join("\n")}`);
+    return true;
+  }
+
+  // /channel <card_id> @Worker-01 msg — targeted post
+  const atMatch = rest.match(/^@(\S+)\s+(.+)$/);
+  const to = atMatch ? atMatch[1]! : "ALL";
+  const message = atMatch ? atMatch[2]! : rest;
+  channelPost(cardId, "master", to, message, true);
+  await ctx.reply(`✅ Posted to card:${cardId} [master→${to}]`);
+  return true;
+}

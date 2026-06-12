@@ -3,5 +3,5 @@ export { handleNewReset, handleCompact, handleEmergencyAlias, handleModels, hand
 export { handleDoctor, handleStatus, handleStop, handleWait, handleRestart, handleHeartbeat, handleHealing, handleFull, handleShort, handleUsage, handleOpenRouter, handleWhoami, handleSoftware } from "./handlers-system.js";
 export { handleMemory, handleFacts, handleNlm } from "./handlers-memory.js";
 export { handleSleep, handleSleepSub, handleWakeup } from "./handlers-sleep.js";
-export { handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban } from "./handlers-tasks.js";
+export { handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban, handleChannel } from "./handlers-tasks.js";
 export { handleUsers, handleSkills, handleHooks, handleMcp, handleHelp } from "./handlers-admin.js";

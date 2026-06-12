@@ -205,6 +205,16 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
         kanbanMarkDelivered(card.id);
       } catch (err) { logAndSwallow(TAG, "nerve:card:done delivery", err); }
     });
+
+    // #891: TG notification when a worker posts →MASTER
+    nerve.on("channel:message", async (_cardId: number, meta?: Record<string, unknown>) => {
+      if (!meta || (meta.to as string)?.toUpperCase() !== "MASTER") return;
+      if (!ctx.telegramAdapter) return;
+      try {
+        const from = meta.from as string ?? "agent";
+        await ctx.telegramAdapter.sendMessage(String(masterChatId), `📡 [${from}→MASTER] card:${_cardId}\n${String(meta.message ?? "").slice(0, 200)}`);
+      } catch (err) { logAndSwallow(TAG, "nerve:channel:message TG notify", err); }
+    });
   }).catch(err => logAndSwallow(TAG, "nerve import", err));
 
   heartbeat.registerTask(createKanbanCleanupTask());

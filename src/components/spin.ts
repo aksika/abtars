@@ -369,7 +369,20 @@ export class Spin {
     try {
       const { buildSoulBundle } = await import("./soul-bundle.js");
       const bundle = buildSoulBundle(request.type);
-      const fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
+      let fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
+
+      // #891: auto-inject channel messages for W/O sessions
+      if (request.type === "W" || request.type === "O" || request.type === "T") {
+        const { channelUnread } = await import("./tasks/kanban-channel.js");
+        const workerName = `Worker-${String(cardId).padStart(2, "0")}`;
+        const parentCard = request.parentCardId ?? cardId;
+        const msgs = channelUnread(parentCard, workerName);
+        if (msgs.length > 0) {
+          const lines = msgs.map(m => `[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${m.message}`);
+          fullPrompt = `[CHANNEL — ${msgs.length} message(s) for ${workerName}]\n${lines.join("\n")}\n[/CHANNEL]\n\n${fullPrompt}`;
+        }
+      }
+
       return (await this.runtime.complete(agentName, fullPrompt, { timeoutMs, session: "fresh" })) || "(no output)";
     } finally { clearTimeout(timer); }
   }
@@ -388,6 +401,15 @@ export class Spin {
       const { drainOrcNotifications } = await import("./spin-notifications.js");
       const notifications = drainOrcNotifications(cardId);
       if (notifications.length) fullPrompt = notifications.join("\n") + "\n\n" + fullPrompt;
+
+      // #891: Orc sees ALL channel messages on its card
+      const { channelUnread } = await import("./tasks/kanban-channel.js");
+      const orcMsgs = channelUnread(cardId, "Orc");
+      if (orcMsgs.length > 0) {
+        const lines = orcMsgs.map(m => `[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${m.message}`);
+        fullPrompt = `[CHANNEL — ${orcMsgs.length} message(s)]\n${lines.join("\n")}\n[/CHANNEL]\n\n${fullPrompt}`;
+      }
+
       return (await orc.sendPrompt("orc:project", fullPrompt)) || "(no output)";
     } finally { clearTimeout(timer); updateBridgeLockField("orc_active", null); }
   }
