@@ -1,12 +1,12 @@
 ---
 name: browser
-description: Control a headless Chromium browser for navigation, form filling, text extraction, screenshots, and multi-step web workflows
+description: Control a headless CloakBrowser (stealth Chromium) for navigation, form filling, text extraction, screenshots, and multi-step web workflows
 user-invocable: false
 ---
 
 # Browser Tool
 
-Headless Chromium via shell. Use for auth flows, JS-rendered pages, form submissions, screenshots.
+**CloakBrowser** — stealth Chromium with 58 C++ source-level patches. Passes Cloudflare Turnstile, bot detection, 0.9 reCAPTCHA score. No Docker, no patchright, no Chrome installation needed.
 
 ```bash
 abtars-browser --action <ACTION> [--url <URL>] [--selector <SEL>] [--value <VAL>] [--session-id <ID>] [--full-page]
@@ -16,21 +16,21 @@ abtars-browser --action <ACTION> [--url <URL>] [--selector <SEL>] [--value <VAL>
 - `navigate` — go to URL (requires `--url`). Returns title, final URL, status.
 - `click` — click element (requires `--selector`)
 - `fill` — fill form field (requires `--selector`, `--value`)
-- `extract_text` — get visible text (optional `--selector` to scope). Truncates at 4000 chars.
-- `screenshot` — capture page (optional `--full-page`)
-- `get_page_info` — list interactive elements with selectors (max 50)
+- `extract_text` — get visible text (optional `--selector` to scope, optional `--url` to navigate first). Truncates at 4000 chars.
+- `screenshot` — capture page (optional `--full-page`, optional `--url` to navigate first)
+- `get_page_info` — list interactive elements with selectors (max 50, optional `--url` to navigate first)
 - `close_session` — close browser session
 
 ## Sessions
 Same `--session-id` = same browser tab across calls. Auto-close after 5 min idle. Max 3 concurrent.
 
-## Container
-```bash
-docker ps --filter name=abtars-browser --format "{{.Status}}"  # check
-~/.abtars/browser-docker.sh                                     # start if needed
-```
+## Architecture
+- **No Docker.** CloakBrowser runs directly on the host.
+- **No patchright.** Uses Playwright-compatible `cloakbrowser` package with stealth Chromium binary (auto-downloaded on first run, ~200MB, cached at `~/.cloakbrowser/`).
+- **Auto-updating.** Binary updates in background.
+- **humanize=True** — human-like mouse curves, keyboard timing, scroll patterns for bypassing behavioral detection.
 
 ## When NOT to use
-- Simple URL fetch → use `/ingest <url>`
+- Simple URL fetch → use `/ingest <url>` or `abtars-fetch`
 - Public APIs → direct HTTP
 - Static pages → ingestion pipeline

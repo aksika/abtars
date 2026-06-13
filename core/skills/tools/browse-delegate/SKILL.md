@@ -23,5 +23,5 @@ Returns immediately. Browsie agent runs in background. Results delivered to chat
 
 ## Rules
 - **NEVER** run `abtars-browser` directly — always use `abtars-browse`
-- **NEVER** run `docker exec` on the browser container
+- **NEVER** use Docker for browser tasks — CloakBrowser runs natively
 - Tell user you've dispatched the task, then continue handling other messages
