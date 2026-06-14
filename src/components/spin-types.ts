@@ -59,6 +59,7 @@ export interface SpinRequest {
   priority?: string;
   tools?: SandboxPolicy;
   timeoutMs?: number;
+  callbackPeer?: string; // #675: peer to notify on completion
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

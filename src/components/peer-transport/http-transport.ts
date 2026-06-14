@@ -30,6 +30,12 @@ export class HttpTransport implements PeerTransport {
       const config = loadPeerConfig();
       return callPeer(peer, message.payload.prompt as string, config.maxHops);
     }
+    if (message.type === "task" && message.payload.action === "callback") {
+      const config = loadPeerConfig();
+      const entry = resolvePeer(config.peers, peer);
+      const body = JSON.stringify({ task_id: message.payload.task_id, status: message.payload.status, result_summary: message.payload.result_summary, error: message.payload.error });
+      return this.httpCall(entry, peer, "POST", "/v1/callbacks", body);
+    }
     if (message.type === "task") return this.delegateTask(peer, message.payload.goal as string, message.payload as any);
     if (message.type === "check") return this.checkTask(peer, message.payload.taskId as number);
     if (message.type === "terminate") return this.terminateTask(peer, message.payload.taskId as number);
@@ -53,7 +59,14 @@ export class HttpTransport implements PeerTransport {
   async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string }): Promise<number> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
-    const body = JSON.stringify({ goal, priority: opts?.priority ?? "MEDIUM", context: opts?.context });
+
+    // Construct callback URL from our own agent-api port
+    const selfPort = parseInt(process.env["AGENT_API_PORT"] || "3100", 10);
+    const selfHost = entry.host; // peer knows us by the host they connect to — use their entry's perspective
+    // Actually: we don't know our own external IP. Include callback as our self.name — remote looks us up in its peers.json
+    const callbackUrl = `callback://${config.self.name}`;
+
+    const body = JSON.stringify({ goal, priority: opts?.priority ?? "MEDIUM", context: opts?.context, callback_peer: config.self.name });
     const response = await this.httpCall(entry, peer, "POST", "/v1/tasks", body);
     const parsed = JSON.parse(response);
     logInfo(TAG, `Delegated to ${peer}: card #${parsed.task_id}`);

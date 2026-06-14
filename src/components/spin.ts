@@ -269,6 +269,7 @@ export class Spin {
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM", type: request.type,
       parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
+      notes: request.callbackPeer ? JSON.stringify({ callback_peer: request.callbackPeer }) : undefined,
     });
 
     if (!this.canDispatch(request.type, cardId)) {
@@ -286,11 +287,15 @@ export class Spin {
 
     const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.execute(request, cardId, timeout)
-      .then(result => { kanbanComplete(cardId, null, result.slice(0, 500)); })
+      .then(result => {
+        kanbanComplete(cardId, null, result.slice(0, 500));
+        if (request.callbackPeer) fireCallback(request.callbackPeer, cardId, "done", result.slice(0, 500));
+      })
       .catch(err => {
         const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
         logWarn(TAG, `${request.type} card:${cardId} failed: ${msg}`);
         kanbanRetryOrFail(cardId, msg);
+        if (request.callbackPeer) fireCallback(request.callbackPeer, cardId, "failed", undefined, msg);
       })
       .finally(() => {
         this.markDone(request.type, cardId);
@@ -430,6 +435,21 @@ export class Spin {
 
       return (await orc.sendPrompt("orc:project", fullPrompt)) || "(no output)";
     } finally { clearTimeout(timer); updateBridgeLockField("orc_active", null); }
+  }
+}
+
+/** #675: Fire result callback to the delegating peer. Fire-and-forget. */
+async function fireCallback(peerName: string, taskId: number, status: "done" | "failed", result?: string, error?: string): Promise<void> {
+  try {
+    const { getPeerTransport } = await import("./peer-transport/index.js");
+    const transport = getPeerTransport();
+    await transport.send(peerName, {
+      type: "task",
+      payload: { action: "callback", task_id: taskId, status, result_summary: result, error },
+    });
+    logInfo(TAG, `Callback fired to ${peerName} for card:${taskId} (${status})`);
+  } catch (err) {
+    logWarn(TAG, `Callback to ${peerName} failed (card:${taskId}): ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
