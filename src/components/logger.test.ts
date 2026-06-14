@@ -7,10 +7,11 @@ import { tmpdir } from "node:os";
 const tmpDir = mkdtempSync(join(tmpdir(), "logger-test-"));
 vi.mock("../paths.js", () => ({ abtarsHome: () => tmpDir }));
 
-const { logInfo, logWarn, logDebug, flushLogs, setLogLevel, getLogFile } = await import("./logger.js");
+const { logInfo, logWarn, logDebug, flushLogs, setLogLevel, setFileLogging, getLogFile } = await import("./logger.js");
 
 describe("logger buffered writes", () => {
   beforeEach(() => {
+    setFileLogging(true);
     setLogLevel("debug");
   });
 
