@@ -100,7 +100,9 @@ function broadcast(): void {
   // Expire stale entries
   const now = Date.now();
   for (const [, health] of peerTable) {
+    const wasAlive = health.alive;
     health.alive = (now - health.lastSeen) < TTL_MS;
+    if (wasAlive && !health.alive) logDebug(TAG, `PEER_OFFLINE ${health.name} (no heartbeat for ${Math.round((now - health.lastSeen) / 1000)}s)`);
   }
 }
 
@@ -130,7 +132,8 @@ export function startGossip(): void {
       port: rinfo.port,
     };
     peerTable.set(name, health);
-    if (!existing) logDebug(TAG, `Peer discovered: ${name} [${health.capabilities.join(",")}] load=${health.load}`);
+    if (!existing) logDebug(TAG, `PEER_ONLINE ${name} [${health.capabilities.join(",")}] v${health.version}`);
+    else if (!existing.alive) logDebug(TAG, `PEER_ONLINE ${name} returned [${health.capabilities.join(",")}] v${health.version}`);
   });
 
   _socket.on("error", (err) => { logWarn(TAG, `Socket error: ${err.message}`); });
