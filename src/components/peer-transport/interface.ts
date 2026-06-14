@@ -5,6 +5,16 @@
  * Future: libp2p, GossipSub, etc. — swap implementation, same API.
  */
 
+export interface PeerHealth {
+  name: string;
+  lastSeen: number;
+  load: number;
+  sessions: number;
+  capabilities: string[];
+  version: string;
+  alive: boolean;
+}
+
 export interface PeerCard {
   name: string;
   host: string;

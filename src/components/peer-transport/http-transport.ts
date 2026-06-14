@@ -6,6 +6,7 @@
  */
 
 import type { PeerTransport, PeerCard, PeerMessage, TaskResult } from "./interface.js";
+import { getAlivePeers } from "./gossip.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
 import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 
@@ -15,13 +16,7 @@ export class HttpTransport implements PeerTransport {
   private handlers: Array<(from: string, message: PeerMessage) => void> = [];
 
   discover(): PeerCard[] {
-    const config = loadPeerConfig();
-    return Object.entries(config.peers).map(([name, entry]) => ({
-      name,
-      host: entry.host,
-      port: entry.port,
-      capabilities: entry.allowedTools,
-    }));
+    return getAlivePeers();
   }
 
   async send(peer: string, message: PeerMessage): Promise<unknown> {

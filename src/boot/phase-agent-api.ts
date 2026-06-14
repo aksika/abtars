@@ -55,9 +55,16 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
     // Start mDNS wake-up listener (#425)
     const { loadPeerConfig } = await import("../components/peer-config.js");
     const { startDnsWakeup } = await import("../components/dns-wakeup.js");
+    const { startGossipListener } = await import("../components/peer-transport/gossip.js");
     const { callPeer } = await import("../components/peer-client.js");
     const peerConfig = loadPeerConfig();
     const udpPort = peerConfig.self.udpPort ?? 5353;
+
+    // #971: Start gossip health listener
+    if (Object.keys(peerConfig.peers).length > 0) {
+      startGossipListener();
+    }
+
     if (Object.keys(peerConfig.peers).length > 0) {
       startDnsWakeup(udpPort, peerConfig, async (peerName) => {
         try {

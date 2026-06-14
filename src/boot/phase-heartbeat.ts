@@ -229,6 +229,12 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     heartbeat.registerTask({ name: "remote-card-poll", execute: pollRemoteCards });
   }).catch(err => logAndSwallow(TAG, "reconciler", err));
 
+  // #971: Gossip health broadcast — fires every tick
+  import("../components/peer-transport/gossip.js").then(({ gossipBroadcast, setGossipInterval }) => {
+    setGossipInterval(heartbeat.intervalMs);
+    heartbeat.registerTask({ name: "gossip-health", execute: gossipBroadcast });
+  }).catch(err => logAndSwallow(TAG, "gossip", err));
+
   // #440: update check (npm registry, notify if newer version)
   heartbeat.registerTask(createUpdateCheckTask((msg) => {
     import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(err => logAndSwallow(TAG, "sendNotification update-check", err));
