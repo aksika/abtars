@@ -216,3 +216,26 @@ export async function handleHelp(_text: string, ctx: CommandContext): Promise<bo
   await ctx.reply(`📋 Available commands:\n\n${cmds.join("\n")}`);
   return true;
 }
+
+export async function handlePeers(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { getPeerTable } = await import("../peer-transport/gossip.js");
+  const peers = getPeerTable(true);
+  if (peers.length === 0) {
+    await ctx.reply("No peers configured or gossip not started.");
+    return true;
+  }
+  const now = Date.now();
+  const lines = peers
+    .sort((a, b) => (a.alive === b.alive ? a.name.localeCompare(b.name) : a.alive ? -1 : 1))
+    .map(p => {
+      const age = Math.round((now - p.lastSeen) / 1000);
+      const ageStr = age < 60 ? `${age}s ago` : `${Math.round(age / 60)}min ago`;
+      const icon = p.alive ? "🟢" : "🔴";
+      const caps = p.capabilities.length ? ` [${p.capabilities.join(", ")}]` : "";
+      return `${icon} **${p.name}** (${ageStr}) — load ${p.load}${caps}`;
+    });
+  const alive = peers.filter(p => p.alive).length;
+  lines.push(`\n${peers.length} peer(s) (${alive} alive, ${peers.length - alive} dead)`);
+  await ctx.reply(lines.join("\n"));
+  return true;
+}
