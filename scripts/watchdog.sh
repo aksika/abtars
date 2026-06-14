@@ -35,6 +35,17 @@ SPAWNED_AT=0
 RESTART_TIMES=()
 RESTARTING=false
 RESTART_STARTED_AT=0
+STATE_FILE="$AB/watchdog.state"
+
+# Load persisted restart timestamps (filter stale entries)
+if [[ -f "$STATE_FILE" ]]; then
+  _now=$(date +%s)
+  while IFS= read -r _ts; do
+    if [[ -n "$_ts" ]] && (( _now - _ts < CIRCUIT_WINDOW )); then
+      RESTART_TIMES+=("$_ts")
+    fi
+  done < "$STATE_FILE"
+fi
 
 # ── Load .env for Telegram notifications ──
 TG_TOKEN=""
@@ -133,6 +144,7 @@ spawn_bridge() {
       mv "$AB/app" "$AB/app.broken"
       mv "$PREV" "$AB/app"
       RESTART_TIMES=()  # Reset counter for the rollback attempt
+      rm -f "$STATE_FILE"
 
       # Try starting the rolled-back version
       if [ -x "$AB/scripts/doctor.sh" ]; then
@@ -160,13 +172,13 @@ spawn_bridge() {
       else
         log "❌ Auto-rollback also failed"
         notify "❌ Auto-rollback to $ROLLED_VER also failed. Manual intervention required."
-        rm -f "$WD_LOCK"
+        rm -f "$WD_LOCK" "$STATE_FILE"
         exit 0  # intentional stop — launchd must NOT restart
       fi
     else
       log "🚨 CIRCUIT BREAKER — ${CIRCUIT_MAX} restarts in ${CIRCUIT_WINDOW}s, no prior version available"
       notify "🚨 Watchdog circuit breaker tripped — no rollback available, manual intervention needed"
-      rm -f "$WD_LOCK"
+      rm -f "$WD_LOCK" "$STATE_FILE"
       exit 0  # intentional stop — launchd must NOT restart
     fi
   fi
@@ -180,6 +192,7 @@ spawn_bridge() {
   fi
 
   RESTART_TIMES+=("$(date +%s)")
+  printf '%s\n' "${RESTART_TIMES[@]}" > "$STATE_FILE"
   rm -f "$LOCK"
 
   # #686: Kill stale bridge holding port 3100
