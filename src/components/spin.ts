@@ -3,13 +3,13 @@
  * Single flat Map<sessionId, ManagedSession>. No bucketing. No PlatformState.
  */
 
-import { logInfo, logWarn, logTrace } from "./logger.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, isUnblocked } from "./tasks/kanban-board.js";
+import { logInfo, logWarn } from "./logger.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanRetryOrFail, kanbanList, isUnblocked } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
-import { sessionType, typeAgent } from "./spin-types.js";
+import { typeAgent } from "./spin-types.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog } from "./spin-sessions.js";
 
@@ -397,7 +397,7 @@ export class Spin {
       let fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
 
       // #891: auto-inject channel messages for W/O sessions
-      if (request.type === "W" || request.type === "O" || request.type === "T") {
+      if (request.type === "W" || request.type === "T") {
         const { channelUnread } = await import("./tasks/kanban-channel.js");
         const workerName = `Worker-${String(cardId).padStart(2, "0")}`;
         const parentCard = request.parentCardId ?? cardId;

@@ -452,7 +452,6 @@ export class AcpTransport implements IKiroTransport {
       try {
         if (!this.client) throw new Error("ACP not initialized");
         this.lastActivityAt = Date.now();
-        const promptStartedAt = Date.now();
         let timeoutTimer: ReturnType<typeof setInterval> | undefined;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutTimer = setInterval(() => {
@@ -464,7 +463,7 @@ export class AcpTransport implements IKiroTransport {
         });
         const result = await Promise.race([
           this.client.prompt({
-            sid,
+            sessionId: sid,
             prompt: [{ type: "text", text: message }],
           }).finally(() => clearInterval(timeoutTimer)),
           timeoutPromise,
@@ -674,7 +673,7 @@ export class AcpTransport implements IKiroTransport {
     });
 
     if (this.isGemini && this.modelId) {
-      try { await this.client.unstable_setSessionModel({ sessionId: session.sessionId, modelId: this.modelId }); }
+      try { await (this.client as any).unstable_setSessionModel({ sessionId: session.sessionId, modelId: this.modelId }); }
       catch { logWarn(this.tag, `unstable_setSessionModel not supported — using default model`); }
     }
 

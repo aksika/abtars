@@ -60,7 +60,13 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
   return true;
 }
 
-export async function handleSkills(_text: string, ctx: CommandContext): Promise<boolean> {
+export async function handleSkills(text: string, ctx: CommandContext): Promise<boolean> {
+  if (text.includes("reload")) {
+    const { reloadCatalog } = await import("../../capabilities/hotskills/index.js");
+    const count = reloadCatalog();
+    await ctx.reply(`Reloaded — ${count} skills available.`);
+    return true;
+  }
   const { getSkillCache } = await import("../../capabilities/hotskills/index.js");
   const skills = getSkillCache();
   if (skills.length === 0) { await ctx.reply("📚 No skills loaded."); return true; }

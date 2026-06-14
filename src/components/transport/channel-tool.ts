@@ -11,7 +11,7 @@ function formatMsg(m: ChannelMessage): string {
 }
 
 async function executePost(args: Record<string, string>, ctx?: { userId?: string }): Promise<string> {
-  const cardId = parseInt(args.card_id, 10);
+  const cardId = parseInt(args.card_id ?? "", 10);
   if (!cardId) return "❌ card_id required";
   if (!args.message) return "❌ message required";
   const from = args.from || ctx?.userId || "agent";
@@ -22,7 +22,7 @@ async function executePost(args: Record<string, string>, ctx?: { userId?: string
 }
 
 async function executeRead(args: Record<string, string>): Promise<string> {
-  const cardId = parseInt(args.card_id, 10);
+  const cardId = parseInt(args.card_id ?? "", 10);
   if (!cardId) return "❌ card_id required";
   const msgs = channelRead(cardId, { since: args.since, from: args.from });
   if (msgs.length === 0) return "No messages.";

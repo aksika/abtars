@@ -9,7 +9,7 @@
  * Mutates pipelineDeps.loadedCapabilities in place (closure seen by message-pipeline).
  */
 
-import { logInfo, logWarn, logError } from "../components/logger.js";
+import { logInfo, logWarn, logError, logDebug } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
 export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {

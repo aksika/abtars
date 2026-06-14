@@ -244,8 +244,8 @@ export function createUserSessionExpiryTask(): HeartbeatTask {
     name: "user-session-expiry",
     execute: async () => {
       const { spin } = await import("./spin.js");
-      if (!spin["sessionManager"]) return;
-      const sessions = spin["sessionManager"].listAllSessions();
+      const sessions = spin.listAllSessions();
+      if (!sessions.length) return;
       const now = Date.now();
       for (const session of sessions) {
         if (session.idleTimeoutMs === Infinity) continue;

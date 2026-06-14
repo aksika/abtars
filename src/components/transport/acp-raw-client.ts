@@ -3,7 +3,7 @@
  * Used when the SDK's ndJsonStream/Web Streams layer breaks (kiro-cli #7554).
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { logDebug, logInfo, logWarn } from "../logger.js";
+import { logDebug, logWarn } from "../logger.js";
 
 const TAG = "acp-raw";
 

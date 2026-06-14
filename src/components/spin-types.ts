@@ -69,7 +69,7 @@ export function sessionType(session: ManagedSession): SessionType {
 }
 
 export function sessionCreatedAt(session: ManagedSession): number {
-  return parseInt(session.id.split("_")[0], 10) * 1000;
+  return parseInt(session.id.split("_")[0] ?? "0", 10) * 1000;
 }
 
 const TYPE_LABELS: Record<SessionType, string> = {

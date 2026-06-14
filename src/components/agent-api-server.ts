@@ -8,7 +8,7 @@ import { abtarsHome } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import type { IMemorySystem } from "abmind";
 import { abmind } from "../utils/abmind-lazy.js";
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logDebug, logTrace } from "./logger.js";
 import type { SubagentRuntime } from "./subagent-runtime.js";
 import type { AgentSession } from "./subagent-runtime.js";
 import { localDate } from "../utils/date.js";

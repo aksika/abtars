@@ -8,7 +8,7 @@
 import type { PeerTransport, PeerCard, PeerMessage, TaskResult } from "./interface.js";
 import { getAlivePeers } from "./gossip.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
-import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
+import { logInfo, logDebug, logTrace } from "../logger.js";
 
 const TAG = "http-transport";
 
@@ -57,11 +57,7 @@ export class HttpTransport implements PeerTransport {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
 
-    // Construct callback URL from our own agent-api port
-    const selfPort = parseInt(process.env["AGENT_API_PORT"] || "3100", 10);
-    const selfHost = entry.host; // peer knows us by the host they connect to — use their entry's perspective
-    // Actually: we don't know our own external IP. Include callback as our self.name — remote looks us up in its peers.json
-    const callbackUrl = `callback://${config.self.name}`;
+    // Callback: remote peer looks us up in its peers.json by name
 
     logDebug(TAG, `→ peer_delegate ${peer}: priority=${opts?.priority ?? "MEDIUM"}, goal=${goal.length}ch`);
     logTrace(TAG, `→ peer_delegate ${peer} goal: ${goal.slice(0, 300)}`);

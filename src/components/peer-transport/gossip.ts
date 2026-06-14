@@ -99,7 +99,7 @@ function broadcast(): void {
   logTrace(TAG, `Broadcast to ${Object.keys(config.peers).length} peer(s)`);
   // Expire stale entries
   const now = Date.now();
-  for (const [name, health] of peerTable) {
+  for (const [, health] of peerTable) {
     health.alive = (now - health.lastSeen) < TTL_MS;
   }
 }
@@ -178,3 +178,14 @@ export const startGossipListener = startGossip;
 
 /** Alias for http-transport compatibility. */
 export const getAlivePeers = getPeerTable;
+
+/** Alias for phase-heartbeat compatibility. */
+export const gossipBroadcast = broadcast;
+
+/** Alias: update broadcast interval (resets the internal timer). */
+export function setGossipInterval(ms: number): void {
+  if (_interval) { clearInterval(_interval); _interval = setInterval(broadcast, ms); }
+}
+
+/** Alias for stopGossip. */
+export const stopGossipListener = stopGossip;

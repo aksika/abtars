@@ -82,6 +82,9 @@ export class SubagentRuntime {
   /** Set session manager for auto-spawn sub-session creation (#510). */
   setSessionManager(mgr: import("./spin.js").Spin): void { this._sessionManager = mgr; }
 
+  /** Get session manager (may be null before boot completes). */
+  get sessionManager(): import("./spin.js").Spin | null { return this._sessionManager; }
+
   /** Enable Docker sandbox for W/B/C sessions (#478). */
   setSandboxEnabled(enabled: boolean): void { this._sandboxEnabled = enabled; }
 

@@ -8,7 +8,7 @@
 
 import type { ToolDefinition } from "./tool-registry.js";
 import { getPeerTransport } from "../peer-transport/index.js";
-import { kanbanEnqueue, kanbanUpdate, kanbanComplete, kanbanFail } from "../tasks/kanban-board.js";
+import { kanbanEnqueue } from "../tasks/kanban-board.js";
 import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 
 const TAG = "peer-delegate";
@@ -95,7 +95,7 @@ export const peerCheckTool: ToolDefinition = {
   },
   async execute(args: Record<string, string>): Promise<string> {
     const peer = args.peer;
-    const taskId = parseInt(args.task_id, 10);
+    const taskId = parseInt(args.task_id ?? "", 10);
     if (!peer || isNaN(taskId)) return JSON.stringify({ error: "peer and task_id are required" });
 
     try {
@@ -122,7 +122,7 @@ export const peerTerminateTool: ToolDefinition = {
   },
   async execute(args: Record<string, string>): Promise<string> {
     const peer = args.peer;
-    const taskId = parseInt(args.task_id, 10);
+    const taskId = parseInt(args.task_id ?? "", 10);
     if (!peer || isNaN(taskId)) return JSON.stringify({ error: "peer and task_id are required" });
 
     try {

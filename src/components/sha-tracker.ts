@@ -5,7 +5,7 @@
  * Self:   ~/.abtars/config/sha-policy-self.json (agent-generated, preserved across updates)
  * State:  ~/.abtars/state/sha-state.json (runtime, deletable for fresh start)
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { logDebug, logWarn } from "./logger.js";

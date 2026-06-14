@@ -26,7 +26,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "heartbeat", description: "Heartbeat diagnostics" },
   { name: "memory", description: "Memory stats" },
   { name: "skills", description: "List active skills" },
-  { name: "skill", description: "Reload skills catalog" },
+  { name: "skill", description: "List skills (reload: /skill reload)" },
   { name: "tasks", description: "Scheduled tasks" },
   { name: "facts", description: "Core knowledge" },
   { name: "nlm", description: "Knowledge base" },

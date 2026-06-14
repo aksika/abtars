@@ -11,7 +11,7 @@
 import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo } from "./logger.js";
 import { getLogFile } from "./logger.js";
 import { abtarsHome } from "../paths.js";
 import { logAndSwallow } from "./log-and-swallow.js";
@@ -112,7 +112,7 @@ export function createSelfHealerTask(
   return task;
 }
 
-function handleKnownFault(rule: FixRule, errorKey: string, adapter: TelegramAdapter, chatId: string, dryRun: boolean): void {
+function handleKnownFault(rule: FixRule, _errorKey: string, adapter: TelegramAdapter, chatId: string, dryRun: boolean): void {
   if (!shouldAttempt("autofix-known", rule.pattern)) return;
 
   if (dryRun) {
