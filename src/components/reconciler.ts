@@ -19,7 +19,8 @@ const MAX_RETRIES = 3;
 const MAX_WORKERS = 10;
 const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 const STALE_MS = 5 * 60 * 1000;
-const REMOTE_POLL_INTERVAL_MS = 15_000;
+const REMOTE_POLL_INTERVAL_MS = 30_000;
+const REMOTE_MAX_POLLS = 30; // 30 × 30s = 15min, then mark failed
 
 let _lastRemotePoll = 0;
 
@@ -131,6 +132,14 @@ async function pollRemoteCards(): Promise<void> {
     try {
       const meta = JSON.parse(card.notes ?? "{}") as { peer?: string; remote_task_id?: number };
       if (!meta.peer || !meta.remote_task_id) continue;
+
+      // Max poll limit: if card has been running longer than REMOTE_MAX_POLLS × interval, give up
+      const cardAge = Date.now() - new Date(card.created_at).getTime();
+      if (cardAge > REMOTE_MAX_POLLS * REMOTE_POLL_INTERVAL_MS) {
+        kanbanFail(card.id, `remote task timeout (${Math.round(cardAge / 60000)}min, no callback received)`);
+        logWarn(TAG, `Remote card ${card.id} (${meta.peer}#${meta.remote_task_id}) timed out after ${Math.round(cardAge / 60000)}min`);
+        continue;
+      }
 
       const result = await transport.checkTask(meta.peer, meta.remote_task_id);
       if (result.status === "done") {
