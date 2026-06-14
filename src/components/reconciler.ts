@@ -12,17 +12,23 @@ import {
   kanbanGetCard, kanbanGetChildren, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn } from "./logger.js";
+import { getPeerTransport } from "./peer-transport/index.js";
 
 const TAG = "reconciler";
 const MAX_RETRIES = 3;
 const MAX_WORKERS = 10;
 const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 const STALE_MS = 5 * 60 * 1000;
+const REMOTE_POLL_INTERVAL_MS = 15_000;
+
+let _lastRemotePoll = 0;
 
 export function startReconciler(): void {
   nerve.on("card:done", reconcile);
   nerve.on("card:failed", reconcile);
   nerve.on("card:queued", reconcile);
+  // Poll remote cards periodically (no Nerve events for remote state changes)
+  setInterval(pollRemoteCards, REMOTE_POLL_INTERVAL_MS);
   logInfo(TAG, "Reconciler started");
 }
 
@@ -112,4 +118,29 @@ function abortProject(projectId: number, children: KanbanCard[], reason: string)
 function isStale(card: KanbanCard): boolean {
   const lastActivity = new Date(card.updated_at).getTime();
   return Date.now() - lastActivity > STALE_MS;
+}
+
+/** Poll remote peer tasks for status updates. */
+async function pollRemoteCards(): Promise<void> {
+  const remoteCards = kanbanList("running", "status").filter(c => c.type === "remote");
+  if (remoteCards.length === 0) return;
+
+  const transport = getPeerTransport();
+  for (const card of remoteCards) {
+    try {
+      const meta = JSON.parse(card.notes ?? "{}") as { peer?: string; remote_task_id?: number };
+      if (!meta.peer || !meta.remote_task_id) continue;
+
+      const result = await transport.checkTask(meta.peer, meta.remote_task_id);
+      if (result.status === "done") {
+        kanbanComplete(card.id, null, result.result?.slice(0, 500) ?? "completed");
+        logInfo(TAG, `Remote card ${card.id} (${meta.peer}#${meta.remote_task_id}) → done`);
+      } else if (result.status === "failed") {
+        kanbanFail(card.id, result.error ?? "remote task failed");
+        logInfo(TAG, `Remote card ${card.id} (${meta.peer}#${meta.remote_task_id}) → failed`);
+      }
+    } catch (err) {
+      logWarn(TAG, `Remote poll failed for card ${card.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 }

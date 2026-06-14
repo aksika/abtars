@@ -598,10 +598,11 @@ const secretGetTool: ToolDefinition = {
 import { skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool } from "./skill-authoring.js";
 import { mcpTool } from "./mcp-tool.js";
 import { getDelegationTools } from "./delegation-tools.js";
+import { getPeerDelegationTools } from "./peer-delegation-tools.js";
 import { kanbanTool } from "./kanban-tool.js";
 import { channelPostTool, channelReadTool } from "./channel-tool.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, ...getDelegationTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, ...getDelegationTools(), ...getPeerDelegationTools()];
 
 export function getToolDefinitions(): ToolDefinition[] { return ALL_TOOLS; }
 
