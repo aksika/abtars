@@ -566,7 +566,7 @@ export async function handleInboundMessage(
       logWarn(TAG, `Model not found for ${activeSessionId}: ${err.message}`);
       await adapter.sendMessage(channelId, `❌ ${err.message}\nUse /model to switch.`, { threadId: msg.threadId });
     } else {
-      logError(TAG, `Error for ${activeSessionId} — ${err instanceof Error ? err.message : JSON.stringify(err)}`);
+      logError(TAG, `Error for ${activeSessionId} — ${err instanceof Error ? err.message : JSON.stringify(err)}${(err as any)?.code ? ` (code=${(err as any).code})` : ""}`);
     }
     if (adapter.setReaction && msg.messageId) {
       await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
