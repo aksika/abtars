@@ -76,6 +76,7 @@ export class AgentApiServer {
   private runtime: SubagentRuntime;
   private guestName = "GUEST";
   private onPeerActivity?: (msg: string) => void;
+  private tlsEnabled = false;
 
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
@@ -97,6 +98,7 @@ export class AgentApiServer {
           minVersion: "TLSv1.3",
         }, (req: IncomingMessage, res: ServerResponse) => this.handle(req, res));
         hasTls = true;
+        this.tlsEnabled = true;
         logInfo(TAG, "TLS 1.3 enabled for agent-api (self-signed cert)");
       } catch (err) { logAndSwallow(TAG, "TLS setup", err); }
     } else {
@@ -444,7 +446,8 @@ export class AgentApiServer {
     }
 
     logInfo(TAG, `Peer call: ${caller} → ${this.config.agentCodename} [${commsType}]`);
-    this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} [${commsType}]`);
+    const secLabel = `${this.tlsEnabled ? "tls" : "http"}+${commsType === "signed" ? "signed" : "jwt"}`;
+    this.onPeerActivity?.(`🤖 Agents: ${caller} → ${this.config.agentCodename} [${secLabel}]`);
 
     // #678 — Injection scan on peer message content
     if (lastMsg?.content) {
