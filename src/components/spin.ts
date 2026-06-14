@@ -4,7 +4,7 @@
  */
 
 import { logInfo, logWarn, logTrace } from "./logger.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, isUnblocked } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
@@ -345,6 +345,8 @@ export class Spin {
     for (const card of queued) {
       // #897: respect retry backoff
       if ((card as any).next_retry_at && (card as any).next_retry_at > now) continue;
+      // #677: respect DAG dependencies
+      if (!isUnblocked(card)) continue;
       const type = (card.type as SessionType) ?? "T";
       if (this.canDispatch(type, card.id)) {
         this.dispatch({ type, goal: card.title, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id });

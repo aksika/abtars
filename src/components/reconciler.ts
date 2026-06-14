@@ -9,7 +9,7 @@ import { nerve } from "./nerve.js";
 import { spin } from "./spin.js";
 import {
   kanbanList, kanbanFail, kanbanComplete, kanbanUpdate,
-  kanbanGetCard, kanbanGetChildren, type KanbanCard,
+  kanbanGetCard, kanbanGetChildren, isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { getPeerTransport } from "./peer-transport/index.js";
@@ -72,6 +72,7 @@ function reconcileProject(projectId: number): void {
     totalRetries += retries;
 
     if (card.status === "queued") {
+      if (!isUnblocked(card)) continue;
       spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: projectId });
     }
 
@@ -79,6 +80,9 @@ function reconcileProject(projectId: number): void {
       logInfo(TAG, `Retrying card ${card.id} (attempt ${retries + 1}/${MAX_RETRIES})`);
       kanbanUpdate(card.id, { status: "queued" });
       spin.dispatch({ type: "W", goal: card.notes || card.title, source: "agent", cardId: card.id, parentCardId: projectId });
+    } else if (card.status === "failed" && retries >= MAX_RETRIES) {
+      // Permanent failure — cascade to downstream cards
+      cascadeFail(card.id, children);
     }
 
     if (card.status === "running" && isStale(card)) {

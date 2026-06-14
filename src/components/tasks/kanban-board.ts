@@ -30,7 +30,7 @@ export interface KanbanCard {
   due_at: string | null;
   labels: string | null;
   parent_id: number | null;
-  blocked_by: number | null;
+  blocked_by: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -68,7 +68,7 @@ function db(): SqliteDb {
       due_at TEXT,
       labels TEXT,
       parent_id INTEGER REFERENCES kanban_board(id),
-      blocked_by INTEGER REFERENCES kanban_board(id),
+      blocked_by TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       completed_at TEXT,
@@ -87,13 +87,13 @@ function db(): SqliteDb {
 
 import { nerve } from "../nerve.js";
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "announce" }): number {
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "announce"; blocked_by?: string }): number {
   const mode = opts?.deliveryMode ?? (source === "user" ? "announce" : "silent");
   const stmt = db().prepare(
-    `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes, delivery_mode)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes, delivery_mode, blocked_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, mode);
+  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, mode, opts?.blocked_by ?? null);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;
@@ -233,4 +233,34 @@ export function kanbanProgress(id: number, data: { toolUseCount?: number; tokenC
       _progressPending.delete(id);
     }
   }, 30_000));
+}
+
+// ── DAG orchestration (#677) ─────────────────────────────────────────────────
+
+/** Check if all dependencies of a card are satisfied. */
+export function isUnblocked(card: KanbanCard): boolean {
+  if (!card.blocked_by) return true;
+  if (card.blocked_by === "children") {
+    const kids = kanbanGetChildren(card.id);
+    return kids.length > 0 && kids.every(k => k.status === "done" || k.status === "delivered");
+  }
+  const depIds = card.blocked_by.split(",").map(Number).filter(n => !isNaN(n));
+  if (depIds.length === 0) return true;
+  return depIds.every(id => {
+    const dep = kanbanGetCard(id);
+    return dep?.status === "done" || dep?.status === "delivered";
+  });
+}
+
+/** Cascade-fail all cards depending (transitively) on a failed card. */
+export function cascadeFail(failedId: number, projectCards: KanbanCard[]): void {
+  for (const card of projectCards) {
+    if (card.status !== "queued") continue;
+    if (!card.blocked_by) continue;
+    const deps = card.blocked_by.split(",").map(Number).filter(n => !isNaN(n));
+    if (deps.includes(failedId)) {
+      kanbanFail(card.id, `upstream #${failedId} failed`);
+      cascadeFail(card.id, projectCards);
+    }
+  }
 }
