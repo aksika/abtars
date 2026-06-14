@@ -115,12 +115,27 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   if (masterUser && transport) {
     const masterChatId = masterUser.platforms.telegram ?? masterUser.platforms.discord;
     if (masterChatId) {
+      const numericChatId = typeof masterChatId === "number" ? masterChatId : parseInt(String(masterChatId), 10);
       spin.registerMasterSession({
         userId: masterUser.userId,
-        chatId: typeof masterChatId === "number" ? masterChatId : parseInt(String(masterChatId), 10),
+        chatId: numericChatId,
         platform: masterUser.platforms.telegram ? "telegram" : "discord",
         transport,
       });
+      // #964: Session created → model greets (through normal pipeline)
+      if (ctx.telegramAdapter) {
+        ctx.telegramAdapter.injectMessage({
+          platform: "telegram",
+          channelId: String(numericChatId),
+          userId: masterUser.userId,
+          senderId: String(numericChatId),
+          senderName: masterUser.userId,
+          text: "[SESSION START] You just came online. Greet the user.",
+          timestamp: Date.now(),
+          isGroup: false,
+          isVoice: false,
+        });
+      }
     }
   }
 
@@ -258,28 +273,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
         }
       } catch (err) { logWarn("main", `Back online notification failed: ${err}`); }
     }, 3000);
-    // Startup greeting via spin.inject
-    setTimeout(async () => {
-      if (!ctx.telegramAdapter) return;
-      const greetPrompt = "You just came online. Output ONLY a personalized greeting message.";
-      const deliver = async (): Promise<boolean> => {
-        const response = await spin.inject(masterUser?.userId ?? "master", greetPrompt, { deliver: true });
-        if (response && ctx.telegramAdapter) {
-          const { cleanResponse } = await import("../components/clean-response.js");
-          const { text: clean } = cleanResponse(response);
-          if (clean) await ctx.telegramAdapter.sendMessage(String(config.mainChatId), clean);
-          return true;
-        }
-        return false;
-      };
-      try {
-        if (await deliver()) { logInfo("main", "✅ Startup greeting delivered"); return; }
-        logWarn("main", "Startup greeting attempt 1 returned null — retrying in 5s");
-        await new Promise(r => setTimeout(r, 5000));
-        if (await deliver()) { logInfo("main", "✅ Startup greeting delivered (retry)"); }
-        else { logWarn("main", "Startup greeting retry also returned null"); }
-      } catch (err) { logWarn("main", `Startup greeting failed: ${err}`); }
-    }, 10_000);
+
   }
 
   return "ran";
