@@ -115,27 +115,12 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   if (masterUser && transport) {
     const masterChatId = masterUser.platforms.telegram ?? masterUser.platforms.discord;
     if (masterChatId) {
-      const numericChatId = typeof masterChatId === "number" ? masterChatId : parseInt(String(masterChatId), 10);
       spin.registerMasterSession({
         userId: masterUser.userId,
-        chatId: numericChatId,
+        chatId: typeof masterChatId === "number" ? masterChatId : parseInt(String(masterChatId), 10),
         platform: masterUser.platforms.telegram ? "telegram" : "discord",
         transport,
       });
-      // #964: Session created → model greets (through normal pipeline)
-      if (ctx.telegramAdapter) {
-        ctx.telegramAdapter.injectMessage({
-          platform: "telegram",
-          channelId: String(numericChatId),
-          userId: masterUser.userId,
-          senderId: String(numericChatId),
-          senderName: masterUser.userId,
-          text: "[SESSION START] You just came online. Greet the user.",
-          timestamp: Date.now(),
-          isGroup: false,
-          isVoice: false,
-        });
-      }
     }
   }
 
