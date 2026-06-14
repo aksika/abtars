@@ -97,7 +97,6 @@ interface WizardAnswers {
   readonly bedTime: string;
   readonly wakeTime: string;
   readonly groqApiKey: string;
-  readonly embeddingEnabled: boolean;
   readonly securityMode: string;
   readonly trustMode: boolean;
 }
@@ -281,7 +280,6 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   if (isCancel(groqApiKey)) { cancel('Cancelled.'); return null; }
 
   // 12b. Embeddings — handled by `abmind install`, not here
-  const embeddingEnabled = false;
 
   // 13. Summary + confirmation
   const mask = (s: string): string => s ? (s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-4)}` : '***') : '(skipped)';
@@ -302,7 +300,6 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     `  Bed time:            ${String(bedTime ?? '') || '(default 0:30)'}`,
     `  Wake time:           ${String(wakeTime ?? '') || '(default 7:00)'}`,
     `  GROQ_API_KEY:        ${mask(String(groqApiKey ?? ''))}`,
-    `  Embeddings:          ${embeddingEnabled ? 'enabled' : 'disabled'}`,
     `  Trust mode:          ${trustMode ? 'true (auto-approve)' : 'false (prompt user)'}`,
     '',
   ];
@@ -329,7 +326,6 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     bedTime: String(bedTime ?? '').trim(),
     wakeTime: String(wakeTime ?? '').trim(),
     groqApiKey: String(groqApiKey ?? '').trim() || existing?.groqApiKey || '',
-    embeddingEnabled: false,
     securityMode: String(securityMode ?? 'guardrails'),
     trustMode: trustMode === true,
   };
@@ -377,7 +373,6 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     bedTime: '',
     wakeTime: '',
     groqApiKey: '',
-    embeddingEnabled: false,
     securityMode: 'guardrails',
     trustMode: true,
   };
@@ -410,7 +405,6 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       bedTime: kv.get('BED_TIME') ?? '',
       wakeTime: kv.get('WAKE_TIME') ?? '',
       groqApiKey: kv.get('GROQ_API_KEY') ?? '',
-      embeddingEnabled: kv.get('EMBEDDING_ENABLED') === 'true',
       securityMode: kv.get('SECURITY_MODE') ?? 'guardrails',
       trustMode: kv.get('TRUST_MODE') === 'true',
     };
@@ -424,7 +418,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'MAIN_CHAT_ID',
     'DISCORD_APP_ID', 'DISCORD_A2A_CHANNEL_ID',
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
-    'BED_TIME', 'WAKE_TIME', 'HEARTBEAT_INTERVAL_SEC', 'EMBEDDING_ENABLED', 'TRUST_MODE',
+    'BED_TIME', 'WAKE_TIME', 'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
     'TELEGRAM_ENABLED', 'DISCORD_ENABLED', 'IRC_ENABLED',
   ]);
   const keptLines: string[] = [];
@@ -448,7 +442,6 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   if (answers.bedTime) newBlock.push(`BED_TIME=${answers.bedTime}`);
   if (answers.wakeTime) newBlock.push(`WAKE_TIME=${answers.wakeTime}`);
   newBlock.push(`HEARTBEAT_INTERVAL_SEC=300`);
-  newBlock.push(`EMBEDDING_ENABLED=${answers.embeddingEnabled ? 'true' : 'false'}`);
   newBlock.push(`SECURITY_MODE=${answers.securityMode}`);
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
   newBlock.push(`TELEGRAM_ENABLED=${answers.telegramToken ? 'true' : 'false'}`);
