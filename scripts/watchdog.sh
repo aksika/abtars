@@ -161,13 +161,13 @@ spawn_bridge() {
         log "❌ Auto-rollback also failed"
         notify "❌ Auto-rollback to $ROLLED_VER also failed. Manual intervention required."
         rm -f "$WD_LOCK"
-        exit 1
+        exit 0  # intentional stop — launchd must NOT restart
       fi
     else
       log "🚨 CIRCUIT BREAKER — ${CIRCUIT_MAX} restarts in ${CIRCUIT_WINDOW}s, no prior version available"
       notify "🚨 Watchdog circuit breaker tripped — no rollback available, manual intervention needed"
       rm -f "$WD_LOCK"
-      exit 1
+      exit 0  # intentional stop — launchd must NOT restart
     fi
   fi
 
