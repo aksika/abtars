@@ -23,7 +23,7 @@ import type { HeartbeatTask } from "abmind";
 import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
 
 const BLACKLIST = [
-  "-32603", "Transient error", "Internal error", "fetch failed",
+  "-32603", "Transient error", "fetch failed",
   "[self-healer]", "[watchdog]", "[db-integrity]",
   "ECONNRESET", "ETIMEDOUT", "socket hang up",
   "auto-approved", "permission",
