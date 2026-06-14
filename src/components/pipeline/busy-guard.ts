@@ -63,7 +63,7 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
       logWarn("busy-guard", `Queue overflow for ${activeId} — dropped ${dropped} oldest message(s)`);
     }
     entry.queue.push({ msg, adapter });
-    logDebug("busy-guard", `Queued "${ctx.text.slice(0, 40)}" for ${activeId} (${entry.queue.length} pending)`);
+    logInfo("busy-guard", `Queued "${ctx.text.slice(0, 40)}" for ${activeId} (${entry.queue.length} pending)`);
     if (!ctx.deferReply) {
       if (entry.compacting) {
         try { await adapter.sendMessage(msg.channelId, "☕ Hold on, just tidying up my thoughts over coffee... I'll get to you in a moment!", { threadId: msg.threadId }); }

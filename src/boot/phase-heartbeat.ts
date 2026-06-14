@@ -232,6 +232,21 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     heartbeat.registerTask({ name: "spin-tick", execute: () => spin.tick() });
   }).catch(err => logAndSwallow(TAG, "spin-tick", err));
 
+  // #985: Force-clear stuck busy flags (self-healing after greeting/prompt errors)
+  if (pipelineDeps) {
+    const sessions = pipelineDeps.sessions;
+    heartbeat.registerTask({ name: "busy-unstick", execute: () => {
+      const now = Date.now();
+      for (const key of sessions.keys()) {
+        const entry = sessions.get(key);
+        if (entry?.busy && entry.lastActiveAt && now - entry.lastActiveAt > 60_000) {
+          entry.busy = false;
+          logWarn(TAG, `Force-cleared stuck busy on ${key} (>60s)`);
+        }
+      }
+    }});
+  }
+
   // #971: Gossip health broadcast — fires every tick
   import("../components/peer-transport/gossip.js").then(({ gossipBroadcast, setGossipInterval }) => {
     setGossipInterval(heartbeat.intervalMs);
