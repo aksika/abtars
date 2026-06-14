@@ -19,17 +19,12 @@ const MAX_RETRIES = 3;
 const MAX_WORKERS = 10;
 const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 const STALE_MS = 5 * 60 * 1000;
-const REMOTE_POLL_INTERVAL_MS = 30_000;
-const REMOTE_MAX_POLLS = 30; // 30 × 30s = 15min, then mark failed
-
-let _lastRemotePoll = 0;
+const REMOTE_MAX_AGE_MS = 15 * 60 * 1000; // 15min timeout for remote tasks
 
 export function startReconciler(): void {
   nerve.on("card:done", reconcile);
   nerve.on("card:failed", reconcile);
   nerve.on("card:queued", reconcile);
-  // Poll remote cards periodically (no Nerve events for remote state changes)
-  setInterval(pollRemoteCards, REMOTE_POLL_INTERVAL_MS);
   logInfo(TAG, "Reconciler started");
 }
 
@@ -121,8 +116,8 @@ function isStale(card: KanbanCard): boolean {
   return Date.now() - lastActivity > STALE_MS;
 }
 
-/** Poll remote peer tasks for status updates. */
-async function pollRemoteCards(): Promise<void> {
+/** Poll remote peer tasks for status updates. Registered as HB task. */
+export async function pollRemoteCards(): Promise<void> {
   const remoteCards = kanbanList("running", "status").filter(c => c.type === "remote");
   if (remoteCards.length === 0) return;
 
@@ -133,9 +128,8 @@ async function pollRemoteCards(): Promise<void> {
       const meta = JSON.parse(card.notes ?? "{}") as { peer?: string; remote_task_id?: number };
       if (!meta.peer || !meta.remote_task_id) continue;
 
-      // Max poll limit: if card has been running longer than REMOTE_MAX_POLLS × interval, give up
       const cardAge = Date.now() - new Date(card.created_at).getTime();
-      if (cardAge > REMOTE_MAX_POLLS * REMOTE_POLL_INTERVAL_MS) {
+      if (cardAge > REMOTE_MAX_AGE_MS) {
         kanbanFail(card.id, `remote task timeout (${Math.round(cardAge / 60000)}min, no callback received)`);
         logWarn(TAG, `Remote card ${card.id} (${meta.peer}#${meta.remote_task_id}) timed out after ${Math.round(cardAge / 60000)}min`);
         continue;

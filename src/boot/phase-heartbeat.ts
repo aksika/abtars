@@ -223,7 +223,11 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   heartbeat.registerTask(createUserSessionExpiryTask());
 
   // #896: Orc reconciliation loop — self-healing via Nerve events
-  import("../components/reconciler.js").then(({ startReconciler }) => startReconciler()).catch(err => logAndSwallow(TAG, "reconciler", err));
+  // #973: remote-card polling absorbed into HB (no standalone setInterval)
+  import("../components/reconciler.js").then(({ startReconciler, pollRemoteCards }) => {
+    startReconciler();
+    heartbeat.registerTask({ name: "remote-card-poll", execute: pollRemoteCards });
+  }).catch(err => logAndSwallow(TAG, "reconciler", err));
 
   // #440: update check (npm registry, notify if newer version)
   heartbeat.registerTask(createUpdateCheckTask((msg) => {
