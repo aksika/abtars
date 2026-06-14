@@ -152,9 +152,10 @@ export class Spin {
     if (this._greetingSent || !this._greetingAdapter || !this._masterOpts) return;
     this._greetingSent = true;
     const { userId, chatId, platform } = this._masterOpts;
-    // Delay 3s — let transport complete first RPC handshake
-    setTimeout(() => {
-      this._greetingAdapter!.injectMessage({
+    const session = this.getActiveSession(userId, platform);
+    const adapter = this._greetingAdapter!;
+    const inject = (): void => {
+      adapter.injectMessage({
         platform,
         channelId: String(chatId),
         userId,
@@ -165,7 +166,19 @@ export class Spin {
         isGroup: false,
         isVoice: false,
       });
-    }, 3000);
+    };
+    // Poll transport readiness — ACP needs handshake, DirectAPI is instant
+    const poll = setInterval(() => {
+      if (session.transport?.isConnected) {
+        clearInterval(poll);
+        clearTimeout(giveUp);
+        inject();
+      }
+    }, 500);
+    const giveUp = setTimeout(() => {
+      clearInterval(poll);
+      logWarn(TAG, "Greeting skipped — transport not ready after 15s");
+    }, 15_000);
   }
 
   async resolveSession(userId: string, platform: string, chatId: number): Promise<ManagedSession> {
