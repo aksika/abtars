@@ -26,6 +26,11 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
   const notifyPeer = (msg: string): void => { sendNotification(ctx, msg); };
   setPeerActivityCallback(notifyPeer);
 
+  // #978: Create A2A platform adapter (routes peer chat through pipeline/Spin)
+  const { AgentApiAdapter } = await import("../platforms/agent-api/agent-api-adapter.js");
+  const a2aAdapter = new AgentApiAdapter();
+  if (ctx.pipelineDeps) a2aAdapter.setPipeline(ctx.pipelineDeps);
+
   registry.register("agent-api", {
     configured: Boolean(agentConfig.port),
     async create() {
@@ -36,6 +41,7 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
         memory,
         runtime,
         onPeerActivity: notifyPeer,
+        a2aAdapter,
       });
       ctx.agentApiServer = agentApiServer;
       return {
