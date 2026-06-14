@@ -464,16 +464,26 @@ async function checkForUpdates(home: string, opts: UpdateOptions): Promise<numbe
   const { spawnSync } = await import('node:child_process');
   spawnSync('git', ['fetch', '--quiet'], { cwd: repoRoot });
   const result = spawnSync('git', ['rev-list', '--count', 'HEAD..origin/dev'], { cwd: repoRoot, encoding: 'utf-8' });
-  const ahead = parseInt(result.stdout?.trim() ?? '0', 10);
+  const abtarsAhead = parseInt(result.stdout?.trim() ?? '0', 10);
+
+  // Also check abmind sibling repo (#963)
+  const abmindRepo = process.env['ABMIND_REPO'] ?? join(repoRoot, '..', 'abmind');
+  let abmindAhead = 0;
+  if (existsSync(join(abmindRepo, '.git'))) {
+    spawnSync('git', ['fetch', '--quiet'], { cwd: abmindRepo });
+    const abmindResult = spawnSync('git', ['rev-list', '--count', 'HEAD..origin/dev'], { cwd: abmindRepo, encoding: 'utf-8' });
+    abmindAhead = parseInt(abmindResult.stdout?.trim() ?? '0', 10);
+  }
 
   const manifest = await readManifest(join(home, 'manifest.json'));
   process.stdout.write(`Current: ${manifest?.version ?? 'unknown'} (deployed ${manifest?.activatedAt ?? 'never'})\n`);
 
-  if (ahead === 0) {
+  if (abtarsAhead === 0 && abmindAhead === 0) {
     process.stdout.write(`Remote:  up to date\n`);
     return 0;
   }
-  process.stdout.write(`Remote:  dev is ${ahead} commit${ahead === 1 ? '' : 's'} ahead\n`);
+  if (abtarsAhead > 0) process.stdout.write(`Remote:  abtars dev is ${abtarsAhead} commit${abtarsAhead === 1 ? '' : 's'} ahead\n`);
+  if (abmindAhead > 0) process.stdout.write(`Remote:  abmind dev is ${abmindAhead} commit${abmindAhead === 1 ? '' : 's'} ahead\n`);
   process.stdout.write(`Action:  run 'abtars update' to apply\n`);
   return 2; // exit 2 = behind (not error, informational — per AG1 review)
 }
