@@ -4,7 +4,7 @@
  */
 
 import { logInfo, logWarn } from "./logger.js";
-import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanRetryOrFail, kanbanList, isUnblocked } from "./tasks/kanban-board.js";
+import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOrFail, kanbanList, kanbanGetCard, isUnblocked } from "./tasks/kanban-board.js";
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
@@ -119,6 +119,9 @@ export class Spin {
 
   // ── Interactive session lifecycle ──────────────────────────────────────
 
+  private _greetingSent = false;
+  private _greetingAdapter: { injectMessage: (msg: any) => void } | null = null;
+
   registerMasterSession(opts: { userId: string; chatId: number; platform: string; transport: IKiroTransport }): void {
     const session = this.getActiveSession(opts.userId, opts.platform);
     session.transport = opts.transport;
@@ -131,6 +134,38 @@ export class Spin {
     session.pid = t?._rawClient?.pid ?? t?.agent?.pid ?? undefined;
     pushLog(session, "master transport attached");
     logInfo(TAG, `Master session registered: ${opts.userId} (${opts.platform}:${opts.chatId}${session.pid ? ` pid=${session.pid}` : ""})`);
+
+    // #980: Fire greeting once adapter is set (deferred via setGreetingAdapter)
+    this._masterOpts = { userId: opts.userId, chatId: opts.chatId, platform: opts.platform };
+    this.tryFireGreeting();
+  }
+
+  /** Set the adapter for boot greeting. Called after platforms are up. */
+  setGreetingAdapter(adapter: { injectMessage: (msg: any) => void }): void {
+    this._greetingAdapter = adapter;
+    this.tryFireGreeting();
+  }
+
+  private _masterOpts: { userId: string; chatId: number; platform: string } | null = null;
+
+  private tryFireGreeting(): void {
+    if (this._greetingSent || !this._greetingAdapter || !this._masterOpts) return;
+    this._greetingSent = true;
+    const { userId, chatId, platform } = this._masterOpts;
+    // Delay 3s — let transport complete first RPC handshake
+    setTimeout(() => {
+      this._greetingAdapter!.injectMessage({
+        platform,
+        channelId: String(chatId),
+        userId,
+        senderId: String(chatId),
+        senderName: userId,
+        text: "[SESSION START] You just came online. Greet the user.",
+        timestamp: Date.now(),
+        isGroup: false,
+        isVoice: false,
+      });
+    }, 3000);
   }
 
   async resolveSession(userId: string, platform: string, chatId: number): Promise<ManagedSession> {
@@ -351,6 +386,51 @@ export class Spin {
       if (this.canDispatch(type, card.id)) {
         this.dispatch({ type, goal: card.title, source: (card.source as SpinRequest["source"]) ?? "task", cardId: card.id });
       }
+    }
+  }
+
+  /** Periodic housekeeping — registered as HB task (#980). */
+  async tick(): Promise<void> {
+    this.drainQueued();
+    this.checkStaleWorkers();
+    await this.pollRemoteCards();
+  }
+
+  private checkStaleWorkers(): void {
+    const STALE_MS = parseInt(process.env["WORKER_STALE_MS"] || "300000", 10);
+    const now = Date.now();
+    for (const [, cardIds] of this.running) {
+      for (const cardId of cardIds) {
+        const card = kanbanGetCard(cardId);
+        if (!card || card.status !== "running") continue;
+        const lastActivity = new Date(card.updated_at).getTime();
+        if (now - lastActivity > STALE_MS) {
+          logWarn(TAG, `Stale card ${cardId} (${Math.round((now - lastActivity) / 1000)}s no activity) — failing`);
+          kanbanFail(cardId, "stale — no activity");
+        }
+      }
+    }
+  }
+
+  private async pollRemoteCards(): Promise<void> {
+    const remoteCards = kanbanList("running", "status").filter(c => c.type === "remote");
+    if (remoteCards.length === 0) return;
+    const { getPeerTransport } = await import("./peer-transport/index.js");
+    const transport = getPeerTransport();
+    const REMOTE_MAX_AGE_MS = 15 * 60 * 1000;
+    for (const card of remoteCards) {
+      try {
+        const meta = JSON.parse(card.notes ?? "{}") as { peer?: string; remote_task_id?: number };
+        if (!meta.peer || !meta.remote_task_id) continue;
+        const cardAge = Date.now() - new Date(card.created_at).getTime();
+        if (cardAge > REMOTE_MAX_AGE_MS) {
+          kanbanFail(card.id, `remote task timeout (${Math.round(cardAge / 60000)}min)`);
+          continue;
+        }
+        const result = await transport.checkTask(meta.peer, meta.remote_task_id);
+        if (result.status === "done") kanbanComplete(card.id, null, result.result?.slice(0, 500) ?? "completed");
+        else if (result.status === "failed") kanbanFail(card.id, result.error ?? "remote task failed");
+      } catch {}
     }
   }
 

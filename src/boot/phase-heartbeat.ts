@@ -223,11 +223,14 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   heartbeat.registerTask(createUserSessionExpiryTask());
 
   // #896: Orc reconciliation loop — self-healing via Nerve events
-  // #973: remote-card polling absorbed into HB (no standalone setInterval)
-  import("../components/reconciler.js").then(({ startReconciler, pollRemoteCards }) => {
+  import("../components/reconciler.js").then(({ startReconciler }) => {
     startReconciler();
-    heartbeat.registerTask({ name: "remote-card-poll", execute: pollRemoteCards });
   }).catch(err => logAndSwallow(TAG, "reconciler", err));
+
+  // #980: Spin periodic tick — drain retries, stale workers, remote-poll
+  import("../components/spin.js").then(({ spin }) => {
+    heartbeat.registerTask({ name: "spin-tick", execute: () => spin.tick() });
+  }).catch(err => logAndSwallow(TAG, "spin-tick", err));
 
   // #971: Gossip health broadcast — fires every tick
   import("../components/peer-transport/gossip.js").then(({ gossipBroadcast, setGossipInterval }) => {

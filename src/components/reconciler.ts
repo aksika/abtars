@@ -11,15 +11,13 @@ import {
   kanbanList, kanbanFail, kanbanComplete, kanbanUpdate,
   kanbanGetCard, kanbanGetChildren, isUnblocked, cascadeFail, type KanbanCard,
 } from "./tasks/kanban-board.js";
-import { logInfo, logWarn, logDebug } from "./logger.js";
-import { getPeerTransport } from "./peer-transport/index.js";
+import { logInfo, logWarn } from "./logger.js";
 
 const TAG = "reconciler";
 const MAX_RETRIES = 3;
 const MAX_WORKERS = 10;
 const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 const STALE_MS = 5 * 60 * 1000;
-const REMOTE_MAX_AGE_MS = 15 * 60 * 1000; // 15min timeout for remote tasks
 
 export function startReconciler(): void {
   nerve.on("card:done", reconcile);
@@ -120,35 +118,4 @@ function isStale(card: KanbanCard): boolean {
   return Date.now() - lastActivity > STALE_MS;
 }
 
-/** Poll remote peer tasks for status updates. Registered as HB task. */
-export async function pollRemoteCards(): Promise<void> {
-  const remoteCards = kanbanList("running", "status").filter(c => c.type === "remote");
-  if (remoteCards.length === 0) return;
-
-  logDebug(TAG, `Polling ${remoteCards.length} remote card(s)`);
-  const transport = getPeerTransport();
-  for (const card of remoteCards) {
-    try {
-      const meta = JSON.parse(card.notes ?? "{}") as { peer?: string; remote_task_id?: number };
-      if (!meta.peer || !meta.remote_task_id) continue;
-
-      const cardAge = Date.now() - new Date(card.created_at).getTime();
-      if (cardAge > REMOTE_MAX_AGE_MS) {
-        kanbanFail(card.id, `remote task timeout (${Math.round(cardAge / 60000)}min, no callback received)`);
-        logWarn(TAG, `Remote card ${card.id} (${meta.peer}#${meta.remote_task_id}) timed out after ${Math.round(cardAge / 60000)}min`);
-        continue;
-      }
-
-      const result = await transport.checkTask(meta.peer, meta.remote_task_id);
-      if (result.status === "done") {
-        kanbanComplete(card.id, null, result.result?.slice(0, 500) ?? "completed");
-        logInfo(TAG, `Remote card ${card.id} (${meta.peer}#${meta.remote_task_id}) → done`);
-      } else if (result.status === "failed") {
-        kanbanFail(card.id, result.error ?? "remote task failed");
-        logInfo(TAG, `Remote card ${card.id} (${meta.peer}#${meta.remote_task_id}) → failed`);
-      }
-    } catch (err) {
-      logWarn(TAG, `Remote poll failed for card ${card.id}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-}
+// Remote card polling moved to spin.tick() (#980)

@@ -154,26 +154,10 @@ export async function startBridge(): Promise<number> {
     await fire("BridgeStart", { event: "BridgeStart", timestamp: new Date().toISOString(), sessionKey: "", platform: "", userId: "" });
   }
 
-  // #964: All subsystems UP → greet user through normal pipeline
+  // #980: Greeting fires via Spin when session is ready (not here — transport may not be handshaked yet)
   if (ctx.telegramAdapter) {
-    const { loadUsers } = await import("./components/user-registry.js");
-    const master = loadUsers().users.find(u => u.role === "master");
-    if (master) {
-      const chatId = master.platforms.telegram;
-      if (chatId) {
-        ctx.telegramAdapter.injectMessage({
-          platform: "telegram",
-          channelId: String(chatId),
-          userId: master.userId,
-          senderId: String(chatId),
-          senderName: master.userId,
-          text: "[SESSION START] You just came online. Greet the user.",
-          timestamp: Date.now(),
-          isGroup: false,
-          isVoice: false,
-        });
-      }
-    }
+    const { spin } = await import("./components/spin.js");
+    spin.setGreetingAdapter(ctx.telegramAdapter);
   }
 
   return bridge.waitForExit();
