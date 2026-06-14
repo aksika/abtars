@@ -110,8 +110,11 @@ export class HttpTransport implements PeerTransport {
       finalBody = JSON.stringify(parsed);
     }
 
-    const useTls = !!(entry.certFingerprint || entry.certPem);
-    const http = useTls ? await import("node:https") : await import("node:http");
+    // #975: TLS 1.3 mandatory — no HTTP fallback, no escape hatch
+    if (!entry.certFingerprint && !entry.certPem) {
+      throw new Error(`Peer '${peerName}' has no TLS cert configured — refusing connection. Set certFingerprint or certPem in peers.json.`);
+    }
+    const http = await import("node:https");
 
     return new Promise((resolve, reject) => {
       const headers: Record<string, string> = {
@@ -120,7 +123,7 @@ export class HttpTransport implements PeerTransport {
       };
       if (finalBody) headers["Content-Length"] = String(Buffer.byteLength(finalBody));
 
-      const tlsOpts = useTls ? {
+      const tlsOpts = {
         minVersion: "TLSv1.3" as const,
         rejectUnauthorized: true,
         ...(entry.certPem ? { ca: [entry.certPem] } : {}),
@@ -130,7 +133,7 @@ export class HttpTransport implements PeerTransport {
           }
           return undefined;
         },
-      } : {};
+      };
 
       const req = http.request({
         hostname: entry.host,
