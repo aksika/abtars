@@ -1,198 +1,180 @@
 /**
- * peer-transport/gossip.ts — Gossip-based peer health (#971).
+ * gossip.ts — Peer health gossip (#971).
  *
- * Broadcasts health on every HB tick via UDP. Maintains live peer table.
- * Capabilities auto-discovered at boot. No standalone timer.
+ * Each peer broadcasts liveness + load + capabilities every 60s via UDP.
+ * All peers maintain a live peer table (Map with 90s TTL).
+ * Orc reads this table for intelligent routing.
  */
 
 import { createSocket, type Socket } from "node:dgram";
-import { createHmac } from "node:crypto";
-import { existsSync } from "node:fs";
 import { execSync } from "node:child_process";
-import * as os from "node:os";
+import { existsSync } from "node:fs";
+import { cpus, loadavg } from "node:os";
 import { loadPeerConfig } from "../peer-config.js";
-import { logInfo, logWarn, logDebug } from "../logger.js";
-import type { PeerCard, PeerHealth } from "./interface.js";
+import { logInfo, logDebug, logWarn, logTrace } from "../logger.js";
+import { createHmac } from "node:crypto";
 
 const TAG = "gossip";
-const GOSSIP_PORT = parseInt(process.env["GOSSIP_PORT"] || "5355", 10);
-const TTL_FACTOR = 3; // expire after 3 missed ticks
+const GOSSIP_PORT = parseInt(process.env["GOSSIP_PORT"] ?? "5355", 10);
+const BROADCAST_INTERVAL_MS = 60_000;
+const TTL_MS = 180_000; // 3 missed broadcasts → dead
 
-// ── State ────────────────────────────────────────────────────────────────────
+export interface PeerHealth {
+  name: string;
+  lastSeen: number;
+  load: number;
+  sessions: number;
+  capabilities: string[];
+  version: string;
+  alive: boolean;
+  host: string;
+  port: number;
+}
 
 const peerTable = new Map<string, PeerHealth>();
 let _socket: Socket | null = null;
-let _capabilities: string[] | null = null;
-let _hbIntervalMs = 60_000;
+let _interval: ReturnType<typeof setInterval> | null = null;
+let _capabilities: string[] = [];
 
-// ── Public API ───────────────────────────────────────────────────────────────
-
-/** Start UDP listener. Call once at boot. */
-export function startGossipListener(): void {
-  if (_socket) return;
-  _socket = createSocket("udp4");
-  _socket.on("message", handleIncoming);
-  _socket.on("error", (err) => logWarn(TAG, `Socket error: ${err.message}`));
-  _socket.bind(GOSSIP_PORT, () => {
-    logInfo(TAG, `Listening on UDP :${GOSSIP_PORT}`);
-  });
-}
-
-/** Broadcast our health to all known peers. Registered as HB task. */
-export async function gossipBroadcast(): Promise<void> {
-  const config = loadPeerConfig();
-  if (Object.keys(config.peers).length === 0) return;
-
-  const payload = buildPayload(config.self.name);
-  const token = findSelfToken(config);
-  const signed = signPayload(payload, token);
-
-  for (const [, entry] of Object.entries(config.peers)) {
-    const port = entry.udpPort ?? GOSSIP_PORT;
-    sendUdp(entry.host, port, signed);
-  }
-
-  expireStale();
-}
-
-/** Get live peers (alive only). Falls back to peers.json for non-gossiping peers. */
-export function getAlivePeers(): PeerCard[] {
-  const config = loadPeerConfig();
-  const result: PeerCard[] = [];
-
-  for (const [name, entry] of Object.entries(config.peers)) {
-    const health = peerTable.get(name);
-    if (health && health.alive) {
-      result.push({ name, host: entry.host, port: entry.port, capabilities: health.capabilities });
-    } else if (!health) {
-      // Peer hasn't gossiped yet — include from static config (backward compat)
-      result.push({ name, host: entry.host, port: entry.port, capabilities: entry.allowedTools });
-    }
-    // If health exists but alive=false — peer is dead, skip
-  }
-  return result;
-}
-
-/** Get full peer table (for /status display). */
-export function getPeerTable(): Map<string, PeerHealth> {
-  return peerTable;
-}
-
-/** Set HB interval (called at boot from heartbeat config). */
-export function setGossipInterval(ms: number): void {
-  _hbIntervalMs = ms;
-}
-
-/** Stop listener (shutdown). */
-export function stopGossipListener(): void {
-  _socket?.close();
-  _socket = null;
-}
-
-// ── Internal ─────────────────────────────────────────────────────────────────
-
-function buildPayload(selfName: string): string {
-  const caps = getCapabilities();
-  const { version } = getVersionInfo();
-  return JSON.stringify({
-    name: selfName,
-    ts: Math.floor(Date.now() / 1000),
-    load: Math.round(((os.loadavg()[0] ?? 0) / (os.cpus().length || 1)) * 100) / 100,
-    sessions: 0, // TODO: wire spin.listAllSessions().length when available
-    capabilities: caps,
-    version,
-  });
-}
-
-function getCapabilities(): string[] {
-  if (_capabilities) return _capabilities;
-  const caps: string[] = [];
-  try { if (existsSync("/usr/bin/docker") || existsSync("/usr/local/bin/docker") || existsSync("/opt/homebrew/bin/docker")) caps.push("browser"); } catch {}
-  try { if (existsSync("/usr/bin/xcodebuild") || existsSync("/Applications/Xcode.app")) caps.push("xcode"); } catch {}
-  try { if (execSync("nvidia-smi 2>/dev/null", { timeout: 3000 }).length > 0) caps.push("gpu"); } catch {}
-  try { if (process.env["OLLAMA_HOST"] || existsSync("/usr/local/bin/ollama") || existsSync("/opt/homebrew/bin/ollama")) caps.push("ollama"); } catch {}
-  _capabilities = caps;
-  logInfo(TAG, `Capabilities: [${caps.join(", ")}]`);
+/** Auto-discover this peer's capabilities at boot. */
+function discoverCapabilities(): string[] {
+  const caps: string[] = ["bash", "node", "memory"];
+  try { if (execSync("which docker", { stdio: "pipe" }).toString().trim()) caps.push("docker"); } catch {}
+  try { if (execSync("which xcodebuild", { stdio: "pipe" }).toString().trim()) caps.push("xcode"); } catch {}
+  try { if (execSync("which ollama", { stdio: "pipe" }).toString().trim()) caps.push("ollama"); } catch {}
+  if (existsSync("/usr/bin/nvidia-smi") || process.env["CUDA_VISIBLE_DEVICES"]) caps.push("gpu");
+  if (process.env["BROWSER_ENGINE"]) caps.push("browser");
+  if (process.env["GROQ_API_KEY"]) caps.push("stt");
   return caps;
 }
 
-function getVersionInfo(): { version: string } {
-  try {
-    const pkg = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "../../package.json"), "utf-8"));
-    return { version: pkg.version ?? "0.0.0" };
-  } catch {
-    return { version: "0.0.0" };
-  }
+/** Get normalized system load (0-1). */
+function getLoad(): number {
+  const cores = cpus().length || 1;
+  return Math.min(1, loadavg()[0]! / cores);
 }
 
-function signPayload(payload: string, token: string): Buffer {
-  const sig = createHmac("sha256", token).update(payload).digest();
-  // Format: [32-byte HMAC][payload]
-  return Buffer.concat([sig, Buffer.from(payload, "utf-8")]);
-}
-
-function verifyAndParse(data: Buffer): { payload: string; name: string } | null {
-  if (data.length < 33) return null; // 32 sig + at least 1 byte
-  const sig = data.subarray(0, 32);
-  const payload = data.subarray(32).toString("utf-8");
-
-  // Parse to get peer name, then verify against their token
-  let parsed: { name?: string };
-  try { parsed = JSON.parse(payload); } catch { return null; }
-  if (!parsed.name) return null;
-
+/** Build the gossip packet. */
+function buildPacket(): Buffer {
   const config = loadPeerConfig();
-  const peer = config.peers[parsed.name];
-  if (!peer) return null;
-
-  const expected = createHmac("sha256", peer.token).update(payload).digest();
-  if (!sig.equals(expected)) {
-    logDebug(TAG, `HMAC mismatch from ${parsed.name}`);
-    return null;
-  }
-  return { payload, name: parsed.name };
-}
-
-function handleIncoming(data: Buffer): void {
-  const result = verifyAndParse(data);
-  if (!result) return;
-
-  const parsed = JSON.parse(result.payload) as {
-    name: string; ts: number; load: number; sessions: number;
-    capabilities: string[]; version: string;
-  };
-
-  peerTable.set(parsed.name, {
-    name: parsed.name,
-    lastSeen: Date.now(),
-    load: parsed.load,
-    sessions: parsed.sessions,
-    capabilities: parsed.capabilities ?? [],
-    version: parsed.version ?? "?",
-    alive: true,
+  const payload = JSON.stringify({
+    name: config.self.name,
+    ts: Math.floor(Date.now() / 1000),
+    load: Math.round(getLoad() * 100) / 100,
+    sessions: parseInt(process.env["_ACTIVE_SESSIONS"] ?? "0", 10),
+    capabilities: _capabilities,
+    version: process.env["npm_package_version"] ?? "?",
   });
-
-  logDebug(TAG, `← ${parsed.name} load=${parsed.load} caps=[${parsed.capabilities?.join(",")}]`);
+  // HMAC signature for authenticity (use first peer's token as shared group key)
+  const peers = Object.values(config.peers);
+  const key = peers[0]?.token ?? "default";
+  const sig = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
+  return Buffer.from(`${payload}|${sig}`);
 }
 
-function expireStale(): void {
-  const ttl = _hbIntervalMs * TTL_FACTOR;
+/** Verify incoming packet HMAC. */
+function verifyPacket(data: Buffer): Record<string, unknown> | null {
+  const str = data.toString("utf8");
+  const sepIdx = str.lastIndexOf("|");
+  if (sepIdx < 0) return null;
+  const payload = str.slice(0, sepIdx);
+  const sig = str.slice(sepIdx + 1);
+  const config = loadPeerConfig();
+  const peers = Object.values(config.peers);
+  const key = peers[0]?.token ?? "default";
+  const expected = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
+  if (sig !== expected) return null;
+  try { return JSON.parse(payload); } catch { return null; }
+}
+
+/** Broadcast to all known peers. */
+function broadcast(): void {
+  const config = loadPeerConfig();
+  const packet = buildPacket();
+  for (const [name, entry] of Object.entries(config.peers)) {
+    _socket?.send(packet, 0, packet.length, GOSSIP_PORT, entry.host, (err) => {
+      if (err) logTrace(TAG, `Send to ${name} (${entry.host}:${GOSSIP_PORT}) failed: ${err.message}`);
+    });
+  }
+  logTrace(TAG, `Broadcast to ${Object.keys(config.peers).length} peer(s)`);
+  // Expire stale entries
   const now = Date.now();
-  for (const [, health] of peerTable) {
-    health.alive = (now - health.lastSeen) < ttl;
+  for (const [name, health] of peerTable) {
+    health.alive = (now - health.lastSeen) < TTL_MS;
   }
 }
 
-function sendUdp(host: string, port: number, data: Buffer): void {
-  if (!_socket) return;
-  _socket.send(data, 0, data.length, port, host, (err) => {
-    if (err) logDebug(TAG, `UDP send to ${host}:${port} failed: ${err.message}`);
+/** Start gossip system. */
+export function startGossip(): void {
+  _capabilities = discoverCapabilities();
+  logInfo(TAG, `Capabilities: [${_capabilities.join(", ")}]`);
+
+  _socket = createSocket("udp4");
+  _socket.on("message", (msg, rinfo) => {
+    const parsed = verifyPacket(msg);
+    if (!parsed || typeof parsed.name !== "string") return;
+    const name = parsed.name as string;
+    const config = loadPeerConfig();
+    if (name === config.self.name) return; // ignore own echo
+
+    const existing = peerTable.get(name);
+    const health: PeerHealth = {
+      name,
+      lastSeen: Date.now(),
+      load: (parsed.load as number) ?? 0,
+      sessions: (parsed.sessions as number) ?? 0,
+      capabilities: (parsed.capabilities as string[]) ?? [],
+      version: (parsed.version as string) ?? "?",
+      alive: true,
+      host: rinfo.address,
+      port: rinfo.port,
+    };
+    peerTable.set(name, health);
+    if (!existing) logDebug(TAG, `Peer discovered: ${name} [${health.capabilities.join(",")}] load=${health.load}`);
   });
+
+  _socket.on("error", (err) => { logWarn(TAG, `Socket error: ${err.message}`); });
+  _socket.bind(GOSSIP_PORT, "0.0.0.0", () => {
+    logInfo(TAG, `Listening on UDP :${GOSSIP_PORT}`);
+  });
+
+  // Broadcast immediately, then every 60s
+  setTimeout(broadcast, 2000);
+  _interval = setInterval(broadcast, BROADCAST_INTERVAL_MS);
 }
 
-function findSelfToken(config: ReturnType<typeof loadPeerConfig>): string {
-  // Use the first peer's token for HMAC (peers verify against our entry in THEIR peers.json)
-  // All peers share the same token for a given pair — use any peer's token as our signing key
-  const firstPeer = Object.values(config.peers)[0];
-  return firstPeer?.token ?? "default-gossip-key";
+/** Stop gossip. */
+export function stopGossip(): void {
+  if (_interval) { clearInterval(_interval); _interval = null; }
+  if (_socket) { _socket.close(); _socket = null; }
 }
+
+/** Get live peer table (alive peers only unless includeAll). */
+export function getPeerTable(includeAll = false): PeerHealth[] {
+  const now = Date.now();
+  const results: PeerHealth[] = [];
+  for (const health of peerTable.values()) {
+    health.alive = (now - health.lastSeen) < TTL_MS;
+    if (includeAll || health.alive) results.push(health);
+  }
+  return results;
+}
+
+/** Get this peer's capabilities. */
+export function getLocalCapabilities(): string[] { return _capabilities; }
+
+/** Find best peer matching required capabilities, sorted by load. */
+export function findCapablePeer(requires: string[]): PeerHealth | null {
+  const alive = getPeerTable().filter(p =>
+    requires.every(req => p.capabilities.includes(req))
+  );
+  if (alive.length === 0) return null;
+  alive.sort((a, b) => a.load - b.load);
+  return alive[0]!;
+}
+
+/** Alias for boot compatibility. */
+export const startGossipListener = startGossip;
+
+/** Alias for http-transport compatibility. */
+export const getAlivePeers = getPeerTable;

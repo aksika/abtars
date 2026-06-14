@@ -15,33 +15,62 @@ const TAG = "peer-delegate";
 
 export const peerDelegateTool: ToolDefinition = {
   name: "peer_delegate",
-  description: "Delegate a task to a remote peer. Returns immediately with a local card ID. The remote peer executes autonomously. Use peer_check to poll status.",
+  description: "Delegate a task to a remote peer. If peer is omitted, auto-selects the best capable peer by load. Use 'requires' to specify needed capabilities (gpu, docker, ollama, browser, xcode).",
   parameters: {
     type: "object",
     properties: {
-      peer: { type: "string", description: "Peer name (from peers.json)" },
+      peer: { type: "string", description: "Peer name (optional — auto-selects if omitted)" },
       goal: { type: "string", description: "Task goal/instructions for the remote peer" },
       priority: { type: "string", enum: ["CRITICAL", "HIGH", "MEDIUM", "LOW"], description: "Task priority (default: MEDIUM)" },
       context: { type: "string", description: "Optional context to include" },
+      requires: { type: "array", items: { type: "string" }, description: "Required capabilities (e.g. ['gpu', 'docker'])" },
     },
-    required: ["peer", "goal"],
+    required: ["goal"],
   },
   async execute(args: Record<string, string>): Promise<string> {
-    const { peer, goal, priority, context } = args;
-    if (!peer || !goal) return JSON.stringify({ error: "peer and goal are required" });
+    const { goal, priority, context } = args;
+    let peer = args.peer;
+    const requires: string[] = args.requires ? (typeof args.requires === "string" ? JSON.parse(args.requires) : args.requires) : [];
 
-    logDebug(TAG, `peer_delegate called: peer=${peer} priority=${priority ?? "MEDIUM"} goal=${goal.length}ch`);
+    if (!goal) return JSON.stringify({ error: "goal is required" });
+
+    // Auto-select peer if not specified
+    if (!peer && requires.length > 0) {
+      const { findCapablePeer } = await import("../peer-transport/gossip.js");
+      const match = findCapablePeer(requires);
+      if (!match) return JSON.stringify({ error: `No alive peer with capabilities: [${requires.join(", ")}]` });
+      peer = match.name;
+      logDebug(TAG, `Auto-selected peer ${peer} for requires=[${requires.join(",")}] (load=${match.load})`);
+    } else if (!peer) {
+      // No peer, no requires — pick least loaded
+      const { getPeerTable } = await import("../peer-transport/gossip.js");
+      const alive = getPeerTable().sort((a, b) => a.load - b.load);
+      if (alive.length === 0) return JSON.stringify({ error: "No alive peers available" });
+      peer = alive[0]!.name;
+      logDebug(TAG, `Auto-selected least-loaded peer ${peer} (load=${alive[0]!.load})`);
+    }
+
+    // Validate capabilities if requires specified + explicit peer
+    if (requires.length > 0 && args.peer) {
+      const { getPeerTable } = await import("../peer-transport/gossip.js");
+      const entry = getPeerTable(true).find(p => p.name.toLowerCase() === peer!.toLowerCase());
+      if (entry && !requires.every(r => entry.capabilities.includes(r))) {
+        const missing = requires.filter(r => !entry.capabilities.includes(r));
+        return JSON.stringify({ error: `Peer ${peer} lacks capabilities: [${missing.join(", ")}]` });
+      }
+    }
+
+    logDebug(TAG, `peer_delegate: peer=${peer} priority=${priority ?? "MEDIUM"} goal=${goal.length}ch requires=[${requires.join(",")}]`);
     logTrace(TAG, `peer_delegate goal: ${goal.slice(0, 500)}`);
 
     try {
       const transport = getPeerTransport();
       const remoteTaskId = await transport.delegateTask(peer, goal, { priority, context });
 
-      // Create local kanban card to track the remote task
       const localCardId = kanbanEnqueue(`[remote:${peer}] ${goal.slice(0, 80)}`, "peer", undefined, {
         type: "remote",
         priority: priority ?? "MEDIUM",
-        notes: JSON.stringify({ peer, remote_task_id: remoteTaskId, goal }),
+        notes: JSON.stringify({ peer, remote_task_id: remoteTaskId, goal, requires }),
       });
 
       logInfo(TAG, `Delegated to ${peer}: remote#${remoteTaskId} → local#${localCardId}`);

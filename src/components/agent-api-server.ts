@@ -210,6 +210,24 @@ export class AgentApiServer {
       writeResult(res, v1HandleModels());
       return;
     }
+    // #898 — GET /v1/agent-card: live capabilities + health
+    if (url === "/v1/agent-card" && method === "GET") {
+      if (this.requireBearer(req, res) === null) return;
+      const { getLocalCapabilities } = require("./peer-transport/gossip.js") as typeof import("./peer-transport/gossip.js");
+      const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+      const { loadavg, cpus } = require("node:os") as typeof import("node:os");
+      const config = loadPeerConfig();
+      const load = Math.round(Math.min(1, loadavg()[0]! / (cpus().length || 1)) * 100) / 100;
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
+        name: config.self.name,
+        version: process.env["npm_package_version"] ?? "?",
+        capabilities: getLocalCapabilities(),
+        load,
+        max_sessions: parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10),
+        status: "ready",
+      }));
+      return;
+    }
     if (url.startsWith("/v1/models/") && method === "GET") {
       if (this.requireBearer(req, res) === null) return;
       const id = decodeURIComponent(url.slice("/v1/models/".length));
