@@ -88,7 +88,7 @@ Each worker consumes tokens independently. Budget caps prevent runaway spending 
 
 ---
 
-## Peer-to-Peer Communication
+## Distributed Swarm
 
 Multiple abTARS instances communicate directly — agent-to-agent. One instance asks another a question or delegates a task, and gets a response.
 
