@@ -11,7 +11,7 @@ import {
   kanbanList, kanbanFail, kanbanComplete, kanbanUpdate,
   kanbanGetCard, kanbanGetChildren, type KanbanCard,
 } from "./tasks/kanban-board.js";
-import { logInfo, logWarn } from "./logger.js";
+import { logInfo, logWarn, logDebug } from "./logger.js";
 import { getPeerTransport } from "./peer-transport/index.js";
 
 const TAG = "reconciler";
@@ -125,6 +125,7 @@ async function pollRemoteCards(): Promise<void> {
   const remoteCards = kanbanList("running", "status").filter(c => c.type === "remote");
   if (remoteCards.length === 0) return;
 
+  logDebug(TAG, `Polling ${remoteCards.length} remote card(s)`);
   const transport = getPeerTransport();
   for (const card of remoteCards) {
     try {

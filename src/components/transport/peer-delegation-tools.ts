@@ -9,7 +9,7 @@
 import type { ToolDefinition } from "./tool-registry.js";
 import { getPeerTransport } from "../peer-transport/index.js";
 import { kanbanEnqueue, kanbanUpdate, kanbanComplete, kanbanFail } from "../tasks/kanban-board.js";
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 
 const TAG = "peer-delegate";
 
@@ -29,6 +29,9 @@ export const peerDelegateTool: ToolDefinition = {
   async execute(args: Record<string, string>): Promise<string> {
     const { peer, goal, priority, context } = args;
     if (!peer || !goal) return JSON.stringify({ error: "peer and goal are required" });
+
+    logDebug(TAG, `peer_delegate called: peer=${peer} priority=${priority ?? "MEDIUM"} goal=${goal.length}ch`);
+    logTrace(TAG, `peer_delegate goal: ${goal.slice(0, 500)}`);
 
     try {
       const transport = getPeerTransport();

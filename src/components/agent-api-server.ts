@@ -545,7 +545,13 @@ export class AgentApiServer {
     });
 
     logInfo(TAG, `A2A task from ${caller}: card #${cardId} "${goal.slice(0, 60)}"${body.callback_peer ? ` (callback→${body.callback_peer})` : ""}`);
+    logTrace(TAG, `A2A task from ${caller} full goal: ${goal.slice(0, 500)}`);
     this.onPeerActivity?.(`📋 A2A task from ${caller}: "${goal.slice(0, 60)}" → card #${cardId}`);
+    this.pushTraffic({
+      ts: Date.now(), ip: (req.socket.remoteAddress ?? "?"),
+      endpoint: "/v1/tasks", prompt: `[${caller}] ${goal.slice(0, 200)}`,
+      response: `card#${cardId}`, durationMs: 0, status: 202,
+    });
 
     res.writeHead(202, { "Content-Type": "application/json" })
       .end(JSON.stringify({ task_id: cardId, status: "queued" }));
@@ -587,6 +593,7 @@ export class AgentApiServer {
 
   /** #675 — POST /v1/callbacks: remote peer delivers task result. */
   private async handleV1Callback(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
+    const start = Date.now();
     let body: { task_id?: number; status?: string; result_summary?: string; error?: string };
     try {
       body = JSON.parse(await readBody(req));
@@ -602,6 +609,9 @@ export class AgentApiServer {
         .end(JSON.stringify(openaiError("Missing task_id or status", "invalid_request_error", "missing_field")));
       return;
     }
+
+    logDebug(TAG, `← callback from ${caller}: task_id=${taskId} status=${body.status}`);
+    logTrace(TAG, `← callback from ${caller} result: ${(body.result_summary ?? "").slice(0, 300)}`);
 
     // Find local kanban card with matching remote_task_id from this peer
     const { kanbanList, kanbanComplete, kanbanFail } = require("./tasks/kanban-board.js") as typeof import("./tasks/kanban-board.js");
@@ -623,11 +633,17 @@ export class AgentApiServer {
     const card = remoteCards[0]!;
     if (body.status === "done") {
       kanbanComplete(card.id, null, body.result_summary?.slice(0, 500) ?? "completed");
-      logInfo(TAG, `Callback: card ${card.id} (${caller}#${taskId}) → done`);
+      logInfo(TAG, `PEER_CALLBACK ${caller}#${taskId} → local#${card.id} done (${(body.result_summary ?? "").length}ch)`);
     } else {
       kanbanFail(card.id, body.error ?? "remote task failed");
-      logInfo(TAG, `Callback: card ${card.id} (${caller}#${taskId}) → failed`);
+      logInfo(TAG, `PEER_CALLBACK ${caller}#${taskId} → local#${card.id} failed: ${(body.error ?? "").slice(0, 100)}`);
     }
+
+    this.pushTraffic({
+      ts: Date.now(), ip: (req.socket.remoteAddress ?? "?"),
+      endpoint: "/v1/callbacks", prompt: `[${caller}] task_id=${taskId} status=${body.status}`,
+      response: `local_card=${card.id}`, durationMs: Date.now() - start, status: 200,
+    });
 
     res.writeHead(200, { "Content-Type": "application/json" })
       .end(JSON.stringify({ ok: true, local_card_id: card.id, status: body.status }));

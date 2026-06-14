@@ -7,7 +7,7 @@
 
 import type { PeerTransport, PeerCard, PeerMessage, TaskResult } from "./interface.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
-import { logInfo, logWarn } from "../logger.js";
+import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
 
 const TAG = "http-transport";
 
@@ -33,6 +33,8 @@ export class HttpTransport implements PeerTransport {
     if (message.type === "task" && message.payload.action === "callback") {
       const config = loadPeerConfig();
       const entry = resolvePeer(config.peers, peer);
+      logDebug(TAG, `→ callback ${peer}: task_id=${message.payload.task_id} status=${message.payload.status}`);
+      logTrace(TAG, `→ callback ${peer} result: ${String(message.payload.result_summary ?? "").slice(0, 200)}`);
       const body = JSON.stringify({ task_id: message.payload.task_id, status: message.payload.status, result_summary: message.payload.result_summary, error: message.payload.error });
       return this.httpCall(entry, peer, "POST", "/v1/callbacks", body);
     }
@@ -66,18 +68,24 @@ export class HttpTransport implements PeerTransport {
     // Actually: we don't know our own external IP. Include callback as our self.name — remote looks us up in its peers.json
     const callbackUrl = `callback://${config.self.name}`;
 
+    logDebug(TAG, `→ peer_delegate ${peer}: priority=${opts?.priority ?? "MEDIUM"}, goal=${goal.length}ch`);
+    logTrace(TAG, `→ peer_delegate ${peer} goal: ${goal.slice(0, 300)}`);
+
     const body = JSON.stringify({ goal, priority: opts?.priority ?? "MEDIUM", context: opts?.context, callback_peer: config.self.name });
     const response = await this.httpCall(entry, peer, "POST", "/v1/tasks", body);
     const parsed = JSON.parse(response);
-    logInfo(TAG, `Delegated to ${peer}: card #${parsed.task_id}`);
+    logInfo(TAG, `PEER_DELEGATE ${peer} → remote#${parsed.task_id} (${goal.length}ch)`);
     return parsed.task_id;
   }
 
   async checkTask(peer: string, taskId: number): Promise<TaskResult> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
+    logDebug(TAG, `→ peer_check ${peer}#${taskId}`);
     const response = await this.httpCall(entry, peer, "GET", `/v1/tasks/${taskId}`);
     const parsed = JSON.parse(response);
+    logDebug(TAG, `← peer_check ${peer}#${taskId}: status=${parsed.status}`);
+    logTrace(TAG, `← peer_check ${peer}#${taskId} result: ${(parsed.result_summary ?? "").slice(0, 200)}`);
     return {
       taskId: parsed.id ?? taskId,
       status: parsed.status,
@@ -90,8 +98,9 @@ export class HttpTransport implements PeerTransport {
   async terminateTask(peer: string, taskId: number): Promise<void> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
+    logDebug(TAG, `→ peer_terminate ${peer}#${taskId}`);
     await this.httpCall(entry, peer, "DELETE", `/v1/tasks/${taskId}`);
-    logInfo(TAG, `Terminated task ${taskId} on ${peer}`);
+    logInfo(TAG, `PEER_TERMINATE ${peer}#${taskId}`);
   }
 
   private async httpCall(entry: PeerEntry, peerName: string, method: string, path: string, body?: string): Promise<string> {
