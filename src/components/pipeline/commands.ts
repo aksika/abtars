@@ -14,8 +14,8 @@ import { loadUsers } from "../user-registry.js";
 
 const BANG_PREFIX = /^[!！ǃ❗❕‼⁉]+/u;
 
-const INTERRUPT_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/restart"]);
-const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/new", "/reset", "/restart", "/compact", "/coding", "/default"]);
+const INTERRUPT_COMMANDS = new Set(["/stop", "/ctrlc", "/reset", "/restart"]);
+const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/reset", "/restart", "/compact", "/coding", "/default"]);
 
 export const commandMiddleware: Middleware = async (ctx, next) => {
   const { msg, deps } = ctx;

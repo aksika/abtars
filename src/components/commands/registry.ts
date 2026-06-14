@@ -13,7 +13,7 @@ const NON_MASTER_COMMANDS = new Set([
   "/status", "/help", "/whoami", "/doctor", "/software", "/update",
   "/models", "/model", "/skills", "/skill", "/facts", "/tasks", "/task",
   "/usage", "/openrouter", "/session", "/hooks", "/memory", "/kanban",
-  "/heartbeat", "/new", "/reset", "/stop", "/ctrlc",
+  "/heartbeat", "/reset", "/stop", "/ctrlc",
 ]);
 
 export function registerExact(name: string, handler: CommandHandler): void {

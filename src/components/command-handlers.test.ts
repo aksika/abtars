@@ -53,13 +53,6 @@ describe("command-handlers", () => {
   });
   afterEach(() => { setUserRegistryOverride(null); });
 
-  it("/new resets session and replies", async () => {
-    const ctx = makeCtx();
-    const handled = await handleCommand("/new", ctx);
-    expect(handled).toBe(true);
-    expect(ctx.reply).toHaveBeenCalled();
-  });
-
   it("/stop sends interrupt", async () => {
     const ctx = makeCtx();
     const handled = await handleCommand("/stop", ctx);
