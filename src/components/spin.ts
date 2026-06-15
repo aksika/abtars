@@ -154,7 +154,10 @@ export class Spin {
     const { userId, chatId, platform } = this._masterOpts;
     const session = this.getActiveSession(userId, platform);
     const adapter = this._greetingAdapter!;
+    let attempt = 0;
+
     const inject = (): void => {
+      attempt++;
       adapter.injectMessage({
         platform,
         channelId: String(chatId),
@@ -166,7 +169,14 @@ export class Spin {
         isGroup: false,
         isVoice: false,
       });
+      setTimeout(() => {
+        if (session.messageCount > 0) return; // greeting delivered
+        if (attempt >= 3) { logError(TAG, "Greeting failed after 3 attempts"); return; }
+        logWarn(TAG, `Greeting attempt ${attempt}/3 — no response, retrying`);
+        inject();
+      }, 10_000);
     };
+
     // Poll transport readiness — ACP needs handshake, DirectAPI is instant
     const poll = setInterval(() => {
       if (session.transport?.isConnected) {
