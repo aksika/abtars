@@ -162,7 +162,7 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
       const src = f.createdAt ? "(self)" : "(core)";
       const runs = state[`autofix-known:${f.pattern}`]?.totalRuns ?? 0;
       const runsText = runs > 0 ? ` [${runs}x]` : "";
-      return `• "${f.pattern.slice(0, 20)}" → ${f.command[0]} ${src}${v}${runsText}`;
+      return `• "${f.pattern.slice(0, 20)}" → ${f.command?.[0] ?? "?"} ${src}${v}${runsText}`;
     });
     await ctx.reply(`🩺 Fix rules (${fixes.length}):\n${lines.join("\n")}`);
     return true;
@@ -359,6 +359,18 @@ export async function handleUsage(_text: string, ctx: CommandContext): Promise<b
   const credits = await fetchOpenRouterCredits();
   if (credits) {
     msg += `\n💳 OpenRouter: $${credits.remaining.toFixed(2)} remaining ($${credits.purchased.toFixed(2)} purchased, $${credits.used.toFixed(2)} used)`;
+  }
+
+  // Budget status
+  const { getBudgetStatus } = await import("../budget.js");
+  const budgetItems = getBudgetStatus();
+  if (budgetItems.length > 0) {
+    msg += `\n\n📋 Budget (today):`;
+    for (const { agent, used, limit } of budgetItems) {
+      const tokStr = limit.tokens ? `${Math.round(used.tokens / 1000)}K/${limit.tokens}K` : "unlimited";
+      const callStr = limit.calls ? `${used.calls}/${limit.calls}` : "unlimited";
+      msg += `\n  ${agent}: ${tokStr} tokens, ${callStr} calls`;
+    }
   }
 
   await ctx.reply(msg.trim());

@@ -8,6 +8,7 @@ import { join } from "node:path";
 export interface UsageEntry {
   ts: number;
   model: string;
+  agent: string;
   in: number;
   out: number;
 }
@@ -25,10 +26,13 @@ export function initUsageTracker(home: string): void {
   usagePath = join(stateDir, "usage.jsonl");
 }
 
-export function recordUsage(model: string, inputTokens: number, outputTokens: number): void {
+export function recordUsage(model: string, inputTokens: number, outputTokens: number, agent = ""): void {
   _totalTokens += inputTokens + outputTokens;
+  if (agent) {
+    import("./budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(agent, inputTokens + outputTokens)).catch(() => {});
+  }
   if (!usagePath) return;
-  buffer.push({ ts: Date.now(), model, in: inputTokens, out: outputTokens });
+  buffer.push({ ts: Date.now(), model, agent, in: inputTokens, out: outputTokens });
   if (buffer.length >= 100) flushUsage();
 }
 

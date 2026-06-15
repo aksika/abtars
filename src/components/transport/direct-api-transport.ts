@@ -53,6 +53,9 @@ export class DirectApiTransport implements IKiroTransport {
   private _activeSessionKey = "";
   private _activeUserId = "master";
 
+  /** Agent name for budget tracking (set by caller). */
+  agentLabel = "professor";
+
   /** Currently active model (may differ from config if on fallback). */
   get currentModel(): string { return this.activeModel; }
 
@@ -296,7 +299,7 @@ export class DirectApiTransport implements IKiroTransport {
         this._lastCompletionTokens = usage.completion_tokens ?? 0;
         this.contextOrchestrator?.onApiResponse(this._activeSessionKey, usage.prompt_tokens, this.config.maxContext);
         logTrace(TAG, `${this.activeModel} — ${usage.prompt_tokens}→${usage.completion_tokens ?? 0} tokens, ${Date.now() - (this._lastActivityAt ?? Date.now())}ms`);
-        recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0);
+        recordUsage(this.activeModel, usage.prompt_tokens, usage.completion_tokens ?? 0, this.agentLabel);
       }
 
       if (toolCalls.length > 0) {

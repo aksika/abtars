@@ -90,6 +90,14 @@ export class SubagentRuntime {
 
   /** Send a prompt to a named agent and get the response. */
   async complete(agent: AgentName, prompt: string, opts?: AgentOpts): Promise<string> {
+    const { checkBudget, sendBudgetNotification } = await import("./budget.js");
+    const budgetCheck = checkBudget(agent);
+    if (!budgetCheck.allowed) {
+      const reason = budgetCheck.remaining.tokens <= 0 ? "token" : "call";
+      void sendBudgetNotification(agent, reason);
+      throw new Error(`Daily ${reason} budget exceeded for ${agent}. Resets at midnight.`);
+    }
+
     const sessionStrategy = opts?.session ?? DEFAULT_SESSION[agent] ?? "fresh";
     const start = Date.now();
 
