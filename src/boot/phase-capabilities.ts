@@ -14,6 +14,16 @@ import type { BootCtx, PhaseResult } from "./context.js";
 
 export async function phaseCapabilities(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memory, transport, runtime, capabilities, pipelineDeps } = ctx;
+
+  // Skills catalog: pure filesystem, no deps — always generate (#996)
+  try {
+    const { SkillWatcher } = await import("../components/skill-watcher.js");
+    const { abtarsHome } = await import("../paths.js");
+    const { join } = await import("node:path");
+    const sw = new SkillWatcher(join(abtarsHome(), "skills"), join(abtarsHome(), "skills", "skills_catalog.md"));
+    sw.generateCatalog();
+  } catch {}
+
   if (!transport || !pipelineDeps) { ctx.phaseHealth.set(phaseCapabilities.name, { status: "skipped", error: "no transport" }); logWarn("boot", `${phaseCapabilities.name}: skipping — transport not available`); return "skipped"; }
 
   const { createCapabilityApi } = await import("../capabilities/capability.js");
