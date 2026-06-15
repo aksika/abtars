@@ -266,25 +266,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   // Core templates: abmind seeds its own on first boot (#427 ensureInitialized).
   // No longer seeded by abtars install.
 
-  // Create kiro-cli agent config — ACP transport needs ~/.kiro/agents/professor.json
-  const kiroAgentsDir = join(homedir(), '.kiro', 'agents');
-  const professorJson = join(kiroAgentsDir, 'professor.json');
-  if (!opts.dryRun) {
-    await mkdir(kiroAgentsDir, { recursive: true });
-    if (!(await exists(professorJson))) {
-      await writeFile(professorJson, JSON.stringify({
-        name: "professor",
-        description: "Abtars bridge agent",
-        tools: ["*"],
-        allowedTools: ["@builtin"],
-        toolsSettings: { shell: { autoAllowReadonly: true } },
-        includeMcpJson: true,
-      }, null, 2) + '\n');
-      process.stdout.write(`✓ kiro agent: ${professorJson}\n`);
-    }
-  } else {
-    process.stdout.write(`[dry-run] create ${professorJson}\n`);
-  }
+  // Kiro agent config created on-demand by ACP transport (ensureAgentConfig)
 
   // Generate Ed25519 identity keypair (skip if already exists)
   const identityKey = join(paths.config, 'identity.key');
