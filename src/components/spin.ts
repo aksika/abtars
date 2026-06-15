@@ -319,6 +319,10 @@ export class Spin {
     logInfo(TAG, "Orc idle timeout — destroying session");
     if (this.orcSession) { await this.orcSession.destroy(); this.orcSession = null; }
     if (this.orcIdleTimer) { clearTimeout(this.orcIdleTimer); this.orcIdleTimer = null; }
+    // End visible O-session in sessions map
+    for (const [, s] of this.sessions) {
+      if (s.active && s.id.includes("_O_")) { s.status = "ended"; s.active = false; pushLog(s, "orc idle timeout"); break; }
+    }
   }
 
   // ── Dispatch ───────────────────────────────────────────────────────────
@@ -391,7 +395,8 @@ export class Spin {
       return { cardId, result };
     } finally {
       this.markDone(request.type, cardId);
-      if (session) { session.status = "ended"; session.active = false; pushLog(session, "completed"); }
+      // O-type: session stays alive until Orc idle timeout (visible in /session)
+      if (session && request.type !== "O") { session.status = "ended"; session.active = false; pushLog(session, "completed"); }
       this.drainQueued();
     }
   }
