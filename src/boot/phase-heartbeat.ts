@@ -196,7 +196,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
         const pending = kanbanPending();
         const card = pending.find((c: { id: number }) => c.id === cardId);
         if (!card) return; // already delivered or silent
-        if (card.delivery_mode === "silent") { kanbanMarkDelivered(card.id); return; }
+        if (card.delivery_mode === "silent" && !card.result_path) { kanbanMarkDelivered(card.id); return; }
         kanbanSetDelivering(card.id);
         if (ctx.telegramAdapter) {
           await ctx.telegramAdapter.sendMessage(String(masterChatId), `✅ "${card.title}" complete.\n${card.result_summary ?? ""}`);
