@@ -9,6 +9,21 @@
   },
   "fixes": [
     { "pattern": "FTS index", "command": ["abtars-edit", "--rebuild-fts"], "cooldownMin": 30 },
-    { "pattern": "database disk image is malformed", "command": ["abtars-edit", "--rebuild-fts"], "cooldownMin": 30 }
+    { "pattern": "database disk image is malformed", "command": ["abtars-edit", "--rebuild-fts"], "cooldownMin": 30 },
+    { "pattern": "-32603", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "Transient error", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "fetch failed", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "[self-healer]", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "[watchdog]", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "[db-integrity]", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "ECONNRESET", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "ETIMEDOUT", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "socket hang up", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "auto-approved", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "permission", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "BUG REPORT", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "AUTO-FIX", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "Tool args", "command": ["true"], "cooldownMin": 60 },
+    { "pattern": "Normalized", "command": ["true"], "cooldownMin": 60 }
   ]
 }

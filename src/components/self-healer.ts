@@ -29,14 +29,7 @@ function logShaCall(errorKey: string, errorLine: string): void {
   try { appendFileSync(logPath, entry + "\n"); } catch {}
 }
 
-const BLACKLIST = [
-  "-32603", "Transient error", "fetch failed",
-  "[self-healer]", "[watchdog]", "[db-integrity]",
-  "ECONNRESET", "ETIMEDOUT", "socket hang up",
-  "auto-approved", "permission",
-  "BUG REPORT", "AUTO-FIX",
-  "Tool args", "Normalized",
-];
+// Known-noise patterns are in sha-policy.json (seeded) — no hardcoded list.
 
 function logAutoFix(message: string): void {
   const dir = join(abtarsHome(), "logs");
@@ -88,7 +81,6 @@ export function createSelfHealerTask(
           if (ts <= lastTs) break;
           if (bridgeStartTs && ts < bridgeStartTs) continue;
           if (line.includes("TEST ")) continue;
-          if (BLACKLIST.some(b => line.includes(b))) continue;
 
           const match = line.match(/\[([^\]]+)\] (.+)/);
           if (!match) continue;
