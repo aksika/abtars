@@ -69,7 +69,7 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
       try { unlinkSync(todayLockPath(auditDir)); } catch (err) { logAndSwallow("command_handlers", "op", err); }
     }
     writeForceSleep("fresh via /sleep now");
-    await ctx.reply("⚡ Fresh sleep cycle queued — starts on next heartbeat tick (≤5min)");
+    await ctx.reply("💤 Full sleep cycle initiated");
     logInfo(TAG, "Fresh sleep triggered via /sleep now");
     return true;
   }
