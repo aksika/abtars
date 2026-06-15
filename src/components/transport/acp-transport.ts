@@ -2,7 +2,7 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { getEnv } from "../env-schema.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 
@@ -149,8 +149,6 @@ export class AcpTransport implements IKiroTransport {
   private readonly tag: string;
 
   async initialize(): Promise<void> {
-    // #992: clean leftover kiro session files from prior crash-orphaned sessions
-    AcpTransport.cleanupOrphanedKiroSessions(this.workingDir);
     for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
     this.sessions.clear(); // Fresh CLI instance = all old session IDs are stale
     this.onReinit?.();
@@ -586,27 +584,6 @@ export class AcpTransport implements IKiroTransport {
     for (const ext of [".json", ".jsonl", ".history"]) {
       try { unlinkSync(join(dir, kiroSessionId + ext)); } catch {}
     }
-  }
-
-  /** #992: On boot, remove orphaned kiro sessions from prior crashed runs. */
-  private static cleanupOrphanedKiroSessions(ourCwd: string): void {
-    const dir = join(homedir(), ".kiro", "sessions", "cli");
-    let entries: string[];
-    try { entries = readdirSync(dir).filter(f => f.endsWith(".json")); } catch { return; }
-    let cleaned = 0;
-    for (const file of entries) {
-      try {
-        const meta = JSON.parse(readFileSync(join(dir, file), "utf-8"));
-        if ((meta.cwd === ourCwd || meta.cwd === ".") && meta.session_created_reason === "subagent") {
-          const uuid = file.replace(".json", "");
-          for (const ext of [".json", ".jsonl", ".history"]) {
-            try { unlinkSync(join(dir, uuid + ext)); } catch {}
-          }
-          cleaned++;
-        }
-      } catch {}
-    }
-    if (cleaned > 0) logInfo("acp", `Cleaned ${cleaned} orphaned kiro session(s)`);
   }
 
   async setModel(model: string): Promise<void> {
