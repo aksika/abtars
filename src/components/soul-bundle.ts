@@ -60,12 +60,15 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
     // Full Main bundle
     let bundle: { soul: string; profile: string; notes: string; memoryTools: string; coreFacts: string } | null = null;
     try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow(TAG, "op", err); }
+    if (!bundle?.soul) {
+      logWarn(TAG, "SOUL bundle unavailable — abmind not configured or getSessionBundle() failed");
+    }
 
-    const soul = bundle?.soul || readOr(join(HOST_CORE_DIR, "SOUL.md"));
-    const memoryTools = bundle?.profile || readOr(join(HOST_CORE_DIR, "user_profile.md"));
-    const userProfile = bundle?.notes || readOr(join(HOST_CORE_DIR, "agent_notes.md"));
-    const agentNotes = bundle?.memoryTools || readOr(join(HOST_CORE_DIR, "TOOLS.md"));
-    const coreFacts = bundle?.coreFacts || readOr(join(HOST_CORE_DIR, "core_facts.md"));
+    const soul = bundle?.soul ?? "";
+    const userProfile = bundle?.profile ?? "";
+    const agentNotes = bundle?.notes ?? "";
+    const memoryTools = bundle?.memoryTools ?? "";
+    const coreFacts = bundle?.coreFacts ?? "";
 
     if (soul) parts.push(soul);
     if (memoryTools) parts.push(memoryTools);
