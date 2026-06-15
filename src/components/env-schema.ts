@@ -140,6 +140,13 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "ENABLE_AGENT_API", type: "bool", default: "false", description: "Enable A2A agent API (exposes port)" },
   { env: "ENABLE_ASYNC_DELEGATION", type: "bool", default: "false", description: "Enable async session delegation tools (spawn/check/terminate)" },
   { env: "MAX_SESSIONS", type: "int", default: "10", description: "Max concurrent managed sessions per user" },
+
+  // ── Artifact Store (S3) ──
+  { env: "ARTIFACT_S3_ENDPOINT", type: "string", description: "S3-compatible endpoint for artifact store" },
+  { env: "ARTIFACT_S3_KEY", type: "string", description: "S3 access key ID" },
+  { env: "ARTIFACT_S3_SECRET", type: "string", description: "S3 secret access key" },
+  { env: "ARTIFACT_S3_BUCKET", type: "string", default: "abtars-artifacts", description: "S3 bucket name" },
+  { env: "ARTIFACT_S3_REGION", type: "string", default: "auto", description: "S3 region (default auto for R2)" },
 ] as const;
 
 // ── Parsed config type ──────────────────────────────────────────────────────
