@@ -85,6 +85,10 @@
       "source": "config/peers.json.example",
       "dest": "config/peers.json",
       "mode": "0600"
+    },
+    {
+      "source": "config/budget.json.example",
+      "dest": "config/budget.json"
     }
   ],
   "requiredConfigs": [
