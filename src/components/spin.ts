@@ -536,6 +536,14 @@ export class Spin {
     const orc = await this.getOrCreateOrc();
     logInfo(TAG, `▶ O card:${cardId} (persistent Orc)`);
 
+    // #993: Attach Orc transport to visible session — user can sneak in
+    for (const [, s] of this.sessions) {
+      if (s.active && s.id.includes("_O_")) {
+        s.transport = orc.transport as any;
+        s.status = "ready";
+        break;
+      }
+    }
     const timer = setTimeout(() => { logWarn(TAG, `⏱️ O card:${cardId} timed out`); }, timeoutMs);
     try {
       const { buildSoulBundle } = await import("./soul-bundle.js");
