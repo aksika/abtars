@@ -178,18 +178,12 @@ export class Spin {
       }, 10_000);
     };
 
-    // Poll transport readiness — ACP needs handshake, DirectAPI is instant
-    const poll = setInterval(() => {
-      if (session.transport?.isConnected) {
-        clearInterval(poll);
-        clearTimeout(giveUp);
-        inject();
-      }
-    }, 500);
-    const giveUp = setTimeout(() => {
-      clearInterval(poll);
-      logWarn(TAG, "Greeting skipped — transport not ready after 15s");
-    }, 15_000);
+    // Event-driven: fire when transport is ready (#1000)
+    if (session.transport?.isReady) {
+      inject();
+    } else if (session.transport) {
+      session.transport.onReady = () => inject();
+    }
   }
 
   async resolveSession(userId: string, platform: string, chatId: number): Promise<ManagedSession> {

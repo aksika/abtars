@@ -25,6 +25,9 @@ export interface IKiroTransport {
   /** Whether this transport is currently operational. */
   readonly isReady: boolean;
 
+  /** Callback fired once when transport becomes operational. */
+  onReady?: () => void;
+
   /** Context window usage percentage (0-100). Returns -1 if unknown/unsupported. */
   readonly contextPercent: number;
 

@@ -189,6 +189,7 @@ export class AcpTransport implements IKiroTransport {
       const result = await this._rawClient.initialize();
       this._promptSuccessCount = 0;
       logInfo(this.tag, `ACP initialized [raw mode] (agent: ${result.agentInfo.name})`);
+      this.onReady?.();
       return;
     }
 
@@ -300,6 +301,7 @@ export class AcpTransport implements IKiroTransport {
       clientInfo: { name: "abtars", version: "1.0.0" },
     });
     logInfo(this.tag, `ACP initialized (agent: ${initResult.agentInfo?.name ?? "unknown"})`);
+    this.onReady?.();
   }
 
   get isReady(): boolean {
