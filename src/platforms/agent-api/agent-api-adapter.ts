@@ -40,13 +40,10 @@ export class AgentApiAdapter implements PlatformAdapter {
    */
   async handlePeerMessage(peerId: string, sessionId: string, text: string, timeoutMs = 60_000): Promise<string> {
     const { spin } = await import("../../components/spin.js");
-    const { kanbanGetCard } = await import("../../components/tasks/kanban-board.js");
-    const { nerve } = await import("../../components/nerve.js");
 
     logDebug(TAG, `-> ${peerId}/${sessionId}: ${text.slice(0, 100)}`);
 
-    // Dispatch through Spin → Orc handles the request
-    const { cardId } = await spin.dispatchAwait({
+    const { result } = await spin.dispatchAwait({
       type: "O",
       goal: `[PEER REQUEST from ${peerId}] ${text}`,
       title: `peer:${peerId}`,
@@ -54,9 +51,7 @@ export class AgentApiAdapter implements PlatformAdapter {
       timeoutMs,
     });
 
-    const card = kanbanGetCard(cardId);
-    const response = card?.result_summary || card?.error || "No response";
-
+    const response = result || "No response";
     logDebug(TAG, `<- ${peerId}/${sessionId}: ${response.slice(0, 100)}`);
     return response;
   }
