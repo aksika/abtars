@@ -199,7 +199,9 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
         if (card.delivery_mode === "silent" && !card.result_path) { kanbanMarkDelivered(card.id); return; }
         kanbanSetDelivering(card.id);
         if (ctx.telegramAdapter) {
-          await ctx.telegramAdapter.sendMessage(String(masterChatId), `✅ "${card.title}" complete.\n${card.result_summary ?? ""}`);
+          if (card.delivery_mode !== "silent") {
+            await ctx.telegramAdapter.sendMessage(String(masterChatId), `✅ "${card.title}" complete.\n${card.result_summary ?? ""}`);
+          }
           if (card.result_path) await ctx.telegramAdapter.sendDocument(String(masterChatId), card.result_path, `📄 ${card.title}`);
         }
         kanbanMarkDelivered(card.id);
