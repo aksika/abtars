@@ -243,8 +243,12 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
       for (const key of sessions.keys()) {
         const entry = sessions.get(key);
         if (entry?.busy && entry.lastActiveAt && now - entry.lastActiveAt > 60_000) {
+          // #1003: abort in-flight call BEFORE clearing busy — prevents zombie calls
+          if (transport && "sendInterrupt" in transport) {
+            (transport as { sendInterrupt: () => Promise<void> }).sendInterrupt().catch(() => {});
+          }
           entry.busy = false;
-          logWarn(TAG, `Force-cleared stuck busy on ${key} (>60s)`);
+          logWarn(TAG, `Force-cleared stuck busy on ${key} (>60s) — interrupted`);
         }
       }
     }});

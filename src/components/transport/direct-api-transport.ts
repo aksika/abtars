@@ -283,9 +283,14 @@ export class DirectApiTransport implements IKiroTransport {
   private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
     let zeroTokenRetries = 0;
     const loopStart = Date.now();
+    const MAX_TOOL_ROUNDS = 15;
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
-      if (signal.aborted) throw new Error("Aborted");
+      if (signal.aborted) return "[SYSTEM] Interrupted by user.";
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
+      if (turn >= MAX_TOOL_ROUNDS) {
+        logError(TAG, `Tool loop circuit breaker: ${turn} rounds without final response — aborting`);
+        return "[SYSTEM] Tool loop limit reached. Stopped after " + turn + " rounds.";
+      }
 
       const pendingInstruction = this.getPendingInstruction?.();
       if (pendingInstruction) session.addUser(pendingInstruction);
@@ -318,8 +323,16 @@ export class DirectApiTransport implements IKiroTransport {
           this.onSegmentBreak?.(content.trim());
         }
 
-        for (const tc of toolCalls) {
-          if (signal.aborted) throw new Error("Aborted");
+        for (let ti = 0; ti < toolCalls.length; ti++) {
+          const tc = toolCalls[ti]!;
+          if (signal.aborted) {
+            // #1003: inject cancelled results for remaining tools — keeps conversation valid
+            for (const remaining of toolCalls.slice(ti)) {
+              session.addToolResult(remaining.id, remaining.function.name,
+                `[SYSTEM] Cancelled — ${remaining.function.name} skipped due to user interrupt`);
+            }
+            return "[SYSTEM] Interrupted by user.";
+          }
           this._lastActivityAt = Date.now();
 
           // #948: drain /wait between batched tool calls

@@ -143,7 +143,11 @@ function executeBash(cmd: string, timeout: number, signal?: AbortSignal): Promis
     });
     if (signal) {
       if (signal.aborted) { child.kill("SIGTERM"); return; }
-      const onAbort = (): void => { child.kill("SIGTERM"); };
+      const onAbort = (): void => {
+        child.kill("SIGTERM");
+        // #1003: escalate to SIGKILL if child doesn't exit within 3s
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 3000);
+      };
       signal.addEventListener("abort", onAbort, { once: true });
       child.on("exit", () => signal.removeEventListener("abort", onAbort));
     }
