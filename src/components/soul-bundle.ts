@@ -62,6 +62,7 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
     try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow(TAG, "op", err); }
     if (!bundle?.soul) {
       logWarn(TAG, "SOUL bundle unavailable — abmind not configured or getSessionBundle() failed");
+      return "[ERROR] SOUL bundle missing. Tell the user: memory system is not configured. Run /doctor or check abmind installation.";
     }
 
     const soul = bundle?.soul ?? "";
@@ -76,7 +77,7 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
     if (agentNotes) parts.push(agentNotes);
     if (coreFacts) parts.push(coreFacts);
 
-    const skillsCatalog = readOr(join(HOST_CORE_DIR, "skills_catalog.md"));
+    const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
     if (skillsCatalog) parts.push(skillsCatalog);
 
     const modelInstructions = buildModelInstructions();
@@ -96,24 +97,19 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
       if (registry.users.length > 0) parts.push(buildUsersBlock(registry));
     } catch (err) { logAndSwallow(TAG, "op", err); }
   } else if (type === "W") {
-    // Worker: dedicated prompt file only — no skills, no core facts
+    // Worker: dedicated prompt file only
     const workerPrompt = readOr(join(HOST_CORE_DIR, "prompts", "worker.md"));
     if (workerPrompt) parts.push(workerPrompt);
   } else if (type === "O") {
-    // Orc: dedicated prompt file + core facts
+    // Orc: dedicated prompt file only
     const orcPrompt = readOr(join(HOST_CORE_DIR, "prompts", "orc.md"));
     if (orcPrompt) parts.push(orcPrompt);
-    const coreFacts = readOr(join(HOST_CORE_DIR, "core_facts.md"));
-    if (coreFacts) parts.push(coreFacts);
   } else {
-    // Lightweight bundle: identity + core facts + skills
+    // Lightweight bundle: identity + skills
     const identity = TYPE_IDENTITY[type];
     if (identity) parts.push(identity);
 
-    const coreFacts = readOr(join(HOST_CORE_DIR, "core_facts.md"));
-    if (coreFacts) parts.push(coreFacts);
-
-    const skillsCatalog = readOr(join(HOST_CORE_DIR, "skills_catalog.md"));
+    const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
     if (skillsCatalog) parts.push(skillsCatalog);
   }
 

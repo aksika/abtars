@@ -490,35 +490,6 @@ async function checkForUpdates(home: string, opts: UpdateOptions): Promise<numbe
 
 /** Sync bundled assets to runtime paths after successful deploy (#875). */
 async function syncAssets(home: string, _stagedPath: string): Promise<void> {
-  const abmindBundle = join(home, 'app', 'bundle', 'node_modules', 'abmind');
-  const abmindHome = process.env['ABMIND_HOME'] ?? join(process.env['HOME'] ?? '', '.abmind');
-
-  // abmind templates → ~/.abmind/memory/core/
-  const coreDir = join(abmindHome, 'memory', 'core');
-  mkdirSync(coreDir, { recursive: true });
-  const mtSrc = join(abmindBundle, 'dist', 'core', 'memory-tools.md');
-  if (existsSync(mtSrc)) copyFileSync(mtSrc, join(coreDir, 'memory-tools.md'));
-  for (const file of ['core_facts.md', 'agent_notes.md']) {
-    const src = join(abmindBundle, 'templates', 'core', file);
-    if (!existsSync(src)) continue;
-    const live = join(coreDir, file);
-    if (!existsSync(live)) {
-      copyFileSync(src, live);
-    } else {
-      copyFileSync(src, join(coreDir, file.replace('.md', '.template.md')));
-    }
-  }
-
-  // abmind prompts/sleep/ → ~/.abmind/prompts/sleep/
-  const sleepSrc = join(abmindBundle, 'prompts', 'sleep');
-  if (existsSync(sleepSrc)) {
-    const sleepDst = join(abmindHome, 'prompts', 'sleep');
-    mkdirSync(sleepDst, { recursive: true });
-    for (const f of readdirSync(sleepSrc)) {
-      copyFileSync(join(sleepSrc, f), join(sleepDst, f));
-    }
-  }
-
   // abtars core/skills/ → ~/.abtars/skills/core/
   const skillsSrc = join(home, 'app', 'core', 'skills');
   if (existsSync(skillsSrc)) {

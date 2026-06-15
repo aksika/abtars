@@ -18,7 +18,7 @@ export function reloadCatalog(): number { return _instance?.generateCatalog() ??
 export function register(api: CapabilityApi): void {
   const skillWatcher = new SkillWatcher(
     join(abtarsHome(), "skills"),
-    join(abtarsHome(), "core", "skills_catalog.md"),
+    join(abtarsHome(), "skills", "skills_catalog.md"),
   );
   _instance = skillWatcher;
 
