@@ -21,7 +21,8 @@ interface FaultPolicy {
 
 export interface FixRule {
   pattern: string;
-  command: string[];
+  action?: "run" | "suppress";  // default: "run" (backward compat)
+  command?: string[];            // required when action=run
   cooldownMin: number;
   verified?: boolean;
   createdAt?: string;

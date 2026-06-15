@@ -114,6 +114,14 @@ export function createSelfHealerTask(
 function handleKnownFault(rule: FixRule, _errorKey: string, adapter: TelegramAdapter, chatId: string, dryRun: boolean): void {
   if (!shouldAttempt("autofix-known", rule.pattern)) return;
 
+  // Suppress: known noise, skip silently
+  if (rule.action === "suppress") {
+    logDebug("self-healer", `Suppressed: "${rule.pattern}"`);
+    return;
+  }
+
+  if (!rule.command?.length) return;
+
   if (dryRun) {
     logInfo("self-healer", `[DRY-RUN] Would run: ${rule.command.join(" ")}`);
     return;
@@ -147,7 +155,7 @@ function handleUnknownFault(errorLine: string, errorKey: string, adapter: Telegr
   logAutoFix(`AGENT START: ${errorKey}`);
   logShaCall(errorKey, errorLine);
 
-  const prompt = `A runtime error occurred:\n"${errorLine.slice(0, 500)}"\n\nBefore investigating, check ~/.abtars/logs/sha-call.log for prior entries matching this error pattern.\nIf you find a PREVIOUS entry with a similar error pattern:\n  - This is a recurring fault you could not eliminate last time.\n  - Add a no-op fix to ~/.abtars/config/sha-policy-self.json (read existing file, append to fixes array):\n    {"pattern": "<regex matching the error>", "command": ["true"], "cooldownMin": 60, "report": "Recurring transient — suppressed.", "verified": true, "createdAt": "<now>"}\n  - Report: "Recurring unfixable fault — added to known faults."\n  - Do NOT attempt a fix.\n\nOtherwise, diagnose and fix it. After fixing:\n1. Report what you did (1 paragraph)\n2. If this error is likely to recur and you found a deterministic fix, write a wired rule to ~/.abtars/config/sha-policy-self.json so it's handled automatically next time.\n   Format: {"pattern": "...", "command": [...], "cooldownMin": 30}\n   If the error was a one-off or no reliable automated fix exists, skip this step.`;
+  const prompt = `A runtime error occurred:\n"${errorLine.slice(0, 500)}"\n\nBefore investigating, check ~/.abtars/logs/sha-call.log for prior entries matching this error pattern.\nIf you find a PREVIOUS entry with a similar error pattern:\n  - This is a recurring fault you could not eliminate last time.\n  - Add a suppress rule to ~/.abtars/config/sha-policy-self.json (read existing file, append to fixes array):\n    {"pattern": "<regex matching the error>", "action": "suppress", "cooldownMin": 60, "report": "Recurring transient — suppressed.", "verified": true, "createdAt": "<now>"}\n  - Report: "Recurring unfixable fault — suppressed."\n  - Do NOT attempt a fix.\n\nOtherwise, diagnose and fix it. After fixing:\n1. Report what you did (1 paragraph)\n2. If this error is likely to recur and you found a deterministic fix, write a wired rule to ~/.abtars/config/sha-policy-self.json:\n   {"pattern": "...", "action": "run", "command": [...], "cooldownMin": 30}\n   If the error was a one-off or no reliable automated fix exists, skip this step.`;
 
   const timeout = setTimeout(() => { onDone(); }, 5 * 60_000);
 
