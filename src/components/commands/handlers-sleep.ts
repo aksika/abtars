@@ -53,8 +53,8 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
 
   if (sub === "resume") {
     const lock = auditDir ? readLatestSleepLock(auditDir) : null;
-    const hasFailed = lock && Object.values(lock.steps).some(s => s.status === "failed");
-    if (!lock || lock.status === "completed" || !hasFailed) {
+    const hasIncomplete = lock && Object.values(lock.steps).some(s => s.status === "failed" || s.status === "pending");
+    if (!lock || lock.status === "completed" || !hasIncomplete) {
       await ctx.reply("No failed sleep cycle to resume — use /sleep now for a fresh run.");
       return true;
     }
