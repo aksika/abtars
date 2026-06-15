@@ -33,13 +33,14 @@ export function createIdleCompactTask(_deps: IdleCompactDeps): HeartbeatTask {
   };
 }
 
-export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string; startSleep?: () => void; checkHwSleep?: () => void; cronBusy?: () => boolean };
+export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string; startSleep?: () => void; checkHwSleep?: () => void; checkStaleSleep?: () => void; cronBusy?: () => boolean };
 
 /** Daily cycle — spawn Dreamy after BED_TIME + quiet ticks, then hw sleep after more quiet ticks. */
 export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
   return {
     name: "age-check",
     execute: async () => {
+      if (deps.checkStaleSleep) deps.checkStaleSleep();
       if (deps.checkHwSleep && !deps.cronBusy?.()) deps.checkHwSleep();
       if (!isDailyCycleDue(deps)) return;
       logInfo("age-check", `😴 BED_TIME (${deps.sleepHour}:${String(deps.sleepMinute).padStart(2, "0")}) — spawning Dreamy`);

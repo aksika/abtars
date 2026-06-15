@@ -164,6 +164,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     doctorPath: join(abtarsHome(), "scripts", "doctor.sh"),
     startSleep: () => { ctx.sleepHandle?.spawn(); },
     checkHwSleep: () => { ctx.sleepHandle?.checkHwSleep(); },
+    checkStaleSleep: () => { ctx.sleepHandle?.checkStale(); },
     cronBusy: () => cronQueue.currentJob !== null || cronQueue.pending > 0,
   }));
 
