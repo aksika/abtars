@@ -2,8 +2,8 @@ import { logAndSwallow } from "../log-and-swallow.js";
 import { getEnv } from "../env-schema.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 /** Write model into ~/.kiro/agents/{name}.json if it differs or is missing. */
@@ -128,7 +128,7 @@ export class AcpTransport implements IKiroTransport {
 
   constructor(cliPath: string, workingDir: string, opts?: { agent?: string; model?: string; cliArgs?: string[]; autoReinit?: boolean; tag?: string }) {
     this.cliPath = cliPath;
-    this.workingDir = workingDir;
+    this.workingDir = resolve(workingDir);
     this.agentName = opts?.agent ?? "professor";
     this.modelId = opts?.model;
     this.extraCliArgs = opts?.cliArgs;
@@ -149,6 +149,9 @@ export class AcpTransport implements IKiroTransport {
   private readonly tag: string;
 
   async initialize(): Promise<void> {
+    // #992: clean leftover kiro session files from prior crash-orphaned sessions
+    AcpTransport.cleanupOrphanedKiroSessions(this.workingDir);
+    for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
     this.sessions.clear(); // Fresh CLI instance = all old session IDs are stale
     this.onReinit?.();
 
@@ -480,6 +483,7 @@ export class AcpTransport implements IKiroTransport {
           logWarn(this.tag, `SDK failed on first prompt (${elapsed}ms) — switching to raw pipe mode`);
           AcpTransport._rawMode = true;
           this.client = null;
+          for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
           this.sessions.clear();
           await this.initialize();
           sid = await this.getOrCreateSession(this.lastSessionKey);
@@ -488,7 +492,7 @@ export class AcpTransport implements IKiroTransport {
 
         if (code === -32603 && msg.includes("No session found")) {
           const key = [...this.sessions.entries()].find(([, v]) => v === sid)?.[0];
-          if (key) this.sessions.delete(key);
+          if (key) { this.cleanupKiroFiles(sid); this.sessions.delete(key); }
           logWarn(this.tag, `Session ${sessionId} expired — invalidated, will recreate`);
           if (attempt < maxRetries) {
             sid = await this.getOrCreateSession(this.lastSessionKey);
@@ -551,6 +555,8 @@ export class AcpTransport implements IKiroTransport {
   }
 
   destroy(): void {
+    // #992: clean kiro session files before clearing the map
+    for (const kiroId of this.sessions.values()) this.cleanupKiroFiles(kiroId);
     this.sessions.clear();
     // #160: reject any in-flight ops so they don't hang waiting for a child
     // that's about to be killed (or already gone).
@@ -565,6 +571,35 @@ export class AcpTransport implements IKiroTransport {
       this.client = null;
     }
     logInfo(this.tag, "ACP transport destroyed");
+  }
+
+  /** #992: Remove kiro-cli session files for a given session UUID. */
+  private cleanupKiroFiles(kiroSessionId: string): void {
+    const dir = join(homedir(), ".kiro", "sessions", "cli");
+    for (const ext of [".json", ".jsonl", ".history"]) {
+      try { unlinkSync(join(dir, kiroSessionId + ext)); } catch {}
+    }
+  }
+
+  /** #992: On boot, remove orphaned kiro sessions from prior crashed runs. */
+  private static cleanupOrphanedKiroSessions(ourCwd: string): void {
+    const dir = join(homedir(), ".kiro", "sessions", "cli");
+    let entries: string[];
+    try { entries = readdirSync(dir).filter(f => f.endsWith(".json")); } catch { return; }
+    let cleaned = 0;
+    for (const file of entries) {
+      try {
+        const meta = JSON.parse(readFileSync(join(dir, file), "utf-8"));
+        if ((meta.cwd === ourCwd || meta.cwd === ".") && meta.session_created_reason === "subagent") {
+          const uuid = file.replace(".json", "");
+          for (const ext of [".json", ".jsonl", ".history"]) {
+            try { unlinkSync(join(dir, uuid + ext)); } catch {}
+          }
+          cleaned++;
+        }
+      } catch {}
+    }
+    if (cleaned > 0) logInfo("acp", `Cleaned ${cleaned} orphaned kiro session(s)`);
   }
 
   async setModel(model: string): Promise<void> {
