@@ -6,7 +6,7 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { getEnv } from "./env-schema.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { logInfo, logDebug, logWarn } from "./logger.js";
+import { logInfo, logDebug, logWarn, logError } from "./logger.js";
 import { abtarsHome } from "../paths.js";
 import { loadUsers, buildUsersBlock } from "./user-registry.js";
 import type { MemoryManager } from "abmind";
@@ -57,28 +57,27 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
   const parts: string[] = [];
 
   if (type === "A") {
-    // Full Main bundle
+    // Full Main bundle — requires memory state to be known (#998)
     let bundle: { soul: string; profile: string; notes: string; memoryTools: string; coreFacts: string } | null = null;
     try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow(TAG, "op", err); }
+
     if (memory && !bundle?.soul) {
-      logWarn(TAG, "SOUL bundle unavailable — getSessionBundle() returned empty");
+      // Memory available but SOUL missing → misconfiguration. Log ERROR for SHA.
+      logError(TAG, "SOUL bundle missing — abmind misconfigured (memory available but getSessionBundle empty)");
       return "[ERROR] SOUL bundle missing. Tell the user: memory system failed to load persona. Run /doctor or check abmind installation.";
     }
+
     if (!memory) {
-      logWarn(TAG, "SOUL bundle unavailable — memory not initialized yet");
+      // Memory not available — tell model explicitly
+      parts.push("[SYSTEM] Memory unavailable. memory_recall/memory_store tools disabled. Operate without persistent memory.");
+    } else {
+      // Normal: full bundle
+      if (bundle!.soul) parts.push(bundle!.soul);
+      if (bundle!.profile) parts.push(bundle!.profile);
+      if (bundle!.notes) parts.push(bundle!.notes);
+      if (bundle!.memoryTools) parts.push(bundle!.memoryTools);
+      if (bundle!.coreFacts) parts.push(bundle!.coreFacts);
     }
-
-    const soul = bundle?.soul ?? "";
-    const userProfile = bundle?.profile ?? "";
-    const agentNotes = bundle?.notes ?? "";
-    const memoryTools = bundle?.memoryTools ?? "";
-    const coreFacts = bundle?.coreFacts ?? "";
-
-    if (soul) parts.push(soul);
-    if (memoryTools) parts.push(memoryTools);
-    if (userProfile) parts.push(userProfile);
-    if (agentNotes) parts.push(agentNotes);
-    if (coreFacts) parts.push(coreFacts);
 
     const skillsCatalog = readOr(join(abtarsHome(), "skills", "skills_catalog.md"));
     if (skillsCatalog) parts.push(skillsCatalog);

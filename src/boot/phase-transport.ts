@@ -236,11 +236,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   await transport.initialize();
 
-  if ("setSystemPrompt" in transport && typeof (transport as { setSystemPrompt: unknown }).setSystemPrompt === "function") {
-    const { loadSoulBundle } = await import("../components/soul-loader.js");
-    const soul = loadSoulBundle();
-    if (soul) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(soul);
-  }
+  // SOUL bundle set in phase-pipelineDeps (after memory state resolved) #998
 
   if (resolved.fallbacks.length > 0 && resolved.provider.transport !== "api") {
     logWarn("main", `⚠️ Fallbacks configured for ${resolved.provider.transport} transport — only API transport supports model fallback`);

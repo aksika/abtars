@@ -124,6 +124,13 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     }
   }
 
+  // #998: Set system prompt AFTER memory state is known
+  if (transport && "setSystemPrompt" in transport && typeof (transport as any).setSystemPrompt === "function") {
+    const { buildSoulBundle } = await import("../components/soul-bundle.js");
+    const bundle = buildSoulBundle("A", ctx.memory ?? null);
+    if (bundle) (transport as { setSystemPrompt: (p: string) => void }).setSystemPrompt(bundle);
+  }
+
   // #907: Register Nerve notification listeners for Orc
   await import("../components/spin-notifications.js");
 
