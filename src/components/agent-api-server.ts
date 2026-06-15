@@ -486,7 +486,7 @@ export class AgentApiServer {
       const response = await this.a2aAdapter.handlePeerMessage(caller, sessionId, lastMsg.content);
 
       const { buildChatResponse } = await import("./openai-compat-translate.js");
-      const chatResp = buildChatResponse(response, body.model ?? "default");
+      const chatResp = buildChatResponse({ content: response, model: body.model ?? "default" });
       const respBody = JSON.stringify(chatResp);
 
       this.pushTraffic({ ts: start, ip, endpoint: "v1/chat/completions", prompt: (lastMsg.content as string).slice(0, 200), response: response.slice(0, 200), durationMs: Date.now() - start, status: 200 });
