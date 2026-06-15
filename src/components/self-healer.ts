@@ -8,10 +8,10 @@
  * All gating via sha-tracker. No inline state.
  */
 
-import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { logInfo } from "./logger.js";
+import { logInfo, logDebug } from "./logger.js";
 import { getLogFile } from "./logger.js";
 import { abtarsHome } from "../paths.js";
 import { logAndSwallow } from "./log-and-swallow.js";
@@ -21,6 +21,13 @@ import { loadFixes, shouldAttempt, recordResult } from "./sha-tracker.js";
 import type { FixRule } from "./sha-tracker.js";
 import type { HeartbeatTask } from "abmind";
 import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
+
+/** Write SHA dispatch to sha-call.log (model reads this for recurrence detection). */
+function logShaCall(errorKey: string, errorLine: string): void {
+  const logPath = join(abtarsHome(), "logs", "sha-call.log");
+  const entry = JSON.stringify({ ts: localISO(), errorKey, errorLine: errorLine.slice(0, 300) });
+  try { appendFileSync(logPath, entry + "\n"); } catch {}
+}
 
 const BLACKLIST = [
   "-32603", "Transient error", "fetch failed",
@@ -146,8 +153,9 @@ function handleUnknownFault(errorLine: string, errorKey: string, adapter: Telegr
 
   logInfo("self-healer", `Unknown fault — dispatching agent: ${errorKey.slice(0, 60)}`);
   logAutoFix(`AGENT START: ${errorKey}`);
+  logShaCall(errorKey, errorLine);
 
-  const prompt = `A runtime error occurred:\n"${errorLine.slice(0, 500)}"\n\nDiagnose and fix it. After fixing:\n1. Report what you did (1 paragraph)\n2. If this error is likely to recur and you found a deterministic fix, write a wired rule to ~/.abtars/config/sha-policy-self.json so it's handled automatically next time.\n   Format: {"pattern": "...", "command": [...], "cooldownMin": 30}\n   If the error was a one-off or no reliable automated fix exists, skip this step.`;
+  const prompt = `A runtime error occurred:\n"${errorLine.slice(0, 500)}"\n\nBefore investigating, check ~/.abtars/logs/sha-call.log for prior entries matching this error pattern.\nIf you find a PREVIOUS entry with a similar error pattern:\n  - This is a recurring fault you could not eliminate last time.\n  - Add a no-op fix to ~/.abtars/config/sha-policy-self.json (read existing file, append to fixes array):\n    {"pattern": "<regex matching the error>", "command": ["true"], "cooldownMin": 60, "report": "Recurring transient — suppressed.", "verified": true, "createdAt": "<now>"}\n  - Report: "Recurring unfixable fault — added to known faults."\n  - Do NOT attempt a fix.\n\nOtherwise, diagnose and fix it. After fixing:\n1. Report what you did (1 paragraph)\n2. If this error is likely to recur and you found a deterministic fix, write a wired rule to ~/.abtars/config/sha-policy-self.json so it's handled automatically next time.\n   Format: {"pattern": "...", "command": [...], "cooldownMin": 30}\n   If the error was a one-off or no reliable automated fix exists, skip this step.`;
 
   const timeout = setTimeout(() => { onDone(); }, 5 * 60_000);
 

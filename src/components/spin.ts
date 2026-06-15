@@ -35,6 +35,7 @@ export class Spin {
   private runtime: SubagentRuntime | null = null;
   private orcSession: AgentSession | null = null;
   private orcIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  private _lastHealerDoneAt = 0;
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
 
@@ -365,6 +366,11 @@ export class Spin {
   }
 
   async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
+    // #987: enforce concurrency + cooldown gates (same as dispatch)
+    if (!this.canDispatch(request.type, 0)) {
+      throw new Error(`${request.type} session busy or in cooldown — skipping`);
+    }
+
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM", type: request.type,
@@ -459,7 +465,10 @@ export class Spin {
 
   private canDispatch(type: SessionType, _cardId: number): boolean {
     const max = MAX_CONCURRENT[type] ?? 5;
-    return (this.running.get(type)?.size ?? 0) < max;
+    if ((this.running.get(type)?.size ?? 0) >= max) return false;
+    // #987: 2-min cooldown after H session ends
+    if (type === "H" && Date.now() - this._lastHealerDoneAt < 120_000) return false;
+    return true;
   }
 
   private markRunning(type: SessionType, cardId: number): void {
@@ -469,6 +478,7 @@ export class Spin {
 
   private markDone(type: SessionType, cardId: number): void {
     this.running.get(type)?.delete(cardId);
+    if (type === "H") this._lastHealerDoneAt = Date.now();
   }
 
   private async execute(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
