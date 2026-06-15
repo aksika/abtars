@@ -66,7 +66,10 @@ export async function handleSleepSub(text: string, ctx: CommandContext): Promise
 
   if (sub === "now") {
     if (auditDir) {
-      try { unlinkSync(todayLockPath(auditDir)); } catch (err) { logAndSwallow("command_handlers", "op", err); }
+      const lock = readLatestSleepLock(auditDir);
+      if (!lock || lock.status === "completed") {
+        try { unlinkSync(todayLockPath(auditDir)); } catch (err) { logAndSwallow("command_handlers", "op", err); }
+      }
     }
     writeForceSleep("fresh via /sleep now");
     await ctx.reply("💤 Full sleep cycle initiated");
