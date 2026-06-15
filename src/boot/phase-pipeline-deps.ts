@@ -248,25 +248,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     setIrcSend((channel, message) => { ircAdapter.sendMessage(channel, message); });
   }
 
-  // #944: "Back online" notification — fires here because platforms are now wired
-  if (ctx.telegramAdapter || ctx.discordAdapter) {
-    const version = ctx.commit && ctx.commit !== "?" && !ctx.version.includes(ctx.commit)
-      ? `v${ctx.version}-${ctx.commit}` : `v${ctx.version}`;
-    setTimeout(async () => {
-      try {
-        const { sendToMainChat } = await import("../components/main-chat.js");
-        await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `🔄 Back online. ${version}`);
-        logInfo("main", "Startup: Back online notification sent");
-        // Degraded-mode warning if any subsystem failed
-        const failed = [...ctx.phaseHealth].filter(([, h]) => h.status === "failed" || h.status === "skipped");
-        if (failed.length > 0) {
-          const lines = failed.map(([name, h]) => `  ${h.status === "failed" ? "✗" : "»"} ${name}${h.error ? `: ${h.error}` : ""}`);
-          await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `⚠️ Degraded boot (${failed.length} subsystem${failed.length > 1 ? "s" : ""} down):\n${lines.join("\n")}`);
-        }
-      } catch (err) { logWarn("main", `Back online notification failed: ${err}`); }
-    }, 3000);
-
-  }
+  // #1000: "Back online" notification moved to bridge-app.ts (fires before greeting)
 
   return "ran";
 }

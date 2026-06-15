@@ -154,6 +154,22 @@ export async function startBridge(): Promise<number> {
     await fire("BridgeStart", { event: "BridgeStart", timestamp: new Date().toISOString(), sessionKey: "", platform: "", userId: "" });
   }
 
+  // #1000: Back online notification FIRST, then greeting
+  if (ctx.telegramAdapter || ctx.discordAdapter) {
+    try {
+      const { sendToMainChat } = await import("./components/main-chat.js");
+      const version = ctx.commit && ctx.commit !== "?" && !ctx.version.includes(ctx.commit)
+        ? `v${ctx.version}-${ctx.commit}` : `v${ctx.version}`;
+      await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `🔄 Back online. ${version}`);
+      logInfo("main", "Startup: Back online notification sent");
+      const failed = [...ctx.phaseHealth].filter(([, h]) => h.status === "failed" || h.status === "skipped");
+      if (failed.length > 0) {
+        const lines = failed.map(([name, h]) => `  ${h.status === "failed" ? "✗" : "»"} ${name}${h.error ? `: ${h.error}` : ""}`);
+        await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `⚠️ Degraded boot (${failed.length} subsystem${failed.length > 1 ? "s" : ""} down):\n${lines.join("\n")}`);
+      }
+    } catch (err) { logWarn("main", `Back online notification failed: ${err}`); }
+  }
+
   // #980: Greeting fires via Spin when session is ready (not here — transport may not be handshaked yet)
   if (ctx.telegramAdapter) {
     const { spin } = await import("./components/spin.js");
