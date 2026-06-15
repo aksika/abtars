@@ -601,9 +601,9 @@ import { getDelegationTools } from "./delegation-tools.js";
 import { getPeerDelegationTools } from "./peer-delegation-tools.js";
 import { kanbanTool } from "./kanban-tool.js";
 import { channelPostTool, channelReadTool } from "./channel-tool.js";
-import { artifactPushTool, artifactPullTool } from "./artifact-tools.js";
+import { artifactPushTool, artifactPullTool, artifactAttachTool } from "./artifact-tools.js";
 
-const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, ...getDelegationTools(), ...getPeerDelegationTools()];
+const ALL_TOOLS: ToolDefinition[] = [bashTool, memoryStoreTool, memoryRecallTool, memoryEditTool, webBrowseTool, todoTool, taskTool, sendDocumentTool, peerSessionTool, peerWakeupTool, ircSendTool, secretGetTool, skillCreateTool, skillUpdateTool, skillPatchTool, skillRemoveTool, mcpTool, kanbanTool, channelPostTool, channelReadTool, artifactAttachTool, ...getDelegationTools(), ...getPeerDelegationTools()];
 
 // Conditional: artifact store tools (#929)
 if (process.env["ARTIFACT_S3_ENDPOINT"]) {

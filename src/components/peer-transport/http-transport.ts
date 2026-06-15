@@ -30,7 +30,9 @@ export class HttpTransport implements PeerTransport {
       const entry = resolvePeer(config.peers, peer);
       logDebug(TAG, `→ callback ${peer}: task_id=${message.payload.task_id} status=${message.payload.status}`);
       logTrace(TAG, `→ callback ${peer} result: ${String(message.payload.result_summary ?? "").slice(0, 200)}`);
-      const body = JSON.stringify({ task_id: message.payload.task_id, status: message.payload.status, result_summary: message.payload.result_summary, error: message.payload.error });
+      const payload: Record<string, unknown> = { task_id: message.payload.task_id, status: message.payload.status, result_summary: message.payload.result_summary, error: message.payload.error };
+      if (message.payload.artifacts) payload.artifacts = message.payload.artifacts;
+      const body = JSON.stringify(payload);
       return this.httpCall(entry, peer, "POST", "/v1/callbacks", body);
     }
     if (message.type === "task") return this.delegateTask(peer, message.payload.goal as string, message.payload as any);
@@ -53,7 +55,7 @@ export class HttpTransport implements PeerTransport {
     for (const h of this.handlers) { try { h(from, message); } catch {} }
   }
 
-  async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string }): Promise<number> {
+  async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }> }): Promise<number> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
 
@@ -62,7 +64,21 @@ export class HttpTransport implements PeerTransport {
     logDebug(TAG, `→ peer_delegate ${peer}: priority=${opts?.priority ?? "MEDIUM"}, goal=${goal.length}ch`);
     logTrace(TAG, `→ peer_delegate ${peer} goal: ${goal.slice(0, 300)}`);
 
-    const body = JSON.stringify({ goal, priority: opts?.priority ?? "MEDIUM", context: opts?.context, callback_peer: config.self.name });
+    // Size guard for artifacts (#928)
+    if (opts?.artifacts?.length) {
+      const MAX_SINGLE = 1_400_000; // 1.4MB base64 per artifact
+      const MAX_TOTAL = 5_000_000;  // 5MB total
+      let total = 0;
+      for (const a of opts.artifacts) {
+        if (a.content.length > MAX_SINGLE) throw new Error(`Artifact '${a.name}' exceeds 1.4MB limit (${a.content.length} bytes)`);
+        total += a.content.length;
+      }
+      if (total > MAX_TOTAL) throw new Error(`Total artifacts exceed 5MB limit (${total} bytes)`);
+    }
+
+    const payload: Record<string, unknown> = { goal, priority: opts?.priority ?? "MEDIUM", context: opts?.context, callback_peer: config.self.name };
+    if (opts?.artifacts?.length) payload.artifacts = opts.artifacts;
+    const body = JSON.stringify(payload);
     const response = await this.httpCall(entry, peer, "POST", "/v1/tasks", body);
     const parsed = JSON.parse(response);
     logInfo(TAG, `PEER_DELEGATE ${peer} → remote#${parsed.task_id} (${goal.length}ch)`);

@@ -47,7 +47,7 @@ function normalizeIp(raw: string): string {
   return raw.replace(/^::ffff:/, "");
 }
 
-const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
+const MAX_BODY_BYTES = 6 * 1024 * 1024; // 6 MB (artifacts up to 5MB + overhead)
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -559,7 +559,7 @@ export class AgentApiServer {
 
   /** #894 — /v1/tasks: async delegation. Returns 202 + cardId immediately. */
   private async handleV1Tasks(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
-    let body: { goal?: string; priority?: string; context?: string; callback_peer?: string };
+    let body: { goal?: string; priority?: string; context?: string; callback_peer?: string; artifacts?: Array<{ name: string; content: string }> };
     try {
       body = JSON.parse(await readBody(req));
     } catch (err) {
@@ -585,6 +585,18 @@ export class AgentApiServer {
       deliveryMode: "silent",
       callbackPeer: body.callback_peer,
     });
+
+    // #928: Write inbound artifacts to card workspace
+    if (body.artifacts?.length) {
+      const { basename: bn } = await import("node:path");
+      const dir = join(abtarsHome(), "workspace", "cards", String(cardId));
+      mkdirSync(dir, { recursive: true });
+      for (const art of body.artifacts) {
+        const safeName = bn(art.name);
+        writeFileSync(join(dir, safeName), Buffer.from(art.content, "base64"));
+      }
+      logDebug(TAG, `Wrote ${body.artifacts.length} artifact(s) to card#${cardId} workspace`);
+    }
 
     logInfo(TAG, `A2A task from ${caller}: card #${cardId} "${goal.slice(0, 60)}"${body.callback_peer ? ` (callback→${body.callback_peer})` : ""}`);
     logTrace(TAG, `A2A task from ${caller} full goal: ${goal.slice(0, 500)}`);
@@ -636,7 +648,7 @@ export class AgentApiServer {
   /** #675 — POST /v1/callbacks: remote peer delivers task result. */
   private async handleV1Callback(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
     const start = Date.now();
-    let body: { task_id?: number; status?: string; result_summary?: string; error?: string };
+    let body: { task_id?: number; status?: string; result_summary?: string; error?: string; artifacts?: Array<{ name: string; content: string }> };
     try {
       body = JSON.parse(await readBody(req));
     } catch {
@@ -673,6 +685,19 @@ export class AgentApiServer {
     }
 
     const card = remoteCards[0]!;
+
+    // #928: Write result artifacts to local card workspace
+    if (body.artifacts?.length) {
+      const { basename: bn } = await import("node:path");
+      const dir = join(abtarsHome(), "workspace", "cards", String(card.id));
+      mkdirSync(dir, { recursive: true });
+      for (const art of body.artifacts) {
+        const safeName = bn(art.name);
+        writeFileSync(join(dir, safeName), Buffer.from(art.content, "base64"));
+      }
+      logDebug(TAG, `Wrote ${body.artifacts.length} result artifact(s) to local card#${card.id}`);
+    }
+
     if (body.status === "done") {
       kanbanComplete(card.id, null, body.result_summary?.slice(0, 500) ?? "completed");
       logInfo(TAG, `PEER_CALLBACK ${caller}#${taskId} → local#${card.id} done (${(body.result_summary ?? "").length}ch)`);

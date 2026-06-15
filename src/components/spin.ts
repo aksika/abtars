@@ -351,8 +351,10 @@ export class Spin {
     const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.execute(request, cardId, timeout)
       .then(result => {
+        const { drainArtifacts } = require("./transport/artifact-tools.js") as typeof import("./transport/artifact-tools.js");
+        const artifacts = drainArtifacts(cardId);
         kanbanComplete(cardId, null, result.slice(0, 500));
-        if (request.callbackPeer) fireCallback(request.callbackPeer, cardId, "done", result.slice(0, 500));
+        if (request.callbackPeer) fireCallback(request.callbackPeer, cardId, "done", result.slice(0, 500), undefined, artifacts);
       })
       .catch(err => {
         const msg = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
@@ -567,14 +569,13 @@ export class Spin {
 }
 
 /** #675: Fire result callback to the delegating peer. Fire-and-forget. */
-async function fireCallback(peerName: string, taskId: number, status: "done" | "failed", result?: string, error?: string): Promise<void> {
+async function fireCallback(peerName: string, taskId: number, status: "done" | "failed", result?: string, error?: string, artifacts?: Array<{ name: string; content: string }>): Promise<void> {
   try {
     const { getPeerTransport } = await import("./peer-transport/index.js");
     const transport = getPeerTransport();
-    await transport.send(peerName, {
-      type: "task",
-      payload: { action: "callback", task_id: taskId, status, result_summary: result, error },
-    });
+    const payload: Record<string, unknown> = { action: "callback", task_id: taskId, status, result_summary: result, error };
+    if (artifacts?.length) payload.artifacts = artifacts;
+    await transport.send(peerName, { type: "task", payload });
     logInfo(TAG, `Callback fired to ${peerName} for card:${taskId} (${status})`);
   } catch (err) {
     logWarn(TAG, `Callback to ${peerName} failed (card:${taskId}): ${err instanceof Error ? err.message : String(err)}`);

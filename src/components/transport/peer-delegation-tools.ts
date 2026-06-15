@@ -24,6 +24,7 @@ export const peerDelegateTool: ToolDefinition = {
       priority: { type: "string", enum: ["CRITICAL", "HIGH", "MEDIUM", "LOW"], description: "Task priority (default: MEDIUM)" },
       context: { type: "string", description: "Optional context to include" },
       requires: { type: "array", items: { type: "string" }, description: "Required capabilities (e.g. ['gpu', 'docker'])" },
+      artifacts: { type: "string", description: "JSON array of {name, content} objects (base64-encoded files to send)" },
     },
     required: ["goal"],
   },
@@ -31,6 +32,7 @@ export const peerDelegateTool: ToolDefinition = {
     const { goal, priority, context } = args;
     let peer = args.peer;
     const requires: string[] = args.requires ? (typeof args.requires === "string" ? JSON.parse(args.requires) : args.requires) : [];
+    const artifacts: Array<{ name: string; content: string }> | undefined = args.artifacts ? JSON.parse(args.artifacts) : undefined;
 
     if (!goal) return JSON.stringify({ error: "goal is required" });
 
@@ -65,7 +67,7 @@ export const peerDelegateTool: ToolDefinition = {
 
     try {
       const transport = getPeerTransport();
-      const remoteTaskId = await transport.delegateTask(peer, goal, { priority, context });
+      const remoteTaskId = await transport.delegateTask(peer, goal, { priority, context, artifacts });
 
       const localCardId = kanbanEnqueue(`[remote:${peer}] ${goal.slice(0, 80)}`, "peer", undefined, {
         type: "remote",
