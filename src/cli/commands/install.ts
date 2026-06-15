@@ -410,7 +410,8 @@ export async function install(opts: InstallOptions): Promise<number> {
       process.stdout.write(`✓ restored abtars data\n`);
     }
     // Copy abmind files
-    const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(home), '.abmind');
+    const { resolveAbmindHome } = await import("../deploy-lib/paths.js");
+    const abmindHome = resolveAbmindHome();
     const abmindSrc = join(tmpDir, 'abmind');
     if (fileExists(abmindSrc)) {
       spawnSync('cp', ['-r', ...readdirSync(abmindSrc).map(f => join(abmindSrc, f)), abmindHome], { stdio: 'inherit' });

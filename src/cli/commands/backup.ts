@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, renameSync, r
 import { join, dirname, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createCipheriv, hkdfSync, randomBytes } from "node:crypto";
-import { abtarsHome } from "../../paths.js";
+import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
 
 const DEFAULT_PRUNE_DAYS = 7;
 
@@ -41,7 +41,7 @@ export interface BackupOpts {
 
 export async function backup(opts: BackupOpts = {}): Promise<number> {
   const abHome = abtarsHome();
-  const abmindHome = process.env["ABMIND_HOME"] ?? join(dirname(abHome), ".abmind");
+  const abmindHome = resolveAbmindHome();
   const date = new Date().toISOString().slice(0, 10);
   const destDir = opts.outputDir ?? join(dirname(abHome), ".backup-abtars");
   mkdirSync(destDir, { recursive: true });

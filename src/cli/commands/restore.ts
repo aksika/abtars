@@ -12,7 +12,7 @@ import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from
 import { join, dirname, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createDecipheriv, hkdfSync } from "node:crypto";
-import { abtarsHome } from "../../paths.js";
+import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
 
 export interface RestoreOpts {
   config?: boolean;
@@ -47,7 +47,7 @@ export async function restore(archivePath: string, opts: RestoreOpts = {}): Prom
     }
 
     // Decrypt .enc → temp zip
-    const abmindHome = process.env["ABMIND_HOME"] ?? join(dirname(abtarsHome()), ".abmind");
+    const abmindHome = resolveAbmindHome();
     const keyPath = join(abmindHome, "secret", "abmind.key");
     if (!existsSync(keyPath)) {
       process.stderr.write("Error: abmind.key not found — run `abmind restore <file.abm>` first to recreate it, then retry.\n");

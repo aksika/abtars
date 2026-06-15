@@ -5,6 +5,7 @@
 
 import { logInfo } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
+import { abmindHome } from "../../paths.js";
 
 const TAG = "doctor";
 
@@ -133,7 +134,7 @@ const probeCoreFiles: ProbeFn = async (_ctx) => {
   const { join } = await import("node:path");
   const { homedir } = await import("node:os");
   const start = Date.now();
-  const memDir = join(process.env["ABMIND_HOME"] ?? join(homedir(), ".abmind"), "memory");
+  const memDir = join(abmindHome(), "memory");
   const abmindCore = join(memDir, "core");
   const required = ["SOUL.md", "user_profile.md", "agent_notes.md", "memory-tools.md", "core_facts.md"];
   const missing = required.filter(f => !existsSync(join(abmindCore, f)));
@@ -183,7 +184,7 @@ const probeFtsIntegrity: ProbeFn = async (_ctx) => {
   const { execSync } = await import("node:child_process");
   const start = Date.now();
   try {
-    const dbPath = join(process.env["ABMIND_HOME"] ?? join(homedir(), ".abmind"), "memory", "memory.db");
+    const dbPath = join(abmindHome(), "memory", "memory.db");
     const missing: string[] = [];
     const REQUIRED = ["messages_fts", "extracted_memories_fts", "embeddings"];
     for (const t of REQUIRED) {

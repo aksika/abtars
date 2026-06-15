@@ -7,6 +7,11 @@ export function abtarsHome(): string {
   return process.env.ABTARS_HOME ?? resolve(homedir(), ".abtars");
 }
 
+/** Base directory for abmind runtime data. Override with ABMIND_HOME env var. */
+export function abmindHome(): string {
+  return process.env.ABMIND_HOME ?? resolve(homedir(), ".abmind");
+}
+
 /** Single source of truth for deployed version. Reads ~/.abtars/manifest.json. */
 export function getDeployedVersion(): { version: string; commit: string } {
   try {

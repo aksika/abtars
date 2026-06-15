@@ -601,7 +601,8 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
   // Seed abmind user_profile.md — only if abmind is already installed
   if (answers.userName) {
-    const abmindHome = process.env['ABMIND_HOME'] ?? join(dirname(paths.home), '.abmind');
+    const { abmindHome: resolveAbmind } = await import("../../paths.js");
+    const abmindHome = resolveAbmind();
     const profileDir = join(abmindHome, 'memory', 'core');
     const { existsSync: profileExists } = await import('node:fs');
     if (profileExists(profileDir)) {

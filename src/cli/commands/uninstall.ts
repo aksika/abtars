@@ -8,10 +8,8 @@ import { existsSync, readdirSync, unlinkSync, readlinkSync, rmSync } from "node:
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { stop } from "./stop.js";
+import { abtarsHome } from "../../paths.js";
 
-function abtarsHome(): string {
-  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
-}
 
 function binDir(): string {
   return join(process.env["HOME"] ?? "", ".local", "bin");

@@ -74,8 +74,7 @@ export function reloadSecrets(): void {
   function getPurposeKey(): Buffer | null {
     if (purposeKey) return purposeKey;
     try {
-      const abmindHome = process.env["ABMIND_HOME"] ?? resolve(homedir(), ".abmind");
-      const keyFile = resolve(abmindHome, "secret", "abmind.key");
+      const keyFile = resolve(process.env.ABMIND_HOME ?? resolve(homedir(), ".abmind"), "secret", "abmind.key");
       if (!existsSync(keyFile)) return null;
       const hex = readFileSync(keyFile, "utf-8").trim();
       if (hex.length !== 64) return null;

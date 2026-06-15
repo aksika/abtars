@@ -261,7 +261,8 @@ async function copyAbmind(stagedPath: string, repoRoot: string): Promise<void> {
       // Update ~/.abmind/manifest.json with deployed version
       try {
         const pkg = JSON.parse(readFileSync(join(dest, 'package.json'), 'utf-8'));
-        const abmindHome = process.env['ABMIND_HOME'] ?? join(process.env['HOME'] ?? '', '.abmind');
+        const { resolveAbmindHome } = await import("../deploy-lib/paths.js");
+        const abmindHome = resolveAbmindHome();
         mkdirSync(abmindHome, { recursive: true });
         const { spawnSync } = await import('node:child_process');
         const gitResult = spawnSync('git', ['-C', src, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf-8' });

@@ -18,10 +18,8 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { abtarsHome } from "../../paths.js";
 
-function abtarsHome(): string {
-  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
-}
 
 function readJsonField(file: string, field: string): unknown {
   try {

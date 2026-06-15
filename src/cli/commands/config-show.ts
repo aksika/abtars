@@ -1,9 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { abtarsHome } from "../../paths.js";
 
-function abtarsHome(): string {
-  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
-}
 
 const SECRET_PATTERNS = ["TOKEN", "KEY", "SECRET", "PASSWORD", "PASSWD"];
 

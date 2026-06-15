@@ -1,9 +1,7 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
+import { abtarsHome } from "../../paths.js";
 
-function abtarsHome(): string {
-  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
-}
 
 export async function logs(): Promise<number> {
   const date = new Date().toISOString().slice(0, 10);

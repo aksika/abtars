@@ -601,8 +601,9 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   // Try deployed copy first (always up to date), fall back to ~/.abmind/manifest.json
   const abmindBundlePkg = join(home, "app", "bundle", "node_modules", "abmind", "package.json");
   const abmindAppPkg = join(home, "app", "node_modules", "abmind", "package.json");
-  const abmindHome = process.env["ABMIND_HOME"] ?? join(home, "..", ".abmind");
-  const abmindManifest = join(abmindHome, "manifest.json");
+  const { abmindHome: resolveAbmind } = await import("../../paths.js");
+  const abmHome = resolveAbmind();
+  const abmindManifest = join(abmHome, "manifest.json");
   const abmindPkgPath = existsSync(abmindBundlePkg) ? abmindBundlePkg : existsSync(abmindAppPkg) ? abmindAppPkg : null;
   if (abmindPkgPath) {
     try {

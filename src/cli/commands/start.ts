@@ -1,9 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { abtarsHome } from "../../paths.js";
 
-function abtarsHome(): string {
-  return process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "", ".abtars");
-}
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
