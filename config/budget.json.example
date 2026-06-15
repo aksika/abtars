@@ -1,4 +1,5 @@
 {
+  "_comment": "tokens are in K (1000 = 1M actual tokens). Both limits enforced — whichever hits first blocks.",
   "daily": {
     "professor": { "tokens": 2000, "calls": 200 },
     "dreamy":    { "tokens": 100,  "calls": 20 },
