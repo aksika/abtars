@@ -60,9 +60,12 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
     // Full Main bundle
     let bundle: { soul: string; profile: string; notes: string; memoryTools: string; coreFacts: string } | null = null;
     try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow(TAG, "op", err); }
-    if (!bundle?.soul) {
-      logWarn(TAG, "SOUL bundle unavailable — abmind not configured or getSessionBundle() failed");
-      return "[ERROR] SOUL bundle missing. Tell the user: memory system is not configured. Run /doctor or check abmind installation.";
+    if (memory && !bundle?.soul) {
+      logWarn(TAG, "SOUL bundle unavailable — getSessionBundle() returned empty");
+      return "[ERROR] SOUL bundle missing. Tell the user: memory system failed to load persona. Run /doctor or check abmind installation.";
+    }
+    if (!memory) {
+      logWarn(TAG, "SOUL bundle unavailable — memory not initialized yet");
     }
 
     const soul = bundle?.soul ?? "";
