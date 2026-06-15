@@ -55,7 +55,7 @@ import {
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import type { IKiroTransport } from "./kiro-transport.js";
-import { logInfo, logDebug, logWarn, logError } from "../logger.js";
+import { logInfo, logDebug, logWarn, logError, logTrace } from "../logger.js";
 import { writeRestartReason } from "../transport/bridge-lock-transport.js";
 import { TransportStateMachine } from "./transport-state.js";
 
@@ -281,6 +281,11 @@ export class AcpTransport implements IKiroTransport {
             if (typeof pct === "number") {
               this.lastContextPercent = Math.ceil(pct);
             }
+            const inTok = typeof params["inputTokens"] === "number" ? params["inputTokens"] as number : 0;
+            const outTok = typeof params["outputTokens"] === "number" ? params["outputTokens"] as number : 0;
+            if (inTok || outTok) {
+              import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, inTok + outTok)).catch(() => {});
+            }
           }
           if (method === "_kiro.dev/agent/not_found" || method === "_kiro.dev/model/not_found") {
             this._modelNotFound = true;
@@ -357,6 +362,7 @@ export class AcpTransport implements IKiroTransport {
       const result = await this.trackInFlight("prompt", sessionId, () => this.promptWithRetry(sessionId, message));
 
       logDebug(this.tag, `Prompt complete (stopReason: ${result.stopReason}, ctx: ${this.lastContextPercent}%)`);
+      logTrace(this.tag, `Model: ${this.modelId ?? "unknown"}`);
       this.lastSuccessAt = Date.now();
 
       // #287: if model/agent not found was flagged during this session, reject the response
@@ -383,6 +389,7 @@ export class AcpTransport implements IKiroTransport {
         }).catch(err => logAndSwallow(TAG, "fire AfterPrompt", err));
       }).catch(err => logAndSwallow(TAG, "import hook-system", err));
       this.sm.promptCompleted();
+      import("../budget.js").then(({ incrementBudgetCounter }) => incrementBudgetCounter(this.agentName, 0)).catch(() => {});
 
       // Drain queued concurrent prompt (#671 Layer 2, #930 fix)
       this.drainPending();
