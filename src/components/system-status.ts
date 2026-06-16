@@ -4,6 +4,7 @@
  */
 
 import { logAndSwallow } from "./log-and-swallow.js";
+import { getInstanceName } from "./soul-bundle.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -165,7 +166,7 @@ export function renderStatusText(status: SystemStatus): string {
   const failures = status.subsystems.filter(s => s.status === "failed").length;
   const mood = failures === 0 ? "😊" : failures <= 2 ? "😐" : "😟";
   const lines: string[] = [
-    `abTARS™ — online ${mood}`,
+    `abTARS™ ${getInstanceName()} online ${mood}`,
     `  PID ${process.pid} (up ${uptime})`,
   ];
 

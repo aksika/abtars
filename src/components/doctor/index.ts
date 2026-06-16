@@ -234,6 +234,14 @@ const probeAbmindCli: ProbeFn = async (_ctx) => {
   return { name: "abmind-cli", status: "failed", latencyMs: Date.now() - start, detail: "not on PATH — run: npm install -g abmind" };
 };
 
+const probeInstanceName: ProbeFn = async (_ctx) => {
+  const start = Date.now();
+  const { loadPeerConfig } = await import("../peer-config.js");
+  const name = loadPeerConfig().self.name;
+  if (!name || name === "default") return { name: "instance-name", status: "failed", latencyMs: Date.now() - start, detail: "self.name not set in peers.json — run onboard" };
+  return { name: "instance-name", status: "ok", latencyMs: Date.now() - start, detail: name };
+};
+
 const probeAgentApi: ProbeFn = async (_ctx) => {
   const start = Date.now();
   const { existsSync, readFileSync } = await import("node:fs");
@@ -270,6 +278,7 @@ const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   { fn: probeOllama, timeout: 5000 },
   { fn: probeDashboard, timeout: 5000 },
   { fn: probeAgentApi, timeout: 1000 },
+  { fn: probeInstanceName, timeout: 1000 },
 ];
 
 let lastReport: { report: DoctorReport; generatedAt: number } | null = null;

@@ -37,6 +37,7 @@ export interface OnboardOptions {
   readonly defaultModel?: string;
   readonly discordA2aChannel?: string;
   readonly userName?: string;
+  readonly instanceName?: string;
   readonly force: boolean;
 }
 
@@ -84,6 +85,7 @@ const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
 interface WizardAnswers {
   readonly installMode: "simple" | "supervised" | "supervised-daemon";
   readonly userName: string;
+  readonly instanceName: string;
   readonly passphrase: string;
   readonly telegramToken: string;
   readonly telegramChatId: string;
@@ -122,6 +124,16 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     initialValue: existing?.userName ?? '',
   });
   if (isCancel(userName)) { cancel('Cancelled.'); return null; }
+
+  // 1e. Instance name (identifies this bot to peers and in prompts)
+  const { hostname } = await import("node:os");
+  const instanceName = await text({
+    message: 'Instance name (identifies this bot to peers)',
+    placeholder: hostname(),
+    initialValue: existing?.instanceName ?? '',
+    validate: (v) => v?.trim() ? undefined : 'required',
+  });
+  if (isCancel(instanceName)) { cancel('Cancelled.'); return null; }
 
   // 1d. Passphrase — moved to `abmind install` (#716)
   const passphrase = '';
@@ -313,6 +325,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   return {
     installMode: installMode as "simple" | "supervised" | "supervised-daemon",
     userName: String(userName ?? '').trim(),
+    instanceName: String(instanceName ?? '').trim(),
     passphrase: String(passphrase ?? ''),
     telegramToken: String(telegramToken ?? '').trim(),
     telegramChatId: String(telegramChatId ?? '').trim(),
@@ -360,6 +373,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   return {
     installMode: 'supervised',
     userName: opts.userName ?? '',
+    instanceName: opts.instanceName ?? '',
     passphrase: '',
     telegramToken: opts.telegramToken ?? '',
     telegramChatId: opts.telegramChatId ?? '',
@@ -392,6 +406,7 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
     return {
       installMode: 'simple',
       userName: kv.get('USER_DISPLAY_NAME') ?? '',
+      instanceName: '',
       passphrase: '',
       telegramToken: kv.get('TELEGRAM_BOT_TOKEN') ?? '',
       telegramChatId: kv.get('MAIN_CHAT_ID') ?? '',
@@ -588,6 +603,15 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     };
     await writeFile(usersPath, JSON.stringify(users, null, 2) + '\n', { mode: 0o600 });
     process.stdout.write(`✓ users.json → ${usersPath}\n`);
+
+    // #1009: Write instance name to peers.json
+    const peersPath = join(paths.config, 'peers.json');
+    let peersJson: Record<string, unknown> = { self: { name: "default" }, peers: {} };
+    try { peersJson = JSON.parse(await readFile(peersPath, 'utf-8')); } catch { /* missing — use default */ }
+    if (!peersJson.self || typeof peersJson.self !== 'object') peersJson.self = {};
+    (peersJson.self as Record<string, unknown>).name = answers.instanceName || answers.userName.toLowerCase().replace(/[^a-z0-9-]/g, '') || 'default';
+    await writeFile(peersPath, JSON.stringify(peersJson, null, 2) + '\n', { mode: 0o600 });
+    process.stdout.write(`✓ peers.json (self.name: ${(peersJson.self as Record<string, unknown>).name}) → ${peersPath}\n`);
 
     // Check abmind encryption compatibility
     try {

@@ -124,5 +124,23 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
 
   logInfo(TAG, `Bundle [${type}]: ${parts.length} parts`);
   logDebug(TAG, `Parts: ${parts.map((p, i) => `${i}:${p.length}ch`).join(", ")}`);
-  return parts.join("\n\n---\n\n");
+  return resolveVariables(parts.join("\n\n---\n\n"));
+}
+
+/** #1009: Resolve template variables in prompts. */
+function resolveVariables(text: string): string {
+  return text.replaceAll("{instance_name}", getInstanceName());
+}
+
+/** #1009: Instance identity from peers.json self.name. */
+export function getInstanceName(): string {
+  try {
+    const { loadPeerConfig } = require("./peer-config.js") as typeof import("./peer-config.js");
+    const name = loadPeerConfig().self.name;
+    if (!name || name === "default") {
+      logError(TAG, "Instance name not configured — set self.name in peers.json");
+      return "unknown";
+    }
+    return name;
+  } catch { return "unknown"; }
 }
