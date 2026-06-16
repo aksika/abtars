@@ -17,7 +17,6 @@ export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
 
 const TAG = "spin";
-const ORC_IDLE_MS = (parseInt(process.env["ORC_IDLE_TIMEOUT_SEC"] ?? "1200", 10)) * 1000;
 const USER_SESSION_IDLE_MS = parseInt(process.env["USER_SESSION_IDLE_MS"] ?? "7200000", 10);
 const GUEST_SESSION_IDLE_MS = parseInt(process.env["GUEST_SESSION_IDLE_MS"] ?? "1800000", 10);
 const MAX_TOTAL_SESSIONS = parseInt(process.env["MAX_TOTAL_SESSIONS"] ?? "12", 10);
@@ -34,7 +33,6 @@ export class Spin {
   private running = new Map<SessionType, Set<number>>();
   private runtime: SubagentRuntime | null = null;
   private orcSession: AgentSession | null = null;
-  private orcIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private _lastHealerDoneAt = 0;
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
@@ -248,7 +246,6 @@ export class Spin {
       if (s.transport) { try { s.transport.destroy(); } catch {} }
     }
     if (this.orcSession) { try { this.orcSession.destroy(); } catch {} this.orcSession = null; }
-    if (this.orcIdleTimer) { clearTimeout(this.orcIdleTimer); this.orcIdleTimer = null; }
     this.sessions.clear();
     this.nextIndex = 0;
     logInfo(TAG, "All sessions destroyed (shutdown)");
@@ -290,33 +287,15 @@ export class Spin {
   async sendUserToOrc(message: string): Promise<string | null> {
     const orc = this.getOrcSession();
     if (!orc) return null;
-    this.resetOrcIdle();
     const response = await orc.sendPrompt("orc:user", `[USER] ${message}`);
     return response;
   }
 
   private async getOrCreateOrc(): Promise<AgentSession> {
-    this.resetOrcIdle();
     if (this.orcSession?.isReady) return this.orcSession;
     logInfo(TAG, "Spawning persistent Orc session");
     this.orcSession = await this.runtime!.session("browsie");
     return this.orcSession;
-  }
-
-  private resetOrcIdle(): void {
-    if (this.orcIdleTimer) clearTimeout(this.orcIdleTimer);
-    this.orcIdleTimer = setTimeout(() => this.destroyOrc(), ORC_IDLE_MS);
-    (this.orcIdleTimer as NodeJS.Timeout).unref();
-  }
-
-  private async destroyOrc(): Promise<void> {
-    logInfo(TAG, "Orc idle timeout — destroying session");
-    if (this.orcSession) { await this.orcSession.destroy(); this.orcSession = null; }
-    if (this.orcIdleTimer) { clearTimeout(this.orcIdleTimer); this.orcIdleTimer = null; }
-    // End ALL O-sessions — no zombie sessions visible after transport is dead
-    for (const [, s] of this.sessions) {
-      if (s.id.includes("_O_") && s.status !== "ended") { s.status = "ended"; s.active = false; s.transport = undefined; pushLog(s, "orc idle timeout"); }
-    }
   }
 
   // ── Dispatch ───────────────────────────────────────────────────────────
