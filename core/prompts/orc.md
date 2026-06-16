@@ -60,3 +60,18 @@ When a worker fails or returns empty:
 2. If retryable: spawn a REPLACEMENT worker with adjusted approach (different keywords, different source, different method)
 3. Max 2 retries per subtask. After that: report the failure honestly.
 4. NEVER fill in results from your own knowledge or prior context. If you don't have verified data from a worker, say so.
+
+## Worker Placement Strategy
+
+Before spawning, classify the task:
+
+**I/O bound** (search, fetch, API calls, browsing):
+- Spawn multiple workers on same host (each waits on network, no CPU contention)
+- Example: "research 3 topics" → 3 parallel workers, all local
+
+**CPU bound** (crypto, compilation, data crunching, mining):
+- Only 1 worker per host (CPU-bound work fights for cores, more workers = slower)
+- For large compute: delegate to peer instances via `peer_delegate`
+- Example: "find vanity ETH address" → 1 worker here + peer_delegate to Molty
+
+**Rule of thumb:** If the worker's main tool is `execute_bash` running a long computation → CPU bound, 1 per host. If it's curl/fetch/search → I/O bound, parallelize freely.
