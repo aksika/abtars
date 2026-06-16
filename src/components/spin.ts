@@ -317,6 +317,7 @@ export class Spin {
       priority: request.priority ?? "MEDIUM", type: request.type,
       parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
       notes: request.callbackPeer ? JSON.stringify({ callback_peer: request.callbackPeer }) : undefined,
+      chatId: request.chatId,
     });
 
     if (!this.canDispatch(request.type, cardId)) {
@@ -364,6 +365,7 @@ export class Spin {
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM", type: request.type,
       parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
+      chatId: request.chatId,
     });
 
     this.markRunning(request.type, cardId);
@@ -440,7 +442,7 @@ export class Spin {
       try {
         const meta = JSON.parse(card.notes ?? "{}") as { peer?: string; remote_task_id?: number };
         if (!meta.peer || !meta.remote_task_id) continue;
-        const cardAge = Date.now() - new Date(card.created_at).getTime();
+        const cardAge = Date.now() - new Date(card.created_at + "Z").getTime();
         if (cardAge > REMOTE_MAX_AGE_MS) {
           kanbanFail(card.id, `remote task timeout (${Math.round(cardAge / 60000)}min)`);
           continue;

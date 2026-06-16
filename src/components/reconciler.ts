@@ -43,7 +43,7 @@ function reconcileProject(projectId: number): void {
   if (!project) return;
 
   const now = Date.now();
-  const projectStart = new Date(project.created_at).getTime();
+  const projectStart = new Date(project.created_at + "Z").getTime();
 
   // Circuit breaker: wall-clock
   if (now - projectStart > MAX_WALL_CLOCK_MS) {
