@@ -300,6 +300,17 @@ export class Spin {
 
   // ── Dispatch ───────────────────────────────────────────────────────────
 
+  /** #1010: O-type reuses existing session (one Orc). All others create new. */
+  private getOrCreateVisibleSession(userId: string, type: SessionType): ManagedSession | undefined {
+    if (type === "O") {
+      for (const s of this.sessions.values()) {
+        if (s.id.includes("_O_") && s.status !== "ended") return s;
+      }
+    }
+    const sub = this.createSubSession(userId, "telegram", type);
+    return typeof sub === "string" ? undefined : sub;
+  }
+
   dispatch(request: SpinRequest): number {
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
@@ -317,8 +328,7 @@ export class Spin {
     kanbanRunning(cardId);
 
     const masterUserId = loadUsers().users.find(u => u.role === "master")?.userId ?? "master";
-    const sub = this.createSubSession(masterUserId, "telegram", request.type);
-    const session = typeof sub === "string" ? undefined : sub;
+    const session = this.getOrCreateVisibleSession(masterUserId, request.type);
     if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatch card:${cardId}`); }
 
     const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -360,8 +370,7 @@ export class Spin {
     kanbanRunning(cardId);
 
     const masterUserId = loadUsers().users.find(u => u.role === "master")?.userId ?? "master";
-    const sub = this.createSubSession(masterUserId, "telegram", request.type);
-    const session = typeof sub === "string" ? undefined : sub;
+    const session = this.getOrCreateVisibleSession(masterUserId, request.type);
     if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatchAwait card:${cardId}`); }
 
     const timeout = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
