@@ -4,7 +4,7 @@ import { getEnv } from "../env-schema.js";
  * Implements IKiroTransport with its own agent loop (send → stream → tools → loop).
  */
 
-import { logInfo, logWarn, logDebug, logTrace } from "../logger.js";
+import { logInfo, logWarn, logError, logDebug, logTrace } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { withRetry, isFatal } from "../retry.js";
 import { ConversationSession, type ToolCall, type ContentPart } from "./conversation-session.js";

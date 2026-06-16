@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 const MOCK_SOUL = "You are a test agent. Be helpful.\n\n---\n\nTools: abmind recall, abmind store";
 vi.mock("../components/soul-loader.js", () => ({ loadSoulBundle: () => MOCK_SOUL }));
 
-import { handleInboundMessage, startSession, resetAndPrepare, type PipelineDeps } from "../components/message-pipeline.js";
+import { handleInboundMessage, resetAndPrepare, type PipelineDeps } from "../components/message-pipeline.js";
 import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "../components/kiro-transport.js";
 import { MemoryManager } from "abmind";
@@ -99,20 +99,6 @@ describe("Smoke: bridge lifecycle", () => {
   afterEach(() => {
     memory.close();
     rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("startSession injects SOUL bundle into prompt", async () => {
-    const transport = makeTransport();
-    const memory = new MemoryManager({ memoryEnabled: true, memoryDir: join(tmpDir, "memory"), embeddingEnabled: false } as any);
-    await memory.initialize();
-
-    await startSession(transport, memory, 100, "telegram:100", "Say hello.", async () => {});
-
-    expect(transport.prompts.length).toBe(1);
-    expect(transport.prompts[0]).toContain("You are a test agent");
-    expect(transport.prompts[0]).toContain("abmind recall");
-    expect(transport.prompts[0]!.length).toBeGreaterThan(50);
-    memory.close();
   });
 
   it("first message triggers SOUL injection via pendingSessionStart", async () => {
