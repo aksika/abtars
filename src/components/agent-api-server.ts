@@ -330,6 +330,16 @@ export class AgentApiServer {
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
         return;
       }
+      if (url === "/v1/orc/delegate" && method === "POST") {
+        const body = JSON.parse(await readBody(req));
+        const { peer, goal, title } = body as { peer?: string; goal?: string; title?: string };
+        if (!peer || !goal) { res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: "peer and goal required" })); return; }
+        const { getPeerTransport } = await import("./peer-transport/index.js");
+        const transport = getPeerTransport();
+        const remoteId = await transport.delegateTask(peer, goal, { priority: "MEDIUM", context: title });
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result: `Delegated to ${peer} — remote card #${remoteId}` }));
+        return;
+      }
       res.writeHead(404).end();
     } catch (err) {
       res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));

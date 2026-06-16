@@ -48,8 +48,16 @@ export async function orc(args: string[]): Promise<number> {
       console.log(result);
       return 0;
     }
+    case "delegate": {
+      const peer = flags.get("peer");
+      const goal = flags.get("goal");
+      if (!peer || !goal) { console.log(JSON.stringify({ ok: false, error: "--peer and --goal required" })); return 1; }
+      const result = await call("POST", "/delegate", { peer, goal, title: flags.get("title") });
+      console.log(result);
+      return 0;
+    }
     default:
-      console.log(JSON.stringify({ ok: false, error: "Usage: abtars orc spawn|status|cancel" }));
+      console.log(JSON.stringify({ ok: false, error: "Usage: abtars orc spawn|status|cancel|delegate" }));
       return 1;
   }
 }

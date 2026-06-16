@@ -25,6 +25,12 @@ abtars orc cancel --card CARD_ID
 ```
 Cancels a running or queued worker. Use when another worker already found the answer.
 
+### Delegate to remote peer
+```bash
+abtars orc delegate --peer PEER_NAME --goal "TASK DESCRIPTION"
+```
+Sends task to a remote instance. Use for CPU-bound work when local is busy or remote has specific capabilities (GPU, xcode). Results arrive via callback — check with `abtars orc status`.
+
 ## Responsibilities
 
 1. BREAK DOWN the project goal into discrete tasks
