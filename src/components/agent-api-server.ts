@@ -298,7 +298,42 @@ export class AgentApiServer {
       return;
     }
 
+    // #1011 — Orc worker management (localhost only, no auth — same process)
+    if (url.startsWith("/v1/orc/")) {
+      this.handleOrcRoute(url, method, req, res);
+      return;
+    }
+
     res.writeHead(404).end();
+  }
+
+  private async handleOrcRoute(url: string, method: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const { getOrcTools } = await import("./transport/orc-tools.js");
+      if (url === "/v1/orc/spawn" && method === "POST") {
+        const body = JSON.parse(await readBody(req));
+        const tool = getOrcTools().find(t => t.name === "spawn_worker");
+        const result = await tool!.execute(body);
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+      if (url === "/v1/orc/status" && method === "GET") {
+        const tool = getOrcTools().find(t => t.name === "check_workers");
+        const result = await tool!.execute({});
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+      if (url === "/v1/orc/cancel" && method === "POST") {
+        const body = JSON.parse(await readBody(req));
+        const tool = getOrcTools().find(t => t.name === "cancel_worker");
+        const result = await tool!.execute(body);
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true, result }));
+        return;
+      }
+      res.writeHead(404).end();
+    } catch (err) {
+      res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+    }
   }
 
   /**

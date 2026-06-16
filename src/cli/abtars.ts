@@ -166,6 +166,10 @@ export async function main(argv: readonly string[]): Promise<number> {
         const { logs } = await import('./commands/logs.js');
         return await logs();
       }
+      case 'orc': {
+        const { orc: orcCmd } = await import('./commands/orc.js');
+        return await orcCmd(argv.slice(1));
+      }
       case 'config': {
         const { configShow } = await import('./commands/config-show.js');
         return await configShow();
