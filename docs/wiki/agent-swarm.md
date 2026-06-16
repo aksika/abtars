@@ -161,7 +161,7 @@ The remote peer completes the work and pushes the result back via callback. Loca
 
 | Field | Purpose |
 |-------|---------|
-| `self.name` | This instance's identity |
+| `self.name` | Instance identity — used in prompts (`{instance_name}`), `/status`, gossip, JWT audience, callbacks. Set during onboard. |
 | `peers.<name>.host` | Peer's IP/hostname |
 | `peers.<name>.port` | Agent API port (default 3100) |
 | `peers.<name>.token` | Shared secret for JWT |
