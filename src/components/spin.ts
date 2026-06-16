@@ -433,7 +433,7 @@ export class Spin {
       for (const cardId of cardIds) {
         const card = kanbanGetCard(cardId);
         if (!card || card.status !== "running") continue;
-        const lastActivity = new Date(card.updated_at).getTime();
+        const lastActivity = new Date(card.updated_at + "Z").getTime();
         if (now - lastActivity > STALE_MS) {
           logWarn(TAG, `Stale card ${cardId} (${Math.round((now - lastActivity) / 1000)}s no activity) — failing`);
           kanbanFail(cardId, "stale — no activity");

@@ -114,7 +114,7 @@ function abortProject(projectId: number, children: KanbanCard[], reason: string)
 }
 
 function isStale(card: KanbanCard): boolean {
-  const lastActivity = new Date(card.updated_at).getTime();
+  const lastActivity = new Date(card.updated_at + "Z").getTime();
   return Date.now() - lastActivity > STALE_MS;
 }
 
