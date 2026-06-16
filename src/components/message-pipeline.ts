@@ -168,16 +168,29 @@ export async function handleInboundMessage(
     }
   }
 
-  // --- #936: Resolve session via Spin (sets per-user transport + delivery mode) ---
+  // --- #993: If user switched to a non-Main session with live transport, route there directly ---
   const { spin } = await import("./spin.js");
-  try {
-    const userSession = await spin.resolveSession(msg.userId, msg.platform, ctx.chatId);
-    if (userSession.status === "ready" && userSession.transport) {
-      ctx.transport = userSession.transport;
-      ctx.delivery = userSession.delivery;
+  const { sessionType } = await import("./spin-types.js");
+  const switchedSession = spin.getActiveSession(msg.userId, msg.platform);
+  const switchedToLive = switchedSession?.transport && sessionType(switchedSession) !== "A" && switchedSession.status === "ready";
+  if (switchedToLive) {
+    ctx.transport = switchedSession.transport!;
+    ctx.delivery = switchedSession.delivery;
+    // Mark seen so isSessionStart doesn't inject full soul bundle (Orc already has its context)
+    const entry = deps.sessions.getOrCreate(switchedSession.id);
+    if (!entry.seen) entry.seen = true;
+    switchedSession.lastActiveAt = Date.now();
+  } else {
+    // --- #936: Resolve session via Spin (sets per-user transport + delivery mode) ---
+    try {
+      const userSession = await spin.resolveSession(msg.userId, msg.platform, ctx.chatId);
+      if (userSession.status === "ready" && userSession.transport) {
+        ctx.transport = userSession.transport;
+        ctx.delivery = userSession.delivery;
+      }
+    } catch (err) {
+      logWarn(TAG, `resolveSession failed for ${msg.userId}: ${err instanceof Error ? err.message : String(err)}`);
     }
-  } catch (err) {
-    logWarn(TAG, `resolveSession failed for ${msg.userId}: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // --- Core transport/response handling (will become middleware incrementally) ---
