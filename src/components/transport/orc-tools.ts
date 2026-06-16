@@ -62,7 +62,9 @@ const checkWorkersTool: ToolDefinition = {
     const lines = children.map(c => {
       const icon = c.status === "done" ? "*" : c.status === "running" ? "~" : c.status === "failed" ? "x" : "+";
       const result = c.result_summary ? ` — ${c.result_summary.slice(0, 100)}` : "";
-      return `${icon} #${c.id} ${c.title || "(untitled)"} (${c.status})${result}`;
+      const tokens = c.tokens_used ? ` (${c.tokens_used} tok)` : "";
+      const source = c.type === "remote" ? (() => { try { return ` [${JSON.parse(c.notes ?? "{}").peer}]`; } catch { return ""; } })() : "";
+      return `${icon} #${c.id} ${c.title || "(untitled)"} (${c.status})${tokens}${source}${result}`;
     });
     return `Workers (${children.length}):\n${lines.join("\n")}`;
   },

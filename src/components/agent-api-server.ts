@@ -686,7 +686,7 @@ export class AgentApiServer {
   /** #675 — POST /v1/callbacks: remote peer delivers task result. */
   private async handleV1Callback(req: IncomingMessage, res: ServerResponse, caller: string): Promise<void> {
     const start = Date.now();
-    let body: { task_id?: number; status?: string; result_summary?: string; error?: string; artifacts?: Array<{ name: string; content: string }> };
+    let body: { task_id?: number; status?: string; result_summary?: string; error?: string; artifacts?: Array<{ name: string; content: string }>; tokens_used?: number };
     try {
       body = JSON.parse(await readBody(req));
     } catch {
@@ -742,6 +742,12 @@ export class AgentApiServer {
     } else {
       kanbanFail(card.id, body.error ?? "remote task failed");
       logInfo(TAG, `PEER_CALLBACK ${caller}#${taskId} → local#${card.id} failed: ${(body.error ?? "").slice(0, 100)}`);
+    }
+
+    // #1026: Track remote token cost on local card (propagates to parent)
+    if (body.tokens_used && typeof body.tokens_used === "number") {
+      const { kanbanAddTokens } = require("./tasks/kanban-board.js") as typeof import("./tasks/kanban-board.js");
+      kanbanAddTokens(card.id, body.tokens_used);
     }
 
     this.pushTraffic({

@@ -10,7 +10,9 @@ function formatCard(c: KanbanCard): string {
   const due = c.due_at ? ` due:${c.due_at}` : "";
   const lbl = c.labels ? ` [${c.labels}]` : "";
   const deps = c.blocked_by ? ` <- #${c.blocked_by}` : "";
-  return `${icon} #${c.id} ${c.title} (${c.priority}/${c.status})${due}${lbl}${deps}`;
+  const tokens = c.tokens_used ? ` ${c.tokens_used} tok` : "";
+  const source = c.type === "remote" ? (() => { try { return ` [${JSON.parse(c.notes ?? "{}").peer}]`; } catch { return " [remote]"; } })() : "";
+  return `${icon} #${c.id} ${c.title} (${c.priority}/${c.status})${tokens}${source}${due}${lbl}${deps}`;
 }
 
 async function execute(args: Record<string, string>): Promise<string> {
