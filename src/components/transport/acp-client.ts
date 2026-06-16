@@ -105,12 +105,14 @@ export class AcpClient extends EventEmitter<AcpClientEvents> {
     return this.process !== null && this.initialized;
   }
 
-  /** Kill the child process. */
+  /** Kill the child process. SIGTERM → SIGKILL after 2s (#1012). */
   kill(): void {
     if (this.process) {
+      const pid = this.process.pid;
       this.process.kill("SIGTERM");
       this.process = null;
       this.initialized = false;
+      if (pid) setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch {} }, 2000).unref();
     }
   }
 

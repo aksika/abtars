@@ -216,15 +216,31 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     }, policy);
     logInfo("main", `🔌 Direct API transport (${resolved.providerName}, model=${resolved.model}, ${candidates.length} candidates)`);
   } else {
-    // Kill stale ACP processes from previous run (#921)
+    // Kill stale ACP processes from previous run (#921, #1012)
     const { readAndClearAcpPids } = await import("../components/transport/bridge-lock-transport.js");
     const stalePids = readAndClearAcpPids();
     for (const pid of stalePids) {
       try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
     }
     if (stalePids.length) logDebug("main", `Killed ${stalePids.length} stale ACP process(es)`);
-    // Fallback: pattern-based kill for defense-in-depth
-    try { execSync("pkill -f 'kiro-cli-chat.*acp.*--agent' 2>/dev/null; true", { timeout: 3000 }); } catch { /* best effort */ }
+    // #1012: Defense-in-depth — kill kiro-cli acp processes whose CWD is inside ~/.abtars/
+    // Safe: agent sessions (AG1-5) have CWD outside ~/.abtars/, won't be touched.
+    try {
+      const { abtarsHome } = await import("../paths.js");
+      const home = abtarsHome();
+      const { readlinkSync } = await import("node:fs");
+      const candidates = execSync("pgrep -f 'kiro-cli.*acp' 2>/dev/null || true", { encoding: "utf-8", timeout: 3000 }).trim().split("\n").filter(Boolean);
+      let killed = 0;
+      for (const p of candidates) {
+        const pid = parseInt(p, 10);
+        if (!pid || pid === process.pid) continue;
+        try {
+          const cwd = readlinkSync(`/proc/${pid}/cwd`);
+          if (cwd.startsWith(home)) { process.kill(pid, "SIGTERM"); killed++; }
+        } catch {} // dead, no /proc (macOS), or no permission
+      }
+      if (killed) logDebug("main", `CWD-checked kill: ${killed} orphan(s)`);
+    } catch { /* best effort */ }
     logInfo("main", `🔌 ACP transport (${resolved.provider.cli ?? "kiro-cli"}, model=${resolved.model})`);
     transport = createAgentTransport("professor", {
       cliPath: resolved.provider.cli ?? config.transport.agentCliPath,

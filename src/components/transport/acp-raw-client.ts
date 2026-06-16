@@ -104,8 +104,10 @@ export class AcpRawClient {
 
   destroy(): void {
     if (this.child) {
+      const pid = this.child.pid;
       this.child.kill("SIGTERM");
       this.child = null;
+      if (pid) setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch {} }, 2000).unref();
     }
     for (const [, p] of this.pending) p.reject(new Error("destroyed"));
     this.pending.clear();
