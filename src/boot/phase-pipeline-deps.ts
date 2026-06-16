@@ -107,6 +107,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   // #894: Wire Spin (which IS the session manager now) to runtime
   const { spin } = await import("../components/spin.js");
   spin.setRuntime(ctx.runtime);
+  if (ctx.memory) spin.setMemory(ctx.memory as any);
 
   // #936: Register master session in Spin
   const { loadUsers } = await import("../components/user-registry.js");

@@ -32,10 +32,12 @@ export class Spin {
   private nextIndex = 0;
   private running = new Map<SessionType, Set<number>>();
   private runtime: SubagentRuntime | null = null;
+  private memory: { recordMessage(opts: { role: string; content: string; timestamp: number; userId: string; sessionId: string }): void } | null = null;
   private orcSession: AgentSession | null = null;
   private _lastHealerDoneAt = 0;
 
   setRuntime(runtime: SubagentRuntime): void { this.runtime = runtime; }
+  setMemory(memory: Spin["memory"]): void { this.memory = memory; }
 
   // ── Session CRUD ───────────────────────────────────────────────────────
 
@@ -512,7 +514,13 @@ export class Spin {
         }
       }
 
-      return (await this.runtime.complete(agentName, fullPrompt, { timeoutMs, session: "fresh" })) || "(no output)";
+      const result = (await this.runtime.complete(agentName, fullPrompt, { timeoutMs, session: "fresh" })) || "(no output)";
+      if (this.memory) {
+        const sid = `${request.type}_card${cardId}`;
+        this.memory.recordMessage({ role: "user", content: request.goal, timestamp: Date.now(), userId: "system", sessionId: sid });
+        this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: sid });
+      }
+      return result;
     } finally { clearTimeout(timer); clearInterval(staleCheck); }
   }
 
@@ -556,7 +564,12 @@ export class Spin {
         fullPrompt = `[CHANNEL — ${orcMsgs.length} message(s)]\n${lines.join("\n")}\n[/CHANNEL]\n\n${fullPrompt}`;
       }
 
-      return (await orc.sendPrompt(orcSessionKey, fullPrompt)) || "(no output)";
+      const result = (await orc.sendPrompt(orcSessionKey, fullPrompt)) || "(no output)";
+      if (this.memory) {
+        this.memory.recordMessage({ role: "user", content: request.goal, timestamp: Date.now(), userId: "system", sessionId: orcSessionKey });
+        this.memory.recordMessage({ role: "assistant", content: result, timestamp: Date.now(), userId: "system", sessionId: orcSessionKey });
+      }
+      return result;
     } finally { clearTimeout(timer); updateBridgeLockField("orc_active", null); setActiveOrcCard(null); }
   }
 }
