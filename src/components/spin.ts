@@ -313,9 +313,9 @@ export class Spin {
     logInfo(TAG, "Orc idle timeout — destroying session");
     if (this.orcSession) { await this.orcSession.destroy(); this.orcSession = null; }
     if (this.orcIdleTimer) { clearTimeout(this.orcIdleTimer); this.orcIdleTimer = null; }
-    // End visible O-session in sessions map
+    // End ALL O-sessions — no zombie sessions visible after transport is dead
     for (const [, s] of this.sessions) {
-      if (s.active && s.id.includes("_O_")) { s.status = "ended"; s.active = false; pushLog(s, "orc idle timeout"); break; }
+      if (s.id.includes("_O_") && s.status !== "ended") { s.status = "ended"; s.active = false; s.transport = undefined; pushLog(s, "orc idle timeout"); }
     }
   }
 
