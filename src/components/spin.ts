@@ -528,7 +528,9 @@ export class Spin {
 
   private async executeOrc(request: SpinRequest, cardId: number, timeoutMs: number): Promise<string> {
     const { updateBridgeLockField } = await import("./transport/bridge-lock-transport.js");
+    const { setActiveOrcCard } = await import("./transport/orc-tools.js");
     updateBridgeLockField("orc_active", cardId);
+    setActiveOrcCard(cardId);
     const orc = await this.getOrCreateOrc();
     logInfo(TAG, `▶ O card:${cardId} (persistent Orc)`);
 
@@ -544,7 +546,12 @@ export class Spin {
     try {
       const { buildSoulBundle } = await import("./soul-bundle.js");
       const bundle = buildSoulBundle("O");
-      let fullPrompt = bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal;
+
+      // #1005: CONTEXT wrapper (same pattern as Main)
+      const { localDateTime } = await import("../utils/local-time.js");
+      const context = `[CONTEXT — do not respond to this section]\n[PROJECT] card #${cardId}\n[CURRENT TIME] ${localDateTime()}\n[/CONTEXT]\n\n`;
+
+      let fullPrompt = context + (bundle ? `${bundle}\n\n---\n\n${request.goal}` : request.goal);
       const { drainOrcNotifications } = await import("./spin-notifications.js");
       const notifications = drainOrcNotifications(cardId);
       if (notifications.length) fullPrompt = notifications.join("\n") + "\n\n" + fullPrompt;
@@ -558,7 +565,7 @@ export class Spin {
       }
 
       return (await orc.sendPrompt("orc:project", fullPrompt)) || "(no output)";
-    } finally { clearTimeout(timer); updateBridgeLockField("orc_active", null); }
+    } finally { clearTimeout(timer); updateBridgeLockField("orc_active", null); setActiveOrcCard(null); }
   }
 }
 
