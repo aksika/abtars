@@ -4,7 +4,10 @@
  */
 
 const PORT = parseInt(process.env["AGENT_API_PORT"] || "3100", 10);
-const BASE = `http://127.0.0.1:${PORT}/v1/orc`;
+const BASE = `https://127.0.0.1:${PORT}/v1/orc`;
+
+// Skip TLS verification for localhost self-signed cert
+process.env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0";
 
 async function call(method: string, path: string, body?: Record<string, unknown>): Promise<string> {
   const res = await fetch(`${BASE}${path}`, {
