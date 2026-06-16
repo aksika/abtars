@@ -177,7 +177,6 @@ export async function handleInboundMessage(
     ctx.delivery = switchedSession.delivery;
     // Mark seen so isSessionStart doesn't inject full soul bundle (Orc already has its context)
     const entry = deps.sessions.getOrCreate(switchedSession.id);
-    if (!entry.seen) entry.seen = true;
     switchedSession.lastActiveAt = Date.now();
   } else {
     // --- #936: Resolve session via Spin (sets per-user transport + delivery mode) ---

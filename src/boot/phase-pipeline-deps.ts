@@ -90,7 +90,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
   const { setEnqueueCron } = await import("../components/transport/tool-registry.js");
-  setEnqueueCron((id, manual) => {
+  const enqueueCron = (id: string, manual?: boolean): string | null => {
     try {
       const entry = cronReadEntry(id);
       if (!entry) return `❌ Entry ${id} not found`;
@@ -98,7 +98,8 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     } catch (err) {
       return `❌ ${err instanceof Error ? err.message : String(err)}`;
     }
-  });
+  };
+  setEnqueueCron(enqueueCron);
 
   // Wire secret_get tool to memory DB
 
@@ -160,15 +161,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
     sessionManager: ctx.sessionManager,
     updateCtxStart,
     cronCurrentJob: () => cronQueue.currentJob,
-    enqueueCron: (entryId, manual) => {
-      try {
-        const entry = cronReadEntry(entryId);
-        if (!entry) return `❌ Entry ${entryId} not found`;
-        return cronQueue.enqueue(entry, cronCallback, manual);
-      } catch (err) {
-        return `❌ ${err instanceof Error ? err.message : String(err)}`;
-      }
-    },
+    enqueueCron,
     requestShutdown: (code?: number) => ctx.requestShutdownWithCode(code ?? 0),
     sleepProgress: () => ctx.sleepHandle?.progress ?? null,
     loadedCapabilities: [],
