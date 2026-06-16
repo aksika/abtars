@@ -38,7 +38,7 @@ export class AgentApiAdapter implements PlatformAdapter {
    * Process a peer chat message: route through Spin → Orc.
    * Returns the Orc's response (resolved when card completes).
    */
-  async handlePeerMessage(peerId: string, sessionId: string, text: string, timeoutMs = 60_000): Promise<string> {
+  async handlePeerMessage(peerId: string, sessionId: string, text: string, timeoutMs = 300_000): Promise<string> {
     const { spin } = await import("../../components/spin.js");
 
     logDebug(TAG, `-> ${peerId}/${sessionId}: ${text.slice(0, 100)}`);
