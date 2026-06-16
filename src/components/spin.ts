@@ -536,7 +536,7 @@ export class Spin {
 
     // #993: Attach Orc transport to visible session — user can sneak in
     for (const [, s] of this.sessions) {
-      if (s.active && s.id.includes("_O_")) {
+      if (s.id.includes("_O_") && s.status !== "ended") {
         s.transport = orc.transport as any;
         s.status = "ready";
         break;
