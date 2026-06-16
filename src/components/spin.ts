@@ -171,7 +171,7 @@ export class Spin {
         isVoice: false,
       });
       setTimeout(() => {
-        if (session.messageCount > 0) return; // greeting delivered
+        if (session.messageCount > 0 || session.busy) return; // greeting delivered or still processing
         if (attempt >= 3) { logError(TAG, "Greeting failed after 3 attempts"); return; }
         logWarn(TAG, `Greeting attempt ${attempt}/3 — no response, retrying`);
         inject();
