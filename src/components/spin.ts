@@ -535,10 +535,12 @@ export class Spin {
     logInfo(TAG, `▶ O card:${cardId} (persistent Orc)`);
 
     // #993: Attach Orc transport to visible session — user can sneak in
+    let orcSessionKey = "orc:project"; // fallback
     for (const [, s] of this.sessions) {
       if (s.id.includes("_O_") && s.status !== "ended") {
         s.transport = orc.transport as any;
         s.status = "ready";
+        orcSessionKey = s.id; // use proper ManagedSession ID as ACP session key
         break;
       }
     }
@@ -564,7 +566,7 @@ export class Spin {
         fullPrompt = `[CHANNEL — ${orcMsgs.length} message(s)]\n${lines.join("\n")}\n[/CHANNEL]\n\n${fullPrompt}`;
       }
 
-      return (await orc.sendPrompt("orc:project", fullPrompt)) || "(no output)";
+      return (await orc.sendPrompt(orcSessionKey, fullPrompt)) || "(no output)";
     } finally { clearTimeout(timer); updateBridgeLockField("orc_active", null); setActiveOrcCard(null); }
   }
 }
