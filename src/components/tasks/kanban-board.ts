@@ -38,6 +38,7 @@ export interface KanbanCard {
   max_tokens: number | null;
   tokens_used: number | null;
   delivery_mode: string;
+  chat_id: string | null;
 }
 
 let _db: SqliteDb | null = null;
@@ -81,19 +82,20 @@ function db(): SqliteDb {
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN delivery_mode TEXT DEFAULT 'silent'`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN retry_count INTEGER DEFAULT 0`); } catch {}
     try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN next_retry_at TEXT`); } catch {}
+    try { _db.exec(`ALTER TABLE kanban_board ADD COLUMN chat_id TEXT`); } catch {}
   }
   return _db;
 }
 
 import { nerve } from "../nerve.js";
 
-export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "announce"; blocked_by?: string }): number {
+export function kanbanEnqueue(title: string, source: string, sourceId?: string, opts?: { priority?: string; type?: string; labels?: string; due_at?: string; parent_id?: number; notes?: string; deliveryMode?: "silent" | "announce"; blocked_by?: string; chatId?: string }): number {
   const mode = opts?.deliveryMode ?? (source === "user" ? "announce" : "silent");
   const stmt = db().prepare(
-    `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes, delivery_mode, blocked_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO kanban_board (title, source, source_id, priority, type, labels, due_at, parent_id, notes, delivery_mode, blocked_by, chat_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, mode, opts?.blocked_by ?? null);
+  const result = stmt.run(title, source, sourceId ?? null, opts?.priority ?? "MEDIUM", opts?.type ?? null, opts?.labels ?? null, opts?.due_at ?? null, opts?.parent_id ?? null, opts?.notes ?? null, mode, opts?.blocked_by ?? null, opts?.chatId ?? null);
   const id = Number(result.lastInsertRowid);
   nerve.fire("card:queued", id);
   return id;

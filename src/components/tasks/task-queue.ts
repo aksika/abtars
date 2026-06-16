@@ -443,7 +443,7 @@ export class CronQueue {
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
     const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../spin-types.js").SessionType;
 
-    spin.dispatchAwait({ type: sessionType, title: entry.title ?? entry.message.slice(0, 80), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM" })
+    spin.dispatchAwait({ type: sessionType, title: entry.title ?? entry.message.slice(0, 80), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM", chatId: String(entry.chatId) })
       .then(({ cardId: boardId, result: response }) => {
         // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
         // extract just the meaningful content. This happens when the model echoes its last
