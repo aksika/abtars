@@ -156,9 +156,11 @@ export class Spin {
     const session = this.getActiveSession(userId, platform);
     const adapter = this._greetingAdapter!;
     let attempt = 0;
+    let lastInjectAt = 0;
 
     const inject = (): void => {
       attempt++;
+      lastInjectAt = Date.now();
       adapter.injectMessage({
         platform,
         channelId: String(chatId),
@@ -171,11 +173,12 @@ export class Spin {
         isVoice: false,
       });
       setTimeout(() => {
-        if (session.messageCount > 0 || session.busy) return; // greeting delivered or still processing
+        if (session.messageCount > 0) return; // greeting delivered
+        if (Date.now() - lastInjectAt < 25_000) return; // still within expected response time
         if (attempt >= 3) { logError(TAG, "Greeting failed after 3 attempts"); return; }
         logWarn(TAG, `Greeting attempt ${attempt}/3 — no response, retrying`);
         inject();
-      }, 10_000);
+      }, 30_000);
     };
 
     // Event-driven: fire when transport is ready (#1000)
