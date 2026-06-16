@@ -6,6 +6,7 @@
 import type { AgentName } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { SandboxPolicy } from "./tool-sandbox.js";
+import { logError } from "./logger.js";
 
 export type SessionType = "A" | "B" | "C" | "T" | "P" | "S" | "O" | "W" | "D" | "H";
 
@@ -66,7 +67,9 @@ export interface SpinRequest {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 export function sessionType(session: ManagedSession): SessionType {
-  return (session.id.split("_")[1] ?? "A") as SessionType;
+  const type = session.id.split("_")[1];
+  if (!type) logError("spin-types", `Malformed session ID "${session.id}" — no type segment, defaulting to A`);
+  return (type ?? "A") as SessionType;
 }
 
 export function sessionCreatedAt(session: ManagedSession): number {

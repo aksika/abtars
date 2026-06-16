@@ -8,6 +8,7 @@ import { kanbanEnqueue, kanbanRunning, kanbanComplete, kanbanFail, kanbanRetryOr
 import type { SubagentRuntime, AgentSession } from "./subagent-runtime.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
+import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 import { typeAgent } from "./spin-types.js";
 import * as Sessions from "./spin-sessions.js";
@@ -333,7 +334,7 @@ export class Spin {
     this.markRunning(request.type, cardId);
     kanbanRunning(cardId);
 
-    const masterUserId = loadUsers().users.find(u => u.role === "master")?.userId ?? "master";
+    const masterUserId = getMasterUserId();
     const session = this.getOrCreateVisibleSession(masterUserId, request.type);
     if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatch card:${cardId}`); }
 
@@ -379,7 +380,7 @@ export class Spin {
     this.markRunning(request.type, cardId);
     kanbanRunning(cardId);
 
-    const masterUserId = loadUsers().users.find(u => u.role === "master")?.userId ?? "master";
+    const masterUserId = getMasterUserId();
     const session = this.getOrCreateVisibleSession(masterUserId, request.type);
     if (session) { session.name = request.title?.slice(0, 20); pushLog(session, `dispatchAwait card:${cardId}`); }
 

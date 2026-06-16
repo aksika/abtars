@@ -70,7 +70,7 @@ export const spawnSessionTool: ToolDefinition = {
     }
 
     // Create session via session manager
-    const masterUid = (await import("../user-registry.js")).loadUsers().users.find((u: any) => u.role === "master")?.userId ?? "master";
+    const masterUid = (await import("../master-user.js")).getMasterUserId();
     const session = spin.createSubSession(masterUid, "telegram", typeInfo.sessionType);
     if (typeof session === "string") return JSON.stringify({ error: session });
 

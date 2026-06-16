@@ -287,7 +287,7 @@ export function buildSessionStartPrompt(
     }
 
     try {
-      const userRole = loadUsers().byUserId.get(userId)?.role ?? "master";
+      const userRole = loadUsers().byUserId.get(userId)?.role ?? "guest";
       if (userRole === "guest") {
         contextParts.push("Hi! How can I help?");
       } else if (userRole === "user") {
