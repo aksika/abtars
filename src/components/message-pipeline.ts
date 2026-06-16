@@ -38,7 +38,7 @@ import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
-import { buildPrompt, buildSessionStartPrompt } from "./pipeline/prompt-builder.js";
+import { buildPrompt } from "./pipeline/prompt-builder.js";
 import { sessionType } from "./spin-types.js";
 
 import { getEnv } from "./env-schema.js";
@@ -637,21 +637,6 @@ export async function handleInboundMessage(
 }
 
 /** Build session-start prompt with SOUL + context + greeting, send to transport, push response to adapter. */
-export async function startSession(
-  transport: IKiroTransport,
-  memory: MemoryManager,
-  userId: string,
-  sessionKey: string,
-  greeting: string,
-  sendResponse: (text: string) => Promise<unknown>,
-): Promise<void> {
-  const prompt = buildSessionStartPrompt(greeting, memory, userId, sessionKey);
-  logInfo(TAG, `Session start for ${sessionKey} — prompt ${prompt.length} chars`);
-  const response = await transport.sendPrompt(sessionKey, prompt, undefined, userId);
-  if (response?.trim() && response.trim() !== "[NO_REPLY]" && response.trim() !== "(no response)") {
-    await sendResponse(response);
-    memory.recordMessage({ role: "assistant", content: response, timestamp: Date.now(), userId, sessionId: sessionKey });
-  }
-}
+
 
 
