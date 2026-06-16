@@ -255,20 +255,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
 /** Export cronCallback factory for phase-heartbeat's age-check task re-enqueue. */
 export function createCronCallback(ctx: BootCtx): TaskCompleteCallback {
-  return (chatId, message, result, dodFiles) => {
-    if (!ctx.platforms.telegram || !ctx.telegramAdapter) return;
-    const adapter = ctx.telegramAdapter;
-
-    adapter.sendMessage(String(chatId), sanitizeOutbound(result)).catch(err => {
-      logWarn("main", `Cron task TG report failed: ${err}`);
-    });
-
-    if (dodFiles?.length) {
-      for (const file of dodFiles) {
-        adapter.sendDocument(String(chatId), file, message.slice(0, 1024)).catch(err => {
-          logWarn("main", `Cron task TG sendDocument failed: ${err}`);
-        });
-      }
-    }
+  return (_chatId, _message, _result, _dodFiles) => {
+    // #857/#1020: delivery handled exclusively by kanban board (phase-heartbeat card:done handler).
   };
 }
