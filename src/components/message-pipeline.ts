@@ -72,7 +72,6 @@ function extractKeywords(text: string): string[] {
     .filter(w => w.length >= 3 && !STOPWORDS.has(w))
     .slice(0, 3);
 }
-export { SessionRegistry } from "./session-registry.js";
 /** Reset by bridge-app on inbound message to re-enable floating compaction. */
 export let resetIdleCompactFlag: (() => void) | null = null;
 export function setIdleCompactReset(fn: () => void): void { resetIdleCompactFlag = fn; }

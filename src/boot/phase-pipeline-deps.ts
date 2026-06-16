@@ -89,7 +89,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   };
 
   // Wire task_manage --run to the cron queue (singleton: _enqueueCron)
-  const { setEnqueueCron, setSecretGetDb } = await import("../components/transport/tool-registry.js");
+  const { setEnqueueCron } = await import("../components/transport/tool-registry.js");
   setEnqueueCron((id, manual) => {
     try {
       const entry = cronReadEntry(id);
@@ -101,8 +101,6 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
   });
 
   // Wire secret_get tool to memory DB
-  const db = ctx.memory?.getDb();
-  if (db) setSecretGetDb(db as any);
 
   // #894: Wire Spin (which IS the session manager now) to runtime
   const { spin } = await import("../components/spin.js");

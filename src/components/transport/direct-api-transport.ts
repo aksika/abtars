@@ -31,7 +31,6 @@ export interface DirectApiConfig {
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
 }
 
-export { normalizeToolCalls } from "./transport-utils.js";
 
 export class DirectApiTransport implements IKiroTransport {
   private readonly config: DirectApiConfig;

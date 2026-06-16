@@ -270,10 +270,7 @@ export function buildSessionStartPrompt(
   contextParts.push(runtimeLine);
   logInfo(TAG, `Injected runtime identity: ${transportType}`);
 
-  const compSummary = null; // Legacy compaction removed — context engine handles summaries
-  if (compSummary && sessionKey) {
-    // Dead path — kept for type safety during transition
-  } else {
+  {
     const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : undefined;
     const ctxResult = abmind()?.buildSessionStartContext(memory, userId, maxContext, ctxOpts);
     const ctx = ctxResult?.text ?? null;

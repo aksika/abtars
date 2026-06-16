@@ -387,7 +387,6 @@ let _ircSend: ((channel: string, message: string) => void) | null = null;
 export function setIrcSend(fn: (channel: string, message: string) => void): void { _ircSend = fn; }
 
 /** @deprecated — secret_get now reads from file, not DB. Kept for backward compat (callers may still call this). */
-export function setSecretGetDb(_db: unknown): void { /* no-op */ }
 
 let _sendDocument: ((path: string, caption?: string) => Promise<number>) | null = null;
 
