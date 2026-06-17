@@ -182,3 +182,30 @@ When doctor self-heals something:
 ```
 
 No manual intervention needed in either case.
+
+## Stress Tests (verified 2026-06-17, KP + Molty)
+
+The watchdog singleton system (#1035) and instant-death detection (#1042) were stress-tested on both hosts:
+
+| # | Scenario | Expected | Result | Recovery |
+|---|----------|----------|--------|----------|
+| 1 | Kill watchdog | Bridge stays alive, new WD can start + adopt | ✅ | 0s (bridge unaffected) |
+| 2 | Start duplicate watchdog | "Watchdog already running", exits | ✅ | — |
+| 3 | Kill bridge | Watchdog detects + respawns | ✅ | ~25s |
+| 4 | Delete bridge.lock | Watchdog self-heals: recreates file + spawns | ✅ | ~55s |
+| 5 | Corrupt bridge.lock | Same as missing: self-heal + spawn | ✅ | ~60s |
+| 6 | Kill zombie watchdog (non-owner) | Exits without killing bridge | ✅ | 0s |
+| 7 | `abtars stop` | Both die cleanly, file preserved | ✅ | — |
+| 8 | Deploy corrupt bundle | Instant-death → circuit breaker → auto-rollback | ✅ | ~70s |
+
+### Protection stack
+
+```
+Bridge heartbeat    → detects own deadlock     → exits (L2 restarts)
+Watchdog poll (60s) → detects dead/stale bridge → kill + respawn
+Watchdog spawn wait → detects instant-death     → double-count → fast rollback
+Circuit breaker     → 3 failures in 180s        → auto-rollback to app.prev.1
+flock singleton     → prevents duplicate WD     → second instance exits
+Ownership trap      → zombie WD can't kill      → exits without damage
+launchd/systemd     → WD dies for any reason    → respawns WD → adopts bridge
+```
