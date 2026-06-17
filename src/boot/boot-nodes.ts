@@ -37,7 +37,7 @@ export const BOOT_NODES: BootNode[] = [
   { name: "transport",    deps: [],                          optional: true,  run: phaseTransport },
   { name: "memory",       deps: [],                          optional: true,  run: phaseMemory },
   { name: "pipelineDeps", deps: ["transport", "platforms"],  optionalDeps: ["memory"], optional: false, run: phasePipelineDeps },
-  { name: "capabilities", deps: ["transport"],               optionalDeps: ["memory"], optional: true,  run: phaseCapabilities },
+  { name: "capabilities", deps: ["pipelineDeps"],             optionalDeps: ["memory"], optional: true,  run: phaseCapabilities },
   { name: "memoryIpc",    deps: ["memory", "transport"],     optional: true,  run: phaseMemoryIpc },
   { name: "sleep",        deps: ["memory", "heartbeat"],     optional: true,  run: phaseSleep },
   { name: "dashboard",    deps: ["heartbeat"],               optionalDeps: ["transport"], optional: true, run: phaseDashboard },
