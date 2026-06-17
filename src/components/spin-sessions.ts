@@ -32,6 +32,10 @@ export function allocateSession(
     messageCount: 0, tokenCount: 0, toolCallCount: 0,
     log: [],
     shortIndex: idx,
+    // Pipeline state defaults (#1040)
+    busy: false, queue: [], fullMode: false, pendingStart: false,
+    seen: false, compacting: false, ctxWarned: false, compactFailures: 0,
+    primingTerms: [], completions: [],
   };
   sessions.set(session.id, session);
   pushLog(session, "created");

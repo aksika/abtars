@@ -9,7 +9,6 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { cleanResponse } from "./clean-response.js";
 import { loadUsers } from "./user-registry.js";
 import { tryReaction } from "./reactions.js";
-import { SessionRegistry } from "./session-registry.js";
 import { ModelNotFoundError } from "./transport/acp-transport.js";
 import type { SttConfig } from "./stt.js";
 import { synthesizeSpeech, type TtsConfig } from "./tts.js";
@@ -76,19 +75,24 @@ function extractKeywords(text: string): string[] {
 export let resetIdleCompactFlag: (() => void) | null = null;
 export function setIdleCompactReset(fn: () => void): void { resetIdleCompactFlag = fn; }
 
-/** Shared session reset: reset transport, clear buffer, delete session entry. */
+/** Shared session reset: reset transport, clear buffer, mark pendingStart. */
 export async function resetAndPrepare(opts: {
   transport: IKiroTransport;
   sessionKey: string;
   reason: string;
-  sessions: SessionRegistry;
   conversationBuffer?: { clear: (key: string) => void };
   bufKey?: string;
 }): Promise<void> {
   await opts.transport.resetSession(opts.sessionKey);
   if (opts.conversationBuffer && opts.bufKey) opts.conversationBuffer.clear(opts.bufKey);
-  opts.sessions.delete(opts.sessionKey);
-  opts.sessions.getOrCreate(opts.sessionKey).pendingStart = true;
+  const { spin } = await import("./spin.js");
+  const pSession = spin.getSessionById(opts.sessionKey);
+  if (pSession) {
+    pSession.seen = false;
+    pSession.pendingStart = true;
+    pSession.busy = false;
+    pSession.queue = [];
+  }
   // #254: clear emergency mode on reset — next session starts fresh
   const t = opts.transport as unknown as { setEmergencyMode?: (o: null) => void };
   t.setEmergencyMode?.(null);
@@ -120,7 +124,6 @@ export interface VoiceDeps {
 
 /** Pipeline dependencies — composed from focused interfaces. */
 export interface PipelineDeps extends TransportDeps, MemoryDeps, VoiceDeps {
-  sessions: SessionRegistry;
   sessionManager: import("./spin.js").Spin;
   cronCurrentJob?: () => RunningJob | null;
   enqueueCron?: (entryId: string, manual?: boolean) => string | null;
@@ -176,7 +179,7 @@ export async function handleInboundMessage(
     ctx.transport = switchedSession.transport!;
     ctx.delivery = switchedSession.delivery;
     // Mark seen so isSessionStart doesn't inject full soul bundle (Orc already has its context)
-    const entry = deps.sessions.getOrCreate(switchedSession.id);
+    switchedSession.seen = true;
     switchedSession.lastActiveAt = Date.now();
   } else {
     // --- #936: Resolve session via Spin (sets per-user transport + delivery mode) ---
@@ -196,7 +199,6 @@ export async function handleInboundMessage(
     memory, memoryConfig,
     idleSave, conversationBuffer,
     ttsConfig,
-    sessions,
   } = deps;
   const transport = ctx.transport;
 
@@ -210,7 +212,8 @@ export async function handleInboundMessage(
   // Resolve active transport session via session manager (#510)
   const activeSessionId = deps.sessionManager.getActiveSessionId(userId, msg.platform);
 
-  const busyEntry = sessions.getOrCreate(activeSessionId);
+  const pSession = spin.getSessionById(activeSessionId)!;
+  const busyEntry = pSession;
   let typingInterval: ReturnType<typeof setInterval> | undefined;
   let typingTtlTimer: ReturnType<typeof setTimeout> | undefined;
   let toolElapsedTimer: ReturnType<typeof setInterval> | undefined;
@@ -225,7 +228,7 @@ export async function handleInboundMessage(
 
     // --- Build prompt ---
     const { prompt: builtPrompt, imageContent, recalledHits } = await buildPrompt(msg, text, {
-      memory, memoryConfig, sessions, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
+      memory, memoryConfig, sessionManager: deps.sessionManager, conversationBuffer, contextPercent: ctxPct, maxContext: deps.maxContext,
       isAcp: !("agentLoop" in transport),
     }, registry);
 
@@ -279,11 +282,10 @@ export async function handleInboundMessage(
 
     // Wire /wait steer injection (#655) — agent loop drains this between tool rounds
     if ("getPendingInstruction" in transport) {
-      const sessionEntry = deps.sessions.getOrCreate(activeSessionId);
       (transport as any).getPendingInstruction = () => {
-        const pending = sessionEntry.pendingWait;
+        const pending = pSession.pendingWait;
         if (!pending) return undefined;
-        sessionEntry.pendingWait = undefined;
+        pSession.pendingWait = undefined;
         return pending;
       };
     }
@@ -392,7 +394,7 @@ export async function handleInboundMessage(
 
     // --- Extract clean answer ---
     const cleanAnswer = transport.answerOnly;
-    const rawResponse = sessions.get(activeSessionId)?.fullMode ? response : (cleanAnswer || response);
+    const rawResponse = pSession.fullMode ? response : (cleanAnswer || response);
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
@@ -504,8 +506,8 @@ export async function handleInboundMessage(
     if (getEnv().activeMemory) {
       const modelTopics = getEnv().primingModelTopics && topics ? topics : [];
       const regexKw = extractKeywords(text);
-      const existing = sessions.get(activeSessionId)?.primingTerms ?? [];
-      sessions.getOrCreate(activeSessionId).primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
+      const existing = pSession.primingTerms ?? [];
+      pSession.primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
     }
 
     // --- Record to memory (skip for guests) ---
@@ -519,7 +521,7 @@ export async function handleInboundMessage(
     }
 
     // --- TTS for voice notes ---
-    if (isVoice && ttsConfig && !sessions.get(activeSessionId)?.fullMode && adapter.sendVoice) {
+    if (isVoice && ttsConfig && !pSession.fullMode && adapter.sendVoice) {
       try {
         await adapter.sendTyping?.(channelId, msg.threadId);
         const audio = await synthesizeSpeech(cleanAnswer || response, ttsConfig);
@@ -601,7 +603,7 @@ export async function handleInboundMessage(
 
     if (isContextOverflow) {
       logWarn(TAG, `Context overflow detected — auto-resetting session`);
-      await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}`, sessions });
+      await resetAndPrepare({ transport, sessionKey: activeSessionId, reason: `ctx-overflow: ${errStr.slice(0, 100)}` });
       await adapter.sendMessage(channelId, "🔄 Context window full — session reset. Send your message again.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else if (isTimeout) {
       logWarn(TAG, `Request timeout — not resetting session`);
@@ -625,10 +627,9 @@ export async function handleInboundMessage(
     idleSave.reset(activeSessionId, chatId);
 
     // Drain queued messages
-    const entry = sessions.get(activeSessionId);
-    if (entry?.queue.length) {
-      const next = entry.queue.shift()!;
-      logInfo(TAG, `Draining queued message for ${activeSessionId} (${entry.queue.length} remaining)`);
+    if (pSession?.queue.length) {
+      const next = pSession.queue.shift()!;
+      logInfo(TAG, `Draining queued message for ${activeSessionId} (${pSession.queue.length} remaining)`);
       handleInboundMessage(next.msg, next.adapter, deps).catch(e => logError(TAG, "Queue drain error", e));
     }
   }

@@ -13,7 +13,6 @@ import { loadUsers } from "../user-registry.js";
 import { abmind } from "../../utils/abmind-lazy.js";
 import { getEnv } from "../env-schema.js";
 import { readAndClearRestartReason } from "../transport/bridge-lock-transport.js";
-import type { SessionRegistry } from "../session-registry.js";
 import type { MemoryManager } from "abmind";
 import type { ConversationBuffer } from "../conversation-buffer.js";
 import type { InboundMessage } from "../../types/platform.js";
@@ -25,7 +24,6 @@ const ACTIVE_MEMORY_LIMIT = 5;
 export interface BuildPromptDeps {
   memory: MemoryManager | null;
   memoryConfig: { memoryEnabled: boolean; memoryDir: string };
-  sessions: SessionRegistry;
   sessionManager: import("../spin.js").Spin;
   conversationBuffer: ConversationBuffer;
   contextPercent: number;
@@ -46,11 +44,13 @@ export async function buildPrompt(
   deps: BuildPromptDeps,
   registry: UserRegistry,
 ): Promise<BuildPromptResult> {
-  const { memory, sessions, conversationBuffer, contextPercent } = deps;
+  const { memory, conversationBuffer, contextPercent } = deps;
   const { channelId, isGroup } = msg;
   const userId = msg.userId;
   const sessionKey = deps.sessionManager.getActiveSessionId(userId, msg.platform);
   const bufKey = `${msg.platform}:${channelId}`;
+  const { spin } = await import("../spin.js");
+  const pSession = spin.getSessionById(sessionKey);
 
   // --- Timestamp prefix ---
   let prompt = `[${localTime()}] ${text}`;
@@ -96,14 +96,16 @@ export async function buildPrompt(
   }
 
   // --- Session-start injection ---
-  const entry = sessions.getOrCreate(sessionKey);
-  const isSessionStart = entry.pendingStart || !entry.seen;
-  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry.seen} pendingStart=${entry.pendingStart} isSessionStart=${isSessionStart}`);
+  const entry = pSession;
+  const isSessionStart = !entry || entry.pendingStart || !entry.seen;
+  logTrace(TAG, `session-state: key=${sessionKey} seen=${entry?.seen} pendingStart=${entry?.pendingStart} isSessionStart=${isSessionStart}`);
   if (isSessionStart && memory) {
     prompt = buildSessionStartPrompt(prompt, memory, userId, sessionKey, deps.maxContext, msg.platform);
   }
-  entry.seen = true;
-  entry.pendingStart = false;
+  if (entry) {
+    entry.seen = true;
+    entry.pendingStart = false;
+  }
 
   // Record user message to memory
   const userRole = registry.byUserId.get(userId)?.role;
@@ -120,7 +122,7 @@ export async function buildPrompt(
     if (userEntry?.role !== "guest" && (contextPercent < 0 || contextPercent < getEnv().ctxCompactPct)) {
       try {
         const t0 = performance.now();
-        const priming = sessions.get(sessionKey)?.primingTerms ?? [];
+        const priming = pSession?.primingTerms ?? [];
         const now = new Date();
         const recall = await memory.recallSearch({
           translated: [...new Set([text, ...priming])],

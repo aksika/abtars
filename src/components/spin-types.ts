@@ -46,6 +46,21 @@ export interface ManagedSession {
 
   // Display
   shortIndex: number;
+
+  // Pipeline state (#1040 — merged from SessionRegistry)
+  busy: boolean;
+  queue: Array<{ msg: import("../types/platform.js").InboundMessage; adapter: import("../types/platform.js").PlatformAdapter }>;
+  fullMode: boolean;
+  pendingStart: boolean;
+  seen: boolean;
+  compacting: boolean;
+  ctxWarned: boolean;
+  compactFailures: number;
+  primingTerms: string[];
+  pendingWait?: string;
+
+  // Completion buffer (#1040 — merged from completion-buffer.ts)
+  completions: Array<{ sessionId: string; goal: string; status: string; result: string; elapsedMs: number; inputTokens: number; outputTokens: number }>;
 }
 
 export interface SpinRequest {
