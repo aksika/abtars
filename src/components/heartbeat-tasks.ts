@@ -7,7 +7,6 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { execSync } from "node:child_process";
 import { logInfo, logError } from "./logger.js";
 import { setIdleCompactReset } from "./message-pipeline.js";
-import type { SessionRegistry } from "./session-registry.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind";
 import type { HeartbeatTask } from "abmind";
@@ -19,7 +18,6 @@ export interface IdleCompactDeps {
   memory: MemoryManager | null;
   memoryDir: string;
   allowedUserIds: Set<number>;
-  sessions: SessionRegistry;
   isSleepActive: () => boolean;
 }
 

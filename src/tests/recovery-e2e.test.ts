@@ -8,7 +8,6 @@ import { tmpdir } from "node:os";
 import { isDailyCycleDue, resetBedtimeCounter, type DailyCycleDeps } from "../components/daily-cycle.js";
 import { classifyResume } from "../components/platform-detect.js";
 
-import { SessionRegistry } from "../components/session-registry.js";
 
 let tmpDir: string;
 
@@ -17,7 +16,6 @@ function makeDeps(overrides: Partial<DailyCycleDeps> = {}): DailyCycleDeps {
     sleepHour: 6, sleepMinute: 0,
     bridgeLockPath: join(tmpDir, "bridge.lock"),
     memory: null,
-    sessions: new SessionRegistry(),
     isSleepActive: () => false,
     ...overrides,
   };

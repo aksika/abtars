@@ -82,7 +82,7 @@ export class TelegramAdapter implements PlatformAdapter {
     await p.idleSave.save(sessionKey, chatId);
     await resetAndPrepare({
       transport: this.deps.transport, sessionKey, reason,
-      sessions: p.sessions, conversationBuffer: this.deps.conversationBuffer, bufKey,
+      conversationBuffer: this.deps.conversationBuffer, bufKey,
     });
     if (p.memoryConfig.memoryEnabled) {
       const reg = loadUsers();
@@ -465,9 +465,9 @@ export class TelegramAdapter implements PlatformAdapter {
     } else {
       const reactionUser = loadUsers().byPlatformId.get("telegram:" + user.id)?.userId ?? "unknown";
       const activeId = this.deps.sessionManager.getActiveSessionId(reactionUser, "telegram");
-      const { sessions } = this.deps.pipeline;
-      const entry = sessions.getOrCreate(activeId);
-      if (entry.busy) {
+      const { spin } = await import("../../components/spin.js");
+      const entry = spin.getSessionById(activeId);
+      if (entry?.busy) {
         entry.queue.push({ msg: { userId: reactionUser, channelId: String(chatId), senderName, senderId: String(user.id), text: signal, messageId: reaction.message_id, platform: "telegram", timestamp: Date.now(), isGroup: false, isVoice: false }, adapter: this });
         logDebug(TAG, `Queued reaction signal for busy ${activeId} (${entry.queue.length} pending)`);
       } else {

@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { TelegramAdapter, type TelegramAdapterConfig, type TelegramAdapterDeps } from "./telegram-adapter.js";
 import type { PipelineDeps } from "../../components/message-pipeline.js";
-import { SessionRegistry } from "../../components/session-registry.js";
 import type { IKiroTransport } from "../../components/transport/kiro-transport.js";
 import type { InboundMessage } from "../../types/platform.js";
+import type { ManagedSession } from "../../components/spin-types.js";
 
 // Mock TelegramApi
 vi.mock("./telegram-api.js", () => ({
@@ -78,7 +78,6 @@ function makeDeps(transport: IKiroTransport): TelegramAdapterDeps {
       startedAt: Date.now(),
       sttConfig: null,
       ttsConfig: null,
-      sessions: new SessionRegistry(),
       sessionManager: { getActiveSessionId: () => "1_A_01", getActiveSession: () => ({ id: "1_A_01", type: "A", paused: false }) } as any,
       updateCtxStart: vi.fn(),
     } as PipelineDeps,
@@ -94,12 +93,32 @@ describe("TelegramAdapter", () => {
   let transport: IKiroTransport;
   let deps: TelegramAdapterDeps;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
     transport = mockTransport();
     deps = makeDeps(transport);
     adapter = new TelegramAdapter(makeConfig(), deps);
+    // Mock spin.getSessionById so pipeline can resolve session state
+    const spinMod = await import("../../components/spin.js");
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue({
+      id: "1_A_01", userId: "master", platform: "telegram", chatId: 42,
+      delivery: "simple", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    } as ManagedSession);
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue({
+      id: "1_A_01", userId: "master", platform: "telegram", chatId: 42,
+      delivery: "simple", active: true, status: "ready",
+      idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+      log: [], shortIndex: 1,
+      busy: false, queue: [], fullMode: false, pendingStart: false, seen: true,
+      compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    } as ManagedSession);
   });
+
+  afterEach(() => { vi.restoreAllMocks(); });
 
   it("has correct name and capabilities", () => {
     expect(adapter.name).toBe("telegram");

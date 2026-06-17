@@ -131,7 +131,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     heartbeat.registerTask(createIdleCompactTask({
       transport, memory, memoryDir: memoryConfig.memoryDir,
       allowedUserIds: config.telegram.allowedUserIds,
-      sessions: ctx.sessions,
       isSleepActive: ctx.isSleepActive,
     }));
   }
@@ -159,7 +158,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     sleepAuditDir: ctx.sleepAuditDir,
     sleepHour: SLEEP_HOUR,
     sleepMinute: SLEEP_MINUTE,
-    sessions: ctx.sessions,
     isSleepActive: ctx.isSleepActive,
     doctorPath: join(abtarsHome(), "scripts", "doctor.sh"),
     startSleep: () => { ctx.sleepHandle?.spawn(); },
@@ -237,19 +235,17 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   }).catch(err => logAndSwallow(TAG, "spin-tick", err));
 
   // #985: Force-clear stuck busy flags (self-healing after greeting/prompt errors)
-  if (pipelineDeps) {
-    const sessions = pipelineDeps.sessions;
+  {
+    const { spin: spinRef } = require("../components/spin.js") as typeof import("../components/spin.js");
     heartbeat.registerTask({ name: "busy-unstick", execute: () => {
       const now = Date.now();
-      for (const key of sessions.keys()) {
-        const entry = sessions.get(key);
-        if (entry?.busy && entry.lastActiveAt && now - entry.lastActiveAt > 60_000) {
-          // #1003: abort in-flight call BEFORE clearing busy — prevents zombie calls
+      for (const s of spinRef.listAllSessions()) {
+        if (s.busy && s.lastActiveAt && now - s.lastActiveAt > 60_000) {
           if (transport && "sendInterrupt" in transport) {
             (transport as { sendInterrupt: () => Promise<void> }).sendInterrupt().catch(() => {});
           }
-          entry.busy = false;
-          logWarn(TAG, `Force-cleared stuck busy on ${key} (>60s) — interrupted`);
+          s.busy = false;
+          logWarn(TAG, `Force-cleared stuck busy on ${s.id} (>60s) — interrupted`);
         }
       }
     }});

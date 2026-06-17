@@ -22,8 +22,6 @@ import type { CapabilityRegistry } from "../capabilities/capability.js";
 import type { IDashboardSlot } from "../components/skeleton.js";
 import type { AgentApiServer } from "../components/agent-api-server.js";
 import type { PlatformAdapter } from "../types/platform.js";
-import { SessionRegistry as SessionRegistryClass } from "../components/session-registry.js";
-import type { SessionRegistry } from "../components/session-registry.js";
 import { spin as spinInstance } from "../components/spin.js";
 import type { ModelHealthRegistry } from "../components/transport/model-health-registry.js";
 import type { SttConfig } from "../components/stt.js";
@@ -79,7 +77,6 @@ export interface BootCtx {
   pipelineDeps: PipelineDeps | null;
 
   // ── Session state ──
-  sessions: SessionRegistry;
   sessionManager: import("../components/spin.js").Spin;
 
   // ── Subsystems ────────────────────────────────────────────────────────
@@ -152,7 +149,6 @@ export function createBootCtx(overrides: Partial<BootCtx> = {}): BootCtx {
     pipelineDeps: null,
 
     // Session state
-    sessions: new SessionRegistryClass(),
     sessionManager: spinInstance,
 
     // Subsystems

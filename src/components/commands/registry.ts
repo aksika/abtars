@@ -83,7 +83,7 @@ export async function triggerNewSession(ctx: CommandContext, reason = "new-sessi
   await ctx.idleSave.save(ctx.sessionKey, ctx.chatId);
   await resetAndPrepare({
     transport: ctx.transport, sessionKey: ctx.sessionKey,
-    reason, sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
+    reason, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
   if (hasHooks("SessionStart")) {
@@ -103,7 +103,7 @@ export async function triggerResetSession(ctx: CommandContext): Promise<void> {
   if (ctx.rebuildTransport) await ctx.rebuildTransport();
   await resetAndPrepare({
     transport: ctx.transport, sessionKey: ctx.sessionKey,
-    reason: "reset-transport", sessions: ctx.sessions, conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
+    reason: "reset-transport", conversationBuffer: ctx.conversationBuffer, bufKey: ctx.bufKey,
   });
   if (ctx.memoryConfig.memoryEnabled) ctx.updateCtxStart(ctx.memoryConfig.memoryDir, ctx.userId);
   if (hasHooks("SessionStart")) {

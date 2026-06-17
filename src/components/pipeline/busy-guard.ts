@@ -11,7 +11,9 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
   const { msg, adapter, deps } = ctx;
   const userId = msg.userId;
   const activeId = deps.sessionManager.getActiveSessionId(userId, msg.platform);
-  const entry = deps.sessions.getOrCreate(activeId);
+  const { spin } = await import("../spin.js");
+  const entry = spin.getSessionById(activeId);
+  if (!entry) { await next(); return; }
 
   if (entry.busy) {
     const text = ctx.text.trim();

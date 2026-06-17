@@ -3,7 +3,6 @@
  * Uses real pipeline + real memory, mock transport + mock adapter.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SessionRegistry } from "../components/session-registry.js";
 import { Spin } from "../components/spin.js";
 const SessionManager = Spin;
 import { mkdtempSync, rmSync } from "node:fs";
@@ -18,6 +17,7 @@ import type { PlatformAdapter, InboundMessage } from "../types/platform.js";
 import type { IKiroTransport } from "../components/kiro-transport.js";
 import { MemoryManager } from "abmind";
 import { ConversationBuffer } from "../components/conversation-buffer.js";
+import type { ManagedSession } from "../components/spin-types.js";
 
 import { makeMemoryTestConfig } from "./helpers.js";
 
@@ -70,7 +70,20 @@ function makeMsg(text: string, overrides: Partial<InboundMessage> = {}): Inbound
   };
 }
 
-function makeDeps(transport: IKiroTransport, memory: MemoryManager | null, overrides: Partial<PipelineDeps> = {}): PipelineDeps {
+function makeManagedSession(overrides: Partial<ManagedSession> = {}): ManagedSession {
+  return {
+    id: "test_A_01", userId: "master", platform: "telegram", chatId: 100,
+    delivery: "simple", active: true, status: "ready",
+    idleTimeoutMs: 0, lastActiveAt: Date.now(), messageCount: 0, tokenCount: 0, toolCallCount: 0,
+    log: [], shortIndex: 1,
+    busy: false, queue: [], fullMode: false, pendingStart: false, seen: false,
+    compacting: false, ctxWarned: false, compactFailures: 0, primingTerms: [], completions: [],
+    ...overrides,
+  };
+}
+
+function makeDeps(transport: IKiroTransport, memory: MemoryManager | null, sessionOverrides: Partial<ManagedSession> = {}): PipelineDeps {
+  const session = makeManagedSession(sessionOverrides);
   return {
     transport,
     codingMode: { has: () => false, getTransport: () => null, start: vi.fn(), stop: vi.fn() } as any,
@@ -82,31 +95,38 @@ function makeDeps(transport: IKiroTransport, memory: MemoryManager | null, overr
     config: { agentTransport: "acp", workingDir: tmpDir },
     startedAt: Date.now(),
     sttConfig: null, ttsConfig: null,
-    sessions: new SessionRegistry(),
-    sessionManager: { getActiveSessionId: () => "test_A_01", getActiveSession: () => ({ id: "test_A_01", type: "A", shortIndex: 1, ended: false }) } as any,
+    sessionManager: {
+      getActiveSessionId: () => "test_A_01",
+      getActiveSession: () => session,
+      getSessionById: (id: string) => id === "test_A_01" ? session : undefined,
+    } as any,
     updateCtxStart: vi.fn(),
-    ...overrides,
   };
 }
 
 describe("Smoke: bridge lifecycle", () => {
+  let spinMod: typeof import("../components/spin.js");
+
   beforeEach(async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "smoke-"));
     memory = new MemoryManager(makeMemoryTestConfig(tmpDir));
     await memory.initialize();
+    spinMod = await import("../components/spin.js");
   });
 
   afterEach(() => {
     memory.close();
     rmSync(tmpDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
   });
 
   it("first message triggers SOUL injection via pendingSessionStart", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const sessions = new SessionRegistry();
-    sessions.getOrCreate("test_A_01").pendingStart = true;
-    const deps = makeDeps(transport, memory, { sessions });
+    const session = makeManagedSession({ pendingStart: true });
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(session);
+    const deps = makeDeps(transport, memory, { pendingStart: true });
 
     await handleInboundMessage(makeMsg("hello"), adapter, deps);
 
@@ -119,9 +139,10 @@ describe("Smoke: bridge lifecycle", () => {
   it("second message does NOT re-inject SOUL", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const sessions = new SessionRegistry();
-    sessions.getOrCreate("test_A_01").seen = true;
-    const deps = makeDeps(transport, memory, { sessions });
+    const session = makeManagedSession({ seen: true });
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(session);
+    const deps = makeDeps(transport, memory, { seen: true });
 
     await handleInboundMessage(makeMsg("hello again"), adapter, deps);
 
@@ -132,19 +153,37 @@ describe("Smoke: bridge lifecycle", () => {
   it("resetAndPrepare triggers SOUL re-injection on next message", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const sessions = new SessionRegistry();
-    sessions.getOrCreate("test_A_01").seen = true;
-    const deps = makeDeps(transport, memory, { sessions });
+    const session = makeManagedSession({ seen: true });
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(session);
+
+    const deps: PipelineDeps = {
+      transport,
+      codingMode: { has: () => false, getTransport: () => null, start: vi.fn(), stop: vi.fn() } as any,
+      memory,
+      memoryConfig: { memoryEnabled: !!memory, memoryDir: tmpDir },
+      nlmConfig: { enabled: false },
+      idleSave: { reset: vi.fn(), save: vi.fn(), getTimers: () => new Map(), clearAll: vi.fn() } as any,
+      conversationBuffer: new ConversationBuffer(50),
+      config: { agentTransport: "acp", workingDir: tmpDir },
+      startedAt: Date.now(),
+      sttConfig: null, ttsConfig: null,
+      sessionManager: {
+        getActiveSessionId: () => "test_A_01",
+        getActiveSession: () => session,
+        getSessionById: (id: string) => id === "test_A_01" ? session : undefined,
+      } as any,
+      updateCtxStart: vi.fn(),
+    };
 
     // First message — no SOUL (already seen)
     await handleInboundMessage(makeMsg("msg1"), adapter, deps);
     expect(transport.prompts[0]).not.toContain("You are a test agent");
 
     // Reset
-    await resetAndPrepare({
-      transport, sessionKey: "test_A_01", reason: "test-reset",
-      sessions,
-    });
+    await resetAndPrepare({ transport, sessionKey: "test_A_01", reason: "test-reset" });
+    expect(session.pendingStart).toBe(true);
+    expect(session.seen).toBe(false);
 
     // Next message — SOUL re-injected
     transport.prompts.length = 0;
@@ -155,9 +194,10 @@ describe("Smoke: bridge lifecycle", () => {
   it("session-start prompt bypasses interceptor (not truncated)", async () => {
     const transport = makeTransport();
     const adapter = makeAdapter();
-    const sessions = new SessionRegistry();
-    sessions.getOrCreate("test_A_01").pendingStart = true;
-    const deps = makeDeps(transport, memory, { sessions });
+    const session = makeManagedSession({ pendingStart: true });
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session);
+    vi.spyOn(spinMod.spin, "getActiveSession").mockReturnValue(session);
+    const deps = makeDeps(transport, memory, { pendingStart: true });
 
     await handleInboundMessage(makeMsg("hello"), adapter, deps);
 

@@ -20,8 +20,9 @@ const DESTRUCTIVE_COMMANDS = new Set(["/stop", "/ctrlc", "/reset", "/restart", "
 export const commandMiddleware: Middleware = async (ctx, next) => {
   const { msg, deps } = ctx;
   const { transport, config, startedAt, memory, memoryConfig, nlmConfig,
-    idleSave, sessions, sessionManager,
+    idleSave, sessionManager,
     updateCtxStart, conversationBuffer } = deps;
+  const { spin } = await import("../spin.js");
 
   // #157: strip leading bangs for non-master (kiro-cli executes ! as shell)
   const registry = loadUsers();
@@ -43,14 +44,15 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
 
   // Interrupt commands: kill in-progress response first, then handle
   const activeId = sessionManager.getActiveSessionId(msg.userId, msg.platform);
-  if (INTERRUPT_COMMANDS.has(cmd) && sessions.get(activeId)?.busy) {
+  if (INTERRUPT_COMMANDS.has(cmd) && spin.getSessionById(activeId)?.busy) {
     logInfo("commands", `Interrupt command ${cmd} while busy — stopping current response`);
     await transport.sendInterrupt();
-    sessions.getOrCreate(activeId).busy = false;
+    const s = spin.getSessionById(activeId);
+    if (s) s.busy = false;
   }
 
   // Non-interrupt destructive commands while busy: defer to busy guard (will be queued)
-  if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && sessions.get(activeId)?.busy) {
+  if (!INTERRUPT_COMMANDS.has(cmd) && DESTRUCTIVE_COMMANDS.has(cmd) && spin.getSessionById(activeId)?.busy) {
     const deferredWording: Record<string, string> = {
       "/compact": "⏳ Will /compact after current response finishes.",
       "/coding": "⏳ Will switch to coding mode after current response finishes.",
@@ -76,7 +78,6 @@ export const commandMiddleware: Middleware = async (ctx, next) => {
     transport, config, startedAt,
     memory, memoryConfig, nlmConfig,
     idleSave,
-    sessions,
     sessionManager: deps.sessionManager,
     updateCtxStart,
     cronCurrentJob: deps.cronCurrentJob?.() ?? null,

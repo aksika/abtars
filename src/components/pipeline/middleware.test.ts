@@ -1,12 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { runPipeline, createMessageContext, type Middleware, type MessageContext } from "./middleware.js";
-import { SessionRegistry } from "../session-registry.js";
 
 function makeMsg(overrides = {}) {
   return { platform: "telegram", channelId: "100", userId: "master", senderId: "42", senderName: "Test", text: "hello", timestamp: Date.now(), isGroup: false, isVoice: false, ...overrides } as any;
 }
 function makeAdapter() { return { sendMessage: vi.fn().mockResolvedValue(1), chunkResponse: (t: string) => [t] } as any; }
-function makeDeps() { return { sessions: new SessionRegistry(), transport: {} } as any; }
+function makeDeps() { return { transport: {} } as any; }
 
 describe("runPipeline", () => {
   it("runs middlewares in order", async () => {

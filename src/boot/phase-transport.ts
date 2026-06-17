@@ -262,11 +262,11 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
   // Flush message queues on reinit — model lost context
   if ("onReinit" in transport) {
     (transport as any).onReinit = () => {
-      for (const key of ctx.sessions.keys()) {
-        const entry = ctx.sessions.get(key);
-        if (entry && entry.queue.length) {
-          logWarn("transport", `Reinit: flushing ${entry.queue.length} queued message(s)`);
-          entry.queue.length = 0;
+      const { spin } = require("../components/spin.js") as typeof import("../components/spin.js");
+      for (const s of spin.listAllSessions()) {
+        if (s.queue.length) {
+          logWarn("transport", `Reinit: flushing ${s.queue.length} queued message(s)`);
+          s.queue.length = 0;
         }
       }
     };

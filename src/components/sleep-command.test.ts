@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { SessionRegistry } from "./session-registry.js";
 import { Spin } from "./spin.js";
 const SessionManager = Spin;
 
@@ -56,7 +55,6 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     nlmConfig: { enabled: false },
     codingMode: { has: vi.fn().mockReturnValue(false), start: vi.fn(), stop: vi.fn(), getTransport: vi.fn() } as unknown as CodingMode,
     idleSave: { reset: vi.fn(), stop: vi.fn(), save: vi.fn().mockResolvedValue(undefined) } as unknown as IdleSave,
-    sessions: new SessionRegistry(),
     sessionManager: new SessionManager(),
     updateCtxStart: vi.fn(),
     ...overrides,

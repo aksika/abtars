@@ -2,10 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { handleCommand, type CommandContext } from "./commands/index.js";
 import { Spin } from "./spin.js";
 const SessionManager = Spin;
-import { SessionRegistry } from "./session-registry.js";
 import { setUserRegistryOverride } from "./user-registry.js";
 import type { CodingMode } from "./coding-mode.js";
 import type { IdleSave } from "./idle-save.js";
+import type { ManagedSession } from "./spin-types.js";
 
 vi.mock("node:child_process", () => ({
   execFile: vi.fn((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
@@ -36,7 +36,6 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     nlmConfig: { enabled: false },
     codingMode: { has: vi.fn().mockReturnValue(false), start: vi.fn(), stop: vi.fn(), getTransport: vi.fn() } as unknown as CodingMode,
     idleSave: { reset: vi.fn(), stop: vi.fn(), save: vi.fn().mockResolvedValue(undefined) } as unknown as IdleSave,
-    sessions: new SessionRegistry(),
     sessionManager: { endSession: vi.fn(), getActiveSessionId: () => "telegram:123", getActiveSession: () => ({ id: "telegram:123" }), setRuntime: vi.fn() } as any,
     updateCtxStart: vi.fn(),
     ...overrides,
@@ -62,17 +61,24 @@ describe("command-handlers", () => {
 
   it("/full enables full mode", async () => {
     const ctx = makeCtx();
+    const spinMod = await import("./spin.js");
+    const session: Partial<ManagedSession> = { fullMode: false };
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session as ManagedSession);
     const handled = await handleCommand("/full", ctx);
     expect(handled).toBe(true);
-    expect(ctx.sessions.get("telegram:123")?.fullMode).toBe(true);
+    expect(session.fullMode).toBe(true);
+    vi.restoreAllMocks();
   });
 
   it("/short disables full mode", async () => {
     const ctx = makeCtx();
-    ctx.sessions.getOrCreate("telegram:123").fullMode = true;
+    const spinMod = await import("./spin.js");
+    const session: Partial<ManagedSession> = { fullMode: true };
+    vi.spyOn(spinMod.spin, "getSessionById").mockReturnValue(session as ManagedSession);
     const handled = await handleCommand("/short", ctx);
     expect(handled).toBe(true);
-    expect(ctx.sessions.get("telegram:123")?.fullMode).toBeFalsy();
+    expect(session.fullMode).toBeFalsy();
+    vi.restoreAllMocks();
   });
 
   it("/task run calls enqueueCron", async () => {

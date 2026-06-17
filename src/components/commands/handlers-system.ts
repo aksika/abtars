@@ -78,7 +78,9 @@ export async function handleWait(text: string, ctx: CommandContext): Promise<boo
 
 export async function handleStop(_text: string, ctx: CommandContext): Promise<boolean> {
   await ctx.transport.sendInterrupt();
-  ctx.sessions.getOrCreate(ctx.sessionKey).busy = false;
+  const { spin } = await import("../spin.js");
+  const s = spin.getSessionById(ctx.sessionKey);
+  if (s) s.busy = false;
   await ctx.reply("🛑 Ctrl+C sent.");
   logInfo(TAG, "Ctrl+C interrupt sent");
   return true;
@@ -192,14 +194,18 @@ export async function handleHealing(text: string, ctx: CommandContext): Promise<
 
 export async function handleFull(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.platform !== "telegram") { await ctx.reply("📺 Full mode is only available on Telegram."); return true; }
-  ctx.sessions.getOrCreate(ctx.sessionKey).fullMode = true;
+  const { spin } = await import("../spin.js");
+  const s = spin.getSessionById(ctx.sessionKey);
+  if (s) s.fullMode = true;
   await ctx.reply("📺 Full mode — sending raw output, TTS disabled.");
   return true;
 }
 
 export async function handleShort(_text: string, ctx: CommandContext): Promise<boolean> {
   if (ctx.platform !== "telegram") { await ctx.reply("✂️ Short mode is only available on Telegram."); return true; }
-  ctx.sessions.getOrCreate(ctx.sessionKey).fullMode = false;
+  const { spin } = await import("../spin.js");
+  const s = spin.getSessionById(ctx.sessionKey);
+  if (s) s.fullMode = false;
   await ctx.reply("✂️ Short mode — clean responses, TTS enabled.");
   return true;
 }
