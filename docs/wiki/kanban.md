@@ -29,7 +29,7 @@ Any source can create cards:
 ## Card lifecycle
 
 ```
-📥 queued → ⏳ running → 📬 done → 🚚 delivering → ✅ delivered
+📥 queued → ⏳ running → 📬 done → 🚚 delivering → ✓ delivered
                            ↓
                          ❌ failed (after 3 delivery attempts or task error)
 ```

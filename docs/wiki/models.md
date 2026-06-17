@@ -28,7 +28,7 @@ Works on all platforms (text output).
 
 3-step picker:
 1. Pick agent slot (professor, dreamy, browsie, coding)
-2. Pick provider (shows model count, current marked ✅)
+2. Pick provider (shows model count, current marked ✓)
 3. Pick model
 
 ### Quick switch (all platforms)

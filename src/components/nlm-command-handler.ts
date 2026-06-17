@@ -111,10 +111,10 @@ async function handleCreate(name: string): Promise<NLMCommandResult> {
     const parsed = JSON.parse(result.data);
     const id = parsed.notebook_id ?? parsed.id ?? "?";
     logInfo(TAG, `Created notebook "${name}" → ${id}`);
-    return { text: `✅ Notebook "${name}" created (${id})` };
+    return { text: `✓ Notebook "${name}" created (${id})` };
   } catch (err) {
     logAndSwallow(TAG, "JSON.parse notebook create", err);
-    return { text: `✅ ${result.data}` };
+    return { text: `✓ ${result.data}` };
   }
 }
 

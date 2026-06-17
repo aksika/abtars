@@ -18,7 +18,7 @@ async function executePost(args: Record<string, string>, ctx?: { userId?: string
   const to = args.to || "ALL";
   const directive = args.directive === "true" || args.directive === "1";
   const id = channelPost(cardId, from, to, args.message, directive);
-  return `✅ Posted #${id} to card:${cardId} [${from}→${to}]`;
+  return `✓ Posted #${id} to card:${cardId} [${from}→${to}]`;
 }
 
 async function executeRead(args: Record<string, string>): Promise<string> {

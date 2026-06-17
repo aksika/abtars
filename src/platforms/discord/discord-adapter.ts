@@ -177,7 +177,7 @@ export class DiscordAdapter implements PlatformAdapter {
       this.api.onSelectMenu("model_picker_model", async (modelInteraction) => {
         const modelId = modelInteraction.values[0]!;
         // Route through command handler as /model <provider> <model>
-        await modelInteraction.update({ content: `✅ Switching to **${providerId}/${modelId}**...`, components: [] });
+        await modelInteraction.update({ content: `✓ Switching to **${providerId}/${modelId}**...`, components: [] });
 
         // Trigger the actual switch via the command pipeline
         const msg: InboundMessage = {

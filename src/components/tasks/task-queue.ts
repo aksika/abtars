@@ -333,7 +333,7 @@ export class CronQueue {
       child.stderr?.on("data", (d: Buffer) => { output += d.toString(); });
 
       child.on("exit", (code) => {
-        const status = code === 0 ? "✅" : `❌ (exit ${code})`;
+        const status = code === 0 ? "✓" : `❌ (exit ${code})`;
         logInfo(TAG, `■ Script ${status}: "${entry.message.slice(0, 60)}"`);
         recordRunToFile(entry.id, code ?? undefined);
         if (code === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
@@ -407,7 +407,7 @@ export class CronQueue {
         if (response) {
           recordRunToFile(entry.id, 0);
           recordRun(entry, 0);
-          logInfo(TAG, `✅ Greeting delivered to ${entry.targetUserId}`);
+          logInfo(TAG, `✓ Greeting delivered to ${entry.targetUserId}`);
         } else {
           recordRunToFile(entry.id, 1);
           logWarn(TAG, `Greeting failed for ${entry.targetUserId}`);
@@ -467,7 +467,7 @@ export class CronQueue {
           }
           exitCode = dod.passed ? 0 : 1;
           dodResult = `\nDoD: ${dod.passed ? "PASSED" : "FAILED"}\n${dod.details}`;
-          logInfo(TAG, `■ Agent DoD ${dod.passed ? "✅" : "❌"}: "${entry.message.slice(0, 60)}"\n${dod.details}`);
+          logInfo(TAG, `■ Agent DoD ${dod.passed ? "✓" : "❌"}: "${entry.message.slice(0, 60)}"\n${dod.details}`);
         } else {
           logInfo(TAG, `■ Agent completed: "${entry.message.slice(0, 60)}"`);
         }
@@ -486,7 +486,7 @@ export class CronQueue {
         recordRunToFile(entry.id, exitCode);
         if (exitCode === 0) recordRun(entry, 0); // #694: count toward maxRunsPerDay only on success
         const paused = this.checkAutoPause(entry, exitCode, `${summary}${dodResult}`);
-        const icon = exitCode === 0 ? "✅" : "❌";
+        const icon = exitCode === 0 ? "✓" : "❌";
         if (exitCode !== 0) {
           scheduleRetry(entry, !!entry._retrying);
           if (!paused) this.tryInjectFailure(entry, `${icon} ${summary}${dodResult}`);

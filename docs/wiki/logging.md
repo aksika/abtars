@@ -48,5 +48,5 @@ grep "swallowed" ~/.abtars/logs/bridge-$(date +%F).log
 grep "Response delivered\|send failed" ~/.abtars/logs/bridge-$(date +%F).log
 
 # Boot sequence
-grep "✓\|✅\|ERROR" ~/.abtars/logs/bridge-$(date +%F).log | head -20
+grep "✓\|✓\|ERROR" ~/.abtars/logs/bridge-$(date +%F).log | head -20
 ```

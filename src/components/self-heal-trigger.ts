@@ -32,7 +32,7 @@ export async function triggerSelfHeal(
   try {
     const fixed = await deps.heal(source, error);
     if (fixed) {
-      deps.sendNotification(String(chatId), `✅ Self-healed`);
+      deps.sendNotification(String(chatId), `✓ Self-healed`);
       logInfo(TAG, `"${source}" healed successfully`);
       return true;
     }

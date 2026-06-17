@@ -223,7 +223,7 @@ export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTas
                 `[TASK COMPLETE] Project "${card.title}" done.\nSummary: ${card.result_summary ?? "(no summary)"}\nAnnounce completion briefly.`
               );
             } else {
-              await deps.sendMessage(deps.chatId(), `✅ "${card.title}" complete.\n${card.result_summary ?? ""}`);
+              await deps.sendMessage(deps.chatId(), `✓ "${card.title}" complete.\n${card.result_summary ?? ""}`);
             }
             if (card.result_path) {
               await deps.sendDocument(deps.chatId(), card.result_path, `📄 ${card.title}`);

@@ -45,7 +45,7 @@ describe("ActionGate integration (#790)", () => {
 
     await new Promise(r => setTimeout(r, 10));
 
-    const callbackData = notifyCalls[0]!.buttons[0]!.data; // "✅ Allow once"
+    const callbackData = notifyCalls[0]!.buttons[0]!.data; // "✓ Allow once"
     gate.handleCallback(callbackData);
 
     const granted = await authPromise;

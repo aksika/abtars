@@ -209,6 +209,6 @@ export async function handleChannel(text: string, ctx: CommandContext): Promise<
   const to = atMatch ? atMatch[1]! : "ALL";
   const message = atMatch ? atMatch[2]! : rest;
   channelPost(cardId, "master", to, message, true);
-  await ctx.reply(`✅ Posted to card:${cardId} [master→${to}]`);
+  await ctx.reply(`✓ Posted to card:${cardId} [master→${to}]`);
   return true;
 }

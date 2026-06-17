@@ -53,7 +53,7 @@ export function printHealthSummary(home: string): void {
 
   process.stdout.write("\n── Dependency health ──\n");
   for (const item of items) {
-    const icon = item.ok ? "✅" : "⚠️ ";
+    const icon = item.ok ? "✓" : "⚠️ ";
     process.stdout.write(`  ${icon} ${item.label}\n`);
     if (item.hint) process.stdout.write(`     ${item.hint}\n`);
   }

@@ -155,7 +155,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
           signal: AbortSignal.timeout(10_000),
         });
         if (res.ok) {
-          results.push(`✅ ${model} — alive`);
+          results.push(`✓ ${model} — alive`);
           if (catalog[model]) catalog[model]!.status = "alive";
         } else {
           const body = await res.text().catch(err => { logAndSwallow(TAG, "read model probe error body", err); return ""; });
@@ -212,7 +212,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
     if ("setModel" in ctx.transport) {
       await (ctx.transport as unknown as { setModel: (m: string) => Promise<void> }).setModel(newModel);
     }
-    await ctx.reply(`✅ Switched to ${newModel}`);
+    await ctx.reply(`✓ Switched to ${newModel}`);
     return true;
   }
 
@@ -238,7 +238,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       if (models.length === 0) { await ctx.reply(`❌ No models found for provider "${providerArg}"`); return true; }
       const lines = [`📋 Models on ${providerArg}:`];
       for (const m of models) {
-        const current = m.id === currentModel ? " ✅" : "";
+        const current = m.id === currentModel ? " ✓" : "";
         lines.push(`  • ${m.id}${current}`);
       }
       lines.push(`\nUse /model quick <name> to switch.`);
@@ -287,7 +287,7 @@ export async function handleModels(text: string, ctx: CommandContext): Promise<b
       }
     }
     writeTransportConfig(tc, `global provider → ${providerName}`);
-    await ctx.reply(`✅ All agents → ${providerName}. Use /reset to apply.`);
+    await ctx.reply(`✓ All agents → ${providerName}. Use /reset to apply.`);
     return true;
   }
 

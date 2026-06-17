@@ -38,7 +38,7 @@ export class PermissionHandler {
 
     return new Promise<boolean>(async (resolve) => {
       const messageId = await this.sendKeyboard(chatId, `🔐 Kiro wants to: ${action}`, [
-        { text: "✅ Approve", callback_data: `perm:approve:${acpRequestId}` },
+        { text: "✓ Approve", callback_data: `perm:approve:${acpRequestId}` },
         { text: "❌ Deny", callback_data: `perm:deny:${acpRequestId}` },
       ]);
 

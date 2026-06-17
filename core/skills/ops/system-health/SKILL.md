@@ -93,7 +93,7 @@ python3 ~/.abtars/scripts/scout-ollama.py
 
 Produce a concise report:
 
-1. **Status**: one-line overall (✅ healthy / ⚠️ degraded / 🔴 down)
+1. **Status**: one-line overall (✓ healthy / ⚠️ degraded / 🔴 down)
 2. **Services**: gateway, channels (Telegram/Discord) — up/down each
 3. **Issues**: only NEW/UNEXPECTED problems (not in system-notes.md)
 4. **Known & accepted**: one-line summary like "3 known deviations acknowledged, all expected"

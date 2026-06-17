@@ -27,7 +27,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     }
     const result = ctx.sessionManager.createSession(ctx.userId, ctx.platform, type);
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
-    await ctx.reply(`✅ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) created.`);
+    await ctx.reply(`✓ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) created.`);
     logInfo(TAG, `New session ${result.id} for ${ctx.userId}`);
     return true;
   }
@@ -39,7 +39,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     if (indexStr && isNaN(index!)) { await ctx.reply("Usage: /session end [#]"); return true; }
     const result = ctx.sessionManager.endSession(ctx.userId, ctx.platform, index);
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
-    await ctx.reply(`✅ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) ended.`);
+    await ctx.reply(`✓ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) ended.`);
     logInfo(TAG, `Ended session ${result.id}`);
     return true;
   }

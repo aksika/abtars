@@ -202,7 +202,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
         const targetChat = card.chat_id || String(masterChatId);
         if (ctx.telegramAdapter) {
           if (card.delivery_mode !== "silent") {
-            await ctx.telegramAdapter.sendMessage(targetChat, `✅ "${card.title}" complete.\n${card.result_summary ?? ""}`);
+            await ctx.telegramAdapter.sendMessage(targetChat, `✓ "${card.title}" complete.\n${card.result_summary ?? ""}`);
           }
           if (card.result_path) await ctx.telegramAdapter.sendDocument(targetChat, card.result_path, `📄 ${card.title}`);
         }

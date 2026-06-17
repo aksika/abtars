@@ -26,7 +26,7 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
       const guestId = `guest-${platformId}`;
       users.push({ userId: guestId, role: "guest", maxClass: 0, tools: [], platforms: { telegram: parseInt(platformId, 10) || 0 } });
       writeFileSync(configPath, JSON.stringify({ users }, null, 2), "utf-8");
-      await ctx.reply(`✅ Approved guest: ${guestId} (platform ID: ${platformId})`);
+      await ctx.reply(`✓ Approved guest: ${guestId} (platform ID: ${platformId})`);
     } catch (err) {
       await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -43,7 +43,7 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
       const raw = JSON.parse(readFileSync(configPath, "utf-8"));
       const users = (Array.isArray(raw.users) ? raw.users : []).filter((u: { userId: string }) => u.userId !== targetUserId);
       writeFileSync(configPath, JSON.stringify({ users }, null, 2), "utf-8");
-      await ctx.reply(`✅ Revoked: ${targetUserId}`);
+      await ctx.reply(`✓ Revoked: ${targetUserId}`);
     } catch (err) {
       await ctx.reply(`❌ Failed: ${err instanceof Error ? err.message : String(err)}`);
     }

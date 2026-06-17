@@ -169,7 +169,7 @@ When everything is working (the common case):
 🩺 Health check...
 [doctor] Done. 0 fixes applied, 0 warnings.
 ♻️ Bridge starting...
-✅ All systems healthy
+✓ All systems healthy
 ```
 
 When doctor self-heals something:
@@ -178,7 +178,7 @@ When doctor self-heals something:
 [doctor] FIX: installed and loaded watchdog LaunchAgent
 [doctor] Done. 1 fixes applied, 0 warnings.
 ♻️ Bridge starting...
-✅ All systems healthy
+✓ All systems healthy
 ```
 
 No manual intervention needed in either case.
@@ -189,14 +189,14 @@ The watchdog singleton system (#1035) and instant-death detection (#1042) were s
 
 | # | Scenario | Expected | Result | Recovery |
 |---|----------|----------|--------|----------|
-| 1 | Kill watchdog | Bridge stays alive, new WD can start + adopt | ✅ | 0s (bridge unaffected) |
-| 2 | Start duplicate watchdog | "Watchdog already running", exits | ✅ | — |
-| 3 | Kill bridge | Watchdog detects + respawns | ✅ | ~25s |
-| 4 | Delete bridge.lock | Watchdog self-heals: recreates file + spawns | ✅ | ~55s |
-| 5 | Corrupt bridge.lock | Same as missing: self-heal + spawn | ✅ | ~60s |
-| 6 | Kill zombie watchdog (non-owner) | Exits without killing bridge | ✅ | 0s |
-| 7 | `abtars stop` | Both die cleanly, file preserved | ✅ | — |
-| 8 | Deploy corrupt bundle | Instant-death → circuit breaker → auto-rollback | ✅ | ~70s |
+| 1 | Kill watchdog | Bridge stays alive, new WD can start + adopt | ✓ | 0s (bridge unaffected) |
+| 2 | Start duplicate watchdog | "Watchdog already running", exits | ✓ | — |
+| 3 | Kill bridge | Watchdog detects + respawns | ✓ | ~25s |
+| 4 | Delete bridge.lock | Watchdog self-heals: recreates file + spawns | ✓ | ~55s |
+| 5 | Corrupt bridge.lock | Same as missing: self-heal + spawn | ✓ | ~60s |
+| 6 | Kill zombie watchdog (non-owner) | Exits without killing bridge | ✓ | 0s |
+| 7 | `abtars stop` | Both die cleanly, file preserved | ✓ | — |
+| 8 | Deploy corrupt bundle | Instant-death → circuit breaker → auto-rollback | ✓ | ~70s |
 
 ### Protection stack
 

@@ -288,7 +288,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     setDelegationDeps(ctx.runtime);
   }
 
-  logInfo("main", "✅ Transport ready");
+  logInfo("main", "✓ Transport ready");
 
   // Wire ActionGate for auth-required commands
   const { join } = await import("node:path");
@@ -390,6 +390,6 @@ export async function rebuildTransport(ctx: BootCtx): Promise<PhaseResult> {
   if (ctx.idleSave && ctx.transport) {
     (ctx.idleSave as unknown as { transport: IKiroTransport }).transport = ctx.transport;
   }
-  logInfo("main", "✅ Transport rebuilt");
+  logInfo("main", "✓ Transport rebuilt");
   return "ran";
 }
