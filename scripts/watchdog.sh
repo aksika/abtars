@@ -242,8 +242,17 @@ spawn_bridge() {
 
   # Wait for bridge.lock with PID
   local wait=0
+  local spawned_pid=$!
   BRIDGE_PID=""
   while (( wait < 30 )); do
+    # Instant-death check: if process already died, bridge can't boot
+    if ! kill -0 "$spawned_pid" 2>/dev/null; then
+      log "Bridge died during startup (PID=$spawned_pid)"
+      RESTART_TIMES+=("$(date +%s)")
+      RESTART_TIMES+=("$(date +%s)")
+      printf '%s\n' "${RESTART_TIMES[@]}" > "$STATE_FILE"
+      return
+    fi
     if [[ -f "$LOCK" ]]; then
       BRIDGE_PID=$(grep -o '"pid":[0-9]*' "$LOCK" | grep -o '[0-9]*' || echo "")
       if [[ -n "$BRIDGE_PID" && "$BRIDGE_PID" != "0" ]]; then
