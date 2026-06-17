@@ -10,11 +10,13 @@ LOG="$AB/logs/watchdog.log"
 ENV_FILE="$AB/.env"
 
 # ── Singleton enforcement via flock/lockf on sentinel file ──
-exec 200>>"$AB/.bridge.flock"
-if command -v flock &>/dev/null; then
-  flock -n 200 || { echo "Watchdog already running"; exit 0; }
-else
-  lockf -s -t 0 200 || { echo "Watchdog already running"; exit 0; }
+if [[ "${ABTARS_WD_EXEC:-}" != "1" ]]; then
+  exec 200>>"$AB/.bridge.flock"
+  if command -v flock &>/dev/null; then
+    flock -n 200 || { echo "Watchdog already running"; exit 0; }
+  else
+    lockf -s -t 0 200 || { echo "Watchdog already running"; exit 0; }
+  fi
 fi
 
 POLL_SEC=60
@@ -293,7 +295,7 @@ graceful_restart() {
   # New instance will adopt the bridge we just spawned
   log "Reloading watchdog from disk"
   sleep 5  # let bridge write bridge.lock before exec
-  exec "$0" "${BRIDGE_ARGS[@]}"
+  ABTARS_WD_EXEC=1 exec "$0" "${BRIDGE_ARGS[@]}"
 }
 
 BRIDGE_ARGS=("$@")
