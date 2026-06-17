@@ -174,7 +174,7 @@ spawn_bridge() {
       if [ -f "$AB/config/.env" ]; then set -a; source "$AB/config/.env"; set +a; fi
       log "Starting bridge (rollback): node app/bundle/abtars.js"
       cd "$AB"
-      ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js >> "$AB/logs/launchd.log" 2>&1 &
+      ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js >> "$AB/logs/launchd.log" 2>&1 200>&- &
       BRIDGE_PID=""
       for i in $(seq 1 15); do
         sleep 2
@@ -237,7 +237,7 @@ spawn_bridge() {
   if [ -f "$AB/config/.env" ]; then set -a; source "$AB/config/.env"; set +a; fi
   log "Starting bridge: node app/bundle/abtars.js $*"
   cd "$AB"
-  ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
+  ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js "$@" >> "$AB/logs/launchd.log" 2>&1 200>&- &
   SPAWNED_AT=$(date +%s)
 
   # Wait for bridge.lock with PID
