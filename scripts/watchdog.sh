@@ -298,12 +298,10 @@ graceful_restart() {
   fi
   BRIDGE_PID=""
   PLANNED_RESTART=true
-  spawn_bridge "${BRIDGE_ARGS[@]}"
+  # Don't spawn here — let the new watchdog instance handle it cleanly after exec.
+  # Spawning before exec causes orphans: the spawned bridge and the post-exec bridge race.
   RESTARTING=false
-  # Self-replace: reload watchdog.sh from disk (picks up script changes on deploy)
-  # New instance will adopt the bridge we just spawned
   log "Reloading watchdog from disk"
-  sleep 5  # let bridge write bridge.lock before exec
   ABTARS_WD_EXEC=1 exec "$0" "${BRIDGE_ARGS[@]}"
 }
 
