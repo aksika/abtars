@@ -289,6 +289,9 @@ graceful_restart() {
   PLANNED_RESTART=true
   spawn_bridge "${BRIDGE_ARGS[@]}"
   RESTARTING=false
+  # Self-replace: reload watchdog.sh from disk (picks up script changes on deploy)
+  log "Reloading watchdog from disk"
+  exec "$0" "${BRIDGE_ARGS[@]}"
 }
 
 BRIDGE_ARGS=("$@")
@@ -309,7 +312,18 @@ trap '
 log "Watchdog starting (stale=${STALE_SEC}s, poll=${POLL_SEC}s, circuit=${CIRCUIT_MAX}/${CIRCUIT_WINDOW}s)"
 write_lock_field "watchdogPid" $$
 
-spawn_bridge "$@"
+# Adopt existing bridge if alive (exec self-replace after USR1, or manual restart)
+if [[ -f "$LOCK" ]]; then
+  _existing_pid=$(python3 -c "import json; print(json.load(open('$LOCK')).get('pid',0))" 2>/dev/null || echo 0)
+  if [[ "$_existing_pid" -gt 0 ]] 2>/dev/null && kill -0 "$_existing_pid" 2>/dev/null; then
+    BRIDGE_PID="$_existing_pid"
+    log "Adopted existing bridge (PID=$BRIDGE_PID)"
+  else
+    spawn_bridge "$@"
+  fi
+else
+  spawn_bridge "$@"
+fi
 LAST_POLL_AT=$(date +%s)
 
 # ── Monitor loop ──
