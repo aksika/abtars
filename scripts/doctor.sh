@@ -100,41 +100,34 @@ WD_PID=""
 
 if [[ "$INSTALL_MODE" == "supervised" ]]; then
 
-WD_LOCK="$AB/watchdog.lock"
 WD_PID=""
 WD_ALIVE=false
-if [ -f "$WD_LOCK" ]; then
-  WD_PID=$(json_field "$WD_LOCK" pid 0)
-  WD_LAST=$(json_field "$WD_LOCK" lastCheck 0)
+if [ -f "$AB/bridge.lock" ]; then
+  WD_PID=$(json_field "$AB/bridge.lock" watchdogPid 0)
   if [ "$WD_PID" -gt 0 ] 2>/dev/null && kill -0 "$WD_PID" 2>/dev/null; then
     WD_ALIVE=true
-    # Check lastCheck freshness (should be < 2 min old)
-    if [ "$WD_LAST" -gt 0 ]; then
-      WD_AGE=$(( ($(date +%s) - WD_LAST / 1000) ))
-      if [ "$WD_AGE" -gt 120 ]; then
-        warn "watchdog stale -- last check ${WD_AGE}s ago"
-      fi
-    fi
   else
-    # Watchdog PID dead — check if bridge also dead (circuit breaker?)
-    BRIDGE_PID=$(json_field "$AB/bridge.lock" pid 0 2>/dev/null)
-    if [ "$BRIDGE_PID" -gt 0 ] 2>/dev/null && ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
-      warn "watchdog and bridge both dead -- circuit breaker may have tripped. Check $AB/logs/watchdog.log"
-    else
-      warn "watchdog not running (PID $WD_PID dead)"
-    fi
-    if $FIX; then
-      if [[ "$(uname)" == "Darwin" ]] && launchctl list 2>/dev/null | grep -q abtars.watchdog; then
-        launchctl kickstart -k "gui/$(id -u)/com.abtars.watchdog" 2>/dev/null && fix "restarted watchdog via LaunchAgent"
-      elif command -v systemctl &>/dev/null && systemctl --user is-enabled abtars-watchdog.service &>/dev/null; then
-        systemctl --user restart abtars-watchdog.service 2>/dev/null && fix "restarted watchdog via systemd"
+    if [ "$WD_PID" -gt 0 ] 2>/dev/null; then
+      # Watchdog PID dead — check if bridge also dead (circuit breaker?)
+      BRIDGE_PID=$(json_field "$AB/bridge.lock" pid 0 2>/dev/null)
+      if [ "$BRIDGE_PID" -gt 0 ] 2>/dev/null && ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+        warn "watchdog and bridge both dead -- circuit breaker may have tripped. Check $AB/logs/watchdog.log"
       else
-        warn "watchdog not running -- start manually: ~/.abtars/scripts/watchdog.sh &"
+        warn "watchdog not running (PID $WD_PID dead)"
+      fi
+      if $FIX; then
+        if [[ "$(uname)" == "Darwin" ]] && launchctl list 2>/dev/null | grep -q abtars.watchdog; then
+          launchctl kickstart -k "gui/$(id -u)/com.abtars.watchdog" 2>/dev/null && fix "restarted watchdog via LaunchAgent"
+        elif command -v systemctl &>/dev/null && systemctl --user is-enabled abtars-watchdog.service &>/dev/null; then
+          systemctl --user restart abtars-watchdog.service 2>/dev/null && fix "restarted watchdog via systemd"
+        else
+          warn "watchdog not running -- start manually: ~/.abtars/scripts/watchdog.sh &"
+        fi
       fi
     fi
   fi
 else
-  warn "watchdog.lock missing -- watchdog not running"
+  warn "bridge.lock missing -- watchdog status unknown"
   if $FIX; then
     if [[ "$(uname)" == "Darwin" ]] && launchctl list 2>/dev/null | grep -q abtars.watchdog; then
       launchctl kickstart -k "gui/$(id -u)/com.abtars.watchdog" 2>/dev/null && fix "started watchdog via LaunchAgent"

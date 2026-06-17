@@ -249,6 +249,35 @@ const probeAgentApi: ProbeFn = async (_ctx) => {
   }
 };
 
+const probeProcessHealth: ProbeFn = async (_ctx) => {
+  const start = Date.now();
+  try {
+    const { readFileSync, existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { abtarsHome } = await import("../../paths.js");
+    const lockPath = join(abtarsHome(), "bridge.lock");
+    if (!existsSync(lockPath)) return { name: "process-health", status: "skipped", latencyMs: Date.now() - start, detail: "no bridge.lock" };
+    const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
+    const issues: string[] = [];
+
+    // Check bridge pid
+    if (lock.pid && lock.pid > 0) {
+      try { process.kill(lock.pid, 0); } catch { issues.push(`bridge pid ${lock.pid} dead`); }
+    }
+    // Check watchdog pid
+    if (lock.watchdogPid && lock.watchdogPid > 0) {
+      try { process.kill(lock.watchdogPid, 0); } catch { issues.push(`watchdog pid ${lock.watchdogPid} dead`); }
+    } else if (!lock.watchdogPid) {
+      issues.push("no watchdog (unprotected)");
+    }
+
+    if (issues.length === 0) return { name: "process-health", status: "ok", latencyMs: Date.now() - start };
+    return { name: "process-health", status: "failed", latencyMs: Date.now() - start, detail: issues.join(", ") };
+  } catch {
+    return { name: "process-health", status: "skipped", latencyMs: Date.now() - start, detail: "parse error" };
+  }
+};
+
 const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   // Static file checks
   { fn: probeCoreFiles, timeout: 1000 },
@@ -269,6 +298,7 @@ const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
   { fn: probeDashboard, timeout: 5000 },
   { fn: probeAgentApi, timeout: 1000 },
   { fn: probeInstanceName, timeout: 1000 },
+  { fn: probeProcessHealth, timeout: 1000 },
 ];
 
 let lastReport: { report: DoctorReport; generatedAt: number } | null = null;

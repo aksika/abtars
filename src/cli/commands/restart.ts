@@ -111,8 +111,10 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
 
     if (bridgeAlive) await killBridge(bridgePid!);
     killPortHolder(3100);
-    // Clear stale restart requests so the new bridge doesn't restart again (#731)
+    // Mark cold boot in bridge.lock (kill first, then write — avoids race with bridge heartbeat)
     const { updateBridgeLockField } = await import("../../components/transport/bridge-lock-transport.js");
+    updateBridgeLockField("pid", null);
+    // Clear stale restart requests so the new bridge doesn't restart again (#731)
     updateBridgeLockField("restartRequested", null);
     // Clear circuit breaker state — intentional start = clean slate (#967)
     try { const { unlinkSync } = await import("node:fs"); unlinkSync(join(home, "watchdog.state")); } catch { /* ENOENT */ }

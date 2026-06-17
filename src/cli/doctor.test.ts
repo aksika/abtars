@@ -25,7 +25,7 @@ function setupHome(home: string, manifest: Record<string, unknown> = { installMo
     chmodSync(join(home, ".abtars", "config", "models.json"), 0o600);
     chmodSync(join(home, ".abtars", "config", "users.json"), 0o600);
     // Use current PID so doctor sees a live process
-    writeFileSync(join(home, ".abtars", "watchdog.lock"), JSON.stringify({ pid: process.pid }));
+    writeFileSync(join(home, ".abtars", "bridge.lock"), JSON.stringify({ pid: process.pid, watchdogPid: process.pid }));
   }
 }
 

@@ -5,7 +5,7 @@
  * we're about to kill. Each process gets SIGTERM → 5s grace → SIGKILL.
  *
  * Lock files (verified against live install):
- *   ~/.abtars/watchdog.lock = {"pid": number, "lastCheck": epoch-ms}
+ *   ~/.abtars/bridge.lock = {pid, watchdogPid, startedAt, version, sleepStatus, lastHeartbeat, ...}
  *   ~/.abtars/bridge.lock   = {"pid": number, "lastHeartbeat": ..., ...}
  * Both are separate files; no watchdog PID is embedded in bridge.lock.
  *
@@ -68,7 +68,6 @@ function removeLock(path: string): void {
 export async function stop(opts: { force?: boolean }): Promise<number> {
   const home = abtarsHome();
   const manifestPath = join(home, "manifest.json");
-  const watchdogLock = join(home, "watchdog.lock");
   const bridgeLock = join(home, "bridge.lock");
   const force = opts.force ?? false;
 
@@ -100,18 +99,12 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
     } catch { /* not loaded = success */ }
   }
 
-  const wdPid = readJsonField(watchdogLock, "pid") as number | undefined;
+  const wdPid = readJsonField(bridgeLock, "watchdogPid") as number | undefined;
   let wdResult: KillResult = "not-running";
   let wdPidActual: number | undefined;
   if (wdPid && wdPid > 0) {
     wdPidActual = wdPid;
     wdResult = await killGracefully(wdPid, ["watchdog.sh"]);
-    if (wdResult === "killed" || wdResult === "forced") {
-      removeLock(watchdogLock);
-    } else if (wdResult === "stale") {
-      process.stdout.write(`⚠️ watchdog.lock PID ${wdPid} is not watchdog.sh — stale lock, removing\n`);
-      removeLock(watchdogLock);
-    }
   }
 
   // 2) Bridge second

@@ -408,8 +408,7 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
 
   if (mode === "supervised-daemon" || mode === "supervised") {
     process.stdout.write("\n♻️ Restarting bridge via watchdog...\n");
-    const wdLock = join(paths.home, "watchdog.lock");
-    const wdPid = readJsonField(wdLock, "pid") as number | undefined;
+    const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
     if (wdPid && wdPid > 0) {
       try {
         process.kill(wdPid, "SIGUSR1");
@@ -440,8 +439,7 @@ function printDryRun(paths: ReturnType<typeof packagePaths>, repoRoot: string, o
   const { spawnSync } = require('node:child_process') as typeof import('node:child_process');
   const commit = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).stdout?.trim() ?? '?';
   const branch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoRoot, encoding: 'utf-8' }).stdout?.trim() ?? '?';
-  const wdLock = join(paths.home, "watchdog.lock");
-  const wdPid = readJsonField(wdLock, "pid") as number | undefined;
+  const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
 
   process.stdout.write(`
 Dry run — no changes will be made.

@@ -110,14 +110,25 @@ export function readAndClearForceSleep(): string | null {
 }
 
 /** Initialize bridge.lock with full boot state. Single writer for initial creation. */
-export function initBridgeLock(opts: { pid: number; startedAt: number; version: string; argv: string[] }): void {
+export interface PrevBridgeState { pid: number | null; lastHeartbeat: number | null }
+
+export function initBridgeLock(opts: { pid: number; startedAt: number; version: string; argv: string[] }): PrevBridgeState {
   const p = join(abtarsHome(), "bridge.lock");
+  let prev: PrevBridgeState = { pid: null, lastHeartbeat: null };
   try {
+    // Read existing state (may have watchdogPid from watchdog, or stale pid from previous bridge)
+    let existing: Record<string, unknown> = {};
+    try { existing = JSON.parse(readFileSync(p, "utf-8")); } catch { /* missing or corrupt — cold boot */ }
+    const prevPid = typeof existing.pid === "number" ? existing.pid : null;
+    prev = { pid: prevPid, lastHeartbeat: typeof existing.lastHeartbeat === "number" ? existing.lastHeartbeat : null };
+    // Merge: preserve watchdogPid from watchdog or env var
+    const wdPid = Number(process.env.ABTARS_WATCHDOG_PID) || existing.watchdogPid || null;
     atomicWriteSync(p, JSON.stringify({
-      pid: opts.pid, startedAt: opts.startedAt, version: opts.version,
+      pid: opts.pid, watchdogPid: wdPid, startedAt: opts.startedAt, version: opts.version,
       sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(),
     }));
   } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
+  return prev;
 }
 
 /** Update lastHeartbeat timestamp in bridge.lock (called every tick). */

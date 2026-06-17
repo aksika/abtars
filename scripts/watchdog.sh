@@ -6,9 +6,16 @@ set -uo pipefail
 
 AB="${ABTARS_HOME:-$HOME/.abtars}"
 LOCK="$AB/bridge.lock"
-WD_LOCK="$AB/watchdog.lock"
 LOG="$AB/logs/watchdog.log"
 ENV_FILE="$AB/.env"
+
+# ── Singleton enforcement via flock/lockf on sentinel file ──
+exec 200>>"$AB/.bridge.flock"
+if command -v flock &>/dev/null; then
+  flock -n 200 || { echo "Watchdog already running"; exit 0; }
+else
+  lockf -s -t 0 200 || { echo "Watchdog already running"; exit 0; }
+fi
 
 POLL_SEC=60
 STALE_SEC="${WATCHDOG_STALE_SEC:-360}"
@@ -102,8 +109,19 @@ wait_for_death() {
   done
 }
 
-write_wd_lock() {
-  printf '{"pid":%d,"lastCheck":%s}\n' $$ "$(now_ms)" > "$WD_LOCK"
+write_lock_field() {
+  local field=$1 value=$2
+  python3 -c "
+import json, os
+p = '$LOCK'
+d = {}
+if os.path.exists(p):
+    try: d = json.load(open(p))
+    except: pass
+d['$field'] = $value
+with open(p + '.tmp', 'w') as f: json.dump(d, f)
+os.rename(p + '.tmp', p)
+" 2>/dev/null || true
 }
 
 rotate_log() {
@@ -151,11 +169,10 @@ spawn_bridge() {
       if [ -x "$AB/scripts/doctor.sh" ]; then
         timeout 30 "$AB/scripts/doctor.sh" --fix >> "$AB/logs/launchd.log" 2>&1 || true
       fi
-      rm -f "$LOCK"
       if [ -f "$AB/config/.env" ]; then set -a; source "$AB/config/.env"; set +a; fi
       log "Starting bridge (rollback): node app/bundle/abtars.js"
       cd "$AB"
-      NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js >> "$AB/logs/launchd.log" 2>&1 &
+      ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js >> "$AB/logs/launchd.log" 2>&1 &
       BRIDGE_PID=""
       for i in $(seq 1 15); do
         sleep 2
@@ -173,13 +190,13 @@ spawn_bridge() {
       else
         log "❌ Auto-rollback also failed"
         notify "❌ Auto-rollback to $ROLLED_VER also failed. Manual intervention required."
-        rm -f "$WD_LOCK" "$STATE_FILE"
+        rm -f "$STATE_FILE"
         exit 0  # intentional stop — launchd must NOT restart
       fi
     else
       log "🚨 CIRCUIT BREAKER — ${CIRCUIT_MAX} restarts in ${CIRCUIT_WINDOW}s, no prior version available"
       notify "🚨 Watchdog circuit breaker tripped — no rollback available, manual intervention needed"
-      rm -f "$WD_LOCK" "$STATE_FILE"
+      rm -f "$STATE_FILE"
       exit 0  # intentional stop — launchd must NOT restart
     fi
   fi
@@ -197,7 +214,6 @@ spawn_bridge() {
     printf '%s\n' "${RESTART_TIMES[@]}" > "$STATE_FILE"
   fi
   PLANNED_RESTART=false
-  rm -f "$LOCK"
 
   # #686: Kill stale bridge holding port 3100
   if [ -f "$AB/bridge.pid" ]; then
@@ -219,7 +235,7 @@ spawn_bridge() {
   if [ -f "$AB/config/.env" ]; then set -a; source "$AB/config/.env"; set +a; fi
   log "Starting bridge: node app/bundle/abtars.js $*"
   cd "$AB"
-  NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
+  ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js "$@" >> "$AB/logs/launchd.log" 2>&1 &
   SPAWNED_AT=$(date +%s)
 
   # Wait for bridge.lock with PID
@@ -246,7 +262,6 @@ kill_bridge() {
     kill -9 "$BRIDGE_PID" 2>/dev/null || true
     wait_for_death "$BRIDGE_PID"
   fi
-  rm -f "$LOCK"
   BRIDGE_PID=""
 }
 
@@ -270,7 +285,6 @@ graceful_restart() {
     fi
     log "Old bridge exited"
   fi
-  rm -f "$LOCK"
   BRIDGE_PID=""
   PLANNED_RESTART=true
   spawn_bridge "${BRIDGE_ARGS[@]}"
@@ -279,13 +293,21 @@ graceful_restart() {
 
 BRIDGE_ARGS=("$@")
 trap 'graceful_restart' USR1
-# Exit non-zero on TERM/INT so launchd KeepAlive restarts us even if a policy
-# Exit cleanly on TERM/INT — log sender for debugging (#974)
-trap 'log "SIGTERM received (my_pid=$$, ppid=$(ps -o ppid= -p $$ 2>/dev/null | tr -d " "), sender=external)"; kill_bridge "watchdog SIGTERM"; rm -f "$WD_LOCK"; exit 0' TERM INT
+trap '
+  _wd_owner=$(python3 -c "import json; print(json.load(open(\"$LOCK\")).get(\"watchdogPid\",0))" 2>/dev/null || echo 0)
+  if [[ "$_wd_owner" == "$$" ]]; then
+    log "SIGTERM received (owner) — killing bridge"
+    kill_bridge "watchdog SIGTERM"
+    write_lock_field "watchdogPid" "null"
+  else
+    log "SIGTERM received but not owner (file=$_wd_owner, me=$$) — exiting without kill"
+  fi
+  exit 0
+' TERM INT
 
 # ── Startup ──
 log "Watchdog starting (stale=${STALE_SEC}s, poll=${POLL_SEC}s, circuit=${CIRCUIT_MAX}/${CIRCUIT_WINDOW}s)"
-write_wd_lock
+write_lock_field "watchdogPid" $$
 
 spawn_bridge "$@"
 LAST_POLL_AT=$(date +%s)
@@ -295,7 +317,6 @@ while true; do
   sleep "$POLL_SEC" &
   wait $! 2>/dev/null || true
 
-  write_wd_lock
   rotate_log
 
   # Suspend detection: if real elapsed >> POLL_SEC, the host (laptop, VM, WSL)
@@ -312,6 +333,10 @@ while true; do
 
   local_lock=$(read_lock)
   if [[ "$local_lock" == "ERR" ]]; then
+    log "bridge.lock missing or corrupt — self-healing"
+    write_lock_field "watchdogPid" $$
+    BRIDGE_PID=""
+    spawn_bridge "${BRIDGE_ARGS[@]}"
     continue
   fi
 
@@ -340,7 +365,6 @@ while true; do
     log "Bridge process gone (PID=$BRIDGE_PID)"
     notify "🚨 Watchdog: bridge process gone, restarting"
     BRIDGE_PID=""
-    rm -f "$LOCK"
     spawn_bridge "${BRIDGE_ARGS[@]}"
     continue
   fi

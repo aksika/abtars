@@ -20,7 +20,7 @@ const DEFAULT_PRUNE_DAYS = 7;
 const ABTARS_EXCLUDE = [
   "releases", "current", "bin", "app", "app.prev*", "app.staging", "app.broken",
   "logs", "node_modules", "overflow", "browser-socket", "src",
-  "bridge.lock", "watchdog.lock", "browse-spawn.sock", "manifest.json", "*.sock",
+  "bridge.lock", "browse-spawn.sock", "manifest.json", "*.sock",
 ];
 
 // Full mode: exclude these from ~/.abmind/
