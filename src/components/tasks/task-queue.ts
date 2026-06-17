@@ -473,7 +473,9 @@ export class CronQueue {
         }
 
         // Write result file
-        const resultPath = writeResultFile(entry.id, cleaned);
+        // Write result file — skip if DoD files exist (they ARE the result)
+        const producedFiles = dodPaths.filter(p => existsSync(p));
+        const resultPath = producedFiles.length > 0 ? producedFiles[0] : writeResultFile(entry.id, cleaned);
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         // Kanban board: mark complete or failed
