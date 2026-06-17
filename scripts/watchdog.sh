@@ -290,7 +290,9 @@ graceful_restart() {
   spawn_bridge "${BRIDGE_ARGS[@]}"
   RESTARTING=false
   # Self-replace: reload watchdog.sh from disk (picks up script changes on deploy)
+  # New instance will adopt the bridge we just spawned
   log "Reloading watchdog from disk"
+  sleep 5  # let bridge write bridge.lock before exec
   exec "$0" "${BRIDGE_ARGS[@]}"
 }
 
