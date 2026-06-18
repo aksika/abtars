@@ -37,6 +37,10 @@ fi
 # Helper: cross-platform file mode (replaces stat -c %a which fails on macOS)
 file_mode() { python3 -c "import os; print(oct(os.stat('$1').st_mode & 0o777)[2:])" 2>/dev/null; }
 
+# Version header
+DOCTOR_VERSION=$(json_field "$AB/manifest.json" version "unknown")
+echo "abtars doctor v${DOCTOR_VERSION}"
+
 # Helper: process age in seconds from ps -o etime= (POSIX, both macOS + Linux)
 ps_age_seconds() {
   ps -o etime= -p "$1" 2>/dev/null | python3 -c "
@@ -50,7 +54,7 @@ print(sum(int(p) * m for p, m in zip(reversed(parts), mul)))
 }
 
 # ── Manifest reconciliation (install-time state) ────────────────────────────
-MANIFEST="$AB/current/install-manifest.json"
+MANIFEST="$AB/app/install-manifest.json"
 if [ -f "$MANIFEST" ] && command -v python3 &>/dev/null; then
   MANIFEST_FIX_FLAG=""
   if $FIX; then MANIFEST_FIX_FLAG="--fix"; fi
@@ -201,8 +205,13 @@ while IFS= read -r f; do
 done < <(find "$AB" -name "*.lock" -not -path "*/sleep/*" -not -path "*/node_modules/*" -not -name "watchdog.lock" -mmin +60 2>/dev/null)
 
 # 2b. Stale Unix sockets (left by dead bridge process)
+BRIDGE_PID=$(json_field "$AB/bridge.lock" pid "0")
+BRIDGE_ALIVE=false
+if [[ "$BRIDGE_PID" != "0" ]] && kill -0 "$BRIDGE_PID" 2>/dev/null; then BRIDGE_ALIVE=true; fi
+
 for sock in "$AB/browser-socket/"*.sock "$AB/"*.sock "${ABMIND_HOME:-$HOME/.abmind}/"*.sock; do
   [ -S "$sock" ] || continue
+  if $BRIDGE_ALIVE; then continue; fi
   if $FIX; then
     rm -f "$sock"; fix "removed stale socket $sock"
   else
