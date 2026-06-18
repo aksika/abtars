@@ -601,7 +601,8 @@ export async function handleInboundMessage(
         : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."
         : errStr.includes("connect") || errStr.includes("ECONNREFUSED") ? "Connection lost."
         : errStr.includes("exhausted") || errStr.includes("no candidates") ? "All models exhausted."
-        : "Something went wrong.";
+        : errStr.includes("aborted") || errStr.includes("code=20") ? "Request aborted — model connection dropped."
+        : `Error: ${errStr.slice(0, 80)}`;
       await adapter.sendMessage(channelId, `❌ ${reason}`, { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     }
   } finally {
