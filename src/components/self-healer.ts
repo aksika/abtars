@@ -84,7 +84,12 @@ export function createSelfHealerTask(
 
           const match = line.match(/\[([^\]]+)\] (.+)/);
           if (!match) continue;
-          const errorKey = `${match[1]}:${match[2]!.slice(0, 80)}`;
+          const stableMsg = match[2]!.slice(0, 80)
+            .replace(/\b[0-9a-f]{8,}\b/gi, "X")
+            .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}[:\d.]*/g, "T")
+            .replace(/\b\d{4,}\b/g, "N")
+            .replace(/\s+/g, " ").trim();
+          const errorKey = `${match[1]}:${stableMsg}`;
 
           // Try to match a wired fix rule
           const rule = fixes.find(f => line.includes(f.pattern));
