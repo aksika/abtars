@@ -161,24 +161,30 @@ circuit_check() {
 
 spawn_bridge() {
   if ! circuit_check; then
-    # Auto-rollback attempt before giving up
-    local PREV="$AB/app.prev.1"
-    if [ -d "$PREV" ]; then
+    # Cascading rollback: try slots 1→2→3 (#1048)
+    local ROLLBACK_STATE="$AB/.rollback-state"
+    local TRIED=$(cat "$ROLLBACK_STATE" 2>/dev/null || echo "0")
+
+    for SLOT in 1 2 3; do
+      (( SLOT <= TRIED )) && continue
+      local PREV="$AB/app.prev.$SLOT"
+      [ -d "$PREV" ] || continue
+
+      echo "$SLOT" > "$ROLLBACK_STATE"
       local ROLLED_VER
       ROLLED_VER=$(python3 -c "import json; print(json.load(open('$PREV/package.json'))['version'])" 2>/dev/null || echo "unknown")
-      log "🔄 Circuit breaker — attempting auto-rollback to $ROLLED_VER..."
+      log "🔄 Circuit breaker — attempting rollback to slot $SLOT ($ROLLED_VER)..."
       rm -rf "$AB/app.broken"
       mv "$AB/app" "$AB/app.broken"
       mv "$PREV" "$AB/app"
-      RESTART_TIMES=()  # Reset counter for the rollback attempt
+      RESTART_TIMES=()
       rm -f "$STATE_FILE"
 
-      # Try starting the rolled-back version
       if [ -x "$AB/scripts/doctor.sh" ]; then
         timeout 30 "$AB/scripts/doctor.sh" --fix >> "$AB/logs/launchd.log" 2>&1 || true
       fi
       if [ -f "$AB/config/.env" ]; then set -a; source "$AB/config/.env"; set +a; fi
-      log "Starting bridge (rollback): node app/bundle/abtars.js"
+      log "Starting bridge (rollback slot $SLOT): node app/bundle/abtars.js"
       cd "$AB"
       ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" node app/bundle/abtars.js >> "$AB/logs/launchd.log" 2>&1 200>&- &
       BRIDGE_PID=""
@@ -192,21 +198,20 @@ spawn_bridge() {
 
       if [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
         rm -rf "$AB/app.broken"
-        log "✓ Auto-rollback successful — running $ROLLED_VER (PID=$BRIDGE_PID)"
-        notify "⚠️ Auto-rolled back to $ROLLED_VER after crash loop (3 restarts in ${CIRCUIT_WINDOW}s)"
+        rm -f "$ROLLBACK_STATE"
+        log "✓ Auto-rollback successful — running $ROLLED_VER (slot $SLOT, PID=$BRIDGE_PID)"
+        notify "⚠️ Auto-rolled back to $ROLLED_VER (slot $SLOT) after crash loop"
         return 0
-      else
-        log "❌ Auto-rollback also failed"
-        notify "❌ Auto-rollback to $ROLLED_VER also failed. Manual intervention required."
-        rm -f "$STATE_FILE"
-        exit 0  # intentional stop — launchd must NOT restart
       fi
-    else
-      log "🚨 CIRCUIT BREAKER — ${CIRCUIT_MAX} restarts in ${CIRCUIT_WINDOW}s, no prior version available"
-      notify "🚨 Watchdog circuit breaker tripped — no rollback available, manual intervention needed"
-      rm -f "$STATE_FILE"
-      exit 0  # intentional stop — launchd must NOT restart
-    fi
+      log "❌ Slot $SLOT ($ROLLED_VER) also failed — trying next..."
+    done
+
+    # All slots exhausted — full shutdown
+    log "🚨 All rollback slots exhausted. Shutting down."
+    notify "🚨 All 3 rollback slots exhausted. Shutting down — manual intervention required."
+    rm -f "$STATE_FILE"
+    abtars stop 2>/dev/null || true
+    exit 0
   fi
 
   # Health check before every spawn
@@ -269,6 +274,7 @@ spawn_bridge() {
     ((wait++))
   done
   log "Bridge spawned (PID=$BRIDGE_PID)"
+  rm -f "$AB/.rollback-state"  # Clear stale rollback state on successful start
 }
 
 kill_bridge() {

@@ -13,10 +13,11 @@ import {
   writeManifest,
 } from '../deploy-lib-import.js';
 
-export async function rollback(opts?: { to?: number }): Promise<number> {
+export async function rollback(opts?: { to?: number; cascade?: boolean }): Promise<number> {
   const paths = packagePaths('abtars');
   const manifest = await readManifest(paths.manifest);
   const slot = opts?.to ?? 1;
+  const cascade = opts?.cascade ?? true;
 
   if (slot < 1 || slot > 3) {
     process.stderr.write(`Invalid --to value: ${slot}. Must be 1-3.\n`);
@@ -32,6 +33,10 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
   }
 
   if (!existsSync(prevDir)) {
+    if (cascade && slot < 3) {
+      process.stdout.write(`x slot ${slot} not available — trying slot ${slot + 1}...\n`);
+      return rollback({ to: slot + 1, cascade });
+    }
     process.stderr.write(`Nothing to roll back to (no app.prev.${slot}/ found).\n`);
     return 2;
   }
@@ -74,12 +79,21 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
     const health = await healthProbe(paths.home, restartTs, 60_000);
     if (health.healthy) {
       process.stdout.write(`✓ Bridge healthy (PID ${health.pid})\n`);
-    } else {
-      process.stderr.write(`⚠️ Bridge may not have started. Check logs.\n`);
+      process.stdout.write(`\nRollback complete.\n`);
+      return 0;
     }
 
-    process.stdout.write(`\nRollback complete.\n`);
-    return 0;
+    // Unhealthy — cascade to next slot
+    if (cascade && slot < 3) {
+      process.stdout.write(`x slot ${slot} unhealthy — trying slot ${slot + 1}...\n`);
+      return rollback({ to: slot + 1, cascade });
+    }
+
+    // All exhausted — full shutdown
+    process.stderr.write(`x all slots exhausted — shutting down.\n`);
+    const { stop } = await import('./stop.js');
+    await stop();
+    return 2;
   } finally {
     await release();
   }

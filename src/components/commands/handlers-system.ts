@@ -674,3 +674,17 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   await ctx.reply(lines.join("\n"));
   return true;
 }
+
+export async function handleRollback(text: string, ctx: CommandContext): Promise<boolean> {
+  const arg = text.replace(/^\/rollback\s*/i, "").trim();
+  const slot = parseInt(arg) || 1;
+  if (slot < 1 || slot > 3) {
+    await ctx.reply("Slot must be 1-3. Usage: /rollback 1");
+    return true;
+  }
+  await ctx.reply(`Rolling back to slot ${slot}...`);
+  const { rollback } = await import("../../cli/commands/rollback.js");
+  const code = await rollback({ to: slot });
+  await ctx.reply(code === 0 ? `+ Rolled back to slot ${slot}` : `x Rollback failed (code ${code})`);
+  return true;
+}
