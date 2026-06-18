@@ -391,9 +391,16 @@ export class DirectApiTransport implements IKiroTransport {
     session: ConversationSession,
     signal: AbortSignal,
   ): Promise<{ content: string | null; toolCalls: ToolCall[]; usage: { prompt_tokens: number; completion_tokens: number } | null }> {
-    // Compose pipeline signal (user /stop) with per-request timeout
+    // Compose pipeline signal (user /stop) with per-request timeout (silence-based)
     const timeoutCtrl = new AbortController();
-    const timer = setTimeout(() => timeoutCtrl.abort(new Error("model API timeout")), this._timeoutOverrideMs ?? getEnv().modelApiTimeoutMs);
+    const timeoutMs = this._timeoutOverrideMs ?? getEnv().modelApiTimeoutMs;
+    this._lastActivityAt = Date.now();
+    const timer = setInterval(() => {
+      if (Date.now() - this._lastActivityAt > timeoutMs) {
+        clearInterval(timer);
+        timeoutCtrl.abort(new Error("model API timeout"));
+      }
+    }, 5000);
     const composed = AbortSignal.any([signal, timeoutCtrl.signal]);
 
     try {
@@ -419,7 +426,7 @@ export class DirectApiTransport implements IKiroTransport {
         else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
-      clearTimeout(timer);
+      clearInterval(timer);
       const toolCalls = this.finalizeToolCalls(toolCallAcc);
       return { content: content || null, toolCalls, usage };
     }
@@ -445,7 +452,7 @@ export class DirectApiTransport implements IKiroTransport {
         else if (event.type === "tool_call_delta") { this.accumulateToolCall(toolCallAcc, event); }
         else if (event.type === "done") { usage = event.usage; }
       }
-      clearTimeout(timer);
+      clearInterval(timer);
       const toolCalls = this.finalizeToolCalls(toolCallAcc);
       return { content: content || null, toolCalls, usage };
     }
@@ -534,7 +541,7 @@ export class DirectApiTransport implements IKiroTransport {
 
     return { content: content || null, toolCalls, usage };
     } finally {
-      clearTimeout(timer);
+      clearInterval(timer);
     }
   }
 
