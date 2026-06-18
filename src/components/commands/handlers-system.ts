@@ -425,22 +425,29 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   const user = loadUsers().byUserId.get(ctx.userId);
   const isMaster = user?.role === "master";
 
-  // /software rollback <version>
+  // /software rollback <version|slot>
   if (arg.startsWith("rollback")) {
     if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
     const targetVersion = arg.replace(/^rollback\s*/, "").trim();
     if (!targetVersion) {
-      await ctx.reply("Usage: /software rollback <version>\nUse /software to see available versions.");
+      await ctx.reply("Usage: /software rollback <version or slot 1-3>\nUse /software to see available versions.");
       return true;
     }
 
+    // Accept slot number directly (1, 2, 3)
+    const asSlot = parseInt(targetVersion);
     let targetSlot: number | null = null;
-    for (let i = 1; i <= 3; i++) {
-      const pkgPath = join(home, `app.prev.${i}`, "package.json");
-      try {
-        const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
-        if (ver === targetVersion) { targetSlot = i; break; }
-      } catch { /* slot empty */ }
+    if (asSlot >= 1 && asSlot <= 3 && String(asSlot) === targetVersion) {
+      const pkgPath = join(home, `app.prev.${asSlot}`, "package.json");
+      try { readFileSync(pkgPath, "utf-8"); targetSlot = asSlot; } catch {}
+    } else {
+      for (let i = 1; i <= 3; i++) {
+        const pkgPath = join(home, `app.prev.${i}`, "package.json");
+        try {
+          const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+          if (ver === targetVersion) { targetSlot = i; break; }
+        } catch { /* slot empty */ }
+      }
     }
 
     if (!targetSlot) {

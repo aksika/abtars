@@ -31,7 +31,6 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "facts", description: "Core knowledge" },
   { name: "nlm", description: "Knowledge base" },
   { name: "restart", description: "Restart bridge" },
-  { name: "rollback", description: "Rollback to slot N (1-3)" },
   { name: "wakeup", description: "Wake Mac from sleep" },
   { name: "sleep", description: "Sleep status / resume / now" },
   { name: "whoami", description: "Your user info & clearance" },
