@@ -181,6 +181,54 @@ fi
 fi # end supervised-only watchdog block
 fi # end supervised-only supervisor check
 
+# 0a. Double watchdog detection
+WD_COUNT=$(pgrep -f "watchdog.sh" 2>/dev/null | wc -l)
+if (( WD_COUNT > 1 )); then
+  warn "duplicate watchdog: $WD_COUNT watchdog.sh processes running"
+fi
+
+# 0b. Bridge PID consistency (bridge.lock vs actual process)
+if [ -f "$AB/bridge.lock" ]; then
+  LOCK_BRIDGE_PID=$(json_field "$AB/bridge.lock" pid 0)
+  if [[ "$LOCK_BRIDGE_PID" != "0" ]]; then
+    if kill -0 "$LOCK_BRIDGE_PID" 2>/dev/null; then
+      PROC_CMD=$(ps -p "$LOCK_BRIDGE_PID" -o args= 2>/dev/null || true)
+      if [[ "$PROC_CMD" != *"abtars.js"* ]]; then
+        warn "bridge.lock PID $LOCK_BRIDGE_PID is not abtars (recycled PID: ${PROC_CMD:0:40})"
+      fi
+    fi
+  fi
+
+  # 0c. Bridge uptime
+  STARTED_AT=$(json_field "$AB/bridge.lock" startedAt 0)
+  if [[ "$STARTED_AT" != "0" ]]; then
+    UPTIME_SEC=$(python3 -c "
+from datetime import datetime, timezone
+try:
+    started = datetime.fromisoformat('$STARTED_AT'.replace('Z','+00:00'))
+    diff = int((datetime.now(timezone.utc) - started).total_seconds())
+    h, m = divmod(diff // 60, 60)
+    print(f'{h}h {m}m')
+except: print('unknown')
+" 2>/dev/null)
+    echo "[doctor] bridge uptime: $UPTIME_SEC"
+  fi
+fi
+
+# 0d. Circuit breaker state — recent restarts
+STATE_FILE="$AB/watchdog.state"
+if [ -f "$STATE_FILE" ]; then
+  NOW=$(date +%s)
+  RECENT=0
+  while IFS= read -r ts; do
+    [[ -z "$ts" ]] && continue
+    (( NOW - ts < 1800 )) && RECENT=$((RECENT + 1))
+  done < "$STATE_FILE"
+  if (( RECENT >= 2 )); then
+    warn "circuit breaker: $RECENT restarts in last 30min — recent instability"
+  fi
+fi
+
 # 1. Directory permissions (sensitive dirs should be 700)
 for d in "$AB/secret" "$AB/secret/cookies" "$ABMIND/memory"; do
   if [ -d "$d" ] && [ "$(file_mode "$d")" != "700" ]; then
