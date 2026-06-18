@@ -181,6 +181,7 @@ export class TelegramApi {
       timeout,
       allowed_updates: [
         "message",
+        "edited_message",
         "callback_query",
         "message_reaction",
       ],
