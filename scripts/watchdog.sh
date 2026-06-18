@@ -24,7 +24,7 @@ while true; do
   rm -f "$AB/.start-reason"
 
   # Start bridge
-  cd "$AB" && ABTARS_START_REASON="$REASON" node app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
+  cd "$AB" && NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" node app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
 
   # Poll: alive + heartbeat
