@@ -26,6 +26,11 @@ process.on("uncaughtException", (err) => {
   process.exit(1);
 });
 
+process.on("exit", (code) => {
+  const stack = new Error("exit trace").stack?.split("\n").slice(1, 6).join("\n") ?? "";
+  console.error(`[EXIT] code=${code} at ${new Date().toISOString()}\n${stack}`);
+});
+
 process.on("unhandledRejection", (reason) => {
   const msg = reason instanceof Error ? reason.message : String(reason);
   const isAcpRecoverable = (reason instanceof Error && reason.name === "AcpExitError")
