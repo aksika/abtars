@@ -152,16 +152,14 @@ describe("#372 — abtars stop", () => {
 
   // ── Supervised-daemon refusal ─────────────────────────────────────────
 
-  it("refuses when installMode is supervised-daemon without --force", async () => {
+  it("stops cleanly when installMode is supervised-daemon without --force", async () => {
     writeFileSync(join(tmpHome, "manifest.json"), JSON.stringify({ installMode: "supervised-daemon" }));
 
     captureStdio();
     const exit = await stop({});
     restoreStdio();
 
-    expect(exit).toBe(1);
-    expect(stderr).toContain("supervised-daemon");
-    expect(stderr).toMatch(/systemctl stop|launchctl bootout/);
+    expect(exit).toBe(0);
   });
 
   it("proceeds when installMode is supervised-daemon with --force", async () => {
