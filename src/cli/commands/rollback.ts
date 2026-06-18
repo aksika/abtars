@@ -1,9 +1,10 @@
 /**
- * `abtars rollback` — swap app/ with a prior version, restart, health-verify.
+ * `abtars rollback` — swap app/ ↔ app.prev.N/, restart via watchdog, health-verify.
  * --to N (1-3, default 1) selects which prior to restore.
+ * --no-cascade disables automatic fallback to next slot.
  */
 
-import { existsSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, renameSync, unlinkSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   acquireLock,
@@ -12,6 +13,10 @@ import {
   readManifest,
   writeManifest,
 } from '../deploy-lib-import.js';
+
+function readJsonField(path: string, field: string): unknown {
+  try { return JSON.parse(readFileSync(path, 'utf-8'))[field]; } catch { return undefined; }
+}
 
 export async function rollback(opts?: { to?: number; cascade?: boolean }): Promise<number> {
   const paths = packagePaths('abtars');
@@ -48,15 +53,14 @@ export async function rollback(opts?: { to?: number; cascade?: boolean }): Promi
 
   const release = await acquireLock(paths.lock, 'rollback');
   try {
-    // Swap: app/ → app.broken/, app.prev.N/ → app/
-    const brokenDir = join(paths.home, 'app.broken');
-    rmSync(brokenDir, { recursive: true, force: true });
-    renameSync(paths.app, brokenDir);
+    // Swap: app/ ↔ app.prev.N/ via temp
+    const tempDir = join(paths.home, 'app.swap-temp');
+    renameSync(paths.app, tempDir);
     renameSync(prevDir, paths.app);
-    rmSync(brokenDir, { recursive: true, force: true });
-    process.stdout.write(`✓ rolled back: app.prev.${slot}/ → app/\n`);
+    renameSync(tempDir, prevDir);
+    process.stdout.write(`✓ swapped: app/ ↔ app.prev.${slot}/\n`);
 
-    // Update manifest (swap version ↔ previousVersion)
+    // Update manifest
     if (manifest.previousVersion) {
       await writeManifest(paths.manifest, {
         ...manifest,
@@ -69,11 +73,26 @@ export async function rollback(opts?: { to?: number; cascade?: boolean }): Promi
       process.stdout.write(`✓ manifest: ${manifest.version} → ${manifest.previousVersion}\n`);
     }
 
-    // Restart bridge
+    // Restart — same pattern as abtars update: clear .stopped, USR1, fallback cold
+    try { unlinkSync(join(paths.home, '.stopped')); } catch {}
+    try { unlinkSync(join(paths.home, 'watchdog.state')); } catch {}
+
     const restartTs = Date.now();
-    const { restart } = await import('./restart.js');
-    process.stdout.write(`♻️ Restarting bridge...\n`);
-    await restart({ cold: true }).catch(() => {});
+    const wdPid = readJsonField(join(paths.home, 'bridge.lock'), 'watchdogPid') as number | undefined;
+    if (wdPid && wdPid > 0) {
+      try {
+        process.kill(wdPid, 'SIGUSR1');
+        process.stdout.write(`♻️ USR1 sent to watchdog (PID ${wdPid})\n`);
+      } catch {
+        process.stdout.write(`♻️ Watchdog gone — cold restart...\n`);
+        const { restart } = await import('./restart.js');
+        await restart({ cold: true }).catch(() => {});
+      }
+    } else {
+      process.stdout.write(`♻️ No watchdog — cold restart...\n`);
+      const { restart } = await import('./restart.js');
+      await restart({ cold: true }).catch(() => {});
+    }
 
     // Health probe
     const health = await healthProbe(paths.home, restartTs, 60_000);
