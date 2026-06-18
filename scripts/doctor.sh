@@ -230,7 +230,7 @@ if [ -f "$STATE_FILE" ]; then
 fi
 
 # 1. Directory permissions (sensitive dirs should be 700)
-for d in "$AB/secret" "$ABMIND/memory"; do
+for d in "$AB/secret" "$AB/config"; do
   if [ -d "$d" ] && [ "$(file_mode "$d")" != "700" ]; then
     if $FIX; then
       chmod 700 "$d"; fix "$d permissions → 700"
