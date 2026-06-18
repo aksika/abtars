@@ -441,19 +441,12 @@ export async function handleInboundMessage(
     }
 
     // --- Empty response ---
+    if (!userResponse && reactionEmoji) {
+      userResponse = reactionEmoji; // emoji IS the response — deliver normally
+    }
     if (!userResponse) {
       if (noReply) {
         logDebug(TAG, "LLM returned [NO_REPLY], dropping silently");
-        return;
-      }
-      if (reactionEmoji) {
-        if (adapter.setReaction && msg.messageId) {
-          try { await adapter.setReaction(channelId, msg.messageId, reactionEmoji); }
-          catch { await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId }); }
-        } else {
-          await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
-        }
-        activeSession.messageCount = (activeSession.messageCount ?? 0) + 1;
         return;
       }
       if (transport.toolCallsSucceeded > 0) {
@@ -470,14 +463,6 @@ export async function handleInboundMessage(
     // --- Clear 👀 reaction ---
     if (adapter.setReaction && msg.messageId) {
       await adapter.setReaction(channelId, msg.messageId, "").catch(err => logAndSwallow(TAG, "adapter call", err));
-    }
-
-    // --- Standalone emoji → try reaction, fallback to message ---
-    const trimmed = userResponse.trim();
-    const isEmojiOnly = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}]{1,2}$/u.test(trimmed);
-    if (isEmojiOnly) {
-      await tryReaction(adapter, channelId, msg.messageId, trimmed, msg.threadId);
-      return;
     }
 
     // --- Deliver response — always chunk and send (#583) ---
