@@ -33,7 +33,7 @@ while true; do
     [[ -f "$AB/.stopped" ]] && exit 0
     kill -0 "$PID" 2>/dev/null || break
     # Grace period: skip stale check while bridge is booting
-    (( $(date +%s) - SPAWNED_AT < STALE )) && continue
+    (( $(date +%s) - SPAWNED_AT < 180 )) && continue
     HB=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
     NOW=$(($(date +%s) * 1000))
     if [[ -n "$HB" ]] && (( (NOW - HB) / 1000 > STALE )); then
