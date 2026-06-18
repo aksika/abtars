@@ -8,6 +8,10 @@ POLL=60
 LOG="$AB/logs/bridge.log"
 STATE="$AB/watchdog.state"
 
+# Singleton: only one watchdog instance
+exec 200>"$AB/watchdog.lock"
+flock -n 200 || exit 0
+
 [[ -f "$AB/.stopped" ]] && exit 0
 
 while true; do
@@ -16,7 +20,7 @@ while true; do
   rm -f "$AB/.start-reason"
 
   # Start bridge
-  cd "$AB" && ABTARS_START_REASON="$REASON" node app/bundle/abtars.js >> "$LOG" 2>&1 &
+  cd "$AB" && ABTARS_START_REASON="$REASON" node app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
 
   # Poll: alive + heartbeat
