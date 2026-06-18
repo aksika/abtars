@@ -16,6 +16,9 @@ else
   lockf -s -t 0 200 || exit 0
 fi
 
+# Write PID for health checks (doctor)
+echo $$ > "$AB/watchdog.pid"
+
 [[ -f "$AB/.stopped" ]] && exit 0
 
 while true; do
@@ -24,7 +27,7 @@ while true; do
   rm -f "$AB/.start-reason"
 
   # Start bridge
-  cd "$AB" && NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" node app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
+  cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" node app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
 
   # Poll: alive + heartbeat
