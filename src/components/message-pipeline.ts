@@ -595,6 +595,7 @@ export async function handleInboundMessage(
       logWarn(TAG, `Request timeout — not resetting session`);
       await adapter.sendMessage(channelId, "❌ Model timed out.", { threadId: msg.threadId }).catch(err => logAndSwallow(TAG, "adapter call", err));
     } else {
+      logError(TAG, `Pipeline error: ${errStr.slice(0, 500)}`);
       const reason = errStr.includes("credits") ? "OpenRouter credits exhausted — top up at openrouter.ai/credits"
         : errStr.includes("rate") || errStr.includes("429") ? "Rate limited."
         : errStr.includes("auth") || errStr.includes("401") || errStr.includes("403") ? "Authentication failed."
