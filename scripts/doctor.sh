@@ -275,32 +275,6 @@ if [ -f "$DB" ]; then
   fi
 fi
 
-# 9. Embedding health (only if EMBEDDING_ENABLED=true)
-if grep -q "^EMBEDDING_ENABLED=true" "$AB/config/.env" "$AB/.env" 2>/dev/null; then
-  if ! command -v ollama &>/dev/null; then
-    warn "EMBEDDING_ENABLED but ollama not installed"
-  elif ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
-    warn "EMBEDDING_ENABLED but ollama not running — start with: systemctl start ollama"
-  elif ! ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
-    if $FIX; then
-      ollama pull nomic-embed-text &>/dev/null && fix "pulled nomic-embed-text model"
-    else
-      warn "EMBEDDING_ENABLED but nomic-embed-text not pulled"
-    fi
-  fi
-
-  if [ -f "$DB" ]; then
-    NULL_EMBEDS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM extracted_memories WHERE embedding IS NULL;" 2>/dev/null || echo 0)
-    if [ "$NULL_EMBEDS" -gt 0 ]; then
-      if $FIX; then
-        EMBEDDING_ENABLED=true node "$(dirname "$0")/../dist/cli/abmind.js" embed 2>/dev/null && fix "batch-embedded $NULL_EMBEDS memories"
-      else
-        warn "$NULL_EMBEDS extracted memories missing embeddings -- run: abmind embed"
-      fi
-    fi
-  fi
-fi
-
 # 10. Heartbeat liveness (startup check -- was previous session's heartbeat healthy?)
 LOCK_FILE="$AB/bridge.lock"
 if [ -f "$LOCK_FILE" ]; then
