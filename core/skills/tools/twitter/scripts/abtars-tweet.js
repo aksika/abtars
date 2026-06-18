@@ -200,10 +200,17 @@ async function runFeed(format, count, topN, discover, outputPath) {
   }
   console.error(`Fetching timelines for ${handles.length} handles...`);
   const allTweets = [];
-  for (const h of handles) {
+  const BATCH_LIMIT = 20;
+  const HANDLE_TIMEOUT_MS = 10_000;
+  const batch = handles.slice(0, BATCH_LIMIT);
+  if (handles.length > BATCH_LIMIT) console.error(`  (processing ${BATCH_LIMIT} of ${handles.length} — batch limit)`);
+  for (const h of batch) {
     try {
       console.error(`  @${h}...`);
-      const tweets = await fetchTimeline(h, count);
+      const tweets = await Promise.race([
+        fetchTimeline(h, count),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), HANDLE_TIMEOUT_MS)),
+      ]);
       const cutoff = Date.now() - 24 * 60 * 60 * 1e3;
       const recent = tweets.filter((t) => new Date(t.createdAt).getTime() > cutoff);
       allTweets.push(...recent);
