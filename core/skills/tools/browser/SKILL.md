@@ -1,6 +1,6 @@
 ---
 name: browser
-description: Control a headless CloakBrowser (stealth Chromium) for navigation, form filling, text extraction, screenshots, and multi-step web workflows
+description: Headless CloakBrowser — navigate, fill forms, extract text, screenshot
 user-invocable: false
 ---
 

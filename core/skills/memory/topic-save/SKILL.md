@@ -1,6 +1,6 @@
 ---
 name: topic-save
-description: Save, update, and manage topic-specific knowledge files from conversation discussions
+description: Save and manage topic-specific knowledge files from conversations
 user-invocable: true
 ---
 

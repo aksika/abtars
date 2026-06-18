@@ -1,3 +1,9 @@
+---
+name: gdrive-backup
+description: Weekly backup of config + encrypted memory to Google Drive
+user-invocable: false
+---
+
 # Google Drive Backup
 
 Weekly backup of `~/.backup-abtars/` zip + encrypted memory.db to Google Drive.

@@ -1,6 +1,6 @@
 ---
 name: skill-authoring
-description: When to use skill_create vs memory_store. Use skill_create for repeatable procedures/recipes; use memory_store for facts, events, preferences.
+description: When to use skill_create (procedures) vs memory_store (facts)
 ---
 
 # Skill Authoring Guide

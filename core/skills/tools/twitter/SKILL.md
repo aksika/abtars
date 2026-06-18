@@ -1,6 +1,6 @@
 ---
 name: twitter
-description: Fetch Twitter/X content. Quick mode (no auth) for single tweets. Full mode (cookies) for feeds, search, timelines.
+description: Fetch Twitter/X content — single tweets (no auth) or feeds (cookies)
 requires:
   files: [~/.abtars/workspace/twitterX]
 ---

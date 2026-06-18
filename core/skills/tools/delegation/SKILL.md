@@ -1,6 +1,6 @@
 ---
 name: delegation
-description: Spawn background sessions to work on tasks independently while you continue responding to the user.
+description: Spawn background sessions for parallel tasks while responding to user
 trigger: when a task is complex enough to run in the background, or when the user asks for multiple things simultaneously
 ---
 

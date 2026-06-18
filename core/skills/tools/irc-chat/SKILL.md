@@ -1,6 +1,6 @@
 ---
 name: irc-chat
-description: Participate in IRC channels when the bridge has irc.json configured. Post on user request, respond to @mentions and the user, coordinate with other bots on shared channels.
+description: Participate in IRC channels — post, respond to mentions, coordinate
 requires: abtars
 ---
 

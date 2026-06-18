@@ -1,6 +1,6 @@
 ---
 name: clawhub
-description: Search, install, and update community skills from ClawHub (clawhub.ai). Use when the user asks for new capabilities or you need a skill that doesn't exist locally.
+description: Search, install, and update community skills from ClawHub (clawhub.ai)
 ---
 
 # ClawHub — Community Skill Registry

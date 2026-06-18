@@ -1,6 +1,6 @@
 ---
 name: nlm
-description: Query the NotebookLM knowledge base (Layer 6) for answers grounded in curated reference material
+description: Query NotebookLM knowledge base (Layer 6) for grounded answers
 user-invocable: false
 ---
 

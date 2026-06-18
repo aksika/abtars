@@ -1,6 +1,6 @@
 ---
 name: system-health
-description: Run a system health check. Reads system-notes.md for known acceptable deviations before reporting.
+description: Run system health check, reads system-notes for known deviations
 user-invocable: true
 ---
 

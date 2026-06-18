@@ -1,3 +1,9 @@
+---
+name: session-start
+description: Greeting and session start behavior — what to do on first message
+user-invocable: false
+---
+
 # Session Start
 
 When a session starts (first message after restart, `/new`, or `/reset`), you receive a `[LAST SESSION SUMMARY]` block prepended to the prompt.

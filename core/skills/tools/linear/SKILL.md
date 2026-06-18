@@ -1,6 +1,6 @@
 ---
 name: linear
-description: Manage Linear projects, issues, and tasks via the bundled Node CLI and the official Linear API. Use when you need to read, create, update, or organize Linear issues, projects, teams, milestones, comments, cycles, labels, and documents.
+description: Manage Linear issues, projects, cycles, and documents via API
 metadata: {"gracebot":{"always":false,"emoji":"📐","homepage":"https://github.com/MaTriXy/linear-skill","requires":{"bins":["node","npm"],"env":["LINEAR_API_KEY"]},"primaryEnv":"LINEAR_API_KEY","install":[{"id":"node-brew","kind":"brew","formula":"node","bins":["node","npm"],"label":"Install Node.js (brew)"}]},"clawdbot":{"always":false,"emoji":"📐","homepage":"https://github.com/MaTriXy/linear-skill","requires":{"bins":["node","npm"],"env":["LINEAR_API_KEY"]},"primaryEnv":"LINEAR_API_KEY","install":[{"id":"node-brew","kind":"brew","formula":"node","bins":["node","npm"],"label":"Install Node.js (brew)"}]}}
 ---
 

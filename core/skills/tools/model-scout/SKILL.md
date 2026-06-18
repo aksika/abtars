@@ -1,3 +1,9 @@
+---
+name: model-scout
+description: Find the best free cloud models and propose top 3 candidates
+user-invocable: true
+---
+
 # Model Scout
 
 Find the best free cloud models and propose the top 3 candidates.

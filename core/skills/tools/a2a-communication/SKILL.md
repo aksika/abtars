@@ -1,6 +1,6 @@
 ---
 name: a2a-communication
-description: Communicate with other abtars agents via peer_ask tool. Delegate tasks, ask questions, coordinate across instances.
+description: Communicate with other abtars agents — delegate tasks, ask questions
 requires: abtars
 ---
 

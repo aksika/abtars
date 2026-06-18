@@ -1,6 +1,6 @@
 ---
 name: rss
-description: Fetch RSS/Atom feeds via abtars-rss CLI. Use when a task needs to pull news, articles, or structured feed data.
+description: Fetch RSS/Atom feeds via abtars-rss CLI for news and articles
 requires:
   bins: [abtars-rss]
 ---
