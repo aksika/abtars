@@ -279,8 +279,10 @@ async function copyAbmind(stagedPath: string, repoRoot: string): Promise<void> {
         const gitResult = spawnSync('git', ['-C', src, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf-8' });
         const commit = gitResult.status === 0 ? gitResult.stdout.trim() : '';
         const version = commit ? `${pkg.version}-${commit}` : pkg.version;
-        const manifest = { version, activatedAt: new Date().toISOString(), source: 'local' };
-        writeFileSync(join(abmindHome, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+        const manifestPath = join(abmindHome, 'manifest.json');
+        const existing = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf-8')) : {};
+        const manifest = { ...existing, version, activatedAt: new Date().toISOString(), source: 'local' };
+        writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
       } catch { /* non-fatal — display only */ }
       process.stdout.write(`✓ abmind copied from ${src}\n`);
 
