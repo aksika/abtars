@@ -8,9 +8,13 @@ POLL=60
 LOG="$AB/logs/bridge.log"
 STATE="$AB/watchdog.state"
 
-# Singleton: only one watchdog instance
-exec 200>"$AB/watchdog.lock"
-flock -n 200 || exit 0
+# Singleton: only one watchdog instance (flock on Linux, lockf on Mac)
+exec 200>>"$AB/.bridge.flock"
+if command -v flock &>/dev/null; then
+  flock -n 200 || exit 0
+else
+  lockf -s -t 0 200 || exit 0
+fi
 
 [[ -f "$AB/.stopped" ]] && exit 0
 
