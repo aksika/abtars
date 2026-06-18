@@ -48,14 +48,4 @@ export function ensureDir(absPath: string): void {
   mkdirSync(absPath, { recursive: true });
 }
 
-/**
- * Canonical path for user-facing reports, grouped by category.
- * Example: reportsDir("tasks") → ~/.abtars/reports/tasks/
- *
- * Callers are responsible for mkdirSync(dir, { recursive: true }).
- * All abtars-produced reports should live under this tree so they're
- * discoverable by the send-report skill and the future consolidation work.
- */
-export function reportsDir(category: string): string {
-  return join(abtarsHome(), "reports", category);
-}
+

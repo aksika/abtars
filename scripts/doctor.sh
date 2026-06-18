@@ -538,7 +538,6 @@ AUDIT_MAX_BYTES=5242880  # 5MB
 
 stale_logs=$(find "$AB/logs" -type f -name "*.log" -mtime +"$LOGS_KEEP_DAYS" 2>/dev/null | wc -l)
 stale_overflow=$(find "$AB/overflow" -type f -mtime +"$DATA_KEEP_DAYS" 2>/dev/null | wc -l)
-stale_reports=$(find "$AB/reports" -type f -mtime +"$DATA_KEEP_DAYS" 2>/dev/null | wc -l)
 stale_media=$(find "$AB/received/media" -type f -mtime +"$LOGS_KEEP_DAYS" 2>/dev/null | wc -l)
 
 audit_size=0
@@ -546,19 +545,18 @@ if [ -f "$AB/logs/audit.jsonl" ]; then
   audit_size=$(stat -c%s "$AB/logs/audit.jsonl" 2>/dev/null || stat -f%z "$AB/logs/audit.jsonl" 2>/dev/null || echo 0)
 fi
 
-total_stale=$((stale_logs + stale_overflow + stale_reports + stale_media))
+total_stale=$((stale_logs + stale_overflow + stale_media))
 if [ "$total_stale" -gt 0 ] || [ "$audit_size" -gt "$AUDIT_MAX_BYTES" ]; then
   if $FIX; then
     [ "$stale_logs" -gt 0 ] && find "$AB/logs" -type f -name "*.log" -mtime +"$LOGS_KEEP_DAYS" -delete && fix "deleted $stale_logs log file(s) older than ${LOGS_KEEP_DAYS}d"
     [ "$stale_overflow" -gt 0 ] && find "$AB/overflow" -type f -mtime +"$DATA_KEEP_DAYS" -delete && fix "deleted $stale_overflow overflow file(s) older than ${DATA_KEEP_DAYS}d"
-    [ "$stale_reports" -gt 0 ] && find "$AB/reports" -type f -mtime +"$DATA_KEEP_DAYS" -delete && fix "deleted $stale_reports report file(s) older than ${DATA_KEEP_DAYS}d"
     [ "$stale_media" -gt 0 ] && find "$AB/received/media" -type f -mtime +"$LOGS_KEEP_DAYS" -delete && fix "deleted $stale_media media file(s) older than ${LOGS_KEEP_DAYS}d"
     if [ "$audit_size" -gt "$AUDIT_MAX_BYTES" ]; then
       tail -5000 "$AB/logs/audit.jsonl" > "$AB/logs/audit.jsonl.tmp" && mv "$AB/logs/audit.jsonl.tmp" "$AB/logs/audit.jsonl"
       fix "audit.jsonl truncated (was $audit_size bytes)"
     fi
   else
-    [ "$total_stale" -gt 0 ] && warn "$total_stale stale file(s) reclaimable (logs>${LOGS_KEEP_DAYS}d, overflow/reports>${DATA_KEEP_DAYS}d, media>${LOGS_KEEP_DAYS}d)"
+    [ "$total_stale" -gt 0 ] && warn "$total_stale stale file(s) reclaimable (logs>${LOGS_KEEP_DAYS}d, overflow>${DATA_KEEP_DAYS}d, media>${LOGS_KEEP_DAYS}d)"
     [ "$audit_size" -gt "$AUDIT_MAX_BYTES" ] && warn "audit.jsonl is $audit_size bytes (>${AUDIT_MAX_BYTES})"
   fi
 fi
