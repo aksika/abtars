@@ -34,20 +34,29 @@ while true; do
   SPAWNED_AT=$(date +%s)
 
   # Poll: alive + heartbeat
+  DEATH_REASON=""
   while sleep "$POLL"; do
     [[ -f "$AB/.stopped" ]] && exit 0
-    kill -0 "$PID" 2>/dev/null || break
+    if ! kill -0 "$PID" 2>/dev/null; then
+      wait "$PID" 2>/dev/null; EXIT_CODE=$?
+      DEATH_REASON="process-gone:exit=$EXIT_CODE"
+      break
+    fi
     # Grace period: skip stale check while bridge is booting
     (( $(date +%s) - SPAWNED_AT < 180 )) && continue
     HB=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
     NOW=$(($(date +%s) * 1000))
     if [[ -n "$HB" ]] && (( (NOW - HB) / 1000 > STALE )); then
+      DEATH_REASON="stale-heartbeat:$(( (NOW - HB) / 1000 ))s"
       kill -9 "$PID" 2>/dev/null
       break
     fi
   done
 
   [[ -f "$AB/.stopped" ]] && exit 0
+
+  # Log death
+  echo "$(date +%FT%T) Bridge died: $DEATH_REASON (PID=$PID)" >> "$AB/logs/watchdog.log"
 
   # Record death
   echo "$(date +%s)" >> "$STATE"
