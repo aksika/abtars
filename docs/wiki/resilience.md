@@ -197,6 +197,7 @@ The watchdog singleton system (#1035) and instant-death detection (#1042) were s
 | 6 | Kill zombie watchdog (non-owner) | Exits without killing bridge | ✓ | 0s |
 | 7 | `abtars stop` | Both die cleanly, file preserved | ✓ | — |
 | 8 | Deploy corrupt bundle | Instant-death → circuit breaker → auto-rollback | ✓ | ~70s |
+| 9 | Start 2nd watchdog (systemd race) | PID guard blocks before flock, exits 0 | ✓ | — |
 
 ### Protection stack
 
