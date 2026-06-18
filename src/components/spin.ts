@@ -175,11 +175,11 @@ export class Spin {
       });
       setTimeout(() => {
         if (session.messageCount > 0) return; // greeting delivered
-        if (Date.now() - lastInjectAt < 25_000) return; // still within expected response time
+        if (session.busy) return; // model still thinking — don't retry
         if (attempt >= 3) { logError(TAG, "Greeting failed after 3 attempts"); return; }
         logWarn(TAG, `Greeting attempt ${attempt}/3 — no response, retrying`);
         inject();
-      }, 30_000);
+      }, 60_000);
     };
 
     // Event-driven: fire when transport is ready (#1000)
