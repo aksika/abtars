@@ -26,6 +26,7 @@ while true; do
   # Start bridge
   cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" node app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
+  disown $PID
   SPAWNED_AT=$(date +%s)
 
   # Poll: alive + heartbeat
