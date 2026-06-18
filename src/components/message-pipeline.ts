@@ -453,6 +453,7 @@ export async function handleInboundMessage(
         } else {
           await adapter.sendMessage(channelId, reactionEmoji, { threadId: msg.threadId });
         }
+        activeSession.messageCount = (activeSession.messageCount ?? 0) + 1;
         return;
       }
       if (transport.toolCallsSucceeded > 0) {
