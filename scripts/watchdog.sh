@@ -26,11 +26,14 @@ while true; do
   # Start bridge
   cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" node app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
+  SPAWNED_AT=$(date +%s)
 
   # Poll: alive + heartbeat
   while sleep "$POLL"; do
     [[ -f "$AB/.stopped" ]] && exit 0
     kill -0 "$PID" 2>/dev/null || break
+    # Grace period: skip stale check while bridge is booting
+    (( $(date +%s) - SPAWNED_AT < STALE )) && continue
     HB=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
     NOW=$(($(date +%s) * 1000))
     if [[ -n "$HB" ]] && (( (NOW - HB) / 1000 > STALE )); then
