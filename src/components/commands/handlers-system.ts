@@ -455,7 +455,9 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       return true;
     }
 
-    await ctx.reply(`⚠️ Rolling back to ${targetVersion}...`);
+    let slotVersion = "unknown";
+    try { slotVersion = JSON.parse(readFileSync(join(home, `app.prev.${targetSlot}`, "package.json"), "utf-8")).version; } catch {}
+    await ctx.reply(`⚠️ Rolling back to slot ${targetSlot} (${slotVersion})...`);
     try {
       const { rollback } = await import("../../cli/commands/rollback.js");
       await rollback({ to: targetSlot });
