@@ -8,13 +8,32 @@ POLL=60
 LOG="$AB/logs/bridge.log"
 STATE="$AB/watchdog.state"
 
-# Singleton: only one watchdog instance (flock on Linux, lockf on Mac)
+# Secondary singleton guard: PID check via bridge.lock (belt + suspenders with flock)
+OLD_WD=$(python3 -c "import json;print(json.load(open('$LOCK')).get('watchdogPid',''))" 2>/dev/null)
+if [[ -n "$OLD_WD" && "$OLD_WD" != "$$" ]] && kill -0 "$OLD_WD" 2>/dev/null; then
+  if [[ -f /proc/$OLD_WD/cmdline ]] && grep -q "watchdog" /proc/"$OLD_WD"/cmdline 2>/dev/null; then
+    exit 0
+  fi
+fi
+
+# Primary singleton: flock on Linux, lockf on Mac
 exec 200>>"$AB/.bridge.flock"
 if command -v flock &>/dev/null; then
   flock -n 200 || exit 0
 else
   lockf -s -t 0 200 || exit 0
 fi
+
+# Write our PID into bridge.lock for secondary guard
+python3 -c "
+import json,os
+p='$LOCK'
+try:
+  d=json.load(open(p))
+except: d={}
+d['watchdogPid']=$$
+with open(p,'w') as f: json.dump(d,f)
+" 2>/dev/null
 
 # Don't propagate signals to bridge child
 trap '' HUP
