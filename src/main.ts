@@ -25,6 +25,19 @@ initEnv();
 import { checkCircuitBreaker } from "./boot/circuit-breaker.js";
 checkCircuitBreaker();
 
+// #1050: Prevent duplicate bridge instances
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+try {
+  const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
+  const lock = JSON.parse(readFileSync(join(home, "bridge.lock"), "utf-8"));
+  if (lock.pid && lock.pid !== process.pid) {
+    process.kill(lock.pid, 0); // throws if dead
+    console.error(`[FATAL] Another bridge running (PID ${lock.pid}) — exiting`);
+    process.exit(1);
+  }
+} catch { /* lock missing, corrupt, or PID dead — proceed */ }
+
 process.on("uncaughtException", (err) => {
   console.error(`[FATAL] Uncaught exception: ${err.stack ?? err.message ?? err}`);
   process.exit(1);
