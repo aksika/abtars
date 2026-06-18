@@ -407,16 +407,21 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
   }
 
   if (mode === "supervised-daemon" || mode === "supervised") {
-    process.stdout.write("\n♻️ Restarting bridge via watchdog...\n");
-    const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
-    if (wdPid && wdPid > 0) {
+    process.stdout.write("\n♻️ Restarting bridge...\n");
+    const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
+    // Write start reason + clear watchdog state (new software = clean counter)
+    const { writeFileSync, unlinkSync } = await import("node:fs");
+    const commit = readJsonField(join(paths.app, "package.json"), "version") as string ?? "unknown";
+    writeFileSync(join(paths.home, ".start-reason"), `update:${commit}`);
+    try { unlinkSync(join(paths.home, "watchdog.state")); } catch {}
+
+    if (bridgePid && bridgePid > 0) {
       try {
-        process.kill(wdPid, "SIGUSR1");
-        process.stdout.write(`  USR1 sent to watchdog (PID ${wdPid})\n`);
-        try { const { unlinkSync } = await import("node:fs"); unlinkSync(join(paths.home, "watchdog.state")); } catch {}
+        process.kill(bridgePid, "SIGTERM");
+        process.stdout.write(`  SIGTERM sent to bridge (PID ${bridgePid}) — watchdog will respawn\n`);
         return true;
       } catch {
-        process.stdout.write(`⚠️ Could not signal watchdog (PID ${wdPid}).\n`);
+        process.stdout.write(`⚠️ Could not kill bridge (PID ${bridgePid}).\n`);
       }
     }
     // Fallback: cold restart

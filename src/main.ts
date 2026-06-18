@@ -21,6 +21,10 @@ import { resetAbmindCache } from "./utils/abmind-lazy.js";
 
 initEnv();
 
+// #1050: Auto-rollback on crash loop — runs before anything else (just file ops)
+import { checkCircuitBreaker } from "./boot/circuit-breaker.js";
+checkCircuitBreaker();
+
 process.on("uncaughtException", (err) => {
   console.error(`[FATAL] Uncaught exception: ${err.stack ?? err.message ?? err}`);
   process.exit(1);

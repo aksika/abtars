@@ -126,7 +126,8 @@ export async function startBridge(): Promise<number> {
   ctx.commit = deployed.commit;
 
   // Write bridge.lock immediately — watchdog lifeline, before any phase that could hang
-  initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2) });
+  const startReason = process.env["ABTARS_START_REASON"] ?? "unknown";
+  initBridgeLock({ pid: process.pid, startedAt: Date.now(), version: `${ctx.version}${ctx.commit ? "-" + ctx.commit : ""}`, argv: process.argv.slice(2), startReason });
 
   const bridge = new Bridge(ctx);
   ctx.isSleepActive = (): boolean => ctx.sleepHandle?.isActive === true;

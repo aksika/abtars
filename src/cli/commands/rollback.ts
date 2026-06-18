@@ -63,9 +63,14 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
       process.stdout.write(`✓ manifest: ${manifest.version} → ${manifest.previousVersion}\n`);
     }
 
-    // Restart — clear .stopped, then exit so watchdog respawns with new code
+    // Restart — clear .stopped, write start reason, then exit so watchdog respawns with new code
     try { unlinkSync(join(paths.home, '.stopped')); } catch {}
     try { unlinkSync(join(paths.home, 'watchdog.state')); } catch {}
+    const { readFileSync: rfs } = await import('node:fs');
+    let rollbackCommit = "unknown";
+    try { rollbackCommit = JSON.parse(rfs(join(paths.app, "package.json"), "utf-8")).version; } catch {}
+    const { writeFileSync: wfs } = await import('node:fs');
+    wfs(join(paths.home, '.start-reason'), `manual-rollback:${slot}:${rollbackCommit}`);
 
     const restartTs = Date.now();
     process.stdout.write(`♻️ Restarting bridge...\n`);

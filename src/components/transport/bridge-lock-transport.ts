@@ -112,7 +112,7 @@ export function readAndClearForceSleep(): string | null {
 /** Initialize bridge.lock with full boot state. Single writer for initial creation. */
 export interface PrevBridgeState { pid: number | null; lastHeartbeat: number | null }
 
-export function initBridgeLock(opts: { pid: number; startedAt: number; version: string; argv: string[] }): PrevBridgeState {
+export function initBridgeLock(opts: { pid: number; startedAt: number; version: string; argv: string[]; startReason?: string }): PrevBridgeState {
   const p = join(abtarsHome(), "bridge.lock");
   let prev: PrevBridgeState = { pid: null, lastHeartbeat: null };
   try {
@@ -125,7 +125,7 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
     const wdPid = Number(process.env.ABTARS_WATCHDOG_PID) || existing.watchdogPid || null;
     atomicWriteSync(p, JSON.stringify({
       pid: opts.pid, watchdogPid: wdPid, startedAt: opts.startedAt, version: opts.version,
-      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(),
+      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(), startReason: opts.startReason ?? "unknown",
     }));
   } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
   return prev;
