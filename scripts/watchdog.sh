@@ -16,6 +16,10 @@ else
   lockf -s -t 0 200 || exit 0
 fi
 
+# Don't propagate signals to bridge child
+trap '' HUP
+trap 'exit 0' TERM INT
+
 [[ -f "$AB/.stopped" ]] && exit 0
 
 while true; do
