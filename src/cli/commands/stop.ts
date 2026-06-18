@@ -69,34 +69,26 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
   const home = abtarsHome();
   const manifestPath = join(home, "manifest.json");
   const bridgeLock = join(home, "bridge.lock");
-  const force = opts.force ?? false;
+  const stoppedSentinel = join(home, ".stopped");
 
-  // Supervised-daemon refusal
   const installMode = readJsonField(manifestPath, "installMode") as string | undefined;
-  if (installMode === "supervised-daemon" && !force) {
-    process.stderr.write(`Bridge runs under supervised-daemon — use supervisor stop (supervisor will respawn if you kill the process directly).\n`);
-    if (process.platform === "darwin") {
-      process.stderr.write(`  sudo -k launchctl bootout system/com.abtars.daemon\n`);
-    } else {
-      process.stderr.write(`  sudo -k systemctl stop abtars\n`);
-    }
-    process.stderr.write(`\nUse 'abtars stop --force' to kill the process anyway (supervisor will respawn).\n`);
-    return 1;
-  }
 
-  // 1) Unload supervisor service (prevent respawn) then kill watchdog
-  if (force && process.platform === "darwin") {
-    const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
-    const uid = `gui/${process.getuid!()}`;
-    try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000 }); }
-    catch { /* already unloaded or not present */ }
-    // #923: Verify bootout stuck — launchd may have already respawned
-    try {
-      await new Promise(r => setTimeout(r, 1000));
-      execFileSync("launchctl", ["print", `${uid}/com.abtars.watchdog`], { timeout: 3000, stdio: "pipe" });
-      // Still loaded — retry bootout
+  // 0) Write sentinel — prevents watchdog from respawning even if kill races with launchd
+  try { require("node:fs").writeFileSync(stoppedSentinel, `stopped at ${new Date().toISOString()}\n`); } catch {}
+
+  // 1) Unload supervisor service (prevent respawn)
+  if (installMode === "supervised-daemon" || installMode === "supervised") {
+    if (process.platform === "darwin") {
+      const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
+      const uid = `gui/${process.getuid!()}`;
       try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000 }); } catch {}
-    } catch { /* not loaded = success */ }
+      await new Promise(r => setTimeout(r, 1000));
+      // Retry in case launchd respawned before bootout took effect
+      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000 }); } catch {}
+    } else {
+      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000 }); } catch {}
+      try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 5000 }); } catch {}
+    }
   }
 
   const wdPid = readJsonField(bridgeLock, "watchdogPid") as number | undefined;
@@ -133,8 +125,8 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
 
   process.stdout.write(`🛑 ${wdMsg}\n   ${brMsg}\n`);
 
-  if (force && process.platform === "darwin") {
-    process.stdout.write(`   LaunchAgent unloaded. To restart: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.abtars.watchdog.plist\n`);
+  if (installMode === "supervised-daemon" || installMode === "supervised") {
+    process.stdout.write(`   Service unloaded. Use 'abtars start' to restart.\n`);
   }
 
   // Return 0 if nothing's still alive; 1 if we left something running

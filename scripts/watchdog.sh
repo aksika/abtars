@@ -9,6 +9,12 @@ LOCK="$AB/bridge.lock"
 LOG="$AB/logs/watchdog.log"
 ENV_FILE="$AB/.env"
 
+# ── Stop sentinel — if present, exit immediately (abtars stop was called) ──
+if [[ -f "$AB/.stopped" ]]; then
+  echo "$(date +%FT%T) Stopped sentinel found — refusing to start. Use 'abtars start' to resume." >> "$LOG"
+  exit 0
+fi
+
 # ── Singleton enforcement via flock/lockf on sentinel file ──
 if [[ "${ABTARS_WD_EXEC:-}" != "1" ]]; then
   exec 200>>"$AB/.bridge.flock"
