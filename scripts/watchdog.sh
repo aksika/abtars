@@ -16,9 +16,6 @@ else
   lockf -s -t 0 200 || exit 0
 fi
 
-# Write PID for health checks (doctor)
-echo $$ > "$AB/watchdog.pid"
-
 [[ -f "$AB/.stopped" ]] && exit 0
 
 while true; do
