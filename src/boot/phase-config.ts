@@ -77,7 +77,7 @@ export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
     ctx.platforms.discord && "discord",
   ].filter(Boolean).join(", ");
   logInfo("main", "──────────── BRIDGE START ────────────");
-  logInfo("main", `🚀 Bridge starting (platforms=${enabledList}, log=${ctx.config.logLevel})`);
+  logInfo("main", `v${ctx.version}${ctx.commit ? "-" + ctx.commit : ""} (platforms=${enabledList}, log=${ctx.config.logLevel})`);
   if (ctx.sttConfig) logInfo("main", `🎤 STT enabled (${ctx.sttConfig.provider}/${ctx.sttConfig.model || "whisper-large-v3"})`);
   if (ctx.ttsConfig) logInfo("main", `🔊 TTS enabled (Edge TTS / ${ctx.ttsConfig.voice})`);
 
