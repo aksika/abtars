@@ -413,6 +413,7 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
       try {
         process.kill(wdPid, "SIGUSR1");
         process.stdout.write(`  USR1 sent to watchdog (PID ${wdPid})\n`);
+        try { const { unlinkSync } = await import("node:fs"); unlinkSync(join(paths.home, "watchdog.state")); } catch {}
         return true;
       } catch {
         process.stdout.write(`⚠️ Could not signal watchdog (PID ${wdPid}).\n`);
