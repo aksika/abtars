@@ -249,6 +249,17 @@ async function copyAbmind(stagedPath: string, repoRoot: string): Promise<void> {
   for (const src of candidates) {
     const distDir = join(src, 'dist');
     if (existsSync(distDir)) {
+      // Rebuild abmind if source has a build script (#1056)
+      try {
+        const srcPkg = JSON.parse(readFileSync(join(src, 'package.json'), 'utf-8'));
+        if (srcPkg.scripts?.build) {
+          const { spawnSync } = await import('node:child_process');
+          const buildResult = spawnSync('npm', ['run', 'build'], { cwd: src, stdio: 'pipe', timeout: 60_000 });
+          if (buildResult.status === 0) process.stdout.write(`✓ abmind rebuilt\n`);
+          else process.stdout.write(`⚠ abmind build failed — copying existing dist\n`);
+        }
+      } catch { /* no package.json or parse error — skip build */ }
+
       // Copy into bundle/node_modules/ ONLY (single instance — prevents dual DB connection #860)
       const dest = join(stagedPath, 'bundle', 'node_modules', 'abmind');
       mkdirSync(dest, { recursive: true });
