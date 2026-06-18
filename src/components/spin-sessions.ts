@@ -179,8 +179,8 @@ export function formatList(sessions: Map<string, ManagedSession>, userId: string
     const model = s.model ? ` ${s.model}` : "";
     const nm = s.name ? ` "${s.name}"` : "";
     const time = new Date(sessionCreatedAt(s)).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-    const idle = Math.round((Date.now() - s.lastActiveAt) / 60000);
+    const idle = s.busy ? "busy" : `idle ${Math.round((Date.now() - s.lastActiveAt) / 60000)}m`;
     const metrics = s.messageCount ? ` | ${s.messageCount} msgs` : "";
-    return `#${s.shortIndex} ${typeLabel(sessionType(s))}${nm}${bg}${model} — ${time}${paused}${marker} | idle ${idle}m${metrics}`;
+    return `#${s.shortIndex} ${typeLabel(sessionType(s))}${nm}${bg}${model} — ${time}${paused}${marker} | ${idle}${metrics}`;
   }).join("\n");
 }

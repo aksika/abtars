@@ -612,6 +612,7 @@ export async function handleInboundMessage(
     transport.onToolCallStart = undefined;
     transport.onSegmentBreak = undefined;
     busyEntry.busy = false;
+    busyEntry.lastActiveAt = Date.now();
     idleSave.reset(activeSessionId, chatId);
 
     // Drain queued messages

@@ -213,7 +213,7 @@ describe("handleInboundMessage", () => {
 
     await handleInboundMessage(makeMsg(), adapter, deps);
 
-    expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Something went wrong"), expect.any(Object));
+    expect(adapter.sendMessage).toHaveBeenCalledWith("100", expect.stringContaining("Error: boom"), expect.any(Object));
     expect((deps as any)._session.busy).toBe(false);
   });
 
