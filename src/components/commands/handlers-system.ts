@@ -549,14 +549,16 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
         await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return true;
-    } else if ((arg as string) === "npm" || (arg as string) === "update npm") {
-      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
-      logInfo("update", "npm update starting");
-      await ctx.reply("Updating from npm...");
-      const { spawn } = await import("node:child_process");
-      spawn("abtars", ["update", "--source", "npm"], { detached: true, stdio: "ignore" }).unref();
-      return true;
     }
+  }
+
+  if ((arg as string) === "npm" || (arg as string) === "update npm") {
+    if (!isMaster) { await ctx.reply("Requires master role."); return true; }
+    logInfo("update", "npm update starting");
+    await ctx.reply("Updating from npm...");
+    const { spawn } = await import("node:child_process");
+    spawn("abtars", ["update", "--source", "npm"], { detached: true, stdio: "ignore" }).unref();
+    return true;
   }
 
   // /software check — force-refresh npm registry
