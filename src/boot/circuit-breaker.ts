@@ -37,9 +37,14 @@ export function checkCircuitBreaker(): void {
   const appDir = join(home, "app");
   const prevDir = join(home, "app.prev");
   if (!existsSync(prevDir)) {
-    console.error("[circuit-breaker] No app.prev/ to roll back to — stopping");
-    writeFileSync(join(home, ".start-reason"), "stopped");
-    process.exit(1);
+    console.error("[circuit-breaker] No app.prev/ to roll back to — continuing anyway");
+    // Reset counter to avoid retriggering on next boot
+    try {
+      const state = JSON.parse(readFileSync(stateFile, "utf-8"));
+      state.restartCount = 0;
+      writeFileSync(stateFile, JSON.stringify(state) + "\n");
+    } catch {}
+    return;
   }
 
   let commit = "unknown";
