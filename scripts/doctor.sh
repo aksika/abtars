@@ -382,11 +382,11 @@ done
 # 12. Schema version check (removed — schema managed by MemoryManager, no migration table)
 
 # 14. Orphaned kiro-cli processes
-KIRO_PROCS=$(pgrep -f 'kiro-cli acp' 2>/dev/null | wc -l)
+KIRO_PROCS=$(ps ax -o pid,args 2>/dev/null | grep '[k]iro-cli acp' | awk '{print $1}' | wc -l)
 if [ "$KIRO_PROCS" -gt 1 ]; then
   if $FIX; then
     # Keep the newest, kill the rest
-    PIDS=$(pgrep -f 'kiro-cli acp' 2>/dev/null | sort -n)
+    PIDS=$(ps ax -o pid,args 2>/dev/null | grep '[k]iro-cli acp' | awk '{print $1}' | sort -n)
     NEWEST=$(echo "$PIDS" | tail -1)
     for pid in $PIDS; do
       if [ "$pid" != "$NEWEST" ]; then
@@ -399,10 +399,10 @@ if [ "$KIRO_PROCS" -gt 1 ]; then
 fi
 
 # 14b. Orphaned gemini-cli processes
-GEMINI_PROCS=$(pgrep -f 'gemini.*--acp' 2>/dev/null | wc -l)
+GEMINI_PROCS=$(ps ax -o pid,args 2>/dev/null | grep '[g]emini.*--acp' | awk '{print $1}' | wc -l)
 if [ "$GEMINI_PROCS" -gt 1 ]; then
   if $FIX; then
-    PIDS=$(pgrep -f 'gemini.*--acp' 2>/dev/null | sort -n)
+    PIDS=$(ps ax -o pid,args 2>/dev/null | grep '[g]emini.*--acp' | awk '{print $1}' | sort -n)
     NEWEST=$(echo "$PIDS" | tail -1)
     for pid in $PIDS; do
       if [ "$pid" != "$NEWEST" ]; then
@@ -415,10 +415,10 @@ if [ "$GEMINI_PROCS" -gt 1 ]; then
 fi
 
 # 12b. Orphaned abtars-sleep processes
-SLEEP_PROCS=$(pgrep -f 'abtars-sleep' 2>/dev/null | wc -l)
+SLEEP_PROCS=$(ps ax -o pid,args 2>/dev/null | grep '[a]btars-sleep' | awk '{print $1}' | wc -l)
 if [ "$SLEEP_PROCS" -gt 1 ]; then
   if $FIX; then
-    PIDS=$(pgrep -f 'abtars-sleep' 2>/dev/null | sort -n)
+    PIDS=$(ps ax -o pid,args 2>/dev/null | grep '[a]btars-sleep' | awk '{print $1}' | sort -n)
     NEWEST=$(echo "$PIDS" | tail -1)
     for pid in $PIDS; do
       if [ "$pid" != "$NEWEST" ]; then
@@ -441,7 +441,7 @@ if $WD_ALIVE && [ -n "$WD_PID" ]; then
         kill "$pid" 2>/dev/null && fix "killed orphaned abtars.sh wrapper pid $pid (parent $PPID_OF, not watchdog $WD_PID)"
       fi
     fi
-  done < <(pgrep -f 'abtars.sh.*--all' 2>/dev/null)
+  done < <(ps ax -o pid,args 2>/dev/null | grep '[a]btars.sh.*--all' | awk '{print $1}')
   if [ "$WRAPPER_ORPHANS" -gt 0 ] && ! $FIX; then
     warn "$WRAPPER_ORPHANS orphaned abtars.sh wrapper(s) not parented by watchdog"
   fi
@@ -514,7 +514,7 @@ if [ -d "$AB/hooks" ]; then
         warn "stuck hook $pid (${AGE}s) — run with --fix"
       fi
     fi
-  done < <(pgrep -f "$AB/hooks/" 2>/dev/null)
+  done < <(ps ax -o pid,args 2>/dev/null | grep "[h]ooks/" | grep "$AB" | awk '{print $1}')
 fi
 
 # 16e. Hook log file size
@@ -587,7 +587,7 @@ if [ "$total_stale" -gt 0 ] || [ "$audit_size" -gt "$AUDIT_MAX_BYTES" ]; then
 fi
 
 # ── Duplicate bridge detection (#923) ──────────────────────────────────────────
-BRIDGE_PIDS=$(pgrep -f "node.*bundle/abtars.js" 2>/dev/null | sort -n)
+BRIDGE_PIDS=$(ps ax -o pid,args 2>/dev/null | grep '[n]ode.*bundle/abtars.js' | awk '{print $1}' | sort -n)
 if [ -z "$BRIDGE_PIDS" ]; then BRIDGE_COUNT=0; else BRIDGE_COUNT=$(echo "$BRIDGE_PIDS" | wc -l | tr -d ' '); fi
 if [ "$BRIDGE_COUNT" -gt 1 ]; then
   warn "DUPLICATE BRIDGES: $BRIDGE_COUNT processes (PIDs: $(echo $BRIDGE_PIDS | tr '\n' ' '))"

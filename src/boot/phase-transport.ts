@@ -229,7 +229,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       const { abtarsHome } = await import("../paths.js");
       const home = abtarsHome();
       const { readlinkSync } = await import("node:fs");
-      const candidates = execSync("pgrep -f 'kiro-cli.*acp' 2>/dev/null || true", { encoding: "utf-8", timeout: 3000 }).trim().split("\n").filter(Boolean);
+      const candidates = execSync("ps ax -o pid,args 2>/dev/null | grep '[k]iro-cli.*acp' | awk '{print $1}' || true", { encoding: "utf-8", timeout: 3000 }).trim().split("\n").filter(Boolean);
       let killed = 0;
       for (const p of candidates) {
         const pid = parseInt(p, 10);
