@@ -79,3 +79,19 @@ export const busyGuardMiddleware: Middleware = async (ctx, next) => {
 
   await next();
 };
+
+/**
+ * Release busy flag and drain next queued message.
+ * Called from message-pipeline finally block.
+ */
+export function releaseBusy(
+  session: { busy: boolean; queue: Array<{ msg: any; adapter: any }>; lastActiveAt: number },
+  pipeline: (msg: any, adapter: any) => Promise<void>,
+): void {
+  session.busy = false;
+  session.lastActiveAt = Date.now();
+  if (session.queue.length) {
+    const next = session.queue.shift()!;
+    pipeline(next.msg, next.adapter).catch(() => {});
+  }
+}

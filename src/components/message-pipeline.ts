@@ -36,6 +36,7 @@ import type { RunningJob } from "./tasks/task-queue.js";
 import type { InboundMessage, PlatformAdapter } from "../types/platform.js";
 import { updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import { createMessageContext, runPipeline, voiceMiddleware, commandMiddleware, busyGuardMiddleware } from "./pipeline/index.js";
+import { releaseBusy } from "./pipeline/busy-guard.js";
 import { hasHooks, fire as fireHook } from "./hooks/hook-system.js";
 import { buildPrompt } from "./pipeline/prompt-builder.js";
 import { sessionType } from "./spin-types.js";
@@ -611,16 +612,8 @@ export async function handleInboundMessage(
     if (toolElapsedTimer) clearInterval(toolElapsedTimer);
     transport.onToolCallStart = undefined;
     transport.onSegmentBreak = undefined;
-    busyEntry.busy = false;
-    busyEntry.lastActiveAt = Date.now();
+    releaseBusy(pSession, (m, a) => handleInboundMessage(m, a, deps));
     idleSave.reset(activeSessionId, chatId);
-
-    // Drain queued messages
-    if (pSession?.queue.length) {
-      const next = pSession.queue.shift()!;
-      logInfo(TAG, `Draining queued message for ${activeSessionId} (${pSession.queue.length} remaining)`);
-      handleInboundMessage(next.msg, next.adapter, deps).catch(e => logError(TAG, "Queue drain error", e));
-    }
   }
 }
 
