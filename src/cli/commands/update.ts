@@ -424,7 +424,20 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
     writeFileSync(join(paths.home, ".start-reason"), `update:${commit}`);
     try { unlinkSync(join(paths.home, "watchdog.state")); } catch {}
 
-    // Kill old watchdog (bridge survives — nohup'd)
+    // Kill bridge FIRST (before spawning new watchdog — prevents double-bridge race)
+    if (bridgePid && bridgePid > 0) {
+      try {
+        process.kill(bridgePid, "SIGTERM");
+        process.stdout.write(`  🛑 Killing bridge (PID ${bridgePid})...\n`);
+        // Wait for bridge to die
+        for (let i = 0; i < 10; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          try { process.kill(bridgePid, 0); } catch { break; }
+        }
+      } catch {}
+    }
+
+    // Kill old watchdog (bridge already dead — safe to replace)
     try {
       const oldPids = execSync('ps ax -o pid,command | grep "bash.*watchdog.sh" | grep -v grep', { encoding: "utf-8" }).trim();
       if (oldPids) {
@@ -432,12 +445,11 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
           const pid = parseInt(line.trim(), 10);
           if (pid > 0) { try { process.kill(pid, "SIGTERM"); } catch {} }
         }
-        process.stdout.write(`  Killed old watchdog\n`);
         await new Promise(r => setTimeout(r, 1000));
       }
-    } catch {} // no watchdog running — fine
+    } catch {}
 
-    // Start new watchdog (uses freshly staged script, flock deduplicates)
+    // Start new watchdog (bridge is dead → watchdog will spawn fresh)
     const scriptPath = join(paths.home, "scripts/watchdog.sh");
     const logFd = openSync(join(paths.home, "logs/watchdog.log"), "a");
     const wd = spawn("bash", [scriptPath], {
@@ -446,19 +458,8 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
     wd.unref();
     closeSync(logFd);
     process.stdout.write(`  New watchdog spawned\n`);
-    await new Promise(r => setTimeout(r, 2000));
 
-    // Kill bridge → new watchdog respawns with new bundle
-    if (bridgePid && bridgePid > 0) {
-      try {
-        process.kill(bridgePid, "SIGTERM");
-        process.stdout.write(`  SIGTERM sent to bridge (PID ${bridgePid}) — watchdog will respawn\n`);
-        return true;
-      } catch {
-        process.stdout.write(`⚠️ Could not kill bridge (PID ${bridgePid}).\n`);
-      }
-    }
-    // Fallback: bridge not running — watchdog will spawn it on next poll
+    // Bridge already dead, watchdog will respawn — wait for health
     return true;
   }
 
