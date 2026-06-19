@@ -295,7 +295,7 @@ done
 # 3. Stale sleep lock (older than 2 hours, no matching audit .md)
 for lockfile in "$ABMIND/memory/sleep"/sleep_*.lock; do
   [ -f "$lockfile" ] || continue
-  lockage=$(( ($(date +%s) - $(stat -c %Y "$lockfile" 2>/dev/null || echo 0)) / 60 ))
+  lockage=$(( ($(date +%s) - $(stat -c %Y "$lockfile" 2>/dev/null || stat -f %m "$lockfile" 2>/dev/null || echo 0)) / 60 ))
   if [ "$lockage" -gt 120 ]; then
     base=$(basename "$lockfile" .lock)
     if ! ls "$ABMIND/memory/sleep/${base}"_*.md &>/dev/null; then
@@ -337,7 +337,7 @@ if [ -f "$DB" ]; then
     warn "memory.db integrity check failed: $INTEGRITY"
   fi
 
-  DB_SIZE=$(stat -c %s "$DB" 2>/dev/null || echo 0)
+  DB_SIZE=$(stat -c %s "$DB" 2>/dev/null || stat -f %z "$DB" 2>/dev/null || echo 0)
   if [ "$DB_SIZE" -gt 419430400 ]; then
     DB_MB=$((DB_SIZE / 1048576))
     warn "memory.db is ${DB_MB}MB -- approaching 500MB disk budget"
