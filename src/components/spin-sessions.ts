@@ -186,11 +186,12 @@ export function getSessionById(sessions: Map<string, ManagedSession>, sessionId:
   return sessions.get(sessionId);
 }
 
-export function formatList(sessions: Map<string, ManagedSession>, userId: string, platform: string): string {
-  const list = listSessions(sessions, userId, platform);
+export function formatList(sessions: Map<string, ManagedSession>, userId: string, platform: string, showAll = false): string {
+  const list = showAll ? listAllSessions(sessions) : listSessions(sessions, userId, platform);
   if (list.length === 0) return "No active sessions.";
   return list.map(s => {
-    const marker = s.active ? " *" : "";
+    const marker = s.active && s.userId === userId ? " *" : "";
+    const owner = showAll && s.userId !== userId ? ` (${s.userId})` : "";
     const bg = !s.active && sessionType(s) !== "A" ? " (bg)" : "";
     const paused = s.status === "paused" ? " ⏸" : "";
     const remote = s.peer ? ` (remote: ${s.peer})` : "";
@@ -199,6 +200,6 @@ export function formatList(sessions: Map<string, ManagedSession>, userId: string
     const time = new Date(sessionCreatedAt(s)).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
     const idle = s.busy ? "busy" : `idle ${Math.round((Date.now() - s.lastActiveAt) / 60000)}m`;
     const metrics = s.messageCount ? ` | ${s.messageCount} msgs` : "";
-    return `#${s.shortIndex} ${typeLabel(sessionType(s))}${nm}${remote}${bg}${model} — ${time}${paused}${marker} | ${idle}${metrics}`;
+    return `#${s.shortIndex} ${typeLabel(sessionType(s))}${owner}${nm}${remote}${bg}${model} — ${time}${paused}${marker} | ${idle}${metrics}`;
   }).join("\n");
 }

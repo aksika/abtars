@@ -13,7 +13,9 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
 
   // /session (no args) → list
   if (!args) {
-    await ctx.reply(ctx.sessionManager.formatList(ctx.userId, ctx.platform));
+    const { getMasterUserId } = await import("../../boot/phase-config.js");
+    const isMaster = ctx.userId === getMasterUserId();
+    await ctx.reply(ctx.sessionManager.formatList(ctx.userId, ctx.platform, isMaster));
     return true;
   }
 

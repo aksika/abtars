@@ -121,8 +121,8 @@ export class Spin {
     return this.sessions.get(sessionId);
   }
 
-  formatList(userId: string, platform: string): string {
-    return Sessions.formatList(this.sessions, userId, platform);
+  formatList(userId: string, platform: string, showAll = false): string {
+    return Sessions.formatList(this.sessions, userId, platform, showAll);
   }
 
   clearAll(): void { this.sessions.clear(); this.nextIndex = 0; }
