@@ -327,6 +327,9 @@ async function postSwapHousekeeping(
   }
   process.stdout.write(`✓ wrappers refreshed (${installManifest.cliWrappers.length} files)\n`);
 
+  // Nuke stale npm-global binary if present (shadows ~/.abtars/bin/)
+  try { const { execSync: ex } = await import("node:child_process"); ex("npm uninstall -g abtars 2>/dev/null", { stdio: "ignore", timeout: 10_000 }); } catch {}
+
   // Sync core skills
   const skillsCoreSrc = join(paths.app, "core", "skills");
   const skillsCoreDst = join(paths.home, "skills", "core");

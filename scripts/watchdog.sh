@@ -39,7 +39,7 @@ with open(p,'w') as f: json.dump(d,f)
 trap '' HUP
 trap 'exit 0' TERM INT
 
-[[ -f "$AB/.stopped" ]] && exit 0
+[[ -f "$AB/.stopped" ]] && exit 2
 
 while true; do
   # Read start reason (written by update/rollback/start, default: watchdog-respawn)
@@ -64,7 +64,7 @@ while true; do
   # Poll: alive + heartbeat
   DEATH_REASON=""
   while sleep "$POLL"; do
-    [[ -f "$AB/.stopped" ]] && exit 0
+    [[ -f "$AB/.stopped" ]] && exit 2
     # Cooperative restart: yield to replacement watchdog
     if [[ -f "$AB/.restart-watchdog" ]]; then
       rm -f "$AB/.restart-watchdog"
@@ -88,7 +88,7 @@ while true; do
     fi
   done
 
-  [[ -f "$AB/.stopped" ]] && exit 0
+  [[ -f "$AB/.stopped" ]] && exit 2
 
   # Log death
   echo "$(date +%FT%T) Bridge died: $DEATH_REASON (PID=$PID)" >> "$AB/logs/watchdog.log"
@@ -101,7 +101,7 @@ while true; do
   HB_CHECK=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
   if (( DEATHS >= 4 )) && [[ -z "$HB_CHECK" || "$HB_CHECK" == "0" ]]; then
     touch "$AB/.stopped"
-    exit 0
+    exit 2
   fi
 
   sleep 2
