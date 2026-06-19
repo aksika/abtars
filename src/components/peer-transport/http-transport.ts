@@ -25,6 +25,28 @@ export class HttpTransport implements PeerTransport {
       if (entry.transport !== "ws-outbound") continue;
       const client = new Client(name, entry);
       client.onPush((method, payload) => {
+        if (method === "callback") {
+          // Inbound callback from peer — fire as if it arrived via HTTP /v1/callbacks
+          const p = payload as { task_id: number; status: string; result_summary?: string; error?: string; tokens_used?: number };
+          import("../tasks/kanban-board.js").then(({ kanbanList, kanbanComplete, kanbanFail, kanbanAddTokens }) => {
+            const cards = kanbanList("running", "status").filter(c => {
+              if (c.type !== "remote") return false;
+              try { const m = JSON.parse(c.notes ?? "{}"); return m.peer === name && m.remote_task_id === p.task_id; } catch { return false; }
+            });
+            if (!cards.length) return;
+            const card = cards[0]!;
+            if (p.tokens_used) kanbanAddTokens(card.id, p.tokens_used);
+            if (p.status === "done") kanbanComplete(card.id, undefined, p.result_summary);
+            else kanbanFail(card.id, p.error ?? "remote failure");
+            import("../nerve.js").then(({ nerve }) => nerve.emit(p.status === "done" ? "card:done" : "card:failed", card.id));
+          }).catch(() => {});
+        } else if (method === "channel") {
+          // Inbound channel message from peer
+          const p = payload as { card_id: number; from_agent: string; message: string; created_at: string };
+          import("../tasks/kanban-channel.js").then(({ channelPost }) => {
+            channelPost(p.card_id, p.from_agent, "ALL", p.message);
+          }).catch(() => {});
+        }
         for (const h of this.handlers) h(name, { type: method as any, payload: payload as any });
       });
       client.connect();
@@ -64,6 +86,15 @@ export class HttpTransport implements PeerTransport {
       logTrace(TAG, `→ callback ${peer} result: ${String(message.payload.result_summary ?? "").slice(0, 200)}`);
       const payload: Record<string, unknown> = { task_id: message.payload.task_id, status: message.payload.status, result_summary: message.payload.result_summary, error: message.payload.error };
       if (message.payload.artifacts) payload.artifacts = message.payload.artifacts;
+
+      // #972: Push via WS if connected
+      const ws = this.wsClients.get(peer);
+      if (ws?.connected) {
+        await ws.send("callback", payload);
+        logInfo(TAG, `CALLBACK ${peer} (ws) task_id=${message.payload.task_id}`);
+        return;
+      }
+
       const body = JSON.stringify(payload);
       return this.httpCall(entry, peer, "POST", "/v1/callbacks", body);
     }
