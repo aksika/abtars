@@ -10,7 +10,7 @@ import type { IKiroTransport } from "./transport/kiro-transport.js";
 import { loadUsers } from "./user-registry.js";
 import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
-import { typeAgent } from "./spin-types.js";
+import { typeAgent, sessionType } from "./spin-types.js";
 import * as Sessions from "./spin-sessions.js";
 import { pushLog, isHollow } from "./spin-sessions.js";
 
@@ -163,15 +163,22 @@ export class Spin {
     this._greetingSent = true;
     const { userId, chatId, platform } = this._masterOpts;
     const session = this.getActiveSession(userId, platform);
-    const adapter = this._greetingAdapter!;
-    let attempt = 0;
-    let lastInjectAt = 0;
+    this.greetSession(session, chatId, userId);
+  }
 
+  /** Inject a greeting into an interactive session (A/C only). */
+  greetSession(session: ManagedSession, chatId: number, userId: string, adapter?: { injectMessage: (msg: any) => void }): void {
+    const type = sessionType(session);
+    if (type !== "A" && type !== "C") return;
+    if (session.messageCount > 0) return;
+    const a = adapter ?? this._greetingAdapter;
+    if (!a) return;
+
+    let attempt = 0;
     const inject = (): void => {
       attempt++;
-      lastInjectAt = Date.now();
-      adapter.injectMessage({
-        platform,
+      a.injectMessage({
+        platform: session.platform,
         channelId: String(chatId),
         userId,
         senderId: String(chatId),
@@ -182,15 +189,14 @@ export class Spin {
         isVoice: false,
       });
       setTimeout(() => {
-        if (session.messageCount > 0) return; // greeting delivered
-        if (session.busy) return; // model still thinking — don't retry
-        if (attempt >= 3) { logError(TAG, "Greeting failed after 3 attempts"); return; }
+        if (session.messageCount > 0) return;
+        if (session.busy) return;
+        if (attempt >= 3) { logWarn(TAG, "Greeting failed after 3 attempts"); return; }
         logWarn(TAG, `Greeting attempt ${attempt}/3 — no response, retrying`);
         inject();
       }, 60_000);
     };
 
-    // Event-driven: fire when transport is ready (#1000)
     if (session.transport?.isReady) {
       inject();
     } else if (session.transport) {

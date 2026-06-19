@@ -173,4 +173,47 @@ describe("Spin — unified session router (#943)", () => {
       expect(all.some(s => s.peer === "molty")).toBe(true);
     });
   });
+
+  describe("greetSession (#968)", () => {
+    it("fires inject for A session", () => {
+      const session = spin.getActiveSession("aksika", "telegram");
+      session.transport = mockTransport();
+      const adapter = { injectMessage: vi.fn() };
+      spin.greetSession(session, 111, "aksika", adapter);
+      expect(adapter.injectMessage).toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining("[SESSION START]"),
+        userId: "aksika",
+      }));
+    });
+
+    it("fires inject for C session", () => {
+      const result = spin.createSession("aksika", "telegram", "C");
+      expect(typeof result).not.toBe("string");
+      const session = result as import("./spin-types.js").ManagedSession;
+      session.transport = mockTransport();
+      const adapter = { injectMessage: vi.fn() };
+      spin.greetSession(session, 111, "aksika", adapter);
+      expect(adapter.injectMessage).toHaveBeenCalled();
+    });
+
+    it("skips non-interactive types (O, T, W)", () => {
+      const adapter = { injectMessage: vi.fn() };
+      for (const type of ["O", "T", "W"] as const) {
+        const result = spin.createSubSession("aksika", "telegram", type);
+        if (typeof result === "string") continue;
+        result.transport = mockTransport();
+        spin.greetSession(result, 111, "aksika", adapter);
+      }
+      expect(adapter.injectMessage).not.toHaveBeenCalled();
+    });
+
+    it("skips if messageCount > 0", () => {
+      const session = spin.getActiveSession("aksika", "telegram");
+      session.transport = mockTransport();
+      session.messageCount = 5;
+      const adapter = { injectMessage: vi.fn() };
+      spin.greetSession(session, 111, "aksika", adapter);
+      expect(adapter.injectMessage).not.toHaveBeenCalled();
+    });
+  });
 });

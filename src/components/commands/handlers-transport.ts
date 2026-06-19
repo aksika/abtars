@@ -28,6 +28,10 @@ export async function handleNewReset(text: string, ctx: CommandContext): Promise
   const label = isResetDefault ? "🔄 Reset to defaults." : "🔄 Transport reloaded.";
   await ctx.reply(label);
 
+  // Greet in the new session (#968)
+  const newSession = ctx.sessionManager.getActiveSession(ctx.userId, ctx.platform);
+  ctx.sessionManager.greetSession(newSession, ctx.chatId, ctx.userId);
+
   logInfo(TAG, `Reset session → ${activeId} (${ctx.platform})`);
   return true;
 }

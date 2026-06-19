@@ -28,6 +28,7 @@ export async function handleSession(text: string, ctx: CommandContext): Promise<
     const result = ctx.sessionManager.createSession(ctx.userId, ctx.platform, type);
     if (typeof result === "string") { await ctx.reply(`❌ ${result}`); return true; }
     await ctx.reply(`✓ Session #${result.shortIndex} (${typeLabel(sessionType(result))}) created.`);
+    ctx.sessionManager.greetSession(result, ctx.chatId, ctx.userId);
     logInfo(TAG, `New session ${result.id} for ${ctx.userId}`);
     return true;
   }
