@@ -20,7 +20,25 @@ export async function handleSleep(_text: string, ctx: CommandContext): Promise<b
   const lock = auditDir ? readLatestSleepLock(auditDir) : null;
 
   const lines: string[] = ["😴 Sleep status"];
-  const stateLabel = progress ? `🧠 Sleep cycle running (${progress.step}, ${progress.percent}%)` : sleepStatus === "sleeping" ? "😴 Asleep (idle)" : sleepStatus === "hw_sleep" ? "😴 Hardware sleep" : "👋 Awake";
+  let stateLabel: string;
+  if (progress) {
+    stateLabel = `🧠 Sleep cycle running (${progress.step}, ${progress.percent}%)`;
+  } else if (sleepStatus === "sleeping") {
+    stateLabel = "💤 Dreaming";
+    // Show progress from lock file
+    if (lock && lock.status === "ongoing") {
+      const steps = Object.entries(lock.steps);
+      const done = steps.filter(([, s]) => s.status === "ok" || s.status === "skipped").length;
+      const current = steps.find(([, s]) => s.status === "pending" || s.status === "ongoing");
+      const startedAt = lock.startedAt ? new Date(lock.startedAt).toISOString().replace("T", " ").slice(0, 16) : "";
+      if (startedAt) stateLabel += ` (since ${startedAt})`;
+      if (current) stateLabel += `\n  Step: ${current[0]} (${done}/${steps.length})`;
+    }
+  } else if (sleepStatus === "hw_sleep") {
+    stateLabel = "😴 Hardware sleep";
+  } else {
+    stateLabel = "👋 Awake";
+  }
   lines.push(`  State: ${stateLabel}`);
   if (lock) {
     const counts = Object.values(lock.steps);
@@ -109,7 +127,7 @@ export async function handleWakeup(_text: string, ctx: CommandContext): Promise<
 
 // ── /sleep — status + force-trigger ─────────────────────────────────────────
 
-function readLatestSleepLock(auditDir: string): { date: string; status: string; llmCalls: number; steps: Record<string, { status: string }> } | null {
+function readLatestSleepLock(auditDir: string): { date: string; status: string; llmCalls: number; startedAt?: number; steps: Record<string, { status: string }> } | null {
   try {
     const files = readdirSync(auditDir).filter(f => f.startsWith("sleep_") && f.endsWith(".lock")).sort();
     if (files.length === 0) return null;
@@ -117,7 +135,7 @@ function readLatestSleepLock(auditDir: string): { date: string; status: string; 
     const raw = JSON.parse(readFileSync(join(auditDir, latest), "utf-8"));
     const dateMatch = latest.match(/sleep_(\d{4})(\d{2})(\d{2})/);
     const date = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` : "unknown";
-    return { date, status: raw.status ?? "unknown", llmCalls: raw.llmCalls ?? 0, steps: raw.steps ?? {} };
+    return { date, status: raw.status ?? "unknown", llmCalls: raw.llmCalls ?? 0, startedAt: raw.startedAt, steps: raw.steps ?? {} };
   } catch (err) { logAndSwallow(TAG, "readLastSleepAudit", err); return null; }
 }
 

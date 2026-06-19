@@ -121,7 +121,7 @@ export function createSleepHandle(opts: SleepOpts): SleepHandle {
       catch (err) { logWarn("sleep", `Invalid SLEEP_QUALITY='${raw}', using ${abmind()!.DEFAULT_LEVEL}: ${err instanceof Error ? err.message : String(err)}`); return abmind()!.DEFAULT_LEVEL; }
     })();
 
-    abmind()!.runSleepCycle({ runtime: opts.runtime, level })
+    abmind()!.runSleepCycle({ runtime: opts.runtime, level, fresh: forced && !!forceSleep?.includes("fresh") })
       .then(async (result: { ok: boolean; failCount: number }) => {
         running = false;
         progress = null;
