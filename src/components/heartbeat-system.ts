@@ -1,5 +1,5 @@
 import { logInfo, logWarn, logDebug } from "./logger.js";
-import { updateLastHeartbeat } from "./transport/bridge-lock-transport.js";
+import { updateLastHeartbeat, updateBridgeLockField } from "./transport/bridge-lock-transport.js";
 import type { HeartbeatTask } from "abmind";
 
 export type HeartbeatConfig = {
@@ -27,6 +27,7 @@ export class HeartbeatSystem implements ITaskSlot {
   private tasks: HeartbeatTask[] = [];
   private running = false;
   private lastTickAt = 0;
+  private tickCount = 0;
   private readonly taskStatuses = new Map<string, TaskStatus>();
   private _cronQueue: { enqueue: (entry: any, cb: any) => void } | null = null;
   private _notify: ((chatId: string, text: string) => void) | null = null;
@@ -146,6 +147,18 @@ export class HeartbeatSystem implements ITaskSlot {
 
     // Update bridge.lock with lastHeartbeat
     updateLastHeartbeat();
+
+    // Heap stats — once per hour (every 60 ticks)
+    this.tickCount++;
+    if (this.tickCount % 60 === 0) {
+      const heap = Math.round(process.memoryUsage().heapUsed / 1048576);
+      updateBridgeLockField("heapUsedMB", heap);
+      if (heap > 820) {
+        logWarn(TAG, `Heap high: ${heap}MB / 1024MB (80%+)`);
+      } else {
+        logDebug(TAG, `Heap: ${heap}MB / 1024MB`);
+      }
+    }
 
     // Kick the watchdog
     this.config.onTick?.();

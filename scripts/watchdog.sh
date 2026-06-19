@@ -47,7 +47,7 @@ while true; do
   rm -f "$AB/.start-reason"
 
   # Start bridge
-  cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" nohup node app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
+  cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
   disown $PID
   SPAWNED_AT=$(date +%s)
