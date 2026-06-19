@@ -273,11 +273,15 @@ const memoryRecallTool: ToolDefinition = {
     if (memoryBackend) {
       try {
         const t0 = Date.now();
+        const userId = context?.userId ?? getMasterUserId();
+        const { loadUsers } = await import("../user-registry.js");
+        const userEntry = loadUsers().byUserId.get(userId);
         const result = await memoryBackend.recall({
           translated: [args["query"] ?? ""],
           original: args["query"] ?? "",
-          userId: context?.userId ?? getMasterUserId(),
+          userId,
           limit: parseInt(args["limit"] ?? "10", 10),
+          maxClassification: userEntry?.maxClass ?? 1,
         });
         import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
         return JSON.stringify(result);
