@@ -49,6 +49,7 @@ export class DiscordAdapter implements PlatformAdapter {
   private readonly config: DiscordAdapterConfig;
   private deps: DiscordAdapterDeps;
   private poller: DiscordPoller | null = null;
+  private _typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
   constructor(config: DiscordAdapterConfig, deps: DiscordAdapterDeps) {
     this.api = new DiscordApi(config.botToken);
@@ -207,12 +208,25 @@ export class DiscordAdapter implements PlatformAdapter {
   }
 
   async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<string | undefined> {
+    this._stopTypingLoop(channelId);
     const id = await this.api.sendMessage(channelId, text);
     return id || undefined;
   }
 
   async sendTyping(channelId: string): Promise<void> {
     await this.api.sendTyping(channelId);
+  }
+
+  private _startTypingLoop(channelId: string): void {
+    if (this._typingIntervals.has(channelId)) return;
+    this.api.sendTyping(channelId).catch(() => {});
+    const iv = setInterval(() => { this.api.sendTyping(channelId).catch(() => {}); }, 8000);
+    this._typingIntervals.set(channelId, iv);
+  }
+
+  private _stopTypingLoop(channelId: string): void {
+    const iv = this._typingIntervals.get(channelId);
+    if (iv) { clearInterval(iv); this._typingIntervals.delete(channelId); }
   }
 
   async setReaction(channelId: string, messageId: number | string, emoji: string): Promise<void> {
@@ -239,6 +253,13 @@ export class DiscordAdapter implements PlatformAdapter {
 
   private async handleMessage(message: DiscordInboundMessage): Promise<void> {
     logDebug(TAG, `Message from ${message.authorUsername} in ${message.channelId}`);
+
+    // Bot-to-bot filtering (#1064)
+    if (message.authorIsBot) {
+      const policy = getEnv().discordAllowBots;
+      if (policy === "none") return;
+      if (policy === "mentions" && !message.mentionsBotId) return;
+    }
 
     const effectiveChannelId = message.parentChannelId ?? message.channelId;
 
@@ -278,7 +299,7 @@ export class DiscordAdapter implements PlatformAdapter {
 
     // Mention filter: in non-DM channels, check DISCORD_GROUP_MENTIONS mode.
     const isDM = message.isDM;
-    if (!isDM) {
+    if (!isDM && !getEnv().discordFreeChannels.has(effectiveChannelId)) {
       const mentionMode = getEnv().discordGroupMentions; // "required" | "optional"
 
       if (mentionMode === "optional") {
@@ -328,7 +349,9 @@ export class DiscordAdapter implements PlatformAdapter {
       return;
     }
 
+    this._startTypingLoop(message.channelId);
     await handleInboundMessage(inbound, this, this.deps.pipeline);
+    this._stopTypingLoop(message.channelId);
   }
 
   private async handleReaction(
