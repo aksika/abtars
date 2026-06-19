@@ -55,7 +55,7 @@ export class HttpTransport implements PeerTransport {
     for (const h of this.handlers) { try { h(from, message); } catch {} }
   }
 
-  async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }> }): Promise<number> {
+  async delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }> }): Promise<{ taskId: number; remoteSessionId?: string }> {
     const config = loadPeerConfig();
     const entry = resolvePeer(config.peers, peer);
 
@@ -82,7 +82,7 @@ export class HttpTransport implements PeerTransport {
     const response = await this.httpCall(entry, peer, "POST", "/v1/tasks", body);
     const parsed = JSON.parse(response);
     logInfo(TAG, `PEER_DELEGATE ${peer} → remote#${parsed.task_id} (${goal.length}ch)`);
-    return parsed.task_id;
+    return { taskId: parsed.task_id, remoteSessionId: parsed.session_id };
   }
 
   async checkTask(peer: string, taskId: number): Promise<TaskResult> {

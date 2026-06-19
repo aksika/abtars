@@ -49,7 +49,7 @@ export interface PeerTransport {
   onMessage(handler: (from: string, message: PeerMessage) => void): void;
 
   /** Delegate a task to a remote peer. Returns remote cardId. */
-  delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }> }): Promise<number>;
+  delegateTask(peer: string, goal: string, opts?: { priority?: string; context?: string; artifacts?: Array<{ name: string; content: string }> }): Promise<{ taskId: number; remoteSessionId?: string }>;
 
   /** Check status of a remote task. */
   checkTask(peer: string, taskId: number): Promise<TaskResult>;

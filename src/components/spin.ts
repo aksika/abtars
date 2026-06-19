@@ -325,7 +325,7 @@ export class Spin {
     return typeof sub === "string" ? undefined : sub;
   }
 
-  dispatch(request: SpinRequest): number {
+  dispatch(request: SpinRequest): { cardId: number; sessionId?: string } {
     const cardTitle = request.title ?? request.goal.slice(0, 80);
     const cardId = request.cardId ?? kanbanEnqueue(cardTitle, request.source, undefined, {
       priority: request.priority ?? "MEDIUM", type: request.type,
@@ -336,7 +336,7 @@ export class Spin {
 
     if (!this.canDispatch(request.type, cardId)) {
       logInfo(TAG, `${request.type} card:${cardId} queued (concurrency gate)`);
-      return cardId;
+      return { cardId };
     }
 
     this.markRunning(request.type, cardId);
@@ -369,7 +369,7 @@ export class Spin {
         this.drainQueued();
       });
 
-    return cardId;
+    return { cardId, sessionId: session?.id };
   }
 
   async dispatchAwait(request: SpinRequest): Promise<{ cardId: number; result: string }> {
@@ -406,7 +406,7 @@ export class Spin {
 
   spawnChild(parentCardId: number, request: Omit<SpinRequest, "type"> & { type?: SessionType }): number {
     if (request.type === "O") throw new Error("Cannot nest orchestrators");
-    return this.dispatch({ ...request, type: "W", parentCardId });
+    return this.dispatch({ ...request, type: "W", parentCardId }).cardId;
   }
 
   // ── Internal ───────────────────────────────────────────────────────────

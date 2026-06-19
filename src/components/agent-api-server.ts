@@ -625,7 +625,7 @@ export class AgentApiServer {
     }
 
     const { spin } = await import("./spin.js");
-    const cardId = spin.dispatch({
+    const { cardId, sessionId } = spin.dispatch({
       type: "O",
       goal: body.context ? `${goal}\n\nContext: ${body.context}` : goal,
       source: "peer",
@@ -656,7 +656,7 @@ export class AgentApiServer {
     });
 
     res.writeHead(202, { "Content-Type": "application/json" })
-      .end(JSON.stringify({ task_id: cardId, status: "queued" }));
+      .end(JSON.stringify({ task_id: cardId, status: "queued", session_id: sessionId }));
   }
 
   /** #894 — GET /v1/tasks/:id — poll task status + result. */

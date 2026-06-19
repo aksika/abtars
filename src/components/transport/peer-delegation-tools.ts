@@ -67,16 +67,23 @@ export const peerDelegateTool: ToolDefinition = {
 
     try {
       const transport = getPeerTransport();
-      const remoteTaskId = await transport.delegateTask(peer, goal, { priority, context, artifacts });
+      const { taskId: remoteTaskId, remoteSessionId } = await transport.delegateTask(peer, goal, { priority, context, artifacts });
 
       const localCardId = kanbanEnqueue(`[remote:${peer}] ${goal.slice(0, 80)}`, "peer", undefined, {
         type: "remote",
         priority: priority ?? "MEDIUM",
-        notes: JSON.stringify({ peer, remote_task_id: remoteTaskId, goal, requires }),
+        notes: JSON.stringify({ peer, remote_task_id: remoteTaskId, remote_session_id: remoteSessionId, goal, requires }),
       });
 
+      // #949: Create hollow session to track remote worker locally
+      if (remoteSessionId) {
+        const { spin } = await import("../spin.js");
+        const { getMasterUserId } = await import("../../boot/phase-config.js");
+        spin.createHollowSession(getMasterUserId(), "telegram", "W", peer, remoteSessionId);
+      }
+
       logInfo(TAG, `Delegated to ${peer}: remote#${remoteTaskId} → local#${localCardId}`);
-      return JSON.stringify({ ok: true, local_card_id: localCardId, remote_task_id: remoteTaskId, peer, status: "queued" });
+      return JSON.stringify({ ok: true, local_card_id: localCardId, remote_task_id: remoteTaskId, remote_session_id: remoteSessionId, peer, status: "queued" });
     } catch (err) {
       logWarn(TAG, `peer_delegate failed: ${err instanceof Error ? err.message : String(err)}`);
       return JSON.stringify({ error: `peer_delegate failed: ${err instanceof Error ? err.message : String(err)}` });
