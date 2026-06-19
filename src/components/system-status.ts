@@ -171,12 +171,13 @@ export function renderStatusText(status: SystemStatus): string {
   ];
 
   // Watchdog
-  try {
-    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
-    const wdPid = execFileSync("pgrep", ["-f", "watchdog.sh"], { encoding: "utf-8", timeout: 2000 }).trim().split("\n")[0];
-    if (wdPid) lines.push(`  Watchdog: PID ${wdPid} (bash)`);
-    else lines.push("  Watchdog: not running");
-  } catch { lines.push("  Watchdog: not detected"); }
+  const wdPid = process.env.ABTARS_WATCHDOG_PID;
+  if (wdPid && wdPid !== "0") {
+    try { process.kill(Number(wdPid), 0); lines.push(`  Watchdog: PID ${wdPid}`); }
+    catch { lines.push("  Watchdog: not running (stale PID)"); }
+  } else {
+    lines.push("  Watchdog: not detected");
+  }
 
   // Platforms
   const platforms = status.subsystems.find(s => s.name === "phasePlatforms");
