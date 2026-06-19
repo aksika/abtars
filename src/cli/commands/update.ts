@@ -176,7 +176,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
     // ── Step 9: Health probe ────────────────────────────────────────────
     process.stdout.write(`Waiting for bridge health...\n`);
-    const health = await healthProbe(paths.home, restartTimestamp, 60_000);
+    const health = await healthProbe(paths.home, restartTimestamp, 120_000);
 
     if (health.healthy) {
       writeSentinel(paths.home, { ...sentinelData, status: 'success' });
@@ -190,7 +190,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     }
 
     // ── Step 10: Auto-rollback ──────────────────────────────────────────
-    process.stderr.write(`❌ Bridge unhealthy after 60s. Auto-rolling back...\n`);
+    process.stderr.write(`❌ Bridge unhealthy after 120s. Auto-rolling back...\n`);
 
     if (!existsSync(paths.appPrev1)) {
       process.stderr.write(`❌ No app.prev.1/ to roll back to. Manual intervention required.\n`);
@@ -415,51 +415,41 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
   }
 
   if (mode === "supervised-daemon" || mode === "supervised") {
-    process.stdout.write("\n♻️ Replacing watchdog + restarting bridge...\n");
-    const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
-    // Write start reason + clear watchdog state (new software = clean counter)
+    process.stdout.write("\n♻️ Restarting bridge via watchdog...\n");
     const { writeFileSync, unlinkSync, openSync, closeSync } = await import("node:fs");
-    const { execSync, spawn } = await import("node:child_process");
+    const { spawn } = await import("node:child_process");
     const commit = readJsonField(join(paths.app, "package.json"), "version") as string ?? "unknown";
     writeFileSync(join(paths.home, ".start-reason"), `update:${commit}`);
     try { unlinkSync(join(paths.home, "watchdog.state")); } catch {}
 
-    // Kill bridge FIRST (before spawning new watchdog — prevents double-bridge race)
+    // Write sentinel — watchdog will see it on next poll, kill bridge, and exit
+    writeFileSync(join(paths.home, ".restart-watchdog"), "");
+
+    // Kill bridge directly (sentinel only tells WD to exit — bridge needs direct kill)
+    const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
     if (bridgePid && bridgePid > 0) {
-      try {
-        process.kill(bridgePid, "SIGTERM");
-        process.stdout.write(`  🛑 Killing bridge (PID ${bridgePid})...\n`);
-        // Wait for bridge to die
-        for (let i = 0; i < 10; i++) {
-          await new Promise(r => setTimeout(r, 500));
-          try { process.kill(bridgePid, 0); } catch { break; }
-        }
-      } catch {}
+      try { process.kill(bridgePid, "SIGTERM"); } catch {}
+      process.stdout.write(`  🛑 Killing bridge (PID ${bridgePid})...\n`);
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        try { process.kill(bridgePid, 0); } catch { break; }
+      }
     }
 
-    // Kill old watchdog (bridge already dead — safe to replace)
-    try {
-      const oldPids = execSync('ps ax -o pid,command | grep "bash.*watchdog.sh" | grep -v grep', { encoding: "utf-8" }).trim();
-      if (oldPids) {
-        for (const line of oldPids.split("\n").filter(Boolean)) {
-          const pid = parseInt(line.trim(), 10);
-          if (pid > 0) { try { process.kill(pid, "SIGTERM"); } catch {} }
-        }
-        await new Promise(r => setTimeout(r, 1000));
-      }
-    } catch {}
+    process.stdout.write(`  Sentinel written — watchdog will restart with new code\n`);
 
-    // Start new watchdog (bridge is dead → watchdog will spawn fresh)
-    const scriptPath = join(paths.home, "scripts/watchdog.sh");
-    const logFd = openSync(join(paths.home, "logs/watchdog.log"), "a");
-    const wd = spawn("bash", [scriptPath], {
-      detached: true, stdio: ["ignore", logFd, logFd], cwd: paths.home
-    });
-    wd.unref();
-    closeSync(logFd);
-    process.stdout.write(`  New watchdog spawned\n`);
+    // For supervised (no daemon): spawn new watchdog (daemon mode: daemon respawns it)
+    if (mode === "supervised") {
+      const scriptPath = join(paths.home, "scripts/watchdog.sh");
+      const logFd = openSync(join(paths.home, "logs/watchdog.log"), "a");
+      const wd = spawn("bash", [scriptPath], {
+        detached: true, stdio: ["ignore", logFd, logFd], cwd: paths.home
+      });
+      wd.unref();
+      closeSync(logFd);
+      process.stdout.write(`  New watchdog spawned\n`);
+    }
 
-    // Bridge already dead, watchdog will respawn — wait for health
     return true;
   }
 

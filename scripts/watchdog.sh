@@ -49,6 +49,12 @@ while true; do
   # Pre-flight doctor
   [ -x "$AB/scripts/doctor.sh" ] && "$AB/scripts/doctor.sh" --fix >> "$AB/logs/watchdog.log" 2>&1 || true
 
+  # Check for restart sentinel before spawning (consumed by a previous update while we were starting)
+  if [[ -f "$AB/.restart-watchdog" ]]; then
+    rm -f "$AB/.restart-watchdog"
+    exit 0
+  fi
+
   # Start bridge
   cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
@@ -59,6 +65,13 @@ while true; do
   DEATH_REASON=""
   while sleep "$POLL"; do
     [[ -f "$AB/.stopped" ]] && exit 0
+    # Cooperative restart: yield to replacement watchdog
+    if [[ -f "$AB/.restart-watchdog" ]]; then
+      rm -f "$AB/.restart-watchdog"
+      kill "$PID" 2>/dev/null
+      wait "$PID" 2>/dev/null
+      exit 0
+    fi
     if ! kill -0 "$PID" 2>/dev/null; then
       wait "$PID" 2>/dev/null; EXIT_CODE=$?
       DEATH_REASON="process-gone:exit=$EXIT_CODE"

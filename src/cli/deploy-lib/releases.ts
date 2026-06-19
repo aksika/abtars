@@ -96,15 +96,15 @@ export async function healthProbe(
 ): Promise<{ healthy: boolean; pid?: number; heartbeat?: number }> {
   const lockPath = join(home, 'bridge.lock');
   const deadline = Date.now() + timeoutMs;
+  const oldPid = (() => { try { return JSON.parse(readFileSync(lockPath, 'utf-8')).pid; } catch { return 0; } })();
   while (Date.now() < deadline) {
     try {
       const content = JSON.parse(await readFile(lockPath, 'utf-8'));
-      if (content.lastHeartbeat && content.lastHeartbeat > afterTimestamp) {
+      // Verify bridge restarted (new PID) AND is healthy (fresh heartbeat)
+      if (content.pid !== oldPid && content.lastHeartbeat && content.lastHeartbeat > afterTimestamp) {
         return { healthy: true, pid: content.pid, heartbeat: content.lastHeartbeat };
       }
-    } catch {
-      // File doesn't exist yet or invalid JSON — keep polling
-    }
+    } catch {}
     await new Promise(r => setTimeout(r, 3000));
   }
   return { healthy: false };
