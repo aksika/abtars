@@ -10,7 +10,7 @@
 
 import { readFileSync, appendFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { logInfo, logDebug } from "./logger.js";
 import { getLogFile } from "./logger.js";
 import { abtarsHome } from "../paths.js";
@@ -160,7 +160,17 @@ function handleUnknownFault(errorLine: string, errorKey: string, adapter: Telegr
   logAutoFix(`AGENT START: ${errorKey}`);
   logShaCall(errorKey, errorLine);
 
-  const prompt = `A runtime error occurred:\n"${errorLine.slice(0, 500)}"\n\nBefore investigating, check ~/.abtars/logs/sha-call.log for prior entries matching this error pattern.\nIf you find a PREVIOUS entry with a similar error pattern:\n  - This is a recurring fault you could not eliminate last time.\n  - Add a suppress rule to ~/.abtars/config/sha-policy-self.json (read existing file, append to fixes array):\n    {"pattern": "<plain substring from the error line>", "action": "suppress"}\n    Pattern is matched via substring (includes), NOT regex. Use a distinctive fragment.\n  - Report: "Recurring unfixable fault — suppressed."\n  - Do NOT attempt a fix.\n\nOtherwise, diagnose and fix it. After fixing:\n1. Report what you did (1 paragraph)\n2. If this error is likely to recur and you found a deterministic fix, write a wired rule to ~/.abtars/config/sha-policy-self.json:\n   {"pattern": "<substring>", "action": "run", "command": [...], "cooldownMin": 30}\n   Pattern is matched via substring (includes), NOT regex.\n   If the error was a one-off or no reliable automated fix exists, skip this step.`;
+  // Ensure source is available for SHA to investigate
+  const srcDir = join(abtarsHome(), "src/abtars");
+  if (!existsSync(srcDir)) {
+    try {
+      mkdirSync(join(abtarsHome(), "src"), { recursive: true });
+      execSync(`git clone -b dev git@github.com:aksika/abtars.git "${srcDir}"`, { timeout: 60_000, stdio: "ignore" });
+    } catch { /* proceed without source */ }
+  }
+
+  const prompt = `A runtime error occurred:\n"${errorLine.slice(0, 500)}"\n\nBefore investigating, check ~/.abtars/logs/sha-call.log for prior entries matching this error pattern.\nIf you find a PREVIOUS entry with a similar error pattern:\n  - This is a recurring fault you could not eliminate last time.\n  - Add a suppress rule to ~/.abtars/config/sha-policy-self.json (read existing file, append to fixes array):\n    {"pattern": "<plain substring from the error line>", "action": "suppress"}\n    Pattern is matched via substring (includes), NOT regex. Use a distinctive fragment.\n  - Report: "Recurring unfixable fault — suppressed."\n  - Do NOT attempt a fix.\n\nOtherwise, diagnose and fix it. After fixing:\n1. Report what you did (1 paragraph)\n2. If this error is likely to recur and you found a deterministic fix, write a wired rule to ~/.abtars/config/sha-policy-self.json:\n   {"pattern": "<substring>", "action": "run", "command": [...], "cooldownMin": 30}\n   Pattern is matched via substring (includes), NOT regex.\n   If the error was a one-off or no reliable automated fix exists, skip this step.\n\nIf you cannot find the root cause in the source code, tell the user:\n"This may be fixed in a newer version. Try /update to get the latest."
+Do NOT attempt to fix code you don't understand.`;
 
   const timeout = setTimeout(() => { onDone(); }, 5 * 60_000);
 
