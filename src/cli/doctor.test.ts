@@ -3,6 +3,8 @@ import { mkdirSync, writeFileSync, statSync, readFileSync, chmodSync } from "nod
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
+
+const IS_WSL = readFileSync("/proc/version", "utf-8").toLowerCase().includes("microsoft");
 import { tmpdir } from "node:os";
 
 const DOCTOR = join(import.meta.dirname, "../../scripts/doctor.sh");
@@ -59,7 +61,7 @@ describe("doctor.sh", () => {
     expect(code).toBe(0);
   });
 
-  it("--fix fixes directory permissions to 700", () => {
+  it.skipIf(IS_WSL)("--fix fixes directory permissions to 700", () => {
     setupHome(home);
     chmodSync(join(home, ".abtars", "secret"), 0o755);
     chmodSync(join(home, ".abtars", "secret", "cookies"), 0o755);
@@ -94,7 +96,7 @@ describe("doctor.sh", () => {
     expect(output).toContain("WARN");
   });
 
-  it("diagnose-only exits 0 when clean", () => {
+  it.skipIf(IS_WSL)("diagnose-only exits 0 when clean", () => {
     setupHome(home, { installMode: "supervised" }, true);
     const { code } = runDoctor(home, "");
     expect(code).toBe(0);

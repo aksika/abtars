@@ -46,6 +46,9 @@ while true; do
   REASON=$(cat "$AB/.start-reason" 2>/dev/null || echo "watchdog-respawn")
   rm -f "$AB/.start-reason"
 
+  # Pre-flight doctor
+  [ -x "$AB/scripts/doctor.sh" ] && "$AB/scripts/doctor.sh" --fix >> "$AB/logs/watchdog.log" 2>&1 || true
+
   # Start bridge
   cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
