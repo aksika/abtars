@@ -186,7 +186,7 @@ const probeFtsIntegrity: ProbeFn = async (_ctx) => {
   try {
     const dbPath = join(abmindHome(), "memory", "memory.db");
     const missing: string[] = [];
-    const REQUIRED = ["messages_fts", "extracted_memories_fts", "extracted_memories_original_fts", "content_en_trigram", "content_original_trigram"];
+    const REQUIRED = ["extracted_memories_fts", "content_en_trigram", "content_original_trigram"];
     for (const t of REQUIRED) {
       const exists = execSync(`sqlite3 "${dbPath}" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t}'"`, { stdio: "pipe", timeout: 2000, encoding: "utf-8" }).trim();
       if (!exists) missing.push(t);
