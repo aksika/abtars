@@ -201,6 +201,35 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
   // Nuke stale npm-global binary
   try { execSync("npm uninstall -g abtars 2>/dev/null", { stdio: "ignore", timeout: 10_000 }); } catch {}
 
+  // Reload plist/systemd if changed
+  if (process.platform === "darwin") {
+    const src = join(paths.home, "scripts", "com.abtars.watchdog.plist");
+    const dst = join(process.env["HOME"] ?? "", "Library/LaunchAgents/com.abtars.watchdog.plist");
+    if (existsSync(src)) {
+      let srcContent = readFileSync(src, "utf-8").replace(/\{\{HOME\}\}/g, process.env["HOME"] ?? "");
+      const dstContent = existsSync(dst) ? readFileSync(dst, "utf-8") : "";
+      if (srcContent !== dstContent) {
+        writeFileSync(dst, srcContent);
+        const uid = `gui/${process.getuid?.() ?? 501}`;
+        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync(`launchctl bootstrap ${uid} "${dst}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
+        process.stdout.write(`  ✓ plist reloaded\n`);
+      }
+    }
+  } else {
+    const src = join(paths.home, "scripts", "abtars-watchdog.service");
+    const dst = join(process.env["HOME"] ?? "", ".config/systemd/user/abtars-watchdog.service");
+    if (existsSync(src) && existsSync(dst)) {
+      const srcContent = readFileSync(src, "utf-8");
+      const dstContent = readFileSync(dst, "utf-8");
+      if (srcContent !== dstContent) {
+        copyFileSync(src, dst);
+        try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch {}
+        process.stdout.write(`  ✓ systemd unit reloaded\n`);
+      }
+    }
+  }
+
   // Skills + prompts
   const skillsSrc = join(paths.app, "core", "skills");
   const skillsDst = join(paths.home, "skills", "core");
