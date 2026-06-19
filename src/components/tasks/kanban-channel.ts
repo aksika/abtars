@@ -51,6 +51,8 @@ export interface ChannelMessage {
   message: string;
   directive: number;
   created_at: string;
+  remote_peer: string | null;
+  msg_type: string;
 }
 
 const MAX_MESSAGE_LEN = 1000;
@@ -65,7 +67,7 @@ export function channelPost(cardId: number, from: string, to: string, message: s
 }
 
 export function channelRead(cardId: number, opts?: { since?: string; from?: string }): ChannelMessage[] {
-  let sql = "SELECT id, card_id, from_agent, to_agent, message, directive, created_at FROM agent_channel WHERE card_id = ?";
+  let sql = "SELECT id, card_id, from_agent, to_agent, message, directive, created_at, remote_peer, msg_type FROM agent_channel WHERE card_id = ?";
   const params: any[] = [cardId];
   if (opts?.since) { sql += " AND created_at > ?"; params.push(opts.since); }
   if (opts?.from) { sql += " AND from_agent = ?"; params.push(opts.from); }

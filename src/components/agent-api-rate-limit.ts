@@ -30,3 +30,15 @@ export function checkRateLimit(caller: string): { allowed: boolean; retryAfterMs
   w.daily.push(now);
   return { allowed: true };
 }
+
+// #949: Per-peer 10s rate limit on all A2A POST/DELETE endpoints
+const peerLastPost = new Map<string, number>();
+const PEER_POST_COOLDOWN_MS = 10_000;
+
+export function checkPeerPostLimit(peer: string): boolean {
+  const now = Date.now();
+  const last = peerLastPost.get(peer);
+  if (last && now - last < PEER_POST_COOLDOWN_MS) return false;
+  peerLastPost.set(peer, now);
+  return true;
+}

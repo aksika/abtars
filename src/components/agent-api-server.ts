@@ -266,7 +266,7 @@ export class AgentApiServer {
     }
     // #894 — /v1/tasks: async task delegation (fire-and-forget, returns cardId)
     if (url === "/v1/tasks" && method === "POST") {
-      const caller = this.requireBearer(req, res);
+      const caller = this.requireBearerRateLimited(req, res);
       if (caller === null) return;
       this.handleV1Tasks(req, res, caller).catch((err) => {
         logWarn(TAG, `/v1/tasks error: ${err instanceof Error ? err.message : String(err)}`);
@@ -285,7 +285,7 @@ export class AgentApiServer {
     }
     // #894 — DELETE /v1/tasks/:id — cancel task
     if (url.startsWith("/v1/tasks/") && method === "DELETE") {
-      if (this.requireBearer(req, res) === null) return;
+      if (this.requireBearerRateLimited(req, res) === null) return;
       this.handleV1TaskCancel(url, res);
       return;
     }
@@ -294,7 +294,7 @@ export class AgentApiServer {
     // #949 — GET /v1/tasks/:cardId/messages?since=: pull catch-up
     const msgMatch = url.match(/^\/v1\/tasks\/(\d+)\/messages/);
     if (msgMatch && method === "POST") {
-      const caller = this.requireBearer(req, res);
+      const caller = this.requireBearerRateLimited(req, res);
       if (caller === null) return;
       this.handleChannelPush(req, res, caller, Number(msgMatch[1]));
       return;
@@ -307,7 +307,7 @@ export class AgentApiServer {
 
     // #675 — POST /v1/callbacks: peer pushes task result back
     if (url === "/v1/callbacks" && method === "POST") {
-      const caller = this.requireBearer(req, res);
+      const caller = this.requireBearerRateLimited(req, res);
       if (caller === null) return;
       this.handleV1Callback(req, res, caller);
       return;
@@ -397,6 +397,19 @@ export class AgentApiServer {
     res.writeHead(401, { "Content-Type": "application/json" })
       .end(JSON.stringify(openaiError("Invalid bearer token", "authentication_error", "invalid_api_key")));
     return null;
+  }
+
+  /** #949: requireBearer + 10s per-peer rate limit for POST/DELETE. Returns caller or null (response already sent). */
+  private requireBearerRateLimited(req: IncomingMessage, res: ServerResponse): string | null {
+    const caller = this.requireBearer(req, res);
+    if (caller === null) return null;
+    const { checkPeerPostLimit } = require("./agent-api-rate-limit.js") as typeof import("./agent-api-rate-limit.js");
+    if (!checkPeerPostLimit(caller)) {
+      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "10" })
+        .end(JSON.stringify(openaiError("Rate limit: max 1 request per 10s per peer", "rate_limit_error", "rate_limited")));
+      return null;
+    }
+    return caller;
   }
 
   /** #373 — /v1/chat/completions dispatch. */

@@ -199,7 +199,11 @@ export async function handleChannel(text: string, ctx: CommandContext): Promise<
   if (!rest) {
     const msgs = channelRead(cardId);
     if (msgs.length === 0) { await ctx.reply(`Channel #${cardId}: empty.`); return true; }
-    const lines = msgs.map(m => `[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${m.message}`);
+    const lines = msgs.map(m => {
+      const remote = m.remote_peer ? `[${m.remote_peer}] ` : "";
+      const type = m.msg_type && m.msg_type !== "progress" ? `[${m.msg_type}] ` : "";
+      return `${remote}[${m.from_agent}→${m.to_agent}]${m.directive ? " ⚡" : ""} ${type}${m.message}`;
+    });
     await ctx.reply(`📡 Channel #${cardId} (${msgs.length} msgs):\n${lines.join("\n")}`);
     return true;
   }
