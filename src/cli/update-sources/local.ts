@@ -3,7 +3,7 @@
  * checkout and stages the output into releases/<version>/dist/.
  *
  * Staleness guard: runs `git fetch` and refuses to proceed if HEAD is behind
- * origin/<branch>, unless allowStale (--from-local) is passed. Handles the
+ * origin/<branch>, unless allowStale (--local) is passed. Handles the
  * detached-HEAD / no-upstream / unpushed edge cases with a friendly message.
  *
  * Version string: `<package-version>-<short-sha>`, e.g. `0.1.0-28f71ef`.
@@ -65,7 +65,7 @@ function checkStaleness(repoRoot: string, allowStale: boolean): { commit: string
   if (branch === 'HEAD' || branch === null) {
     throw new LocalBuildError(
       'Working tree is in detached HEAD (no current branch).',
-      'Cannot check for staleness. Pass --from-local to proceed with the current tree.',
+      'Cannot check for staleness. Pass --local to proceed with the current tree.',
     );
   }
 
@@ -77,7 +77,7 @@ function checkStaleness(repoRoot: string, allowStale: boolean): { commit: string
   if (upstream === null) {
     throw new LocalBuildError(
       `Branch '${branch}' has no upstream configured.`,
-      'Cannot check for staleness. Push the branch, or pass --from-local to proceed with the current tree.',
+      'Cannot check for staleness. Push the branch, or pass --local to proceed with the current tree.',
     );
   }
 
@@ -87,13 +87,13 @@ function checkStaleness(repoRoot: string, allowStale: boolean): { commit: string
   if (behind === null || !Number.isFinite(behind)) {
     throw new LocalBuildError(
       `Could not determine how far HEAD is behind ${upstream}.`,
-      'Pass --from-local to proceed anyway.',
+      'Pass --local to proceed anyway.',
     );
   }
   if (behind > 0) {
     throw new LocalBuildError(
       `Current branch: ${branch} (${commit})\n${upstream} is ahead by ${behind} commit${behind === 1 ? '' : 's'}.`,
-      `Run 'git pull' first, or pass --from-local to build from the current tree.`,
+      `Run 'git pull' first, or pass --local to build from the current tree.`,
     );
   }
 
@@ -101,7 +101,7 @@ function checkStaleness(repoRoot: string, allowStale: boolean): { commit: string
   if (branch !== 'dev') {
     throw new LocalBuildError(
       `Current branch is '${branch}', but deployments must come from 'dev'.`,
-      `Run 'git checkout dev && git pull', or pass --from-local to override.`,
+      `Run 'git checkout dev && git pull', or pass --local to override.`,
     );
   }
 

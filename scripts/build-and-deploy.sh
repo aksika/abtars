@@ -53,4 +53,4 @@ node esbuild.config.js || { echo "FAILED: esbuild"; exit 1; }
 # Deploy (health-verified, auto-rollback)
 PHASE="deploy"
 echo "=== deploying ==="
-exec node bundle/abtars-cli.js update --from-local
+exec node bundle/abtars-cli.js update --local

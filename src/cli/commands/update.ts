@@ -13,6 +13,7 @@ import { copyFile, mkdir, chmod, readdir } from 'node:fs/promises';
 import { rmSync, cpSync, readdirSync, mkdirSync, copyFileSync } from 'node:fs';
 import { makeLocalBuildSource } from '../update-sources/local.js';
 import { makeNpmSource } from '../update-sources/npm.js';
+import { abtarsHome } from '../../paths.js';
 import type { SourceName } from '../update-sources/types.js';
 import {
   acquireLock, atomicSwap, cleanStaleStaging, configSnapshot,
@@ -20,7 +21,7 @@ import {
   readManifest, readSentinel, writeManifest, writeSentinel,
   type UpdateSentinel,
 } from '../deploy-lib-import.js';
-import { showHintOnce } from '../../components/hints.js';
+
 
 function readJsonField(file: string, field: string): unknown {
   try { return JSON.parse(readFileSync(file, 'utf-8'))[field]; } catch { return undefined; }
@@ -28,7 +29,7 @@ function readJsonField(file: string, field: string): unknown {
 
 export interface UpdateOptions {
   readonly source: SourceName;
-  readonly fromLocal: boolean;
+  readonly localDir?: string;
   readonly allowAbmindMismatch: boolean;
   readonly repoRoot?: string;
   readonly dryRun?: boolean;
@@ -73,22 +74,15 @@ export async function update(opts: UpdateOptions): Promise<number> {
     process.on('SIGTERM', () => { cleanupHandler(); process.exit(143); });
 
     // ── Step 1: Resolve source ──────────────────────────────────────────
-    let repoRoot = opts.repoRoot ?? process.cwd();
-    if (!opts.repoRoot && !existsSync(join(repoRoot, '.git'))) {
-      const { realpathSync } = await import('node:fs');
-      const scriptPath = realpathSync(process.argv[1] ?? '');
-      const { dirname } = await import('node:path');
-      const candidate = join(dirname(scriptPath), '..');
-      if (existsSync(join(candidate, 'bundle'))) repoRoot = candidate;
+    let repoRoot = opts.localDir ?? opts.repoRoot ?? join(abtarsHome(), "src", "abtars");
+    if (!existsSync(join(repoRoot, 'package.json'))) {
+      process.stderr.write(`Source not found at ${repoRoot}\nUse: abtars update --local <DIR>\n`);
+      return 1;
     }
 
     const source = opts.source === 'npm'
       ? makeNpmSource('abtars')
-      : makeLocalBuildSource({ repoRoot, allowStale: opts.fromLocal });
-
-    if (opts.fromLocal) {
-      showHintOnce("update-from-local", "Building from working copy (--from-local). To sync with remote first: git pull && abtars update");
-    }
+      : makeLocalBuildSource({ repoRoot, allowStale: !!opts.localDir });
 
     // --dry-run: print plan and exit
     if (opts.dryRun) {
@@ -101,7 +95,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     const staged = await source.prepare({
       stagingDir: paths.appStaging,
       home: paths.home,
-      allowStale: opts.fromLocal,
+      allowStale: !!opts.localDir,
     });
     process.stdout.write(`✓ staged ${staged.version}\n`);
 

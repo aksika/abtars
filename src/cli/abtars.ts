@@ -3,7 +3,7 @@
  *
  * Subcommands:
  *   install [--upgrade] [--force]
- *   update [--source local|npm|github] [--from-local]
+ *   update [--source local|npm|github] [--local DIR]
  *   rollback [--to <version>]
  *   status
  *
@@ -60,7 +60,7 @@ function printUsage(): void {
 Usage:
   abtars install [--force] [--mode=simple|supervised] [--restore <backup.zip>]
   abtars uninstall [--yes]
-  abtars update  [--source local|npm|github] [--from-local]
+  abtars update  [--source local|npm|github] [--local DIR]
   abtars rollback [--to <version>]
   abtars backup [--config] [--encrypt] [--output <dir>] [--prune-days N]
   abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]
@@ -109,7 +109,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'update':
         return await update({
           source: (flags.get('source') as 'local' | 'npm' | 'github' | undefined) ?? 'local',
-          fromLocal: flags.get('from-local') === true,
+          localDir: typeof flags.get('local') === 'string' ? flags.get('local') as string : flags.get('local') === true ? undefined : undefined,
           allowAbmindMismatch: flags.get('allow-abmind-mismatch') === true,
         });
       case 'rollback':
