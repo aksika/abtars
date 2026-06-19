@@ -420,14 +420,39 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
   }
 
   if (mode === "supervised-daemon" || mode === "supervised") {
-    process.stdout.write("\n♻️ Restarting bridge...\n");
+    process.stdout.write("\n♻️ Replacing watchdog + restarting bridge...\n");
     const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
     // Write start reason + clear watchdog state (new software = clean counter)
-    const { writeFileSync, unlinkSync } = await import("node:fs");
+    const { writeFileSync, unlinkSync, openSync, closeSync } = await import("node:fs");
+    const { execSync, spawn } = await import("node:child_process");
     const commit = readJsonField(join(paths.app, "package.json"), "version") as string ?? "unknown";
     writeFileSync(join(paths.home, ".start-reason"), `update:${commit}`);
     try { unlinkSync(join(paths.home, "watchdog.state")); } catch {}
 
+    // Kill old watchdog (bridge survives — nohup'd)
+    try {
+      const oldPid = execSync('pgrep -f "bash.*watchdog.sh"', { encoding: "utf-8" }).trim();
+      if (oldPid) {
+        for (const p of oldPid.split("\n").filter(Boolean)) {
+          try { process.kill(+p, "SIGTERM"); } catch {}
+        }
+        process.stdout.write(`  Killed old watchdog (PID ${oldPid.split("\n")[0]})\n`);
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    } catch {} // no watchdog running — fine
+
+    // Start new watchdog (uses freshly staged script, flock deduplicates)
+    const scriptPath = join(paths.home, "scripts/watchdog.sh");
+    const logFd = openSync(join(paths.home, "logs/watchdog.log"), "a");
+    const wd = spawn("bash", [scriptPath], {
+      detached: true, stdio: ["ignore", logFd, logFd], cwd: paths.home
+    });
+    wd.unref();
+    closeSync(logFd);
+    process.stdout.write(`  New watchdog spawned\n`);
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Kill bridge → new watchdog respawns with new bundle
     if (bridgePid && bridgePid > 0) {
       try {
         process.kill(bridgePid, "SIGTERM");
@@ -437,11 +462,7 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
         process.stdout.write(`⚠️ Could not kill bridge (PID ${bridgePid}).\n`);
       }
     }
-    // Fallback: cold restart
-    const { restart } = await import("./restart.js");
-    await restart({ cold: true }).catch((err: unknown) => {
-      process.stderr.write(`⚠️ Restart failed: ${err instanceof Error ? err.message : String(err)}\n`);
-    });
+    // Fallback: bridge not running — watchdog will spawn it on next poll
     return true;
   }
 
