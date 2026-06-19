@@ -30,6 +30,7 @@ function readJsonField(file: string, field: string): unknown {
 export interface UpdateOptions {
   readonly source: SourceName;
   readonly localDir?: string;
+  readonly skipFreshness?: boolean;
   readonly allowAbmindMismatch: boolean;
   readonly repoRoot?: string;
   readonly dryRun?: boolean;
@@ -82,7 +83,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
 
     const source = opts.source === 'npm'
       ? makeNpmSource('abtars')
-      : makeLocalBuildSource({ repoRoot, allowStale: !!opts.localDir });
+      : makeLocalBuildSource({ repoRoot, allowStale: !!opts.skipFreshness });
 
     // --dry-run: print plan and exit
     if (opts.dryRun) {
@@ -95,7 +96,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     const staged = await source.prepare({
       stagingDir: paths.appStaging,
       home: paths.home,
-      allowStale: !!opts.localDir,
+      allowStale: !!opts.skipFreshness,
     });
     process.stdout.write(`✓ staged ${staged.version}\n`);
 

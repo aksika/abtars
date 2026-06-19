@@ -109,7 +109,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'update':
         return await update({
           source: (flags.get('source') as 'local' | 'npm' | 'github' | undefined) ?? 'local',
-          localDir: typeof flags.get('local') === 'string' ? flags.get('local') as string : flags.get('local') === true ? undefined : undefined,
+          localDir: typeof flags.get('local') === 'string' ? flags.get('local') as string : undefined,
+          skipFreshness: flags.has('local'),
           allowAbmindMismatch: flags.get('allow-abmind-mismatch') === true,
         });
       case 'rollback':
