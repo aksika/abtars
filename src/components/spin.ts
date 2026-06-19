@@ -12,10 +12,11 @@ import { getMasterUserId } from "./master-user.js";
 import type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 import { typeAgent } from "./spin-types.js";
 import * as Sessions from "./spin-sessions.js";
-import { pushLog } from "./spin-sessions.js";
+import { pushLog, isHollow } from "./spin-sessions.js";
 
 export type { ManagedSession, SpinRequest, SessionType } from "./spin-types.js";
 export { sessionType, sessionCreatedAt, typeLabel, typeAgent, parseSessionType } from "./spin-types.js";
+export { isHollow };
 
 const TAG = "spin";
 const USER_SESSION_IDLE_MS = parseInt(process.env["USER_SESSION_IDLE_MS"] ?? "7200000", 10);
@@ -68,6 +69,13 @@ export class Spin {
 
   createSubSession(userId: string, platform: string, type: SessionType): ManagedSession | string {
     const r = Sessions.createSubSession(this.sessions, this.nextIndex, userId, platform, type, 0, MAX_TOTAL_SESSIONS);
+    if (typeof r === "string") return r;
+    this.nextIndex = r.nextIndex;
+    return r.session;
+  }
+
+  createHollowSession(userId: string, platform: string, type: SessionType, peer: string, remoteSessionId: string): ManagedSession | string {
+    const r = Sessions.createHollowSession(this.sessions, this.nextIndex, userId, platform, type, 0, peer, remoteSessionId, MAX_TOTAL_SESSIONS);
     if (typeof r === "string") return r;
     this.nextIndex = r.nextIndex;
     return r.session;

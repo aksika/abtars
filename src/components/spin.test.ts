@@ -158,5 +158,19 @@ describe("Spin — unified session router (#943)", () => {
       spin.destroyAll();
       expect(spin.listAllSessions()).toHaveLength(0);
     });
+
+    it("createHollowSession creates a session with peer and no transport", () => {
+      const result = spin.createHollowSession("aksika", "telegram", "W", "molty", "remote_W_01");
+      expect(typeof result).not.toBe("string");
+      const session = result as import("./spin-types.js").ManagedSession;
+      expect(session.peer).toBe("molty");
+      expect(session.remoteSessionId).toBe("remote_W_01");
+      expect(session.transport).toBeUndefined();
+      expect(session.busy).toBe(false);
+      expect(session.messageCount).toBe(0);
+      // Visible in list
+      const all = spin.listAllSessions();
+      expect(all.some(s => s.peer === "molty")).toBe(true);
+    });
   });
 });

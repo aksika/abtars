@@ -23,6 +23,8 @@ export interface ManagedSession {
   model?: string;
   provider?: string;
   pid?: number;
+  peer?: string;                 // remote host name (hollow session)
+  remoteSessionId?: string;      // session ID on the peer
 
   // Lifecycle
   active: boolean;               // true = current session for this userId+platform

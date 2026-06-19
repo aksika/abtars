@@ -75,6 +75,23 @@ export function createSubSession(
   return allocateSession(sessions, nextIndex, type, userId, platform, chatId, { active: false, motherId: active?.id });
 }
 
+export function isHollow(session: ManagedSession): boolean { return !!session.peer; }
+
+export function createHollowSession(
+  sessions: Map<string, ManagedSession>, nextIndex: number,
+  userId: string, platform: string, type: SessionType, chatId: number,
+  peer: string, remoteSessionId: string, maxSessions: number,
+): { session: ManagedSession; nextIndex: number } | string {
+  const alive = [...sessions.values()].filter(s => s.status !== "ended");
+  if (alive.length >= maxSessions) return `Max sessions reached — cannot create hollow session.`;
+
+  const result = allocateSession(sessions, nextIndex, type, userId, platform, chatId, { active: false });
+  result.session.peer = peer;
+  result.session.remoteSessionId = remoteSessionId;
+  pushLog(result.session, `hollow (${peer})`);
+  return result;
+}
+
 export function switchSession(sessions: Map<string, ManagedSession>, userId: string, platform: string, index: number): ManagedSession | string {
   const target = [...sessions.values()].find(s => s.shortIndex === index && s.status !== "ended" && s.userId === userId);
   if (!target) return `Session #${index} not found or not switchable.`;
@@ -176,11 +193,12 @@ export function formatList(sessions: Map<string, ManagedSession>, userId: string
     const marker = s.active ? " *" : "";
     const bg = !s.active && sessionType(s) !== "A" ? " (bg)" : "";
     const paused = s.status === "paused" ? " ⏸" : "";
+    const remote = s.peer ? ` (remote: ${s.peer})` : "";
     const model = s.model ? ` ${s.model}` : "";
     const nm = s.name ? ` "${s.name}"` : "";
     const time = new Date(sessionCreatedAt(s)).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
     const idle = s.busy ? "busy" : `idle ${Math.round((Date.now() - s.lastActiveAt) / 60000)}m`;
     const metrics = s.messageCount ? ` | ${s.messageCount} msgs` : "";
-    return `#${s.shortIndex} ${typeLabel(sessionType(s))}${nm}${bg}${model} — ${time}${paused}${marker} | ${idle}${metrics}`;
+    return `#${s.shortIndex} ${typeLabel(sessionType(s))}${nm}${remote}${bg}${model} — ${time}${paused}${marker} | ${idle}${metrics}`;
   }).join("\n");
 }
