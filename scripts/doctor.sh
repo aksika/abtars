@@ -68,6 +68,7 @@ home = '$AB'
 fix_mode = '--fix' in sys.argv
 
 for d in manifest.get('directories', []):
+    if isinstance(d, str): d = {'path': d}
     p = os.path.join(home, d['path'])
     mode = d.get('mode')
     if os.path.isdir(p):
