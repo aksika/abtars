@@ -272,12 +272,14 @@ const memoryRecallTool: ToolDefinition = {
   async execute(args, context): Promise<string> {
     if (memoryBackend) {
       try {
+        const t0 = Date.now();
         const result = await memoryBackend.recall({
           translated: [args["query"] ?? ""],
           original: args["query"] ?? "",
           userId: context?.userId ?? getMasterUserId(),
           limit: parseInt(args["limit"] ?? "10", 10),
         });
+        import("../metrics-collector.js").then(({ recordLatency }) => recordLatency("recall", Date.now() - t0)).catch(() => {});
         return JSON.stringify(result);
       } catch (err) {
         return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });

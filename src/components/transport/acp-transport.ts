@@ -379,6 +379,11 @@ export class AcpTransport implements IKiroTransport {
     } finally {
       // AfterPrompt hook — observe-only
       const durationMs = Date.now() - this.promptStartedAt;
+      // #832: metrics
+      import("../metrics-collector.js").then(({ recordLatency, recordCall }) => {
+        recordLatency(`llm:${this.modelId ?? "unknown"}`, durationMs);
+        recordCall(`llm:${this.modelId ?? "unknown"}`, true);
+      }).catch(() => {});
       import("../hooks/hook-system.js").then(({ hasHooks, fire }) => {
         if (!hasHooks("AfterPrompt")) return;
         fire("AfterPrompt", {

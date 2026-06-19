@@ -704,3 +704,37 @@ export async function handleRollback(text: string, ctx: CommandContext): Promise
   await ctx.reply(code === 0 ? `+ Rolled back to slot ${slot}` : `x Rollback failed (code ${code})`);
   return true;
 }
+
+/** #832: /metrics — structured observability summary. */
+export async function handleMetrics(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { getMetricsSummary } = await import("../metrics-collector.js");
+  const s = getMetricsSummary();
+
+  const lines: string[] = ["Metrics (recent window):"];
+
+  // LLM
+  const models = Object.entries(s.llm);
+  if (models.length > 0) {
+    lines.push("\nLLM latency:");
+    for (const [model, m] of models) {
+      lines.push(`  ${model}: p50=${m.p50}ms p95=${m.p95}ms max=${m.max}ms | ${m.calls} calls, ${m.failures} fails`);
+    }
+  } else { lines.push("\nLLM: no data yet"); }
+
+  // Recall
+  if (s.recall) {
+    lines.push(`\nRecall: p50=${s.recall.p50}ms p95=${s.recall.p95}ms (${s.recall.calls} calls)`);
+  }
+
+  // Sleep
+  if (s.sleep) {
+    const rate = s.sleep.calls > 0 ? Math.round((1 - s.sleep.failures / s.sleep.calls) * 100) : 100;
+    lines.push(`\nSleep: ${s.sleep.calls} runs, ${rate}% success`);
+  }
+
+  // Cron
+  lines.push(`\nCron depth: avg=${s.cronDepth.avg} max=${s.cronDepth.max}`);
+
+  await ctx.reply(lines.join("\n"));
+  return true;
+}

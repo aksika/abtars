@@ -274,3 +274,22 @@ export function createKanbanCleanupTask(): HeartbeatTask {
     },
   };
 }
+
+/** #832: Metrics flush (every 5min) + prune (daily). */
+export function createMetricsTask(cronQueueDepth: () => number): HeartbeatTask {
+  let flushCounter = 0;
+  let pruneCounter = 0;
+  return {
+    name: "metrics",
+    execute: async () => {
+      try {
+        const { recordCronDepth, flushToFile, pruneMetricsFile } = await import("./metrics-collector.js");
+        recordCronDepth(cronQueueDepth());
+        flushCounter++;
+        if (flushCounter % 6 === 0) flushToFile(); // ~5min (6 ticks × 50s)
+        pruneCounter++;
+        if (pruneCounter % 1728 === 0) pruneMetricsFile(); // ~daily (1728 ticks × 50s)
+      } catch (err) { logAndSwallow(TAG, "metrics", err); }
+    },
+  };
+}

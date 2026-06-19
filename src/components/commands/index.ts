@@ -16,7 +16,7 @@ import {
   handleMemory, handleNlm, handleWakeup,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
   handleHooks, handleMcp, handleUsers, handleUsage, handleOpenRouter, handleWhoami,
-  handleSoftware, handlePeers,
+  handleSoftware, handlePeers, handleMetrics,
 } from "./handlers.js";
 import { handleSession } from "./session-handler.js";
 
@@ -63,6 +63,7 @@ registerExact("/usage", handleUsage);
 registerExact("/openrouter", handleOpenRouter);
 registerExact("/whoami", handleWhoami);
 registerExact("/peers", handlePeers);
+registerExact("/metrics", handleMetrics);
 registerExact("/session", handleSession);
 
 // ── Prefix-match commands ───────────────────────────────────────────────────

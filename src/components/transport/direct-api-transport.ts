@@ -146,6 +146,11 @@ export class DirectApiTransport implements IKiroTransport {
     } finally {
       // AfterPrompt hook — observe-only, fire-and-forget
       const durationMs = Date.now() - (this._promptStartedAt ?? Date.now());
+      // #832: metrics
+      import("../metrics-collector.js").then(({ recordLatency, recordCall }) => {
+        recordLatency(`llm:${this.activeModel}`, durationMs);
+        recordCall(`llm:${this.activeModel}`, this._lastAnswer.length > 0);
+      }).catch(() => {});
       import("../hooks/hook-system.js").then(({ hasHooks, fire }) => {
         if (!hasHooks("AfterPrompt")) return;
         fire("AfterPrompt", {

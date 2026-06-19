@@ -29,7 +29,7 @@ import {
   writeRestartReason, readAndClearRestartRequested, readBridgeLockField, updateBridgeLockField, writeSleepStatus,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
-import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask, createSkillStatsFlushTask, createSkillTrashPruneTask, createKanbanDeliveryTask, createKanbanCleanupTask, createUserSessionExpiryTask } from "../components/heartbeat-tasks.js";
+import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask, createSkillStatsFlushTask, createSkillTrashPruneTask, createKanbanDeliveryTask, createKanbanCleanupTask, createUserSessionExpiryTask, createMetricsTask } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
@@ -220,6 +220,12 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   }).catch(err => logAndSwallow(TAG, "nerve import", err));
 
   heartbeat.registerTask(createKanbanCleanupTask());
+
+  // #832: Metrics collection + flush + housekeeping
+  import("../components/metrics-collector.js").then(({ initMetrics }) => {
+    initMetrics(abtarsHome());
+  }).catch(() => {});
+  heartbeat.registerTask(createMetricsTask(() => cronQueue.pending));
 
   // #936: Expire idle user sessions
   heartbeat.registerTask(createUserSessionExpiryTask());
