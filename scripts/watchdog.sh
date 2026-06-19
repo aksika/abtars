@@ -1,22 +1,14 @@
 #!/usr/bin/env bash
-# Minimal watchdog: start bridge, poll alive + heartbeat, respawn on death.
-# No rollback, no circuit breaker (bridge handles that), no USR1.
+# Watchdog: start bridge, poll alive + heartbeat, respawn on death.
+# Reads .start-reason for instructions. Exits on "stopped" (code 2) or update/restart (code 0).
 AB="${ABTARS_HOME:-$HOME/.abtars}"
 LOCK="$AB/bridge.lock"
 STALE=300
 POLL=60
 LOG="$AB/logs/bridge.log"
-STATE="$AB/watchdog.state"
+STATE="$AB/deploy.state"
 
-# Secondary singleton guard: PID check via bridge.lock (belt + suspenders with flock)
-OLD_WD=$(python3 -c "import json;print(json.load(open('$LOCK')).get('watchdogPid',''))" 2>/dev/null)
-if [[ -n "$OLD_WD" && "$OLD_WD" != "$$" ]] && kill -0 "$OLD_WD" 2>/dev/null; then
-  if ps -p "$OLD_WD" -o command= 2>/dev/null | grep -q "watchdog"; then
-    exit 0
-  fi
-fi
-
-# Primary singleton: flock on Linux, lockf on Mac
+# Singleton: flock (Linux) / lockf (macOS)
 exec 200>>"$AB/.bridge.flock"
 if command -v flock &>/dev/null; then
   flock -n 200 || exit 0
@@ -24,12 +16,11 @@ else
   lockf -s -t 0 200 || exit 0
 fi
 
-# Write our PID into bridge.lock for secondary guard
+# Write our PID into bridge.lock
 python3 -c "
-import json,os
+import json
 p='$LOCK'
-try:
-  d=json.load(open(p))
+try: d=json.load(open(p))
 except: d={}
 d['watchdogPid']=$$
 with open(p,'w') as f: json.dump(d,f)
@@ -39,45 +30,54 @@ with open(p,'w') as f: json.dump(d,f)
 trap '' HUP
 trap 'exit 0' TERM INT
 
-[[ -f "$AB/.stopped" ]] && exit 2
-
 while true; do
-  # Read start reason (written by update/rollback/start, default: watchdog-respawn)
-  REASON=$(cat "$AB/.start-reason" 2>/dev/null || echo "watchdog-respawn")
-  rm -f "$AB/.start-reason"
+  # Read .start-reason (one-shot message from update/stop/restart)
+  REASON=""
+  if [[ -f "$AB/.start-reason" ]]; then
+    REASON=$(cat "$AB/.start-reason")
+    rm -f "$AB/.start-reason"
+  fi
+
+  # Act on reason
+  case "$REASON" in
+    stopped) exit 2 ;;            # intentional stop — daemon won't respawn (exit 2)
+    update:*|restart|rollback:*)  # update/restart just killed bridge — we exit so daemon respawns with new code
+      exit 0 ;;
+  esac
 
   # Pre-flight doctor
   [ -x "$AB/scripts/doctor.sh" ] && "$AB/scripts/doctor.sh" --fix >> "$AB/logs/watchdog.log" 2>&1 || true
 
-  # Check for restart sentinel before spawning (consumed by a previous update while we were starting)
-  if [[ -f "$AB/.restart-watchdog" ]]; then
-    rm -f "$AB/.restart-watchdog"
-    exit 0
-  fi
-
   # Start bridge
-  cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
+  BRIDGE_REASON="${REASON:-watchdog-respawn}"
+  cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$BRIDGE_REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
   disown $PID
   SPAWNED_AT=$(date +%s)
 
-  # Poll: alive + heartbeat
+  # Poll: alive + heartbeat + .start-reason
   DEATH_REASON=""
   while sleep "$POLL"; do
-    [[ -f "$AB/.stopped" ]] && exit 2
-    # Cooperative restart: yield to replacement watchdog
-    if [[ -f "$AB/.restart-watchdog" ]]; then
-      rm -f "$AB/.restart-watchdog"
-      kill "$PID" 2>/dev/null
-      wait "$PID" 2>/dev/null
-      exit 0
+    # Check for new instructions
+    if [[ -f "$AB/.start-reason" ]]; then
+      REASON=$(cat "$AB/.start-reason")
+      rm -f "$AB/.start-reason"
+      case "$REASON" in
+        stopped)
+          kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
+          exit 2 ;;
+        update:*|restart|rollback:*)
+          kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
+          exit 0 ;;
+      esac
     fi
+    # Bridge alive?
     if ! kill -0 "$PID" 2>/dev/null; then
       wait "$PID" 2>/dev/null; EXIT_CODE=$?
       DEATH_REASON="process-gone:exit=$EXIT_CODE"
       break
     fi
-    # Grace period: skip stale check while bridge is booting
+    # Stale heartbeat? (skip during boot grace period)
     (( $(date +%s) - SPAWNED_AT < 180 )) && continue
     HB=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
     NOW=$(($(date +%s) * 1000))
@@ -88,19 +88,23 @@ while true; do
     fi
   done
 
-  [[ -f "$AB/.stopped" ]] && exit 2
-
-  # Log death
+  # Log death + update deploy.state restartCount
   echo "$(date +%FT%T) Bridge died: $DEATH_REASON (PID=$PID)" >> "$AB/logs/watchdog.log"
+  python3 -c "
+import json
+p='$STATE'
+try: d=json.load(open(p))
+except: d={}
+d['restartCount'] = d.get('restartCount', 0) + 1
+d['lastDeath'] = '$(date +%FT%T)'
+with open(p,'w') as f: json.dump(d,f)
+" 2>/dev/null
 
-  # Record death
-  echo "$(date +%s)" >> "$STATE"
-
-  # AG5 edge case: if bridge never wrote a heartbeat and 4+ deaths → give up
-  DEATHS=$(awk -v cutoff=$(($(date +%s) - 420)) '$1 > cutoff' "$STATE" 2>/dev/null | wc -l)
+  # Failsafe: 4+ deaths in 7min with no heartbeat ever → give up
   HB_CHECK=$(grep -o '"lastHeartbeat":[0-9]*' "$LOCK" 2>/dev/null | grep -o '[0-9]*')
-  if (( DEATHS >= 4 )) && [[ -z "$HB_CHECK" || "$HB_CHECK" == "0" ]]; then
-    touch "$AB/.stopped"
+  RESTART_COUNT=$(python3 -c "import json; print(json.load(open('$STATE')).get('restartCount',0))" 2>/dev/null || echo 0)
+  if (( RESTART_COUNT >= 4 )) && [[ -z "$HB_CHECK" || "$HB_CHECK" == "0" ]]; then
+    echo "stopped" > "$AB/.start-reason"
     exit 2
   fi
 

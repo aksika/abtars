@@ -69,12 +69,12 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
   const home = abtarsHome();
   const manifestPath = join(home, "manifest.json");
   const bridgeLock = join(home, "bridge.lock");
-  const stoppedSentinel = join(home, ".stopped");
+  const stoppedSentinel = join(home, ".start-reason");
 
   const installMode = readJsonField(manifestPath, "installMode") as string | undefined;
 
   // 0) Write sentinel — prevents watchdog from respawning even if kill races with launchd
-  try { require("node:fs").writeFileSync(stoppedSentinel, `stopped at ${new Date().toISOString()}\n`); } catch {}
+  try { require("node:fs").writeFileSync(stoppedSentinel, "stopped"); } catch {}
 
   // 1) Unload supervisor service (prevent respawn)
   if (installMode === "supervised-daemon" || installMode === "supervised") {
