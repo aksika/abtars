@@ -290,6 +290,21 @@ export class AgentApiServer {
       return;
     }
 
+    // #949 — POST /v1/tasks/:cardId/messages: remote peer pushes channel message
+    // #949 — GET /v1/tasks/:cardId/messages?since=: pull catch-up
+    const msgMatch = url.match(/^\/v1\/tasks\/(\d+)\/messages/);
+    if (msgMatch && method === "POST") {
+      const caller = this.requireBearer(req, res);
+      if (caller === null) return;
+      this.handleChannelPush(req, res, caller, Number(msgMatch[1]));
+      return;
+    }
+    if (msgMatch && method === "GET") {
+      if (this.requireBearer(req, res) === null) return;
+      this.handleChannelPull(url, res, Number(msgMatch[1]));
+      return;
+    }
+
     // #675 — POST /v1/callbacks: peer pushes task result back
     if (url === "/v1/callbacks" && method === "POST") {
       const caller = this.requireBearer(req, res);
@@ -691,6 +706,31 @@ export class AgentApiServer {
     kanbanFail(id, "Cancelled by peer");
     res.writeHead(200, { "Content-Type": "application/json" })
       .end(JSON.stringify({ task_id: id, status: "cancelled" }));
+  }
+
+  /** #949 — POST /v1/tasks/:cardId/messages: receive channel message from remote peer. */
+  private async handleChannelPush(req: IncomingMessage, res: ServerResponse, caller: string, cardId: number): Promise<void> {
+    let body: { from_agent?: string; message?: string; created_at?: string };
+    try { body = JSON.parse(await readBody(req)); } catch {
+      res.writeHead(400).end(JSON.stringify(openaiError("Invalid JSON", "invalid_request_error", "invalid_body")));
+      return;
+    }
+    if (!body.from_agent || !body.message || !body.created_at) {
+      res.writeHead(400).end(JSON.stringify(openaiError("Missing from_agent, message, or created_at", "invalid_request_error", "missing_field")));
+      return;
+    }
+    const { channelPostFromRemote } = require("./tasks/kanban-channel.js") as typeof import("./tasks/kanban-channel.js");
+    channelPostFromRemote(cardId, body.from_agent, body.message, body.created_at, caller);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+  }
+
+  /** #949 — GET /v1/tasks/:cardId/messages?since=: pull messages for catch-up. */
+  private handleChannelPull(url: string, res: ServerResponse, cardId: number): void {
+    const sinceMatch = url.match(/[?&]since=([^&]+)/);
+    const since = sinceMatch ? decodeURIComponent(sinceMatch[1]) : "1970-01-01";
+    const { channelGetSince } = require("./tasks/kanban-channel.js") as typeof import("./tasks/kanban-channel.js");
+    const messages = channelGetSince(cardId, since);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ messages }));
   }
 
   /** #675 — POST /v1/callbacks: remote peer delivers task result. */
