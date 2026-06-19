@@ -12,12 +12,14 @@ DB="$ABMIND/memory/memory.db"
 FIX=false
 WARNS=0
 FIXES=0
+ERRS=0
 
 case "${1:-}" in
   --fix|--fix) FIX=true ;;
 esac
 
 warn() { echo "[doctor] WARN: $1"; WARNS=$((WARNS + 1)); }
+err()  { echo "[doctor] ERR:  $1"; ERRS=$((ERRS + 1)); }
 fix()  { echo "[doctor] FIX:  $1"; FIXES=$((FIXES + 1)); }
 
 # Helper: read JSON field via python3
@@ -181,10 +183,32 @@ fi
 fi # end supervised-only watchdog block
 fi # end supervised-only supervisor check
 
-# 0a. Double watchdog detection
-WD_COUNT=$(pgrep -f "watchdog.sh" 2>/dev/null | wc -l)
-if (( WD_COUNT > 1 )); then
-  warn "duplicate watchdog: $WD_COUNT watchdog.sh processes running"
+# 0a. Orphan process detection (cross-platform, compares against bridge.lock)
+if [ -f "$AB/bridge.lock" ]; then
+  EXPECTED_WD=$(json_field "$AB/bridge.lock" watchdogPid 0)
+  EXPECTED_BR=$(json_field "$AB/bridge.lock" pid 0)
+
+  # All abtars-related processes (bracket trick excludes grep itself)
+  ALL_PROCS=$(ps ax -o pid,args 2>/dev/null | grep "[a]btars" | grep -v "doctor\|patchright" || true)
+
+  # Orphan watchdogs: any watchdog.sh PID not matching bridge.lock or its children
+  WD_PIDS=$(echo "$ALL_PROCS" | grep "watchdog.sh" | awk '{print $1}' || true)
+  for P in $WD_PIDS; do
+    [[ "$P" == "$EXPECTED_WD" ]] && continue
+    # Skip subshells of the expected watchdog (PPID = expected WD)
+    P_PPID=$(ps -o ppid= -p "$P" 2>/dev/null | tr -d ' ')
+    [[ "$P_PPID" == "$EXPECTED_WD" ]] && continue
+    err "orphan watchdog process PID $P (expected: $EXPECTED_WD)"
+    if [[ "$FIX" == "1" ]]; then kill "$P" 2>/dev/null && fix "killed orphan watchdog $P"; fi
+  done
+
+  # Orphan bridges: any abtars.js PID not matching bridge.lock (exclude cli/tweet/embed)
+  BR_PIDS=$(echo "$ALL_PROCS" | grep "abtars.js" | grep -v "cli\|tweet\|embed" | awk '{print $1}' || true)
+  for P in $BR_PIDS; do
+    [[ "$P" == "$EXPECTED_BR" ]] && continue
+    err "orphan bridge process PID $P (expected: $EXPECTED_BR)"
+    if [[ "$FIX" == "1" ]]; then kill "$P" 2>/dev/null && fix "killed orphan bridge $P"; fi
+  done
 fi
 
 # 0b. Bridge PID consistency (bridge.lock vs actual process)
@@ -632,12 +656,12 @@ if $FIX && [ -f "$AB/logs/watchdog.log" ]; then
 fi
 
 if $FIX; then
-  echo "[doctor] Done. $FIXES fixes applied, $WARNS warnings."
+  echo "[doctor] Done. $FIXES fixes applied, $WARNS warnings, $ERRS errors."
 else
-  if [ "$WARNS" -eq 0 ]; then
+  if [ "$WARNS" -eq 0 ] && [ "$ERRS" -eq 0 ]; then
     echo "[doctor] All clear."
   else
-    echo "[doctor] $WARNS warnings. Run with --fix to repair."
+    echo "[doctor] $WARNS warnings, $ERRS errors. Run with --fix to repair."
   fi
 fi
 
