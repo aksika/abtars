@@ -1,51 +1,61 @@
 /**
- * boot/circuit-breaker.ts — Auto-rollback on repeated crash loop (#1050).
+ * boot/circuit-breaker.ts — Auto-rollback on repeated crash loop (#1085).
  * Runs BEFORE boot graph. Only file ops — no imports from components.
- * If 4+ deaths in 7min: destroy current app, promote prev.N, exit.
- * Watchdog respawns with the new code.
+ * If restartCount >= 4 AND reason is unplanned (watchdog-respawn): rollback.
+ * Planned restarts (update/user-restart) reset the counter.
  */
 
-import { readFileSync, existsSync, rmSync, renameSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const WINDOW = 420; // 7 minutes
 const MAX_DEATHS = 4;
 
 export function checkCircuitBreaker(): void {
   const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
-  const stateFile = join(home, "watchdog.state");
-  if (!existsSync(stateFile)) return;
+  const stateFile = join(home, "deploy.state");
+  const reason = process.env["ABTARS_START_REASON"] ?? "watchdog-respawn";
 
-  const now = Math.floor(Date.now() / 1000);
-  const lines = readFileSync(stateFile, "utf-8").trim().split("\n").filter(Boolean);
-  const recent = lines.filter(l => now - parseInt(l, 10) < WINDOW);
-
-  if (recent.length < MAX_DEATHS) return;
-
-  // Circuit breaker tripped — auto-rollback (destroy pattern)
-  const appDir = join(home, "app");
-  for (let slot = 1; slot <= 3; slot++) {
-    const prevDir = join(home, `app.prev.${slot}`);
-    if (!existsSync(prevDir)) continue;
-
-    let commit = "unknown";
-    try { commit = JSON.parse(readFileSync(join(prevDir, "package.json"), "utf-8")).version ?? "unknown"; } catch {}
-
-    // Destroy current, promote prev
-    rmSync(appDir, { recursive: true, force: true });
-    renameSync(prevDir, appDir);
-
-    // Clear state, set reason for next boot
-    try { unlinkSync(stateFile); } catch {}
-    writeFileSync(join(home, ".start-reason"), `auto-rollback:${slot}:${commit}`);
-
-    console.error(`[circuit-breaker] ${recent.length} deaths in 7min — rolled back to slot ${slot} (${commit})`);
-    process.exit(0); // watchdog respawns with new code
+  // Planned restart — reset counter and proceed
+  if (reason.startsWith("update:") || reason === "user-restart" || reason.startsWith("rollback:")) {
+    try {
+      const state = JSON.parse(readFileSync(stateFile, "utf-8"));
+      state.restartCount = 0;
+      writeFileSync(stateFile, JSON.stringify(state) + "\n");
+    } catch {}
+    return;
   }
 
-  // All slots exhausted — stop
-  console.error("[circuit-breaker] All rollback slots exhausted — stopping");
-  try { writeFileSync(join(home, ".stopped"), ""); } catch {}
-  try { unlinkSync(stateFile); } catch {}
-  process.exit(1);
+  // Unplanned restart — check counter
+  let restartCount = 0;
+  try {
+    restartCount = JSON.parse(readFileSync(stateFile, "utf-8")).restartCount ?? 0;
+  } catch {}
+
+  if (restartCount < MAX_DEATHS) return;
+
+  // Circuit breaker tripped — rollback
+  const appDir = join(home, "app");
+  const prevDir = join(home, "app.prev");
+  if (!existsSync(prevDir)) {
+    console.error("[circuit-breaker] No app.prev/ to roll back to — stopping");
+    writeFileSync(join(home, ".start-reason"), "stopped");
+    process.exit(1);
+  }
+
+  let commit = "unknown";
+  try { commit = JSON.parse(readFileSync(join(prevDir, "package.json"), "utf-8")).version ?? "unknown"; } catch {}
+
+  rmSync(appDir, { recursive: true, force: true });
+  renameSync(prevDir, appDir);
+
+  // Reset counter, set reason
+  try {
+    const state = JSON.parse(readFileSync(stateFile, "utf-8"));
+    state.restartCount = 0;
+    writeFileSync(stateFile, JSON.stringify(state) + "\n");
+  } catch {}
+  writeFileSync(join(home, ".start-reason"), `auto-rollback:${commit}`);
+
+  console.error(`[circuit-breaker] ${restartCount} unplanned deaths — rolled back to prev/ (${commit})`);
+  process.exit(0); // WD respawns with rolled-back code
 }

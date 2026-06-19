@@ -117,7 +117,7 @@ export async function restart(opts: { cold?: boolean }): Promise<number> {
     // Clear stale restart requests so the new bridge doesn't restart again (#731)
     updateBridgeLockField("restartRequested", null);
     // Clear circuit breaker state — intentional start = clean slate (#967)
-    try { const { unlinkSync } = await import("node:fs"); unlinkSync(join(home, "watchdog.state")); } catch { /* ENOENT */ }
+    try { const { readFileSync: r, writeFileSync: w } = await import("node:fs"); const s = JSON.parse(r(join(home, "deploy.state"), "utf-8")); s.restartCount = 0; w(join(home, "deploy.state"), JSON.stringify(s) + "\n"); } catch {}
     const argv: string[] = []; // #534: env is SSoT — no CLI args needed
     return spawnLauncher(home, argv);
   }

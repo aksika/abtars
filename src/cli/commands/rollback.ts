@@ -65,7 +65,7 @@ export async function rollback(opts?: { to?: number }): Promise<number> {
 
     // Restart — clear .stopped, write start reason, then exit so watchdog respawns with new code
     try { unlinkSync(join(paths.home, '.stopped')); } catch {}
-    try { unlinkSync(join(paths.home, 'watchdog.state')); } catch {}
+    try { const s = JSON.parse(readFileSync(join(paths.home, 'deploy.state'), 'utf-8')); s.restartCount = 0; writeFileSync(join(paths.home, 'deploy.state'), JSON.stringify(s) + '\n'); } catch {}
     const { readFileSync: rfs } = await import('node:fs');
     let rollbackCommit = "unknown";
     try { rollbackCommit = JSON.parse(rfs(join(paths.app, "package.json"), "utf-8")).version; } catch {}
