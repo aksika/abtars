@@ -34,3 +34,28 @@ describe("checkRateLimit", () => {
     expect(checkRateLimit(b).allowed).toBe(true);
   });
 });
+
+describe("checkPeerPostLimit (#949)", () => {
+  it("allows first call", async () => {
+    const { checkPeerPostLimit } = await import("./agent-api-rate-limit.js");
+    const peer = `peer-first-${Date.now()}`;
+    expect(checkPeerPostLimit(peer)).toBe(true);
+  });
+
+  it("blocks within 10s window", async () => {
+    const { checkPeerPostLimit } = await import("./agent-api-rate-limit.js");
+    const peer = `peer-block-${Date.now()}`;
+    expect(checkPeerPostLimit(peer)).toBe(true);
+    expect(checkPeerPostLimit(peer)).toBe(false);
+  });
+
+  it("independent per peer", async () => {
+    const { checkPeerPostLimit } = await import("./agent-api-rate-limit.js");
+    const a = `peer-a-${Date.now()}`;
+    const b = `peer-b-${Date.now()}`;
+    expect(checkPeerPostLimit(a)).toBe(true);
+    expect(checkPeerPostLimit(b)).toBe(true);
+    expect(checkPeerPostLimit(a)).toBe(false);
+    expect(checkPeerPostLimit(b)).toBe(false);
+  });
+});
