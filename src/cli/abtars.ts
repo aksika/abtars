@@ -14,7 +14,6 @@
 
 process.umask(0o077); // #441: all runtime files 600, dirs 700
 import { doctor } from './commands/doctor.js';
-import { install } from './commands/install.js';
 import { uninstall } from './commands/uninstall.js';
 import { backup } from './commands/backup.js';
 import { onboard } from './commands/onboard.js';
@@ -98,12 +97,8 @@ export async function main(argv: readonly string[]): Promise<number> {
   try {
     switch (command) {
       case 'install':
-        return await install({
-          restore: typeof flags.get('restore') === 'string' ? (flags.get('restore') as string) : undefined,
-          force: flags.get('force') === true,
-          dryRun: flags.get('dry-run') === true,
-          mode: flags.get('mode') === 'simple' ? 'simple' : flags.get('mode') === 'supervised' ? 'supervised' : undefined,
-        });
+        process.stdout.write("'abtars install' is removed. Use 'abtars update --local' (auto-detects first install).\n");
+        return 0;
       case 'uninstall':
         return await uninstall({ yes: flags.get('yes') === true });
       case 'update':
