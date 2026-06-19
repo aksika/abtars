@@ -121,11 +121,19 @@ export function initBridgeLock(opts: { pid: number; startedAt: number; version: 
     try { existing = JSON.parse(readFileSync(p, "utf-8")); } catch { /* missing or corrupt — cold boot */ }
     const prevPid = typeof existing.pid === "number" ? existing.pid : null;
     prev = { pid: prevPid, lastHeartbeat: typeof existing.lastHeartbeat === "number" ? existing.lastHeartbeat : null };
+    // Classify boot type from previous heartbeat gap
+    let bootType = "cold";
+    if (prev.lastHeartbeat) {
+      const gapS = (Date.now() - prev.lastHeartbeat) / 1000;
+      if (gapS < 300) bootType = "darkwake";
+      else if (gapS <= 7200) bootType = "short-outage";
+      else bootType = "long-outage";
+    }
     // Merge: preserve watchdogPid from watchdog or env var
     const wdPid = Number(process.env.ABTARS_WATCHDOG_PID) || existing.watchdogPid || null;
     atomicWriteSync(p, JSON.stringify({
       pid: opts.pid, watchdogPid: wdPid, startedAt: opts.startedAt, version: opts.version,
-      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(), startReason: opts.startReason ?? "unknown",
+      sleepStatus: "awake", argv: opts.argv, lastHeartbeat: Date.now(), startReason: opts.startReason ?? "unknown", bootType,
     }));
   } catch (err) { logAndSwallow("bridge_lock_transport", "op", err); }
   return prev;

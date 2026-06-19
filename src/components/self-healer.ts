@@ -156,6 +156,14 @@ function handleKnownFault(rule: FixRule, _errorKey: string, adapter: TelegramAda
 function handleUnknownFault(errorLine: string, errorKey: string, adapter: TelegramAdapter, chatId: string, onDone: () => void): void {
   if (!shouldAttempt("autofix-unknown", errorKey)) return;
 
+  // Skip dispatch during darkwake (deploy restart) or night hours
+  const hour = new Date().getHours();
+  if (hour < 7) { logDebug("self-healer", `Skipping SHA dispatch — night hours (${hour}:xx)`); return; }
+  try {
+    const lock = JSON.parse(readFileSync(join(abtarsHome(), "bridge.lock"), "utf-8"));
+    if (lock.bootType === "darkwake") { logDebug("self-healer", "Skipping SHA dispatch — darkwake boot"); return; }
+  } catch { /* proceed if unreadable */ }
+
   logInfo("self-healer", `Unknown fault — dispatching agent: ${errorKey.slice(0, 60)}`);
   logAutoFix(`AGENT START: ${errorKey}`);
   logShaCall(errorKey, errorLine);

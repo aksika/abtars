@@ -658,6 +658,8 @@ if [ -f "$AB/bridge.lock" ]; then
   elif [ "$HEAP_MB" -gt 0 ] 2>/dev/null; then
     ok "heap-memory" "${HEAP_MB}MB / 1024MB"
   fi
+  BOOT_TYPE=$(python3 -c "import json; print(json.load(open('$AB/bridge.lock')).get('bootType', 'unknown'))" 2>/dev/null || echo "unknown")
+  ok "boot-type" "$BOOT_TYPE"
 fi
 
 # Summary
