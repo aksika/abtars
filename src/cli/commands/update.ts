@@ -421,6 +421,7 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
     const commit = readJsonField(join(paths.app, "package.json"), "version") as string ?? "unknown";
     writeFileSync(join(paths.home, ".start-reason"), `update:${commit}`);
     try { unlinkSync(join(paths.home, "watchdog.state")); } catch {}
+    try { unlinkSync(join(paths.home, ".stopped")); } catch {}
 
     // Write sentinel — watchdog will see it on next poll, kill bridge, and exit
     writeFileSync(join(paths.home, ".restart-watchdog"), "");
