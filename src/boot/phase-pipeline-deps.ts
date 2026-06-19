@@ -241,6 +241,10 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
 
   // #1000: "Back online" notification moved to bridge-app.ts (fires before greeting)
 
+  // #949: Wire channel→remote sync listener
+  const { initChannelSync } = await import("../components/tasks/kanban-channel.js");
+  initChannelSync();
+
   return "ran";
 }
 

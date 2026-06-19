@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { abtarsHome } from "../../paths.js";
 import { nerve } from "../nerve.js";
-import { logInfo } from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
 
 type SqliteDb = { prepare(sql: string): any; exec(sql: string): void; pragma(s: string): void };
 
@@ -126,4 +126,30 @@ export function channelPostFromRemote(cardId: number, from: string, message: str
 export function channelGetSince(cardId: number, since: string): ChannelMessage[] {
   return db().prepare("SELECT id, card_id, from_agent, to_agent, message, directive, created_at FROM agent_channel WHERE card_id = ? AND created_at > ? ORDER BY created_at ASC")
     .all(cardId, since) as ChannelMessage[];
+}
+
+/** #949: Push channel messages to remote Orc when card has source_peer. */
+export function initChannelSync(): void {
+  nerve.on("channel:message", (cardId: number, meta?: { from: string; to: string; message: string }) => {
+    if (!meta) return;
+    // Lazy import to avoid circular deps
+    const { kanbanGetCard } = require("./kanban-board.js") as typeof import("./kanban-board.js");
+    const card = kanbanGetCard(cardId);
+    if (!card?.source_peer) return;
+    // Don't push messages that came from remote (avoid echo loop)
+    const lastRow = db().prepare("SELECT remote_peer FROM agent_channel WHERE card_id = ? ORDER BY id DESC LIMIT 1").get(cardId) as { remote_peer: string | null } | undefined;
+    if (lastRow?.remote_peer) return;
+    // Push to source peer
+    pushToRemote(card.source_peer, cardId, meta.from, meta.message).catch(err =>
+      logWarn("channel-sync", `Push to ${card.source_peer} failed: ${err instanceof Error ? err.message : String(err)}`)
+    );
+  });
+}
+
+async function pushToRemote(peer: string, cardId: number, from: string, message: string): Promise<void> {
+  const { getPeerTransport } = await import("../peer-transport/index.js");
+  const transport = getPeerTransport();
+  const createdAt = new Date().toISOString().replace("T", " ").slice(0, 19);
+  await transport.pushChannelMessage(peer, cardId, from, message, createdAt);
+  db().prepare("UPDATE agent_channel SET synced = 1 WHERE card_id = ? AND synced = 0").run(cardId);
 }

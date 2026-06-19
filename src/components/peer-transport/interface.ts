@@ -56,4 +56,7 @@ export interface PeerTransport {
 
   /** Terminate a remote task. */
   terminateTask(peer: string, taskId: number): Promise<void>;
+
+  /** #949: Push a channel message to a remote peer. */
+  pushChannelMessage(peer: string, cardId: number, from: string, message: string, createdAt: string): Promise<void>;
 }

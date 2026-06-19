@@ -39,6 +39,7 @@ export interface KanbanCard {
   tokens_used: number | null;
   delivery_mode: string;
   chat_id: string | null;
+  source_peer: string | null;
 }
 
 let _db: SqliteDb | null = null;

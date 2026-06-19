@@ -110,6 +110,13 @@ export class HttpTransport implements PeerTransport {
     logInfo(TAG, `PEER_TERMINATE ${peer}#${taskId}`);
   }
 
+  /** #949: Push a channel message to a remote peer. */
+  async pushChannelMessage(peer: string, cardId: number, from: string, message: string, createdAt: string): Promise<void> {
+    const config = loadPeerConfig();
+    const entry = resolvePeer(config.peers, peer);
+    await this.httpCall(entry, peer, "POST", `/v1/tasks/${cardId}/messages`, JSON.stringify({ from_agent: from, message, created_at: createdAt }));
+  }
+
   private async httpCall(entry: PeerEntry, peerName: string, method: string, path: string, body?: string): Promise<string> {
     const { signJwt } = await import("../peer-jwt.js");
     const config = loadPeerConfig();
