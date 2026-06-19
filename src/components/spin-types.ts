@@ -78,6 +78,7 @@ export interface SpinRequest {
   tools?: SandboxPolicy;
   timeoutMs?: number;
   callbackPeer?: string; // #675: peer to notify on completion
+  sourcePeer?: string;   // #949: which peer delegated this task
   chatId?: string;      // #1008: delivery target chat (fallback: masterChatId)
 }
 

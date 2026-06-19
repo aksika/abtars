@@ -331,7 +331,7 @@ export class Spin {
       priority: request.priority ?? "MEDIUM", type: request.type,
       parent_id: request.parentCardId, deliveryMode: request.deliveryMode,
       notes: request.callbackPeer ? JSON.stringify({ callback_peer: request.callbackPeer }) : undefined,
-      chatId: request.chatId,
+      chatId: request.chatId, sourcePeer: request.sourcePeer,
     });
 
     if (!this.canDispatch(request.type, cardId)) {

@@ -647,6 +647,7 @@ export class AgentApiServer {
       priority: body.priority ?? "MEDIUM",
       deliveryMode: "silent",
       callbackPeer: body.callback_peer,
+      sourcePeer: caller,
     });
 
     // #928: Write inbound artifacts to card workspace
