@@ -37,6 +37,7 @@ function db(): SqliteDb {
     // #949: remote sync columns
     try { _db.exec(`ALTER TABLE agent_channel ADD COLUMN remote_peer TEXT DEFAULT NULL`); } catch { /* already exists */ }
     try { _db.exec(`ALTER TABLE agent_channel ADD COLUMN synced INTEGER DEFAULT 1`); } catch { /* already exists */ }
+    try { _db.exec(`ALTER TABLE agent_channel ADD COLUMN msg_type TEXT DEFAULT 'progress'`); } catch { /* already exists */ }
     try { _db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ac_dedup ON agent_channel(card_id, from_agent, created_at)`); } catch { /* already exists */ }
   }
   return _db;
@@ -54,10 +55,10 @@ export interface ChannelMessage {
 
 const MAX_MESSAGE_LEN = 1000;
 
-export function channelPost(cardId: number, from: string, to: string, message: string, directive = false): number {
+export function channelPost(cardId: number, from: string, to: string, message: string, directive = false, msgType = "progress"): number {
   if (message.length > MAX_MESSAGE_LEN) message = message.slice(0, MAX_MESSAGE_LEN) + "…";
-  const stmt = db().prepare("INSERT INTO agent_channel (card_id, from_agent, to_agent, message, directive) VALUES (?, ?, ?, ?, ?)");
-  const result = stmt.run(cardId, from, to || "ALL", message, directive ? 1 : 0);
+  const stmt = db().prepare("INSERT INTO agent_channel (card_id, from_agent, to_agent, message, directive, msg_type) VALUES (?, ?, ?, ?, ?, ?)");
+  const result = stmt.run(cardId, from, to || "ALL", message, directive ? 1 : 0, msgType);
   nerve.fire("channel:message", cardId, { from, to: to || "ALL", message });
   logInfo("channel", `[${from}→${to || "ALL"}] card:${cardId} (${message.length} chars${directive ? ", directive" : ""})`);
   return result.lastInsertRowid as number;

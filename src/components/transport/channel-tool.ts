@@ -17,7 +17,8 @@ async function executePost(args: Record<string, string>, ctx?: { userId?: string
   const from = args.from || ctx?.userId || "agent";
   const to = args.to || "ALL";
   const directive = args.directive === "true" || args.directive === "1";
-  const id = channelPost(cardId, from, to, args.message, directive);
+  const msgType = args.type || "progress";
+  const id = channelPost(cardId, from, to, args.message, directive, msgType);
   return `✓ Posted #${id} to card:${cardId} [${from}→${to}]`;
 }
 
@@ -39,6 +40,7 @@ export const channelPostTool: ToolDefinition = {
       to: { type: "string", description: "Recipient: ALL (default), Worker-01, ORC, MASTER, or peer:name" },
       message: { type: "string", description: "Short message (max 1000 chars)" },
       directive: { type: "string", description: "Set to 'true' for priority directive (Orc/master only)" },
+      type: { type: "string", enum: ["progress", "question", "result", "error"], description: "Message type (default: progress)" },
     },
     required: ["card_id", "message"],
   },
