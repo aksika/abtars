@@ -587,7 +587,7 @@ fi
 
 # ── Duplicate bridge detection (#923) ──────────────────────────────────────────
 BRIDGE_PIDS=$(pgrep -f "node.*bundle/abtars.js" 2>/dev/null | sort -n)
-BRIDGE_COUNT=$(echo "$BRIDGE_PIDS" | grep -c . 2>/dev/null || echo 0)
+if [ -z "$BRIDGE_PIDS" ]; then BRIDGE_COUNT=0; else BRIDGE_COUNT=$(echo "$BRIDGE_PIDS" | wc -l | tr -d ' '); fi
 if [ "$BRIDGE_COUNT" -gt 1 ]; then
   warn "DUPLICATE BRIDGES: $BRIDGE_COUNT processes (PIDs: $(echo $BRIDGE_PIDS | tr '\n' ' '))"
   if $FIX; then
@@ -645,6 +645,18 @@ if grep -qE "^SECURITY_MODE=seatbelt" "$AB/config/.env" 2>/dev/null; then
     command -v sandbox-exec &>/dev/null && ok "seatbelt" "sandbox-exec available" || warn "seatbelt" "sandbox-exec not found"
   else
     command -v bwrap &>/dev/null && ok "seatbelt" "bwrap available" || warn "seatbelt" "bwrap not found (apt install bubblewrap)"
+  fi
+fi
+
+# ── Heap memory check (#1060) ──────────────────────────────────────────────────
+if [ -f "$AB/bridge.lock" ]; then
+  HEAP_MB=$(python3 -c "import json; print(json.load(open('$AB/bridge.lock')).get('heapUsedMB', 0))" 2>/dev/null || echo 0)
+  if [ "$HEAP_MB" -gt 900 ] 2>/dev/null; then
+    err "heap-memory" "Heap critically high: ${HEAP_MB}MB / 1024MB"
+  elif [ "$HEAP_MB" -gt 700 ] 2>/dev/null; then
+    warn "heap-memory" "Heap elevated: ${HEAP_MB}MB / 1024MB"
+  elif [ "$HEAP_MB" -gt 0 ] 2>/dev/null; then
+    ok "heap-memory" "${HEAP_MB}MB / 1024MB"
   fi
 fi
 
