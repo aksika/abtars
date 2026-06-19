@@ -9,11 +9,43 @@ import type { PeerTransport, PeerCard, PeerMessage, TaskResult } from "./interfa
 import { getAlivePeers } from "./gossip.js";
 import { loadPeerConfig, type PeerEntry } from "../peer-config.js";
 import { logInfo, logDebug, logTrace } from "../logger.js";
+import type { WsPeerClient } from "./ws-peer-client.js";
 
 const TAG = "http-transport";
 
 export class HttpTransport implements PeerTransport {
   private handlers: Array<(from: string, message: PeerMessage) => void> = [];
+  private wsClients = new Map<string, WsPeerClient>();
+
+  /** Init WS connections for all ws-outbound peers. Call on boot. */
+  async initWsConnections(): Promise<void> {
+    const config = loadPeerConfig();
+    const { WsPeerClient: Client } = await import("./ws-peer-client.js");
+    for (const [name, entry] of Object.entries(config.peers)) {
+      if (entry.transport !== "ws-outbound") continue;
+      const client = new Client(name, entry);
+      client.onPush((method, payload) => {
+        for (const h of this.handlers) h(name, { type: method as any, payload: payload as any });
+      });
+      client.connect();
+      this.wsClients.set(name, client);
+      logInfo(TAG, `WS outbound: connecting to ${name}`);
+    }
+  }
+
+  /** Check if a peer is reachable via WS. */
+  hasWsConnection(peer: string): boolean {
+    return this.wsClients.get(peer)?.connected ?? false;
+  }
+
+  /** Send via WS if available, otherwise fall back to HTTP. */
+  private async wsOrHttp(peer: string, method: string, payload: unknown, httpFallback: () => Promise<unknown>): Promise<unknown> {
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      return ws.send(method, payload);
+    }
+    return httpFallback();
+  }
 
   discover(): PeerCard[] {
     return getAlivePeers();
@@ -78,6 +110,15 @@ export class HttpTransport implements PeerTransport {
 
     const payload: Record<string, unknown> = { goal, priority: opts?.priority ?? "MEDIUM", context: opts?.context, callback_peer: config.self.name };
     if (opts?.artifacts?.length) payload.artifacts = opts.artifacts;
+
+    // #972: Route via WS if connected, otherwise HTTP
+    const ws = this.wsClients.get(peer);
+    if (ws?.connected) {
+      const result = await ws.send("delegate", payload) as any;
+      logInfo(TAG, `PEER_DELEGATE ${peer} (ws) → remote#${result.taskId} (${goal.length}ch)`);
+      return { taskId: result.taskId, remoteSessionId: result.session_id };
+    }
+
     const body = JSON.stringify(payload);
     const response = await this.httpCall(entry, peer, "POST", "/v1/tasks", body);
     const parsed = JSON.parse(response);

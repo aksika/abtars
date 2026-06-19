@@ -70,6 +70,11 @@ export async function phaseAgentApi(ctx: BootCtx): Promise<PhaseResult> {
       startGossipListener();
     }
 
+    // #972: Start persistent outbound WS connections
+    if (Object.keys(peerConfig.peers).length > 0) {
+      import("../components/peer-transport/index.js").then(({ initPeerTransport }) => initPeerTransport()).catch(() => {});
+    }
+
     if (Object.keys(peerConfig.peers).length > 0) {
       startDnsWakeup(udpPort, peerConfig, async (peerName) => {
         try {

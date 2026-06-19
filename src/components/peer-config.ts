@@ -23,6 +23,7 @@ export interface PeerEntry {
   allowedTools?: string[];
   allowedRead?: string[];
   allowedWrite?: string[];
+  transport?: "http" | "ws-outbound";
 }
 
 export interface PeerConfig {

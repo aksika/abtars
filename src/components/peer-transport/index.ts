@@ -16,3 +16,9 @@ export function getPeerTransport(): PeerTransport {
   if (!_instance) _instance = new HttpTransport();
   return _instance;
 }
+
+/** Initialize peer transport + WS outbound connections. Call at boot. */
+export async function initPeerTransport(): Promise<void> {
+  const transport = getPeerTransport() as HttpTransport;
+  await transport.initWsConnections();
+}
