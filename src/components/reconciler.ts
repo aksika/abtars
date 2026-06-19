@@ -18,6 +18,8 @@ const MAX_RETRIES = 3;
 const MAX_WORKERS = 10;
 const MAX_WALL_CLOCK_MS = 30 * 60 * 1000;
 const STALE_MS = 5 * 60 * 1000;
+const REMOTE_STALE_MS = 10 * 60 * 1000;
+const REMOTE_WARN_MS = 7 * 60 * 1000;
 
 export function startReconciler(): void {
   nerve.on("card:done", reconcile);
@@ -83,9 +85,22 @@ function reconcileProject(projectId: number): void {
       cascadeFail(card.id, children);
     }
 
-    if (card.status === "running" && isStale(card)) {
+    if (card.status === "running" && card.type !== "remote" && isStale(card)) {
       logWarn(TAG, `Card ${card.id} stale (${STALE_MS / 1000}s no activity) — marking failed`);
       kanbanFail(card.id, "stale — no activity");
+    }
+
+    // #949: Remote cards get longer timeout (10min) + channel warning before failure
+    if (card.status === "running" && card.type === "remote" && card.source_peer) {
+      const age = Date.now() - new Date(card.updated_at + "Z").getTime();
+      if (age > REMOTE_STALE_MS) {
+        logWarn(TAG, `Remote card ${card.id} stale (${REMOTE_STALE_MS / 1000}s) — marking failed`);
+        kanbanFail(card.id, "remote worker unresponsive");
+      } else if (age > REMOTE_WARN_MS && !card.labels?.includes("stale-warned")) {
+        const { channelPost } = require("./tasks/kanban-channel.js") as typeof import("./tasks/kanban-channel.js");
+        channelPost(card.id, "SYSTEM", "ALL", "Remote worker unresponsive — consider cancelling");
+        kanbanUpdate(card.id, { labels: [card.labels, "stale-warned"].filter(Boolean).join(",") });
+      }
     }
   }
 

@@ -801,6 +801,18 @@ export class AgentApiServer {
       kanbanAddTokens(card.id, body.tokens_used);
     }
 
+    // #949: Destroy hollow session for this remote worker
+    try {
+      const { spin } = await import("./spin.js");
+      const meta = JSON.parse(card.notes ?? "{}");
+      if (meta.remote_session_id) {
+        const hollow = spin.listAllSessions().find(s => s.peer === caller && s.remoteSessionId === meta.remote_session_id);
+        if (hollow) {
+          spin.endSession(hollow.userId, hollow.platform, hollow.shortIndex);
+        }
+      }
+    } catch { /* best-effort cleanup */ }
+
     this.pushTraffic({
       ts: Date.now(), ip: (req.socket.remoteAddress ?? "?"),
       endpoint: "/v1/callbacks", prompt: `[${caller}] task_id=${taskId} status=${body.status}`,
