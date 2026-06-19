@@ -80,6 +80,8 @@ export class AgentApiServer {
   private onPeerActivity?: (msg: string) => void;
   private tlsEnabled = false;
   private a2aAdapter?: import("../platforms/agent-api/agent-api-adapter.js").AgentApiAdapter;
+  private peerWsConnections = new Map<string, import("ws").WebSocket>();
+  private peerWss: import("ws").WebSocketServer | null = null;
 
   constructor(deps: AgentApiDeps) {
     this.config = deps.config;
@@ -134,6 +136,41 @@ export class AgentApiServer {
   }
 
   async start(): Promise<void> {
+    // #972: WebSocket server for persistent peer connections
+    const { WebSocketServer } = await import("ws");
+    this.peerWss = new WebSocketServer({ noServer: true });
+
+    this.server.on("upgrade", (req: IncomingMessage, socket: any, head: Buffer) => {
+      if (req.url !== "/v1/ws") { socket.destroy(); return; }
+      const auth = req.headers["authorization"];
+      if (!auth?.startsWith("Bearer ")) { socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n"); socket.destroy(); return; }
+      const token = auth.slice(7);
+      // Verify JWT — find which peer this is
+      import("./peer-jwt.js").then(({ verifyJwt }) => {
+        import("./peer-config.js").then(({ loadPeerConfig }) => {
+          const config = loadPeerConfig();
+          for (const [name, entry] of Object.entries(config.peers)) {
+            const result = verifyJwt(token, entry.token, config.self.name);
+            if (result.status === "valid") {
+              this.peerWss!.handleUpgrade(req, socket, head, (ws) => {
+                this.peerWsConnections.set(name, ws);
+                logInfo(TAG, `Peer WS connected: ${name}`);
+                ws.on("close", () => { this.peerWsConnections.delete(name); logInfo(TAG, `Peer WS disconnected: ${name}`); });
+                ws.on("error", () => { this.peerWsConnections.delete(name); });
+                // Ping/pong keepalive
+                const pingInterval = setInterval(() => { if (ws.readyState === ws.OPEN) ws.ping(); }, 30_000);
+                ws.on("close", () => clearInterval(pingInterval));
+                ws.on("message", (data) => this.handlePeerWsMessage(name, data.toString()));
+              });
+              return;
+            }
+          }
+          socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+          socket.destroy();
+        }).catch(() => { socket.destroy(); });
+      }).catch(() => { socket.destroy(); });
+    });
+
     return new Promise((resolve, reject) => {
       this.server.on("error", (err: NodeJS.ErrnoException) => reject(err));
       this.server.listen(this.config.port, () => resolve());
@@ -142,8 +179,48 @@ export class AgentApiServer {
 
   async stop(): Promise<void> {
     await this.killAgentSession();
+    for (const ws of this.peerWsConnections.values()) ws.close();
+    this.peerWsConnections.clear();
     this.server.closeAllConnections();
     return new Promise((resolve) => this.server.close(() => resolve()));
+  }
+
+  /** Push a message to a connected peer via WS. Returns true if delivered. */
+  pushToPeer(peerName: string, method: string, payload: unknown): boolean {
+    const ws = this.peerWsConnections.get(peerName);
+    if (!ws || ws.readyState !== ws.OPEN) return false;
+    ws.send(JSON.stringify({ type: "push", method, payload }));
+    return true;
+  }
+
+  /** Handle incoming WS message from a peer. */
+  private handlePeerWsMessage(peerName: string, raw: string): void {
+    try {
+      const msg = JSON.parse(raw);
+      if (msg.type === "request") {
+        // Peer sending a request over WS — route same as HTTP
+        this.handlePeerWsRequest(peerName, msg).catch(err => logAndSwallow(TAG, "ws-request", err));
+      }
+    } catch { /* malformed — ignore */ }
+  }
+
+  private async handlePeerWsRequest(peerName: string, msg: { id?: string; method: string; payload: unknown }): Promise<void> {
+    const ws = this.peerWsConnections.get(peerName);
+    if (!ws || ws.readyState !== ws.OPEN) return;
+    // Route based on method — same logic as HTTP handlers
+    let result: unknown = { error: "unknown method" };
+    if (msg.method === "delegate") {
+      // Same as POST /v1/tasks
+      const { spin } = await import("./spin.js");
+      const p = msg.payload as { goal: string; priority?: string; context?: string };
+      const { cardId } = spin.dispatch({ type: "W", goal: p.goal, title: p.goal.slice(0, 60), source: "peer", priority: (p.priority as any) ?? "MEDIUM" });
+      result = { ok: true, taskId: cardId };
+    } else if (msg.method === "check") {
+      const { kanbanGetCard } = await import("./tasks/kanban-board.js");
+      const card = kanbanGetCard((msg.payload as any).taskId);
+      result = card ? { taskId: card.id, status: card.status, result: card.result_summary, error: card.error } : { error: "not found" };
+    }
+    ws.send(JSON.stringify({ type: "response", id: msg.id, payload: result }));
   }
 
   /** Get or create a dedicated agent session for A2A. Routes through Spin (#894). */

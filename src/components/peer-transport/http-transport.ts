@@ -118,25 +118,10 @@ export class HttpTransport implements PeerTransport {
   }
 
   private async httpCall(entry: PeerEntry, peerName: string, method: string, path: string, body?: string): Promise<string> {
-    const { signJwt } = await import("../peer-jwt.js");
-    const config = loadPeerConfig();
-    const now = Math.floor(Date.now() / 1000);
-    const jwt = signJwt({ iss: config.self.name, aud: peerName, iat: now, exp: now + 60 }, entry.token);
-
-    // Sign body content if signingKey configured
-    let finalBody = body;
-    if (body && config.self.signingKey) {
-      const { signMessage } = await import("../digital-signature.js");
-      const { tag } = signMessage(config.self.signingKey, config.self.name, peerName, body);
-      const parsed = JSON.parse(body);
-      parsed._sig = tag;
-      finalBody = JSON.stringify(parsed);
-    }
-
-    // #975: TLS 1.3 mandatory — no HTTP fallback, no escape hatch
-    if (!entry.certFingerprint && !entry.certPem) {
-      throw new Error(`Peer '${peerName}' has no TLS cert configured — refusing connection. Set certFingerprint or certPem in peers.json.`);
-    }
+    const { mintPeerJwt, signBody, tlsOptions } = await import("./peer-auth.js");
+    const jwt = mintPeerJwt(peerName);
+    const finalBody = body ? await signBody(peerName, body) : undefined;
+    const tls = tlsOptions(entry);
     const http = await import("node:https");
 
     return new Promise((resolve, reject) => {
@@ -146,18 +131,6 @@ export class HttpTransport implements PeerTransport {
       };
       if (finalBody) headers["Content-Length"] = String(Buffer.byteLength(finalBody));
 
-      const tlsOpts = {
-        minVersion: "TLSv1.3" as const,
-        rejectUnauthorized: true,
-        ...(entry.certPem ? { ca: [entry.certPem] } : {}),
-        checkServerIdentity: (_host: string, cert: { fingerprint256?: string }) => {
-          if (entry.certFingerprint && cert.fingerprint256 !== entry.certFingerprint) {
-            return new Error(`Cert fingerprint mismatch`);
-          }
-          return undefined;
-        },
-      };
-
       const req = http.request({
         hostname: entry.host,
         port: entry.port,
@@ -165,7 +138,7 @@ export class HttpTransport implements PeerTransport {
         method,
         headers,
         timeout: 60_000,
-        ...tlsOpts,
+        ...tls,
       } as any, (res: any) => {
         let data = "";
         res.on("data", (c: any) => data += c);
