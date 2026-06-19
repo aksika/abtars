@@ -431,12 +431,13 @@ async function restartBridge(paths: ReturnType<typeof packagePaths>): Promise<bo
 
     // Kill old watchdog (bridge survives — nohup'd)
     try {
-      const oldPid = execSync('pgrep -f "bash.*watchdog.sh"', { encoding: "utf-8" }).trim();
-      if (oldPid) {
-        for (const p of oldPid.split("\n").filter(Boolean)) {
-          try { process.kill(+p, "SIGTERM"); } catch {}
+      const oldPids = execSync('ps ax -o pid,command | grep "bash.*watchdog.sh" | grep -v grep', { encoding: "utf-8" }).trim();
+      if (oldPids) {
+        for (const line of oldPids.split("\n").filter(Boolean)) {
+          const pid = parseInt(line.trim(), 10);
+          if (pid > 0) { try { process.kill(pid, "SIGTERM"); } catch {} }
         }
-        process.stdout.write(`  Killed old watchdog (PID ${oldPid.split("\n")[0]})\n`);
+        process.stdout.write(`  Killed old watchdog\n`);
         await new Promise(r => setTimeout(r, 1000));
       }
     } catch {} // no watchdog running — fine

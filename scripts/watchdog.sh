@@ -11,7 +11,7 @@ STATE="$AB/watchdog.state"
 # Secondary singleton guard: PID check via bridge.lock (belt + suspenders with flock)
 OLD_WD=$(python3 -c "import json;print(json.load(open('$LOCK')).get('watchdogPid',''))" 2>/dev/null)
 if [[ -n "$OLD_WD" && "$OLD_WD" != "$$" ]] && kill -0 "$OLD_WD" 2>/dev/null; then
-  if [[ -f /proc/$OLD_WD/cmdline ]] && grep -q "watchdog" /proc/"$OLD_WD"/cmdline 2>/dev/null; then
+  if ps -p "$OLD_WD" -o command= 2>/dev/null | grep -q "watchdog"; then
     exit 0
   fi
 fi
