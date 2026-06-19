@@ -38,7 +38,8 @@ function db(): SqliteDb {
     try { _db.exec(`ALTER TABLE agent_channel ADD COLUMN remote_peer TEXT DEFAULT NULL`); } catch { /* already exists */ }
     try { _db.exec(`ALTER TABLE agent_channel ADD COLUMN synced INTEGER DEFAULT 1`); } catch { /* already exists */ }
     try { _db.exec(`ALTER TABLE agent_channel ADD COLUMN msg_type TEXT DEFAULT 'progress'`); } catch { /* already exists */ }
-    try { _db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ac_dedup ON agent_channel(card_id, from_agent, created_at)`); } catch { /* already exists */ }
+    // #949: dedup index only enforced via INSERT OR IGNORE in channelPostFromRemote
+    try { _db.exec(`CREATE INDEX IF NOT EXISTS idx_ac_dedup ON agent_channel(card_id, from_agent, created_at)`); } catch { /* already exists */ }
   }
   return _db;
 }
@@ -114,11 +115,13 @@ export function channelRetentionGc(activeCardIds: number[]): number {
   return (aged.changes as number) + capped;
 }
 
-/** #949: Insert a message pushed from a remote peer. Dedup via UNIQUE constraint. */
+/** #949: Insert a message pushed from a remote peer. Dedup via existence check. */
 export function channelPostFromRemote(cardId: number, from: string, message: string, createdAt: string, peer: string): boolean {
   if (message.length > MAX_MESSAGE_LEN) message = message.slice(0, MAX_MESSAGE_LEN) + "…";
   try {
-    db().prepare("INSERT OR IGNORE INTO agent_channel (card_id, from_agent, to_agent, message, created_at, remote_peer, synced) VALUES (?, ?, 'ALL', ?, ?, ?, 1)")
+    const exists = db().prepare("SELECT 1 FROM agent_channel WHERE card_id = ? AND from_agent = ? AND created_at = ?").get(cardId, from, createdAt);
+    if (exists) return true; // already have it
+    db().prepare("INSERT INTO agent_channel (card_id, from_agent, to_agent, message, created_at, remote_peer, synced) VALUES (?, ?, 'ALL', ?, ?, ?, 1)")
       .run(cardId, from, message, createdAt, peer);
     nerve.fire("channel:message", cardId, { from, to: "ALL", message });
     return true;
