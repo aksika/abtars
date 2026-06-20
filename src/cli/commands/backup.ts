@@ -16,10 +16,8 @@ import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
 
 const DEFAULT_PRUNE_DAYS = 7;
 
-// Full mode: exclude these from ~/.abtars/ (everything else = user data, backup it all)
-const ABTARS_EXCLUDE = [
-  "logs", "overflow", "browser-socket", "app", "app/*", "bin", "bin/*", "bridge.lock", "*.sock",
-];
+// Full mode: explicit dirs to include (user data only — no code, no logs, no transient state)
+const FULL_DIRS = ["config", "secret", "tasks", "skills", "kanban", "metrics", "auth", "workspace"];
 
 // Full mode: exclude these from ~/.abmind/
 const ABMIND_EXCLUDE = [
@@ -47,19 +45,7 @@ export async function backup(opts: BackupOpts = {}): Promise<number> {
   const isConfig = opts.config === true;
   const prefix = isConfig ? `abtars-config-${date}` : `abtars-${date}`;
 
-  // 1. Build exclude patterns for zip
-  const zipExcludes: string[] = [];
-  if (isConfig) {
-    // Config mode: zip only specific dirs
-    // We'll zip from abHome with explicit includes
-  } else {
-    // Full mode: zip everything except excludes
-    for (const ex of ABTARS_EXCLUDE) {
-      zipExcludes.push(`${ex}/*`, ex);
-    }
-    // Exclude .db-wal/.db-shm patterns
-    zipExcludes.push("*.db-wal", "*.db-shm", "*.sock");
-  }
+  // 1. Determine dirs to include
 
   // 2. Create the zip
   const has7z = spawnSync("which", ["7z"], { encoding: "utf-8" }).status === 0;
@@ -83,16 +69,13 @@ export async function backup(opts: BackupOpts = {}): Promise<number> {
       zipOk = r.status === 0;
     }
   } else {
-    // Full mode: zip ~/.abtars/ with excludes
+    // Full mode: zip only USER DATA dirs
+    const existingFull = FULL_DIRS.filter(d => existsSync(join(abHome, d)));
     if (has7z) {
-      const excludeArgs = ABTARS_EXCLUDE.flatMap(ex => ["-xr!" + ex]);
-      excludeArgs.push("-xr!*.db-wal", "-xr!*.db-shm", "-xr!*.sock");
-      const r = spawnSync("7z", ["a", zipPath, ".", ...excludeArgs], { cwd: abHome, encoding: "utf-8" });
+      const r = spawnSync("7z", ["a", zipPath, ...existingFull], { cwd: abHome, encoding: "utf-8" });
       zipOk = r.status === 0;
     } else {
-      const excludeArgs = ABTARS_EXCLUDE.flatMap(ex => ["-x", `${ex}/*`, "-x", ex]);
-      excludeArgs.push("-x", "*.db-wal", "-x", "*.db-shm", "-x", "*.sock");
-      const r = spawnSync("zip", ["-qr", zipPath, ".", ...excludeArgs], { cwd: abHome, encoding: "utf-8" });
+      const r = spawnSync("zip", ["-qr", zipPath, ...existingFull], { cwd: abHome, encoding: "utf-8" });
       zipOk = r.status === 0;
     }
 
