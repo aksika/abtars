@@ -148,16 +148,16 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     const mode = manifest?.installMode ?? "daemon";
 
     if (mode === "daemon") {
-      process.stdout.write(`  Daemon will respawn watchdog\n`);
-      // Launchd/systemd handles it — noop
-    } else if (mode === "daemon") {
-      const scriptPath = join(paths.home, "scripts/abtars-watchdog.sh");
-      const { openSync, closeSync } = await import("node:fs");
-      const logFd = openSync(join(paths.home, "logs/watchdog.log"), "a");
-      const wd = spawn("bash", [scriptPath], { detached: true, stdio: ["ignore", logFd, logFd], cwd: paths.home });
-      wd.unref();
-      closeSync(logFd);
-      process.stdout.write(`  New watchdog spawned\n`);
+      if (process.platform === "darwin") {
+        const plistPath = join(process.env["HOME"] ?? "", "Library/LaunchAgents/com.abtars.watchdog.plist");
+        const uid = `gui/${process.getuid?.() ?? 501}`;
+        try { execSync(`launchctl bootstrap ${uid} "${plistPath}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
+      } else {
+        try { execSync("systemctl --user unmask abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync("systemctl --user enable abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+        try { execSync("systemctl --user start abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+      }
+      process.stdout.write(`  Daemon started\n`);
     } else {
       // simple: start bridge directly
       const logFd = (await import("node:fs")).openSync(join(paths.home, "logs/bridge.log"), "a");
@@ -277,11 +277,15 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
 async function copyAbmind(stagingDir: string, repoRoot: string): Promise<void> {
   const abmindSrc = join(repoRoot, "..", "abmind");
   if (!existsSync(join(abmindSrc, "package.json"))) return;
-  // Rebuild abmind
+  // Rebuild abmind (type errors are non-fatal — check dist exists after)
   try {
     execSync("npm run build", { cwd: abmindSrc, stdio: "pipe", timeout: 60_000 });
-    process.stdout.write(`✓ abmind rebuilt\n`);
-  } catch { process.stdout.write(`⚠ abmind build failed\n`); return; }
+  } catch {}
+  if (!existsSync(join(abmindSrc, "dist", "cli", "abmind.js"))) {
+    process.stdout.write(`⚠ abmind build failed (no dist output)\n`);
+    return;
+  }
+  process.stdout.write(`✓ abmind rebuilt\n`);
   // Copy dist into staging
   const dest = join(stagingDir, "node_modules", "abmind");
   cpSync(abmindSrc, dest, { recursive: true, filter: (src) => !src.includes("node_modules") && !src.includes(".git") });
