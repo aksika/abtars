@@ -100,9 +100,10 @@ export async function deploy(opts: DeployOptions): Promise<number> {
 
     process.stdout.write(`✓ deployed to releases/${staged.commit || staged.version}\n`);
 
-    // ── Step 4: Onboard (first install only) ──────────────────────────────
+    // ── Step 4: Require prior install ──────────────────────────────────────
     if (isFirstInstall) {
-      await onboard(paths);
+      process.stderr.write("No manifest.json found. Run 'abtars install' first.\n");
+      return 1;
     }
 
     // ── Step 5: Refresh ───────────────────────────────────────────────────
@@ -181,26 +182,6 @@ export async function deploy(opts: DeployOptions): Promise<number> {
   } finally {
     await release();
   }
-}
-
-// ── Onboard (first install) ─────────────────────────────────────────────────
-async function onboard(paths: ReturnType<typeof packagePaths>): Promise<void> {
-  process.stdout.write(`\nFirst install detected — setting up...\n`);
-  // Create directory structure
-  for (const d of ["logs", "config", "secret", "skills/core", "skills/custom", "skills/self", "scripts", "bin"]) {
-    mkdirSync(join(paths.home, d), { recursive: true });
-  }
-  await chmod(join(paths.home, "secret"), 0o700);
-  await chmod(join(paths.home, "config"), 0o700);
-  process.stdout.write(`  ✓ directories created\n`);
-
-  // Set installMode (detect platform)
-  const platform = process.platform;
-  const mode = platform === "darwin" ? "daemon" : "daemon";
-  process.stdout.write(`  ✓ installMode: ${mode}\n`);
-
-  // Write initial manifest with mode
-  await writeManifest(paths.manifest, { ...emptyManifest("abtars", hostname()), installMode: mode } as any);
 }
 
 // ── Refresh ─────────────────────────────────────────────────────────────────

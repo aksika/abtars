@@ -97,8 +97,18 @@ export async function main(argv: readonly string[]): Promise<number> {
   try {
     switch (command) {
       case 'install':
-        process.stdout.write("'abtars install' is removed. Use 'abtars update --local' (auto-detects first install).\n");
-        return 0;
+      case 'onboard':
+        return await onboard({
+          nonInteractive: flags.get('non-interactive') === true,
+          acceptRisk: flags.get('accept-risk') === true,
+          telegramToken: typeof flags.get('telegram-token') === 'string' ? (flags.get('telegram-token') as string) : undefined,
+          telegramChatId: typeof flags.get('telegram-chat-id') === 'string' ? (flags.get('telegram-chat-id') as string) : undefined,
+          defaultProvider: typeof flags.get('default-provider') === 'string' ? (flags.get('default-provider') as string) : undefined,
+          defaultModel: typeof flags.get('default-model') === 'string' ? (flags.get('default-model') as string) : undefined,
+          discordA2aChannel: typeof flags.get('discord-a2a-channel') === 'string' ? (flags.get('discord-a2a-channel') as string) : undefined,
+          userName: typeof flags.get('user-name') === 'string' ? (flags.get('user-name') as string) : undefined,
+          force: flags.get('force') === true,
+        });
       case 'uninstall':
         return await uninstall({ yes: flags.get('yes') === true });
       case 'update':
@@ -128,18 +138,6 @@ export async function main(argv: readonly string[]): Promise<number> {
         // Pass remaining --flags through to doctor.sh. Primitive pass-through:
         // anything after 'doctor' except recognized flags goes to the script.
         return await doctor(argv.slice(1).filter((a) => a !== ''));
-      case 'onboard':
-        return await onboard({
-          nonInteractive: flags.get('non-interactive') === true,
-          acceptRisk: flags.get('accept-risk') === true,
-          telegramToken: typeof flags.get('telegram-token') === 'string' ? (flags.get('telegram-token') as string) : undefined,
-          telegramChatId: typeof flags.get('telegram-chat-id') === 'string' ? (flags.get('telegram-chat-id') as string) : undefined,
-          defaultProvider: typeof flags.get('default-provider') === 'string' ? (flags.get('default-provider') as string) : undefined,
-          defaultModel: typeof flags.get('default-model') === 'string' ? (flags.get('default-model') as string) : undefined,
-          discordA2aChannel: typeof flags.get('discord-a2a-channel') === 'string' ? (flags.get('discord-a2a-channel') as string) : undefined,
-          userName: typeof flags.get('user-name') === 'string' ? (flags.get('user-name') as string) : undefined,
-          force: flags.get('force') === true,
-        });
       case 'status':
         return await status();
       case 'restart':
