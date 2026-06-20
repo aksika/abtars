@@ -104,7 +104,7 @@ async function daemonInstall(): Promise<number> {
     try {
       const { readFileSync: rfs, writeFileSync: wfs } = await import("node:fs");
       const mf = JSON.parse(rfs(manifestPath, "utf-8"));
-      mf.installMode = "supervised-daemon";
+      mf.installMode = "daemon";
       wfs(manifestPath, JSON.stringify(mf, null, 2) + "\n");
     } catch { /* best effort */ }
     process.stdout.write(`✓ systemd unit installed at ${dst}\n`);

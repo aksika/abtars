@@ -30,7 +30,7 @@ export async function status(): Promise<number> {
     `  commit:        ${manifest.commit ?? '(unknown)'}`,
     `  branch:        ${manifest.branch ?? '(unknown)'}`,
     `  source:        ${manifest.source}`,
-    `  mode:          ${manifest.installMode ?? 'supervised'}`,
+    `  mode:          ${manifest.installMode ?? 'daemon'}`,
     `  activated:     ${manifest.activatedAt}`,
     `  app/:          ${appExists ? '✓ present' : '✗ missing'}`,
     `  app.prev/:     ${appPrevExists ? '✓ present' : '○ none'}`,

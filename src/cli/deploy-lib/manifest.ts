@@ -30,8 +30,8 @@ export interface Manifest {
   readonly previousVersion: string | null;
   /** Previous commit (for rollback reference). */
   readonly previousCommit: string | null;
-  /** Install mode: simple (manual), supervised (launchd/systemd user-scope), or supervised-daemon (system-scope). */
-  readonly installMode?: 'simple' | 'supervised' | 'supervised-daemon';
+  /** Install mode: simple (manual) or daemon (watchdog + OS integration if available). */
+  readonly installMode?: 'simple' | 'daemon';
   /** Repo root path (set when source=local). Null for npm installs. */
   readonly repoRoot?: string | null;
 }

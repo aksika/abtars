@@ -120,7 +120,7 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       source: opts.source,
       previousVersion: prior?.version ?? null,
       previousCommit: prior?.commit ?? null,
-      installMode: prior?.installMode ?? "supervised",
+      installMode: prior?.installMode ?? "daemon",
       repoRoot,
     } as any);
     writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "deploying", version: staged.version, startedAt: new Date().toISOString() }) + "\n");
@@ -144,12 +144,12 @@ export async function deploy(opts: DeployOptions): Promise<number> {
 
     // ── Step 8: Respawn ───────────────────────────────────────────────────
     const manifest = await readManifest(paths.manifest);
-    const mode = manifest?.installMode ?? "supervised";
+    const mode = manifest?.installMode ?? "daemon";
 
-    if (mode === "supervised-daemon") {
+    if (mode === "daemon") {
       process.stdout.write(`  Daemon will respawn watchdog\n`);
       // Launchd/systemd handles it — noop
-    } else if (mode === "supervised") {
+    } else if (mode === "daemon") {
       const scriptPath = join(paths.home, "scripts/watchdog.sh");
       const { openSync, closeSync } = await import("node:fs");
       const logFd = openSync(join(paths.home, "logs/watchdog.log"), "a");
@@ -196,7 +196,7 @@ async function onboard(paths: ReturnType<typeof packagePaths>): Promise<void> {
 
   // Set installMode (detect platform)
   const platform = process.platform;
-  const mode = platform === "darwin" ? "supervised-daemon" : "supervised";
+  const mode = platform === "darwin" ? "daemon" : "daemon";
   process.stdout.write(`  ✓ installMode: ${mode}\n`);
 
   // Write initial manifest with mode

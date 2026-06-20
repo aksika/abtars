@@ -83,7 +83,7 @@ const PROVIDER_API_KEY_ENV: Record<ProviderChoice, string> = {
 };
 
 interface WizardAnswers {
-  readonly installMode: "simple" | "supervised" | "supervised-daemon";
+  readonly installMode: "simple" | "daemon";
   readonly userName: string;
   readonly instanceName: string;
   readonly passphrase: string;
@@ -115,7 +115,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   const { packagePaths: pp, readManifest: rm } = await import("../deploy-lib-import.js");
   const mfPaths = pp('abtars');
   const mf = await rm(mfPaths.manifest);
-  const installMode = mf?.installMode ?? 'supervised';
+  const installMode = mf?.installMode ?? 'daemon';
 
   // 1c. User name (for personal greeting)
   const userName = await text({
@@ -323,7 +323,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   outro('Writing config…');
 
   return {
-    installMode: installMode as "simple" | "supervised" | "supervised-daemon",
+    installMode: installMode as "simple" | "daemon",
     userName: String(userName ?? '').trim(),
     instanceName: String(instanceName ?? '').trim(),
     passphrase: String(passphrase ?? ''),
@@ -371,7 +371,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     return `--default-provider must be one of: ${VALID_PROVIDERS.join(', ')}`;
   }
   return {
-    installMode: 'supervised',
+    installMode: 'daemon',
     userName: opts.userName ?? '',
     instanceName: opts.instanceName ?? '',
     passphrase: '',

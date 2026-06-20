@@ -77,7 +77,7 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
   try { require("node:fs").writeFileSync(stoppedSentinel, "stopped"); } catch {}
 
   // 1) Unload supervisor service (prevent respawn)
-  if (installMode === "supervised-daemon" || installMode === "supervised") {
+  if (installMode === "daemon") {
     if (process.platform === "darwin") {
       const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
       const uid = `gui/${process.getuid!()}`;
@@ -125,7 +125,7 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
 
   process.stdout.write(`🛑 ${wdMsg}\n   ${brMsg}\n`);
 
-  if (installMode === "supervised-daemon" || installMode === "supervised") {
+  if (installMode === "daemon") {
     process.stdout.write(`   Service unloaded. Use 'abtars start' to restart.\n`);
   }
 

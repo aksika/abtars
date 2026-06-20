@@ -23,7 +23,7 @@ export async function start(): Promise<number> {
 
   // Reload supervisor service if supervised
   const installMode = readJsonField(join(home, "manifest.json"), "installMode") as string | undefined;
-  if (installMode === "supervised-daemon" || installMode === "supervised") {
+  if (installMode === "daemon") {
     if (process.platform === "darwin") {
       const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
       const uid = `gui/${process.getuid!()}`;

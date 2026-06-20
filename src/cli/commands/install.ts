@@ -28,7 +28,7 @@ export interface InstallOptions {
   readonly restore?: string;
   readonly force: boolean;
   readonly dryRun: boolean;
-  readonly mode?: "simple" | "supervised";
+  readonly mode?: "simple" | "daemon";
 }
 
 // CLI wrappers are read from install-manifest.json at runtime.
@@ -354,7 +354,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   //   3. default: supervised
   const manifestForMode = await readManifest(paths.manifest);
   const existingMode = manifestForMode?.installMode;
-  const mode = opts.mode ?? existingMode ?? "supervised";
+  const mode = opts.mode ?? existingMode ?? "daemon";
   if (manifestForMode) {
     await writeManifest(paths.manifest, { ...manifestForMode, installMode: mode });
   }
@@ -406,7 +406,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   }
 
   // --- supervised: load user-scope watchdog (LaunchAgent / systemd user) ---
-  if (mode === 'supervised') {
+  if (mode === 'daemon') {
     const { execSync } = await import('node:child_process');
     if (process.platform === 'darwin') {
       const plistSrc = join(home, 'scripts', 'com.abtars.watchdog.plist');

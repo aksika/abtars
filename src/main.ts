@@ -1,7 +1,7 @@
 /**
  * Abtars — entry point.
  * Internal restart loop: exit code 0 = restart, non-zero = die.
- * Under SUPERVISION (supervised-daemon mode), the loop is disabled —
+ * Under DAEMON mode, the loop is disabled —
  * the system supervisor (systemd/launchd) handles restarts.
  *
  * CRITICAL: `./boot/env.js` MUST be the first import. ES static imports are
