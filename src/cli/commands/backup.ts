@@ -16,11 +16,9 @@ import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
 
 const DEFAULT_PRUNE_DAYS = 7;
 
-// Full mode: exclude these from ~/.abtars/
+// Full mode: exclude these from ~/.abtars/ (everything else = user data, backup it all)
 const ABTARS_EXCLUDE = [
-  "releases", "current", "bin", "app", "app.prev*", "app.staging", "app.broken",
-  "logs", "node_modules", "overflow", "browser-socket", "src",
-  "bridge.lock", "browse-spawn.sock", "manifest.json", "*.sock",
+  "logs", "overflow", "browser-socket", "*.sock",
 ];
 
 // Full mode: exclude these from ~/.abmind/
@@ -30,7 +28,7 @@ const ABMIND_EXCLUDE = [
 ];
 
 // Config mode: include only these from ~/.abtars/
-const CONFIG_DIRS = ["config", "secret", "tasks", "skills", "core", "agents", "kanban"];
+const CONFIG_DIRS = ["config", "secret", "tasks", "skills", "kanban", "state"];
 
 export interface BackupOpts {
   config?: boolean;
