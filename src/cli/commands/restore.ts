@@ -80,22 +80,7 @@ export async function restore(archivePath: string, opts: RestoreOpts = {}): Prom
   }
 
   // Extract zip to ~/.abtars/ (overlays existing — bridge keeps running)
-  const rc = extractZip(archivePath, abtarsHome());
-
-  // Clean transient state that the bridge must recreate from scratch
-  const transient = ["bridge.lock", "sessions.json", "deploy.state", ".start-reason", ".bridge.flock"];
-  for (const f of transient) {
-    try { unlinkSync(join(abtarsHome(), f)); } catch {}
-  }
-  // Clean state/ dir (all runtime ephemeral)
-  const stateDir = join(abtarsHome(), "state");
-  if (existsSync(stateDir)) {
-    for (const f of readdirSync(stateDir)) {
-      try { unlinkSync(join(stateDir, f)); } catch {}
-    }
-  }
-
-  return rc;
+  return extractZip(archivePath, abtarsHome());
 }
 
 function restoreAbmind(abmPath: string, passphrase?: string): number {
