@@ -479,12 +479,22 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     return _origWrite(chunk, ...args);
   }) as typeof process.stdout.write;
 
-  const manifest = await readManifest(paths.manifest);
+  let manifest = await readManifest(paths.manifest);
   if (!manifest) {
-    process.stderr.write(
-      `Not installed yet. Run 'abtars install' first.\n(Manifest not found at ${paths.manifest}.)\n`,
-    );
-    return 2;
+    // First install — create skeleton + manifest
+    const { mkdirSync } = await import("node:fs");
+    const { chmod } = await import("node:fs/promises");
+    for (const d of ["logs", "config", "secret", "skills/core", "skills/self", "kanban", "state", "bin"]) {
+      mkdirSync(join(paths.home, d), { recursive: true });
+    }
+    await chmod(join(paths.home, "secret"), 0o700);
+    await chmod(join(paths.home, "config"), 0o700);
+    const { hostname } = await import("node:os");
+    const { emptyManifest, writeManifest: wm } = await import("../deploy-lib-import.js");
+    const mode = process.platform === "darwin" ? "daemon" : "daemon";
+    manifest = { ...emptyManifest("abtars", hostname()), installMode: mode } as any;
+    await wm(paths.manifest, manifest as any);
+    process.stdout.write(`✓ skeleton at ${paths.home}\n✓ install mode: ${mode}\n`);
   }
 
   const envPath = join(paths.config, '.env');

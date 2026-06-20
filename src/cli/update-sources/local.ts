@@ -155,7 +155,7 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
 
       // Install deps into the repo (if not skipped).
       if (opts.skipInstall !== true) {
-        runCmd('npm', ['install', '--no-audit', '--no-fund'], repoRoot);
+        runCmd('pnpm', ['install', '--frozen-lockfile'], repoRoot);
       }
 
       // Bundle mode (esbuild) — build directly, skip npm run bundle (it requires ../abmind)

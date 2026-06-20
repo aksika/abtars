@@ -60,7 +60,7 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       pkg.dependencies = { ...pkg.dependencies, ...externals };
       if (pkg.dependencies?.abmind?.startsWith("file:")) delete pkg.dependencies.abmind;
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
-      execSync("npm install --omit=dev --ignore-scripts 2>/dev/null", { cwd: staged.stagedPath, timeout: 60_000 });
+      execSync("pnpm install --prod --ignore-scripts 2>/dev/null", { cwd: staged.stagedPath, timeout: 120_000 });
       process.stdout.write(`✓ external deps installed\n`);
     } catch { process.stdout.write(`⚠ external deps install failed\n`); }
 
