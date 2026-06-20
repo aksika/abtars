@@ -35,6 +35,7 @@ export interface OnboardOptions {
   readonly telegramChatId?: string;
   readonly defaultProvider?: string;
   readonly defaultModel?: string;
+  readonly apiKey?: string;
   readonly discordA2aChannel?: string;
   readonly userName?: string;
   readonly instanceName?: string;
@@ -382,7 +383,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     discordA2aChannel: opts.discordA2aChannel ?? '',
     defaultProvider: provider,
     defaultModel: opts.defaultModel ?? DEFAULT_MODELS[provider],
-    providerApiKey: '',
+    providerApiKey: opts.apiKey ?? '',
     hailMaryModel: '',
     bedTime: '',
     wakeTime: '',
