@@ -68,9 +68,32 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       return 1;
     }
 
-    // ── Step 3: Swap ──────────────────────────────────────────────────────
-    atomicSwap(paths.app, paths.appPrev, paths.appStaging);
-    process.stdout.write(`✓ swap: app.staging/ -> app/\n`);
+    // ── Step 3: Deploy to releases dir + repoint symlink ────────────────
+    const { symlinkSync, unlinkSync, renameSync } = await import("node:fs");
+    mkdirSync(paths.releasesDir, { recursive: true });
+    const releaseDir = join(paths.releasesDir, staged.commit || staged.version);
+    if (existsSync(releaseDir)) rmSync(releaseDir, { recursive: true, force: true });
+    renameSync(staged.stagedPath, releaseDir);
+
+    // Update history.json (ordered array, max 4)
+    let history: string[] = [];
+    try { history = JSON.parse(readFileSync(paths.releasesHistory, "utf-8")); } catch {}
+    history.unshift(staged.commit || staged.version);
+    if (history.length > 4) {
+      const dropped = history.pop()!;
+      rmSync(join(paths.releasesDir, dropped), { recursive: true, force: true });
+    }
+    writeFileSync(paths.releasesHistory, JSON.stringify(history) + "\n");
+
+    // Repoint current symlink
+    try { unlinkSync(paths.releasesCurrentLink); } catch {}
+    symlinkSync(releaseDir, paths.releasesCurrentLink);
+
+    // Keep legacy app/ as symlink for backward compat (WD, bridge.lock paths)
+    try { rmSync(paths.app, { recursive: true, force: true }); } catch {}
+    symlinkSync(releaseDir, paths.app);
+
+    process.stdout.write(`✓ deployed to releases/${staged.commit || staged.version}\n`);
 
     // ── Step 4: Onboard (first install only) ──────────────────────────────
     if (isFirstInstall) {
