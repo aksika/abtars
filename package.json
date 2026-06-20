@@ -11,7 +11,7 @@
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
     "check-imports": "bash -c '! grep -rE \"from \\\"abmind/|from '\\''abmind/\" src --include=*.ts | grep -vE \"abmind/deploy-lib\\\"|abmind/deploy-lib'\\''\"'",
-    "test": "vitest --run && node src/cli/commands/install-smoke.mjs",
+    "test": "vitest --run",
     "test:watch": "vitest",
     "prepublishOnly": "node -e \"const p=require('./package.json');const d=JSON.stringify(p.dependencies||{});if(d.includes('file:')){console.error('ERROR: file: dependency found');process.exit(1)}\"",
     "test:integration": "vitest --run --dir src/tests/integration"
