@@ -90,9 +90,9 @@ export async function backup(opts: BackupOpts = {}): Promise<number> {
       const r = spawnSync("7z", ["a", zipPath, ".", ...excludeArgs], { cwd: abHome, encoding: "utf-8" });
       zipOk = r.status === 0;
     } else {
-      const excludeArgs = ABTARS_EXCLUDE.flatMap(ex => ["-x", `${ex}/*`, "-x", ex]);
-      excludeArgs.push("-x", "*.db-wal", "-x", "*.db-shm", "-x", "*.sock");
-      const r = spawnSync("zip", ["-qr", zipPath, ".", ...excludeArgs], { cwd: abHome, encoding: "utf-8" });
+      const excludePatterns = ABTARS_EXCLUDE.flatMap(ex => [`${ex}/*`, ex]);
+      excludePatterns.push("*.db-wal", "*.db-shm", "*.sock");
+      const r = spawnSync("zip", ["-qr", zipPath, ".", "-x", ...excludePatterns], { cwd: abHome, encoding: "utf-8" });
       zipOk = r.status === 0;
     }
 
