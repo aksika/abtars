@@ -80,11 +80,16 @@ function verifyPacket(data: Buffer): Record<string, unknown> | null {
   const payload = str.slice(0, sepIdx);
   const sig = str.slice(sepIdx + 1);
   const config = loadPeerConfig();
-  const peers = Object.values(config.peers);
-  const key = peers[0]?.token ?? "default";
-  const expected = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
-  if (sig !== expected) return null;
-  try { return JSON.parse(payload); } catch { return null; }
+  // Try every known peer token — sender signs with their peers[0].token
+  for (const peer of Object.values(config.peers)) {
+    const key = peer.token;
+    if (!key) continue;
+    const expected = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
+    if (sig === expected) {
+      try { return JSON.parse(payload); } catch { return null; }
+    }
+  }
+  return null;
 }
 
 /** Broadcast to all known peers. */
