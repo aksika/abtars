@@ -88,6 +88,7 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
     } else {
       try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000 }); } catch {}
       try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 5000 }); } catch {}
+      try { execFileSync("systemctl", ["--user", "mask", "abtars-watchdog"], { timeout: 5000 }); } catch {}
     }
   }
 

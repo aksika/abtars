@@ -29,6 +29,7 @@ export async function start(): Promise<number> {
       const uid = `gui/${process.getuid!()}`;
       try { execFileSync("launchctl", ["bootstrap", uid, plistPath], { timeout: 5000 }); } catch {}
     } else {
+      try { execFileSync("systemctl", ["--user", "unmask", "abtars-watchdog"], { timeout: 5000 }); } catch {}
       try { execFileSync("systemctl", ["--user", "enable", "abtars-watchdog"], { timeout: 5000 }); } catch {}
       try { execFileSync("systemctl", ["--user", "start", "abtars-watchdog"], { timeout: 5000 }); } catch {}
     }
