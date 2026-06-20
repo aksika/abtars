@@ -1,22 +1,26 @@
 /**
- * boot/circuit-breaker.ts — Auto-rollback on repeated crash loop (#1085).
+ * boot/circuit-breaker.ts — Auto-rollback on repeated crash loop (#1085/#1089).
  * Runs BEFORE boot graph. Only file ops — no imports from components.
- * If restartCount >= 4 AND reason is unplanned (watchdog-respawn): rollback.
- * Planned restarts (update/user-restart) reset the counter.
+ * If restartCount >= 4 AND reason is unplanned: repoint current symlink to history[1].
+ * Planned restarts (update/user-restart/rollback) reset the counter.
  */
 
-import { readFileSync, existsSync, rmSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync, writeFileSync, unlinkSync, symlinkSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 
 const MAX_DEATHS = 4;
 
 export function checkCircuitBreaker(): void {
   const home = process.env["ABTARS_HOME"] ?? join(process.env["HOME"] ?? "/tmp", ".abtars");
+  const releasesDir = resolve(homedir(), ".abtars-releases");
   const stateFile = join(home, "deploy.state");
+  const historyFile = join(releasesDir, "history.json");
+  const currentLink = join(releasesDir, "current");
   const reason = process.env["ABTARS_START_REASON"] ?? "watchdog-respawn";
 
   // Planned restart — reset counter and proceed
-  if (reason.startsWith("update:") || reason === "user-restart" || reason.startsWith("rollback:")) {
+  if (reason.startsWith("update:") || reason === "user-restart" || reason.startsWith("rollback:") || reason.startsWith("auto-rollback:")) {
     try {
       const state = JSON.parse(readFileSync(stateFile, "utf-8"));
       state.restartCount = 0;
@@ -33,12 +37,12 @@ export function checkCircuitBreaker(): void {
 
   if (restartCount < MAX_DEATHS) return;
 
-  // Circuit breaker tripped — rollback
-  const appDir = join(home, "app");
-  const prevDir = join(home, "app.prev");
-  if (!existsSync(prevDir)) {
-    console.error("[circuit-breaker] No app.prev/ to roll back to — continuing anyway");
-    // Reset counter to avoid retriggering on next boot
+  // Circuit breaker tripped — rollback via history.json
+  let history: string[] = [];
+  try { history = JSON.parse(readFileSync(historyFile, "utf-8")); } catch {}
+
+  if (history.length < 2) {
+    console.error("[circuit-breaker] No previous release to roll back to — continuing anyway");
     try {
       const state = JSON.parse(readFileSync(stateFile, "utf-8"));
       state.restartCount = 0;
@@ -47,20 +51,34 @@ export function checkCircuitBreaker(): void {
     return;
   }
 
-  let commit = "unknown";
-  try { commit = JSON.parse(readFileSync(join(prevDir, "package.json"), "utf-8")).version ?? "unknown"; } catch {}
+  const target = history[1]!; // prev.1
+  const targetDir = join(releasesDir, target);
+  if (!existsSync(targetDir)) {
+    console.error(`[circuit-breaker] history[1] dir ${target} not found — continuing anyway`);
+    try {
+      const state = JSON.parse(readFileSync(stateFile, "utf-8"));
+      state.restartCount = 0;
+      writeFileSync(stateFile, JSON.stringify(state) + "\n");
+    } catch {}
+    return;
+  }
 
-  rmSync(appDir, { recursive: true, force: true });
-  renameSync(prevDir, appDir);
+  // Repoint current symlink to prev release
+  try { unlinkSync(currentLink); } catch {}
+  symlinkSync(targetDir, currentLink);
 
-  // Reset counter, set reason
+  // Also repoint legacy app/ symlink
+  const appLink = join(home, "app");
+  try { unlinkSync(appLink); } catch {}
+  try { symlinkSync(targetDir, appLink); } catch {}
+
+  // Reset counter
   try {
     const state = JSON.parse(readFileSync(stateFile, "utf-8"));
     state.restartCount = 0;
     writeFileSync(stateFile, JSON.stringify(state) + "\n");
   } catch {}
-  writeFileSync(join(home, ".start-reason"), `auto-rollback:${commit}`);
 
-  console.error(`[circuit-breaker] ${restartCount} unplanned deaths — rolled back to prev/ (${commit})`);
+  console.error(`[circuit-breaker] ${restartCount} unplanned deaths — rolled back to ${target}`);
   process.exit(0); // WD respawns with rolled-back code
 }
