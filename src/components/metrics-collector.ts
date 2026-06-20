@@ -25,9 +25,9 @@ let cronDepthSamples: number[] = [];
 let metricsPath = "";
 
 export function initMetrics(home: string): void {
-  const stateDir = join(home, "state");
-  if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
-  metricsPath = join(stateDir, "metrics.jsonl");
+  const metricsDir = join(home, "metrics");
+  if (!existsSync(metricsDir)) mkdirSync(metricsDir, { recursive: true });
+  metricsPath = join(metricsDir, "metrics.jsonl");
 }
 
 export function recordLatency(key: string, durationMs: number): void {
