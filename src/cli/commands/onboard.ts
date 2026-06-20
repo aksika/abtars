@@ -224,32 +224,44 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(defaultModel)) { cancel('Cancelled.'); return null; }
 
-  // 9. API key — every provider now has an env var; always ask, allow skip
+  // 9. API key — validate against provider, retry on failure, empty = skip
   const apiKeyEnv = PROVIDER_API_KEY_ENV[defaultProvider];
   let providerApiKey = existing?.providerApiKey ?? '';
-  {
+  if (API_PROVIDERS.has(defaultProvider as ProviderChoice)) {
+    const endpoint = PROVIDER_ENDPOINT[defaultProvider as string] ?? '';
+    let validated = false;
+    while (!validated) {
+      const v = await text({
+        message: `${apiKeyEnv} (empty to skip)`,
+        placeholder: existing?.providerApiKey ? '(keep existing)' : 'sk-or-v1-... or leave blank',
+        initialValue: providerApiKey || existing?.providerApiKey,
+      });
+      if (isCancel(v)) { cancel('Cancelled.'); return null; }
+      providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
+      if (!providerApiKey) { validated = true; break; }
+      process.stdout.write('  Validating key...');
+      const result = await checkModelAvailability(endpoint, providerApiKey, String(defaultModel).trim() || DEFAULT_MODELS[defaultProvider as ProviderChoice]);
+      if (result.ok) {
+        process.stdout.write(` ✓ valid\n`);
+        validated = true;
+      } else {
+        process.stdout.write(` ✗ ${result.message}\n`);
+        const retry = await confirm({ message: 'Try a different key? (no = skip)', initialValue: true });
+        if (isCancel(retry)) { cancel('Cancelled.'); return null; }
+        if (!retry) { providerApiKey = ''; validated = true; }
+      }
+    }
+  } else {
     const v = await text({
-      message: `${apiKeyEnv} (${noteEmpty})`,
-      placeholder: existing?.providerApiKey ? '(keep existing)' : 'sk-or-v1-... or leave blank',
+      message: `${apiKeyEnv} (empty to skip)`,
+      placeholder: 'leave blank for local providers',
       initialValue: existing?.providerApiKey,
     });
     if (isCancel(v)) { cancel('Cancelled.'); return null; }
     providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
   }
 
-  // 10. Availability check
-  const modelStr = String(defaultModel).trim() || DEFAULT_MODELS[defaultProvider];
-  if (API_PROVIDERS.has(defaultProvider) && providerApiKey) {
-    const check = await confirm({ message: 'Check availability (GET /v1/models)?', initialValue: true });
-    if (isCancel(check)) { cancel('Cancelled.'); return null; }
-    if (check) {
-      const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
-      const result = await checkModelAvailability(endpoint, providerApiKey, modelStr);
-      process.stdout.write(result.ok ? `✓ ${modelStr} available on ${defaultProvider}\n` : `⚠️  ${result.message}\n`);
-    }
-  }
-
-  // 11. Ultimate fallback (hailMary)
+  // 10. Ultimate fallback (hailMary)
   const hailMary = await text({
     message: `Ultimate fallback model — hailMary (${noteEmpty}; uses same provider + key as above)`,
     placeholder: 'google/gemini-2.5-flash',
@@ -520,6 +532,16 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
       return 4;
     }
     answers = result;
+    // Validate API key in non-interactive mode — warn but continue
+    if (answers.providerApiKey && API_PROVIDERS.has(answers.defaultProvider)) {
+      const endpoint = PROVIDER_ENDPOINT[answers.defaultProvider] ?? '';
+      const check = await checkModelAvailability(endpoint, answers.providerApiKey, answers.defaultModel);
+      if (check.ok) {
+        process.stdout.write(`✓ API key valid (${answers.defaultModel} available)\n`);
+      } else {
+        process.stderr.write(`⚠ API key validation failed: ${check.message}\n  Continuing — fix key in ~/.abtars/config/.env or secret/ later.\n`);
+      }
+    }
   } else {
     answers = await runInteractive(existing);
     if (answers === null) return 1;
