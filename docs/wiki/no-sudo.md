@@ -8,6 +8,10 @@ abtars and abmind install, update, and run entirely in user space. No root acces
 # Install pnpm (package manager) — no sudo
 curl -fsSL https://get.pnpm.io/install.sh | sh -
 
+# Add pnpm global bin to PATH (one-time, adds to your shell rc)
+pnpm setup
+# Restart your shell or: source ~/.bashrc (or ~/.zshrc)
+
 # Install abtars + abmind — no sudo
 pnpm install -g abtars abmind
 ```
