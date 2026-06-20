@@ -33,6 +33,10 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     return 1;
   }
 
+  // ── Migrate from old layout if needed ────────────────────────────────
+  const { migrateIfNeeded } = await import("./migrate-layout.js");
+  migrateIfNeeded(paths.home);
+
   // ── Step 1: Lock ───────────────────────────────────────────────────────
   const release = await acquireLock(paths.lock, "deploy");
   try {
