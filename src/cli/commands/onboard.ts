@@ -484,7 +484,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     // First install — create skeleton + manifest
     const { mkdirSync } = await import("node:fs");
     const { chmod } = await import("node:fs/promises");
-    for (const d of ["logs", "config", "secret", "skills/core", "skills/self", "kanban", "state", "bin"]) {
+    for (const d of ["logs", "config", "secret", "skills/core", "skills/self", "skills/custom", "skills/downloaded", "kanban", "state", "bin"]) {
       mkdirSync(join(paths.home, d), { recursive: true });
     }
     await chmod(join(paths.home, "secret"), 0o700);

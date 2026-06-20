@@ -80,6 +80,16 @@ export async function restore(archivePath: string, opts: RestoreOpts = {}): Prom
   }
 
   // Extract zip to ~/.abtars/
+  if (!opts.config) {
+    // Full restore: nuke existing state (keep manifest for installMode)
+    const home = abtarsHome();
+    const { rmSync } = await import("node:fs");
+    for (const entry of readdirSync(home)) {
+      if (entry === "manifest.json") continue;
+      try { rmSync(join(home, entry), { recursive: true, force: true }); } catch {}
+    }
+    process.stdout.write("✓ cleaned ~/.abtars/ for full restore\n");
+  }
   return extractZip(archivePath, abtarsHome());
 }
 
