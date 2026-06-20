@@ -2,9 +2,8 @@ import { logAndSwallow } from "./log-and-swallow.js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { createServer as createHttpsServer } from "https";
 import { readFileSync, existsSync, appendFileSync, mkdirSync, writeFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
-import { abtarsHome } from "../paths.js";
+import { join } from "path";
+import { abtarsHome, abtarsRoot } from "../paths.js";
 import { AgentApiConfig } from "./agent-api-config.js";
 import type { IMemorySystem } from "abmind";
 import { abmind } from "../utils/abmind-lazy.js";
@@ -118,12 +117,10 @@ export class AgentApiServer {
     mkdirSync(this.logDir, { recursive: true });
     this.logFile = this.newLogFile();
     try {
-      const base = dirname(fileURLToPath(import.meta.url));
       const name = deps.config.agentCodename;
       const candidates = [
-        join(base, `agents/${name}.md`),
-        join(base, `../../agents/${name}.md`),
-        join(abtarsHome(), "agents", `${name}.md`),
+        join(abtarsRoot(), "core", "prompts", `agent_${name}.md`),
+        join(abtarsRoot(), "core", "prompts", "agent_default.md"),
       ];
       this.agentRules = "";
       for (const p of candidates) {
