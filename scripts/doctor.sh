@@ -128,7 +128,7 @@ if [ -f "$AB/bridge.lock" ]; then
         elif command -v systemctl &>/dev/null && systemctl --user is-enabled abtars-watchdog.service &>/dev/null; then
           systemctl --user restart abtars-watchdog.service 2>/dev/null && fix "restarted watchdog via systemd"
         else
-          warn "watchdog not running -- start manually: ~/.abtars/scripts/watchdog.sh &"
+          warn "watchdog not running -- start manually: ~/.abtars/scripts/abtars-watchdog.sh &"
         fi
       fi
     fi
@@ -141,7 +141,7 @@ else
     elif command -v systemctl &>/dev/null && systemctl --user is-enabled abtars-watchdog.service &>/dev/null; then
       systemctl --user start abtars-watchdog.service 2>/dev/null && fix "started watchdog via systemd"
     else
-      warn "start manually: ~/.abtars/scripts/watchdog.sh &"
+      warn "start manually: ~/.abtars/scripts/abtars-watchdog.sh &"
     fi
   fi
 fi
@@ -192,8 +192,8 @@ if [ -f "$AB/bridge.lock" ]; then
   # All abtars-related processes (bracket trick excludes grep itself)
   ALL_PROCS=$(ps ax -o pid,args 2>/dev/null | grep "[a]btars" | grep -v "doctor\|patchright" || true)
 
-  # Orphan watchdogs: any watchdog.sh PID not matching bridge.lock or its children
-  WD_PIDS=$(echo "$ALL_PROCS" | grep "watchdog.sh" | awk '{print $1}' || true)
+  # Orphan watchdogs: any abtars-watchdog.sh PID not matching bridge.lock or its children
+  WD_PIDS=$(echo "$ALL_PROCS" | grep "abtars-watchdog.sh" | awk '{print $1}' || true)
   for P in $WD_PIDS; do
     [[ "$P" == "$EXPECTED_WD" ]] && continue
     # Skip subshells of the expected watchdog (PPID = expected WD)

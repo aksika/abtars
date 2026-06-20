@@ -179,7 +179,7 @@ export function setPeerActivityCallback(cb: ((msg: string) => void) | null): voi
 
 const bashTool: ToolDefinition = {
   name: "execute_bash",
-  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, abtars.sh, watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised.",
+  description: "Execute a bash command. Use for file operations, git, running scripts, and any shell command. Commands that would spawn or restart a bridge/watchdog process (node main.js, abtars.sh, abtars-watchdog.sh, launchctl load/bootstrap/kickstart/start) are blocked — the bridge is already supervised.",
   parameters: {
     type: "object",
     properties: { command: { type: "string", description: "The bash command to execute" } },

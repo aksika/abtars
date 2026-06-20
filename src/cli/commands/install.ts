@@ -256,7 +256,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   } catch { /* not running or no sudo — fine */ }
   try {
     const { execSync } = await import("node:child_process");
-    execSync("pkill -f 'watchdog.sh' 2>/dev/null", { stdio: "ignore" });
+    execSync("pkill -f 'abtars-watchdog.sh' 2>/dev/null", { stdio: "ignore" });
   } catch { /* no watchdog — fine */ }
 
   // Create skeleton (idempotent)

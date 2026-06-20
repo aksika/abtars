@@ -40,7 +40,7 @@ if launchctl list 2>/dev/null | grep -q abtars; then
   fi
 else
   # No launchd — kill watchdog + bridge, we restart watchdog at the end
-  pkill -f "watchdog.sh" 2>/dev/null || true
+  pkill -f "abtars-watchdog.sh" 2>/dev/null || true
   sleep 1
   if [ -f "$HOME_DIR/bridge.lock" ]; then
     BRIDGE_PID=$(python3 -c "import json; print(json.load(open('$HOME_DIR/bridge.lock'))['pid'])" 2>/dev/null || true)
@@ -73,8 +73,8 @@ echo "{\"version\":\"$VERSION\",\"commit\":\"$COMMIT\",\"activatedAt\":\"$(date 
 echo "Restarting..."
 if launchctl list 2>/dev/null | grep -q abtars; then
   echo "LaunchAgent manages watchdog — it will restart the bridge."
-elif [ -f "$HOME_DIR/scripts/watchdog.sh" ]; then
-  nohup bash "$HOME_DIR/scripts/watchdog.sh" >> "$HOME_DIR/logs/watchdog.log" 2>&1 &
+elif [ -f "$HOME_DIR/scripts/abtars-watchdog.sh" ]; then
+  nohup bash "$HOME_DIR/scripts/abtars-watchdog.sh" >> "$HOME_DIR/logs/watchdog.log" 2>&1 &
   echo "Watchdog restarted (PID $!) — it will start the bridge."
 else
   nohup node "$HOME_DIR/app/bundle/abtars.js" >> "$HOME_DIR/logs/bridge.log" 2>&1 &

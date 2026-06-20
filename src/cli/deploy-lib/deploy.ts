@@ -150,7 +150,7 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       process.stdout.write(`  Daemon will respawn watchdog\n`);
       // Launchd/systemd handles it — noop
     } else if (mode === "daemon") {
-      const scriptPath = join(paths.home, "scripts/watchdog.sh");
+      const scriptPath = join(paths.home, "scripts/abtars-watchdog.sh");
       const { openSync, closeSync } = await import("node:fs");
       const logFd = openSync(join(paths.home, "logs/watchdog.log"), "a");
       const wd = spawn("bash", [scriptPath], { detached: true, stdio: ["ignore", logFd, logFd], cwd: paths.home });

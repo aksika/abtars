@@ -97,7 +97,7 @@ export async function stop(opts: { force?: boolean }): Promise<number> {
   let wdPidActual: number | undefined;
   if (wdPid && wdPid > 0) {
     wdPidActual = wdPid;
-    wdResult = await killGracefully(wdPid, ["watchdog.sh"]);
+    wdResult = await killGracefully(wdPid, ["abtars-watchdog.sh"]);
   }
 
   // 2) Bridge second

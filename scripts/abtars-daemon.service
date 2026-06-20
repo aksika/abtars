@@ -8,7 +8,7 @@ Type=simple
 User={{USER}}
 Group={{USER}}
 WorkingDirectory=/home/{{USER}}/.abtars
-ExecStart=/home/{{USER}}/.abtars/scripts/watchdog.sh
+ExecStart=/home/{{USER}}/.abtars/scripts/abtars-watchdog.sh
 Restart=always
 RestartSec=5
 Environment=PATH={{PATH}}
