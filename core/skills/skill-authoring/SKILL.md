@@ -52,3 +52,19 @@ pnpm workspace protocol (`workspace:*`) resolves at install time. Stale lockfile
 - "User prefers tabs over spaces" → memory_store
 - "Meeting with X on Tuesday" → memory_store
 - "Bug #123 was caused by Y" → memory_store (unless the fix is a reusable recipe)
+
+## Skill file structure
+
+```
+<skill-name>/
+  ├── SKILL.md          ← required: description + instructions
+  ├── scripts/          ← optional: executable scripts (py, sh, js)
+  └── references/       ← optional: reference docs
+```
+
+**Rules for scripts:**
+- Scripts go in `<skill>/scripts/`. Never at the skill root.
+- Scripts must be self-contained. Use only Node built-ins, system binaries, or deps declared in SKILL.md metadata.
+- **NEVER bundle node_modules/ inside a skill.** If a script needs a package, declare it in the skill metadata under `requires.bins` or `requires.packages`. The user installs it system-wide.
+- Scripts must be executable (`chmod +x`).
+- Prefer sh/bash for simple automation. Use Python/Node only when necessary.
