@@ -733,10 +733,10 @@ async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<voi
   const { fileURLToPath } = await import('node:url');
   const here = dirname(fileURLToPath(import.meta.url));
   // onboard.ts is at src/cli/commands/onboard.ts or dist/cli/commands/onboard.js
-  // tasks.default.json lives at repo root — three levels up.
+  // tasks.default.json lives at config/tasks/ — three levels up from here.
   const candidates = [
-    join(here, '..', '..', '..', 'tasks.default.json'),
-    join(here, '..', '..', 'tasks.default.json'),
+    join(here, '..', '..', '..', 'config', 'tasks', 'tasks.default.json'),
+    join(here, '..', '..', 'config', 'tasks', 'tasks.default.json'),
   ];
   let templatePath: string | null = null;
   for (const p of candidates) {
