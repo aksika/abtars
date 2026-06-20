@@ -6,7 +6,7 @@
   <string>com.abtars.watchdog</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{{HOME}}/.abtars/scripts/abtars-watchdog.sh</string>
+    <string>{{HOME}}/.abtars-releases/src/abtars/scripts/abtars-watchdog.sh</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

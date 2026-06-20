@@ -5,7 +5,7 @@
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, mkdirSync, copyFileSync } from "node:fs";
-import { copyFile, mkdir, chmod, readdir } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { execSync, spawn } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 import { acquireLock, atomicSwap, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
@@ -186,17 +186,6 @@ export async function deploy(opts: DeployOptions): Promise<number> {
 
 // ── Refresh ─────────────────────────────────────────────────────────────────
 async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string): Promise<void> {
-  // Scripts
-  const repoScripts = join(repoRoot, "scripts");
-  const destScripts = join(paths.home, "scripts");
-  await mkdir(destScripts, { recursive: true });
-  const scriptFiles = (await readdir(repoScripts).catch(() => [] as string[])).filter(f => f.endsWith(".sh") || f.endsWith(".plist") || f.endsWith(".service"));
-  for (const name of scriptFiles) {
-    await copyFile(join(repoScripts, name), join(destScripts, name));
-    if (name.endsWith(".sh")) await chmod(join(destScripts, name), 0o755);
-  }
-  process.stdout.write(`✓ scripts refreshed (${scriptFiles.length} files)\n`);
-
   // CLI wrappers
   await mkdir(paths.bin, { recursive: true });
   const { writeWrapper } = await import("../commands/install.js");
@@ -210,9 +199,10 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
   // Nuke stale npm-global binary
   try { execSync("npm uninstall -g abtars 2>/dev/null", { stdio: "ignore", timeout: 10_000 }); } catch {}
 
-  // Reload plist/systemd if changed
+  // Reload plist/systemd if changed (scripts run from repoRoot directly)
+  const repoScripts = join(repoRoot, "scripts");
   if (process.platform === "darwin") {
-    const src = join(paths.home, "scripts", "com.abtars.watchdog.plist");
+    const src = join(repoScripts, "com.abtars.watchdog.plist");
     const dst = join(process.env["HOME"] ?? "", "Library/LaunchAgents/com.abtars.watchdog.plist");
     if (existsSync(src)) {
       let srcContent = readFileSync(src, "utf-8").replace(/\{\{HOME\}\}/g, process.env["HOME"] ?? "");

@@ -137,8 +137,6 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         await cp(bundleDir, join(stagedPath, 'bundle'), { recursive: true });
         const coreDir = join(repoRoot, 'core');
         if (existsSync(coreDir)) await cp(coreDir, join(stagedPath, 'core'), { recursive: true });
-        const scriptsSrc = join(repoRoot, 'scripts');
-        if (existsSync(scriptsSrc)) await cp(scriptsSrc, join(stagedPath, 'scripts'), { recursive: true });
         const configSrc = join(repoRoot, 'config');
         if (existsSync(configSrc)) await cp(configSrc, join(stagedPath, 'config'), { recursive: true });
         const manifestSrc = join(repoRoot, 'install-manifest.json');
