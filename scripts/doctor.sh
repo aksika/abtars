@@ -31,7 +31,7 @@ if [[ -z "$INSTALL_MODE" ]]; then
   echo "[doctor] FATAL: installMode not set in manifest.json. Run 'abtars install' first." >&2
   exit 1
 fi
-if [[ "$INSTALL_MODE" != "simple" && "$INSTALL_MODE" != "supervised" && "$INSTALL_MODE" != "supervised-daemon" ]]; then
+if [[ "$INSTALL_MODE" != "simple" && "$INSTALL_MODE" != "daemon" ]]; then
   echo "[doctor] FATAL: invalid installMode '$INSTALL_MODE' in manifest.json." >&2
   exit 1
 fi
@@ -105,7 +105,7 @@ fi
 WD_ALIVE=false
 WD_PID=""
 
-if [[ "$INSTALL_MODE" == "supervised" ]]; then
+if [[ "$INSTALL_MODE" == "daemon" ]]; then
 
 WD_PID=""
 WD_ALIVE=false
@@ -147,7 +147,7 @@ else
 fi
 
 # LaunchAgent / systemd check (supervised mode only)
-if [[ "$INSTALL_MODE" == "supervised" || "$INSTALL_MODE" == "supervised-daemon" ]]; then
+if [[ "$INSTALL_MODE" == "daemon" ]]; then
 if [[ "$(uname)" == "Darwin" ]]; then
   if ! launchctl list 2>/dev/null | grep -q abtars.watchdog; then
     if $FIX; then
