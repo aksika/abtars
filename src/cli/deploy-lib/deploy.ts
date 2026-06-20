@@ -26,7 +26,8 @@ function readJsonField(file: string, field: string): unknown {
 export async function deploy(opts: DeployOptions): Promise<number> {
   const paths = packagePaths("abtars");
   const isFirstInstall = !existsSync(paths.manifest);
-  const repoRoot = opts.localDir ?? join(abtarsHome(), "src", "abtars");
+  const repoRoot = opts.localDir
+    ?? (existsSync(join(paths.releasesDir, "src", "abtars", "package.json")) ? join(paths.releasesDir, "src", "abtars") : join(abtarsHome(), "src", "abtars"));
 
   if (!existsSync(join(repoRoot, "package.json"))) {
     process.stderr.write(`Source not found at ${repoRoot}\nUse: abtars update --local <DIR>\n`);
