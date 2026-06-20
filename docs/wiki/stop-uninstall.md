@@ -8,9 +8,11 @@
 abtars stop --force
 ```
 
-Kills watchdog first (prevents respawn), then bridge. Works on all install modes (simple, supervised, supervised-daemon).
+Kills watchdog first (prevents respawn), then bridge. Unloads daemon service so it won't auto-restart. Works on both install modes (simple, daemon).
 
-### Manually
+### Manually (not recommended)
+
+**Warning:** If you only `pkill` without disabling the daemon, systemd/launchd will respawn the watchdog immediately.
 
 ```bash
 # 1. Disable daemon (prevents auto-restart)
