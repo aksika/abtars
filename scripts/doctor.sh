@@ -228,10 +228,11 @@ if [ -f "$AB/bridge.lock" ]; then
   STARTED_AT=$(json_field "$AB/bridge.lock" startedAt 0)
   if [[ "$STARTED_AT" != "0" ]]; then
     UPTIME_SEC=$(python3 -c "
-from datetime import datetime, timezone
+import time
 try:
-    started = datetime.fromisoformat('$STARTED_AT'.replace('Z','+00:00'))
-    diff = int((datetime.now(timezone.utc) - started).total_seconds())
+    ts = int('$STARTED_AT')
+    if ts > 1e12: ts = ts / 1000  # millis to seconds
+    diff = int(time.time() - ts)
     h, m = divmod(diff // 60, 60)
     print(f'{h}h {m}m')
 except: print('unknown')
