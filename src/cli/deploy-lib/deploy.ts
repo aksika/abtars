@@ -29,18 +29,30 @@ export async function deploy(opts: DeployOptions): Promise<number> {
   const repoRoot = opts.localDir
     ?? (existsSync(join(paths.releasesDir, "src", "abtars", "package.json")) ? join(paths.releasesDir, "src", "abtars") : join(abtarsHome(), "src", "abtars"));
 
-  // Clone source repos if missing (first install from npm, or fresh machine)
-  if (!opts.localDir && !existsSync(join(repoRoot, "package.json"))) {
+  // Sync source repos — clone if missing, fetch+reset if exists, nuke+reclone on failure
+  if (!opts.localDir) {
     const srcDir = join(paths.releasesDir, "src");
     mkdirSync(srcDir, { recursive: true });
-    process.stdout.write("Cloning source repos...\n");
-    try {
-      execSync("git clone -b dev https://github.com/aksika/abtars.git", { cwd: srcDir, stdio: "pipe", timeout: 120_000 });
-      execSync("git clone -b dev https://github.com/aksika/abmind.git", { cwd: srcDir, stdio: "pipe", timeout: 120_000 });
-      process.stdout.write("✓ source cloned\n");
-    } catch (err) {
-      process.stderr.write(`Failed to clone source: ${err instanceof Error ? err.message : String(err)}\n`);
-      return 1;
+    const abmindSrcDir = join(srcDir, "abmind");
+    const repos: Array<[string, string]> = [[repoRoot, "abtars"], [abmindSrcDir, "abmind"]];
+    for (const [dir, name] of repos) {
+      try {
+        if (existsSync(join(dir, ".git"))) {
+          execSync("git fetch --depth 1 origin dev && git reset --hard origin/dev", { cwd: dir, stdio: "pipe", timeout: 30_000 });
+        } else {
+          rmSync(dir, { recursive: true, force: true });
+          execSync(`git clone --depth 1 -b dev https://github.com/aksika/${name}.git`, { cwd: srcDir, stdio: "pipe", timeout: 120_000 });
+        }
+      } catch {
+        // Fetch failed (corrupted shallow clone) — nuke and reclone
+        try {
+          rmSync(dir, { recursive: true, force: true });
+          execSync(`git clone --depth 1 -b dev https://github.com/aksika/${name}.git`, { cwd: srcDir, stdio: "pipe", timeout: 120_000 });
+        } catch (err) {
+          process.stderr.write(`Failed to sync ${name}: ${err instanceof Error ? err.message : String(err)}\n`);
+          if (name === "abtars") return 1;
+        }
+      }
     }
   }
 
