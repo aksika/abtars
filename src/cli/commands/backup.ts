@@ -18,7 +18,7 @@ const DEFAULT_PRUNE_DAYS = 7;
 
 // Full mode: exclude these from ~/.abtars/ (everything else = user data, backup it all)
 const ABTARS_EXCLUDE = [
-  "logs", "overflow", "browser-socket", "app", "bin", "bridge.lock", "*.sock",
+  "logs", "overflow", "browser-socket", "app", "app/*", "bin", "bin/*", "bridge.lock", "*.sock",
 ];
 
 // Full mode: exclude these from ~/.abmind/
