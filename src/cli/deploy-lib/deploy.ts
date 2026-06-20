@@ -29,6 +29,21 @@ export async function deploy(opts: DeployOptions): Promise<number> {
   const repoRoot = opts.localDir
     ?? (existsSync(join(paths.releasesDir, "src", "abtars", "package.json")) ? join(paths.releasesDir, "src", "abtars") : join(abtarsHome(), "src", "abtars"));
 
+  // Clone source repos if missing (first install from npm, or fresh machine)
+  if (!opts.localDir && !existsSync(join(repoRoot, "package.json"))) {
+    const srcDir = join(paths.releasesDir, "src");
+    mkdirSync(srcDir, { recursive: true });
+    process.stdout.write("Cloning source repos...\n");
+    try {
+      execSync("git clone -b dev https://github.com/aksika/abtars.git", { cwd: srcDir, stdio: "pipe", timeout: 120_000 });
+      execSync("git clone -b dev https://github.com/aksika/abmind.git", { cwd: srcDir, stdio: "pipe", timeout: 120_000 });
+      process.stdout.write("✓ source cloned\n");
+    } catch (err) {
+      process.stderr.write(`Failed to clone source: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+  }
+
   if (!existsSync(join(repoRoot, "package.json"))) {
     process.stderr.write(`Source not found at ${repoRoot}\nUse: abtars update --local <DIR>\n`);
     return 1;
