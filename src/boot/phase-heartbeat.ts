@@ -33,7 +33,7 @@ import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, creat
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
-import { abtarsHome } from "../paths.js";
+import { abtarsHome, abtarsRoot } from "../paths.js";
 import { createCronCallback } from "./phase-pipeline-deps.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 import { readEnvWithDefault } from "../components/env.js";
@@ -159,7 +159,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     sleepHour: SLEEP_HOUR,
     sleepMinute: SLEEP_MINUTE,
     isSleepActive: ctx.isSleepActive,
-    doctorPath: join(abtarsHome(), "scripts", "doctor.sh"),
+    doctorPath: join(abtarsRoot(), "scripts", "doctor.sh"),
     startSleep: () => { ctx.sleepHandle?.spawn(); },
     checkHwSleep: () => { ctx.sleepHandle?.checkHwSleep(); },
     checkStaleSleep: () => { ctx.sleepHandle?.checkStale(); },

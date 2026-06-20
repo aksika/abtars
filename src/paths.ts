@@ -1,6 +1,6 @@
 import { resolve, join, relative } from "node:path";
 import { homedir } from "node:os";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, existsSync } from "node:fs";
 
 /** Base directory for all Abtars runtime data. Override with ABTARS_HOME env var. */
 export function abtarsHome(): string {
@@ -10,6 +10,26 @@ export function abtarsHome(): string {
 /** Base directory for abmind runtime data. Override with ABMIND_HOME env var. */
 export function abmindHome(): string {
   return process.env.ABMIND_HOME ?? resolve(homedir(), ".abmind");
+}
+
+let _abtarsRootCache: string | null = null;
+
+/**
+ * Root of the active release (code, prompts, scripts, templates).
+ * Resolves ~/.abtars-releases/current symlink. Falls back to legacy layout.
+ * Override with ABTARS_ROOT env var (always re-read, not cached).
+ */
+export function abtarsRoot(): string {
+  if (process.env.ABTARS_ROOT) return process.env.ABTARS_ROOT;
+  if (_abtarsRootCache) return _abtarsRootCache;
+  const releasesDir = resolve(homedir(), ".abtars-releases", "current");
+  if (existsSync(releasesDir)) { _abtarsRootCache = realpathSync(releasesDir); return _abtarsRootCache; }
+  // Legacy fallback: app/ inside abtarsHome (pre-#1089)
+  const legacyApp = join(abtarsHome(), "app");
+  if (existsSync(legacyApp)) { _abtarsRootCache = legacyApp; return _abtarsRootCache; }
+  // Ultimate fallback: relative to this file (npm package layout)
+  _abtarsRootCache = resolve(__dirname, "..");
+  return _abtarsRootCache;
 }
 
 /** Single source of truth for deployed version. Reads ~/.abtars/manifest.json. */

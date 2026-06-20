@@ -5,7 +5,7 @@ import { homedir} from "node:os";
 import { logInfo} from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { readEntries as cronReadEntries } from "../tasks/task-store.js";
-import { abtarsHome } from "../../paths.js";
+import { abtarsHome, abtarsRoot } from "../../paths.js";
 import type { CommandContext } from "./types.js";
 
 const TAG = "cmd";
@@ -17,7 +17,7 @@ export async function handleDoctor(_text: string, ctx: CommandContext): Promise<
   if (arg === "fix" || arg === "fix-full") {
     const flag = arg === "fix-full" ? "--fix-full" : "--fix";
     try {
-      const raw = await execAsync("bash", [join(abtarsHome(), "scripts", "doctor.sh"), flag], 30000);
+      const raw = await execAsync("bash", [join(abtarsRoot(), "scripts", "doctor.sh"), flag], 30000);
       await ctx.reply(`🩺 doctor.sh ${flag}:\n${raw || "(no output)"}`);
     } catch (err) {
       await ctx.reply(`❌ doctor.sh failed: ${err instanceof Error ? err.message : String(err)}`);

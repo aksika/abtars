@@ -17,6 +17,7 @@ describe("abtars-browse", () => {
 
   afterEach(() => {
     process.env.HOME = originalHome;
+    delete process.env.ABTARS_ROOT;
     process.cwd = originalCwd;
     rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -68,9 +69,10 @@ describe("abtars-browse", () => {
 
   describe("loadBrowsePrompt", () => {
     it("loads template and replaces variables", () => {
-      const promptDir = join(tmpDir, ".abtars", "prompts");
+      const promptDir = join(tmpDir, "core", "prompts");
       mkdirSync(promptDir, { recursive: true });
       writeFileSync(join(promptDir, "browsing_prompt.md"), "Task: ${TASK}\nID: ${TASK_ID}\nReport: ${REPORT_FILE}", "utf-8");
+      process.env.ABTARS_ROOT = tmpDir;
 
       const result = loadBrowsePrompt("check notifications", 42, "abc123");
       expect(result).toContain("Task: check notifications");

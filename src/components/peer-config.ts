@@ -29,6 +29,7 @@ export interface PeerEntry {
 export interface PeerConfig {
   self: { name: string; signingKey?: string; udpPort?: number };
   peers: Record<string, PeerEntry>;
+  gossipSecret?: string;
   maxHops: number;
   timeoutMs: number;
 }
@@ -76,6 +77,7 @@ export function loadPeerConfig(): PeerConfig {
         ...(typeof raw.self?.udpPort === "number" ? { udpPort: raw.self.udpPort } : {}),
       },
       peers,
+      ...(typeof raw.gossipSecret === "string" ? { gossipSecret: raw.gossipSecret } : {}),
       maxHops: typeof raw.maxHops === "number" ? raw.maxHops : DEFAULTS.maxHops,
       timeoutMs: typeof raw.timeoutMs === "number" ? raw.timeoutMs : DEFAULTS.timeoutMs,
     };
