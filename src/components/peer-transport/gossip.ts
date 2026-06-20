@@ -55,6 +55,11 @@ function getLoad(): number {
 }
 
 /** Build the gossip packet. */
+function getGossipKey(config: ReturnType<typeof loadPeerConfig>): string | null {
+  if (config.gossipSecret) return config.gossipSecret as string;
+  return null;
+}
+
 function buildPacket(): Buffer {
   const config = loadPeerConfig();
   const payload = JSON.stringify({
@@ -65,9 +70,7 @@ function buildPacket(): Buffer {
     capabilities: _capabilities,
     version: process.env["npm_package_version"] ?? "?",
   });
-  // HMAC signature for authenticity (use first peer's token as shared group key)
-  const peers = Object.values(config.peers);
-  const key = peers[0]?.token ?? "default";
+  const key = getGossipKey(config) ?? Object.values(config.peers)[0]?.token ?? "default";
   const sig = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
   return Buffer.from(`${payload}|${sig}`);
 }
@@ -80,14 +83,19 @@ function verifyPacket(data: Buffer): Record<string, unknown> | null {
   const payload = str.slice(0, sepIdx);
   const sig = str.slice(sepIdx + 1);
   const config = loadPeerConfig();
-  // Try every known peer token — sender signs with their peers[0].token
+  // Prefer shared gossipSecret
+  const shared = getGossipKey(config);
+  if (shared) {
+    const expected = createHmac("sha256", shared).update(payload).digest("base64url").slice(0, 16);
+    if (sig === expected) { try { return JSON.parse(payload); } catch { return null; } }
+    return null;
+  }
+  // Fallback: try all peer tokens
   for (const peer of Object.values(config.peers)) {
     const key = peer.token;
     if (!key) continue;
     const expected = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
-    if (sig === expected) {
-      try { return JSON.parse(payload); } catch { return null; }
-    }
+    if (sig === expected) { try { return JSON.parse(payload); } catch { return null; } }
   }
   return null;
 }
