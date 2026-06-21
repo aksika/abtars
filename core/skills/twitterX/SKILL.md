@@ -1,8 +1,6 @@
 ---
-name: twitter
+name: twitterX
 description: Fetch Twitter/X content — single tweets (no auth) or feeds (cookies)
-requires:
-  files: [~/.abtars/workspace/twitterX]
 ---
 
 # Twitter / X
