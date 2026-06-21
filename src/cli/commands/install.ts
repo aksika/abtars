@@ -240,6 +240,18 @@ export async function install(opts: InstallOptions): Promise<number> {
   const homeExists = await exists(home);
   const manifest = homeExists ? await readManifest(paths.manifest) : null;
 
+  // #1101: Detect and remove stale shims from previous installs
+  try {
+    const { execSync } = await import("node:child_process");
+    const shimPath = execSync("which abtars 2>/dev/null", { encoding: "utf-8" }).trim();
+    const pnpmHome = process.env.PNPM_HOME ?? "";
+    if (shimPath && pnpmHome && !shimPath.startsWith(pnpmHome) && !shimPath.includes(".abtars")) {
+      const { unlinkSync } = await import("node:fs");
+      try { unlinkSync(shimPath); process.stdout.write(`✓ removed stale shim ${shimPath}\n`); }
+      catch { process.stderr.write(`⚠️  Stale shim at ${shimPath} — remove manually: rm ${shimPath}\n`); }
+    }
+  } catch { /* which failed — no shim */ }
+
   if (homeExists && manifest && !opts.force && !opts.restore) {
     process.stderr.write(
       `~/.abtars already installed at version ${manifest.version || '(unset)'}.\nUse 'abtars update' to upgrade, or --force to re-seed missing config.\n`,
