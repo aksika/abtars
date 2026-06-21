@@ -8,11 +8,13 @@ Experienced? Jump straight to [Installation](./install.md) for the full technica
 
 1. **A computer that stays on** — Mac mini, NUC, old laptop, cloud VM, WSL on your desktop. abTARS runs 24/7 on your hardware.
 
-2. **Node.js 22+** — the runtime. Install via [Homebrew](https://brew.sh) (macOS) or [NodeSource](https://github.com/nodesource/distributions) (Linux/WSL).
+2. **Node.js 22+** — the runtime (recommended: Node 24). Install via [Homebrew](https://brew.sh) (`brew install node@24`) on macOS or [NodeSource](https://github.com/nodesource/distributions) on Linux/WSL.
 
-3. **A Telegram bot token** — create one via [@BotFather](https://t.me/BotFather) on Telegram. This is how you'll talk to your agent.
+3. **pnpm** — the package manager. Install with `npm install -g pnpm`.
 
-4. **A model provider** — at least one of:
+4. **A Telegram bot token** — create one via [@BotFather](https://t.me/BotFather) on Telegram. This is how you'll talk to your agent.
+
+5. **A model provider** — at least one of:
    - **ollama** (free, runs locally — good for privacy)
    - **OpenRouter** (paid, access to all frontier models)
    - **Kiro CLI / Gemini CLI / Claude Code** (if you already use one)
@@ -75,8 +77,7 @@ Edit `~/.abmind/memory/core/SOUL.md` — this defines who your agent is: name, p
 ### Updating
 
 ```bash
-npm update -g abtars@alpha abmind@alpha
-abtars update
+abtars update    # pulls latest source, rebuilds, deploys, restarts
 ```
 
 ### Something broke?
