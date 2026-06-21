@@ -84,7 +84,7 @@ export async function restore(archivePath: string, opts: RestoreOpts = {}): Prom
 }
 
 function restoreAbmind(abmPath: string, passphrase?: string): number {
-  const args = ["restore", "--input", abmPath, "--mode", "merge"];
+  const args = ["restore", abmPath, "--mode", "merge"];
   if (passphrase) args.push("--passphrase", passphrase);
 
   const envPassphrase = process.env["ABMIND_BACKUP_PASSPHRASE"];
@@ -135,18 +135,18 @@ function extractZip(archivePath: string, destDir: string): number {
 
 function extractDate(filePath: string): string | null {
   const name = basename(filePath);
-  const match = name.match(/(\d{4}-\d{2}-\d{2})/);
+  const match = name.match(/(\d{8}-\d{4})/);
   return match?.[1] ?? null;
 }
 
 function findSiblingAbm(dir: string, date: string | null): string | null {
   if (!existsSync(dir)) return null;
-  const files = readdirSync(dir).filter(f => f.endsWith(".abm"));
+  // Look for abmind zip first, then .abm
+  const files = readdirSync(dir).filter(f => f.startsWith("abmind-") && (f.endsWith(".zip") || f.endsWith(".7z") || f.endsWith(".abm")));
   if (date) {
     const exact = files.find(f => f.includes(date));
     if (exact) return join(dir, exact);
   }
-  // Fallback: latest .abm in the dir
   const sorted = files.sort().reverse();
   return sorted[0] ? join(dir, sorted[0]) : null;
 }
