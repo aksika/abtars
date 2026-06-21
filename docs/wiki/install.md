@@ -28,18 +28,16 @@ node --version   # should show v24.x.x
 npm install -g pnpm
 ```
 
-After installing packages with native addons, pnpm v10+ requires explicit approval for build scripts:
+After installing abTARS, pnpm will ask you to approve native module compilation. Just follow the prompt:
 
 ```bash
-pnpm approve-builds -g    # select better-sqlite3 when prompted
+pnpm approve-builds -g    # select better-sqlite3, press Enter
 ```
 
 ### git (required)
 
-`abtars install` clones the source repo. Git must be on PATH.
-
 ```bash
-git --version   # any recent version works
+git --version   # any recent version
 ```
 
 ### Telegram bot token (required)
@@ -56,8 +54,8 @@ Create a bot via [@BotFather](https://t.me/BotFather) on Telegram. You'll need:
 | **OpenRouter** | Cloud, aggregator | Sign up at [openrouter.ai](https://openrouter.ai), get an API key. Access to all major models. |
 | **OpenAI** | Cloud, direct | API key from [platform.openai.com](https://platform.openai.com) |
 | **Anthropic** | Cloud, direct | API key from [console.anthropic.com](https://console.anthropic.com) |
-| **Kiro CLI** | Local agent host (ACP) | Install `kiro-cli` separately |
-| **Gemini CLI** | Local agent host (ACP) | Install `gemini` separately |
+| **Kiro CLI** | Local AI coding tool | Install [Kiro](https://kiro.dev) separately |
+| **Gemini CLI** | Local AI coding tool | Install [Gemini CLI](https://github.com/google-gemini/gemini-cli) separately |
 
 ### Model requirements
 
@@ -214,14 +212,14 @@ In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
 
 ## Providers
 
-| Provider | Transport | Setup |
-|----------|-----------|-------|
-| ollama | Direct API | `ollama serve` locally, free |
-| OpenRouter | Direct API | API key in `~/.abtars/secret/OPENROUTER_API_KEY` |
-| OpenAI | Direct API | API key in `~/.abtars/secret/OPENAI_API_KEY` |
-| Anthropic | Direct API | API key in `~/.abtars/secret/ANTHROPIC_API_KEY` |
-| Kiro CLI | ACP | `kiro-cli` installed and on PATH |
-| Gemini CLI | ACP | `gemini` installed and on PATH |
+| Provider | Setup |
+|----------|-------|
+| ollama | `ollama serve` locally, free. No API key needed. |
+| OpenRouter | API key in `~/.abtars/secret/OPENROUTER_API_KEY` |
+| OpenAI | API key in `~/.abtars/secret/OPENAI_API_KEY` |
+| Anthropic | API key in `~/.abtars/secret/ANTHROPIC_API_KEY` |
+| Kiro CLI | `kiro-cli` installed and on PATH |
+| Gemini CLI | `gemini` installed and on PATH |
 
 Configure in `~/.abtars/config/transport.json`.
 
