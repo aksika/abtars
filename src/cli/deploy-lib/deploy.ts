@@ -195,12 +195,8 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       }
       process.stdout.write(`  Daemon started\n`);
     } else {
-      // simple: start bridge directly
-      const logFd = (await import("node:fs")).openSync(join(paths.home, "logs/bridge.log"), "a");
-      const br = spawn("node", ["--max-old-space-size=1024", "app/bundle/abtars.js"], { detached: true, stdio: ["ignore", logFd, logFd], cwd: paths.home, env: { ...process.env, ABTARS_START_REASON: `update:${staged.version}` } });
-      br.unref();
-      (await import("node:fs")).closeSync(logFd);
-      process.stdout.write(`  Bridge spawned directly\n`);
+      // simple mode: update only deploys, user manages lifecycle via start/stop
+      process.stdout.write(`  Deployed. Run 'abtars start' to launch the bridge.\n`);
     }
 
     // ── Step 9: Health probe ──────────────────────────────────────────────
