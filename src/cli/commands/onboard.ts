@@ -56,7 +56,7 @@ const PROVIDER_TRANSPORT_NAME: Record<ProviderChoice, string> = {
   gemini: 'gemini',
 };
 const DEFAULT_MODELS: Record<ProviderChoice, string> = {
-  openrouter: 'google/gemini-2.5-flash',
+  openrouter: 'deepseek/deepseek-v4-flash',
   anthropic: 'claude-sonnet-4-5-20250929',
   openai: 'gpt-4o',
   ollama: 'kimi-k2.5:cloud',
@@ -104,80 +104,74 @@ interface WizardAnswers {
   readonly trustMode: boolean;
 }
 
+
 async function runInteractive(existing: WizardAnswers | null): Promise<WizardAnswers | null> {
-  // Dynamic import — @clack/prompts is the only dep introduced in Phase 3;
-  // keep it off the critical path for Phase 1-2 subcommands.
   const { intro, outro, text, select, confirm, isCancel, cancel } = await import('@clack/prompts');
 
   intro('abtars onboard — first-time setup');
-  const noteEmpty = 'press Enter to skip';
 
-  // 1. Deployment mode — set by `abtars install --mode=X`, read from manifest
-  const { packagePaths: pp, readManifest: rm } = await import("../deploy-lib-import.js");
-  const mfPaths = pp('abtars');
-  const mf = await rm(mfPaths.manifest);
-  const installMode = mf?.installMode ?? 'daemon';
+  // Auto-read username from abmind if available
+  let userName = '';
+  try {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { homedir } = await import("node:os");
+    const abmindManifest = JSON.parse(readFileSync(join(homedir(), ".abmind", "manifest.json"), "utf-8"));
+    userName = abmindManifest.username ?? abmindManifest.userName ?? '';
+  } catch { /* abmind not installed */ }
 
-  // 1c. User name (for personal greeting)
-  const userName = await text({
-    message: 'Your name',
-    placeholder: 'your name',
-    initialValue: existing?.userName ?? '',
-  });
-  if (isCancel(userName)) { cancel('Cancelled.'); return null; }
-
-  // 1e. Instance name (identifies this bot to peers and in prompts)
-  const { hostname } = await import("node:os");
+  // 1. Agent name
   const instanceName = await text({
-    message: 'Instance name (identifies this bot to peers)',
-    placeholder: hostname(),
+    message: 'abTARS agent name',
+    placeholder: 'MyBot',
     initialValue: existing?.instanceName ?? '',
     validate: (v) => v?.trim() ? undefined : 'required',
   });
   if (isCancel(instanceName)) { cancel('Cancelled.'); return null; }
 
-  // 1d. Passphrase — moved to `abmind install` (#716)
-  const passphrase = '';
+  // 2. Install mode
+  const installMode = await select({
+    message: 'Install mode',
+    options: [
+      { value: 'daemon', label: 'daemon — auto-restart, survives reboot (recommended)' },
+      { value: 'simple', label: 'simple — manual start/stop' },
+    ],
+    initialValue: existing?.installMode ?? 'daemon',
+  });
+  if (isCancel(installMode)) { cancel('Cancelled.'); return null; }
 
-  // 2. Security mode
+  // 3. Security mode
   const securityMode = await select({
-    message: 'Security mode — restrict agent file/command access?',
+    message: 'Security mode (seatbelt/guardrails/none)',
     options: [
       { value: 'guardrails', label: 'guardrails — path guard + command blocklist (recommended)' },
-      { value: 'off', label: 'off — no restrictions (legacy)' },
+      { value: 'seatbelt', label: 'seatbelt — strict sandbox (experimental)' },
+      { value: 'off', label: 'none — no restrictions' },
     ],
     initialValue: existing?.securityMode ?? 'guardrails',
   });
   if (isCancel(securityMode)) { cancel('Cancelled.'); return null; }
 
-  // 3. Trust mode
-  const trustMode = await confirm({
-    message: 'Trust mode — auto-approve agent permission requests? (recommended for personal use)',
-    initialValue: true,
-  });
-  if (isCancel(trustMode)) { cancel('Cancelled.'); return null; }
-
-  // 4-5. Telegram (optional)
-  const telegramToken = await text({
-    message: `Telegram bot token (@BotFather → /mybots → API Token, ${noteEmpty})`,
-    placeholder: '123456789:ABCdefGHI...',
-    initialValue: existing?.telegramToken,
-    validate: (v) => (!v || v.trim() === '' || v.includes(':')) ? undefined : 'expected format "<id>:<secret>" or empty',
-  });
-  if (isCancel(telegramToken)) { cancel('Cancelled.'); return null; }
-
-  // Chat ID — user enters manually
-  let detectedChatId = existing?.telegramChatId ?? '';
-
+  // 4. Main chat ID
   const telegramChatId = await text({
-    message: `Your Telegram chat ID (message @userinfobot on Telegram to get it)`,
+    message: 'Main chat ID (Telegram)',
     placeholder: '123456789',
-    initialValue: detectedChatId,
-    validate: (v) => (!v || v.trim() === '' || /^-?\d+$/.test(v.trim())) ? undefined : 'expected numeric user ID or empty',
+    initialValue: existing?.telegramChatId ?? '',
+    validate: (v) => (!v || /^-?\d+$/.test(v.trim())) ? undefined : 'expected numeric ID',
   });
   if (isCancel(telegramChatId)) { cancel('Cancelled.'); return null; }
 
-  // 4-6. Discord (all optional)
+  // 5. Telegram bot token
+  const telegramToken = await text({
+    message: 'Telegram bot token (@BotFather)',
+    placeholder: '123456789:ABCdefGHI...',
+    initialValue: existing?.telegramToken ?? '',
+    validate: (v) => (!v || v.includes(':')) ? undefined : 'expected format "id:secret"',
+  });
+  if (isCancel(telegramToken)) { cancel('Cancelled.'); return null; }
+
+  // 6-8. Discord (optional)
+  const noteEmpty = 'Enter to skip';
   const discordBotToken = await text({
     message: `Discord bot token (${noteEmpty})`,
     placeholder: 'MTIzNDU2...',
@@ -189,71 +183,72 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     message: `Discord app ID (${noteEmpty})`,
     placeholder: '987654321098765432',
     initialValue: existing?.discordAppId,
-    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected Discord snowflake or empty',
+    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected snowflake or empty',
   });
   if (isCancel(discordAppId)) { cancel('Cancelled.'); return null; }
 
   const discordA2aChannel = await text({
-    message: `Discord allowed channel ID (${noteEmpty})`,
+    message: `Discord channel ID (${noteEmpty})`,
     placeholder: '987654321098765432',
     initialValue: existing?.discordA2aChannel,
-    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected Discord snowflake or empty',
+    validate: (v) => (!v || v.trim() === '' || /^\d{10,20}$/.test(v.trim())) ? undefined : 'expected snowflake or empty',
   });
   if (isCancel(discordA2aChannel)) { cancel('Cancelled.'); return null; }
 
-  // 7. Provider
+  // 9. Provider
   const defaultProvider = await select<ProviderChoice>({
-    message: 'Default transport provider',
+    message: "Model's provider (use /model to change later)",
     options: [
       { value: 'openrouter', label: 'openrouter — many models via API key' },
       { value: 'anthropic', label: 'anthropic — Claude API (direct)' },
       { value: 'openai', label: 'openai — GPT API (direct)' },
       { value: 'ollama', label: 'ollama — local/cloud Ollama endpoint' },
-      { value: 'kiro', label: 'kiro — Kiro CLI (free or paid; tier via model)' },
-      { value: 'gemini', label: 'gemini — Gemini CLI (free or paid; tier via model)' },
+      { value: 'kiro', label: 'kiro — Kiro CLI' },
+      { value: 'gemini', label: 'gemini — Gemini CLI' },
     ],
-    initialValue: existing?.defaultProvider ?? 'kiro',
+    initialValue: existing?.defaultProvider ?? 'openrouter',
   });
   if (isCancel(defaultProvider)) { cancel('Cancelled.'); return null; }
 
-  // 8. Default model
+  // 10. Main model (prefilled per provider)
   const defaultModel = await text({
-    message: `Default model (for ${defaultProvider})`,
+    message: 'Main model',
     placeholder: DEFAULT_MODELS[defaultProvider],
     initialValue: existing?.defaultModel ?? DEFAULT_MODELS[defaultProvider],
   });
   if (isCancel(defaultModel)) { cancel('Cancelled.'); return null; }
+  const modelStr = String(defaultModel ?? '').trim() || DEFAULT_MODELS[defaultProvider];
 
-  // 9. API key — validate against provider, retry on failure, empty = skip
+  // 11. API key — required + validated for OpenRouter, optional for others
   const apiKeyEnv = PROVIDER_API_KEY_ENV[defaultProvider];
   let providerApiKey = existing?.providerApiKey ?? '';
-  if (API_PROVIDERS.has(defaultProvider as ProviderChoice)) {
-    const endpoint = PROVIDER_ENDPOINT[defaultProvider as string] ?? '';
+  if (defaultProvider === 'openrouter') {
+    const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
     let validated = false;
     while (!validated) {
       const v = await text({
-        message: `${apiKeyEnv} (empty to skip)`,
-        placeholder: existing?.providerApiKey ? '(keep existing)' : 'sk-or-v1-... or leave blank',
+        message: `${apiKeyEnv} (required)`,
+        placeholder: 'sk-or-v1-...',
         initialValue: providerApiKey || existing?.providerApiKey,
+        validate: (val) => val?.trim() ? undefined : 'API key required for OpenRouter',
       });
       if (isCancel(v)) { cancel('Cancelled.'); return null; }
-      providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
-      if (!providerApiKey) { validated = true; break; }
+      providerApiKey = String(v ?? '').trim();
       process.stdout.write('  Validating key...');
-      const result = await checkModelAvailability(endpoint, providerApiKey, String(defaultModel).trim() || DEFAULT_MODELS[defaultProvider as ProviderChoice]);
+      const result = await checkModelAvailability(endpoint, providerApiKey, modelStr);
       if (result.ok) {
         process.stdout.write(` ✓ valid\n`);
         validated = true;
       } else {
         process.stdout.write(` ✗ ${result.message}\n`);
-        const retry = await confirm({ message: 'Try a different key? (no = skip)', initialValue: true });
+        const retry = await confirm({ message: 'Try a different key?', initialValue: true });
         if (isCancel(retry)) { cancel('Cancelled.'); return null; }
-        if (!retry) { providerApiKey = ''; validated = true; }
+        if (!retry) { validated = true; }
       }
     }
   } else {
     const v = await text({
-      message: `${apiKeyEnv} (empty to skip)`,
+      message: `${apiKeyEnv} (${noteEmpty})`,
       placeholder: 'leave blank for local providers',
       initialValue: existing?.providerApiKey,
     });
@@ -261,71 +256,20 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     providerApiKey = String(v ?? '').trim() || existing?.providerApiKey || '';
   }
 
-  // 10. Ultimate fallback (hailMary)
-  const hailMary = await text({
-    message: `Ultimate fallback model — hailMary (${noteEmpty}; uses same provider + key as above)`,
-    placeholder: 'google/gemini-2.5-flash',
-    initialValue: existing?.hailMaryModel ?? 'google/gemini-2.5-flash',
-  });
-  if (isCancel(hailMary)) { cancel('Cancelled.'); return null; }
-  const hailMaryModel = String(hailMary ?? '').trim();
-
-  if (hailMaryModel && API_PROVIDERS.has(defaultProvider) && providerApiKey) {
-    const check = await confirm({ message: `Check hailMary availability (${hailMaryModel})?`, initialValue: true });
-    if (isCancel(check)) { cancel('Cancelled.'); return null; }
-    if (check) {
-      const endpoint = PROVIDER_ENDPOINT[defaultProvider] ?? '';
-      const result = await checkModelAvailability(endpoint, providerApiKey, hailMaryModel);
-      process.stdout.write(result.ok ? `✓ ${hailMaryModel} available\n` : `⚠️  ${result.message}\n`);
-    }
-  }
-
-  // 12. Sleep schedule + voice + trust mode
-  const bedTime = await text({
-    message: `Bed time HH:MM — daily sleep trigger (${noteEmpty} for default 0:30)`,
-    placeholder: '0:30',
-    initialValue: existing?.bedTime,
-    validate: (v) => (!v || /^\d{1,2}:\d{2}$/.test(v.trim())) ? undefined : 'expected H:MM format',
-  });
-  if (isCancel(bedTime)) { cancel('Cancelled.'); return null; }
-
-  const wakeTime = await text({
-    message: `Wake time HH:MM (${noteEmpty} for default 7:00)`,
-    placeholder: '7:00',
-    initialValue: existing?.wakeTime,
-    validate: (v) => (!v || /^\d{1,2}:\d{2}$/.test(v.trim())) ? undefined : 'expected H:MM format',
-  });
-  if (isCancel(wakeTime)) { cancel('Cancelled.'); return null; }
-
-  const groqApiKey = await text({
-    message: `GROQ_API_KEY for voice-note transcription (${noteEmpty})`,
-    placeholder: existing?.groqApiKey ? '(keep existing)' : 'gsk_...',
-    initialValue: existing?.groqApiKey,
-  });
-  if (isCancel(groqApiKey)) { cancel('Cancelled.'); return null; }
-
-  // 12b. Embeddings — handled by `abmind install`, not here
-
-  // 13. Summary + confirmation
+  // Summary
   const mask = (s: string): string => s ? (s.length > 8 ? `${s.slice(0, 4)}…${s.slice(-4)}` : '***') : '(skipped)';
   const lines = [
     '',
     '── Summary ──',
-    `  Deployment mode:     ${installMode}`,
-    `  Your name:           ${String(userName ?? '') || '(skipped)'}`,
-    `  Telegram token:      ${mask(String(telegramToken ?? ''))}`,
+    `  Agent name:          ${String(instanceName ?? '')}`,
+    `  Install mode:        ${installMode}`,
+    `  Security:            ${securityMode}`,
     `  Telegram chat ID:    ${String(telegramChatId ?? '') || '(skipped)'}`,
+    `  Telegram token:      ${mask(String(telegramToken ?? ''))}`,
     `  Discord bot token:   ${mask(String(discordBotToken ?? ''))}`,
-    `  Discord app ID:      ${String(discordAppId ?? '') || '(skipped)'}`,
-    `  Discord channel ID:  ${String(discordA2aChannel ?? '') || '(skipped)'}`,
     `  Provider:            ${defaultProvider}`,
-    `  Default model:       ${modelStr}`,
+    `  Main model:          ${modelStr}`,
     `  ${apiKeyEnv}:        ${mask(providerApiKey)}`,
-    `  hailMary model:      ${hailMaryModel || '(skipped)'}`,
-    `  Bed time:            ${String(bedTime ?? '') || '(default 0:30)'}`,
-    `  Wake time:           ${String(wakeTime ?? '') || '(default 7:00)'}`,
-    `  GROQ_API_KEY:        ${mask(String(groqApiKey ?? ''))}`,
-    `  Trust mode:          ${trustMode ? 'true (auto-approve)' : 'false (prompt user)'}`,
     '',
   ];
   process.stdout.write(lines.join('\n'));
@@ -337,9 +281,9 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
 
   return {
     installMode: installMode as "simple" | "daemon",
-    userName: String(userName ?? '').trim(),
+    userName,
     instanceName: String(instanceName ?? '').trim(),
-    passphrase: String(passphrase ?? ''),
+    passphrase: '',
     telegramToken: String(telegramToken ?? '').trim(),
     telegramChatId: String(telegramChatId ?? '').trim(),
     discordBotToken: String(discordBotToken ?? '').trim(),
@@ -348,12 +292,12 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     defaultProvider: defaultProvider as ProviderChoice,
     defaultModel: modelStr,
     providerApiKey,
-    hailMaryModel,
-    bedTime: String(bedTime ?? '').trim(),
-    wakeTime: String(wakeTime ?? '').trim(),
-    groqApiKey: String(groqApiKey ?? '').trim() || existing?.groqApiKey || '',
+    hailMaryModel: modelStr,
+    bedTime: '',
+    wakeTime: '',
+    groqApiKey: existing?.groqApiKey ?? '',
     securityMode: String(securityMode ?? 'guardrails'),
-    trustMode: trustMode === true,
+    trustMode: true,
   };
 }
 
