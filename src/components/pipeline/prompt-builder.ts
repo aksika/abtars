@@ -280,8 +280,8 @@ export function buildSessionStartPrompt(
       contextParts.push(ctx);
       const s = ctxResult!.stats;
       const ctxPct = maxContext ? Math.round(ctx.length / maxContext * 100) : -1;
-      logInfo(TAG, `Session start: ${s.messages} messages + ${s.dailies} dailies (${(s.usedBytes / 1024).toFixed(1)}KB / ${(s.budget / 1024).toFixed(0)}KB budget, ${ctxPct}% ctx${isCodeSession ? ", Code" : ""})`);
-      logDebug(TAG, `Session context: ${s.messages} msgs, ${s.dailies} dailies, ${s.usedBytes}B / ${s.budget}B budget, ${ctxPct}% ctx`);
+      logInfo(TAG, `Session start: ${s.messages} messages + ${s.dailies}d ${s.weeklies}w ${s.quarterlies}q (${(s.usedBytes / 1024).toFixed(1)}KB / ${(s.budget / 1024).toFixed(0)}KB budget, ${ctxPct}% ctx${isCodeSession ? ", Code" : ""})`);
+      logDebug(TAG, `Session context: ${s.messages} msgs, ${s.dailies}d ${s.weeklies}w ${s.quarterlies}q, ${s.usedBytes}B / ${s.budget}B budget, ${ctxPct}% ctx`);
       logTrace(TAG, `session-start content: ${ctx.slice(0, 500)}...`);
     }
 
