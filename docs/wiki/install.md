@@ -52,10 +52,12 @@ Create a bot via [@BotFather](https://t.me/BotFather) on Telegram. You'll need:
 
 | Provider | Type | Setup |
 |----------|------|-------|
-| **ollama** | Local, free | `curl -fsSL https://ollama.ai/install.sh \| sh` then `ollama pull` a model |
-| **OpenRouter** | Cloud, paid | Sign up at [openrouter.ai](https://openrouter.ai), get an API key |
-| **Kiro CLI** | Local agent host | Install `kiro-cli` separately |
-| **Gemini CLI** | Local agent host | Install `gemini` separately |
+| **ollama** | Local, free | `curl -fsSL https://ollama.ai/install.sh \| sh` (Linux) or `brew install ollama` (macOS) |
+| **OpenRouter** | Cloud, aggregator | Sign up at [openrouter.ai](https://openrouter.ai), get an API key. Access to all major models. |
+| **OpenAI** | Cloud, direct | API key from [platform.openai.com](https://platform.openai.com) |
+| **Anthropic** | Cloud, direct | API key from [console.anthropic.com](https://console.anthropic.com) |
+| **Kiro CLI** | Local agent host (ACP) | Install `kiro-cli` separately |
+| **Gemini CLI** | Local agent host (ACP) | Install `gemini` separately |
 
 ### Model requirements
 
@@ -216,8 +218,10 @@ In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
 |----------|-----------|-------|
 | ollama | Direct API | `ollama serve` locally, free |
 | OpenRouter | Direct API | API key in `~/.abtars/secret/OPENROUTER_API_KEY` |
-| Kiro CLI | ACP | `kiro-cli` installed |
-| Gemini CLI | ACP | `gemini` installed |
+| OpenAI | Direct API | API key in `~/.abtars/secret/OPENAI_API_KEY` |
+| Anthropic | Direct API | API key in `~/.abtars/secret/ANTHROPIC_API_KEY` |
+| Kiro CLI | ACP | `kiro-cli` installed and on PATH |
+| Gemini CLI | ACP | `gemini` installed and on PATH |
 
 Configure in `~/.abtars/config/transport.json`.
 
