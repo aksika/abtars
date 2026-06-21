@@ -29,7 +29,7 @@ import {
   writeRestartReason, readAndClearRestartRequested, readBridgeLockField, updateBridgeLockField, writeSleepStatus,
 } from "../components/transport/bridge-lock-transport.js";
 import { createSelfHealerTask } from "../components/self-healer.js";
-import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask, createSkillStatsFlushTask, createSkillTrashPruneTask, createKanbanDeliveryTask, createKanbanCleanupTask, createUserSessionExpiryTask, createMetricsTask } from "../components/heartbeat-tasks.js";
+import { createIdleCompactTask, createAgeCheckTask, createDbIntegrityTask, createUpdateCheckTask, createSkillStatsFlushTask, createSkillReloadTask, createKanbanDeliveryTask, createKanbanCleanupTask, createUserSessionExpiryTask, createMetricsTask } from "../components/heartbeat-tasks.js";
 import { checkCron, readPendingReminders, clearPendingReminders } from "../components/tasks/task-checker.js";
 import { loadUsers } from "../components/user-registry.js";
 import { logInfo, logWarn, logDebug } from "../components/logger.js";
@@ -168,9 +168,9 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
 
-  // #613: skill usage stats flush + trash pruning
+  // #613: skill usage stats flush
   heartbeat.registerTask(createSkillStatsFlushTask());
-  heartbeat.registerTask(createSkillTrashPruneTask());
+  heartbeat.registerTask(createSkillReloadTask());
 
   // #857: kanban board — deliver completed cards + cleanup old ones
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;

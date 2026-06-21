@@ -35,9 +35,12 @@ export type AgeCheckDeps = DailyCycleDeps & { doctorPath: string; startSleep?: (
 
 /** Daily cycle — spawn Dreamy after BED_TIME + quiet ticks, then hw sleep after more quiet ticks. */
 export function createAgeCheckTask(deps: AgeCheckDeps): HeartbeatTask {
+  let counter = 0;
   return {
     name: "age-check",
     execute: async () => {
+      counter++;
+      if (counter % 5 !== 0) return; // every 5 ticks (~5 min)
       if (deps.checkStaleSleep) deps.checkStaleSleep();
       if (deps.checkHwSleep && !deps.cronBusy?.()) deps.checkHwSleep();
       if (!isDailyCycleDue(deps)) return;
@@ -112,13 +115,43 @@ export function createUpdateCheckTask(notify: (msg: string) => void): HeartbeatT
   };
 }
 
-/** #613: Flush skill usage stats to disk every heartbeat tick. */
+/** #613: Flush skill usage stats to disk every 3 hours. */
 export function createSkillStatsFlushTask(): HeartbeatTask {
+  let lastFlushAt = 0;
+  const INTERVAL_MS = 3 * 60 * 60 * 1000;
   return {
     name: "skill-stats-flush",
     execute: async () => {
+      if (Date.now() - lastFlushAt < INTERVAL_MS) return;
+      lastFlushAt = Date.now();
       const { flush } = await import("./skill-stats.js");
       flush();
+    },
+  };
+}
+
+/** #1114: Reload skills catalog every 10 minutes if skill files changed. */
+export function createSkillReloadTask(): HeartbeatTask {
+  let lastCheckAt = 0;
+  let lastMtime = 0;
+  const INTERVAL_MS = 10 * 60 * 1000;
+  return {
+    name: "skill-reload",
+    execute: async () => {
+      if (Date.now() - lastCheckAt < INTERVAL_MS) return;
+      lastCheckAt = Date.now();
+      const { statSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { abtarsHome } = await import("../paths.js");
+      const skillsDir = join(abtarsHome(), "skills");
+      try {
+        const mtime = statSync(skillsDir).mtimeMs;
+        if (mtime === lastMtime) return;
+        lastMtime = mtime;
+        const { reloadCatalog } = await import("../capabilities/hotskills/index.js");
+        const count = reloadCatalog();
+        logInfo("skill-reload", `Catalog regenerated: ${count} skills`);
+      } catch { /* skills dir missing — skip */ }
     },
   };
 }
