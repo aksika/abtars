@@ -379,6 +379,10 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   if (!opts.acceptRisk) {
     return '--non-interactive requires --accept-risk (you are bypassing safety prompts)';
   }
+  if (!opts.instanceName) return '--instance-name is required in non-interactive mode';
+  if (!opts.telegramToken) return '--telegram-token is required in non-interactive mode';
+  if (!opts.telegramChatId) return '--telegram-chat-id is required in non-interactive mode';
+  if (!opts.userName) return '--user-name is required in non-interactive mode';
   const provider = (opts.defaultProvider ?? 'openrouter') as ProviderChoice;
   if (!VALID_PROVIDERS.includes(provider)) {
     return `--default-provider must be one of: ${VALID_PROVIDERS.join(', ')}`;
