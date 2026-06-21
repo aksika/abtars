@@ -478,90 +478,12 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     // /update with no args → treat as /software (show info)
     if (arg === "" && _text.match(/^\/software\s*$/i)) {
       // Fall through to info display below
-    } else if (arg === "update pull" || arg === "pull") {
+    } else if (arg === "update pull" || arg === "pull" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build" || arg === "update") {
       if (!isMaster) { await ctx.reply("Requires master role."); return true; }
-      try {
-        const { spawnSync } = await import("node:child_process");
-        const { mkdirSync, rmSync: rms } = await import("node:fs");
-        const srcDir = join(home, "src", "abtars");
-        const abmindDir = join(home, "src", "abmind");
-        logInfo("update", "Pull requested");
-
-        const pullOrReclone = (dir: string, repo: string): { ok: boolean; msg: string } => {
-          mkdirSync(join(home, "src"), { recursive: true });
-          // Try fetch+reset if .git exists
-          if (existsSync(join(dir, ".git"))) {
-            spawnSync("git", ["-C", dir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-            const r = spawnSync("git", ["-C", dir, "reset", "--hard", "origin/dev"], { encoding: "utf-8" });
-            const hasConflicts = spawnSync("git", ["-C", dir, "grep", "-q", "^<<<<<<<"], { encoding: "utf-8" }).status === 0;
-            if (r.status === 0 && !hasConflicts) {
-              return { ok: true, msg: (r.stdout || "").trim().slice(0, 300) };
-            }
-            // Failed or conflicts — nuke and reclone
-            logInfo("update", `${dir}: reset failed or conflicts — recloning`);
-            rms(dir, { recursive: true, force: true });
-          }
-          // Clone fresh
-          const cl = spawnSync("git", ["clone", "-b", "dev", repo, dir], { encoding: "utf-8", timeout: 60_000 });
-          if (cl.status === 0) return { ok: true, msg: "cloned fresh" };
-          return { ok: false, msg: (cl.stderr || "").trim().slice(0, 300) };
-        };
-
-        const abtarsResult = pullOrReclone(srcDir, "git@github.com:aksika/abtars.git");
-        if (!abtarsResult.ok) { await ctx.reply(`Pull failed (abtars):\n${abtarsResult.msg}`); return true; }
-        let pulled = `Pulled:\n${abtarsResult.msg}`;
-
-        const abmindResult = pullOrReclone(abmindDir, "git@github.com:aksika/abmind.git");
-        pulled += `\nabmind: ${abmindResult.msg}`;
-
-        logInfo("update", `Pull complete`);
-        await ctx.reply(`${pulled}\n\nReady to deploy: /update deploy`);
-      } catch (err) {
-        await ctx.reply(`Pull failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      return true;
-    } else if (arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build") {
-      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
-      try {
-        const { spawnSync, spawn } = await import("node:child_process");
-        const srcDir = join(home, "src", "abtars");
-        const abmindDir = join(home, "src", "abmind");
-        if (!existsSync(join(srcDir, ".git"))) {
-          await ctx.reply("No source repo. Run /update pull first.");
-          return true;
-        }
-        // Guard: skip if already running this commit
-        const { getDeployedVersion } = await import("../../paths.js");
-        const head = spawnSync("git", ["-C", srcDir, "rev-parse", "--short", "HEAD"], { encoding: "utf-8" }).stdout.trim();
-        const running = getDeployedVersion();
-        if (head && (running.version.includes(head) || running.commit === head)) {
-          await ctx.reply(`Already running ${head}. Nothing to deploy.`);
-          return true;
-        }
-        logInfo("update", `Deploy starting (non-blocking)`);
-        // Pre-flight: check for merge conflict markers in source
-        const markers = spawnSync("git", ["-C", srcDir, "grep", "-l", "^<<<<<<<"], { encoding: "utf-8", timeout: 10_000 });
-        if (markers.stdout.trim()) {
-          const files = markers.stdout.trim().split("\n").join(", ");
-          await ctx.reply(`⚠️ Conflict markers found in source — refusing to deploy.\nFiles: ${files}\nRepo has a broken commit. Notify dev team.`);
-          return true;
-        }
-        await ctx.reply("⚙️ Deploying (building in background)...");
-
-        // Write deploy state (#878)
-        const logFile = `deploy-${new Date().toISOString().replace(/[:.]/g, "").slice(0, 15)}.log`;
-        const { writeFileSync: wfs } = await import("node:fs");
-        wfs(join(home, "deploy.state"), JSON.stringify({ status: "running", startedAt: new Date().toISOString(), logFile }) + "\n");
-
-        // Spawn build-and-deploy.sh detached — bridge stays responsive (#871)
-        const script = join(srcDir, "scripts", "build-and-deploy.sh");
-        spawn("bash", [script, srcDir, abmindDir], {
-          detached: true,
-          stdio: "ignore",
-        }).unref();
-      } catch (err) {
-        await ctx.reply(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      await ctx.reply("⚙️ Updating (pull + build + deploy)...");
+      logInfo("update", "Update requested via /software");
+      const { spawn } = await import("node:child_process");
+      spawn("abtars", ["update"], { detached: true, stdio: "ignore" }).unref();
       return true;
     }
   }
