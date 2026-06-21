@@ -48,7 +48,8 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
       const running = ctx.cronCurrentJob?.entryId === e.id;
       const tick = e.paused ? "⏸" : !runsToday ? "—" : succeeded ? "✓" : running ? "~" : failed ? "✗" : started ? "✗" : "+";
       const label = e.title || e.message.split("\n")[0].replace(/[~\/][\w.\/-]+\//g, "").slice(0, 30);
-      return `${tick}  ${e.id.padEnd(22)}${sched.padEnd(16)}${label}`;
+      const name = label.length > 18 ? label.slice(0, 18) : label;
+      return `${tick}  ${name.padEnd(20)}${sched.padEnd(16)}${label}`;
     });
     listing = lines.length > 0 ? "<pre>" + lines.join("\n") + "</pre>" : "(no active entries)";
   } catch (err) {
@@ -59,7 +60,8 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
   if (ctx.cronCurrentJob) {
     const j = ctx.cronCurrentJob;
     const ago = Math.round((Date.now() - j.startedAt) / 1000);
-    running = `\n▶ Running: ${j.type} (pid ${j.pid}, ${ago}s ago)\n   ${j.entryId}`;
+    const name = j.message.split("\n")[0].slice(0, 30);
+    running = `\n~ Running: ${name} (${ago}s)`;
   }
   await ctx.reply(`⏰ ${now}\n\n${listing}${running}`, { parseMode: "HTML" });
   return true;
@@ -69,7 +71,15 @@ export async function handleTasksTrigger(text: string, ctx: CommandContext): Pro
   const id = text.replace(/^\/(tasks?|cron) run /, "").trim();
   if (!id) { await ctx.reply("Usage: /task run <cron-id>"); return true; }
   const err = ctx.enqueueCron?.(id, true);
-  await ctx.reply(err ?? `⏳ Running: ${id}`);
+  if (err) { await ctx.reply(err); return true; }
+  // Resolve display name
+  let name = id;
+  try {
+    const { readEntry } = await import("../tasks/task-store.js");
+    const entry = readEntry(id);
+    if (entry) name = entry.title || entry.message.split("\n")[0].slice(0, 30);
+  } catch { /* fallback to id */ }
+  await ctx.reply(`Running task: ${name}`);
   return true;
 }
 
