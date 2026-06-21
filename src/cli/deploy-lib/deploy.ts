@@ -91,9 +91,10 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     const pkgPath = join(staged.stagedPath, "package.json");
     try {
       const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-      const externals: Record<string, string> = { patchright: "^1.59.4", "rettiwt-api": "^4.1.3" };
-      pkg.dependencies = { ...pkg.dependencies, ...externals };
       if (pkg.dependencies?.abmind?.startsWith("file:")) delete pkg.dependencies.abmind;
+      // Remove bundled-only deps that aren't needed at runtime
+      delete pkg.dependencies?.patchright;
+      delete pkg.dependencies?.["rettiwt-api"];
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
       execSync("pnpm install --prod --ignore-scripts 2>/dev/null", { cwd: staged.stagedPath, timeout: 120_000 });
       process.stdout.write(`✓ external deps installed\n`);

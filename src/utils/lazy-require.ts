@@ -17,6 +17,7 @@ export interface OptionalDep {
 
 export const OPTIONAL_DEPS: Record<string, OptionalDep> = {
   browser: { packages: ["patchright"], label: "Browser automation", postInstall: "patchright install chromium" },
+  twitter: { packages: ["rettiwt-api"], label: "Twitter/X integration" },
   pdf: { packages: ["pdf-parse"], label: "PDF reading" },
   youtube: { packages: ["youtube-transcript"], label: "YouTube transcripts" },
   image: { packages: ["jimp"], label: "Image processing" },
