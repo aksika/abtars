@@ -417,7 +417,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   if (answers.discordA2aChannel) newBlock.push(`DISCORD_A2A_CHANNEL_ID=${answers.discordA2aChannel}`);
   if (answers.bedTime) newBlock.push(`BED_TIME=${answers.bedTime}`);
   if (answers.wakeTime) newBlock.push(`WAKE_TIME=${answers.wakeTime}`);
-  newBlock.push(`HEARTBEAT_INTERVAL_SEC=300`);
+  newBlock.push(`HEARTBEAT_INTERVAL_SEC=60`);
   newBlock.push(`SECURITY_MODE=${answers.securityMode}`);
   newBlock.push(`TRUST_MODE=${answers.trustMode ? 'true' : 'false'}`);
   newBlock.push(`TELEGRAM_ENABLED=${answers.telegramToken ? 'true' : 'false'}`);
