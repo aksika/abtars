@@ -16,7 +16,7 @@ import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
 const DEFAULT_PRUNE_DAYS = 7;
 
 const ABTARS_EXCLUDE = [
-  "logs", "overflow", "browser-socket", "app", "app/*", "bin", "bin/*", "bridge.lock", "*.sock",
+  "src", "logs", "overflow", "browser-socket", "app", "app/*", "bin", "bin/*", "bridge.lock", "*.sock",
   "*.db-wal", "*.db-shm",
 ];
 
@@ -125,11 +125,10 @@ function runAbmindBackup(abmindHome: string): string | null {
   const backupsDir = join(abmindHome, "backups");
   mkdirSync(backupsDir, { recursive: true });
 
-  const result = spawnSync("abmind", ["backup"], { encoding: "utf-8", env: { ...process.env } });
+  const result = spawnSync("abmind", ["backup", "--database"], { encoding: "utf-8", env: { ...process.env } });
   if (result.status !== 0) return null;
 
-  // abmind backup (full) produces a .zip
-  const files = readdirSync(backupsDir).filter(f => f.endsWith(".zip") || f.endsWith(".7z")).sort().reverse();
+  const files = readdirSync(backupsDir).filter(f => f.endsWith(".abm")).sort().reverse();
   return files[0] ? join(backupsDir, files[0]) : null;
 }
 

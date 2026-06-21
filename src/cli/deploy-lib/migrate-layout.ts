@@ -55,9 +55,14 @@ export function migrateIfNeeded(home: string): boolean {
   // Move src/ if exists
   const srcDir = join(home, "src");
   const releasesSrc = join(releasesDir, "src");
-  if (existsSync(srcDir) && !existsSync(releasesSrc)) {
-    renameSync(srcDir, releasesSrc);
-    process.stdout.write("  ✓ src/ → releases/src/\n");
+  if (existsSync(srcDir)) {
+    if (!existsSync(releasesSrc)) {
+      renameSync(srcDir, releasesSrc);
+      process.stdout.write("  ✓ src/ → releases/src/\n");
+    } else {
+      rmSync(srcDir, { recursive: true, force: true });
+      process.stdout.write("  ✓ src/ removed (already in releases/src/)\n");
+    }
   }
 
   // Create symlinks
