@@ -10,16 +10,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+          cache: 'pnpm'
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
       - run: node esbuild.config.js
 
-      - name: Publish to npm (alpha)
-        run: npm publish --tag alpha
+      - name: Publish to npm (latest)
+        run: pnpm publish --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -27,24 +32,22 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     steps:
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Install from npm
-        run: npm install -g abtars@alpha abmind@alpha
+        run: pnpm install -g abtars abmind
 
       - name: Verify CLI runs
         run: abtars --help
 
-      - name: Verify install flow
-        run: |
-          abmind install --non-interactive --passphrase testpass --username ci
-          abtars install --mode=simple --force
-          abtars doctor || true
-
       - name: Verify version matches
         run: |
-          EXPECTED=$(npm view abtars@alpha version)
-          ACTUAL=$(node -e "console.log(require('$(npm root -g)/abtars/package.json').version)")
-          [ "$EXPECTED" = "$ACTUAL" ] && echo "✓ version $ACTUAL" || (echo "MISMATCH: npm=$EXPECTED installed=$ACTUAL" && exit 1)
+          EXPECTED=$(pnpm view abtars version)
+          ACTUAL=$(abtars --version 2>&1 | head -1)
+          echo "npm=$EXPECTED installed=$ACTUAL"

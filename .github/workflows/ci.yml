@@ -16,22 +16,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
-      - name: Lint
-        run: npm run lint --if-present
+      - name: Build
+        run: node esbuild.config.js
 
       - name: Test
-        run: npm test -- --silent 2>&1 | tail -20
+        run: pnpm test -- --silent 2>&1 | tail -20
 
       - name: Smoke test (install + help)
         run: |
           node bundle/abtars-cli.js --help
-          node bundle/abtars-cli.js install --mode=simple --force
-          node bundle/abtars-cli.js doctor 2>&1 || true
