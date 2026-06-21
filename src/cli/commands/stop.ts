@@ -1,16 +1,9 @@
 /**
- * abtars stop — kill watchdog (if running) then bridge (#372).
+ * abtars stop — kill watchdog (if running) then bridge.
  *
- * Ordering matters: watchdog dies first so it doesn't respawn the bridge
- * we're about to kill. Each process gets SIGTERM → 5s grace → SIGKILL.
- *
- * Lock files (verified against live install):
- *   ~/.abtars/bridge.lock = {pid, watchdogPid, startedAt, version, sleepStatus, lastHeartbeat, ...}
- *   ~/.abtars/bridge.lock   = {"pid": number, "lastHeartbeat": ..., ...}
- * Both are separate files; no watchdog PID is embedded in bridge.lock.
- *
- * Supervised-daemon mode: refuses without --force (systemd/launchd would
- * respawn immediately). Mirrors the pattern in restart.ts for --cold.
+ * Ordering: watchdog dies first so it doesn't respawn the bridge.
+ * Each process gets SIGTERM → 5s grace → SIGKILL.
+ * Daemon mode: unloads launchd/systemd service before killing.
  */
 
 import { logAndSwallow } from "../../components/log-and-swallow.js";
