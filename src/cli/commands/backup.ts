@@ -145,7 +145,7 @@ function runAbmindDbBackup(abmindHome: string): string | null {
   const backupsDir = join(abmindHome, "backups");
   mkdirSync(backupsDir, { recursive: true });
 
-  const result = spawnSync("abmind", ["backup", "--database"], { encoding: "utf-8", env: { ...process.env } });
+  const result = spawnSync("abmind", ["backup"], { encoding: "utf-8", env: { ...process.env } });
   if (result.status !== 0) return null;
 
   const abmFiles = readdirSync(backupsDir).filter(f => f.endsWith(".abm")).sort().reverse();
