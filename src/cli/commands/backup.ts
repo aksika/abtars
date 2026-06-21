@@ -187,6 +187,8 @@ export async function backup(opts: BackupOpts = {}): Promise<number> {
 }
 
 function runAbmindBackup(abHome: string, abmindHome: string): string | null {
+  const backupsDir = join(abmindHome, "backups");
+  mkdirSync(backupsDir, { recursive: true });
   const abmindPaths = [
     join(dirname(abHome), "workspace", "ab", "abmind", "dist", "cli", "abmind-backup.js"),
     join(abmindHome, "lib", "node_modules", "abmind", "dist", "cli", "abmind-backup.js"),
@@ -201,8 +203,7 @@ function runAbmindBackup(abHome: string, abmindHome: string): string | null {
 
   if (result.status !== 0) return null;
 
-  // Find latest .abm in backups dir
-  const backupsDir = join(abmindHome, "backups");
+  // Find latest .abm in backups dir (created by abmind backup)
   if (!existsSync(backupsDir)) return null;
   const abmFiles = readdirSync(backupsDir).filter(f => f.endsWith(".abm")).sort().reverse();
   return abmFiles[0] ? join(backupsDir, abmFiles[0]) : null;
