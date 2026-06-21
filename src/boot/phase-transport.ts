@@ -211,6 +211,7 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
       maxContext: resolved.contextWindow,
       maxOutput: resolved.maxOutput,
       maxTurns: tc?.maxTurns ?? 50,
+      maxToolRounds: tc?.maxToolRounds ?? 25,
       apiFormat: resolved.provider.apiFormat,
       thinking: resolved.provider.thinking,
     }, policy);

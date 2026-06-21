@@ -26,6 +26,7 @@ export interface DirectApiConfig {
   maxContext: number;
   maxOutput: number;
   maxTurns: number;
+  maxToolRounds?: number;
   apiFormat?: "chat" | "responses" | "anthropic";
   thinking?: { style: "effort"; default: string } | { style: "extended"; default: number };
   fallbacks?: Array<{ endpoint: string; apiKey?: string; model: string; maxContext?: number }>;
@@ -287,11 +288,10 @@ export class DirectApiTransport implements IKiroTransport {
   private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
     let zeroTokenRetries = 0;
     const loopStart = Date.now();
-    const MAX_TOOL_ROUNDS = 15;
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
       if (signal.aborted) return "[SYSTEM] Interrupted by user.";
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
-      if (turn >= MAX_TOOL_ROUNDS) {
+      if (turn >= (this.config.maxToolRounds ?? 25)) {
         logError(TAG, `Tool loop circuit breaker: ${turn} rounds without final response — aborting`);
         return "[SYSTEM] Tool loop limit reached. Stopped after " + turn + " rounds.";
       }

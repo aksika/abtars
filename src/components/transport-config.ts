@@ -61,6 +61,7 @@ export type TransportConfig = {
   providers: Record<string, ProviderConfig>;
   transportDefaults?: TransportDefaults;
   maxTurns?: number;
+  maxToolRounds?: number;
   hailMary?: { model: string; provider: string };
   healthPolicy?: HealthPolicyConfig;
 };
