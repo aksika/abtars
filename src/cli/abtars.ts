@@ -67,7 +67,7 @@ Usage:
   abtars onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   abtars restart [--cold]
   abtars start
-  abtars stop [--force]
+  abtars stop
   abtars status
   abtars logs
   abtars config
@@ -145,7 +145,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       case 'restart':
         return await restart({ cold: flags.get('cold') === true });
       case 'stop':
-        return await stop({ force: flags.get('force') === true });
+        return await stop({});
       case 'start': {
         const { start: startCmd } = await import('./commands/start.js');
         return await startCmd();

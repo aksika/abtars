@@ -58,7 +58,7 @@ function removeLock(path: string): void {
   catch (err) { logAndSwallow("stop", "op", err); }
 }
 
-export async function stop(opts: { force?: boolean }): Promise<number> {
+export async function stop(opts: {}): Promise<number> {
   const home = abtarsHome();
   const manifestPath = join(home, "manifest.json");
   const bridgeLock = join(home, "bridge.lock");
