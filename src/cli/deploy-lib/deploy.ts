@@ -26,15 +26,14 @@ function readJsonField(file: string, field: string): unknown {
 export async function deploy(opts: DeployOptions): Promise<number> {
   const paths = packagePaths("abtars");
   const isFirstInstall = !existsSync(paths.manifest);
-  const repoRoot = opts.localDir
-    ?? (existsSync(join(paths.releasesDir, "src", "abtars", "package.json")) ? join(paths.releasesDir, "src", "abtars") : join(abtarsHome(), "src", "abtars"));
 
   // Sync source repos — clone if missing, fetch+reset if exists, nuke+reclone on failure
   if (!opts.localDir) {
     const srcDir = join(paths.releasesDir, "src");
     mkdirSync(srcDir, { recursive: true });
+    const abtarsSrcDir = join(srcDir, "abtars");
     const abmindSrcDir = join(srcDir, "abmind");
-    const repos: Array<[string, string]> = [[repoRoot, "abtars"], [abmindSrcDir, "abmind"]];
+    const repos: Array<[string, string]> = [[abtarsSrcDir, "abtars"], [abmindSrcDir, "abmind"]];
     for (const [dir, name] of repos) {
       try {
         if (existsSync(join(dir, ".git"))) {
@@ -44,7 +43,6 @@ export async function deploy(opts: DeployOptions): Promise<number> {
           execSync(`git clone --depth 1 -b dev https://github.com/aksika/${name}.git`, { cwd: srcDir, stdio: "pipe", timeout: 120_000 });
         }
       } catch {
-        // Fetch failed (corrupted shallow clone) — nuke and reclone
         try {
           rmSync(dir, { recursive: true, force: true });
           execSync(`git clone --depth 1 -b dev https://github.com/aksika/${name}.git`, { cwd: srcDir, stdio: "pipe", timeout: 120_000 });
@@ -63,6 +61,8 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       } catch {}
     }
   }
+
+  const repoRoot = opts.localDir ?? join(paths.releasesDir, "src", "abtars");
 
   if (!existsSync(join(repoRoot, "package.json"))) {
     process.stderr.write(`Source not found at ${repoRoot}\nUse: abtars update --local <DIR>\n`);
