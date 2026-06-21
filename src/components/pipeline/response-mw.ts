@@ -48,8 +48,9 @@ export async function deliverResponse(ctx: DeliveryContext): Promise<DeliveryRes
   const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
   let userResponse = cleanedText;
 
-  // Strip <thinking> blocks
-  userResponse = userResponse.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "");
+  // Strip <think>/<thinking> blocks + orphaned closing tags
+  userResponse = userResponse.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>\s*/g, "");
+  userResponse = userResponse.replace(/<\/think(?:ing)?>\s*/g, "");
 
   // Secret redaction
   for (const [key, val] of Object.entries(process.env)) {

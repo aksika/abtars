@@ -399,10 +399,11 @@ export async function handleInboundMessage(
     const { text: cleanedText, reactionEmoji, noReply, topics } = cleanResponse(rawResponse);
     let userResponse = cleanedText;
 
-    // #869: strip <thinking> blocks unless user opted in via /reasoning show
+    // #869: strip <think>/<thinking> blocks unless user opted in via /reasoning show
     const reasoningSession = transport.getActiveSession?.();
     if (!reasoningSession?.showReasoning) {
-      userResponse = userResponse.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "");
+      userResponse = userResponse.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>\s*/g, "");
+      userResponse = userResponse.replace(/<\/think(?:ing)?>\s*/g, "");
     }
 
     // --- Secret redaction (belt-and-suspenders for #436) ---
