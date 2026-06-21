@@ -1,8 +1,8 @@
 /**
- * `abtars backup` — full or config-only backup with optional encryption.
+ * `abtars backup` — full or config-only backup.
  *
- * Full (default): zip ~/.abtars/ (minus binaries/runtime) + encrypted .abm via `abmind backup`
- * Config:         zip config dirs only (config/, secret/, tasks/, skills/, kanban/, metrics/, auth/)
+ * Full (default): abtars zip + abmind zip (filesystem + encrypted DB inside)
+ * Config:         abtars config dirs only, no abmind
  *
  * Flags: --full (default), --config, --encrypt, --output <dir>, --prune-days N
  */
@@ -18,6 +18,10 @@ const DEFAULT_PRUNE_DAYS = 7;
 const ABTARS_EXCLUDE = [
   "logs", "overflow", "browser-socket", "app", "app/*", "bin", "bin/*", "bridge.lock", "*.sock",
   "*.db-wal", "*.db-shm",
+];
+
+const ABMIND_EXCLUDE = [
+  "lib", "node_modules", "backups", "working", "*.sock", "*.db-wal", "*.db-shm",
 ];
 
 const CONFIG_DIRS = ["config", "secret", "tasks", "skills", "kanban", "metrics", "auth"];
@@ -44,13 +48,12 @@ export async function backup(opts: BackupOpts = {}): Promise<number> {
   mkdirSync(destDir, { recursive: true });
 
   const isConfig = opts.config === true;
-  const prefix = isConfig ? `abtars-config-${ts}` : `abtars-${ts}`;
-
-  // 1. Create the zip (abtars state only)
   const has7z = spawnSync("which", ["7z"], { encoding: "utf-8" }).status === 0;
   const zipExt = has7z ? ".7z" : ".zip";
-  let zipPath = join(destDir, prefix + zipExt);
 
+  // 1. Zip abtars state
+  const abtarsPrefix = isConfig ? `abtars-config-${ts}` : `abtars-${ts}`;
+  const abtarsZip = join(destDir, abtarsPrefix + zipExt);
   let zipOk: boolean;
 
   if (isConfig) {
@@ -60,60 +63,64 @@ export async function backup(opts: BackupOpts = {}): Promise<number> {
       return 1;
     }
     if (has7z) {
-      const r = spawnSync("7z", ["a", zipPath, ...existingDirs], { cwd: abHome, encoding: "utf-8" });
-      zipOk = r.status === 0;
+      zipOk = spawnSync("7z", ["a", abtarsZip, ...existingDirs], { cwd: abHome, encoding: "utf-8" }).status === 0;
     } else {
-      const r = spawnSync("zip", ["-qr", zipPath, ...existingDirs], { cwd: abHome, encoding: "utf-8" });
-      zipOk = r.status === 0;
+      zipOk = spawnSync("zip", ["-qr", abtarsZip, ...existingDirs], { cwd: abHome, encoding: "utf-8" }).status === 0;
     }
   } else {
     if (has7z) {
       const excludeArgs = ABTARS_EXCLUDE.flatMap(ex => ["-xr!" + ex]);
-      const r = spawnSync("7z", ["a", zipPath, ".", ...excludeArgs], { cwd: abHome, encoding: "utf-8" });
-      zipOk = r.status === 0;
+      zipOk = spawnSync("7z", ["a", abtarsZip, ".", ...excludeArgs], { cwd: abHome, encoding: "utf-8" }).status === 0;
     } else {
       const excludePatterns = ABTARS_EXCLUDE.flatMap(ex => [`${ex}/*`, ex]);
-      const r = spawnSync("zip", ["-qr", zipPath, ".", "-x", ...excludePatterns], { cwd: abHome, encoding: "utf-8" });
-      zipOk = r.status === 0;
+      zipOk = spawnSync("zip", ["-qr", abtarsZip, ".", "-x", ...excludePatterns], { cwd: abHome, encoding: "utf-8" }).status === 0;
     }
   }
 
   if (!zipOk) {
-    process.stderr.write("Backup zip failed\n");
+    process.stderr.write("abtars zip failed\n");
     return 1;
   }
 
-  if (!isConfig) {
-    const actual = statSync(zipPath).size;
-    if (actual < 100_000) {
-      process.stderr.write(`⚠️ Backup suspiciously small (${actual} bytes)\n`);
-    }
-  }
+  const abtarsSize = (statSync(abtarsZip).size / 1024 / 1024).toFixed(1);
+  process.stdout.write(`✓ ${basename(abtarsZip)} (${abtarsSize}MB)\n`);
 
-  const zipSize = (statSync(zipPath).size / 1024 / 1024).toFixed(1);
-  process.stdout.write(`✓ ${basename(zipPath)} (${zipSize}MB)\n`);
-
-  // 2. Encrypt zip if requested
-  if (opts.encrypt) {
-    const encPath = zipPath + ".enc";
-    const ok = encryptFile(zipPath, encPath, abmindHome);
-    if (!ok) return 1;
-    unlinkSync(zipPath);
-    zipPath = encPath;
-    process.stdout.write(`✓ encrypted → ${basename(encPath)}\n`);
-  }
-
-  // 3. Run abmind backup (produces encrypted .abm with all memory data)
-  if (!isConfig) {
-    const abmResult = runAbmindBackup(abmindHome);
-    if (abmResult) {
-      const dest = join(destDir, basename(abmResult));
-      renameSync(abmResult, dest);
-      const size = (statSync(dest).size / 1024).toFixed(0);
-      process.stdout.write(`✓ ${basename(dest)} (${size}KB)\n`);
+  // 2. abmind backup (always runs abmind backup --database, full wraps it in a zip)
+  if (!isConfig && existsSync(abmindHome)) {
+    const abmFile = runAbmindDbBackup(abmindHome);
+    if (!abmFile) {
+      process.stderr.write("⚠️ abmind backup --database failed\n");
     } else {
-      process.stderr.write("⚠️ abmind backup failed or produced no .abm\n");
+      // Full: zip abmind filesystem + include the .abm inside
+      const abmindZip = join(destDir, `abmind-${ts}${zipExt}`);
+      if (has7z) {
+        const excludeArgs = ABMIND_EXCLUDE.flatMap(ex => ["-xr!" + ex]);
+        spawnSync("7z", ["a", abmindZip, ".", ...excludeArgs], { cwd: abmindHome, encoding: "utf-8" });
+        spawnSync("7z", ["a", abmindZip, abmFile], { encoding: "utf-8" });
+      } else {
+        const excludePatterns = ABMIND_EXCLUDE.flatMap(ex => [`${ex}/*`, ex]);
+        spawnSync("zip", ["-qr", abmindZip, ".", "-x", ...excludePatterns], { cwd: abmindHome, encoding: "utf-8" });
+        spawnSync("zip", ["-qj", abmindZip, abmFile], { encoding: "utf-8" });
+      }
+      // Clean up the standalone .abm (it's inside the zip now)
+      try { unlinkSync(abmFile); } catch { /* ignore */ }
+
+      if (existsSync(abmindZip)) {
+        const size = (statSync(abmindZip).size / 1024 / 1024).toFixed(1);
+        process.stdout.write(`✓ ${basename(abmindZip)} (${size}MB)\n`);
+      } else {
+        process.stderr.write("⚠️ abmind zip failed\n");
+      }
     }
+  }
+
+  // 3. Encrypt abtars zip if requested
+  if (opts.encrypt) {
+    const encPath = abtarsZip + ".enc";
+    const ok = encryptFile(abtarsZip, encPath, abmindHome);
+    if (!ok) return 1;
+    unlinkSync(abtarsZip);
+    process.stdout.write(`✓ encrypted → ${basename(encPath)}\n`);
   }
 
   // 4. Prune old backups
@@ -126,9 +133,7 @@ export async function backup(opts: BackupOpts = {}): Promise<number> {
       if (!(f.endsWith(".zip") || f.endsWith(".7z") || f.endsWith(".abm") || f.endsWith(".enc"))) continue;
       const fPath = join(destDir, f);
       try {
-        if (now - statSync(fPath).mtimeMs > maxAge) {
-          unlinkSync(fPath);
-        }
+        if (now - statSync(fPath).mtimeMs > maxAge) unlinkSync(fPath);
       } catch { /* skip */ }
     }
   }
@@ -136,11 +141,11 @@ export async function backup(opts: BackupOpts = {}): Promise<number> {
   return 0;
 }
 
-function runAbmindBackup(abmindHome: string): string | null {
+function runAbmindDbBackup(abmindHome: string): string | null {
   const backupsDir = join(abmindHome, "backups");
   mkdirSync(backupsDir, { recursive: true });
 
-  const result = spawnSync("abmind", ["backup"], { encoding: "utf-8", env: { ...process.env } });
+  const result = spawnSync("abmind", ["backup", "--database"], { encoding: "utf-8", env: { ...process.env } });
   if (result.status !== 0) return null;
 
   const abmFiles = readdirSync(backupsDir).filter(f => f.endsWith(".abm")).sort().reverse();
