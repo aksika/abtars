@@ -297,7 +297,26 @@ export class Spin {
   }
 
   async injectGreeting(userId: string, prompt: string): Promise<string | null> {
-    return this.inject(userId, prompt, { deliver: true });
+    if (!this._greetingAdapter) { logWarn(TAG, "injectGreeting: no adapter"); return null; }
+    const registry = loadUsers();
+    const user = registry.byUserId.get(userId);
+    if (!user) { logWarn(TAG, `inject: unknown user ${userId}`); return null; }
+    const chatId = user.platforms.telegram ?? user.platforms.discord;
+    if (!chatId) { logWarn(TAG, `inject: no chatId for ${userId}`); return null; }
+    const platform = user.platforms.telegram ? "telegram" : "discord";
+    this._greetingAdapter.injectMessage({
+      platform,
+      channelId: String(chatId),
+      userId,
+      senderId: String(chatId),
+      senderName: userId,
+      text: prompt,
+      timestamp: Date.now(),
+      isGroup: false,
+      isVoice: false,
+    });
+    logInfo(TAG, `injectGreeting: routed to pipeline for ${userId}`);
+    return "routed";
   }
 
   // ── Orc ────────────────────────────────────────────────────────────────
