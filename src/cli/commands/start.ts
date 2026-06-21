@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -16,13 +16,15 @@ function readJsonField(file: string, field: string): unknown {
 export async function start(): Promise<number> {
   const home = abtarsHome();
   const lockFile = join(home, "bridge.lock");
-  const stoppedSentinel = join(home, ".stopped");
+  const startReasonFile = join(home, ".start-reason");
 
-  // Remove stop sentinel
-  try { if (existsSync(stoppedSentinel)) unlinkSync(stoppedSentinel); } catch {}
+  // Clear stop sentinel so WD/bridge can start
+  try { unlinkSync(startReasonFile); } catch {}
+  try { unlinkSync(join(home, ".stopped")); } catch {}
 
-  // Reload supervisor service if supervised
   const installMode = readJsonField(join(home, "manifest.json"), "installMode") as string | undefined;
+
+  // Daemon mode — let launchd/systemd handle it
   if (installMode === "daemon") {
     if (process.platform === "darwin") {
       const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
@@ -37,6 +39,7 @@ export async function start(): Promise<number> {
     return 0;
   }
 
+  // Simple mode — spawn bridge directly
   if (existsSync(lockFile)) {
     try {
       const lock = JSON.parse(readFileSync(lockFile, "utf-8"));
@@ -44,9 +47,27 @@ export async function start(): Promise<number> {
         process.stdout.write(`Bridge already running (pid ${lock.pid}).\n`);
         return 0;
       }
-    } catch { /* corrupt lock — proceed with start */ }
+    } catch { /* corrupt lock — proceed */ }
   }
 
-  const { restart } = await import("./restart.js");
-  return restart({ cold: true });
+  const entryPoint = join(home, "app", "bundle", "abtars.js");
+  if (!existsSync(entryPoint)) {
+    process.stderr.write(`No release deployed. Run 'abtars update' first.\n`);
+    return 1;
+  }
+
+  const { spawn } = await import("node:child_process");
+  const { openSync, closeSync, mkdirSync } = await import("node:fs");
+  mkdirSync(join(home, "logs"), { recursive: true });
+  const logFd = openSync(join(home, "logs", "bridge.log"), "a");
+  const br = spawn("node", ["--max-old-space-size=1024", entryPoint], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    cwd: home,
+    env: { ...process.env, ABTARS_START_REASON: "manual-start" },
+  });
+  br.unref();
+  closeSync(logFd);
+  process.stdout.write(`✓ Bridge started (pid ${br.pid}).\n`);
+  return 0;
 }
