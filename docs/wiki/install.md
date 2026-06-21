@@ -212,14 +212,16 @@ In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
 
 ## Providers
 
-| Provider | Setup |
-|----------|-------|
-| ollama | `ollama serve` locally, free. No API key needed. |
-| OpenRouter | API key in `~/.abtars/secret/OPENROUTER_API_KEY` |
-| OpenAI | API key in `~/.abtars/secret/OPENAI_API_KEY` |
-| Anthropic | API key in `~/.abtars/secret/ANTHROPIC_API_KEY` |
+| Provider | What you need |
+|----------|---------------|
+| ollama | Running locally (`ollama serve`). Free, no API key. |
+| OpenRouter | An API key from [openrouter.ai](https://openrouter.ai) |
+| OpenAI | An API key from [platform.openai.com](https://platform.openai.com) |
+| Anthropic | An API key from [console.anthropic.com](https://console.anthropic.com) |
 | Kiro CLI | `kiro-cli` installed and on PATH |
 | Gemini CLI | `gemini` installed and on PATH |
+
+The install wizard asks for your provider and API key — it handles the rest.
 
 Configure in `~/.abtars/config/transport.json`.
 
