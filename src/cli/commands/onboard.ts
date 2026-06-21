@@ -697,24 +697,10 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   // Seed default agent-api rules
   process.stdout.write(`\n💡 To edit providers, agents, hailMary, fallback chains — edit:\n   ${join(paths.config, 'transport.json')}\n   Docs: https://aksika.github.io/abtars/\n`);
 
-  // Skip the build+start automation in non-interactive mode (scripts expect to do it themselves)
-  if (opts.nonInteractive) {
-    process.stdout.write(`\nNext: 'abtars update' to build, then start the bridge.\n`);
-    return 0;
-  }
-
-  const { existsSync } = await import('node:fs');
-  const hasRelease = existsSync(join(paths.home, 'current'));
-  if (!hasRelease) {
-    process.stdout.write(`\nNext: run 'abtars update' to stage the release, then start the bridge.\n`);
-    return 0;
-  }
-
-  process.stdout.write(`\n✓ Onboarding complete.\n`);
-  process.stdout.write(`\nNext: start the bridge\n`);
-  process.stdout.write(`  Daemon mode:  sudo $(which abtars) daemon install\n`);
-  process.stdout.write(`  Manual mode:  abtars start\n`);
-  return 0;
+  // Run update (clone source, build, deploy, start bridge)
+  process.stdout.write(`\nRunning abtars update...\n`);
+  const { update } = await import("./update.js");
+  return await update({ source: "local", skipFreshness: true });
 }
 
 // ── Default task seeding (#383) ─────────────────────────────────────────────
