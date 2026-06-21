@@ -33,7 +33,6 @@ export const SYSTEM_DEPS: Record<string, SystemDep> = {
   bwrap:      { bin: "bwrap",      label: "Seatbelt sandbox (Linux)", installHint: "apt install bubblewrap", platform: "linux" },
   lightpanda: { bin: "lightpanda", label: "Web-fetch level 3",        installHint: "see https://lightpanda.io" },
   ollama:     { bin: "ollama",     label: "Local embeddings",         installHint: "curl -fsSL https://ollama.ai/install.sh | sh" },
-  docker:     { bin: "docker",     label: "Docker sandbox",           installHint: "https://docs.docker.com/get-docker/" },
 };
 
 function libDir(): string {
