@@ -54,6 +54,14 @@ export async function deploy(opts: DeployOptions): Promise<number> {
         }
       }
     }
+
+    // Ensure abmind is built (needs deps for tsc)
+    if (existsSync(join(abmindSrcDir, "package.json")) && !existsSync(join(abmindSrcDir, "dist", "cli", "abmind.js"))) {
+      try {
+        execSync("pnpm install --ignore-scripts 2>/dev/null || npm install --ignore-scripts 2>/dev/null", { cwd: abmindSrcDir, stdio: "pipe", timeout: 120_000 });
+        execSync("npm run build", { cwd: abmindSrcDir, stdio: "pipe", timeout: 60_000 });
+      } catch {}
+    }
   }
 
   if (!existsSync(join(repoRoot, "package.json"))) {

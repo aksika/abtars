@@ -116,7 +116,7 @@ export async function getSystemStatus(ctx: StatusContext): Promise<SystemStatus>
   try {
     const { readdirSync } = await import("node:fs");
     const bd = join(homedir(), ".backup-abtars");
-    const bk = readdirSync(bd).filter((f: string) => f.startsWith("abtars-")).sort();
+    const bk = readdirSync(bd).filter((f: string) => f.startsWith("abtars-") && f.endsWith(".zip")).sort();
     if (bk.length > 0) lastBackup = bk[bk.length - 1] ?? null;
   } catch (err) { logAndSwallow("system_status", "op", err); }
 
