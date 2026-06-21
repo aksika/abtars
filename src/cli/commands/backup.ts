@@ -125,10 +125,11 @@ function runAbmindBackup(abmindHome: string): string | null {
   const backupsDir = join(abmindHome, "backups");
   mkdirSync(backupsDir, { recursive: true });
 
-  const result = spawnSync("abmind", ["backup", "--database"], { encoding: "utf-8", env: { ...process.env } });
+  const result = spawnSync("abmind", ["backup"], { encoding: "utf-8", env: { ...process.env } });
   if (result.status !== 0) return null;
 
-  const files = readdirSync(backupsDir).filter(f => f.endsWith(".abm")).sort().reverse();
+  // Full backup produces .zip; fallback to .abm for backward compat
+  const files = readdirSync(backupsDir).filter(f => f.endsWith(".zip") || f.endsWith(".7z") || f.endsWith(".abm")).sort().reverse();
   return files[0] ? join(backupsDir, files[0]) : null;
 }
 
