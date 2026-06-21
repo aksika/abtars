@@ -225,6 +225,71 @@ The install wizard asks for your provider and API key — it handles the rest.
 
 Configure in `~/.abtars/config/transport.json`.
 
+## Managing API keys
+
+abTARS stores all secrets in `~/.abtars/secret/` — one file per key, encrypted at rest (AES-256-GCM). You never edit config files for keys.
+
+### Adding a key after install
+
+```bash
+# Write the key (no trailing newline!)
+echo -n "sk-or-v1-abc123..." > ~/.abtars/secret/OPENROUTER_API_KEY
+
+# Restart to pick it up (encrypted automatically on boot)
+abtars stop --force && abtars start
+```
+
+The filename becomes the environment variable name. That's the only rule.
+
+### Provider keys
+
+| Provider | Secret filename | Where to get it |
+|----------|----------------|-----------------|
+| OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| OpenAI | `OPENAI_API_KEY` | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| Anthropic | `ANTHROPIC_API_KEY` | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) |
+
+### Service/skill keys (optional integrations)
+
+| Service | Secret filename | Settings (in `.env.skills`) |
+|---------|----------------|----------------------------|
+| Home Assistant | `HA_TOKEN` | `HA_URL=http://192.168.1.4:8123` |
+| Groq (voice STT) | `GROQ_API_KEY` | `STT_MODEL=whisper-large-v3` |
+| Google AI (images) | `GOOGLE_AI_API_KEY` | `GOOGLE_AI_MODEL=gemini-2.0-flash-preview-image-generation` |
+| Discord | `DISCORD_BOT_TOKEN` | `DISCORD_APP_ID=your-app-id` |
+
+Example — adding Home Assistant:
+
+```bash
+# 1. Drop the long-lived access token
+echo -n "eyJ0eXAi..." > ~/.abtars/secret/HA_TOKEN
+
+# 2. Add non-secret settings
+echo "HA_URL=http://192.168.1.4:8123" >> ~/.abtars/config/.env.skills
+
+# 3. Restart
+abtars stop --force && abtars start
+```
+
+Your agent can now control Home Assistant. See [Adding a Service](./add-service.md) for the full guide (including writing skills).
+
+### Removing a key
+
+```bash
+rm ~/.abtars/secret/OPENAI_API_KEY
+abtars stop --force && abtars start
+```
+
+### How it stays safe
+
+- Files are AES-256-GCM encrypted at rest after the first boot
+- Keys only exist as plaintext in memory while the bridge runs
+- All secret files are `chmod 600` (owner-read only)
+- `abtars doctor` checks vault integrity on every run
+- Logs never contain secret values
+
+See [Secrets Vault](./secrets.md) for the full technical details.
+
 ## Post-install verification
 
 ```bash
