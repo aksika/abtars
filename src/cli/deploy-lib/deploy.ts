@@ -344,6 +344,7 @@ async function copyAbmind(stagingDir: string, repoRoot: string): Promise<void> {
   // Copy dist into staging
   const dest = join(stagingDir, "node_modules", "abmind");
   cpSync(abmindSrc, dest, { recursive: true, filter: (src) => !src.includes("node_modules") && !src.includes(".git") });
+  try { const { chmodSync } = await import("node:fs"); chmodSync(join(dest, "dist/cli/abmind.js"), 0o755); } catch {}
   process.stdout.write(`✓ abmind copied\n`);
   // Refresh global abmind CLI
   try {
