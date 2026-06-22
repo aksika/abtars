@@ -11,9 +11,23 @@ STATE="$AB/deploy.state"
 # Singleton: flock (Linux) / lockf (macOS)
 exec 200>>"$AB/.bridge.flock"
 if command -v flock &>/dev/null; then
-  flock -n 200 || exit 0
+  if ! flock -w 5 200; then
+    WD_PID=$(python3 -c "import json; print(json.load(open('$LOCK')).get('watchdogPid',''))" 2>/dev/null)
+    if [[ -n "$WD_PID" ]] && ! kill -0 "$WD_PID" 2>/dev/null; then
+      rm -f "$AB/.bridge.flock"
+      exec "$0" "$@"
+    fi
+    exit 0
+  fi
 else
-  lockf -s -t 0 200 || exit 0
+  if ! lockf -s -t 5 200; then
+    WD_PID=$(python3 -c "import json; print(json.load(open('$LOCK')).get('watchdogPid',''))" 2>/dev/null)
+    if [[ -n "$WD_PID" ]] && ! kill -0 "$WD_PID" 2>/dev/null; then
+      rm -f "$AB/.bridge.flock"
+      exec "$0" "$@"
+    fi
+    exit 0
+  fi
 fi
 
 # Write our PID into bridge.lock
