@@ -6,8 +6,6 @@
     "schedule": "0 9 * * *",
     "type": "task",
     "executor": "agent",
-    "agent": "professor",
-    "targetUserId": "adrika",
     "maxRunsPerDay": 1
   },
   {
