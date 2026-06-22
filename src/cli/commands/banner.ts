@@ -1,5 +1,6 @@
 /**
  * CLI banner — prints command name + version on every invocation.
+ * Shared utility: mirrored in abmind/cli/banner.ts — keep in sync.
  */
 
 import { packagePaths, readManifest } from '../deploy-lib-import.js';
