@@ -49,3 +49,23 @@ When the user asks to run a scheduled task (e.g. "run the finance report", "trig
 - Specific time: `--at` + `--type reminder` or `--type task`
 - Recurring: `--schedule` + appropriate executor
 - No specific time ("remind me later"): use `abtars-todo` instead
+
+## Task files convention
+
+Complex tasks (scripts, data feeds, prompts) get a **directory** at `~/.abtars/tasks/<task-id>/`:
+
+```
+tasks/<task-id>/
+├── TASK.md              # instructions/prompt (agent reads this)
+├── run.sh               # entry script (if executor=script)
+├── feeds.json           # data files
+└── ...                  # any supporting files
+```
+
+When creating a task that needs supporting files:
+1. `mkdir -p ~/.abtars/tasks/<task-id>/`
+2. Write `TASK.md` with the full prompt/instructions
+3. Write any scripts/data files alongside it
+4. Register in tasks.json with `abtars-task add --message "Run the <task>"` — the message tells the agent what to do; TASK.md provides the detailed instructions
+
+Never put task files loose at the `tasks/` root. One directory per task.
