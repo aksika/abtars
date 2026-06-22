@@ -1,15 +1,11 @@
 /**
- * abtars CLI top-level dispatcher (#158 Phase 1b).
+ * abtars CLI top-level dispatcher.
  *
  * Subcommands:
  *   install [--upgrade] [--force]
  *   update [--source local|npm|github] [--local DIR]
  *   rollback [--to <version>]
  *   status
- *
- * Phase 2 will add: reset, doctor, onboard, migrate.
- * Phase 1 install intentionally does NOT run onboard — operator seeds
- * config/ from examples only; interactive onboard is Phase 3.
  */
 
 process.umask(0o077); // #441: all runtime files 600, dirs 700

@@ -1,10 +1,8 @@
 /**
- * `abtars install [--force]` — first-time setup.
+ * `abtars install [--force]` — scaffolding utilities.
  *
- *   - No existing ~/.abtars: create dirs, seed config/ from .env.example,
- *     create PATH symlinks. Does NOT run onboard (Phase 3).
- *   - Existing ~/.abtars: refuse unless --force (which
- *     re-seeds missing config and reconciles symlinks, no code changes).
+ *   Exports writeWrapper (used by deploy.ts) and install() for legacy paths.
+ *   The primary install flow is in onboard.ts (called by CLI dispatcher).
  */
 
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
@@ -433,9 +431,8 @@ export async function install(opts: InstallOptions): Promise<number> {
     process.stdout.write(`Next: 'abtars update' to build and activate the first release.\n`);
   } else {
     process.stdout.write(`\n── Next steps ──\n`);
-    process.stdout.write(`  1. Run 'abtars onboard' to configure Telegram token + model provider\n`);
-    process.stdout.write(`  2. (Optional) Install Ollama for memory embeddings: curl -fsSL https://ollama.com/install.sh | sh\n`);
-    process.stdout.write(`  3. Start the bridge: 'abtars restart' or use the watchdog\n\n`);
+    process.stdout.write(`  1. (Optional) Install Ollama for memory embeddings: curl -fsSL https://ollama.com/install.sh | sh\n`);
+    process.stdout.write(`  2. Start the bridge: 'abtars restart' or use the watchdog\n\n`);
   }
 
   const { printHealthSummary } = await import('./health-check.js');

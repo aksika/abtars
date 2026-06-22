@@ -429,7 +429,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
 }
 
 export async function onboard(opts: OnboardOptions): Promise<number> {
-  await printBanner("onboard");
+  await printBanner("install");
   const paths = packagePaths('abtars');
 
   // Install log (#718)
@@ -692,10 +692,12 @@ async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<voi
   const { fileURLToPath } = await import('node:url');
   const here = dirname(fileURLToPath(import.meta.url));
   // onboard.ts is at src/cli/commands/onboard.ts or dist/cli/commands/onboard.js
-  // tasks.default.json lives at config/tasks/ — three levels up from here.
+  // tasks.default.json lives at config/tasks/ in the source tree.
   const candidates = [
     join(here, '..', '..', '..', 'config', 'tasks', 'tasks.default.json'),
     join(here, '..', '..', 'config', 'tasks', 'tasks.default.json'),
+    join(abtarsHome, '..', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.default.json'),
+    join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.default.json'),
   ];
   let templatePath: string | null = null;
   for (const p of candidates) {
