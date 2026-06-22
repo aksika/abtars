@@ -17,8 +17,9 @@ import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
 const DEFAULT_PRUNE_DAYS = 7;
 
 const ABTARS_EXCLUDE = [
-  "src", "logs", "overflow", "browser-socket", "app", "app/*", "bin", "bin/*", "bridge.lock", "*.sock",
-  "*.db-wal", "*.db-shm",
+  "src", "logs", "overflow", "browser-socket", "app", "bin", "bridge.lock",
+  "deploy.state", ".bridge.flock", "state/task-queue-state.json",
+  "*.sock", "*.db-wal", "*.db-shm",
 ];
 
 const CONFIG_DIRS = ["config", "secret", "tasks", "skills", "kanban", "metrics", "auth"];
