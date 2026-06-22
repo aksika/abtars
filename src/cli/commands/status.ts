@@ -21,7 +21,11 @@ export async function status(): Promise<number> {
   }
 
   const appExists = existsSync(paths.app);
-  const appPrevExists = existsSync(paths.appPrev);
+  let rollbackCount = 0;
+  try {
+    const history: string[] = JSON.parse(readFileSync(paths.releasesHistory, "utf-8"));
+    rollbackCount = Math.min(history.length - 1, 3); // skip current
+  } catch {}
 
   const lines = [
     `abtars status`,
@@ -33,7 +37,7 @@ export async function status(): Promise<number> {
     `  mode:          ${manifest.installMode ?? 'daemon'}`,
     `  activated:     ${manifest.activatedAt}`,
     `  app/:          ${appExists ? '✓ present' : '✗ missing'}`,
-    `  app.prev/:     ${appPrevExists ? '✓ present' : '○ none'}`,
+    `  rollback:      ${rollbackCount > 0 ? `${rollbackCount} available` : '○ none'}`,
     `  previous:      ${manifest.previousVersion ?? '(none)'}`,
     `  host:          ${manifest.host}`,
   ];
