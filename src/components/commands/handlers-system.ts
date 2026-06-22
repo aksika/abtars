@@ -583,13 +583,24 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   // Rollback slots
   lines.push("");
   lines.push("  Rollback:");
-  for (let i = 1; i <= 3; i++) {
-    const pkgPath = join(home, `app.prev.${i}`, "package.json");
-    try {
-      const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
-      lines.push(`    ${i}: ${ver}`);
-    } catch {
-      lines.push(`    ${i}: (empty)`);
+  try {
+    const { resolve } = await import("node:path");
+    const { homedir } = await import("node:os");
+    const historyPath = resolve(homedir(), ".abtars-releases", "history.json");
+    const history: string[] = JSON.parse(readFileSync(historyPath, "utf-8"));
+    const prev = history.slice(1, 4); // skip current (index 0)
+    for (let i = 0; i < 3; i++) {
+      lines.push(`    ${i + 1}: ${prev[i] ?? "(empty)"}`);
+    }
+  } catch {
+    for (let i = 1; i <= 3; i++) {
+      const pkgPath = join(home, `app.prev.${i}`, "package.json");
+      try {
+        const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
+        lines.push(`    ${i}: ${ver}`);
+      } catch {
+        lines.push(`    ${i}: (empty)`);
+      }
     }
   }
 
