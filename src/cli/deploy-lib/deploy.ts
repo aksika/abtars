@@ -5,7 +5,7 @@
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, mkdirSync, copyFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { execSync, spawn } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 import { acquireLock, atomicSwap, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
@@ -262,7 +262,28 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
   for (const name of installManifest.cliWrappers) {
     await writeWrapper(paths.bin, name, paths.app, false);
   }
+
+  // abmind CLI wrappers — point at the bundled copy inside the release
+  const abmindDist = join(paths.app, "node_modules", "abmind", "dist", "cli");
+  if (existsSync(abmindDist)) {
+    for (const name of ["abmind", "abmind-embed"]) {
+      const cliFile = name === "abmind" ? "abmind.js" : `${name}.js`;
+      const target = join(abmindDist, cliFile);
+      const content = `#!/usr/bin/env bash\nexec node "${target}" "$@"\n`;
+      await writeFile(join(paths.bin, name), content, { mode: 0o755 });
+    }
+  }
+
   process.stdout.write(`✓ wrappers refreshed (${installManifest.cliWrappers.length} files)\n`);
+
+  // One-time cleanup: remove stale binary dirs from data directories (#1134)
+  const abmindHome = join(process.env["HOME"] ?? "", ".abmind");
+  for (const stale of [join(abmindHome, "bin"), join(abmindHome, "current"), join(paths.home, "bin")]) {
+    if (existsSync(stale)) {
+      rmSync(stale, { recursive: true, force: true });
+      process.stdout.write(`✓ removed stale ${stale}\n`);
+    }
+  }
 
   // Reload plist/systemd if changed (scripts run from repoRoot directly)
   const repoScripts = join(repoRoot, "scripts");
