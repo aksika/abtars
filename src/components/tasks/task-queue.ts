@@ -472,15 +472,18 @@ export class CronQueue {
           logInfo(TAG, `■ Agent completed: "${entry.message.slice(0, 60)}"`);
         }
 
-        // Write result file
         // Write result file — skip if DoD files exist (they ARE the result)
+        // #1118: inline tasks skip file writing — deliver text directly via kanban
         const producedFiles = dodPaths.filter(p => existsSync(p));
-        const resultPath = producedFiles.length > 0 ? producedFiles[0] : writeResultFile(entry.id, cleaned);
+        const isReport = entry.deliveryMethod === "report";
+        const resultPath = producedFiles.length > 0 ? producedFiles[0] : (isReport ? writeResultFile(entry.id, cleaned) : null);
         if (resultPath) logInfo(TAG, `■ Result: ${resultPath}`);
 
         // Kanban board: mark complete or failed
         if (exitCode === 0) {
-          kanbanComplete(boardId, resultPath, summary);
+          // #1118: inline tasks store full response as summary (delivered as chat message)
+          const kanbanSummary = isReport ? summary : cleaned;
+          kanbanComplete(boardId, resultPath, kanbanSummary);
         } else {
           kanbanFail(boardId, `${summary}${dodResult}`);
         }

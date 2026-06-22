@@ -28,6 +28,7 @@ export interface CronEntry {
   taskFile?: string;
   targetUserId?: string; // #936: route task output to this user's session via spin.injectGreeting()
   agent?: string; // #935: session type — professor, browsie, coding, dreamy
+  deliveryMethod?: "inline" | "report"; // #1118: inline = chat message, report = file document
   paused?: boolean;
   maxRunsPerDay?: number;
   consecutiveFails?: number;

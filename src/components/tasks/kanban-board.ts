@@ -111,7 +111,7 @@ export function kanbanRunning(id: number): void {
 export function kanbanComplete(id: number, resultPath: string | null, summary: string): void {
   db().prepare(
     `UPDATE kanban_board SET status = 'done', result_path = ?, result_summary = ?, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
-  ).run(resultPath, summary.slice(0, 500), id);
+  ).run(resultPath, summary.slice(0, 4000), id);
   nerve.fire("card:done", id);
 }
 
