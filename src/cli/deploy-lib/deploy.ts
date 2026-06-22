@@ -367,9 +367,4 @@ async function copyAbmind(stagingDir: string, repoRoot: string): Promise<void> {
   cpSync(abmindSrc, dest, { recursive: true, filter: (src) => !src.includes("node_modules") && !src.includes(".git") });
   try { const { chmodSync } = await import("node:fs"); chmodSync(join(dest, "dist/cli/abmind.js"), 0o755); } catch {}
   process.stdout.write(`✓ abmind copied\n`);
-  // Refresh global abmind CLI
-  try {
-    execSync(`npm link --ignore-scripts`, { cwd: abmindSrc, stdio: "pipe", timeout: 30_000 });
-    process.stdout.write(`✓ abmind CLI linked (global binary refreshed)\n`);
-  } catch { process.stdout.write(`⚠ abmind CLI link failed (non-critical)\n`); }
 }
