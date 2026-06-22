@@ -163,10 +163,15 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "deploying", version: staged.version, startedAt: new Date().toISOString() }) + "\n");
     process.stdout.write(`✓ manifest updated\n`);
 
-    // ── Step 7: Kill bridge ───────────────────────────────────────────────
+    // ── Step 7: Kill old watchdog + bridge ──────────────────────────────
     if (!isFirstInstall) {
       writeFileSync(join(paths.home, ".start-reason"), `update:${staged.version}`);
       const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
+      const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
+      // Kill watchdog first (prevents respawn race)
+      if (wdPid && wdPid > 0) {
+        try { process.kill(wdPid, "SIGTERM"); } catch {}
+      }
       if (bridgePid && bridgePid > 0) {
         try { process.kill(bridgePid, "SIGTERM"); } catch {}
         process.stdout.write(`  x Killing bridge (PID ${bridgePid})...\n`);
@@ -175,11 +180,21 @@ export async function deploy(opts: DeployOptions): Promise<number> {
           try { process.kill(bridgePid, 0); } catch { break; }
         }
       }
-      // Clear .stopped so WD can start
+      // Wait for watchdog to die
+      if (wdPid && wdPid > 0) {
+        for (let i = 0; i < 6; i++) {
+          try { process.kill(wdPid, 0); } catch { break; }
+          await new Promise(r => setTimeout(r, 500));
+        }
+      }
+      // Clear .stopped and .start-reason so new WD can start clean
       try { rmSync(join(paths.home, ".stopped")); } catch {}
     }
 
     // ── Step 8: Respawn ───────────────────────────────────────────────────
+    // Clear stale .start-reason so the new watchdog doesn't read the "update:X" signal and exit immediately
+    try { rmSync(join(paths.home, ".start-reason")); } catch {}
+
     const manifest = await readManifest(paths.manifest);
     const mode = manifest?.installMode ?? "daemon";
 
@@ -187,8 +202,10 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       if (process.platform === "darwin") {
         const plistPath = join(process.env["HOME"] ?? "", "Library/LaunchAgents/com.abtars.watchdog.plist");
         const uid = `gui/${process.getuid?.() ?? 501}`;
+        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
         try { execSync(`launchctl bootstrap ${uid} "${plistPath}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
       } else {
+        try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch {}
         try { execSync("systemctl --user unmask abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
         try { execSync("systemctl --user enable abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
         try { execSync("systemctl --user start abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
