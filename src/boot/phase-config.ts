@@ -2,7 +2,7 @@
  * phase-config — boot phase 1: parse CLI flags, load config, set log level.
  *
  * Side effects:
- * - Prepends ~/.abtars/bin to PATH
+ * - Prepends ~/.local/bin to PATH
  * - Truncates ~/.abtars/logs/launchd.log
  * - Sets log level (module-level singleton: logger.currentLevel)
  * - Emits BRIDGE START + startup log lines
@@ -27,7 +27,7 @@ import type { TtsConfig } from "../components/tts.js";
 
 export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   // Intentional: raw process.env — mutates PATH for child processes (kiro-cli, gemini-cli)
-  const binDir = join(abtarsHome(), "bin");
+  const binDir = join(homedir(), ".local", "bin");
   if (!process.env["PATH"]?.includes(binDir)) {
     process.env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`;
   }

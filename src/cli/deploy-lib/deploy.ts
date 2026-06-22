@@ -261,9 +261,6 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
   }
   process.stdout.write(`✓ wrappers refreshed (${installManifest.cliWrappers.length} files)\n`);
 
-  // Nuke stale npm-global binary
-  try { execSync("npm uninstall -g abtars 2>/dev/null", { stdio: "ignore", timeout: 10_000 }); } catch {}
-
   // Reload plist/systemd if changed (scripts run from repoRoot directly)
   const repoScripts = join(repoRoot, "scripts");
   if (process.platform === "darwin") {

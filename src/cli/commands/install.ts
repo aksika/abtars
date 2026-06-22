@@ -326,25 +326,10 @@ export async function install(opts: InstallOptions): Promise<number> {
   }
   process.stdout.write(`✓ wrappers in ${paths.bin}\n`);
 
-  // Reconcile PATH symlinks
-  if (!opts.dryRun) await mkdir(userBinDir, { recursive: true });
-  const refused: string[] = [];
-  for (const name of installManifest.cliWrappers) {
-    const r = await reconcilePathLink(paths.bin, userBinDir, name, opts.force, opts.dryRun);
-    if (r.action === 'refused') {
-      refused.push(r.message ?? name);
-    }
-  }
-  if (refused.length > 0) {
-    process.stderr.write(`\nPATH symlink conflicts:\n  ${refused.join('\n  ')}\n`);
-  } else {
-    process.stdout.write(`✓ PATH symlinks in ${userBinDir}\n`);
-  }
-
   // Warn if ~/.local/bin not on PATH
-  if (!isPathOnPATH(userBinDir)) {
+  if (!isPathOnPATH(paths.bin)) {
     process.stderr.write(
-      `\nWarning: ${userBinDir} is not on $PATH. Add to your shell config:\n  export PATH="${userBinDir}:$PATH"\n`,
+      `\nWarning: ${paths.bin} is not on $PATH. Add to your shell config:\n  export PATH="${paths.bin}:$PATH"\n`,
     );
   }
 

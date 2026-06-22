@@ -66,7 +66,7 @@ export function packagePaths(pkg: PackageName): PackagePaths {
     appPrev2: join(home, 'app.prev.2'),
     appPrev3: join(home, 'app.prev.3'),
     appStaging: join(home, 'app.staging'),
-    bin: join(home, 'bin'),
+    bin: resolveUserBinDir(),
     manifest: join(home, 'manifest.json'),
     lock: join(home, '.update.lock'),
     // #1089

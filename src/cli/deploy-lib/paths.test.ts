@@ -41,7 +41,7 @@ describe('deploy-lib/paths', () => {
     expect(p.app).toBe('/x/ab/app');
     expect(p.appPrev).toBe('/x/ab/app.prev');
     expect(p.appStaging).toBe('/x/ab/app.staging');
-    expect(p.bin).toBe('/x/ab/bin');
+    expect(p.bin).toBe(join(homedir(), '.local', 'bin'));
     expect(p.manifest).toBe('/x/ab/manifest.json');
     expect(p.lock).toBe('/x/ab/.update.lock');
   });
