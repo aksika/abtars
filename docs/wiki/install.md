@@ -90,6 +90,10 @@ abtars deps install all
 # 1. Install CLI tools
 pnpm install -g abtars@alpha abmind@alpha
 
+# Ensure abtars is on PATH (pnpm global bin location varies by platform):
+export PATH="$(pnpm bin -g):$HOME/.local/bin:$PATH"
+# Add the line above to ~/.bashrc or ~/.zshrc for persistence.
+
 # 2. Optional deps (recommended before first start)
 abtars deps install all
 
@@ -188,12 +192,17 @@ In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
 ## What gets created
 
 ```
+~/.local/bin/
+├── abtars               # CLI wrapper (overwritten on every deploy)
+├── abtars-browser       # browser subprocess wrapper
+├── abtars-task          # task subprocess wrapper
+└── ...                  # other tool wrappers
+
 ~/.abtars/
 ├── config/              # .env, transport.json, users.json, peers.json
 ├── secret/              # API keys (encrypted at rest after first boot)
 ├── skills/              # core/ + custom/
 ├── logs/                # bridge-YYYY-MM-DD.log, watchdog.log
-├── bin/                 # CLI wrapper (abtars)
 ├── app -> releases/current  # symlink to active release
 └── lib/                 # optional deps (abtars deps install)
 
