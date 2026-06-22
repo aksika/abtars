@@ -448,6 +448,36 @@ if $WD_ALIVE && [ -n "$WD_PID" ]; then
   fi
 fi
 
+# 16a. Stale .start-reason check
+START_REASON_FILE="$AB/.start-reason"
+if [ -f "$START_REASON_FILE" ]; then
+  SR_CONTENT=$(cat "$START_REASON_FILE" 2>/dev/null)
+  if [[ "$SR_CONTENT" == update:* ]]; then
+    SR_AGE=$(( $(date +%s) - $(stat -c %Y "$START_REASON_FILE" 2>/dev/null || stat -f %m "$START_REASON_FILE" 2>/dev/null || echo 0) ))
+    if [ "$SR_AGE" -gt 300 ]; then
+      warn "stale .start-reason ('$SR_CONTENT', ${SR_AGE}s old) — watchdog may refuse to start"
+      if $FIX; then rm -f "$START_REASON_FILE" && fix "removed stale .start-reason"; fi
+    fi
+  fi
+fi
+
+# 16b. CLI reachable at ~/.local/bin/abtars
+LOCAL_BIN="$HOME/.local/bin/abtars"
+if [ ! -x "$LOCAL_BIN" ]; then
+  warn "CLI not reachable at $LOCAL_BIN (run 'abtars update' to refresh wrappers)"
+fi
+
+# 16c. Rollback history available
+HISTORY_FILE="$HOME/.abtars-releases/history.json"
+if [ -f "$HISTORY_FILE" ]; then
+  HISTORY_LEN=$(python3 -c "import json; print(len(json.load(open('$HISTORY_FILE'))))" 2>/dev/null || echo 0)
+  if [ "$HISTORY_LEN" -le 1 ]; then
+    warn "no rollback available (history.json has $HISTORY_LEN entries)"
+  fi
+elif [ -d "$HOME/.abtars-releases" ]; then
+  warn "history.json missing — no rollback tracking"
+fi
+
 # 13. Delegate DB health to abmind doctor
 if [ -d "$ABMIND" ] && command -v abmind &>/dev/null; then
   echo "[doctor] Delegating DB health to abmind doctor..."
