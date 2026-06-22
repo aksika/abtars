@@ -1,5 +1,5 @@
 ---
-name: cron
+name: task
 description: Schedule time-based reminders and tasks
 user-invocable: false
 ---
