@@ -64,7 +64,7 @@ Usage:
   abtars backup [--config] [--encrypt] [--output <dir>] [--prune-days N]
   abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]
   abtars doctor [<args passed to doctor.sh>...]
-  abtars onboard [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
+  abtars install [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   abtars restart [--cold]
   abtars start
   abtars stop
@@ -97,7 +97,6 @@ export async function main(argv: readonly string[]): Promise<number> {
   try {
     switch (command) {
       case 'install':
-      case 'onboard':
         return await onboard({
           nonInteractive: flags.get('non-interactive') === true,
           acceptRisk: flags.get('accept-risk') === true,

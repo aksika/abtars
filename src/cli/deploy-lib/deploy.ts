@@ -136,10 +136,13 @@ export async function deploy(opts: DeployOptions): Promise<number> {
 
     process.stdout.write(`✓ deployed to releases/${staged.commit || staged.version}\n`);
 
-    // ── Step 4: Require prior install ──────────────────────────────────────
+    // ── Step 4: Bootstrap manifest if missing ─────────────────────────────
     if (isFirstInstall) {
-      process.stderr.write("No manifest.json found. Run 'abtars install' first.\n");
-      return 1;
+      await writeManifest(paths.manifest, {
+        ...emptyManifest("abtars", hostname()),
+        installMode: "daemon",
+        source: opts.source,
+      } as any);
     }
 
     // ── Step 5: Refresh ───────────────────────────────────────────────────
