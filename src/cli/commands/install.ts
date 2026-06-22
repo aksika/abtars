@@ -213,6 +213,7 @@ fi
     process.stdout.write(`[dry-run] write wrapper ${path}\n`);
     return;
   }
+  try { const { unlinkSync } = await import("node:fs"); unlinkSync(path); } catch { /* doesn't exist */ }
   await writeFile(path, content, { mode: 0o755 });
 }
 
