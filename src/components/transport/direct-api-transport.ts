@@ -288,6 +288,7 @@ export class DirectApiTransport implements IKiroTransport {
   private async agentLoop(session: ConversationSession, signal: AbortSignal): Promise<string> {
     let zeroTokenRetries = 0;
     const loopStart = Date.now();
+    const callSigs: string[] = []; // #1133: track across turns for loop detection
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
       if (signal.aborted) return "[SYSTEM] Interrupted by user.";
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
@@ -327,6 +328,7 @@ export class DirectApiTransport implements IKiroTransport {
           this.onSegmentBreak?.(content.trim());
         }
 
+        // #1133: Track tool call signatures for loop detection
         for (let ti = 0; ti < toolCalls.length; ti++) {
           const tc = toolCalls[ti]!;
           if (signal.aborted) {
@@ -346,7 +348,23 @@ export class DirectApiTransport implements IKiroTransport {
           this.onToolCallStart?.(tc.function.name ?? "tool");
 
           let args: Record<string, string>;
-          try { args = JSON.parse(tc.function.arguments); } catch (err) { logAndSwallow(TAG, "JSON.parse tool args", err); args = {}; }
+          try { args = JSON.parse(tc.function.arguments); } catch {
+            // #1133: Reject malformed args — never execute with broken arguments
+            const errMsg = `Tool call rejected: malformed arguments (JSON parse error). Reformat and retry.`;
+            logWarn(TAG, `Malformed tool args for ${tc.function.name}: ${tc.function.arguments.slice(0, 80)}`);
+            session.addToolResult(tc.id, tc.function.name, JSON.stringify({ error: errMsg }));
+            continue;
+          }
+
+          // #1133: Loop detection — abort if same call (name+args hash) repeats 3x across turns
+          const { createHash } = await import("node:crypto");
+          const sig = `${tc.function.name}:${createHash("sha256").update(tc.function.arguments).digest("hex").slice(0, 8)}`;
+          callSigs.push(sig);
+          if (callSigs.filter(s => s === sig).length >= 3) {
+            logWarn(TAG, `Tool loop detected: ${tc.function.name} repeated 3x — aborting`);
+            session.addToolResult(tc.id, tc.function.name, JSON.stringify({ error: "[SYSTEM] Repeated identical tool call detected (3x). Stop retrying and provide a final text response to the user." }));
+            break;
+          }
 
           const result = await executeToolCall(tc.function.name, args, { userId: this._activeUserId, signal, sandboxPolicy: this.sandboxPolicy });
           session.addToolResult(tc.id, tc.function.name, result);
