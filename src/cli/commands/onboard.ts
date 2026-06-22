@@ -445,7 +445,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   let manifest = await readManifest(paths.manifest);
   if (!manifest) {
     // First install — create skeleton + manifest
-    const { mkdirSync } = await import("node:fs");
+    const { mkdirSync, existsSync: fileExists, symlinkSync } = await import("node:fs");
     const { chmod } = await import("node:fs/promises");
     for (const d of ["logs", "config", "secret", "skills/core", "skills/self", "skills/custom", "skills/downloaded", "kanban", "state"]) {
       mkdirSync(join(paths.home, d), { recursive: true });
@@ -454,17 +454,15 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     await chmod(join(paths.home, "config"), 0o700);
     // Ensure ~/.local/bin/ exists and has our binary (symlink from pnpm bin if needed)
     const { homedir } = await import("node:os");
-    const { symlinkSync, lstatSync } = await import("node:fs");
     const localBin = join(homedir(), ".local", "bin");
     mkdirSync(localBin, { recursive: true });
     const localAbtars = join(localBin, "abtars");
-    if (!existsSync(localAbtars)) {
-      // Find where pnpm put the binary and symlink it
+    if (!fileExists(localAbtars)) {
       try {
         const { execSync: ex } = await import("node:child_process");
         const pnpmBin = ex("pnpm bin -g", { encoding: "utf-8", timeout: 5000 }).trim();
         const pnpmAbtars = join(pnpmBin, "abtars");
-        if (existsSync(pnpmAbtars)) {
+        if (fileExists(pnpmAbtars)) {
           symlinkSync(pnpmAbtars, localAbtars);
         }
       } catch { /* pnpm not available — user installed via npm, binary already in PATH */ }
