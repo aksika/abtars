@@ -435,37 +435,23 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     if (!isMaster) { await ctx.reply("❌ Requires master role."); return true; }
     const targetVersion = arg.replace(/^rollback\s*/, "").trim();
     if (!targetVersion) {
-      await ctx.reply("Usage: /software rollback <version or slot 1-3>\nUse /software to see available versions.");
+      await ctx.reply("Usage: /software rollback <slot 1-3>\nUse /software to see available versions.");
       return true;
     }
 
-    // Accept slot number directly (1, 2, 3)
     const asSlot = parseInt(targetVersion);
-    let targetSlot: number | null = null;
-    if (asSlot >= 1 && asSlot <= 3 && String(asSlot) === targetVersion) {
-      const pkgPath = join(home, `app.prev.${asSlot}`, "package.json");
-      try { readFileSync(pkgPath, "utf-8"); targetSlot = asSlot; } catch {}
-    } else {
-      for (let i = 1; i <= 3; i++) {
-        const pkgPath = join(home, `app.prev.${i}`, "package.json");
-        try {
-          const ver = JSON.parse(readFileSync(pkgPath, "utf-8")).version;
-          if (ver === targetVersion) { targetSlot = i; break; }
-        } catch { /* slot empty */ }
-      }
-    }
-
-    if (!targetSlot) {
-      await ctx.reply(`❌ Version ${targetVersion} not found in rollback slots.`);
+    if (!(asSlot >= 1 && asSlot <= 3) || String(asSlot) !== targetVersion) {
+      await ctx.reply(`❌ Invalid slot: ${targetVersion}. Use 1, 2, or 3.`);
       return true;
     }
 
-    let slotVersion = "unknown";
-    try { slotVersion = JSON.parse(readFileSync(join(home, `app.prev.${targetSlot}`, "package.json"), "utf-8")).version; } catch {}
-    await ctx.reply(`⚠️ Rolling back to slot ${targetSlot} (${slotVersion})...`);
+    await ctx.reply(`⚠️ Rolling back to slot ${asSlot}...`);
     try {
       const { rollback } = await import("../../cli/commands/rollback.js");
-      await rollback({ to: targetSlot });
+      const code = await rollback({ to: asSlot });
+      if (code !== 0) {
+        await ctx.reply(`❌ Rollback failed (exit ${code}).`);
+      }
     } catch (err) {
       await ctx.reply(`❌ Rollback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
