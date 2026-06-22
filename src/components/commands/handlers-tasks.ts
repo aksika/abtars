@@ -68,14 +68,27 @@ export async function handleTasksList(_text: string, ctx: CommandContext): Promi
 }
 
 export async function handleTasksTrigger(text: string, ctx: CommandContext): Promise<boolean> {
-  const id = text.replace(/^\/(tasks?|cron) run /, "").trim();
-  if (!id) { await ctx.reply("Usage: /task run <cron-id>"); return true; }
+  const raw = text.replace(/^\/(tasks?|cron) run /, "").trim();
+  if (!raw) { await ctx.reply("Usage: /task run <cron-id>"); return true; }
+
+  // Resolve ID: try exact, then normalized (spaces→hyphens, lowercase), then title match
+  let id = raw;
+  const { readEntry, readEntries } = await import("../tasks/task-store.js");
+  if (!readEntry(id)) {
+    const normalized = raw.toLowerCase().replace(/\s+/g, "-");
+    if (readEntry(normalized)) {
+      id = normalized;
+    } else {
+      const byTitle = readEntries().find(e => e.title?.toLowerCase() === raw.toLowerCase());
+      if (byTitle) id = byTitle.id;
+    }
+  }
+
   const err = ctx.enqueueCron?.(id, true);
   if (err) { await ctx.reply(err); return true; }
   // Resolve display name
   let name = id;
   try {
-    const { readEntry } = await import("../tasks/task-store.js");
     const entry = readEntry(id);
     if (entry) name = entry.title || entry.message.split("\n")[0].slice(0, 30);
   } catch { /* fallback to id */ }
