@@ -483,17 +483,23 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
 
       // Fetch + show incoming commits
       let msg = "Pulling...\n";
+      let hasNew = false;
       for (const [name, dir] of [["abtars", abtarsDir], ["abmind", abmindDir]] as const) {
         if (!existsSync(join(dir, ".git"))) { msg += `${name}: no repo\n`; continue; }
         spawnSync("git", ["-C", dir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
         const log = spawnSync("git", ["-C", dir, "log", "--oneline", "HEAD..origin/dev"], { encoding: "utf-8" });
         const commits = (log.stdout || "").trim();
         if (commits) {
+          hasNew = true;
           const lines = commits.split("\n");
           msg += `${name}: ${lines.length} commit${lines.length > 1 ? "s" : ""}\n${commits.slice(0, 300)}\n`;
         } else {
           msg += `${name}: already up to date\n`;
         }
+      }
+      if (!hasNew) {
+        await ctx.reply(msg.trim() + "\n\nNothing new. Skipping deploy.");
+        return true;
       }
       await ctx.reply(msg + "\nDeploying...");
       logInfo("update", "git update requested");
