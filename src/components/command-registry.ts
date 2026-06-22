@@ -21,7 +21,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "hooks", description: "List configured hooks" },
   { name: "stop", description: "Stop current response" },
   { name: "wait", description: "Inject message mid-run (non-interrupting)" },
-  { name: "update", description: "Pull & deploy latest code" },
+  { name: "update", description: "Update: git | alpha | stable" },
   { name: "emergency", description: "Activate paid hailMary model" },
   { name: "heartbeat", description: "Heartbeat diagnostics" },
   { name: "memory", description: "Memory stats" },

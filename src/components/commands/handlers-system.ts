@@ -458,28 +458,67 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     return true;
   }
 
-  // /software update [deploy|pull]
-  if (arg === "update" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build" ||
-      arg === "update pull" || arg === "pull" || arg === "") {
-    // /update with no args → treat as /software (show info)
-    if (arg === "" && _text.match(/^\/software\s*$/i)) {
-      // Fall through to info display below
-    } else if (arg === "update pull" || arg === "pull" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build" || arg === "update") {
-      if (!isMaster) { await ctx.reply("Requires master role."); return true; }
-      await ctx.reply("⚙️ Updating (pull + build + deploy)...");
-      logInfo("update", "Update requested via /software");
-      const { spawn } = await import("node:child_process");
-      spawn("abtars", ["update"], { detached: true, stdio: "ignore" }).unref();
+  // /update git | alpha | stable
+  if (arg === "update" || arg === "update git" || arg === "git" ||
+      arg === "update alpha" || arg === "alpha" ||
+      arg === "update stable" || arg === "stable" ||
+      arg === "update deploy" || arg === "deploy" || arg === "update pull" || arg === "pull" || arg === "update build" || arg === "build") {
+    // /update with no args → show usage
+    if (arg === "update") {
+      await ctx.reply("Usage: /update git | alpha | stable");
       return true;
     }
+    // Legacy aliases → git
+    const channel = (arg === "git" || arg === "update git" || arg === "update pull" || arg === "pull" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build")
+      ? "git"
+      : (arg === "alpha" || arg === "update alpha") ? "alpha" : "stable";
+
+    if (!isMaster) { await ctx.reply("Requires master role."); return true; }
+
+    if (channel === "git") {
+      const { spawnSync, spawn } = await import("node:child_process");
+      const releasesRoot = join(process.env["HOME"] ?? "", ".abtars-releases", "src");
+      const abtarsDir = join(releasesRoot, "abtars");
+      const abmindDir = join(releasesRoot, "abmind");
+
+      // Fetch + show incoming commits
+      let msg = "Pulling...\n";
+      for (const [name, dir] of [["abtars", abtarsDir], ["abmind", abmindDir]] as const) {
+        if (!existsSync(join(dir, ".git"))) { msg += `${name}: no repo\n`; continue; }
+        spawnSync("git", ["-C", dir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
+        const log = spawnSync("git", ["-C", dir, "log", "--oneline", "HEAD..origin/dev"], { encoding: "utf-8" });
+        const commits = (log.stdout || "").trim();
+        if (commits) {
+          const lines = commits.split("\n");
+          msg += `${name}: ${lines.length} commit${lines.length > 1 ? "s" : ""}\n${commits.slice(0, 300)}\n`;
+        } else {
+          msg += `${name}: already up to date\n`;
+        }
+      }
+      await ctx.reply(msg + "\nDeploying...");
+      logInfo("update", "git update requested");
+      spawn("abtars", ["update"], { detached: true, stdio: "ignore" }).unref();
+    } else if (channel === "alpha") {
+      await ctx.reply("Updating from npm (alpha)...");
+      logInfo("update", "npm alpha update requested");
+      const { spawn } = await import("node:child_process");
+      spawn("abtars", ["update", "--source", "npm", "--tag", "alpha"], { detached: true, stdio: "ignore" }).unref();
+    } else {
+      await ctx.reply("Updating from npm (stable)...");
+      logInfo("update", "npm stable update requested");
+      const { spawn } = await import("node:child_process");
+      spawn("abtars", ["update", "--source", "npm"], { detached: true, stdio: "ignore" }).unref();
+    }
+    return true;
   }
 
   if ((arg as string) === "npm" || (arg as string) === "update npm") {
+    // Legacy: /update npm → alpha
     if (!isMaster) { await ctx.reply("Requires master role."); return true; }
-    logInfo("update", "npm update starting");
-    await ctx.reply("Updating from npm...");
+    logInfo("update", "npm alpha update (legacy /update npm)");
+    await ctx.reply("Updating from npm (alpha)...");
     const { spawn } = await import("node:child_process");
-    spawn("abtars", ["update", "--source", "npm"], { detached: true, stdio: "ignore" }).unref();
+    spawn("abtars", ["update", "--source", "npm", "--tag", "alpha"], { detached: true, stdio: "ignore" }).unref();
     return true;
   }
 
@@ -605,7 +644,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   } catch { /* no state file = normal */ }
 
   lines.push("");
-  lines.push("  /update [pull|deploy|npm] | /software rollback <version>");
+  lines.push("  /update [git|alpha|stable] | /software rollback <version>");
   await ctx.reply(lines.join("\n"));
   return true;
 }
