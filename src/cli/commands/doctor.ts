@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars doctor` — thin TS wrapper around scripts/doctor.sh.
  *
@@ -26,6 +27,7 @@ async function pathExists(p: string): Promise<boolean> {
 }
 
 export async function doctor(args: readonly string[] = []): Promise<number> {
+  await printBanner("doctor");
   const paths = packagePaths('abtars');
   const installed = join(paths.home, 'scripts', 'doctor.sh');
   const repo = join(process.cwd(), 'scripts', 'doctor.sh');

@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * abtars stop — kill watchdog (if running) then bridge.
  *
@@ -59,6 +60,7 @@ function removeLock(path: string): void {
 }
 
 export async function stop(opts: {}): Promise<number> {
+  await printBanner("stop");
   const home = abtarsHome();
   const manifestPath = join(home, "manifest.json");
   const bridgeLock = join(home, "bridge.lock");

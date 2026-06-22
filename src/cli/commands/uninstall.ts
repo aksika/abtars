@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * abtars uninstall — stop everything, remove ~/.abtars/ and CLI symlinks.
  *
@@ -56,6 +57,7 @@ function unloadLaunchd(): void {
 }
 
 export async function uninstall(opts: { yes?: boolean }): Promise<number> {
+  await printBanner("uninstall");
   const home = abtarsHome();
 
   if (!existsSync(home)) {

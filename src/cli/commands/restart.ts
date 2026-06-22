@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * abtars restart [--cold] — unified restart command.
  * Warm (default): writeRestartRequested → main.ts internal loop restarts.
@@ -29,6 +30,7 @@ async function killBridge(pid: number): Promise<void> {
 }
 
 export async function restart(opts: { cold?: boolean }): Promise<number> {
+  await printBanner("restart");
   const home = abtarsHome();
   const lockFile = join(home, "bridge.lock");
   const cold = opts.cold ?? false;

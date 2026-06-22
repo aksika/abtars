@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars onboard` — first-time interactive configuration wizard
  * (plan #158 Phase 3, subsumes ticket #153).
@@ -428,6 +429,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
 }
 
 export async function onboard(opts: OnboardOptions): Promise<number> {
+  await printBanner("onboard");
   const paths = packagePaths('abtars');
 
   // Install log (#718)

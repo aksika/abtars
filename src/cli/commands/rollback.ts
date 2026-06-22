@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars rollback` — repoint current symlink to a previous release from history.json.
  * --to N (1-3, default 1) selects which prior to restore.
@@ -9,6 +10,7 @@ import { homedir } from 'node:os';
 import { acquireLock, packagePaths } from '../deploy-lib-import.js';
 
 export async function rollback(opts?: { to?: number }): Promise<number> {
+  await printBanner("rollback");
   const paths = packagePaths('abtars');
   const releasesDir = resolve(homedir(), '.abtars-releases');
   const historyFile = join(releasesDir, 'history.json');

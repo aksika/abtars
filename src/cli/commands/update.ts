@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars update` — unified deploy command.
  * Detects first-time install (no manifest.json) and onboards automatically.
@@ -16,6 +17,7 @@ export interface UpdateOptions {
 }
 
 export async function update(opts: UpdateOptions): Promise<number> {
+  await printBanner("update");
   if (opts.source !== "local" && opts.source !== "npm") {
     process.stderr.write(`--source ${opts.source} is not supported.\nUse --source local (default) or --source npm.\n`);
     return 2;

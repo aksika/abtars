@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars daemon` — manage the system service (install/uninstall/start/stop/restart/status).
  */
@@ -211,6 +212,7 @@ async function daemonStatus(): Promise<number> {
 // ── router ──
 
 export async function daemon(args: string[]): Promise<number> {
+  await printBanner("daemon");
   const sub = args[0] ?? "status";
   switch (sub) {
     case "install": return daemonInstall();

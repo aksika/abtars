@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars deps` — manage optional dependencies.
  */
@@ -83,6 +84,7 @@ function remove(names: string[]): number {
 }
 
 export async function deps(args: string[]): Promise<number> {
+  await printBanner("deps");
   const sub = args[0] ?? "list";
   switch (sub) {
     case "list": return list();

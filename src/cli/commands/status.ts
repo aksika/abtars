@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars status` — print manifest + bridge state.
  * Read-only. Exit code 0 on healthy install, 1 otherwise.
@@ -9,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export async function status(): Promise<number> {
+  await printBanner("status");
   const paths = packagePaths('abtars');
   const manifest = await readManifest(paths.manifest);
 

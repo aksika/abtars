@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ function readJsonField(file: string, field: string): unknown {
 }
 
 export async function start(): Promise<number> {
+  await printBanner("start");
   const home = abtarsHome();
   const lockFile = join(home, "bridge.lock");
   const startReasonFile = join(home, ".start-reason");

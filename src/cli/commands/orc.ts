@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * cli/commands/orc.ts — Orc worker management CLI (#1011).
  * Calls bridge agent-api endpoints on localhost.
@@ -19,6 +20,7 @@ async function call(method: string, path: string, body?: Record<string, unknown>
 }
 
 export async function orc(args: string[]): Promise<number> {
+  await printBanner("orc");
   const sub = args[0];
   const flags = new Map<string, string>();
   for (let i = 1; i < args.length; i++) {

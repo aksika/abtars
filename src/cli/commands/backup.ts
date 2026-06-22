@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars backup` — full or config-only backup.
  *
@@ -37,6 +38,7 @@ function timestamp(): string {
 }
 
 export async function backup(opts: BackupOpts = {}): Promise<number> {
+  await printBanner("backup");
   const abHome = abtarsHome();
   const abmindHome = resolveAbmindHome();
   const ts = timestamp();

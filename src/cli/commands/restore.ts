@@ -1,3 +1,4 @@
+import { printBanner } from './banner.js';
 /**
  * `abtars restore` — restore from backup archive, auto-detect type.
  *
@@ -20,6 +21,7 @@ export interface RestoreOpts {
 }
 
 export async function restore(archivePath: string, opts: RestoreOpts = {}): Promise<number> {
+  await printBanner("restore");
   if (!archivePath) {
     process.stderr.write("Usage: abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]\n");
     return 1;
