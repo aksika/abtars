@@ -163,15 +163,27 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "deploying", version: staged.version, startedAt: new Date().toISOString() }) + "\n");
     process.stdout.write(`✓ manifest updated\n`);
 
-    // ── Step 7: Kill old watchdog + bridge ──────────────────────────────
+    // ── Step 7: Stop everything ─────────────────────────────────────────
     if (!isFirstInstall) {
+      // 7.1 Stop daemon service (tells WD to exit via service manager)
+      if (process.platform === "darwin") {
+        const uid = `gui/${process.getuid?.() ?? 501}`;
+        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
+      } else {
+        try { execSync("systemctl --user stop abtars-watchdog", { stdio: "ignore", timeout: 5000 }); } catch {}
+      }
+
+      // 7.2 Write .start-reason = "update:X" (safety net if WD survives service stop)
       writeFileSync(join(paths.home, ".start-reason"), `update:${staged.version}`);
-      const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
+
+      // 7.3 Kill WD PID explicitly (belt)
       const wdPid = readJsonField(join(paths.home, "bridge.lock"), "watchdogPid") as number | undefined;
-      // Kill watchdog first (prevents respawn race)
       if (wdPid && wdPid > 0) {
         try { process.kill(wdPid, "SIGTERM"); } catch {}
       }
+
+      // 7.4 Kill bridge PID
+      const bridgePid = readJsonField(join(paths.home, "bridge.lock"), "pid") as number | undefined;
       if (bridgePid && bridgePid > 0) {
         try { process.kill(bridgePid, "SIGTERM"); } catch {}
         process.stdout.write(`  x Killing bridge (PID ${bridgePid})...\n`);
@@ -180,29 +192,33 @@ export async function deploy(opts: DeployOptions): Promise<number> {
           try { process.kill(bridgePid, 0); } catch { break; }
         }
       }
-      // Wait for watchdog to die
+
+      // 7.5 Wait for WD to die (flock release). SIGKILL after 3s.
       if (wdPid && wdPid > 0) {
+        let wdAlive = false;
         for (let i = 0; i < 6; i++) {
-          try { process.kill(wdPid, 0); } catch { break; }
+          try { process.kill(wdPid, 0); wdAlive = true; } catch { wdAlive = false; break; }
           await new Promise(r => setTimeout(r, 500));
         }
+        if (wdAlive) { try { process.kill(wdPid, "SIGKILL"); } catch {} }
       }
-      // Clear .stopped and .start-reason so new WD can start clean
+
+      // 7.6 Clear .stopped sentinel
       try { rmSync(join(paths.home, ".stopped")); } catch {}
     }
 
     // ── Step 8: Respawn ───────────────────────────────────────────────────
-    // Clear stale .start-reason so the new watchdog doesn't read the "update:X" signal and exit immediately
-    try { rmSync(join(paths.home, ".start-reason")); } catch {}
+    // 8.1 Write neutral .start-reason — new WD won't match any exit case
+    writeFileSync(join(paths.home, ".start-reason"), "deploy-respawn");
 
     const manifest = await readManifest(paths.manifest);
     const mode = manifest?.installMode ?? "daemon";
 
+    // 8.2 Restart daemon service
     if (mode === "daemon") {
       if (process.platform === "darwin") {
         const plistPath = join(process.env["HOME"] ?? "", "Library/LaunchAgents/com.abtars.watchdog.plist");
         const uid = `gui/${process.getuid?.() ?? 501}`;
-        try { execSync(`launchctl bootout ${uid}/com.abtars.watchdog 2>/dev/null`, { stdio: "ignore", timeout: 5000 }); } catch {}
         try { execSync(`launchctl bootstrap ${uid} "${plistPath}"`, { stdio: "ignore", timeout: 5000 }); } catch {}
       } else {
         try { execSync("systemctl --user daemon-reload", { stdio: "ignore", timeout: 5000 }); } catch {}
