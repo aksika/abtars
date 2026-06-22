@@ -33,8 +33,8 @@ export interface BackupOpts {
 
 function timestamp(): string {
   const now = new Date();
-  const d = now.toISOString().slice(0, 10).replace(/-/g, "");
-  const t = now.toTimeString().slice(0, 5).replace(":", "");
+  const d = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+  const t = `${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
   return `${d}-${t}`;
 }
 
