@@ -62,7 +62,7 @@ A heartbeat task that detects recurring errors in the bridge log and either auto
 
 **Toggle:** `/healing` command enables/disables the self-healer. `/healing reset` clears circuit breakers.
 
-### Task-failure SHA (Self-Healing Agent)
+### SHA: Self-Healing Agent
 
 When a scheduled task fails, a dedicated self-healing agent session diagnoses and attempts to fix the issue programmatically.
 
