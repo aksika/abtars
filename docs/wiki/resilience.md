@@ -62,17 +62,29 @@ A heartbeat task that detects recurring errors in the bridge log and either auto
 
 **Toggle:** `/healing` command enables/disables the self-healer. `/healing reset` clears circuit breakers.
 
-### Task-failure SHA
+### Task-failure SHA (Self-Healing Agent)
 
-When a scheduled task fails, a dedicated self-healing agent session diagnoses and attempts to fix the issue.
+When a scheduled task fails, a dedicated self-healing agent session diagnoses and attempts to fix the issue programmatically.
+
+**Enable/disable:**
+
+```bash
+# Enable (add to ~/.abtars/config/.env)
+SELFHEAL_ENABLED=true
+
+# Disable
+SELFHEAL_ENABLED=false    # or remove the line
+```
+
+Or at runtime: `/healing` command toggles the self-healer on/off. `/healing reset` clears circuit breakers.
 
 **Flow:**
 
-1. Task fails → user sees `⚠️ &lt;task&gt; failed`
+1. Task fails → user sees `⚠️ <task> failed`
 2. SHA fires in an isolated `_S_` (System) session → user sees `🔧 Calling self-healing agent`
 3. SHA diagnoses root cause and attempts programmatic fix
 4. If fixed → task succeeds on next tick
-5. If unfixable → SHA reports "Requires human intervention: &lt;reason&gt;"
+5. If unfixable → SHA reports "Requires human intervention: <reason>"
 6. After 3 consecutive failures → task auto-pauses, user sees `⛔ Needs manual fix`
 
 **Three-state concurrency guard:**
@@ -82,6 +94,12 @@ When a scheduled task fails, a dedicated self-healing agent session diagnoses an
 | `idle` | Fire SHA with all pending failures | Normal path |
 | `running` | Drop entirely (no count, no notify) | SHA might be fixing it right now |
 | `cooldown` (60s) | Count + notify, skip SHA | Let fix propagate before retrying |
+
+**What SHA can and cannot do:**
+
+SHA is forbidden from modifying vital config files (`transport.json`, `.env`, `peers.json`, `users.json`) unless the bridge is in a crash loop. It can fix JSON corruption, pause tasks, and repair scripts. The full rules are in its system prompt at `src/boot/phase-pipeline-deps.ts`.
+
+**Auto-fix whitelist:** Pattern-based rules live in `src/components/self-healer/`. When a known error matches, a predefined repair action runs. Custom rules can be added there.
 
 **Isolation:** SHA runs in a System session (`_S_` type) — no access to user memory, no memory storage, minimal SOUL prompt. Cannot pollute the user's conversation context.
 
