@@ -427,7 +427,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   newBlock.push(`IRC_ENABLED=false`);
   newBlock.push(`LOG_LEVEL=debug`);
   newBlock.push(`ACTIVE_MEMORY=true`);
-  newBlock.push(`ENABLE_AGENT_API=true`);
+  newBlock.push(`ENABLE_AGENT_API=false`);
   newBlock.push(`SELFHEAL_ENABLED=true`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
