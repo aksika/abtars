@@ -61,6 +61,31 @@ export async function handleUsers(text: string, ctx: CommandContext): Promise<bo
 }
 
 export async function handleSkills(text: string, ctx: CommandContext): Promise<boolean> {
+  // #1141: /skill run <name>, /skill stop, /skill list (runnable)
+  const args = text.replace(/^\/skills?\s*/, "").trim();
+  if (args.startsWith("run ")) {
+    const skillName = args.slice(4).trim();
+    if (!skillName) { await ctx.reply("Usage: /skill run <name>"); return true; }
+    const { launchSkill } = await import("../skill-session.js");
+    const err = await launchSkill(skillName, ctx.userId, String(ctx.chatId));
+    await ctx.reply(err ?? `* Skill "${skillName}" started.`);
+    return true;
+  }
+  if (args === "stop") {
+    const { endSkillSession } = await import("../skill-session.js");
+    const ended = await endSkillSession(String(ctx.chatId));
+    await ctx.reply(ended ? "* Skill session ended." : "No active skill session.");
+    return true;
+  }
+  if (args === "list") {
+    const { listRunnableSkills } = await import("../skill-session.js");
+    const skills = listRunnableSkills();
+    if (skills.length === 0) { await ctx.reply("No runnable skills (no skill.json found)."); return true; }
+    const lines = skills.map(s => `  ${s.interactive ? "~" : "*"} ${s.name}${s.description ? ` — ${s.description}` : ""}`);
+    await ctx.reply(`Runnable skills:\n${lines.join("\n")}\n\nUse: /skill run <name>`);
+    return true;
+  }
+
   if (text.includes("reload")) {
     const { reloadCatalog } = await import("../../capabilities/hotskills/index.js");
     const count = reloadCatalog();

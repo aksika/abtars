@@ -396,6 +396,17 @@ export class CronQueue {
       }
     }
 
+    // #1141: Inject task-scoped persistent context if it exists
+    const contextFile = join(abtarsHome(), "workspace", entry.id, "CONTEXT.md");
+    if (existsSync(contextFile)) {
+      const raw = readFileSync(contextFile, "utf-8").trim();
+      if (raw) {
+        const ctx = raw.length > 30000 ? (logWarn(TAG, `Task context truncated (${raw.length} > 30000)`), raw.slice(0, 30000)) : raw;
+        prompt = `[TASK CONTEXT — your notes from previous runs]\n${ctx}\n\n[TASK]\n${prompt}`;
+        logInfo(TAG, `Injected task context (${ctx.length} chars)`);
+      }
+    }
+
     logInfo(TAG, `▶ Agent: "${entry.message.slice(0, 60)}"`);
 
     // #936 Phase 2: Route to user session via injectGreeting if targetUserId is set
@@ -425,6 +436,20 @@ export class CronQueue {
     // Set current BEFORE any await — prevents race where enqueue() sees _current=null
     // and calls processNext() again while we're awaiting the dynamic import.
     this.setCurrent(entry, 0, "agent");
+
+    // #1141: Skill-trigger task — delegate to launchSkill()
+    if ((entry as any).skill) {
+      const { launchSkill } = await import("../skill-session.js");
+      const userId = entry.targetUserId ?? String(entry.chatId);
+      const err = await launchSkill((entry as any).skill, userId, String(entry.chatId), prompt);
+      if (err) logWarn(TAG, `Skill launch failed for "${entry.id}": ${err}`);
+      else logInfo(TAG, `■ Skill "${(entry as any).skill}" launched for "${entry.id}"`);
+      recordRunToFile(entry.id, err ? 1 : 0);
+      if (!err) recordRun(entry, 0);
+      this.clearCurrent();
+      this.processNext();
+      return;
+    }
 
     // Kanban board: track this task (Spin handles card lifecycle)
     // Set $WORKSPACE for agent tool execution — all output goes here

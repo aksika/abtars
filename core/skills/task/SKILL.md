@@ -69,3 +69,40 @@ When creating a task that needs supporting files:
 4. Register in tasks.json with `abtars-task add --message "Run the <task>"` — the message tells the agent what to do; TASK.md provides the detailed instructions
 
 Never put task files loose at the `tasks/` root. One directory per task.
+
+## Skill-trigger tasks
+
+A task can trigger a named skill by setting the `skill` field in tasks.json:
+
+```json
+{
+  "id": "finance-report",
+  "skill": "finance",
+  "message": "Run the daily report",
+  "executor": "agent",
+  "schedule": "30 9 * * *"
+}
+```
+
+The skill must have a `skill.json` in its directory to be launchable. When fired, the task-queue launches the skill in a dedicated session with the skill's SKILL.md + CONTEXT.md.
+
+## Persistent task context (CONTEXT.md)
+
+Tasks can maintain persistent notes across runs via `~/.abtars/workspace/<task-id>/CONTEXT.md`. If this file exists, its content is automatically prepended to the task prompt on every run.
+
+At the end of a task run, update this file with notes for your next run: what was covered, what to do next. Keep it concise.
+
+## Skill-managed context (for skills with user-scoped progress)
+
+Skills that serve multiple users (tutoring, coaching) maintain per-user context:
+
+```
+~/.abtars/workspace/<skill-name>/<userId>/CONTEXT.md
+```
+
+The SKILL.md should instruct:
+1. Read your context file at the start of each session
+2. Update it at the end with progress notes
+3. Create the directory on first run if it doesn't exist
+
+This convention works for both task-triggered and manually invoked skill sessions (`/skill run <name>`).
