@@ -11,6 +11,7 @@ import { printBanner } from './banner.js';
 
 import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
+import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { createDecipheriv, hkdfSync } from "node:crypto";
 import { abtarsHome, abmindHome as resolveAbmindHome } from "../../paths.js";
@@ -75,7 +76,16 @@ export async function restore(archivePath: string, opts: RestoreOpts = {}): Prom
     const sibling = findSiblingAbm(dir, date);
     if (sibling) {
       const rc = restoreAbmindSibling(sibling, opts.passphrase);
-      if (rc !== 0) return rc;
+      if (rc !== 0) {
+        // Continue with abtars restore, print prominent message at the end
+        const abmFile = sibling.endsWith(".abm") ? sibling : null;
+        process.on("exit", () => {
+          process.stderr.write("\n\n══════════════════════════════════════════════════\n");
+          process.stderr.write("⚠ MEMORY NOT RESTORED — wrong passphrase.\n");
+          process.stderr.write("Fix: abmind restore " + (abmFile ?? "<file.abm>") + " --passphrase <original>\n");
+          process.stderr.write("══════════════════════════════════════════════════\n");
+        });
+      }
     } else {
       process.stdout.write("ℹ no sibling .abm found — memory not restored\n");
     }
@@ -112,8 +122,8 @@ function restoreAbmindSibling(siblingPath: string, passphrase?: string): number 
   const abmindHome = resolveAbmindHome();
   const is7z = siblingPath.endsWith(".7z");
   const extractResult = is7z
-    ? spawnSync("7z", ["x", `-o${abmindHome}`, "-aoa", siblingPath], { encoding: "utf-8", stdio: "inherit" })
-    : spawnSync("unzip", ["-o", siblingPath, "-d", abmindHome], { encoding: "utf-8", stdio: "inherit" });
+    ? spawnSync("7z", ["x", `-o${abmindHome}`, "-aoa", "-bso0", siblingPath], { encoding: "utf-8", stdio: "pipe" })
+    : spawnSync("unzip", ["-oq", siblingPath, "-d", abmindHome], { encoding: "utf-8", stdio: "pipe" });
   if (extractResult.status !== 0) {
     process.stderr.write("abmind archive extract failed\n");
     return 1;
@@ -133,9 +143,9 @@ function restoreAbmindSibling(siblingPath: string, passphrase?: string): number 
 }
 
 function extractZip(archivePath: string, destDir: string): number {
+  // Avoid "getcwd: cannot access parent directories" if CWD is inside destDir
+  try { process.chdir(homedir()); } catch {}
   const is7z = archivePath.endsWith(".7z");
-
-  // Sanity check
   const listCmd = is7z
     ? spawnSync("7z", ["l", archivePath], { encoding: "utf-8" })
     : spawnSync("unzip", ["-l", archivePath], { encoding: "utf-8" });
@@ -147,11 +157,11 @@ function extractZip(archivePath: string, destDir: string): number {
   // Extract, excluding binary dirs + manifest (install state, not user data)
   let result;
   if (is7z) {
-    result = spawnSync("7z", ["x", `-o${destDir}`, "-aoa", "-xr!releases", "-xr!current", "-xr!bin", "-xr!manifest.json", archivePath],
-      { encoding: "utf-8", stdio: "inherit" });
+    result = spawnSync("7z", ["x", `-o${destDir}`, "-aoa", "-bso0", "-xr!releases", "-xr!current", "-xr!bin", "-xr!manifest.json", archivePath],
+      { encoding: "utf-8", stdio: "pipe" });
   } else {
-    result = spawnSync("unzip", ["-o", archivePath, "-d", destDir, "-x", "releases/*", "current/*", "bin/*", "manifest.json"],
-      { encoding: "utf-8", stdio: "inherit" });
+    result = spawnSync("unzip", ["-oq", archivePath, "-d", destDir, "-x", "releases/*", "current/*", "bin/*", "manifest.json"],
+      { encoding: "utf-8", stdio: "pipe" });
   }
 
   if (result.status !== 0) {
