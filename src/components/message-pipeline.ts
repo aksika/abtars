@@ -425,7 +425,7 @@ export async function handleInboundMessage(
         }
       }
       // Record assistant response to memory
-      if (memory && registry.byUserId.get(userId)?.role !== "guest") {
+      if (memory && registry.byUserId.get(userId)?.role !== "guest" && !text.startsWith("[SESSION START]")) {
         memory.recordMessage({ role: "assistant", content: cleanAnswer || response, timestamp: Date.now(), userId, sessionId: activeSessionId });
       }
       if (isVoice && ttsConfig && adapter.sendVoice) {
@@ -498,9 +498,9 @@ export async function handleInboundMessage(
       pSession.primingTerms = [...new Set([...modelTopics, ...regexKw, ...existing])].slice(0, PRIMING_MAX);
     }
 
-    // --- Record to memory (skip for guests) ---
+    // --- Record to memory (skip for guests and greeting injects) ---
     const isGuest = registry.byUserId.get(userId)?.role === "guest";
-    if (memory && !isGuest) {
+    if (memory && !isGuest && !text.startsWith("[SESSION START]")) {
       memory.recordMessage({
         role: "assistant", content: cleanAnswer || response,
         timestamp: Date.now(), userId, sessionId: activeSessionId,
