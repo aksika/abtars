@@ -25,14 +25,15 @@ function readLocalVersion(home: string): string | null {
   } catch { return null; }
 }
 
-export function makeNpmSource(packageName: string): UpdateSource {
+export function makeNpmSource(packageName: string, tag?: string): UpdateSource {
+  const distTag = tag ?? "latest";
   return {
     name: "npm",
     async prepare(ctx: PrepareContext): Promise<StagedRelease> {
-      const latest = run("npm", ["view", packageName, "version"], ctx.home);
+      const latest = run("npm", ["view", `${packageName}@${distTag}`, "version"], ctx.home);
       const current = readLocalVersion(ctx.home);
       if (latest === current) {
-        throw new Error(`Already at latest version (${latest}). Nothing to update.`);
+        throw new Error(`Already at ${distTag} version (${latest}). Nothing to update.`);
       }
 
       const stagedPath = ctx.stagingDir;

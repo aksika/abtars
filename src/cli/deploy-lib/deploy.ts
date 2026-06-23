@@ -17,6 +17,7 @@ export interface DeployOptions {
   readonly source: SourceName;
   readonly localDir?: string;
   readonly skipFreshness?: boolean;
+  readonly tag?: string;
 }
 
 function readJsonField(file: string, field: string): unknown {
@@ -81,7 +82,7 @@ export async function deploy(opts: DeployOptions): Promise<number> {
 
     // ── Step 2: Build + Stage ──────────────────────────────────────────────
     const source = opts.source === "npm"
-      ? makeNpmSource("abtars")
+      ? makeNpmSource("abtars", opts.tag)
       : makeLocalBuildSource({ repoRoot, allowStale: !!opts.skipFreshness });
 
     const staged = await source.prepare({ stagingDir: paths.appStaging, home: paths.home, allowStale: !!opts.skipFreshness });

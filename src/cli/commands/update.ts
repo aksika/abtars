@@ -14,6 +14,7 @@ export interface UpdateOptions {
   readonly allowAbmindMismatch: boolean;
   readonly dryRun?: boolean;
   readonly check?: boolean;
+  readonly tag?: string;
 }
 
 export async function update(opts: UpdateOptions): Promise<number> {
@@ -38,6 +39,7 @@ export async function update(opts: UpdateOptions): Promise<number> {
     source: opts.source,
     localDir: opts.localDir,
     skipFreshness: opts.skipFreshness,
+    tag: opts.tag,
   };
 
   return deploy(deployOpts);

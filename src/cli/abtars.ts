@@ -114,6 +114,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           localDir: typeof flags.get('local') === 'string' ? flags.get('local') as string : undefined,
           skipFreshness: flags.has('local'),
           allowAbmindMismatch: flags.get('allow-abmind-mismatch') === true,
+          tag: typeof flags.get('tag') === 'string' ? flags.get('tag') as string : undefined,
         });
       case 'rollback':
         return await rollback({ to: typeof flags.get('to') === 'string' ? Number(flags.get('to')) : undefined });

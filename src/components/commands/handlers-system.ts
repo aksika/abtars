@@ -503,17 +503,26 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       }
       await ctx.reply(msg + "\nDeploying...");
       logInfo("update", "git update requested");
-      spawn("abtars", ["update"], { detached: true, stdio: "ignore" }).unref();
+      const child = spawn("abtars", ["update"], { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+      child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
     } else if (channel === "alpha") {
       await ctx.reply("Updating from npm (alpha)...");
       logInfo("update", "npm alpha update requested");
       const { spawn } = await import("node:child_process");
-      spawn("abtars", ["update", "--source", "npm", "--tag", "alpha"], { detached: true, stdio: "ignore" }).unref();
+      const child = spawn("abtars", ["update", "--source", "npm", "--tag", "alpha"], { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+      child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
     } else {
       await ctx.reply("Updating from npm (stable)...");
       logInfo("update", "npm stable update requested");
       const { spawn } = await import("node:child_process");
-      spawn("abtars", ["update", "--source", "npm"], { detached: true, stdio: "ignore" }).unref();
+      const child = spawn("abtars", ["update", "--source", "npm"], { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+      child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
     }
     return true;
   }
