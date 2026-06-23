@@ -140,3 +140,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => { console.error(`Fatal: ${err.message}`); process.exit(1); });
+
+// Hard 60s process timeout — prevents hanging indefinitely on slow feeds
+setTimeout(() => { console.error("Timeout: 60s exceeded"); process.exit(1); }, 60_000).unref();

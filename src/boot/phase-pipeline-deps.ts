@@ -58,7 +58,7 @@ export async function phasePipelineDeps(ctx: BootCtx): Promise<PhaseResult> {
       if (ctx.telegramAdapter) {
         ctx.telegramAdapter.sendNotification(String(getEnv().mainChatId), `🔧 Calling self-healing agent`);
       }
-      const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}${pending}\n\nDiagnose the root cause. If you can fix it programmatically (config change, script fix, token refresh), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.`;
+      const msg = `[System] You ARE the self-healing agent. A scheduled task failed:\nTask: "${entryId}"\nCommand: ${command}\nResult: ${result}${pending}\n\nDiagnose the root cause. If you can fix it programmatically (script fix, token refresh, pause task), do it. If the fix requires human action (manual browser login, external service down), state clearly: "Requires human intervention: <reason>" — do NOT create a skill or suggest adding error handling (you ARE the error handling). Be concise.\n\nFORBIDDEN: Do NOT modify vital config files unless the bridge is in a crash loop or cannot boot:\n- transport.json\n- .env / .env.skills\n- peers.json\n- users.json\nException: fixing JSON structural corruption (invalid syntax, parse errors) is always allowed.\n\nA single task failure is NOT grounds for config changes. Investigate root cause, report findings.`;
       void (async () => {
         try {
           const { SubagentRuntime } = await import("../components/subagent-runtime.js");
