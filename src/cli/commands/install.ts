@@ -411,7 +411,8 @@ export async function install(opts: InstallOptions): Promise<number> {
         const content = readFileSync(plistSrc, 'utf-8').replaceAll('{{HOME}}', homedir());
         const { writeFileSync } = await import('node:fs');
         writeFileSync(plistDst, content);
-        try { execSync(`launchctl load "${plistDst}"`, { stdio: 'ignore' }); } catch { /* already loaded */ }
+        const uid = `gui/${process.getuid!()}`;
+        try { execSync(`launchctl bootstrap ${uid} "${plistDst}"`, { stdio: 'ignore', timeout: 5000 }); } catch { /* already loaded */ }
         process.stdout.write(`✓ watchdog LaunchAgent loaded\n`);
       }
     } else if (process.platform === 'linux') {
