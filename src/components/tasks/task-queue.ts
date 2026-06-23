@@ -103,7 +103,7 @@ function readTaskFile(taskFile: string): { prompt: string; dodPaths: string[] } 
   // Glob associated files: {taskname}_* in same directory (cap 10k chars total)
   const dir = dirname(filePath);
   const base = basename(filePath, ".md");
-  const associated = readdirSync(dir).filter(f => f.startsWith(base + "_")).sort();
+  const associated = readdirSync(dir).filter(f => f !== base + ".md" && !f.startsWith(".")).sort();
   if (associated.length > 0) {
     let injected = "\n\n---\n## Associated files\n";
     let totalChars = 0;
