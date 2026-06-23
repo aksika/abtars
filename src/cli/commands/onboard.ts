@@ -397,6 +397,7 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
     'DEFAULT_PROVIDER', 'DEFAULT_MODEL',
     'BED_TIME', 'WAKE_TIME', 'HEARTBEAT_INTERVAL_SEC', 'TRUST_MODE',
     'TELEGRAM_ENABLED', 'DISCORD_ENABLED', 'IRC_ENABLED',
+    'LOG_LEVEL', 'ACTIVE_MEMORY', 'ENABLE_AGENT_API', 'SELFHEAL_ENABLED',
   ]);
   const keptLines: string[] = [];
   for (const line of existing.split('\n')) {
@@ -424,6 +425,10 @@ function mergeEnvContent(existing: string, answers: WizardAnswers): string {
   newBlock.push(`TELEGRAM_ENABLED=${answers.telegramToken ? 'true' : 'false'}`);
   newBlock.push(`DISCORD_ENABLED=${answers.discordBotToken ? 'true' : 'false'}`);
   newBlock.push(`IRC_ENABLED=false`);
+  newBlock.push(`LOG_LEVEL=debug`);
+  newBlock.push(`ACTIVE_MEMORY=true`);
+  newBlock.push(`ENABLE_AGENT_API=true`);
+  newBlock.push(`SELFHEAL_ENABLED=true`);
 
   return [...keptLines, ...newBlock, ''].join('\n');
 }
@@ -611,6 +616,22 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     await writeFile(peersPath, JSON.stringify(peersJson, null, 2) + '\n', { mode: 0o600 });
     process.stdout.write(`✓ peers.json (self.name: ${(peersJson.self as Record<string, unknown>).name}) → ${peersPath}\n`);
 
+    // Copy models.json (model metadata for context window, cost, rank)
+    const modelsPath = join(paths.config, 'models.json');
+    const { existsSync: modelsExists, copyFileSync: modelsCopy } = await import('node:fs');
+    if (!modelsExists(modelsPath)) {
+      const { fileURLToPath } = await import('node:url');
+      const here = dirname(fileURLToPath(import.meta.url));
+      const modelsCandidates = [
+        join(here, '..', '..', '..', 'config', 'models.json'),
+        join(here, '..', '..', 'config', 'models.json'),
+        join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'models.json'),
+      ];
+      for (const p of modelsCandidates) {
+        if (modelsExists(p)) { modelsCopy(p, modelsPath); process.stdout.write(`✓ models.json → ${modelsPath}\n`); break; }
+      }
+    }
+
     // Check abmind encryption compatibility
     try {
       const manifestPath = join(homedir(), '.abmind', 'manifest.json');
@@ -666,23 +687,13 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
 
 // ── Default task seeding (#383) ─────────────────────────────────────────────
 
-interface TaskTemplateEntry {
-  readonly id?: string;
-  readonly title?: string;
-  readonly message: string;
-  readonly schedule: string;
-  readonly type: "task" | "reminder";
-  readonly executor: "agent" | "script";
-  readonly maxRunsPerDay?: number;
-}
-
 /**
- * Seed default tasks (#383) via `abtars-task add` — skipped if tasks.json
+ * Seed default tasks (#383) via copy — skipped if tasks.json
  * already exists. Called from onboard after .env is persisted so chatId
  * is available.
  */
 async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<void> {
-  const { existsSync } = await import('node:fs');
+  const { existsSync, mkdirSync, copyFileSync } = await import('node:fs');
   const tasksJson = join(abtarsHome, 'tasks', 'tasks.json');
   if (existsSync(tasksJson)) {
     process.stdout.write(`• tasks.json exists — skipping default-task seed\n`);
@@ -691,58 +702,22 @@ async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<voi
 
   const { fileURLToPath } = await import('node:url');
   const here = dirname(fileURLToPath(import.meta.url));
-  // onboard.ts is at src/cli/commands/onboard.ts or dist/cli/commands/onboard.js
-  // tasks.default.json lives at config/tasks/ in the source tree.
   const candidates = [
-    join(here, '..', '..', '..', 'config', 'tasks', 'tasks.default.json'),
-    join(here, '..', '..', 'config', 'tasks', 'tasks.default.json'),
-    join(abtarsHome, '..', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.default.json'),
-    join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.default.json'),
+    join(here, '..', '..', '..', 'config', 'tasks', 'tasks.json'),
+    join(here, '..', '..', 'config', 'tasks', 'tasks.json'),
+    join(abtarsHome, '..', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
+    join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'config', 'tasks', 'tasks.json'),
   ];
   let templatePath: string | null = null;
   for (const p of candidates) {
     if (existsSync(p)) { templatePath = p; break; }
   }
   if (!templatePath) {
-    process.stdout.write(`• tasks.default.json not found — skipping default-task seed\n`);
+    process.stdout.write(`• tasks.json template not found — skipping default-task seed\n`);
     return;
   }
 
-  let template: TaskTemplateEntry[];
-  try {
-    const raw = await readFile(templatePath, 'utf-8');
-    template = JSON.parse(raw) as TaskTemplateEntry[];
-  } catch (err) {
-    process.stdout.write(`• Failed to read tasks.default.json: ${err instanceof Error ? err.message : String(err)}\n`);
-    return;
-  }
-
-  const { spawnSync } = await import('node:child_process');
-  let seeded = 0;
-  for (const entry of template) {
-    const args = [
-      'add',
-      '--schedule', entry.schedule,
-      '--message', entry.message,
-      '--chat-id', chatId,
-      '--type', entry.type,
-      '--executor', entry.executor,
-    ];
-    if (entry.id) args.push('--id', entry.id);
-    if (entry.title) args.push('--title', entry.title);
-    if (entry.maxRunsPerDay) args.push('--max-runs-per-day', String(entry.maxRunsPerDay));
-    const result = spawnSync('abtars-task', args, {
-      encoding: 'utf-8',
-      env: { ...process.env, ABTARS_HOME: abtarsHome },
-    });
-    if (result.status === 0) {
-      seeded++;
-    } else {
-      const err = result.error?.message ?? result.stderr?.trim() ?? result.stdout?.trim() ?? `exit ${result.status}`;
-      process.stdout.write(`  ⚠️ failed to seed task "${entry.message.slice(0, 40)}": ${err}\n`);
-    }
-  }
-  if (seeded > 0) {
-    process.stdout.write(`✓ seeded ${seeded} default task${seeded === 1 ? '' : 's'}\n`);
-  }
+  mkdirSync(join(abtarsHome, 'tasks'), { recursive: true });
+  copyFileSync(templatePath, tasksJson);
+  process.stdout.write(`✓ default tasks seeded\n`);
 }
