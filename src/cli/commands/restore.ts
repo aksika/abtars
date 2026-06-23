@@ -74,7 +74,7 @@ export async function restore(archivePath: string, opts: RestoreOpts = {}): Prom
     const dir = dirname(archivePath);
     const sibling = findSiblingAbm(dir, date);
     if (sibling) {
-      const rc = restoreAbmind(sibling, opts.passphrase);
+      const rc = restoreAbmindSibling(sibling, opts.passphrase);
       if (rc !== 0) return rc;
     } else {
       process.stdout.write("ℹ no sibling .abm found — memory not restored\n");
@@ -101,6 +101,34 @@ function restoreAbmind(abmPath: string, passphrase?: string): number {
     return 1;
   }
   process.stdout.write("✓ abmind memory restored\n");
+  return 0;
+}
+
+/** Handle abmind sibling: .abm direct, .7z/.zip → extract to ~/.abmind + find .abm inside */
+function restoreAbmindSibling(siblingPath: string, passphrase?: string): number {
+  if (siblingPath.endsWith(".abm")) return restoreAbmind(siblingPath, passphrase);
+
+  // .7z or .zip: extract filesystem to ~/.abmind/, then find .abm inside and restore memories
+  const abmindHome = resolveAbmindHome();
+  const is7z = siblingPath.endsWith(".7z");
+  const extractResult = is7z
+    ? spawnSync("7z", ["x", `-o${abmindHome}`, "-aoa", siblingPath], { encoding: "utf-8", stdio: "inherit" })
+    : spawnSync("unzip", ["-o", siblingPath, "-d", abmindHome], { encoding: "utf-8", stdio: "inherit" });
+  if (extractResult.status !== 0) {
+    process.stderr.write("abmind archive extract failed\n");
+    return 1;
+  }
+  process.stdout.write("✓ abmind files restored\n");
+
+  // Find .abm file extracted into abmindHome
+  const abmFile = readdirSync(abmindHome).find(f => f.endsWith(".abm"));
+  if (abmFile) {
+    const abmPath = join(abmindHome, abmFile);
+    const rc = restoreAbmind(abmPath, passphrase);
+    try { unlinkSync(abmPath); } catch {} // cleanup extracted .abm
+    return rc;
+  }
+  process.stdout.write("ℹ no .abm in archive — files restored but memories not imported\n");
   return 0;
 }
 

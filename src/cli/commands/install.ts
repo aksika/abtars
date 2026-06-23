@@ -415,7 +415,8 @@ export async function install(opts: InstallOptions): Promise<number> {
         process.stdout.write(`✓ watchdog LaunchAgent loaded\n`);
       }
     } else if (process.platform === 'linux') {
-      const unitSrc = join(home, 'scripts', 'abtars-watchdog.service');
+      const releaseSrc = join(homedir(), '.abtars-releases', 'src', 'abtars', 'scripts', 'abtars-watchdog.service');
+      const unitSrc = existsSync(releaseSrc) ? releaseSrc : join(home, 'scripts', 'abtars-watchdog.service');
       const unitDir = join(homedir(), '.config', 'systemd', 'user');
       if (existsSync(unitSrc)) {
         mkdirSync(unitDir, { recursive: true });
