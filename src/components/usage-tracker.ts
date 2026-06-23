@@ -1,6 +1,6 @@
 /**
  * usage-tracker.ts — append-only token usage log + aggregation.
- * Storage: ~/.abtars/state/usage.jsonl (one JSON line per prompt).
+ * Storage: ~/.abtars/metrics/usage.jsonl (one JSON line per prompt).
  */
 import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -21,9 +21,9 @@ let _totalTokens = 0;
 export function getTotalTokens(): number { return _totalTokens; }
 
 export function initUsageTracker(home: string): void {
-  const stateDir = join(home, "state");
-  if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
-  usagePath = join(stateDir, "usage.jsonl");
+  const metricsDir = join(home, "metrics");
+  if (!existsSync(metricsDir)) mkdirSync(metricsDir, { recursive: true });
+  usagePath = join(metricsDir, "usage.jsonl");
 }
 
 export function recordUsage(model: string, inputTokens: number, outputTokens: number, agent = ""): void {

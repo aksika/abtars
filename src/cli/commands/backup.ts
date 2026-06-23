@@ -18,8 +18,7 @@ const DEFAULT_PRUNE_DAYS = 7;
 
 const ABTARS_EXCLUDE = [
   "src", "logs", "overflow", "browser-socket", "app", "bin", "bridge.lock",
-  "deploy.state", ".bridge.flock", "state/task-queue-state.json",
-  "state/sha-state.json", "state/telegram-offset",
+  "deploy.state", ".bridge.flock", "state",
   "*.sock", "*.db-wal", "*.db-shm",
 ];
 

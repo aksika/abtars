@@ -55,7 +55,7 @@ describe("metrics-collector", () => {
     recordCall("llm:test", true);
     flushToFile();
     flushToFile();
-    const path = join(tmp, "state", "metrics.jsonl");
+    const path = join(tmp, "metrics", "metrics.jsonl");
     expect(existsSync(path)).toBe(true);
     const lines = readFileSync(path, "utf-8").trim().split("\n");
     expect(lines.length).toBe(2);
@@ -68,7 +68,7 @@ describe("metrics-collector", () => {
     recordLatency("llm:x", 50);
     flushToFile();
     // Manually write an old line
-    const path = join(tmp, "state", "metrics.jsonl");
+    const path = join(tmp, "metrics", "metrics.jsonl");
     const old = JSON.stringify({ ts: Date.now() - 8 * 24 * 60 * 60 * 1000, llm: {} }) + "\n";
     const current = readFileSync(path, "utf-8");
     const { writeFileSync } = require("node:fs");
