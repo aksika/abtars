@@ -71,7 +71,16 @@ while true; do
 
   # Poll: alive + heartbeat + .start-reason
   DEATH_REASON=""
+  LAST_POLL_AT=$(date +%s)
   while sleep "$POLL"; do
+    # Suspend detection: if poll gap >> POLL, host was asleep — skip stale check
+    _now_s=$(date +%s)
+    _poll_gap=$(( _now_s - LAST_POLL_AT ))
+    LAST_POLL_AT=$_now_s
+    if (( _poll_gap > POLL * 3 )); then
+      echo "$(date +%FT%T) Suspend detected (poll gap ${_poll_gap}s >> ${POLL}s) — granting one-cycle grace" >> "$AB/logs/watchdog.log"
+      continue
+    fi
     # Check for new instructions
     if [[ -f "$AB/.start-reason" ]]; then
       REASON=$(cat "$AB/.start-reason")
