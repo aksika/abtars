@@ -169,6 +169,14 @@ function extractZip(archivePath: string, destDir: string): number {
     return 1;
   }
 
+  // Re-sync skills/core from source (excluded from backup, deployed from repo)
+  const srcSkills = join(homedir(), ".abtars-releases", "src", "abtars", "core", "skills");
+  const dstSkills = join(destDir, "skills", "core");
+  if (existsSync(srcSkills)) {
+    spawnSync("cp", ["-rf", srcSkills + "/.", dstSkills], { stdio: "pipe" });
+    process.stdout.write("✓ skills/core re-synced from source\n");
+  }
+
   process.stdout.write(`✓ Restored to ${destDir}\n`);
   return 0;
 }
