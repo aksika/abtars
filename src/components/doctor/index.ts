@@ -143,11 +143,13 @@ const probeCoreFiles: ProbeFn = async (_ctx) => {
 };
 
 const probeTlsIdentity: ProbeFn = async (_ctx) => {
+  const start = Date.now();
+  const { getEnv } = await import("../../boot/env.js");
+  if (!getEnv().enableAgentApi) return { name: "tls-identity", status: "ok", latencyMs: Date.now() - start, detail: "agent-api disabled, skipped" };
   const { existsSync } = await import("node:fs");
   const { execSync } = await import("node:child_process");
   const { join } = await import("node:path");
   const { abtarsHome } = await import("../../paths.js");
-  const start = Date.now();
   const issues: string[] = [];
   try { execSync("which openssl", { stdio: "ignore" }); } catch { issues.push("openssl not found"); }
   const configDir = join(abtarsHome(), "config");
@@ -234,6 +236,8 @@ const probeInstanceName: ProbeFn = async (_ctx) => {
 
 const probeAgentApi: ProbeFn = async (_ctx) => {
   const start = Date.now();
+  const { getEnv } = await import("../../boot/env.js");
+  if (!getEnv().enableAgentApi) return { name: "agent api", status: "ok", latencyMs: Date.now() - start, detail: "agent-api disabled, skipped" };
   const { existsSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { abtarsHome } = await import("../../paths.js");
