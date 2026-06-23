@@ -271,7 +271,9 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
       const cliFile = name === "abmind" ? "abmind.js" : `${name}.js`;
       const target = join(abmindDist, cliFile);
       const content = `#!/usr/bin/env bash\nexec node "${target}" "$@"\n`;
-      await writeFile(join(paths.bin, name), content, { mode: 0o755 });
+      const dest = join(paths.bin, name);
+      try { rmSync(dest); } catch {}
+      await writeFile(dest, content, { mode: 0o755 });
     }
   }
 
