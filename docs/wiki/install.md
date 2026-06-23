@@ -82,7 +82,7 @@ abtars deps install all
 
 ```bash
 # 1. Install CLI tools
-pnpm install -g abtars@alpha abmind@alpha --allow-build=better-sqlite3
+pnpm add -g "abtars@>=0.3.2-alpha.0" "abmind@>=0.2.3-alpha.0" --allow-build=better-sqlite3
 
 # Ensure abtars is on PATH (pnpm global bin location varies by platform):
 export PATH="$(pnpm bin -g):$HOME/.local/bin:$PATH"
@@ -114,7 +114,7 @@ Step 4 automatically clones source, builds, deploys, and starts the bridge (daem
 
 | Step | What happens |
 |------|-------------|
-| `pnpm install -g abtars@alpha abmind@alpha --allow-build=better-sqlite3` | Installs CLI tools globally |
+| `pnpm add -g "abtars@>=..." "abmind@>=..." --allow-build=better-sqlite3` | Installs CLI tools globally |
 | `abtars deps install all` | Installs optional npm packages (browser, PDF, YouTube, image) |
 | `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption |
 | `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
@@ -138,7 +138,7 @@ Install ollama before `abmind install` if you want local embeddings.
 Omit `--non-interactive` and the wizard will prompt for each value:
 
 ```bash
-pnpm install -g abtars@alpha abmind@alpha --allow-build=better-sqlite3
+pnpm add -g "abtars@>=0.3.2-alpha.0" "abmind@>=0.2.3-alpha.0" --allow-build=better-sqlite3
 abtars deps install all
 abmind install
 abtars install
@@ -158,7 +158,7 @@ Set during install. Daemon mode starts automatically after `abtars install`. Sim
 | Channel | Command | Who |
 |---|---|---|
 | **Stable** | `pnpm install -g abtars abmind` | Normal users |
-| **Alpha** | `pnpm install -g abtars@alpha abmind@alpha --allow-build=better-sqlite3` | Early adopters |
+| **Alpha** | `pnpm add -g "abtars@>=0.3.2-alpha.0" "abmind@>=0.2.3-alpha.0" --allow-build=better-sqlite3` | Early adopters |
 | **Dev** | `git clone` + `abtars update --local` | Contributors |
 
 ## Commands reference
