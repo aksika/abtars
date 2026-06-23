@@ -88,9 +88,6 @@ pnpm add -g "abtars@>=0.3.2-alpha.0" "abmind@>=0.2.3-alpha.0" --allow-build=bett
 export PATH="$(pnpm bin -g):$HOME/.local/bin:$PATH"
 # Add the line above to ~/.bashrc or ~/.zshrc for persistence.
 
-# 1b. Build native module (required on macOS, harmless on Linux)
-cd "$(pnpm root -g)/abmind/node_modules/better-sqlite3" && npx --yes node-gyp rebuild && cd -
-
 # 2. Optional deps (recommended before first start)
 abtars deps install all
 
