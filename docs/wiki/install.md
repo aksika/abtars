@@ -82,7 +82,9 @@ abtars deps install all
 
 ```bash
 # 1. Install CLI tools
-pnpm add -g "abtars@>=0.3.2-alpha.0" "abmind@>=0.2.3-alpha.0" --allow-build=better-sqlite3
+ABTARS_V=$(npm view abtars@alpha version)
+ABMIND_V=$(npm view abmind@alpha version)
+pnpm add -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
 
 # Ensure abtars is on PATH (pnpm global bin location varies by platform):
 export PATH="$(pnpm bin -g):$HOME/.local/bin:$PATH"
@@ -97,6 +99,7 @@ abtars install --non-interactive --accept-risk \
   --telegram-token "YOUR_BOT_TOKEN" \
   --telegram-chat-id "YOUR_CHAT_ID" \
   --user-name "yourname" \
+  --passphrase "your-encryption-passphrase" \
   --default-provider openrouter \
   --default-model "deepseek/deepseek-v4-flash" \
   --api-key "sk-or-v1-..."
@@ -112,7 +115,7 @@ Step 3 automatically clones source, builds, deploys, and starts the bridge (daem
 
 | Step | What happens |
 |------|-------------|
-| `pnpm add -g "abtars@>=..." "abmind@>=..." --allow-build=better-sqlite3` | Installs CLI tools globally |
+| `pnpm add -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"` | Installs CLI tools globally (explicit version avoids pnpm cache staleness) |
 | `abtars deps install all` | Installs optional npm packages (browser, PDF, YouTube, image) |
 | `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
 | `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption (discovers user from abtars) |
@@ -136,7 +139,9 @@ Install ollama before `abmind install` if you want local embeddings.
 Omit `--non-interactive` and the wizard will prompt for each value:
 
 ```bash
-pnpm add -g "abtars@>=0.3.2-alpha.0" "abmind@>=0.2.3-alpha.0" --allow-build=better-sqlite3
+ABTARS_V=$(npm view abtars@alpha version)
+ABMIND_V=$(npm view abmind@alpha version)
+pnpm add -g "abtars@$ABTARS_V" "abmind@$ABMIND_V"
 abtars deps install all
 abtars install
 abmind install
@@ -156,7 +161,7 @@ Set during install. Daemon mode starts automatically after `abtars install`. Sim
 | Channel | Command | Who |
 |---|---|---|
 | **Stable** | `pnpm install -g abtars abmind` | Normal users |
-| **Alpha** | `pnpm add -g "abtars@>=0.3.2-alpha.0" "abmind@>=0.2.3-alpha.0" --allow-build=better-sqlite3` | Early adopters |
+| **Alpha** | `pnpm add -g "abtars@$(npm view abtars@alpha version)" "abmind@$(npm view abmind@alpha version)"` | Early adopters |
 | **Dev** | `git clone` + `abtars update --local` | Contributors |
 
 ## Commands reference
