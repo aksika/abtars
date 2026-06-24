@@ -13,7 +13,7 @@ import type { MemoryManager } from "abmind";
 import type { SessionType } from "./spin-types.js";
 
 const TAG = "soul-bundle";
-const HOST_CORE_DIR = join(abtarsRoot(), "core");
+const HOST_CORE_DIR = abtarsRoot();
 
 function readOr(path: string): string {
   try { return existsSync(path) ? readFileSync(path, "utf-8").trim() : ""; } catch { return ""; }

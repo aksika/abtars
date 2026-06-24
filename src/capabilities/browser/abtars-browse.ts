@@ -75,7 +75,7 @@ export function validateArgs(args: BrowseArgs): { ok: true; task: string; chatId
 // --- Prompt loading ---
 
 export function loadBrowsePrompt(task: string, _chatId: number, taskId?: string): string {
-  const path = join(abtarsRoot(), "core", "prompts", "browsing_prompt.md");
+  const path = join(abtarsRoot(), "prompts", "browsing_prompt.md");
 
   if (!existsSync(path)) {
     throw new Error(`browsing_prompt.md not found at ${path}`);

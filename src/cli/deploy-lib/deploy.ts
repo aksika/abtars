@@ -317,38 +317,12 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
     }
   }
 
-  // Skills + prompts
-  const skillsSrc = join(paths.app, "core", "skills");
-  const skillsDst = join(paths.home, "skills", "core");
-  if (existsSync(skillsSrc)) {
-    rmSync(skillsDst, { recursive: true, force: true });
-    cpSync(skillsSrc, skillsDst, { recursive: true });
-  }
-  const promptsSrc = join(paths.app, "core", "prompts");
-  const promptsDst = join(paths.home, "core", "prompts");
-  if (existsSync(promptsSrc)) {
-    mkdirSync(promptsDst, { recursive: true });
-    for (const f of readdirSync(promptsSrc).filter(f => f.endsWith(".md"))) {
-      copyFileSync(join(promptsSrc, f), join(promptsDst, f));
-    }
-  }
+  // Reconcile runtime tree from templates
+  const { reconcile, migrate } = await import("./reconcile.js");
+  const templatesSrc = join(paths.app, "templates");
+  reconcile(templatesSrc, paths.home);
+  migrate(paths.home);
   process.stdout.write(`✓ skills + prompts synced\n`);
-
-  // Config seed (first install only — don't overwrite existing)
-  const releaseConfig = join(paths.app, "config");
-  const destConfig = join(paths.home, "config");
-  if (existsSync(releaseConfig)) {
-    mkdirSync(destConfig, { recursive: true });
-    for (const f of readdirSync(releaseConfig)) {
-      if (f.endsWith(".example")) {
-        cpSync(join(releaseConfig, f), join(destConfig, f));
-        const target = join(destConfig, f.replace(".example", ""));
-        if (!existsSync(target)) cpSync(join(releaseConfig, f), target);
-      }
-    }
-    const defaultTransport = join(releaseConfig, "transport.default.json");
-    if (existsSync(defaultTransport)) cpSync(defaultTransport, join(destConfig, "transport.default.json"));
-  }
 }
 
 // ── Copy abmind ─────────────────────────────────────────────────────────────

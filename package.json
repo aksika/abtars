@@ -50,7 +50,7 @@
   "license": "Apache-2.0",
   "files": [
     "bundle/",
-    "core/",
+    "templates/",
     "scripts/",
     "README.md",
     "LICENSE",

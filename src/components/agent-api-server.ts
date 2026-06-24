@@ -119,8 +119,8 @@ export class AgentApiServer {
     try {
       const name = deps.config.agentCodename;
       const candidates = [
-        join(abtarsRoot(), "core", "prompts", `agent_${name}.md`),
-        join(abtarsRoot(), "core", "prompts", "agent_default.md"),
+        join(abtarsRoot(), "prompts", `agent_${name}.md`),
+        join(abtarsRoot(), "prompts", "agent_default.md"),
       ];
       this.agentRules = "";
       for (const p of candidates) {

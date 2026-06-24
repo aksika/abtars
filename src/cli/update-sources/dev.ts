@@ -135,8 +135,8 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         await rm(stagedPath, { recursive: true, force: true });
         await mkdir(stagedPath, { recursive: true });
         await cp(bundleDir, join(stagedPath, 'bundle'), { recursive: true });
-        const coreDir = join(repoRoot, 'core');
-        if (existsSync(coreDir)) await cp(coreDir, join(stagedPath, 'core'), { recursive: true });
+        const templatesDir = join(repoRoot, 'templates');
+        if (existsSync(templatesDir)) await cp(templatesDir, join(stagedPath, 'templates'), { recursive: true });
         const configSrc = join(repoRoot, 'config');
         if (existsSync(configSrc)) await cp(configSrc, join(stagedPath, 'config'), { recursive: true });
         const manifestSrc = join(repoRoot, 'install-manifest.json');
@@ -168,20 +168,10 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
       await mkdir(stagedPath, { recursive: true });
       await cp(join(repoRoot, 'bundle'), join(stagedPath, 'bundle'), { recursive: true });
 
-      // Copy core skills for runtime sync
-      const coreSkillsSrc = join(repoRoot, 'core', 'skills');
-      if (existsSync(coreSkillsSrc)) {
-        await cp(coreSkillsSrc, join(stagedPath, 'core', 'skills'), { recursive: true });
-      }
-      // Copy core prompts (orc.md, worker.md) for runtime sync
-      const corePromptsSrc = join(repoRoot, 'core', 'prompts');
-      if (existsSync(corePromptsSrc)) {
-        await cp(corePromptsSrc, join(stagedPath, 'core', 'prompts'), { recursive: true });
-      }
-      // Copy config dir (models.json, examples, seeds)
-      const configSrc = join(repoRoot, 'config');
-      if (existsSync(configSrc)) {
-        await cp(configSrc, join(stagedPath, 'config'), { recursive: true });
+      // Copy templates/ for reconcile (skills, prompts, config seeds, tasks)
+      const templatesSrc = join(repoRoot, 'templates');
+      if (existsSync(templatesSrc)) {
+        await cp(templatesSrc, join(stagedPath, 'templates'), { recursive: true });
       }
 
       // Ensure ESM works
