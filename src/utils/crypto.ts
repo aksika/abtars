@@ -64,3 +64,29 @@ export function writeKeyFile(keyPath: string, master: Buffer): void {
   mkdirSync(dirname(keyPath), { recursive: true });
   writeFileSync(keyPath, master.toString("hex"), { mode: 0o600 });
 }
+
+const VERIFY_PLAINTEXT = "abtars-verify";
+
+/** Create key.verify file next to the key (encrypt known plaintext). */
+export function writeKeyVerify(keyPath: string, key: Buffer): void {
+  const iv = randomBytes(IV_LEN);
+  const cipher = createCipheriv(ALGO, key, iv);
+  const enc = Buffer.concat([cipher.update(VERIFY_PLAINTEXT, "utf-8"), cipher.final()]);
+  const blob = Buffer.concat([iv, enc, cipher.getAuthTag()]).toString("base64");
+  writeFileSync(join(dirname(keyPath), "key.verify"), blob, { mode: 0o600 });
+}
+
+/** Validate a key against key.verify. Returns true if key is correct. */
+export function validateKey(keyPath: string, key: Buffer): boolean {
+  try {
+    const blob = readFileSync(join(dirname(keyPath), "key.verify"), "utf-8").trim();
+    const buf = Buffer.from(blob, "base64");
+    const iv = buf.subarray(0, IV_LEN);
+    const tag = buf.subarray(buf.length - TAG_LEN);
+    const ct = buf.subarray(IV_LEN, buf.length - TAG_LEN);
+    const d = createDecipheriv(ALGO, key, iv);
+    d.setAuthTag(tag);
+    const result = d.update(ct, undefined, "utf-8") + d.final("utf-8");
+    return result === VERIFY_PLAINTEXT;
+  } catch { return false; }
+}

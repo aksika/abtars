@@ -65,16 +65,21 @@ for (const envPath of ENV_FILES) {
 }
 
 // Load secrets from ~/.abtars/secret/ — decrypt + auto-encrypt plaintext + load into process.env
-import { loadKey, deriveKey, encrypt, decrypt } from "../utils/crypto.js";
+import { loadKey, deriveKey, encrypt, decrypt, validateKey } from "../utils/crypto.js";
 
 export function reloadSecrets(): void {
   if (!existsSync(secretDir)) return;
 
-  const keyFile = resolve(secretDir, "abtars.key");
+  const keyFile = resolve(home, "config", "abtars.key");
   const master = loadKey(keyFile);
   const purposeKey = master ? deriveKey(master) : null;
 
-  const SKIP_ENCRYPT = new Set(["WEB_AUTH_TOKEN", "abtars.key"]);
+  if (purposeKey && !validateKey(keyFile, purposeKey)) {
+    process.stderr.write(`[env] ⚠ abtars.key failed verification — secrets will not be decrypted (wrong passphrase?)\n`);
+    return;
+  }
+
+  const SKIP_ENCRYPT = new Set(["WEB_AUTH_TOKEN"]);
 
   for (const file of readdirSync(secretDir)) {
     const fullPath = resolve(secretDir, file);
