@@ -711,7 +711,6 @@ async function seedDefaultTasks(chatId: string, abtarsHome: string): Promise<voi
     if (existsSync(p)) { templatePath = p; break; }
   }
   if (!templatePath) {
-    process.stdout.write(`• tasks.json template not found — skipping default-task seed\n`);
     return;
   }
 
