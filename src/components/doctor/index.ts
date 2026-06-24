@@ -6,6 +6,7 @@
 import { logInfo } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
 import { abmindHome } from "../../paths.js";
+import { getEnv } from "../env-schema.js";
 
 const TAG = "doctor";
 
@@ -35,7 +36,7 @@ export interface DoctorCtx {
 
 type ProbeFn = (ctx: DoctorCtx) => Promise<ProbeResult>;
 
-function withTimeout(probe: ProbeFn, timeoutMs: number): ProbeFn {
+function withTimeout(probe: ProbeFn, timeoutMs: number, name: string): ProbeFn {
   return async (ctx) => {
     const start = Date.now();
     try {
@@ -45,7 +46,7 @@ function withTimeout(probe: ProbeFn, timeoutMs: number): ProbeFn {
       ]);
       return result;
     } catch (err) {
-      return { name: "unknown", status: "failed", latencyMs: Date.now() - start, detail: `timeout after ${timeoutMs}ms` };
+      return { name, status: "failed", latencyMs: Date.now() - start, detail: `timeout after ${timeoutMs}ms` };
     }
   };
 }
@@ -144,7 +145,7 @@ const probeCoreFiles: ProbeFn = async (_ctx) => {
 
 const probeTlsIdentity: ProbeFn = async (_ctx) => {
   const start = Date.now();
-  const { getEnv } = await import("../../boot/env.js");
+  
   if (!getEnv().enableAgentApi) return { name: "tls-identity", status: "ok", latencyMs: Date.now() - start, detail: "agent-api disabled, skipped" };
   const { existsSync } = await import("node:fs");
   const { execSync } = await import("node:child_process");
@@ -236,7 +237,7 @@ const probeInstanceName: ProbeFn = async (_ctx) => {
 
 const probeAgentApi: ProbeFn = async (_ctx) => {
   const start = Date.now();
-  const { getEnv } = await import("../../boot/env.js");
+  
   if (!getEnv().enableAgentApi) return { name: "agent api", status: "ok", latencyMs: Date.now() - start, detail: "agent-api disabled, skipped" };
   const { existsSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -282,27 +283,27 @@ const probeProcessHealth: ProbeFn = async (_ctx) => {
   }
 };
 
-const PROBES: Array<{ fn: ProbeFn; timeout: number }> = [
+const PROBES: Array<{ fn: ProbeFn; timeout: number; name: string }> = [
   // Static file checks
-  { fn: probeCoreFiles, timeout: 1000 },
-  { fn: probeSecretPerms, timeout: 1000 },
-  { fn: probeTlsIdentity, timeout: 2000 },
-  { fn: probeFtsIntegrity, timeout: 3000 },
+  { fn: probeCoreFiles, timeout: 1000, name: "core-files" },
+  { fn: probeSecretPerms, timeout: 1000, name: "secret-perms" },
+  { fn: probeTlsIdentity, timeout: 2000, name: "tls-identity" },
+  { fn: probeFtsIntegrity, timeout: 3000, name: "fts-integrity" },
   // Memory
-  { fn: probeAbmindCli, timeout: 3000 },
-  { fn: probeMemory, timeout: 5000 },
-  { fn: probeHeartbeat, timeout: 2000 },
+  { fn: probeAbmindCli, timeout: 3000, name: "abmind-cli" },
+  { fn: probeMemory, timeout: 5000, name: "memory" },
+  { fn: probeHeartbeat, timeout: 2000, name: "heartbeat" },
   // Transport + platforms
-  { fn: probeTransport, timeout: 10000 },
-  { fn: probeTelegram, timeout: 5000 },
-  { fn: probeDiscord, timeout: 5000 },
-  { fn: probeIrc, timeout: 5000 },
+  { fn: probeTransport, timeout: 10000, name: "transport" },
+  { fn: probeTelegram, timeout: 5000, name: "telegram" },
+  { fn: probeDiscord, timeout: 5000, name: "discord" },
+  { fn: probeIrc, timeout: 5000, name: "irc" },
   // Infra
-  { fn: probeOllama, timeout: 5000 },
-  { fn: probeDashboard, timeout: 5000 },
-  { fn: probeAgentApi, timeout: 1000 },
-  { fn: probeInstanceName, timeout: 1000 },
-  { fn: probeProcessHealth, timeout: 1000 },
+  { fn: probeOllama, timeout: 5000, name: "ollama" },
+  { fn: probeDashboard, timeout: 5000, name: "dashboard" },
+  { fn: probeAgentApi, timeout: 1000, name: "agent-api" },
+  { fn: probeInstanceName, timeout: 1000, name: "instance-name" },
+  { fn: probeProcessHealth, timeout: 1000, name: "process-health" },
 ];
 
 let lastReport: { report: DoctorReport; generatedAt: number } | null = null;
@@ -316,11 +317,7 @@ export async function getDoctorReport(ctx: DoctorCtx, opts?: { force?: boolean }
 
   const start = Date.now();
   const results = await Promise.all(
-    PROBES.map(p => withTimeout(p.fn, p.timeout)(ctx).then(r => {
-      // withTimeout may return name="unknown" — fix it
-      if (r.name === "unknown") r.name = "probe";
-      return r;
-    }))
+    PROBES.map(p => withTimeout(p.fn, p.timeout, p.name)(ctx))
   );
 
   // Add boot phases not covered by active probes
