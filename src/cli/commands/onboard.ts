@@ -1,4 +1,5 @@
 import { printBanner } from './banner.js';
+import { deriveFromPassphrase, writeKeyFile } from '../../utils/crypto.js';
 /**
  * `abtars onboard` — first-time interactive configuration wizard
  * (plan #158 Phase 3, subsumes ticket #153).
@@ -661,7 +662,6 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   // Initialize passphrase-based encryption — generate abtars.key (#1166)
   if (answers.passphrase && answers.userName) {
     try {
-      const { deriveFromPassphrase, writeKeyFile } = await import("../../utils/crypto.js");
       const master = deriveFromPassphrase(answers.passphrase, answers.userName);
       const keyPath = join(paths.home, "secret", "abtars.key");
       writeKeyFile(keyPath, master);

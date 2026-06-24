@@ -65,11 +65,11 @@ for (const envPath of ENV_FILES) {
 }
 
 // Load secrets from ~/.abtars/secret/ — decrypt + auto-encrypt plaintext + load into process.env
+import { loadKey, deriveKey, encrypt, decrypt } from "../utils/crypto.js";
 
 export function reloadSecrets(): void {
   if (!existsSync(secretDir)) return;
 
-  const { loadKey, deriveKey, encrypt, decrypt } = require("../utils/crypto.js") as typeof import("../utils/crypto.js");
   const keyFile = resolve(secretDir, "abtars.key");
   const master = loadKey(keyFile);
   const purposeKey = master ? deriveKey(master) : null;
