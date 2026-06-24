@@ -123,9 +123,13 @@ export async function startBridge(): Promise<number> {
   // Boot-time doctor fix — chmod secrets, fix dirs (#1180)
   try {
     const { spawnSync } = await import("node:child_process");
-    const { abtarsRoot } = await import("./paths.js");
     const { join } = await import("node:path");
-    spawnSync("bash", [join(abtarsRoot(), "scripts", "doctor.sh"), "--fix"], { timeout: 15000, stdio: "pipe" });
+    const { homedir } = await import("node:os");
+    const doctorPath = join(homedir(), ".abtars-releases", "src", "abtars", "scripts", "doctor.sh");
+    const { existsSync } = await import("node:fs");
+    if (existsSync(doctorPath)) {
+      spawnSync("bash", [doctorPath, "--fix"], { timeout: 15000, stdio: "pipe" });
+    }
   } catch { /* non-fatal */ }
 
   // Populate version/commit from manifest.json
