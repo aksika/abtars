@@ -76,10 +76,12 @@ export function writeKeyVerify(keyPath: string, key: Buffer): void {
   writeFileSync(join(dirname(keyPath), "key.verify"), blob, { mode: 0o600 });
 }
 
-/** Validate a key against key.verify. Returns true if key is correct. */
+/** Validate a key against key.verify. Returns true if key is correct or no verify file exists. */
 export function validateKey(keyPath: string, key: Buffer): boolean {
+  const verifyPath = join(dirname(keyPath), "key.verify");
+  if (!existsSync(verifyPath)) return true; // no verify file = skip validation
   try {
-    const blob = readFileSync(join(dirname(keyPath), "key.verify"), "utf-8").trim();
+    const blob = readFileSync(verifyPath, "utf-8").trim();
     const buf = Buffer.from(blob, "base64");
     const iv = buf.subarray(0, IV_LEN);
     const tag = buf.subarray(buf.length - TAG_LEN);
