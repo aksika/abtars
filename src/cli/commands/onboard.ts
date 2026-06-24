@@ -143,6 +143,25 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
   });
   if (isCancel(installMode)) { cancel('Cancelled.'); return null; }
 
+  // 2b. Your name (used for encryption + user identity)
+  if (!userName) {
+    const uname = await text({
+      message: 'Your name (used for encryption + identity)',
+      placeholder: 'aksika',
+      validate: (v) => v?.trim() ? undefined : 'required',
+    });
+    if (isCancel(uname)) { cancel('Cancelled.'); return null; }
+    userName = String(uname).trim();
+  }
+
+  // 2c. Encryption passphrase (mandatory — protects secrets at rest)
+  const passphrase = await text({
+    message: 'Encryption passphrase (protects secrets at rest)',
+    placeholder: 'choose a strong passphrase',
+    validate: (v) => v?.trim() ? undefined : 'required — secrets are encrypted with this',
+  });
+  if (isCancel(passphrase)) { cancel('Cancelled.'); return null; }
+
   // 3. Security mode
   const securityMode = await select({
     message: 'Security mode (seatbelt/guardrails/none)',
@@ -286,7 +305,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     installMode: installMode as "simple" | "daemon",
     userName,
     instanceName: String(instanceName ?? '').trim(),
-    passphrase: opts.passphrase ?? '',
+    passphrase: String(passphrase).trim(),
     telegramToken: String(telegramToken ?? '').trim(),
     telegramChatId: String(telegramChatId ?? '').trim(),
     discordBotToken: String(discordBotToken ?? '').trim(),
@@ -330,6 +349,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   if (!opts.telegramToken) return '--telegram-token is required in non-interactive mode';
   if (!opts.telegramChatId) return '--telegram-chat-id is required in non-interactive mode';
   if (!opts.userName) return '--user-name is required in non-interactive mode';
+  if (!opts.passphrase) return '--passphrase is required in non-interactive mode';
   const provider = (opts.defaultProvider ?? 'openrouter') as ProviderChoice;
   if (!VALID_PROVIDERS.includes(provider)) {
     return `--default-provider must be one of: ${VALID_PROVIDERS.join(', ')}`;
