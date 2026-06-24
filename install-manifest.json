@@ -78,6 +78,10 @@
       "dest": "config/sha-policy.json"
     },
     {
+      "source": "templates/config/default-minimal.md",
+      "dest": "config/default-minimal.md"
+    },
+    {
       "source": "tasks.default.json",
       "dest": "tasks/tasks.json"
     },

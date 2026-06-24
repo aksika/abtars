@@ -68,8 +68,10 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
     }
 
     if (!memory) {
-      // Memory not available — tell model explicitly
-      parts.push("[SYSTEM] Memory unavailable. memory_recall/memory_store tools disabled. Operate without persistent memory.");
+      // No memory provider — use default-minimal.md fallback bundle (#1164)
+      const minimal = readOr(join(abtarsHome(), "config", "default-minimal.md"));
+      if (minimal) parts.push(minimal);
+      else parts.push("[SYSTEM] Memory unavailable. Operate without persistent memory.");
     } else {
       // Normal: full bundle
       if (bundle!.soul) parts.push(bundle!.soul);
