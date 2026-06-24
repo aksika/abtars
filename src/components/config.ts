@@ -177,27 +177,13 @@ export async function loadAndValidateConfig(): Promise<Config> {
 
   // --- DISCORD_BOT_TOKEN (optional — Discord disabled if absent) ---
   const discordBotToken = getEnv().discordBotToken;
-  let discordEnabled = !!discordBotToken;
+  const discordEnabled = !!discordBotToken;
+  const discordAppId = getEnv().discordAppId;
 
-  let discordAppId: string | undefined;
   let discordAllowedUserIds: Set<string> | undefined;
-
   if (discordEnabled) {
-    // --- DISCORD_APP_ID (required when Discord enabled) ---
-    const rawAppId = getEnv().discordAppId;
-    if (!rawAppId || !isValidSnowflake(rawAppId)) {
-      logWarn("config", "DISCORD_APP_ID missing or invalid — disabling Discord");
-      discordEnabled = false;
-    } else {
-      discordAppId = rawAppId;
-      // Discord user IDs from users.json
-      const discordUsers = registry.users.filter(u => u.platforms.discord);
-      discordAllowedUserIds = new Set(discordUsers.map(u => u.platforms.discord!));
-      if (discordAllowedUserIds.size === 0) {
-        logWarn("config", "No Discord users in users.json — disabling Discord");
-        discordEnabled = false;
-      }
-    }
+    const discordUsers = registry.users.filter(u => u.platforms.discord);
+    discordAllowedUserIds = new Set(discordUsers.map(u => u.platforms.discord!));
   }
 
   const resolvedMainChatId = mainChatId ?? String([...allowedUserIds][0] ?? "");
