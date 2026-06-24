@@ -657,15 +657,14 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     }
   }
 
-  // Initialize passphrase-based encryption (#607)
+  // Initialize passphrase-based encryption — generate abtars.key (#1166)
   if (answers.passphrase && answers.userName) {
     try {
-      const { deriveFromPassphrase, writeKeyVerify } = await import("abmind");
-      const { writeToKeyring } = await import("abmind");
-      const key = deriveFromPassphrase(answers.passphrase, answers.userName);
-      writeKeyVerify(key);
-      const stored = writeToKeyring(answers.passphrase);
-      process.stdout.write(`✓ Encryption key derived from passphrase${stored ? " (stored in keyring)" : ""}\n`);
+      const { deriveFromPassphrase, writeKeyFile } = await import("../../utils/crypto.js");
+      const master = deriveFromPassphrase(answers.passphrase, answers.userName);
+      const keyPath = join(paths.home, "secret", "abtars.key");
+      writeKeyFile(keyPath, master);
+      process.stdout.write(`✓ abtars.key derived from passphrase\n`);
     } catch (err) {
       process.stdout.write(`⚠ Key init failed: ${err instanceof Error ? err.message : String(err)}\n`);
     }
