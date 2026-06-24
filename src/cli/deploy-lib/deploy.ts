@@ -6,7 +6,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, mkdirSync, copyFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { execSync, spawn } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 import { acquireLock, atomicSwap, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
 import { makeLocalBuildSource } from "../update-sources/dev.js";
@@ -96,7 +96,12 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       delete pkg.dependencies?.patchright;
       delete pkg.dependencies?.["rettiwt-api"];
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
-      execSync("pnpm install --prod --ignore-scripts 2>/dev/null", { cwd: staged.stagedPath, timeout: 120_000 });
+      const pnpmBin = spawnSync("which", ["pnpm"], { encoding: "utf-8" }).stdout.trim() || "pnpm";
+      try {
+        execSync(`${pnpmBin} install --prod --allow-build=better-sqlite3`, { cwd: staged.stagedPath, timeout: 120_000 });
+      } catch {
+        execSync("npm install --production", { cwd: staged.stagedPath, timeout: 120_000 });
+      }
       process.stdout.write(`✓ external deps installed\n`);
     } catch { process.stdout.write(`⚠ external deps install failed\n`); }
 

@@ -49,7 +49,20 @@ function db(): SqliteDb {
     const dir = join(abtarsHome(), "kanban");
     mkdirSync(dir, { recursive: true });
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Database = require("better-sqlite3");
+    let Database: any;
+    try {
+      Database = require("better-sqlite3");
+    } catch {
+      // Self-heal: attempt native rebuild (#1185)
+      try {
+        const { execSync } = require("node:child_process");
+        const modPath = require.resolve("better-sqlite3/package.json").replace("/package.json", "");
+        execSync("npx --yes node-gyp rebuild", { cwd: modPath, timeout: 60_000, stdio: "pipe" });
+        Database = require("better-sqlite3");
+      } catch (e) {
+        throw new Error(`better-sqlite3 not available and rebuild failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
     _db = new Database(join(dir, "kanban.db")) as SqliteDb;
     _db.pragma("journal_mode = WAL");
     _db.exec(`CREATE TABLE IF NOT EXISTS kanban_board (
