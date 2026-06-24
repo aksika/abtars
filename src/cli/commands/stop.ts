@@ -81,9 +81,8 @@ export async function stop(opts: {}): Promise<number> {
       // Retry in case launchd respawned before bootout took effect
       try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); } catch {}
     } else {
-      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000 }); } catch {}
-      try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 5000 }); } catch {}
-      try { execFileSync("systemctl", ["--user", "mask", "abtars-watchdog"], { timeout: 5000 }); } catch {}
+      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); } catch {}
+      try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); } catch {}
     }
   }
 
