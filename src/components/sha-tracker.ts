@@ -52,6 +52,7 @@ type StateFile = Record<string, FaultState>;
 
 let cachedPolicy: PolicyFile | null = null;
 let policyCorrupt = false;
+let shaDisabled = process.env["SELFHEAL_ENABLED"] === "false";
 
 function abtarsHome(): string {
   return process.env["ABTARS_HOME"] ?? join(homedir(), ".abtars");
@@ -62,14 +63,16 @@ function selfPolicyPath(): string { return join(abtarsHome(), "config", "sha-pol
 function statePath(): string { return join(abtarsHome(), "state", "sha-state.json"); }
 
 function loadPolicy(): PolicyFile | null {
+  if (shaDisabled) return null;
   if (cachedPolicy) return cachedPolicy;
   try {
     cachedPolicy = JSON.parse(readFileSync(policyPath(), "utf-8"));
     policyCorrupt = false;
     return cachedPolicy;
   } catch {
-    logWarn(TAG, "sha-policy.json missing or invalid — denying all attempts (circuit breaker)");
+    logWarn(TAG, "sha-policy.json missing or invalid — self-healer disabled until restart");
     policyCorrupt = true;
+    shaDisabled = true;
     return null;
   }
 }
