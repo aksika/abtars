@@ -40,6 +40,7 @@ export interface OnboardOptions {
   readonly discordA2aChannel?: string;
   readonly userName?: string;
   readonly instanceName?: string;
+  readonly passphrase?: string;
   readonly force: boolean;
 }
 
@@ -284,7 +285,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
     installMode: installMode as "simple" | "daemon",
     userName,
     instanceName: String(instanceName ?? '').trim(),
-    passphrase: '',
+    passphrase: opts.passphrase ?? '',
     telegramToken: String(telegramToken ?? '').trim(),
     telegramChatId: String(telegramChatId ?? '').trim(),
     discordBotToken: String(discordBotToken ?? '').trim(),
@@ -336,7 +337,7 @@ function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
     installMode: 'daemon',
     userName: opts.userName ?? '',
     instanceName: opts.instanceName ?? '',
-    passphrase: '',
+    passphrase: opts.passphrase ?? '',
     telegramToken: opts.telegramToken ?? '',
     telegramChatId: opts.telegramChatId ?? '',
     discordBotToken: '',
@@ -369,7 +370,7 @@ async function readExisting(envPath: string): Promise<WizardAnswers | null> {
       installMode: 'simple',
       userName: kv.get('USER_DISPLAY_NAME') ?? '',
       instanceName: '',
-      passphrase: '',
+      passphrase: opts.passphrase ?? '',
       telegramToken: kv.get('TELEGRAM_BOT_TOKEN') ?? '',
       telegramChatId: kv.get('MAIN_CHAT_ID') ?? '',
       discordBotToken: kv.get('DISCORD_BOT_TOKEN') ?? '',

@@ -104,6 +104,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           discordA2aChannel: typeof flags.get('discord-a2a-channel') === 'string' ? (flags.get('discord-a2a-channel') as string) : undefined,
           userName: typeof flags.get('user-name') === 'string' ? (flags.get('user-name') as string) : undefined,
           instanceName: typeof flags.get('instance-name') === 'string' ? (flags.get('instance-name') as string) : undefined,
+          passphrase: typeof flags.get('passphrase') === 'string' ? (flags.get('passphrase') as string) : undefined,
           force: flags.get('force') === true,
         });
       case 'uninstall':
