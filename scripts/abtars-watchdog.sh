@@ -64,7 +64,7 @@ while true; do
 
   # Start bridge
   BRIDGE_REASON="${REASON:-watchdog-respawn}"
-  cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="$AB/lib/node_modules:${ABMIND_HOME:-$HOME/.abmind}/lib/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$BRIDGE_REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
+  cd "$AB" && ABTARS_WATCHDOG_PID=$$ NODE_PATH="$HOME/.abtars-releases/deps/node_modules:${NODE_PATH:-}" ABTARS_START_REASON="$BRIDGE_REASON" nohup node --max-old-space-size=1024 app/bundle/abtars.js >> "$LOG" 2>&1 200>&- &
   PID=$!
   disown $PID
   SPAWNED_AT=$(date +%s)

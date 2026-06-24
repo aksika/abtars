@@ -1,9 +1,10 @@
 /**
  * lazy-require.ts — Install optional deps on first use.
- * Installs into ~/.abtars/lib/node_modules/. Falls back gracefully.
+ * Installs into ~/.abtars-releases/deps/node_modules/. Falls back gracefully.
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { logInfo, logWarn } from "../components/logger.js";
 import { abtarsHome } from "../paths.js";
 
@@ -37,7 +38,7 @@ export const SYSTEM_DEPS: Record<string, SystemDep> = {
 };
 
 function libDir(): string {
-  const d = join(abtarsHome(), "lib");
+  const d = join(homedir(), ".abtars-releases", "deps");
   mkdirSync(d, { recursive: true });
   return d;
 }
@@ -46,12 +47,12 @@ function libNodeModules(): string {
   return join(libDir(), "node_modules");
 }
 
-/** Check if a package is installed in ~/.abtars/lib/ */
+/** Check if a package is installed in ~/.abtars-releases/deps/ */
 export function isInstalled(pkg: string): boolean {
   return existsSync(join(libNodeModules(), pkg));
 }
 
-/** Install packages into ~/.abtars/lib/ */
+/** Install packages into ~/.abtars-releases/deps/ */
 export function installPackages(packages: readonly string[]): void {
   const { execSync } = require("node:child_process");
   const dir = libDir();

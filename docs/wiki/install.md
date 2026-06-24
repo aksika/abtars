@@ -156,6 +156,12 @@ abmind install
 
 Set during install. Daemon mode starts automatically after `abtars install`. Simple mode requires `abtars start`.
 
+**Simple mode note:** If you use optional deps (`abtars deps install`), add to your shell profile:
+```bash
+export NODE_PATH="$HOME/.abtars-releases/deps/node_modules:$NODE_PATH"
+```
+Daemon mode sets this automatically.
+
 ## Install channels
 
 | Channel | Command | Who |
@@ -200,11 +206,11 @@ In simple mode, `update` deploys but doesn't restart. Run `abtars start` after.
 ├── secret/              # API keys (encrypted at rest after first boot)
 ├── skills/              # core/ + custom/
 ├── logs/                # bridge-YYYY-MM-DD.log, watchdog.log
-├── app -> releases/current  # symlink to active release
-└── lib/                 # optional deps (abtars deps install)
+└── app -> releases/current  # symlink to active release
 
 ~/.abtars-releases/
 ├── src/                 # source checkouts (abtars/, abmind/)
+├── deps/node_modules/   # optional deps (abtars deps install)
 ├── <commit>/            # deployed releases
 ├── current -> <commit>  # active release symlink
 └── history.json         # release history

@@ -92,6 +92,21 @@ function walkFiles(dir: string): string[] {
 
 /** Config format migrations (idempotent). */
 export function migrate(home: string): void {
+  // #1185: move ~/.abtars/lib/ → ~/.abtars-releases/deps/
+  const oldLib = join(home, "lib");
+  if (existsSync(join(oldLib, "node_modules"))) {
+    const { homedir } = require("node:os");
+    const newDeps = join(homedir(), ".abtars-releases", "deps");
+    if (!existsSync(newDeps)) {
+      const { renameSync } = require("node:fs");
+      renameSync(oldLib, newDeps);
+      logInfo(TAG, "Migrated: ~/.abtars/lib/ → ~/.abtars-releases/deps/");
+    } else {
+      rmSync(oldLib, { recursive: true, force: true });
+      logInfo(TAG, "Removed: ~/.abtars/lib/ (deps already at new location)");
+    }
+  }
+
   // irc-secure-to-signed: rename "secure" → "signed" in irc.json
   const ircPath = join(home, "config", "irc.json");
   if (existsSync(ircPath)) {
