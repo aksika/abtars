@@ -13,7 +13,7 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
  * - In-proc watchdog setInterval (WD_THRESHOLD_MS = hbInterval × 3)
  * - Capability-registered commands + heartbeat tasks
  * - Nerve card:done subscription for instant kanban delivery
- * - heartbeat.start() + memory.setHeartbeat()
+ * - heartbeat.start()
  *
  * Must run after phase-platforms (tasks read ctx.telegramAdapter lazily via closures).
  * Must run after phase-pipeline-deps (selfHealerTask mutates pipelineDeps in place).
@@ -23,7 +23,7 @@ import { logAndSwallow } from "../components/log-and-swallow.js";
  */
 
 import { join } from "node:path";
-import { HeartbeatSystem } from "../components/heartbeat-system.js";
+import { HeartbeatSystem, setHeartbeatInstance } from "../components/heartbeat-system.js";
 import { classifyResume } from "../components/platform-detect.js";
 import {
   writeRestartReason, readAndClearRestartRequested, readBridgeLockField, updateBridgeLockField, writeSleepStatus,
@@ -83,6 +83,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     },
   });
   ctx.heartbeat = heartbeat;
+  setHeartbeatInstance(heartbeat);
 
   // --- Tier 1 tasks (no transport/pipeline deps) ---
   heartbeat.registerTask(createSkillStatsFlushTask());
@@ -103,7 +104,7 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
 
   // Start heartbeat immediately — watchdog kick from tick 1 (Tier 1)
   heartbeat.start();
-  memory?.setHeartbeat(heartbeat);
+
   logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
 
   // --- Tier 3 tasks (require transport + pipeline) ---

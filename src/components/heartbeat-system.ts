@@ -164,3 +164,8 @@ export class HeartbeatSystem implements ITaskSlot {
     this.config.onTick?.();
   }
 }
+
+// #1181: Module-level singleton for local access (avoids circular dep via abmind)
+let _instance: HeartbeatSystem | null = null;
+export function setHeartbeatInstance(hb: HeartbeatSystem): void { _instance = hb; }
+export function getHeartbeatInstance(): HeartbeatSystem | null { return _instance; }

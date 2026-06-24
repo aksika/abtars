@@ -5,8 +5,10 @@
 
 import { logInfo } from "../logger.js";
 import { logAndSwallow } from "../log-and-swallow.js";
-import { abmindHome } from "../../paths.js";
+import { abmindHome, abtarsHome } from "../../paths.js";
 import { getEnv } from "../env-schema.js";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 
 const TAG = "doctor";
 
@@ -25,7 +27,7 @@ export interface DoctorReport {
 }
 
 export interface DoctorCtx {
-  memory?: { getStats: () => any; getCronInfo: () => any } | null;
+  memory?: { getStats: () => any } | null;
   transport?: { sendPrompt: (key: string, msg: string) => Promise<string> } | null;
   telegramRunning?: boolean;
   discordRunning?: boolean;
@@ -272,6 +274,20 @@ const probeProcessHealth: ProbeFn = async (_ctx) => {
   }
 };
 
+// #1181: NEW heartbeat probe — reads bridge.lock directly (no abmind dependency)
+const probeHeartbeat: ProbeFn = async () => {
+  const start = Date.now();
+  try {
+    const lockPath = join(abtarsHome(), "bridge.lock");
+    const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
+    const age = Date.now() - (lock.lastHeartbeat ?? 0);
+    if (age > 120_000) return { name: "heartbeat", status: "failed", latencyMs: Date.now() - start, detail: `stale (${Math.round(age / 1000)}s ago)` };
+    return { name: "heartbeat", status: "ok", latencyMs: Date.now() - start };
+  } catch {
+    return { name: "heartbeat", status: "skipped", latencyMs: Date.now() - start, detail: "no bridge.lock" };
+  }
+};
+
 const PROBES: Array<{ fn: ProbeFn; timeout: number; name: string }> = [
   // Memory mode check (first)
   { fn: async () => getEnv().memory === "none" ? { name: "memory-mode", status: "warn" as const, latencyMs: 0, detail: "No persistent memory available" } : { name: "memory-mode", status: "ok" as const, latencyMs: 0, detail: `provider: ${getEnv().memory}` }, timeout: 100, name: "memory-mode" },
@@ -283,6 +299,7 @@ const PROBES: Array<{ fn: ProbeFn; timeout: number; name: string }> = [
   // Memory
   { fn: probeAbmindCli, timeout: 3000, name: "abmind-cli" },
   { fn: probeMemory, timeout: 5000, name: "memory" },
+  { fn: probeHeartbeat, timeout: 1000, name: "heartbeat" },
   // Transport + platforms
   { fn: probeTransport, timeout: 10000, name: "transport" },
   { fn: probeTelegram, timeout: 5000, name: "telegram" },

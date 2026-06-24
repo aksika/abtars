@@ -79,8 +79,8 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
         contextPercent: transport.contextPercent,
       },
       memory: memory ? { getStats: (userId?: string) => memory.getStats(userId) } : null,
-      heartbeat: memory
-        ? { running: memory.getStats()?.heartbeatRunning ?? false, intervalMs: heartbeat.intervalMs, tasks: heartbeat.getTaskNames().map(n => ({ name: n })) }
+      heartbeat: heartbeat
+        ? { running: heartbeat.isRunning, intervalMs: heartbeat.intervalMs, tasks: heartbeat.getTaskNames().map(n => ({ name: n })) }
         : null,
       notebooklm: nlmConfig.enabled,
       agentApi: ctx.agentApiServer ? { getTrafficLog: () => ctx.agentApiServer!.getTrafficLog() } : null,

@@ -104,19 +104,21 @@ export async function handleRestart(_text: string, ctx: CommandContext): Promise
 }
 
 export async function handleHeartbeat(_text: string, ctx: CommandContext): Promise<boolean> {
-  const cronInfo = ctx.memory?.getCronInfo();
-  if (!cronInfo) { await ctx.reply("💓 Heartbeat not available."); return true; }
+  const { getHeartbeatInstance } = await import("../heartbeat-system.js");
+  const hb = getHeartbeatInstance();
+  if (!hb) { await ctx.reply("💓 Heartbeat not available."); return true; }
 
-  const mins = Math.round(cronInfo.intervalMs / 60000);
+  const mins = Math.round(hb.intervalMs / 60000);
   const lines = [
-    `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min interval)`,
+    `💓 Heartbeat: ${hb.isRunning ? "running" : "stopped"} (${mins}min interval)`,
     "",
   ];
 
   // Task statuses
-  if (cronInfo.taskStatuses.size > 0) {
+  const statuses = hb.getTaskStatuses();
+  if (statuses.size > 0) {
     lines.push("Tasks (last tick):");
-    for (const [name, status] of cronInfo.taskStatuses) {
+    for (const [name, status] of statuses) {
       lines.push(`  ${status} ${name}`);
     }
   }
@@ -243,7 +245,8 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
   const ctxPct = ctx.transport.contextPercent >= 0
     ? `${ctx.transport.contextPercent}%`
     : "n/a";
-  const cronInfo = ctx.memory?.getCronInfo();
+  const { getHeartbeatInstance } = await import("../heartbeat-system.js");
+  const hb = getHeartbeatInstance();
 
   // Transport details from transport.json
   const { loadTransport: lt, resolveAgent: ra } = await import("../transport-config.js");
@@ -264,16 +267,21 @@ async function buildStatusLines(ctx: CommandContext): Promise<string[]> {
     `📊 Context window: ${ctxPct}`,
     `⏱️ Uptime: ${uptime}`,
   ];
-  if (cronInfo) {
-    const mins = Math.round(cronInfo.intervalMs / 60000);
+  if (hb) {
+    const mins = Math.round(hb.intervalMs / 60000);
     lines.push(
-      `💓 Heartbeat: ${cronInfo.heartbeatRunning ? "running" : "stopped"} (${mins}min)`,
+      `💓 Heartbeat: ${hb.isRunning ? "running" : "stopped"} (${mins}min)`,
     );
     if (ctx.loadedCapabilities?.length) {
       lines.push(`🔌 Capabilities: ${ctx.loadedCapabilities.join(", ")}`);
     }
-    lines.push(`😴 Last sleep: ${cronInfo.lastSleepAudit ?? "(never)"}`);
-    const sp = ctx.sleepProgress?.();
+    // Last sleep audit from filesystem
+    try {
+      const { readdirSync } = await import("node:fs");
+      const sleepDir = join(homedir(), ".abmind", "memory", "sleep");
+      const files = readdirSync(sleepDir).filter((f: string) => f.startsWith("sleep_")).sort();
+      lines.push(`😴 Last sleep: ${files.length > 0 ? files[files.length - 1] : "(never)"}`);
+    } catch { lines.push("😴 Last sleep: (unknown)"); }    const sp = ctx.sleepProgress?.();
     if (sp) {
       lines.push(`😴 Sleep: ${sp.percent}% (${sp.step})`);
     }
