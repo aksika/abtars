@@ -108,7 +108,10 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
     const fb = getEnvFallback();
     const fbValidation = validateProviderReady(fb.providerName, fb.provider, getEnv());
     if (!fbValidation.ok) {
-      throw new Error(`No transport.json, no backup, and .env emergency model also invalid: ${fbValidation.reason}`);
+      logError("main", `No transport.json, no backup, and .env emergency model also invalid: ${fbValidation.reason}`);
+      logWarn("main", "Transport unavailable — running in Tier 2 (no agent responses)");
+      ctx.transport = null;
+      return "skipped";
     }
     logWarn("main", `⚠️ No transport.json — emergency mode: ${fb.model} via ${fb.providerName}`);
     resolved = { model: fb.model, provider: fb.provider, providerName: fb.providerName, contextWindow: fb.contextWindow, maxOutput: fb.maxOutput, fallbacks: [] };
@@ -149,7 +152,10 @@ export async function buildTransport(ctx: BootCtx): Promise<PhaseResult> {
         logError("main", `All models failed init (${tried}) — keeping existing transport up`);
         return "ran";
       }
-      throw new Error(`All configured models failed init (${tried}). Fix transport.json or use /emergency`);
+      logError("main", `All configured models failed init (${tried}). Fix transport.json or use /emergency`);
+      logWarn("main", "Transport unavailable — running in Tier 2 (no agent responses)");
+      ctx.transport = null;
+      return "skipped";
     }
   }
 

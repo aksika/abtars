@@ -44,11 +44,7 @@ const TAG = "heartbeat";
 
 export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   const { config, memoryConfig, memory, transport, cronQueue, pipelineDeps, capabilities } = ctx;
-  if (!transport || !cronQueue || !pipelineDeps) {
-    ctx.phaseHealth.set(phaseHeartbeat.name, { status: "skipped", error: "no transport/cronQueue/pipelineDeps" }); logWarn("boot", `${phaseHeartbeat.name}: skipping — deps not available`); return "skipped";
-  }
-
-  const cronCallback = createCronCallback(ctx);
+  // Tier 3 deps may be null if transport failed — core heartbeat still starts
 
   // #613: initialize skill usage stats from disk
   const { init: initSkillStats } = await import("../components/skill-stats.js");
@@ -87,6 +83,36 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     },
   });
   ctx.heartbeat = heartbeat;
+
+  // --- Tier 1 tasks (no transport/pipeline deps) ---
+  heartbeat.registerTask(createSkillStatsFlushTask());
+  heartbeat.registerTask(createSkillReloadTask());
+  heartbeat.registerTask(createUpdateCheckTask((msg) => {
+    import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(err => logAndSwallow(TAG, "sendNotification update-check", err));
+  }));
+  heartbeat.registerTask({
+    name: "restart-check",
+    execute: async () => {
+      const req = readAndClearRestartRequested();
+      if (req) {
+        logInfo("restart-check", `Restart requested: ${req}`);
+        process.exit(0);
+      }
+    },
+  });
+
+  // Start heartbeat immediately — watchdog kick from tick 1 (Tier 1)
+  heartbeat.start();
+  memory?.setHeartbeat(heartbeat);
+  logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
+
+  // --- Tier 3 tasks (require transport + pipeline) ---
+  if (!transport || !cronQueue || !pipelineDeps) {
+    logWarn(TAG, "Transport/pipeline unavailable — Tier 3 tasks skipped (Tier 2 mode)");
+    return "ran";
+  }
+
+  const cronCallback = createCronCallback(ctx);
 
   heartbeat.registerTask({
     name: "tasks",
@@ -167,10 +193,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
   }));
 
   heartbeat.registerTask(createDbIntegrityTask(memory));
-
-  // #613: skill usage stats flush
-  heartbeat.registerTask(createSkillStatsFlushTask());
-  heartbeat.registerTask(createSkillReloadTask());
 
   // #857: kanban board — deliver completed cards + cleanup old ones
   const masterChatId = [...config.telegram.allowedUserIds][0] ?? 0;
@@ -263,27 +285,9 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
     heartbeat.registerTask({ name: "gossip-health", execute: async () => { gossipBroadcast(); } });
   }).catch(err => logAndSwallow(TAG, "gossip", err));
 
-  // #440: update check (npm registry, notify if newer version)
-  heartbeat.registerTask(createUpdateCheckTask((msg) => {
-    import("../components/notification.js").then(({ sendNotification }) => sendNotification(ctx, msg)).catch(err => logAndSwallow(TAG, "sendNotification update-check", err));
-  }));
-
   if (transport.healthCheck) {
     heartbeat.registerTask({ name: "transport-health", execute: () => transport.healthCheck!() });
   }
-
-  // In-proc watchdog: wall-clock comparison every 60s
-  // Restart flag check
-  heartbeat.registerTask({
-    name: "restart-check",
-    execute: async () => {
-      const req = readAndClearRestartRequested();
-      if (req) {
-        logInfo("restart-check", `Restart requested: ${req}`);
-        process.exit(0);
-      }
-    },
-  });
 
   // Self-healing agent (optional)
   let selfHealerTask: ReturnType<typeof createSelfHealerTask> | null = null;
@@ -310,11 +314,6 @@ export async function phaseHeartbeat(ctx: BootCtx): Promise<PhaseResult> {
 
   // #318: fire model-health immediately at boot (don't wait for first tick)
   queueMicrotask(() => { runModelHealth().catch(err => logAndSwallow(TAG, "runModelHealth boot", err)); });
-
-  // heartbeat.start
-  heartbeat.start();
-  memory?.setHeartbeat(heartbeat);
-  logInfo("main", `💓 Heartbeat started (${Math.round(hbIntervalMs / 1000)}s interval)`);
 
   // Expose sendSystemMessage for phase-sleep
   ctx.sendSystemMessage = sendSystemMessage;
