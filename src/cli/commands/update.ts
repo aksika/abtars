@@ -8,19 +8,18 @@ import { deploy, type DeployOptions } from "../deploy-lib/deploy.js";
 import type { SourceName } from "../update-sources/types.js";
 
 export interface UpdateOptions {
-  readonly source: SourceName;
+  readonly source: SourceName | null;
   readonly localDir?: string;
   readonly skipFreshness?: boolean;
   readonly allowAbmindMismatch: boolean;
   readonly dryRun?: boolean;
   readonly check?: boolean;
-  readonly tag?: string;
 }
 
 export async function update(opts: UpdateOptions): Promise<number> {
   await printBanner("update");
-  if (opts.source !== "local" && opts.source !== "npm") {
-    process.stderr.write(`--source ${opts.source} is not supported.\nUse --source local (default) or --source npm.\n`);
+  if (!opts.source) {
+    process.stderr.write(`No channel specified.\nUsage: abtars update --dev [dir] | --alpha | --stable\n`);
     return 2;
   }
 
@@ -39,7 +38,6 @@ export async function update(opts: UpdateOptions): Promise<number> {
     source: opts.source,
     localDir: opts.localDir,
     skipFreshness: opts.skipFreshness,
-    tag: opts.tag,
   };
 
   return deploy(deployOpts);

@@ -458,24 +458,25 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
     return true;
   }
 
-  // /update git | alpha | stable
-  if (arg === "update" || arg === "update git" || arg === "git" ||
+  // /update dev | alpha | stable
+  if (arg === "update" || arg === "update dev" || arg === "dev" ||
+      arg === "update git" || arg === "git" ||
       arg === "update alpha" || arg === "alpha" ||
       arg === "update stable" || arg === "stable" ||
       arg === "update deploy" || arg === "deploy" || arg === "update pull" || arg === "pull" || arg === "update build" || arg === "build") {
     // /update with no args → show usage
     if (arg === "update") {
-      await ctx.reply("Usage: /update git | alpha | stable");
+      await ctx.reply("Usage: /update dev | alpha | stable");
       return true;
     }
-    // Legacy aliases → git
-    const channel = (arg === "git" || arg === "update git" || arg === "update pull" || arg === "pull" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build")
-      ? "git"
+    // dev + hidden aliases (git, pull, deploy, build)
+    const channel = (arg === "dev" || arg === "update dev" || arg === "git" || arg === "update git" || arg === "update pull" || arg === "pull" || arg === "update deploy" || arg === "deploy" || arg === "update build" || arg === "build")
+      ? "dev"
       : (arg === "alpha" || arg === "update alpha") ? "alpha" : "stable";
 
     if (!isMaster) { await ctx.reply("Requires master role."); return true; }
 
-    if (channel === "git") {
+    if (channel === "dev") {
       const { spawnSync, spawn } = await import("node:child_process");
       const releasesRoot = join(process.env["HOME"] ?? "", ".abtars-releases", "src");
       const abtarsDir = join(releasesRoot, "abtars");

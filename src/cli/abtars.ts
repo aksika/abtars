@@ -3,7 +3,7 @@
  *
  * Subcommands:
  *   install [--upgrade] [--force]
- *   update [--source local|npm|github] [--local DIR]
+ *   update [--dev [DIR] | --alpha | --stable]
  *   rollback [--to <version>]
  *   status
  */
@@ -55,7 +55,7 @@ function printUsage(): void {
 Usage:
   abtars install [--force] [--mode=simple|supervised] [--restore <backup.zip>]
   abtars uninstall [--yes]
-  abtars update  [--source local|npm|github] [--local DIR]
+  abtars update  [--dev [DIR] | --alpha | --stable]
   abtars rollback [--to <version>]
   abtars backup [--config] [--encrypt] [--output <dir>] [--prune-days N]
   abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]
@@ -108,14 +108,32 @@ export async function main(argv: readonly string[]): Promise<number> {
         });
       case 'uninstall':
         return await uninstall({ yes: flags.get('yes') === true });
-      case 'update':
+      case 'update': {
+        // Determine channel: --dev [dir], --alpha, --stable (hidden: --local [dir], --source local|npm)
+        let source: 'dev' | 'alpha' | 'stable' | null = null;
+        let localDir: string | undefined;
+        if (flags.get('dev') === true || typeof flags.get('dev') === 'string') {
+          source = 'dev';
+          if (typeof flags.get('dev') === 'string') localDir = flags.get('dev') as string;
+        } else if (flags.get('alpha') === true) {
+          source = 'alpha';
+        } else if (flags.get('stable') === true) {
+          source = 'stable';
+        } else if (flags.has('local') || flags.get('source') === 'local') {
+          // Hidden alias: --local [dir] or --source local
+          source = 'dev';
+          if (typeof flags.get('local') === 'string') localDir = flags.get('local') as string;
+        } else if (flags.get('source') === 'npm') {
+          // Hidden alias: --source npm → alpha
+          source = 'alpha';
+        }
         return await update({
-          source: (flags.get('source') as 'local' | 'npm' | 'github' | undefined) ?? 'local',
-          localDir: typeof flags.get('local') === 'string' ? flags.get('local') as string : undefined,
-          skipFreshness: flags.has('local'),
+          source,
+          localDir,
+          skipFreshness: source === 'dev',
           allowAbmindMismatch: flags.get('allow-abmind-mismatch') === true,
-          tag: typeof flags.get('tag') === 'string' ? flags.get('tag') as string : undefined,
         });
+      }
       case 'rollback':
         return await rollback({ to: typeof flags.get('to') === 'string' ? Number(flags.get('to')) : undefined });
       case 'backup':

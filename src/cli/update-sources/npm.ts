@@ -27,9 +27,11 @@ function readLocalVersion(home: string): string | null {
 
 export function makeNpmSource(packageName: string, tag?: string): UpdateSource {
   const distTag = tag ?? "latest";
+  const sourceName = distTag === "alpha" ? "alpha" : "stable";
   return {
-    name: "npm",
+    name: sourceName,
     async prepare(ctx: PrepareContext): Promise<StagedRelease> {
+      // --force: workaround for pnpm dist-tag cache bug (#1147). Remove when pnpm fixes.
       const latest = run("npm", ["view", `${packageName}@${distTag}`, "version"], ctx.home);
       const current = readLocalVersion(ctx.home);
       if (latest === current) {
@@ -54,7 +56,7 @@ export function makeNpmSource(packageName: string, tag?: string): UpdateSource {
       // Install production deps
       run("npm", ["install", "--omit=dev", "--no-audit", "--no-fund"], stagedPath);
 
-      return { version: latest, stagedPath, commit: null, branch: null, packageLockHash: null, source: "npm" };
+      return { version: latest, stagedPath, commit: null, branch: null, packageLockHash: null, source: sourceName };
     },
   };
 }

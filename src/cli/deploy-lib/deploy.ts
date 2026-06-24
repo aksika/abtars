@@ -9,7 +9,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { execSync, spawn } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 import { acquireLock, atomicSwap, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
-import { makeLocalBuildSource } from "../update-sources/local.js";
+import { makeLocalBuildSource } from "../update-sources/dev.js";
 import { makeNpmSource } from "../update-sources/npm.js";
 import type { SourceName } from "../update-sources/types.js";
 
@@ -17,7 +17,6 @@ export interface DeployOptions {
   readonly source: SourceName;
   readonly localDir?: string;
   readonly skipFreshness?: boolean;
-  readonly tag?: string;
 }
 
 function readJsonField(file: string, field: string): unknown {
@@ -81,8 +80,8 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     process.stdout.write(`Building from ${repoRoot}...\n`);
 
     // ── Step 2: Build + Stage ──────────────────────────────────────────────
-    const source = opts.source === "npm"
-      ? makeNpmSource("abtars", opts.tag)
+    const source = opts.source === "alpha" || opts.source === "stable"
+      ? makeNpmSource("abtars", opts.source === "alpha" ? "alpha" : "latest")
       : makeLocalBuildSource({ repoRoot, allowStale: !!opts.skipFreshness });
 
     const staged = await source.prepare({ stagingDir: paths.appStaging, home: paths.home, allowStale: !!opts.skipFreshness });

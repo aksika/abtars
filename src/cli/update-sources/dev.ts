@@ -121,7 +121,7 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
   const isNpmPackage = !existsSync(join(repoRoot, '.git'));
 
   return {
-    name: 'local',
+    name: 'dev',
     async prepare(ctx: PrepareContext): Promise<StagedRelease> {
       // npm package mode: no git, no build — just copy the pre-built bundle
       if (isNpmPackage) {
@@ -143,7 +143,7 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
         if (existsSync(manifestSrc)) await copyFile(manifestSrc, join(stagedPath, 'install-manifest.json'));
         await writeFile(join(stagedPath, 'package.json'), JSON.stringify({ type: "module", name: "abtars", version }, null, 2) + "\n");
         process.stdout.write(`✓ staged ${version} (from npm package)\n`);
-        return { version, stagedPath, commit: null, branch: null, packageLockHash: null, source: 'local' };
+        return { version, stagedPath, commit: null, branch: null, packageLockHash: null, source: 'dev' };
       }
 
       // Git checkout mode: build from source
@@ -191,7 +191,7 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
       await copyFile(join(repoRoot, 'install-manifest.json'), join(stagedPath, 'install-manifest.json'));
 
       const packageLockHash = await hashFile(join(repoRoot, 'package-lock.json'));
-      return { version, stagedPath, commit, branch, packageLockHash, source: 'local' };
+      return { version, stagedPath, commit, branch, packageLockHash, source: 'dev' };
     },
   };
 }

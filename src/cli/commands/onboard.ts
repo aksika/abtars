@@ -682,7 +682,7 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   // Run update (clone source, build, deploy, start bridge)
   process.stdout.write(`\nRunning abtars update...\n`);
   const { update } = await import("./update.js");
-  return await update({ source: "local", skipFreshness: true });
+  return await update({ source: "dev", skipFreshness: true, allowAbmindMismatch: false });
 }
 
 // ── Default task seeding (#383) ─────────────────────────────────────────────

@@ -5,7 +5,7 @@
  * app.staging/ directory containing the bundle, ready for atomic swap.
  */
 
-export type SourceName = 'local' | 'npm' | 'github';
+export type SourceName = 'dev' | 'alpha' | 'stable';
 
 export interface StagedRelease {
   readonly version: string;

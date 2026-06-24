@@ -22,8 +22,8 @@ export interface Manifest {
   readonly activatedAt: string;
   /** Hostname where install lives (informational). */
   readonly host: string;
-  /** Source adapter that produced the current release (local | npm | github). */
-  readonly source: 'local' | 'npm' | 'github';
+  /** Source adapter that produced the current release. */
+  readonly source: 'dev' | 'alpha' | 'stable' | 'local' | 'npm' | 'github';
   /** Applied migrations (ordered). */
   readonly migrationsApplied: readonly string[];
   /** Previous version (for rollback). Null on first install. */
@@ -59,7 +59,7 @@ export function emptyManifest(pkg: 'abtars' | 'abmind', host: string): Manifest 
     packageLockHash: null,
     activatedAt: new Date().toISOString(),
     host,
-    source: 'local',
+    source: 'dev',
     migrationsApplied: [],
     previousVersion: null,
     previousCommit: null,
