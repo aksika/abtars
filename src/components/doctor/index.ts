@@ -82,19 +82,6 @@ const probeIrc: ProbeFn = async (ctx) => {
   return { name: "irc", status: "ok", latencyMs: Date.now() - start, detail: "running" };
 };
 
-const probeHeartbeat: ProbeFn = async (ctx) => {
-  const start = Date.now();
-  if (!ctx.memory || typeof ctx.memory.getCronInfo !== "function") return { name: "heartbeat", status: "skipped", latencyMs: 0 };
-  try {
-    const info = ctx.memory.getCronInfo();
-    if (!info) return { name: "heartbeat", status: "skipped", latencyMs: Date.now() - start, detail: "no cron info" };
-    const running = info.heartbeatRunning;
-    return { name: "heartbeat", status: running ? "ok" : "failed", latencyMs: Date.now() - start, detail: running ? `interval ${info.intervalMs}ms` : "not running" };
-  } catch (err) {
-    logAndSwallow(TAG, "probe heartbeat", err);
-    return { name: "heartbeat", status: "failed", latencyMs: Date.now() - start };
-  }
-};
 
 const probeTransport: ProbeFn = async (ctx) => {
   const start = Date.now();
@@ -131,6 +118,7 @@ const probeOllama: ProbeFn = async (_ctx) => {
 };
 
 const probeCoreFiles: ProbeFn = async (_ctx) => {
+  if (getEnv().memory !== "abmind") return { name: "core-files", status: "skipped", latencyMs: 0, detail: "MEMORY is not abmind" };
   const { existsSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { homedir } = await import("node:os");
@@ -182,6 +170,7 @@ const probeSecretPerms: ProbeFn = async (_ctx) => {
 // ── Collector ────────────────────────────────────────────────────────────────
 
 const probeFtsIntegrity: ProbeFn = async (_ctx) => {
+  if (getEnv().memory !== "abmind") return { name: "fts-integrity", status: "skipped", latencyMs: 0, detail: "MEMORY is not abmind" };
   const { join } = await import("node:path");
   const { homedir } = await import("node:os");
   const { execSync } = await import("node:child_process");
@@ -284,6 +273,8 @@ const probeProcessHealth: ProbeFn = async (_ctx) => {
 };
 
 const PROBES: Array<{ fn: ProbeFn; timeout: number; name: string }> = [
+  // Memory mode check (first)
+  { fn: async () => getEnv().memory === "none" ? { name: "memory-mode", status: "warn" as const, latencyMs: 0, detail: "No persistent memory available" } : { name: "memory-mode", status: "ok" as const, latencyMs: 0, detail: `provider: ${getEnv().memory}` }, timeout: 100, name: "memory-mode" },
   // Static file checks
   { fn: probeCoreFiles, timeout: 1000, name: "core-files" },
   { fn: probeSecretPerms, timeout: 1000, name: "secret-perms" },
@@ -292,7 +283,6 @@ const PROBES: Array<{ fn: ProbeFn; timeout: number; name: string }> = [
   // Memory
   { fn: probeAbmindCli, timeout: 3000, name: "abmind-cli" },
   { fn: probeMemory, timeout: 5000, name: "memory" },
-  { fn: probeHeartbeat, timeout: 2000, name: "heartbeat" },
   // Transport + platforms
   { fn: probeTransport, timeout: 10000, name: "transport" },
   { fn: probeTelegram, timeout: 5000, name: "telegram" },
