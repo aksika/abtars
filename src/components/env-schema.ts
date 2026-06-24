@@ -285,14 +285,14 @@ function parseBool(raw: string): boolean {
   return raw.toLowerCase() === "true" || raw === "1";
 }
 
-// ── Singleton ───────────────────────────────────────────────────────────────
+// ── Singleton (globalThis to survive esbuild chunk duplication #1171) ────────
 
-let _env: Readonly<EnvConfig> | null = null;
+const _G = globalThis as unknown as { __abtarsEnv: Readonly<EnvConfig> | null };
 
 /** Get the parsed env config. Auto-initializes on first call if needed. */
 export function getEnv(): Readonly<EnvConfig> {
-  if (!_env) initEnv();
-  return _env!;
+  if (!_G.__abtarsEnv) initEnv();
+  return _G.__abtarsEnv!;
 }
 
 /** Sanitized config dump — masks API keys/tokens, shows everything else. For /status. */
@@ -444,12 +444,12 @@ export function initEnv(): Readonly<EnvConfig> {
   for (const w of warnings) logWarn("env", w);
   logInfo("env", `${SCHEMA.length} vars loaded, ${overrideCount} overridden, ${warnings.length} warnings`);
 
-  _env = Object.freeze(env);
-  return _env;
+  _G.__abtarsEnv = Object.freeze(env);
+  return _G.__abtarsEnv;
 }
 
 /** Reset singleton (for tests only). */
-export function _resetEnv(): void { _env = null; }
+export function _resetEnv(): void { _G.__abtarsEnv = null; }
 
 // ── Typo detection helpers ──────────────────────────────────────────────────
 
