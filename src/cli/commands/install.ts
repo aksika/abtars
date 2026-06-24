@@ -6,10 +6,11 @@
  */
 
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, copyFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { hostname, homedir as _homedir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { emptyManifest, packagePaths, readManifest, resolveUserBinDir, writeManifest } from '../deploy-lib-import.js';
 
 /** Resolve real user home even under sudo. */
@@ -224,7 +225,7 @@ export async function install(opts: InstallOptions): Promise<number> {
   const paths = packagePaths('abtars');
   const home = paths.home;
   const userBinDir = resolveUserBinDir();
-  const repoRoot = process.cwd();
+  const repoRoot = join(dirname(realpathSync(process.argv[1] ?? fileURLToPath(import.meta.url))), "..");
 
   // Install log (#718)
   const { initInstallLog, logInstall, logInstallHeader } = await import("../install-log.js");
