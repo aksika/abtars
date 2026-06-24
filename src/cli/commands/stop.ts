@@ -72,16 +72,17 @@ export async function stop(opts: {}): Promise<number> {
   try { require("node:fs").writeFileSync(stoppedSentinel, "stopped"); } catch {}
 
   // 1) Unload supervisor service (prevent respawn)
+  let serviceWasStopped = false;
   if (installMode === "daemon") {
     if (process.platform === "darwin") {
       const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
       const uid = `gui/${process.getuid!()}`;
-      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); } catch {}
+      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); serviceWasStopped = true; } catch {}
       await new Promise(r => setTimeout(r, 1000));
       // Retry in case launchd respawned before bootout took effect
       try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); } catch {}
     } else {
-      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); } catch {}
+      try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); serviceWasStopped = true; } catch {}
       try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 5000, stdio: 'pipe' }); } catch {}
     }
   }
@@ -114,7 +115,12 @@ export async function stop(opts: {}): Promise<number> {
   const brMsg = formatResult("Bridge", brResult, brPidActual);
 
   if (wdResult === "not-running" && brResult === "not-running") {
-    process.stdout.write(`Nothing to stop — neither watchdog nor bridge running.\n`);
+    if (serviceWasStopped) {
+      removeLock(bridgeLock);
+      process.stdout.write(`🛑 Stopped via service manager.\n`);
+    } else {
+      process.stdout.write(`Nothing to stop — neither watchdog nor bridge running.\n`);
+    }
     return 0;
   }
 
