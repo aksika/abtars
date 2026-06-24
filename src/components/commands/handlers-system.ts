@@ -583,6 +583,10 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
 
   // abmind block
   lines.push("");
+  // Only show abmind if configured as memory provider (#1162)
+  const { getEnv } = await import("../env-schema.js");
+  const memoryProvider = getEnv().memory;
+  if (memoryProvider === "abmind" || memoryProvider === "auto") {
   // Try deployed copy first (always up to date), fall back to ~/.abmind/manifest.json
   const abmindBundlePkg = join(home, "app", "bundle", "node_modules", "abmind", "package.json");
   const abmindAppPkg = join(home, "app", "node_modules", "abmind", "package.json");
@@ -620,6 +624,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   } else {
     lines.push("  abmind: not installed");
   }
+  } // end memoryProvider gate
 
   // Rollback slots
   lines.push("");
@@ -660,7 +665,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
   } catch { /* no state file = normal */ }
 
   lines.push("");
-  lines.push("  /update [git|alpha|stable] | /software rollback <version>");
+  lines.push("  /update [dev|alpha|stable] | /software rollback <version>");
   await ctx.reply(lines.join("\n"));
   return true;
 }
