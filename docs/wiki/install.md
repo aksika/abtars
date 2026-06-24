@@ -91,13 +91,7 @@ export PATH="$(pnpm bin -g):$HOME/.local/bin:$PATH"
 # 2. Optional deps (recommended before first start)
 abtars deps install all
 
-# 3. Install memory system
-abmind install --non-interactive \
-  --agent-name "MyBot" \
-  --username "yourname" \
-  --passphrase "your-passphrase"
-
-# 4. Install + deploy + start bridge
+# 3. Install + deploy + start bridge
 abtars install --non-interactive --accept-risk \
   --instance-name "MyBot" \
   --telegram-token "YOUR_BOT_TOKEN" \
@@ -106,9 +100,13 @@ abtars install --non-interactive --accept-risk \
   --default-provider openrouter \
   --default-model "deepseek/deepseek-v4-flash" \
   --api-key "sk-or-v1-..."
+
+# 4. Install memory system (picks up username + agent name from abtars config)
+abmind install --non-interactive \
+  --passphrase "your-passphrase"
 ```
 
-Step 4 automatically clones source, builds, deploys, and starts the bridge (daemon mode). The bot is live after this completes.
+Step 3 automatically clones source, builds, deploys, and starts the bridge (daemon mode). The bot is live after this completes. Step 4 discovers username and agent name from the abtars config created in step 3 — no need to pass them again.
 
 ### What each step does
 
@@ -116,8 +114,8 @@ Step 4 automatically clones source, builds, deploys, and starts the bridge (daem
 |------|-------------|
 | `pnpm add -g "abtars@>=..." "abmind@>=..." --allow-build=better-sqlite3` | Installs CLI tools globally |
 | `abtars deps install all` | Installs optional npm packages (browser, PDF, YouTube, image) |
-| `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption |
 | `abtars install` | Creates config, clones source, builds, deploys release, starts bridge |
+| `abmind install` | Creates `~/.abmind/`, initializes memory DB, sets encryption (discovers user from abtars) |
 
 ### System dependencies (optional)
 
@@ -140,8 +138,8 @@ Omit `--non-interactive` and the wizard will prompt for each value:
 ```bash
 pnpm add -g "abtars@>=0.3.2-alpha.0" "abmind@>=0.2.3-alpha.0" --allow-build=better-sqlite3
 abtars deps install all
-abmind install
 abtars install
+abmind install
 ```
 
 ## Install modes
