@@ -177,7 +177,7 @@ export async function loadAndValidateConfig(): Promise<Config> {
 
   // --- DISCORD_BOT_TOKEN (optional — Discord disabled if absent) ---
   const discordBotToken = getEnv().discordBotToken;
-  const discordEnabled = !!discordBotToken;
+  let discordEnabled = !!discordBotToken;
 
   let discordAppId: string | undefined;
   let discordAllowedUserIds: Set<string> | undefined;
@@ -186,18 +186,17 @@ export async function loadAndValidateConfig(): Promise<Config> {
     // --- DISCORD_APP_ID (required when Discord enabled) ---
     const rawAppId = getEnv().discordAppId;
     if (!rawAppId || !isValidSnowflake(rawAppId)) {
-      throw new Error(
-        "DISCORD_APP_ID is required and must be a valid Discord snowflake ID (17–20 digits) when DISCORD_BOT_TOKEN is set",
-      );
-    }
-    discordAppId = rawAppId;
-    // Discord user IDs from users.json
-    const discordUsers = registry.users.filter(u => u.platforms.discord);
-    discordAllowedUserIds = new Set(discordUsers.map(u => u.platforms.discord!));
-    if (discordAllowedUserIds.size === 0) {
-      throw new Error(
-        "No Discord users in users.json — add at least one user with platforms.discord",
-      );
+      logWarn("config", "DISCORD_APP_ID missing or invalid — disabling Discord");
+      discordEnabled = false;
+    } else {
+      discordAppId = rawAppId;
+      // Discord user IDs from users.json
+      const discordUsers = registry.users.filter(u => u.platforms.discord);
+      discordAllowedUserIds = new Set(discordUsers.map(u => u.platforms.discord!));
+      if (discordAllowedUserIds.size === 0) {
+        logWarn("config", "No Discord users in users.json — disabling Discord");
+        discordEnabled = false;
+      }
     }
   }
 
