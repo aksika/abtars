@@ -173,6 +173,16 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
       if (existsSync(coreSkillsSrc)) {
         await cp(coreSkillsSrc, join(stagedPath, 'core', 'skills'), { recursive: true });
       }
+      // Copy core prompts (orc.md, worker.md) for runtime sync
+      const corePromptsSrc = join(repoRoot, 'core', 'prompts');
+      if (existsSync(corePromptsSrc)) {
+        await cp(corePromptsSrc, join(stagedPath, 'core', 'prompts'), { recursive: true });
+      }
+      // Copy config dir (models.json, examples, seeds)
+      const configSrc = join(repoRoot, 'config');
+      if (existsSync(configSrc)) {
+        await cp(configSrc, join(stagedPath, 'config'), { recursive: true });
+      }
 
       // Ensure ESM works
       await writeFile(join(stagedPath, 'package.json'), JSON.stringify({ type: "module", name: "abtars", version }, null, 2) + "\n");
