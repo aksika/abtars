@@ -73,8 +73,10 @@ When a scheduled task fails, a dedicated self-healing agent session diagnoses an
 SELFHEAL_ENABLED=true
 
 # Disable
-SELFHEAL_ENABLED=false    # or remove the line
+SELFHEAL_ENABLED=false    # or remove the line (default: off)
 ```
+
+SHA also requires `~/.abtars/config/sha-policy.json` (seeded automatically during install). If the policy file is missing, SHA auto-disables at boot with a single log message — no repeated warnings. To re-enable: restore the policy file and restart the bridge.
 
 Or at runtime: `/healing` command toggles the self-healer on/off. `/healing reset` clears circuit breakers.
 
