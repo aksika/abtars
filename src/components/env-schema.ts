@@ -77,7 +77,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "STREAM_FLUSH_SEC", type: "int", default: "3", description: "Stream edit flush interval (seconds, 0=disabled)" },
 
   // ── Memory ──
-  { env: "MEMORY", type: "string", default: "auto", description: "Memory dir path, 'auto' (detect ~/.abmind/memory), or 'none'" },
+  { env: "MEMORY", type: "string", default: "abmind", description: "Memory provider: 'abmind' (default) or 'none'" },
   { env: "ACTIVE_MEMORY", type: "bool", default: "true", description: "Enable ambient recall on every turn" },
   { env: "PRIMING_MODEL_TOPICS", type: "bool", default: "true", description: "Use model-generated topics for priming" },
 

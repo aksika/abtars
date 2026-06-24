@@ -27,6 +27,8 @@ const explicitMethods = {
   initialize: async () => {},
   close: () => {},
   shutdown: async () => {},
+  getConfig: () => ({ memoryDir: "", memoryEnabled: false }),
+  getDatabase: () => null,
   getDb: () => null,
   get editor() { return new Proxy({}, handler); },
   get contextEngine() { return null; },

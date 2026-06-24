@@ -12,7 +12,7 @@
  */
 
 import { logAndSwallow } from "../components/log-and-swallow.js";
-import { writeFileSync, existsSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { loadAndValidateConfig } from "../components/config.js";
@@ -36,23 +36,11 @@ export async function phaseConfig(ctx: BootCtx): Promise<PhaseResult> {
   ctx.config = await loadAndValidateConfig();
   setLogLevel(ctx.config.logLevel);
 
-  // Resolve memory path from MEMORY env var
-  const memoryEnv = getEnv().memory;
-  let memoryDir: string;
-  let memoryEnabled: boolean;
-
-  if (memoryEnv === "none") {
-    memoryEnabled = false;
-    memoryDir = "";
-  } else if (memoryEnv === "auto") {
-    const defaultPath = join(homedir(), ".abmind", "memory");
-    memoryEnabled = existsSync(join(defaultPath, "memory.db"));
-    memoryDir = defaultPath;
-  } else {
-    // Explicit path
-    memoryDir = memoryEnv.startsWith("~") ? join(homedir(), memoryEnv.slice(1)) : memoryEnv;
-    memoryEnabled = true;
-  }
+  // Resolve memory provider from MEMORY env var
+  const provider = getEnv().memory; // "abmind" | "none"
+  const memoryEnabled = provider !== "none";
+  const abmindHome = process.env["ABMIND_HOME"] || join(homedir(), ".abmind");
+  const memoryDir = memoryEnabled ? join(abmindHome, "memory") : "";
 
   ctx.memoryConfig = { memoryEnabled, memoryDir } as any;
   // startedAt set by createBootCtx; preserved here

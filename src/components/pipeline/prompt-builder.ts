@@ -274,7 +274,7 @@ export function buildSessionStartPrompt(
 
   {
     const ctxOpts = isCodeSession ? { skipDailies: true, maxAgeMs: 48 * 60 * 60 * 1000 } : undefined;
-    const ctxResult = abmind()?.buildSessionStartContext(memory, userId, maxContext, ctxOpts);
+    const ctxResult = memory.available !== false ? abmind()?.buildSessionStartContext(memory, userId, maxContext, ctxOpts) : null;
     const ctx = ctxResult?.text ?? null;
     if (ctx) {
       contextParts.push(ctx);
@@ -291,8 +291,8 @@ export function buildSessionStartPrompt(
         contextParts.push("Hi! How can I help?");
       } else if (userRole === "user") {
         contextParts.push("[SESSION START] Returning user. Be friendly and helpful.");
-      } else if (!isCodeSession) {
-        // Wake-up only for Main sessions
+      } else if (!isCodeSession && memory.available !== false) {
+        // Wake-up only for Main sessions with live memory
         const wakeUp = memory.buildWakeUp();
         if (wakeUp) {
           contextParts.push(wakeUp);
