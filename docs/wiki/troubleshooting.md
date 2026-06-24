@@ -81,7 +81,7 @@ tail -f ~/.abtars/logs/launchd.log
 
 **Manually load (if install didn't):**
 ```bash
-cp ~/.abtars/scripts/com.abtars.watchdog.plist ~/Library/LaunchAgents/
+cp ~/.abtars-releases/src/abtars/scripts/com.abtars.watchdog.plist ~/Library/LaunchAgents/
 sed -i '' "s|{{HOME}}|$HOME|g" ~/Library/LaunchAgents/com.abtars.watchdog.plist
 launchctl load ~/Library/LaunchAgents/com.abtars.watchdog.plist
 ```
@@ -118,12 +118,20 @@ journalctl --user -u abtars-watchdog -f
 
 **Manually enable (if install didn't):**
 ```bash
-cp ~/.abtars/scripts/abtars-watchdog.service ~/.config/systemd/user/
+cp ~/.abtars-releases/src/abtars/scripts/abtars-watchdog.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now abtars-watchdog
 ```
 
+**Reload service file after update (if watchdog fails to start):**
+```bash
+cp ~/.abtars-releases/src/abtars/scripts/abtars-watchdog.service ~/.config/systemd/user/abtars-watchdog.service
+systemctl --user daemon-reload
+systemctl --user restart abtars-watchdog
+```
+
 **Common issues:**
+- Exit code 203/EXEC → service file points to a missing script. Reload the service file (see above).
 - "Failed to connect to bus" → systemd not running in WSL. Add to `/etc/wsl.conf`:
   ```ini
   [boot]
