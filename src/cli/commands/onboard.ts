@@ -113,15 +113,7 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
 
   intro('abtars onboard — first-time setup');
 
-  // Auto-read username from abmind if available
   let userName = '';
-  try {
-    const { readFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { homedir } = await import("node:os");
-    const abmindManifest = JSON.parse(readFileSync(join(homedir(), ".abmind", "manifest.json"), "utf-8"));
-    userName = abmindManifest.username ?? abmindManifest.userName ?? '';
-  } catch { /* abmind not installed */ }
 
   // 1. Agent name
   const instanceName = await text({
@@ -662,21 +654,6 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
         process.stdout.write(`⚠️  abmind encryption uses name '${manifest.encryptionUser}' but you entered '${answers.userName}'. Backup restore will need the encryption name ('${manifest.encryptionUser}').\n`);
       }
     } catch { /* no abmind or no manifest — fine */ }
-  }
-
-  // Seed abmind user_profile.md — only if abmind is already installed
-  if (answers.userName) {
-    const { abmindHome: resolveAbmind } = await import("../../paths.js");
-    const abmindHome = resolveAbmind();
-    const profileDir = join(abmindHome, 'memory', 'core');
-    const { existsSync: profileExists } = await import('node:fs');
-    if (profileExists(profileDir)) {
-      const profilePath = join(profileDir, 'user_profile.md');
-      if (!profileExists(profilePath)) {
-        await writeFile(profilePath, `# User Profile\n\nName: ${answers.userName}\n`, { mode: 0o600 });
-        process.stdout.write(`✓ user_profile.md → ${profilePath}\n`);
-      }
-    }
   }
 
   // Initialize passphrase-based encryption — generate abtars.key (#1166)
