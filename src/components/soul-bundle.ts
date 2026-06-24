@@ -61,15 +61,15 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
     let bundle: { soul: string; profile: string; notes: string; memoryTools: string; coreFacts: string } | null = null;
     try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow(TAG, "op", err); }
 
-    if (memory && !bundle?.soul) {
+    if (memory && memory.available !== false && !bundle?.soul) {
       // Memory available but SOUL missing → misconfiguration. Log ERROR for SHA.
       logError(TAG, "SOUL bundle missing — abmind misconfigured (memory available but getSessionBundle empty)");
       return "[ERROR] SOUL bundle missing. Tell the user: memory system failed to load persona. Run /doctor or check abmind installation.";
     }
 
-    if (!memory) {
+    if (!memory || memory.available === false) {
       // No memory provider — use default-minimal.md fallback bundle (#1164)
-      const minimal = readOr(join(abtarsHome(), "config", "default-minimal.md"));
+      const minimal = readOr(join(abtarsHome(), "prompts", "default-minimal.md"));
       if (minimal) parts.push(minimal);
       else parts.push("[SYSTEM] Memory unavailable. Operate without persistent memory.");
     } else {
