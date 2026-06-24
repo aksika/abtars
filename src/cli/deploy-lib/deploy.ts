@@ -280,7 +280,7 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
 
   // One-time cleanup: remove stale binary dirs from data directories (#1134)
   const abmindHome = join(process.env["HOME"] ?? "", ".abmind");
-  for (const stale of [join(abmindHome, "bin"), join(abmindHome, "current"), join(paths.home, "bin")]) {
+  for (const stale of [join(abmindHome, "bin"), join(abmindHome, "current"), join(paths.home, "bin"), join(paths.home, "scripts")]) {
     if (existsSync(stale)) {
       rmSync(stale, { recursive: true, force: true });
       process.stdout.write(`✓ removed stale ${stale}\n`);
@@ -304,7 +304,7 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
       }
     }
   } else {
-    const src = join(paths.home, "scripts", "abtars-watchdog.service");
+    const src = join(repoScripts, "abtars-watchdog.service");
     const dst = join(process.env["HOME"] ?? "", ".config/systemd/user/abtars-watchdog.service");
     if (existsSync(src) && existsSync(dst)) {
       const srcContent = readFileSync(src, "utf-8");
