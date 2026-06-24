@@ -504,7 +504,7 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       }
       await ctx.reply(msg + "\nDeploying...");
       logInfo("update", "git update requested");
-      const child = spawn("abtars", ["update"], { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn("abtars", ["update", "--dev"], { stdio: ["ignore", "pipe", "pipe"] });
       let stderr = "";
       child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
       child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
