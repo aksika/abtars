@@ -76,10 +76,10 @@ export async function stop(opts: {}): Promise<number> {
     if (process.platform === "darwin") {
       const plistPath = join(homedir(), "Library", "LaunchAgents", "com.abtars.watchdog.plist");
       const uid = `gui/${process.getuid!()}`;
-      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000 }); } catch {}
+      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); } catch {}
       await new Promise(r => setTimeout(r, 1000));
       // Retry in case launchd respawned before bootout took effect
-      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000 }); } catch {}
+      try { execFileSync("launchctl", ["bootout", uid, plistPath], { timeout: 5000, stdio: 'pipe' }); } catch {}
     } else {
       try { execFileSync("systemctl", ["--user", "stop", "abtars-watchdog"], { timeout: 5000 }); } catch {}
       try { execFileSync("systemctl", ["--user", "disable", "abtars-watchdog"], { timeout: 5000 }); } catch {}
