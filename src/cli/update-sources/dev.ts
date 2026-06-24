@@ -153,7 +153,16 @@ export function makeLocalBuildSource(opts: LocalBuildOptions = {}): UpdateSource
 
       // Install deps into the repo (if not skipped).
       if (opts.skipInstall !== true) {
-        runCmd('pnpm', ['install', '--frozen-lockfile'], repoRoot);
+        const pnpmPath = (() => {
+          try { return spawnSync('which', ['pnpm'], { encoding: 'utf-8' }).stdout.trim() || 'pnpm'; } catch { return 'pnpm'; }
+        })();
+        try {
+          runCmd(pnpmPath, ['install', '--frozen-lockfile'], repoRoot);
+        } catch (err) {
+          if (err instanceof LocalBuildError && err.message.includes('ENOENT')) {
+            runCmd('npm', ['install'], repoRoot);
+          } else throw err;
+        }
       }
 
       // Bundle mode (esbuild) — build directly, skip npm run bundle (it requires ../abmind)
