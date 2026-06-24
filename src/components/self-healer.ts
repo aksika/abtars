@@ -19,7 +19,7 @@ import { getEnv } from "./env-schema.js";
 import { localISO } from "../utils/local-time.js";
 import { loadFixes, shouldAttempt, recordResult } from "./sha-tracker.js";
 import type { FixRule } from "./sha-tracker.js";
-import type { HeartbeatTask } from "abmind";
+import type { HeartbeatTask } from "../types/index.js";
 import type { TelegramAdapter } from "../platforms/telegram/telegram-adapter.js";
 
 /** Write SHA dispatch to sha-call.log (model reads this for recurrence detection). */

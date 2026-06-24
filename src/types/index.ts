@@ -35,12 +35,13 @@ export type {
   ExtractedMemory,
   MemorySearchParams,
   MemorySearchResult,
-  HeartbeatTask,
   InstantStoreParams,
   InstantStoreResult,
   EditMemoryParams,
   EditMemoryResult,
 } from "abmind";
+
+export type HeartbeatTask = { name: string; heavy?: boolean; execute: () => Promise<boolean | void> };
 
 export type {
   DiscordInboundMessage,

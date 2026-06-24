@@ -9,7 +9,7 @@ import { logInfo, logError } from "./logger.js";
 import { setIdleCompactReset } from "./message-pipeline.js";
 import type { IKiroTransport } from "./transport/kiro-transport.js";
 import type { MemoryManager } from "abmind";
-import type { HeartbeatTask } from "abmind";
+import type { HeartbeatTask } from "../types/index.js";
 import { isDailyCycleDue, type DailyCycleDeps } from "./daily-cycle.js";
 
 const TAG = "heartbeat_tasks";

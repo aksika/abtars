@@ -1,6 +1,6 @@
 import { logInfo, logWarn, logDebug } from "./logger.js";
 import { updateLastHeartbeat, updateBridgeLockField } from "./transport/bridge-lock-transport.js";
-import type { HeartbeatTask } from "abmind";
+import type { HeartbeatTask } from "../types/index.js";
 
 export type HeartbeatConfig = {
   enabled: boolean;

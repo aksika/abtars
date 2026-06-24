@@ -10,15 +10,10 @@
  * Owns no module-level singletons.
  */
 
-import { logInfo } from "../components/logger.js";
 import type { BootCtx, PhaseResult } from "./context.js";
 
 export async function phaseMemoryIpc(ctx: BootCtx): Promise<PhaseResult> {
   if (!ctx.memory) return "skipped";
-  ctx.memory.setLlmCall(async (prompt: string, content: string) => {
-    return ctx.transport!.sendPrompt("system:memory", `${prompt}\n\n${content}`);
-  });
-  logInfo("main", "🧠 Memory LLM callback registered");
 
   const { MemoryIpcServer } = await import("abmind");
   const { SqliteBackend } = await import("abmind");

@@ -6,7 +6,7 @@
 import { getEnv } from "../components/env-schema.js";
 import { logInfo, logWarn } from "../components/logger.js";
 import type { BootCtx } from "./context.js";
-import type { HeartbeatTask } from "abmind";
+import type { HeartbeatTask } from "../types/index.js";
 
 export function createModelHealthTask(ctx: BootCtx): { task: HeartbeatTask; runNow: () => Promise<void> } {
   let done = false;
