@@ -333,6 +333,37 @@ async function checkModelAvailability(endpoint: string, apiKey: string, model: s
   }
 }
 
+async function validateModelCatalog(model: string, provider: string): Promise<{ ok: boolean; message: string }> {
+  try {
+    const { fileURLToPath } = await import('node:url');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+      join(here, '..', '..', '..', 'templates', 'config', 'models.json'),
+      join(here, '..', '..', 'templates', 'config', 'models.json'),
+      join(here, '..', 'templates', 'config', 'models.json'),
+      join(process.env['HOME'] ?? '', '.abtars-releases', 'src', 'abtars', 'templates', 'config', 'models.json'),
+      join(process.env['HOME'] ?? '', '.abtars', 'config', 'models.json'),
+    ];
+    let catalog: Record<string, { transports?: string[] }> | null = null;
+    for (const p of candidates) {
+      try {
+        catalog = JSON.parse(await readFile(p, 'utf-8'));
+        break;
+      } catch { /* try next */ }
+    }
+    if (!catalog) return { ok: true, message: '' }; // no catalog = skip validation
+    const entry = catalog[model];
+    if (!entry) return { ok: false, message: `Model "${model}" not found in models.json catalog` };
+    const provName = PROVIDER_TRANSPORT_NAME[provider as ProviderChoice] ?? provider;
+    if (entry.transports && !entry.transports.includes(provName)) {
+      return { ok: false, message: `Model "${model}" not available for provider "${provName}" (supported: ${entry.transports.join(', ')})` };
+    }
+    return { ok: true, message: '' };
+  } catch {
+    return { ok: true, message: '' }; // validation error = don't block install
+  }
+}
+
 function validateNonInteractive(opts: OnboardOptions): WizardAnswers | string {
   if (!opts.acceptRisk) {
     return '--non-interactive requires --accept-risk (you are bypassing safety prompts)';
@@ -529,6 +560,23 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
   } else {
     answers = await runInteractive(existing);
     if (answers === null) return 1;
+  }
+
+  // Validate model against models.json catalog
+  const catalogResult = await validateModelCatalog(answers.defaultModel, answers.defaultProvider);
+  if (!catalogResult.ok) {
+    if (opts.nonInteractive) {
+      if (!opts.force) {
+        process.stderr.write(`error: ${catalogResult.message}\n  Use --force to override.\n`);
+        return 4;
+      }
+      process.stderr.write(`⚠ ${catalogResult.message} (--force: continuing)\n`);
+    } else {
+      const { confirm: cfm, isCancel: isCnl, cancel: cnl } = await import('@clack/prompts');
+      process.stderr.write(`⚠ ${catalogResult.message}\n`);
+      const cont = await cfm({ message: 'Continue with this model?', initialValue: false });
+      if (isCnl(cont) || !cont) { cnl('Cancelled.'); return 1; }
+    }
   }
 
   // Read current .env to preserve operator-added lines.
