@@ -1,7 +1,7 @@
 import { logAndSwallow } from "../../components/log-and-swallow.js";
 import { logInfo, logWarn } from "../../components/logger.js";
 import { getEnv } from "../../components/env-schema.js";
-import type { Browser, BrowserContext, Page } from "patchright";
+import type { Browser, BrowserContext, Page } from "cloakbrowser";
 import { execFileSync } from "node:child_process";
 import type { BrowserSession } from "../../types/browser.js";
 
@@ -25,7 +25,7 @@ const DEFAULTS = {
   WEB_SCRAPE_USER_AGENT: "Mozilla/5.0 (compatible; Abtars/1.0)",
 } as const;
 
-export type BrowserEngine = "patchright";
+export type BrowserEngine = "cloakbrowser";
 
 export interface BrowserConfig {
   sessionTimeoutMs: number;
@@ -51,7 +51,7 @@ export function parseBrowserConfig(): BrowserConfig {
   // Intentional: raw process.env — tests mutate this at runtime, getEnv() cache won't reflect changes
   const userAgent = process.env["WEB_SCRAPE_USER_AGENT"]?.trim() || DEFAULTS.WEB_SCRAPE_USER_AGENT;
 
-  const engine = "patchright" as BrowserEngine;
+  const engine = "cloakbrowser" as BrowserEngine;
 
   return { sessionTimeoutMs, maxSessions, userAgent, engine };
 }
@@ -118,7 +118,7 @@ export class BrowserManager {
   }
 
   private async _launchPatchright(): Promise<Browser> {
-    const { chromium } = await import("patchright");
+    const { chromium } = await import("cloakbrowser");
     const headed = getEnv().browserHeaded;
     const args = headed ? [] : ["--headless=new"];
     if (getEnv().browserNoSandbox) args.push("--no-sandbox");

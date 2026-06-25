@@ -2,7 +2,7 @@
  * esbuild.config.js — Bundle abtars into a single ESM output.
  *
  * Produces bundle/ with code-split chunks. Native addons
- * and browser automation (patchright) are external.
+ * and browser automation (cloakbrowser) are external.
  *
  * Usage: node esbuild.config.js
  */
@@ -53,7 +53,7 @@ function capabilityRegistryPlugin() {
 
 const external = [
   "rettiwt-api",
-  "patchright",
+  "cloakbrowser",
   "better-sqlite3",
   "abmind",
   "pdf-parse",

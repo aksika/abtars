@@ -109,7 +109,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "SELFHEAL_ENABLED", type: "bool", default: "false", description: "Enable self-healer task" },
 
   // ── Browser ──
-  { env: "BROWSER_ENGINE", type: "string", default: "patchright", description: "Browser engine: patchright, chromium" },
+  { env: "BROWSER_ENGINE", type: "string", default: "cloakbrowser", description: "Browser engine: cloakbrowser" },
   { env: "BROWSER_HEADED", type: "bool", default: "false", description: "Run browser in headed mode" },
   { env: "BROWSER_NO_SANDBOX", type: "bool", default: "false", description: "Disable browser sandbox" },
   { env: "BROWSER_CHANNEL", type: "string", description: "Browser channel (e.g. chrome)" },
@@ -400,7 +400,7 @@ export function initEnv(): Readonly<EnvConfig> {
 
     selfhealEnabled: parseBool(readOr("SELFHEAL_ENABLED", "false")),
 
-    browserEngine: readOr("BROWSER_ENGINE", "patchright"),
+    browserEngine: readOr("BROWSER_ENGINE", "cloakbrowser"),
     browserHeaded: parseBool(readOr("BROWSER_HEADED", "false")),
     browserNoSandbox: parseBool(readOr("BROWSER_NO_SANDBOX", "false")),
     browserChannel: read("BROWSER_CHANNEL"),

@@ -53,8 +53,8 @@ export type PageElement = {
 /** Internal session state tracked by BrowserManager. */
 export type BrowserSession = {
   sessionId: string;
-  context: import("patchright").BrowserContext;
-  page: import("patchright").Page;
+  context: import("cloakbrowser").BrowserContext;
+  page: import("cloakbrowser").Page;
   createdAt: number;
   lastActivityAt: number;
 };
