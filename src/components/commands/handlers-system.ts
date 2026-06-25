@@ -495,8 +495,8 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       let hasNew = false;
       for (const [name, dir] of [["abtars", abtarsDir], ["abmind", abmindDir]] as const) {
         if (!existsSync(join(dir, ".git"))) { msg += `${name}: no repo\n`; continue; }
-        spawnSync("git", ["-C", dir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000 });
-        const log = spawnSync("git", ["-C", dir, "log", "--oneline", "HEAD..origin/dev"], { encoding: "utf-8" });
+        spawnSync("git", ["-C", dir, "fetch", "origin", "dev"], { encoding: "utf-8", timeout: 30_000, killSignal: "SIGKILL" });
+        const log = spawnSync("git", ["-C", dir, "log", "--oneline", "HEAD..origin/dev"], { encoding: "utf-8", killSignal: "SIGKILL" });
         const commits = (log.stdout || "").trim();
         if (commits) {
           hasNew = true;
@@ -514,11 +514,11 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       logInfo("update", "git update requested");
 
       // Pull + build fresh source, then deploy from fresh bundle
-      spawnSync("git", ["-C", abtarsDir, "fetch", "origin", "dev"], { timeout: 30_000 });
-      spawnSync("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000 });
+      spawnSync("git", ["-C", abtarsDir, "fetch", "origin", "dev"], { timeout: 30_000, killSignal: "SIGKILL" });
+      spawnSync("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000, killSignal: "SIGKILL" });
       if (existsSync(join(abmindDir, ".git"))) {
-        spawnSync("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000 });
-        spawnSync("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000 });
+        spawnSync("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000, killSignal: "SIGKILL" });
+        spawnSync("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000, killSignal: "SIGKILL" });
       }
       const build = spawnSync("node", ["esbuild.config.js"], { cwd: abtarsDir, encoding: "utf-8", timeout: 60_000 });
       if (build.status !== 0) {
