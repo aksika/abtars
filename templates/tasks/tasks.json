@@ -6,7 +6,8 @@
     "schedule": "0 9 * * *",
     "type": "task",
     "executor": "agent",
-    "maxRunsPerDay": 1
+    "maxRunsPerDay": 1,
+    "deliveryMode": "announce"
   },
   {
     "id": "daily-backup",
@@ -15,6 +16,7 @@
     "schedule": "0 0 * * *",
     "type": "task",
     "executor": "script",
-    "maxRunsPerDay": 1
+    "maxRunsPerDay": 1,
+    "deliveryMode": "silent"
   }
 ]
