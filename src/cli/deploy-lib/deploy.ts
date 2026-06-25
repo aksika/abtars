@@ -4,9 +4,9 @@
  */
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, mkdirSync, copyFileSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, mkdirSync, copyFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { execSync, spawn, spawnSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 import { acquireLock, atomicSwap, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
 import { makeLocalBuildSource } from "../update-sources/dev.js";
@@ -87,31 +87,12 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     const staged = await source.prepare({ stagingDir: paths.appStaging, home: paths.home, allowStale: !!opts.skipFreshness });
     process.stdout.write(`✓ staged ${staged.version}\n`);
 
-    // External runtime deps
-    const pkgPath = join(staged.stagedPath, "package.json");
+    // External runtime deps — copy pre-compiled native modules from source repo
+    const nm = join(staged.stagedPath, "node_modules");
     try {
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-      if (pkg.dependencies?.abmind?.startsWith("file:")) delete pkg.dependencies.abmind;
-      // Remove bundled-only deps that aren't needed at runtime
-      delete pkg.dependencies?.patchright;
-      delete pkg.dependencies?.["rettiwt-api"];
-      writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
-      const pnpmBin = spawnSync("which", ["pnpm"], { encoding: "utf-8" }).stdout.trim() || "pnpm";
-      try {
-        execSync(`${pnpmBin} add better-sqlite3 --prod --allow-build=better-sqlite3`, { cwd: staged.stagedPath, timeout: 120_000, stdio: "pipe" });
-      } catch {
-        // pnpm may exit 7 due to node-gyp cleanup bug — check if .node compiled anyway
-        const built = spawnSync("find", [staged.stagedPath, "-name", "better_sqlite3.node", "-type", "f"], { encoding: "utf-8" }).stdout.trim();
-        if (!built) {
-          try { execSync("npm install better-sqlite3", { cwd: staged.stagedPath, timeout: 120_000, stdio: "pipe" }); } catch { /* self-heal at runtime */ }
-        }
-      }
-      // Ensure symlink exists (pnpm exit 7 may skip hoisting)
-      const nm = join(staged.stagedPath, "node_modules");
-      const sqliteLink = join(nm, "better-sqlite3");
-      if (!existsSync(sqliteLink)) {
-        const pnpmStore = spawnSync("find", [join(nm, ".pnpm"), "-maxdepth", "3", "-name", "better-sqlite3", "-type", "d"], { encoding: "utf-8" }).stdout.trim().split("\n")[0];
-        if (pnpmStore) { try { symlinkSync(pnpmStore, sqliteLink); } catch { /* */ } }
+      const sqliteSrc = join(repoRoot, "node_modules", "better-sqlite3");
+      if (existsSync(sqliteSrc)) {
+        cpSync(sqliteSrc, join(nm, "better-sqlite3"), { recursive: true });
       }
       process.stdout.write(`✓ external deps installed\n`);
     } catch { process.stdout.write(`⚠ external deps install failed\n`); }
