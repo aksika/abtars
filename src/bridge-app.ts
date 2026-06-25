@@ -173,7 +173,17 @@ export async function startBridge(): Promise<number> {
       const { sendToMainChat } = await import("./components/main-chat.js");
       const version = ctx.commit && ctx.commit !== "?" && !ctx.version.includes(ctx.commit)
         ? `v${ctx.version}-${ctx.commit}` : `v${ctx.version}`;
-      await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `🔄 Back online. ${version}`);
+      // #1202: Include update result if deploy just completed
+      let deployNote = "";
+      try {
+        const { readFileSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const state = JSON.parse(readFileSync(join(process.env["HOME"] ?? "", ".abtars", "deploy.state"), "utf-8"));
+        if (state.completedAt && Date.now() - new Date(state.completedAt).getTime() < 5 * 60_000) {
+          deployNote = state.status === "success" ? " (updated)" : ` (update ${state.status})`;
+        }
+      } catch {}
+      await sendToMainChat({ telegram: ctx.telegramAdapter, discord: ctx.discordAdapter }, `🔄 Back online. ${version}${deployNote}`);
       logInfo("main", "Startup: Back online notification sent");
       const failed = [...ctx.phaseHealth].filter(([, h]) => h.status === "failed" || h.status === "skipped");
       if (failed.length > 0) {
