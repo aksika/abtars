@@ -50,51 +50,7 @@
     "overflow",
     "state"
   ],
-  "configSeeds": [
-    {
-      "source": "config/.env.example",
-      "dest": "config/.env",
-      "mode": "0600"
-    },
-    {
-      "source": "config/.env.skills.example",
-      "dest": "config/.env.skills",
-      "mode": "0600"
-    },
-    {
-      "source": "models.default.json",
-      "dest": "config/models.json"
-    },
-    {
-      "source": "config/transport.json.example",
-      "dest": "config/transport.json"
-    },
-    {
-      "source": "config/users.json.example",
-      "dest": "config/users.json"
-    },
-    {
-      "source": "templates/sha-policy.json",
-      "dest": "config/sha-policy.json"
-    },
-    {
-      "source": "templates/config/default-minimal.md",
-      "dest": "config/default-minimal.md"
-    },
-    {
-      "source": "tasks.default.json",
-      "dest": "tasks/tasks.json"
-    },
-    {
-      "source": "config/peers.json.example",
-      "dest": "config/peers.json",
-      "mode": "0600"
-    },
-    {
-      "source": "config/budget.json.example",
-      "dest": "config/budget.json"
-    }
-  ],
+  "configSeeds": [],
   "requiredConfigs": [
     {
       "path": "config/transport.json",
