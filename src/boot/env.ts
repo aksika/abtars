@@ -79,7 +79,7 @@ export function reloadSecrets(): void {
     return;
   }
 
-  const SKIP_ENCRYPT = new Set(["WEB_AUTH_TOKEN"]);
+  const SKIP_ENCRYPT = new Set(["WEB_AUTH"]);
 
   for (const file of readdirSync(secretDir)) {
     const fullPath = resolve(secretDir, file);

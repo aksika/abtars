@@ -28,7 +28,7 @@ export function loadDashboardConfig(
   return {
     webPort: parseNumericEnv(env["WEB_PORT"], DASHBOARD_DEFAULTS.webPort),
     webHost: env["WEB_HOST"]?.trim() || DASHBOARD_DEFAULTS.webHost,
-    webAuthToken: env["WEB_AUTH_TOKEN"]?.trim() ?? "",
+    webAuthToken: env["WEB_AUTH"]?.trim() ?? "",
     webPushIntervalMs: parseNumericEnv(
       env["WEB_PUSH_INTERVAL_MS"],
       DASHBOARD_DEFAULTS.webPushIntervalMs,
@@ -38,7 +38,7 @@ export function loadDashboardConfig(
 
 /**
  * Validate that the dashboard config is usable when `--web` is enabled.
- * Throws if `WEB_AUTH_TOKEN` is missing.
+ * Throws if `WEB_AUTH` is missing.
  */
 export function validateDashboardConfig(
   config: DashboardConfig,
@@ -46,7 +46,7 @@ export function validateDashboardConfig(
 ): void {
   if (webEnabled && !config.webAuthToken) {
     throw new Error(
-      "WEB_AUTH_TOKEN is required when --web is enabled",
+      "WEB_AUTH is required when --web is enabled",
     );
   }
 }

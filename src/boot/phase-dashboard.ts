@@ -33,23 +33,23 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
   if (!transport || !heartbeat) { ctx.phaseHealth.set(phaseDashboard.name, { status: "skipped", error: "no transport/heartbeat" }); logWarn("boot", `${phaseDashboard.name}: skipping — deps not available`); return "skipped"; }
 
   const dashConfig = loadDashboardConfig(process.env);
-  // Auto-generate WEB_AUTH_TOKEN if missing — persist to .env so it survives restart
+  // Auto-generate WEB_AUTH if missing — persist to .env so it survives restart
   if (!dashConfig.webAuthToken) {
     const { randomBytes } = await import("node:crypto");
     const { readFile, writeFile } = await import("node:fs/promises");
     const token = randomBytes(32).toString("hex");
     dashConfig.webAuthToken = token;
-    process.env["WEB_AUTH_TOKEN"] = token;
+    process.env["WEB_AUTH"] = token;
     const envPath = join(process.cwd(), "config", ".env");
     try {
       let content = "";
       try { content = await readFile(envPath, "utf-8"); } catch (err) { logAndSwallow("phase_dashboard", "op", err); }
-      content = content.replace(/^WEB_AUTH_TOKEN=.*$/m, "").trimEnd();
-      content += `\nWEB_AUTH_TOKEN=${token}\n`;
+      content = content.replace(/^WEB_AUTH=.*$/m, "").trimEnd();
+      content += `\nWEB_AUTH=${token}\n`;
       await writeFile(envPath, content, { mode: 0o600 });
-      logInfo("dashboard", `🔑 WEB_AUTH_TOKEN auto-generated and saved to ${envPath}`);
+      logInfo("dashboard", `🔑 WEB_AUTH auto-generated and saved to ${envPath}`);
     } catch (err) {
-      logInfo("dashboard", `🔑 WEB_AUTH_TOKEN auto-generated (not persisted: ${err instanceof Error ? err.message : String(err)})`);
+      logInfo("dashboard", `🔑 WEB_AUTH auto-generated (not persisted: ${err instanceof Error ? err.message : String(err)})`);
     }
     // Token auto-generated — user can find it in .env
   }

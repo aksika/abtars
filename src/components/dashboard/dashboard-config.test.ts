@@ -20,7 +20,7 @@ describe("loadDashboardConfig", () => {
     const config = loadDashboardConfig({
       WEB_PORT: "8080",
       WEB_HOST: "127.0.0.1",
-      WEB_AUTH_TOKEN: "secret-token",
+      WEB_AUTH: "secret-token",
       WEB_PUSH_INTERVAL_MS: "10000",
     });
     expect(config.webPort).toBe(8080);
@@ -79,12 +79,12 @@ describe("validateDashboardConfig", () => {
   it("throws when webEnabled is true and token is empty", () => {
     const config = loadDashboardConfig({});
     expect(() => validateDashboardConfig(config, true)).toThrow(
-      "WEB_AUTH_TOKEN is required",
+      "WEB_AUTH is required",
     );
   });
 
   it("does not throw when webEnabled is true and token is set", () => {
-    const config = loadDashboardConfig({ WEB_AUTH_TOKEN: "my-token" });
+    const config = loadDashboardConfig({ WEB_AUTH: "my-token" });
     expect(() => validateDashboardConfig(config, true)).not.toThrow();
   });
 
@@ -152,7 +152,7 @@ describe("loadDashboardConfig — Property 10: Dashboard config parsing with def
       WEB_PORT: optionalString,
       WEB_HOST: optionalString,
       WEB_PUSH_INTERVAL_MS: optionalString,
-      WEB_AUTH_TOKEN: optionalString,
+      WEB_AUTH: optionalString,
     });
 
     fc.assert(
