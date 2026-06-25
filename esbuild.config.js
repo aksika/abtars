@@ -61,6 +61,10 @@ const external = [
   "jimp",
 ];
 
+// Clean stale chunks before building (esbuild code-splits produce hashed filenames)
+import { rmSync } from "node:fs";
+rmSync("bundle", { recursive: true, force: true });
+
 const result = await esbuild.build({
   entryPoints: {
     abtars: "src/main.ts",
