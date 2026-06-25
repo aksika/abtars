@@ -14,9 +14,18 @@ if [ ! -d "$SRC_DIR/.git" ]; then
 fi
 
 echo "+ Fetching latest..."
-git -C "$SRC_DIR" fetch origin dev
+# 30s timeout with SIGKILL (git ignores SIGTERM during network ops)
+# Use gtimeout (brew coreutils) or timeout (Linux)
+TIMEOUT_CMD="$(command -v gtimeout || command -v timeout || true)"
+if [ -n "$TIMEOUT_CMD" ]; then
+  "$TIMEOUT_CMD" --signal=KILL 30 git -C "$SRC_DIR" fetch origin dev
+  [ -d "$ABMIND_DIR/.git" ] && "$TIMEOUT_CMD" --signal=KILL 30 git -C "$ABMIND_DIR" fetch origin dev
+else
+  git -C "$SRC_DIR" fetch origin dev
+  [ -d "$ABMIND_DIR/.git" ] && git -C "$ABMIND_DIR" fetch origin dev
+fi
 git -C "$SRC_DIR" checkout origin/dev
-[ -d "$ABMIND_DIR/.git" ] && git -C "$ABMIND_DIR" fetch origin dev && git -C "$ABMIND_DIR" checkout origin/dev
+[ -d "$ABMIND_DIR/.git" ] && git -C "$ABMIND_DIR" checkout origin/dev
 
 echo "+ Building..."
 node "$SRC_DIR/esbuild.config.js"
