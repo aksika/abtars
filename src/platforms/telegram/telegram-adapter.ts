@@ -405,12 +405,14 @@ export class TelegramAdapter implements PlatformAdapter {
 
     // #512: commands bypass the sequential await — execute immediately even if agent is mid-stream
     if (text.startsWith("/") && !text.startsWith("//")) {
+      if (!this.deps.pipeline?.sessionManager) return; // pipeline not wired yet
       handleInboundMessage(inbound, this, this.deps.pipeline).catch((err) => {
         logError(TAG, `Command dispatch error: ${err instanceof Error ? err.message : String(err)}`);
       });
       return;
     }
 
+    if (!this.deps.pipeline?.sessionManager) return; // pipeline not wired yet
     await handleInboundMessage(inbound, this, this.deps.pipeline);
   }
 

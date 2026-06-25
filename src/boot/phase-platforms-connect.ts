@@ -100,14 +100,11 @@ export async function phasePlatformsConnect(ctx: BootCtx): Promise<PhaseResult> 
 
   // --- Discord service ---
   registry.register("discord", {
-    configured: Boolean(config.discord.enabled && config.discord.botToken),
+    configured: Boolean(config.discord.enabled && config.discord.botToken && config.discord.allowedUserIds?.size),
     async create() {
       const { isValidSnowflake } = await import("../components/config.js");
       if (!config.discord.appId || !isValidSnowflake(config.discord.appId)) {
         throw new Error("DISCORD_APP_ID missing or invalid — Discord disabled");
-      }
-      if (!config.discord.allowedUserIds?.size) {
-        throw new Error("No Discord users in users.json — Discord disabled");
       }
       const { DiscordAdapter } = await import("../platforms/discord/discord-adapter.js");
       const adapter = new DiscordAdapter(
