@@ -514,8 +514,12 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       logInfo("update", "git update requested");
 
       // Pull + build fresh source, then deploy from fresh bundle
-      spawnSync("git", ["-C", abtarsDir, "pull", "--ff-only", "origin", "dev"], { timeout: 30_000 });
-      if (existsSync(join(abmindDir, ".git"))) spawnSync("git", ["-C", abmindDir, "pull", "--ff-only", "origin", "dev"], { timeout: 30_000 });
+      spawnSync("git", ["-C", abtarsDir, "fetch", "origin", "dev"], { timeout: 30_000 });
+      spawnSync("git", ["-C", abtarsDir, "checkout", "origin/dev"], { timeout: 10_000 });
+      if (existsSync(join(abmindDir, ".git"))) {
+        spawnSync("git", ["-C", abmindDir, "fetch", "origin", "dev"], { timeout: 30_000 });
+        spawnSync("git", ["-C", abmindDir, "checkout", "origin/dev"], { timeout: 10_000 });
+      }
       const build = spawnSync("node", ["esbuild.config.js"], { cwd: abtarsDir, encoding: "utf-8", timeout: 60_000 });
       if (build.status !== 0) {
         await ctx.reply(`x Build failed:\n${(build.stderr || build.stdout || "").slice(-300)}`);
