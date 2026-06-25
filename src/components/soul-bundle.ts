@@ -62,9 +62,8 @@ export function buildSoulBundle(type: SessionType, memory?: MemoryManager | null
     try { bundle = memory?.getSessionBundle() ?? null; } catch (err) { logAndSwallow(TAG, "op", err); }
 
     if (memory && memory.available !== false && !bundle?.soul) {
-      // Memory available but SOUL missing → misconfiguration. Log ERROR for SHA.
-      logError(TAG, "SOUL bundle missing — abmind misconfigured (memory available but getSessionBundle empty)");
-      return "[ERROR] SOUL bundle missing. Tell the user: memory system failed to load persona. Run /doctor or check abmind installation.";
+      logWarn(TAG, "SOUL bundle empty — disabling memory until next boot");
+      memory.available = false;
     }
 
     if (!memory || memory.available === false) {
