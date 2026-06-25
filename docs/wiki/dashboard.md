@@ -59,4 +59,4 @@ Requires authentication. The token is stored as `WEB_AUTH` in your `.env` file:
 grep WEB_AUTH ~/.abtars/config/.env
 ```
 
-Open `http://localhost:3000?token=<value>` in your browser. The token is auto-generated on first boot if missing.
+Check the dashboard port with `abtars status` or `/status` in Telegram, then open `http://localhost:<port>?token=<value>` in your browser. The token is auto-generated on first boot if missing.
