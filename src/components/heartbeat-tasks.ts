@@ -250,8 +250,8 @@ export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTas
           kanbanSetDelivering(card.id);
           try {
             if (card.delivery_mode === "deliver") {
-              if (card.result_summary) await deps.sendMessage(deps.chatId(), card.result_summary);
               if (card.result_path) await deps.sendDocument(deps.chatId(), card.result_path, card.title);
+              await deps.sendSystemMessage(`[SYSTEM] Task "${card.title}" complete. File delivered: ${card.result_path ?? "(no file)"}`);
             } else {
               // "announce"
               await deps.sendSystemMessage(

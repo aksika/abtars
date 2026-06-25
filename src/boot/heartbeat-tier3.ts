@@ -124,8 +124,10 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
 
         if (card.delivery_mode === "deliver") {
           if (ctx.telegramAdapter) {
-            if (card.result_summary) await ctx.telegramAdapter.sendMessage(targetChat, card.result_summary);
             if (card.result_path) await ctx.telegramAdapter.sendDocument(targetChat, card.result_path, card.title);
+          }
+          if (ctx.sendSystemMessage) {
+            await ctx.sendSystemMessage(`[SYSTEM] Task "${card.title}" complete. File delivered: ${card.result_path ?? "(no file)"}`);
           }
           kanbanMarkDelivered(card.id);
           return;
