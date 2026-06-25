@@ -527,11 +527,8 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       }
       // Run deploy from the FRESH bundle (not the old deployed binary)
       const bundleCli = join(abtarsDir, "bundle", "abtars-cli.js");
-      const child = spawn("node", [bundleCli, "update", "--dev", abtarsDir], { stdio: ["ignore", "pipe", "pipe"] });
-      let stderr = "";
-      child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-      const killTimer = setTimeout(() => { child.kill("SIGKILL"); ctx.reply("x Deploy timed out (3min). Check logs.").catch(() => {}); }, 180_000);
-      child.on("close", (code) => { clearTimeout(killTimer); if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
+      const child = spawn("node", [bundleCli, "update", "--dev", abtarsDir], { detached: true, stdio: "ignore" });
+      child.unref();
     } else if (channel === "alpha") {
       await ctx.reply("Updating from npm (alpha)...");
       logInfo("update", "npm alpha update requested");
