@@ -204,6 +204,4 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
   const { task: modelHealthTask, runNow: runModelHealth } = createModelHealthTask(ctx);
   heartbeat.registerTask(modelHealthTask);
   queueMicrotask(() => { runModelHealth().catch(err => logAndSwallow(TAG, "runModelHealth boot", err)); });
-
-  logInfo(TAG, `Registered ${heartbeat.taskNames().length} total heartbeat tasks`);
 }
