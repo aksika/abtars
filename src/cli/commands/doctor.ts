@@ -29,7 +29,7 @@ async function pathExists(p: string): Promise<boolean> {
 export async function doctor(args: readonly string[] = []): Promise<number> {
   await printBanner("doctor");
   const paths = packagePaths('abtars');
-  const installed = join(paths.home, 'scripts', 'doctor.sh');
+  const installed = join(paths.releasesSrc, 'abtars', 'scripts', 'doctor.sh');
   const repo = join(process.cwd(), 'scripts', 'doctor.sh');
   const candidate = (await pathExists(installed)) ? installed : (await pathExists(repo)) ? repo : null;
 
