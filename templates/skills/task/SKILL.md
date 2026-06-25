@@ -59,6 +59,27 @@ Standard cron: `minute hour day month weekday`
 | `agent` | Agent session runs the TASK.md prompt |
 | `script` | Shell command in `message` field runs directly |
 
+## Delivery modes
+
+Controls how the task result reaches the user. Set `deliveryMode` in tasks.json.
+
+| Mode | Behavior | Use for |
+|------|----------|---------|
+| `deliver` | Drop result_summary + file to chat automatically (no LLM) | Reports, backups with output |
+| `announce` | Inject result into agent — agent composes a natural delivery | Greetings, conversational tasks |
+| `silent` | No output to user | Internal housekeeping |
+
+Default is `deliver` if not specified. Example:
+
+```json
+{
+  "id": "finance-report",
+  "deliveryMode": "deliver",
+  "executor": "agent",
+  "schedule": "30 9 * * *"
+}
+```
+
 ## Managing tasks
 
 ```bash
