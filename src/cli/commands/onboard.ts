@@ -584,12 +584,11 @@ export async function onboard(opts: OnboardOptions): Promise<number> {
     }
     if (!tc["agents"]) {
       const provName = PROVIDER_TRANSPORT_NAME[answers.defaultProvider] ?? answers.defaultProvider;
-      const model = provName === "kiro" ? "auto" : answers.defaultModel;
       tc["agents"] = {
-        "professor": { "model": model, "provider": provName },
-        "dreamy": { "model": model, "provider": provName },
-        "browsie": { "model": model, "provider": provName },
-        "coding": { "model": model, "provider": provName },
+        "professor": { "model": answers.defaultModel, "provider": provName },
+        "dreamy": { "model": answers.defaultModel, "provider": provName },
+        "browsie": { "model": answers.defaultModel, "provider": provName },
+        "coding": { "model": answers.defaultModel, "provider": provName },
       };
     }
     if (answers.hailMaryModel) {
