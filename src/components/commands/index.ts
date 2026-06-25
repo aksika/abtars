@@ -11,7 +11,7 @@ import {
   handleStatus, handleDoctor, handleStop, handleWait, handleRestart,
   handleFull, handleShort, handleHealing, handleFacts,
   handleTasksList, handleTasksTrigger, handleTasksLog, handleTaskPause, handleKanban,
-  handleChannel,
+  handleChannel, handleTodo,
   handleEmergencyAlias, handleModels, handleHeartbeat, handleReasoning, handleContinue,
   handleMemory, handleNlm, handleWakeup,
   handleSleep, handleSleepSub, handleHelp, handleSkills,
@@ -39,6 +39,7 @@ registerExact("/update", handleSoftware);
 registerExact("/facts", handleFacts);
 registerExact("/tasks", handleTasksList);
 registerExact("/task", handleTasksList);
+registerExact("/todo", handleTodo);
 registerExact("/kanban", handleKanban);
 registerPrefix("/kanban ", handleKanban);
 registerExact("/channel", handleChannel);

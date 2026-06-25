@@ -239,3 +239,15 @@ export async function handleChannel(text: string, ctx: CommandContext): Promise<
   await ctx.reply(`✓ Posted to card:${cardId} [master→${to}]`);
   return true;
 }
+
+export async function handleTodo(_text: string, ctx: CommandContext): Promise<boolean> {
+  const { existsSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { abtarsHome } = await import("../../paths.js");
+  const todoPath = join(abtarsHome(), "workspace", "todo", "todo.md");
+  if (!existsSync(todoPath)) { await ctx.reply("Todo list is empty."); return true; }
+  const content = readFileSync(todoPath, "utf-8").trim();
+  if (!content || content === "# Todo List") { await ctx.reply("Todo list is empty."); return true; }
+  await ctx.reply(content);
+  return true;
+}

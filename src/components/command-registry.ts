@@ -28,6 +28,7 @@ export const BOT_COMMANDS: readonly BotCommand[] = [
   { name: "skills", description: "List active skills" },
   { name: "skill", description: "List skills (reload: /skill reload)" },
   { name: "tasks", description: "Scheduled tasks" },
+  { name: "todo", description: "Todo list" },
   { name: "facts", description: "Core knowledge" },
   { name: "nlm", description: "Knowledge base" },
   { name: "restart", description: "Restart bridge" },
