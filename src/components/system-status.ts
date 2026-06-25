@@ -199,6 +199,26 @@ export function renderStatusText(status: SystemStatus): string {
   // Sleep
   if (status.sleepStatus) lines.push(`  Sleep: ${status.sleepStatus}`);
 
+  // Dashboard
+  const webPort = process.env["WEB_PORT"];
+  if (webPort) lines.push(`  Dashboard: :${webPort}`);
+  else lines.push(`  Dashboard: disabled`);
+
+  // Agent API
+  const apiPort = process.env["AGENT_API_PORT"];
+  if (apiPort) lines.push(`  Agent API: :${apiPort}`);
+
+  // Heartbeat
+  try {
+    const { getHeartbeatInstance } = require("./heartbeat-system.js") as typeof import("./heartbeat-system.js");
+    const hb = getHeartbeatInstance();
+    if (hb) {
+      const mins = Math.round(hb.intervalMs / 60000);
+      const taskCount = hb.getTaskNames().length;
+      lines.push(`  Heartbeat: ${hb.isRunning ? "running" : "stopped"} (${mins}min, ${taskCount} tasks)`);
+    }
+  } catch { /* */ }
+
   // Skills
   try {
     const { getSkillCache } = require("../capabilities/hotskills/index.js") as typeof import("../capabilities/hotskills/index.js");
