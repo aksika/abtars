@@ -4,7 +4,7 @@
  */
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, mkdirSync, copyFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, mkdirSync, copyFileSync, symlinkSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { execSync, spawn, spawnSync } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
@@ -105,6 +105,13 @@ export async function deploy(opts: DeployOptions): Promise<number> {
         if (!built) {
           try { execSync("npm install better-sqlite3", { cwd: staged.stagedPath, timeout: 120_000, stdio: "pipe" }); } catch { /* self-heal at runtime */ }
         }
+      }
+      // Ensure symlink exists (pnpm exit 7 may skip hoisting)
+      const nm = join(staged.stagedPath, "node_modules");
+      const sqliteLink = join(nm, "better-sqlite3");
+      if (!existsSync(sqliteLink)) {
+        const pnpmStore = spawnSync("find", [join(nm, ".pnpm"), "-maxdepth", "3", "-name", "better-sqlite3", "-type", "d"], { encoding: "utf-8" }).stdout.trim().split("\n")[0];
+        if (pnpmStore) { try { symlinkSync(pnpmStore, sqliteLink); } catch { /* */ } }
       }
       process.stdout.write(`✓ external deps installed\n`);
     } catch { process.stdout.write(`⚠ external deps install failed\n`); }
