@@ -713,6 +713,16 @@ if [ -f "$AB/bridge.lock" ]; then
   ok "boot-type" "$BOOT_TYPE"
 fi
 
+# Plaintext secrets in .env
+ENV_FILE="$AB/config/.env"
+SECRETS_ENC="$AB/config/secrets.enc"
+if [ -f "$SECRETS_ENC" ] && [ -f "$ENV_FILE" ]; then
+  EXPOSED=$(grep -iE '_(TOKEN|KEY|SECRET|PASSWORD)=' "$ENV_FILE" | grep -v '^#' | cut -d= -f1 | tr '\n' ' ')
+  if [ -n "$EXPOSED" ]; then
+    warn "plaintext-secrets" "secrets.enc exists but .env still has: $EXPOSED— remove them from .env"
+  fi
+fi
+
 # Summary
 if $FIX && [ -f "$AB/logs/watchdog.log" ]; then
   echo ""
