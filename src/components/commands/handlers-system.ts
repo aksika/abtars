@@ -512,10 +512,22 @@ export async function handleSoftware(_text: string, ctx: CommandContext): Promis
       }
       await ctx.reply(msg + "\nDeploying...");
       logInfo("update", "git update requested");
-      const child = spawn("abtars", ["update", "--dev"], { stdio: ["ignore", "pipe", "pipe"] });
+
+      // Pull + build fresh source, then deploy from fresh bundle
+      spawnSync("git", ["-C", abtarsDir, "pull", "--ff-only", "origin", "dev"], { timeout: 30_000 });
+      if (existsSync(join(abmindDir, ".git"))) spawnSync("git", ["-C", abmindDir, "pull", "--ff-only", "origin", "dev"], { timeout: 30_000 });
+      const build = spawnSync("node", ["esbuild.config.js"], { cwd: abtarsDir, encoding: "utf-8", timeout: 60_000 });
+      if (build.status !== 0) {
+        await ctx.reply(`x Build failed:\n${(build.stderr || build.stdout || "").slice(-300)}`);
+        return true;
+      }
+      // Run deploy from the FRESH bundle (not the old deployed binary)
+      const bundleCli = join(abtarsDir, "bundle", "abtars-cli.js");
+      const child = spawn("node", [bundleCli, "update", "--dev", abtarsDir], { stdio: ["ignore", "pipe", "pipe"] });
       let stderr = "";
       child.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
-      child.on("close", (code) => { if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
+      const killTimer = setTimeout(() => { child.kill("SIGKILL"); ctx.reply("x Deploy timed out (3min). Check logs.").catch(() => {}); }, 180_000);
+      child.on("close", (code) => { clearTimeout(killTimer); if (code !== 0 && code !== null) ctx.reply(`x Update failed (exit ${code}):\n${stderr.slice(-300)}`).catch(() => {}); });
     } else if (channel === "alpha") {
       await ctx.reply("Updating from npm (alpha)...");
       logInfo("update", "npm alpha update requested");
