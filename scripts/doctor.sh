@@ -146,6 +146,25 @@ else
   fi
 fi
 
+# Deploy lock staleness check
+DEPLOY_LOCK="$AB/deploy.lock"
+if [ -f "$DEPLOY_LOCK" ]; then
+  LOCK_AGE=$(( $(date +%s) - $(stat -c %Y "$DEPLOY_LOCK" 2>/dev/null || stat -f %m "$DEPLOY_LOCK" 2>/dev/null) ))
+  if [ "$LOCK_AGE" -gt 300 ]; then
+    LOCK_PID=$(json_field "$DEPLOY_LOCK" pid 0)
+    if ! kill -0 "$LOCK_PID" 2>/dev/null; then
+      if $FIX; then
+        rm -f "$DEPLOY_LOCK"
+        fix "removed stale deploy.lock (pid $LOCK_PID dead, ${LOCK_AGE}s old)"
+      else
+        warn "stale deploy.lock (pid $LOCK_PID dead, ${LOCK_AGE}s old) — run with --fix"
+      fi
+    else
+      warn "deploy.lock held by pid $LOCK_PID for ${LOCK_AGE}s — may be hung"
+    fi
+  fi
+fi
+
 # LaunchAgent / systemd check (supervised mode only)
 if [[ "$INSTALL_MODE" == "daemon" ]]; then
 if [[ "$(uname)" == "Darwin" ]]; then
