@@ -325,6 +325,7 @@ export async function handleInboundMessage(
       if (!totalToolStartAt) totalToolStartAt = Date.now();
       currentToolName = toolName;
       toolStartAt = Date.now();
+      activeSession.lastActiveAt = Date.now(); // #1198: keep session alive during tool execution
       adapter.sendTyping?.(channelId, msg.threadId).catch(err => logAndSwallow(TAG, "adapter call", err));
 
       // Clear previous elapsed timer
