@@ -13,7 +13,7 @@ import { abtarsHome } from "../../paths.js";
 import { homedir } from "node:os";
 
 function libNmDir(): string {
-  return join(homedir(), ".abtars-releases", "deps", "node_modules");
+  return join(homedir(), ".local", "lib", "node_modules");
 }
 
 function list(): number {

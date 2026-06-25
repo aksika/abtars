@@ -38,7 +38,7 @@ export const SYSTEM_DEPS: Record<string, SystemDep> = {
 };
 
 function libDir(): string {
-  const d = join(homedir(), ".abtars-releases", "deps");
+  const d = join(homedir(), ".local", "lib");
   mkdirSync(d, { recursive: true });
   return d;
 }

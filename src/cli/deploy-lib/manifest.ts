@@ -34,8 +34,6 @@ export interface Manifest {
   readonly installMode?: 'simple' | 'daemon';
   /** Repo root path (set when source=local). Null for npm installs. */
   readonly repoRoot?: string | null;
-  /** Deployed native dep versions (managed by syncNativeDeps). */
-  readonly nativeDeps?: Record<string, string>;
 }
 
 export async function readManifest(path: string): Promise<Manifest | null> {

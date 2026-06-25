@@ -168,7 +168,7 @@ async function reconcilePathLink(
 export async function writeWrapper(binDir: string, name: string, currentLink: string, dryRun: boolean): Promise<void> {
   const bundleFile = name === 'abtars' ? 'abtars-cli.js' : `${name}.js`;
   // #912: ensure node is in PATH on macOS (homebrew) and Linux (.local/bin)
-  const pathPreamble = `export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"\n`;
+  const pathPreamble = `export PATH="/opt/homebrew/bin:$HOME/.local/bin:$PATH"\nexport NODE_PATH="$HOME/.local/lib/node_modules:\${NODE_PATH:-}"\n`;
   let content: string;
 
   if (name === 'abmind') {

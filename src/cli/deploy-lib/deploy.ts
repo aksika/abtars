@@ -87,13 +87,6 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     const staged = await source.prepare({ stagingDir: paths.appStaging, home: paths.home, allowStale: !!opts.skipFreshness });
     process.stdout.write(`✓ staged ${staged.version}\n`);
 
-    // Native deps — manifest-driven npm install (only on version change)
-    const { syncNativeDeps } = await import("./native-deps.js");
-    const existingManifest = isFirstInstall ? null : await readManifest(paths.manifest);
-    const depsDir = join(paths.releasesDir, "deps");
-    const nativeUpdated = syncNativeDeps(repoRoot, depsDir, existingManifest ?? emptyManifest("abtars", hostname()) as any);
-    if (nativeUpdated.length) process.stdout.write(`✓ native deps: ${nativeUpdated.join(", ")}\n`);
-
     // Copy abmind
     await copyAbmind(staged.stagedPath, repoRoot);
 
@@ -156,7 +149,6 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       previousCommit: prior?.commit ?? null,
       installMode: prior?.installMode ?? "daemon",
       repoRoot,
-      nativeDeps: (existingManifest as any)?.nativeDeps ?? prior?.nativeDeps ?? undefined,
     } as any);
     writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "deploying", version: staged.version, startedAt: new Date().toISOString() }) + "\n");
     process.stdout.write(`✓ manifest updated\n`);
@@ -264,7 +256,7 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
     for (const name of ["abmind", "abmind-embed"]) {
       const cliFile = name === "abmind" ? "abmind.js" : `${name}.js`;
       const target = join(abmindDist, cliFile);
-      const content = `#!/usr/bin/env bash\nexec node "${target}" "$@"\n`;
+      const content = `#!/usr/bin/env bash\nexport NODE_PATH="$HOME/.local/lib/node_modules:\${NODE_PATH:-}"\nexec node "${target}" "$@"\n`;
       const dest = join(paths.bin, name);
       try { rmSync(dest); } catch {}
       await writeFile(dest, content, { mode: 0o755 });
@@ -275,7 +267,7 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
 
   // One-time cleanup: remove stale binary dirs from data directories (#1134)
   const abmindHome = join(process.env["HOME"] ?? "", ".abmind");
-  for (const stale of [join(abmindHome, "bin"), join(abmindHome, "current"), join(paths.home, "bin"), join(paths.home, "scripts")]) {
+  for (const stale of [join(abmindHome, "bin"), join(abmindHome, "current"), join(abmindHome, "lib"), join(paths.home, "bin"), join(paths.home, "scripts"), join(paths.releasesDir, "deps")]) {
     if (existsSync(stale)) {
       rmSync(stale, { recursive: true, force: true });
       process.stdout.write(`✓ removed stale ${stale}\n`);
