@@ -87,17 +87,12 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     const staged = await source.prepare({ stagingDir: paths.appStaging, home: paths.home, allowStale: !!opts.skipFreshness });
     process.stdout.write(`✓ staged ${staged.version}\n`);
 
-    // External runtime deps — copy pre-compiled native modules to shared deps
-    try {
-      const { homedir } = await import("node:os");
-      const depsNm = join(homedir(), ".abtars-releases", "deps", "node_modules");
-      mkdirSync(depsNm, { recursive: true });
-      const sqliteSrc = join(repoRoot, "node_modules", "better-sqlite3");
-      if (existsSync(sqliteSrc)) {
-        cpSync(sqliteSrc, join(depsNm, "better-sqlite3"), { recursive: true });
-      }
-      process.stdout.write(`✓ external deps installed\n`);
-    } catch { process.stdout.write(`⚠ external deps install failed\n`); }
+    // Native deps — manifest-driven npm install (only on version change)
+    const { syncNativeDeps } = await import("./native-deps.js");
+    const existingManifest = isFirstInstall ? null : await readManifest(paths.manifest);
+    const depsDir = join(paths.releasesDir, "deps");
+    const nativeUpdated = syncNativeDeps(repoRoot, depsDir, existingManifest ?? emptyManifest("abtars", hostname()) as any);
+    if (nativeUpdated.length) process.stdout.write(`✓ native deps: ${nativeUpdated.join(", ")}\n`);
 
     // Copy abmind
     await copyAbmind(staged.stagedPath, repoRoot);
@@ -161,6 +156,7 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       previousCommit: prior?.commit ?? null,
       installMode: prior?.installMode ?? "daemon",
       repoRoot,
+      nativeDeps: (existingManifest as any)?.nativeDeps ?? prior?.nativeDeps ?? undefined,
     } as any);
     writeFileSync(join(paths.home, "deploy.state"), JSON.stringify({ status: "deploying", version: staged.version, startedAt: new Date().toISOString() }) + "\n");
     process.stdout.write(`✓ manifest updated\n`);
