@@ -116,8 +116,38 @@ export async function phaseDashboard(ctx: BootCtx): Promise<PhaseResult> {
     });
   }
 
-  await dashboardServer.start();
+  // Auto-pick port on EADDRINUSE (range: configured → configured+10)
+  const basePort = dashConfig.webPort;
+  let bound = false;
+  for (let attempt = 0; attempt <= 10; attempt++) {
+    dashConfig.webPort = basePort + attempt;
+    try {
+      await dashboardServer.start();
+      bound = true;
+      break;
+    } catch (err: any) {
+      if (err?.code === "EADDRINUSE" && attempt < 10) {
+        // Recreate server with new port if not custom module
+        if (!customModule) {
+          dashboardServer = new DashboardServer({
+            config: dashConfig,
+            authGate,
+            getStatus,
+            registry,
+            memorySearchController,
+            agentApiConfig: agentApiOpts ? { port: agentApiOpts.port } : null,
+          });
+        } else {
+          throw err; // custom modules don't support port retry
+        }
+        continue;
+      }
+      throw err;
+    }
+  }
+  if (!bound) { logWarn(TAG, `All ports ${basePort}-${basePort + 10} in use — dashboard disabled`); return "skipped"; }
   ctx.dashboardServer = dashboardServer;
-  logInfo("main", `🌐 Web dashboard enabled on ${dashConfig.webHost}:${dashConfig.webPort}${customModule ? ` (custom: ${customModule})` : ""}`);
+  if (dashConfig.webPort !== basePort) logWarn(TAG, `Port ${basePort} in use — dashboard bound to :${dashConfig.webPort}`);
+  logInfo("main", `Web dashboard on ${dashConfig.webHost}:${dashConfig.webPort}${customModule ? ` (custom: ${customModule})` : ""}`);
   return "ran";
 }

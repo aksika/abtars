@@ -57,6 +57,15 @@ export async function status(): Promise<number> {
     lines.push(`  bridge:        ○ stopped`);
   }
 
+  // Dashboard + Agent API ports from .env
+  try {
+    const envContent = readFileSync(join(paths.home, 'config', '.env'), 'utf-8');
+    const webPort = envContent.match(/^WEB_PORT=(\d+)/m)?.[1];
+    const apiPort = envContent.match(/^AGENT_API_PORT=(\d+)/m)?.[1];
+    if (webPort) lines.push(`  dashboard:     :${webPort}`);
+    if (apiPort) lines.push(`  agent-api:     :${apiPort}`);
+  } catch { /* no .env */ }
+
   process.stdout.write(`${lines.join('\n')}\n`);
 
   // Sentinel warning

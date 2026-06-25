@@ -4,7 +4,7 @@ import { printBanner } from './banner.js';
  * Calls bridge agent-api endpoints on localhost.
  */
 
-const PORT = parseInt(process.env["AGENT_API_PORT"] || "3100", 10);
+const PORT = parseInt(process.env["AGENT_API_PORT"] || "7100", 10);
 const BASE = `https://127.0.0.1:${PORT}/v1/orc`;
 
 // Skip TLS verification for localhost self-signed cert
