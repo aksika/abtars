@@ -1,18 +1,19 @@
 /**
- * NpmSource: fetch latest published version from npm registry (#462).
- * Downloads tarball, extracts, installs prod deps, stages.
+ * NpmSource: fetch latest published version directly from npm registry (#1176).
+ * Pure HTTP fetch — no npm/pnpm CLI dependency.
  */
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveVersion, downloadTarball } from "./registry-client.js";
 import type { PrepareContext, StagedRelease, UpdateSource } from "./types.js";
 
-const TIMEOUT_MS = 60_000;
+const TAR_TIMEOUT_MS = 60_000;
 
 function run(cmd: string, args: string[], cwd: string): string {
-  const r = spawnSync(cmd, args, { cwd, encoding: "utf-8", timeout: TIMEOUT_MS });
+  const r = spawnSync(cmd, args, { cwd, encoding: "utf-8", timeout: TAR_TIMEOUT_MS });
   if (r.error) throw new Error(`${cmd} ${args.join(" ")}: ${r.error.message}`);
   if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")} exited ${r.status}: ${r.stderr?.trim()}`);
   return r.stdout.trim();
@@ -31,21 +32,19 @@ export function makeNpmSource(packageName: string, tag?: string): UpdateSource {
   return {
     name: sourceName,
     async prepare(ctx: PrepareContext): Promise<StagedRelease> {
-      // --force: workaround for pnpm dist-tag cache bug (#1147). Remove when pnpm fixes.
-      const latest = run("npm", ["view", `${packageName}@${distTag}`, "version"], ctx.home);
+      const { version, tarballUrl } = await resolveVersion(packageName, distTag);
       const current = readLocalVersion(ctx.home);
-      if (latest === current) {
-        throw new Error(`Already at ${distTag} version (${latest}). Nothing to update.`);
+      if (version === current) {
+        throw new Error(`Already at ${distTag} version (${version}). Nothing to update.`);
       }
 
       const stagedPath = ctx.stagingDir;
       await rm(stagedPath, { recursive: true, force: true });
       await mkdir(stagedPath, { recursive: true });
 
-      // Download tarball
-      run("npm", ["pack", `${packageName}@${latest}`, "--pack-destination", stagedPath], stagedPath);
-      const tgzName = `${packageName}-${latest}.tgz`.replace("@", "").replace("/", "-");
-      const tgzPath = join(stagedPath, tgzName);
+      // Download tarball directly from registry
+      const tgzPath = join(stagedPath, `${packageName.replace("/", "-")}-${version}.tgz`);
+      await downloadTarball(tarballUrl, tgzPath);
 
       // Extract (strip package/ prefix)
       run("tar", ["-xzf", tgzPath, "--strip-components=1"], stagedPath);
@@ -53,10 +52,9 @@ export function makeNpmSource(packageName: string, tag?: string): UpdateSource {
       // Cleanup tarball
       if (existsSync(tgzPath)) unlinkSync(tgzPath);
 
-      // Install production deps
-      run("npm", ["install", "--omit=dev", "--no-audit", "--no-fund"], stagedPath);
+      // No dep install — native deps handled by #1191 (manifest-driven copy from deps/ dir)
 
-      return { version: latest, stagedPath, commit: null, branch: null, packageLockHash: null, source: sourceName };
+      return { version, stagedPath, commit: null, branch: null, packageLockHash: null, source: sourceName };
     },
   };
 }

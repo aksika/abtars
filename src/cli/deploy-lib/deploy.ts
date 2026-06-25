@@ -4,9 +4,9 @@
  */
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, mkdirSync, copyFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, rmSync, cpSync, readdirSync, mkdirSync, copyFileSync, unlinkSync, chmodSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { execSync, spawn } from "node:child_process";
+import { execSync, spawn, spawnSync } from "node:child_process";
 import { abtarsHome } from "../../paths.js";
 import { acquireLock, atomicSwap, cleanStaleStaging, healthProbe, packagePaths, readManifest, writeManifest, emptyManifest } from "../deploy-lib/index.js";
 import { makeLocalBuildSource } from "../update-sources/dev.js";
@@ -323,19 +323,37 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
 // ── Copy abmind ─────────────────────────────────────────────────────────────
 async function copyAbmind(stagingDir: string, repoRoot: string): Promise<void> {
   const abmindSrc = join(repoRoot, "..", "abmind");
-  if (!existsSync(join(abmindSrc, "package.json"))) return;
-  // Rebuild abmind (type errors are non-fatal — check dist exists after)
-  try {
-    execSync("npm run build", { cwd: abmindSrc, stdio: "pipe", timeout: 60_000 });
-  } catch {}
-  if (!existsSync(join(abmindSrc, "dist", "cli", "abmind.js"))) {
-    process.stdout.write(`⚠ abmind build failed (no dist output)\n`);
+  if (existsSync(join(abmindSrc, "package.json"))) {
+    // Dev mode: build from sibling git repo
+    try {
+      execSync("npm run build", { cwd: abmindSrc, stdio: "pipe", timeout: 60_000 });
+    } catch {}
+    if (!existsSync(join(abmindSrc, "dist", "cli", "abmind.js"))) {
+      process.stdout.write(`⚠ abmind build failed (no dist output)\n`);
+      return;
+    }
+    process.stdout.write(`✓ abmind rebuilt\n`);
+    const dest = join(stagingDir, "node_modules", "abmind");
+    cpSync(abmindSrc, dest, { recursive: true, filter: (src) => !src.includes("node_modules") && !src.includes(".git") });
+    try { chmodSync(join(dest, "dist/cli/abmind.js"), 0o755); } catch {}
+    process.stdout.write(`✓ abmind copied\n`);
     return;
   }
-  process.stdout.write(`✓ abmind rebuilt\n`);
-  // Copy dist into staging
-  const dest = join(stagingDir, "node_modules", "abmind");
-  cpSync(abmindSrc, dest, { recursive: true, filter: (src) => !src.includes("node_modules") && !src.includes(".git") });
-  try { const { chmodSync } = await import("node:fs"); chmodSync(join(dest, "dist/cli/abmind.js"), 0o755); } catch {}
-  process.stdout.write(`✓ abmind copied\n`);
+
+  // Registry mode (#1176): fetch abmind tarball directly
+  try {
+    const { resolveVersion, downloadTarball } = await import("../update-sources/registry-client.js");
+    const tag = process.env["ABMIND_TAG"] ?? "alpha";
+    const { version, tarballUrl } = await resolveVersion("abmind", tag);
+    const dest = join(stagingDir, "node_modules", "abmind");
+    const tgzPath = join(stagingDir, `abmind-${version}.tgz`);
+    await downloadTarball(tarballUrl, tgzPath);
+    mkdirSync(dest, { recursive: true });
+    spawnSync("tar", ["-xzf", tgzPath, "--strip-components=1", "-C", dest], { stdio: "pipe" });
+    if (existsSync(tgzPath)) unlinkSync(tgzPath);
+    try { chmodSync(join(dest, "dist/cli/abmind.js"), 0o755); } catch {}
+    process.stdout.write(`✓ abmind ${version} (registry)\n`);
+  } catch (err) {
+    process.stdout.write(`⚠ abmind fetch skipped: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
 }
