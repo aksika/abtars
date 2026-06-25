@@ -65,7 +65,7 @@ Controls how the task result reaches the user. Set `deliveryMode` in tasks.json.
 
 | Mode | Behavior | Use for |
 |------|----------|---------|
-| `deliver` | Drop result_summary + file to chat automatically (no LLM) | Reports, backups with output |
+| `deliver` | Drop the result file to chat automatically (no LLM) | Reports, generated documents |
 | `announce` | Inject result into agent — agent composes a natural delivery | Greetings, conversational tasks |
 | `silent` | No output to user | Internal housekeeping |
 
