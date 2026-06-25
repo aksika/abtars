@@ -52,12 +52,12 @@
   ],
   "configSeeds": [
     {
-      "source": ".env.example",
+      "source": "config/.env.example",
       "dest": "config/.env",
       "mode": "0600"
     },
     {
-      "source": ".env.skills.example",
+      "source": "config/.env.skills.example",
       "dest": "config/.env.skills",
       "mode": "0600"
     },
