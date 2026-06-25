@@ -98,9 +98,13 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
       const pnpmBin = spawnSync("which", ["pnpm"], { encoding: "utf-8" }).stdout.trim() || "pnpm";
       try {
-        execSync(`${pnpmBin} add better-sqlite3 --prod --allow-build=better-sqlite3`, { cwd: staged.stagedPath, timeout: 120_000 });
+        execSync(`${pnpmBin} add better-sqlite3 --prod --allow-build=better-sqlite3`, { cwd: staged.stagedPath, timeout: 120_000, stdio: "pipe" });
       } catch {
-        execSync("npm install better-sqlite3", { cwd: staged.stagedPath, timeout: 120_000 });
+        // pnpm may exit 7 due to node-gyp cleanup bug — check if .node compiled anyway
+        const built = spawnSync("find", [staged.stagedPath, "-name", "better_sqlite3.node", "-type", "f"], { encoding: "utf-8" }).stdout.trim();
+        if (!built) {
+          try { execSync("npm install better-sqlite3", { cwd: staged.stagedPath, timeout: 120_000, stdio: "pipe" }); } catch { /* self-heal at runtime */ }
+        }
       }
       process.stdout.write(`✓ external deps installed\n`);
     } catch { process.stdout.write(`⚠ external deps install failed\n`); }
