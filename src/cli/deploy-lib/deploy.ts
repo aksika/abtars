@@ -87,12 +87,14 @@ export async function deploy(opts: DeployOptions): Promise<number> {
     const staged = await source.prepare({ stagingDir: paths.appStaging, home: paths.home, allowStale: !!opts.skipFreshness });
     process.stdout.write(`✓ staged ${staged.version}\n`);
 
-    // External runtime deps — copy pre-compiled native modules from source repo
-    const nm = join(staged.stagedPath, "node_modules");
+    // External runtime deps — copy pre-compiled native modules to shared deps
     try {
+      const { homedir } = await import("node:os");
+      const depsNm = join(homedir(), ".abtars-releases", "deps", "node_modules");
+      mkdirSync(depsNm, { recursive: true });
       const sqliteSrc = join(repoRoot, "node_modules", "better-sqlite3");
       if (existsSync(sqliteSrc)) {
-        cpSync(sqliteSrc, join(nm, "better-sqlite3"), { recursive: true });
+        cpSync(sqliteSrc, join(depsNm, "better-sqlite3"), { recursive: true });
       }
       process.stdout.write(`✓ external deps installed\n`);
     } catch { process.stdout.write(`⚠ external deps install failed\n`); }
