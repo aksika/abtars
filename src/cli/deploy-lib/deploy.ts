@@ -98,9 +98,9 @@ export async function deploy(opts: DeployOptions): Promise<number> {
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
       const pnpmBin = spawnSync("which", ["pnpm"], { encoding: "utf-8" }).stdout.trim() || "pnpm";
       try {
-        execSync(`${pnpmBin} install --prod`, { cwd: staged.stagedPath, timeout: 120_000 });
+        execSync(`${pnpmBin} add better-sqlite3 --prod --allow-build=better-sqlite3`, { cwd: staged.stagedPath, timeout: 120_000 });
       } catch {
-        execSync("npm install --production", { cwd: staged.stagedPath, timeout: 120_000 });
+        execSync("npm install better-sqlite3", { cwd: staged.stagedPath, timeout: 120_000 });
       }
       process.stdout.write(`✓ external deps installed\n`);
     } catch { process.stdout.write(`⚠ external deps install failed\n`); }
