@@ -113,14 +113,29 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
         const pending = kanbanPending();
         const card = pending.find((c: { id: number }) => c.id === cardId);
         if (!card) return;
-        if (card.delivery_mode === "silent" && !card.result_path) { kanbanMarkDelivered(card.id); return; }
+
         kanbanSetDelivering(card.id);
         const targetChat = card.chat_id || String(masterChatId);
-        if (ctx.telegramAdapter) {
-          if (card.delivery_mode !== "silent") {
-            await ctx.telegramAdapter.sendMessage(targetChat, `+ "${card.title}" complete.\n${card.result_summary ?? ""}`);
+
+        if (card.delivery_mode === "silent") {
+          kanbanMarkDelivered(card.id);
+          return;
+        }
+
+        if (card.delivery_mode === "deliver") {
+          if (ctx.telegramAdapter) {
+            if (card.result_summary) await ctx.telegramAdapter.sendMessage(targetChat, card.result_summary);
+            if (card.result_path) await ctx.telegramAdapter.sendDocument(targetChat, card.result_path, card.title);
           }
-          if (card.result_path) await ctx.telegramAdapter.sendDocument(targetChat, card.result_path, card.title);
+          kanbanMarkDelivered(card.id);
+          return;
+        }
+
+        // "announce" — inject into agent for natural delivery
+        if (ctx.sendSystemMessage) {
+          await ctx.sendSystemMessage(
+            `[TASK COMPLETE] "${card.title}" done.\nResult:\n${card.result_summary ?? "(no output)"}\n\nDeliver this to the user naturally.`
+          );
         }
         kanbanMarkDelivered(card.id);
       } catch (err) { logAndSwallow(TAG, "nerve:card:done delivery", err); }

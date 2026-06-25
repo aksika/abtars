@@ -732,7 +732,7 @@ export class AgentApiServer {
       goal: body.context ? `${goal}\n\nContext: ${body.context}` : goal,
       source: "peer",
       priority: body.priority ?? "MEDIUM",
-      deliveryMode: "silent",
+      deliveryMode: body.delivery_mode,
       callbackPeer: body.callback_peer,
       sourcePeer: caller,
     });

@@ -73,7 +73,7 @@ export interface SpinRequest {
   source: "task" | "user" | "agent" | "peer";
   cardId?: number;
   parentCardId?: number;
-  deliveryMode?: "silent" | "announce";
+  deliveryMode?: "silent" | "deliver" | "announce";
   priority?: string;
   tools?: SandboxPolicy;
   timeoutMs?: number;

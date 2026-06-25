@@ -311,7 +311,7 @@ export class CronQueue {
   private runOrc(entry: CronEntry): void {
     logInfo(TAG, `▶ Orc: "${entry.message.slice(0, 60)}"`);
     import("../spin.js").then(({ spin }) => {
-      spin.dispatch({ type: "O", goal: entry.message, source: "task", priority: entry.priority ?? "MEDIUM", deliveryMode: "announce" });
+      spin.dispatch({ type: "O", goal: entry.message, source: "task", priority: entry.priority ?? "MEDIUM", deliveryMode: entry.deliveryMode });
       this.clearCurrent();
       this.processNext();
     }).catch((err) => {
@@ -468,7 +468,7 @@ export class CronQueue {
     const AGENT_SESSION: Record<string, string> = { professor: "A", browsie: "B", coding: "C", dreamy: "D" };
     const sessionType = (AGENT_SESSION[entry.agent ?? ""] ?? "T") as import("../spin-types.js").SessionType;
 
-    spin.dispatchAwait({ type: sessionType, title: entry.title ?? entry.message.slice(0, 80), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM", chatId: String(entry.chatId) })
+    spin.dispatchAwait({ type: sessionType, title: entry.title ?? entry.message.slice(0, 80), goal: prompt, source: "task", priority: entry.priority ?? "MEDIUM", chatId: String(entry.chatId), deliveryMode: entry.deliveryMode })
       .then(({ cardId: boardId, result: response }) => {
         // Guard: if model returned raw JSON tool output ({"stdout":...,"exit_code":...}),
         // extract just the meaningful content. This happens when the model echoes its last

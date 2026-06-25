@@ -50,7 +50,7 @@ export function register(api: CapabilityApi): void {
 
           // #900: dispatch via Spin — kanban tracks, Nerve delivers result
           import("../../components/spin.js").then(({ spin: s }) => {
-            const { cardId } = s.dispatch({ type: "B", goal: prompt, source: "agent", deliveryMode: "announce", timeoutMs });
+            const { cardId } = s.dispatch({ type: "B", goal: prompt, source: "agent", timeoutMs });
             conn.write(JSON.stringify({ ok: true, taskId, cardId, status: "spawned" }) + "\n");
           }).catch((err) => {
             conn.write(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }) + "\n");

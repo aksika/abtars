@@ -249,15 +249,14 @@ export function createKanbanDeliveryTask(deps: KanbanDeliveryDeps): HeartbeatTas
           }
           kanbanSetDelivering(card.id);
           try {
-            if (card.type === "O") {
-              await deps.sendSystemMessage(
-                `[TASK COMPLETE] Project "${card.title}" done.\nSummary: ${card.result_summary ?? "(no summary)"}\nAnnounce completion briefly.`
-              );
+            if (card.delivery_mode === "deliver") {
+              if (card.result_summary) await deps.sendMessage(deps.chatId(), card.result_summary);
+              if (card.result_path) await deps.sendDocument(deps.chatId(), card.result_path, card.title);
             } else {
-              await deps.sendMessage(deps.chatId(), `✓ "${card.title}" complete.\n${card.result_summary ?? ""}`);
-            }
-            if (card.result_path) {
-              await deps.sendDocument(deps.chatId(), card.result_path, `📄 ${card.title}`);
+              // "announce"
+              await deps.sendSystemMessage(
+                `[TASK COMPLETE] "${card.title}" done.\nResult:\n${card.result_summary ?? "(no output)"}\n\nDeliver this to the user naturally.`
+              );
             }
             kanbanMarkDelivered(card.id);
           } catch (err) {
