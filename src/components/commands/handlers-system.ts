@@ -13,31 +13,24 @@ const TAG = "cmd";
 export async function handleDoctor(_text: string, ctx: CommandContext): Promise<boolean> {
   const arg = _text.replace(/^\/doctor\s*/i, "").trim().toLowerCase();
 
-  // /doctor fix → run doctor.sh --fix
+  // /doctor fix → run fixes
   if (arg === "fix" || arg === "fix-full") {
-    const flag = arg === "fix-full" ? "--fix-full" : "--fix";
     try {
-      const raw = await execAsync("bash", [join(abtarsRoot(), "scripts", "doctor.sh"), flag], 30000);
-      await ctx.reply(`🩺 doctor.sh ${flag}:\n${raw || "(no output)"}`);
+      const { runFixes, runAllProbes, renderHuman } = await import("../../cli/commands/doctor-probes.js");
+      const fixes = await runFixes();
+      const fixLines = fixes.map(f => `  ${f.success ? "+" : "x"} ${f.action}`).join("\n");
+      const output = await runAllProbes();
+      await ctx.reply(`🩺 Fix:\n${fixLines || "(nothing to fix)"}\n\n${renderHuman(output)}`);
     } catch (err) {
-      await ctx.reply(`❌ doctor.sh failed: ${err instanceof Error ? err.message : String(err)}`);
+      await ctx.reply(`x doctor fix failed: ${err instanceof Error ? err.message : String(err)}`);
     }
     return true;
   }
 
-  const { getDoctorReport, renderDoctorText } = await import("../doctor/index.js");
-  const force = arg === "force";
-  const svcStates = ctx.registry?.getStates() ?? {};
   await ctx.reply("🩺 Running diagnostics...");
-  const report = await getDoctorReport({
-    memory: ctx.memory,
-    transport: ctx.transport,
-    telegramRunning: svcStates.telegram?.running ?? false,
-    discordRunning: svcStates.discord?.running ?? false,
-    ircRunning: svcStates.irc?.running ?? false,
-    phaseHealth: ctx.phaseHealth,
-  }, { force });
-  await ctx.reply(renderDoctorText(report));
+  const { runAllProbes, renderHuman } = await import("../../cli/commands/doctor-probes.js");
+  const output = await runAllProbes();
+  await ctx.reply(renderHuman(output));
   return true;
 }
 

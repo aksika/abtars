@@ -59,7 +59,7 @@ Usage:
   abtars rollback [--to <version>]
   abtars backup [--config] [--encrypt] [--output <dir>] [--prune-days N]
   abtars restore <file.zip|.7z|.abm|.enc> [--config] [--passphrase <p>]
-  abtars doctor [<args passed to doctor.sh>...]
+  abtars doctor [--json] [--fix]
   abtars install [--non-interactive --accept-risk --telegram-token ... --telegram-chat-id ...]
   abtars restart [--cold]
   abtars start
@@ -152,8 +152,6 @@ export async function main(argv: readonly string[]): Promise<number> {
         });
       }
       case 'doctor':
-        // Pass remaining --flags through to doctor.sh. Primitive pass-through:
-        // anything after 'doctor' except recognized flags goes to the script.
         return await doctor(argv.slice(1).filter((a) => a !== ''));
       case 'status':
         return await status();

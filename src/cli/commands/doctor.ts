@@ -1,52 +1,42 @@
 import { printBanner } from './banner.js';
 /**
- * `abtars doctor` — thin TS wrapper around scripts/doctor.sh.
- *
- * Per plan v7 Ag2-review round 2: don't port bash-native diagnostic logic
- * to TS. scripts/doctor.sh does pgrep/filesystem/lock inspection well;
- * rewriting duplicates platform detection. Wrapper spawns doctor.sh
- * (installed by the migration into $AB/scripts/), captures exit status +
- * output, pretty-prints, and returns the status.
- *
- * Fallback: if $AB/scripts/doctor.sh isn't present (pre-install, or flat
- * layout pre-migration), execs the repo's scripts/doctor.sh from cwd.
+ * `abtars doctor` — TypeScript health probes grouped by subsystem layer.
+ * --json: machine-readable output for /doctor Telegram handler.
+ * --fix: diagnose + apply fixes + re-probe.
  */
 
-import { spawn } from 'node:child_process';
-import { stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { packagePaths } from '../deploy-lib-import.js';
-
-async function pathExists(p: string): Promise<boolean> {
-  try {
-    await stat(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
+import { runAllProbes, runFixes, renderHuman, renderJson } from './doctor-probes.js';
 
 export async function doctor(args: readonly string[] = []): Promise<number> {
-  await printBanner("doctor");
-  const paths = packagePaths('abtars');
-  const installed = join(paths.releasesSrc, 'abtars', 'scripts', 'doctor.sh');
-  const repo = join(process.cwd(), 'scripts', 'doctor.sh');
-  const candidate = (await pathExists(installed)) ? installed : (await pathExists(repo)) ? repo : null;
+  const json = args.includes("--json");
+  const fix = args.includes("--fix");
 
-  if (candidate === null) {
-    process.stderr.write(
-      `doctor.sh not found (looked in ${installed} and ${repo}).\n` +
-        `Run from an abtars checkout or after 'abtars install'.\n`,
-    );
-    return 2;
+  if (!json) await printBanner("doctor");
+
+  const output = await runAllProbes();
+
+  if (fix) {
+    const fixes = await runFixes();
+    output.fixes = fixes;
+    if (!json) {
+      for (const f of fixes) {
+        const icon = f.success ? "+" : "x";
+        process.stdout.write(`  [${icon}] ${f.action}\n`);
+      }
+      if (fixes.length > 0) process.stdout.write(`\n${fixes.filter(f => f.success).length} fix(es) applied.\n\n`);
+      // Re-probe after fixes
+      const recheck = await runAllProbes();
+      process.stdout.write(renderHuman(recheck) + "\n");
+      return Object.values(recheck.layers).flat().filter(r => r.status === "failed").length > 0 ? 1 : 0;
+    }
   }
 
-  return new Promise<number>((resolve) => {
-    const child = spawn(candidate, [...args], { stdio: 'inherit', env: process.env });
-    child.on('exit', (code) => resolve(code ?? 1));
-    child.on('error', (err) => {
-      process.stderr.write(`doctor.sh spawn failed: ${err.message}\n`);
-      resolve(1);
-    });
-  });
+  if (json) {
+    process.stdout.write(renderJson(output) + "\n");
+  } else {
+    process.stdout.write(renderHuman(output) + "\n");
+  }
+
+  const failed = Object.values(output.layers).flat().filter(r => r.status === "failed").length;
+  return failed > 0 ? 1 : 0;
 }

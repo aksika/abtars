@@ -82,7 +82,7 @@ export async function registerTier3Tasks(ctx: BootCtx): Promise<void> {
     sleepHour: SLEEP_HOUR,
     sleepMinute: SLEEP_MINUTE,
     isSleepActive: ctx.isSleepActive,
-    doctorPath: join(abtarsRoot(), "scripts", "doctor.sh"),
+    // doctorPath removed — runFixes() called directly from heartbeat-tasks.ts
     startSleep: () => { ctx.sleepHandle?.spawn(); },
     checkHwSleep: () => { ctx.sleepHandle?.checkHwSleep(); },
     checkStaleSleep: () => { ctx.sleepHandle?.checkStale(); },

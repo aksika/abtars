@@ -60,7 +60,7 @@ while true; do
   esac
 
   # Pre-flight doctor
-  [ -x "$AB/scripts/doctor.sh" ] && "$AB/scripts/doctor.sh" --fix >> "$AB/logs/watchdog.log" 2>&1 || true
+  command -v abtars &>/dev/null && abtars doctor --fix >> "$AB/logs/watchdog.log" 2>&1 || true
 
   # Start bridge
   BRIDGE_REASON="${REASON:-watchdog-respawn}"
