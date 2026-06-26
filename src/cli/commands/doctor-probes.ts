@@ -252,12 +252,20 @@ async function probeA2a(): Promise<ProbeResult> {
   const port = peers.self.udpPort;
   try {
     const dgram = await import("node:dgram");
-    const inUse = await new Promise<boolean>((resolve) => {
+    const { createHmac } = await import("node:crypto");
+    const key = peers.gossipSecret ?? Object.values(peers.peers ?? {})[0]?.token ?? "default";
+    const payload = JSON.stringify({ type: "ping", name: "__doctor__" });
+    const sig = createHmac("sha256", key).update(payload).digest("base64url").slice(0, 16);
+    const ping = Buffer.from(`${payload}|${sig}`);
+
+    const alive = await new Promise<boolean>((resolve) => {
       const sock = dgram.createSocket("udp4");
-      sock.on("error", (err: NodeJS.ErrnoException) => { sock.close(); resolve(err.code === "EADDRINUSE"); });
-      sock.bind(port, "127.0.0.1", () => { sock.close(); resolve(false); });
+      const timer = setTimeout(() => { sock.close(); resolve(false); }, 500);
+      sock.on("message", () => { clearTimeout(timer); sock.close(); resolve(true); });
+      sock.on("error", () => { clearTimeout(timer); sock.close(); resolve(false); });
+      sock.send(ping, port, "127.0.0.1");
     });
-    return { name: "a2a", status: inUse ? "ok" : "failed", detail: inUse ? `UDP :${port} alive` : `UDP :${port} not bound` };
+    return { name: "a2a", status: alive ? "ok" : "failed", detail: alive ? `UDP :${port} alive` : `UDP :${port} no response` };
   } catch {
     return { name: "a2a", status: "failed", detail: "UDP probe error" };
   }

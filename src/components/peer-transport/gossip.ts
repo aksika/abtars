@@ -130,6 +130,17 @@ export function startGossip(): void {
     if (!parsed || typeof parsed.name !== "string") return;
     const name = parsed.name as string;
     const config = loadPeerConfig();
+
+    // Ping/pong: reply with signed PONG, skip peer-table update
+    if (parsed.type === "ping") {
+      const key = getGossipKey(config) ?? Object.values(config.peers)[0]?.token ?? "default";
+      const pong = "PONG";
+      const sig = createHmac("sha256", key).update(pong).digest("base64url").slice(0, 16);
+      const reply = Buffer.from(`${pong}|${sig}`);
+      _socket?.send(reply, 0, reply.length, rinfo.port, rinfo.address);
+      return;
+    }
+
     if (name === config.self.name) return; // ignore own echo
 
     const existing = peerTable.get(name);
