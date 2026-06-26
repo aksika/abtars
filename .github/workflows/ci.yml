@@ -33,7 +33,7 @@ jobs:
         run: node esbuild.config.js
 
       - name: Test
-        run: pnpm test -- --silent 2>&1 | tail -20
+        run: pnpm test -- --silent
 
       - name: Smoke test (install + help)
         run: |
