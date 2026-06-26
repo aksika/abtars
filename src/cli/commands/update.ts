@@ -4,7 +4,7 @@ import { printBanner } from './banner.js';
  * Detects first-time install (no manifest.json) and onboards automatically.
  * #1085: replaces separate install + update commands.
  */
-import { deploy, type DeployOptions } from "../deploy-lib/deploy.js";
+import { deploy } from "../deploy-lib/deploy.js";
 import type { SourceName } from "../update-sources/types.js";
 
 export interface UpdateOptions {
@@ -34,11 +34,14 @@ export async function update(opts: UpdateOptions): Promise<number> {
     return 0;
   }
 
-  const deployOpts: DeployOptions = {
-    source: opts.source,
-    localDir: opts.localDir,
-    skipFreshness: opts.skipFreshness,
-  };
+  // Explicit local build (--local <dir> / --dev <dir>): build that checkout
+  // in-process. Used by devs and by emergency-update.sh (which already execs a
+  // freshly-built bundle). The latest-dev / alpha / stable paths go through the
+  // stable bootstrap, which obtains fresh code then execs a fresh __deploy.
+  if (opts.localDir) {
+    return deploy({ source: opts.source, localDir: opts.localDir, skipFreshness: opts.skipFreshness });
+  }
 
-  return deploy(deployOpts);
+  const { bootstrap } = await import("../bootstrap.js");
+  return bootstrap({ channel: opts.source });
 }

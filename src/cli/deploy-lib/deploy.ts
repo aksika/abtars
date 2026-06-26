@@ -56,7 +56,7 @@ export function syncSrcRepos(srcDir: string, names: readonly string[]): void {
  * Ensure abmind src is built (needs deps for tsc). Obtain step.
  * NOTE: pnpm fallback retained until WS-A (#1234); abmind path unification is #1238.
  */
-function ensureAbmindBuilt(abmindSrcDir: string): void {
+export function ensureAbmindBuilt(abmindSrcDir: string): void {
   if (existsSync(join(abmindSrcDir, "package.json")) && !existsSync(join(abmindSrcDir, "dist", "cli", "abmind.js"))) {
     try {
       execSync("pnpm install --ignore-scripts 2>/dev/null || npm install --ignore-scripts 2>/dev/null", { cwd: abmindSrcDir, stdio: "pipe", timeout: 120_000 });
@@ -168,11 +168,14 @@ async function deployActivation(args: { staged: StagedRelease; channel: SourceNa
   }
 
   // ── Step 3: Deploy to releases dir + repoint symlink ────────────────
-  const { symlinkSync, unlinkSync: unlink, renameSync } = await import("node:fs");
+  const { symlinkSync, unlinkSync: unlink } = await import("node:fs");
   mkdirSync(paths.releasesDir, { recursive: true });
   const releaseDir = join(paths.releasesDir, staged.commit || staged.version);
   if (existsSync(releaseDir)) rmSync(releaseDir, { recursive: true, force: true });
-  renameSync(staged.stagedPath, releaseDir);
+  // Copy (not rename): the running __deploy CLI execs from staged.stagedPath;
+  // moving it would break code-split dynamic imports. staged/ is reclaimed by
+  // cleanStaleStaging on the next bootstrap.
+  cpSync(staged.stagedPath, releaseDir, { recursive: true });
 
   // Update history.json (ordered array, max 4)
   let history: string[] = [];
@@ -380,7 +383,7 @@ async function refresh(paths: ReturnType<typeof packagePaths>, repoRoot: string)
 }
 
 // ── Copy abmind ─────────────────────────────────────────────────────────────
-async function copyAbmind(stagingDir: string, repoRoot: string): Promise<void> {
+export async function copyAbmind(stagingDir: string, repoRoot: string): Promise<void> {
   const abmindSrc = join(repoRoot, "..", "abmind");
   if (existsSync(join(abmindSrc, "package.json"))) {
     // Dev mode: build from sibling git repo
