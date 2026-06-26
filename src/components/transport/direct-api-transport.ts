@@ -290,7 +290,7 @@ export class DirectApiTransport implements IKiroTransport {
     const loopStart = Date.now();
     const callSigs: string[] = []; // #1133: track across turns for loop detection
     for (let turn = 0; turn < this.config.maxTurns; turn++) {
-      if (signal.aborted) return signal.reason === "timeout" ? "[SYSTEM] Response timed out." : "[SYSTEM] Interrupted by user.";
+      if (signal.aborted) return signal.reason === "timeout" ? "Response timed out." : "Interrupted.";
       if (this.isPaused?.()) return "⏸ Session paused. Use `/session resume` to continue.";
       if (turn >= (this.config.maxToolRounds ?? 25)) {
         logError(TAG, `Tool loop circuit breaker: ${turn} rounds without final response — aborting`);
@@ -337,7 +337,7 @@ export class DirectApiTransport implements IKiroTransport {
               session.addToolResult(remaining.id, remaining.function.name,
                 `[SYSTEM] Cancelled — ${remaining.function.name} skipped due to user interrupt`);
             }
-            return signal.reason === "timeout" ? "[SYSTEM] Response timed out." : "[SYSTEM] Interrupted by user.";
+            return signal.reason === "timeout" ? "Response timed out." : "Interrupted.";
           }
           this._lastActivityAt = Date.now();
 
