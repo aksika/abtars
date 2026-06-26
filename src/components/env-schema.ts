@@ -132,7 +132,7 @@ const SCHEMA: readonly EnvVarDef[] = [
   { env: "NOTEBOOKLM_DEFAULT_NOTEBOOK", type: "string", default: "", description: "Default NotebookLM notebook" },
   { env: "PERMISSION_TIMEOUT_SEC", type: "int", default: "60", description: "Permission prompt timeout (seconds)" },
   { env: "TRUST_MODE", type: "bool", default: "false", description: "Skip permission prompts" },
-  { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | sandbox" },
+  { env: "SECURITY_MODE", type: "string", default: "off", description: "Security mode: off | guardrails | seatbelt | docker" },
   { env: "MAX_AGENT_CALL_PER_HOUR", type: "int", required: true, description: "Agent API rate limit: max requests per caller per hour" },
   { env: "MAX_AGENT_CALL_PER_DAY", type: "int", required: true, description: "Agent API rate limit: max requests per caller per day" },
   { env: "TELEGRAM_ENABLED", type: "bool", default: "", description: "Enable Telegram platform (fallback: token presence)" },

@@ -682,11 +682,11 @@ for PORT in $AGENT_API_PORT $WEB_PORT; do
 done
 
 # Docker availability check (#478 — sandbox mode)
-if grep -qE "^SECURITY_MODE=sandbox" "$AB/config/.env" 2>/dev/null; then
+if grep -qE "^SECURITY_MODE=docker" "$AB/config/.env" 2>/dev/null; then
   if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
     ok "docker" "Docker available for sandbox mode"
   else
-    warn "docker" "SECURITY_MODE=sandbox but Docker not available — sessions will run in-process"
+    warn "docker" "SECURITY_MODE=docker but Docker not available — sessions will run in-process"
   fi
 fi
 

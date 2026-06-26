@@ -156,11 +156,12 @@ async function runInteractive(existing: WizardAnswers | null): Promise<WizardAns
 
   // 3. Security mode
   const securityMode = await select({
-    message: 'Security mode (seatbelt/guardrails/none)',
+    message: 'Security mode',
     options: [
+      { value: 'off', label: 'off — no restrictions (ActionGate still active)' },
       { value: 'guardrails', label: 'guardrails — path guard + command blocklist (recommended)' },
-      { value: 'seatbelt', label: 'seatbelt — strict sandbox (experimental)' },
-      { value: 'off', label: 'none — no restrictions' },
+      { value: 'seatbelt', label: 'seatbelt — guardrails + OS per-command sandbox (bwrap/sandbox-exec)' },
+      { value: 'docker', label: 'docker — full isolation: per-session Docker containers (requires Docker)' },
     ],
     initialValue: existing?.securityMode ?? 'guardrails',
   });

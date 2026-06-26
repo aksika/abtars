@@ -23,19 +23,20 @@ export async function phaseTransport(ctx: BootCtx): Promise<PhaseResult> {
 
   await buildTransport(ctx);
 
-  // Sandbox detection (#478)
-  if (getEnv().securityMode === "sandbox") {
+  // Docker detection (#478)
+  const { isDockerActive, isSeatbeltActive } = await import("../components/guardrails.js");
+  if (isDockerActive()) {
     const { dockerAvailable } = await import("../components/sandbox-runtime.js");
     if (dockerAvailable()) {
       ctx.sandboxEnabled = true;
-      logInfo("main", "🐳 Sandbox mode active — W/B/C sessions will run in Docker containers");
+      logInfo("main", "🐳 Docker mode active — W/B/C sessions will run in Docker containers");
     } else {
-      logWarn("main", "SECURITY_MODE=sandbox but Docker not available — falling back to guardrails");
+      logWarn("main", "SECURITY_MODE=docker but Docker not available — falling back to seatbelt");
     }
   }
 
   // Seatbelt detection (#906)
-  if (getEnv().securityMode === "seatbelt") {
+  if (isSeatbeltActive()) {
     const { isAvailable, mechanismName } = await import("../components/seatbelt/index.js");
     if (isAvailable()) {
       ctx.seatbeltActive = true;
