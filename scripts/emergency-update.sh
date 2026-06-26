@@ -28,7 +28,8 @@ git -C "$SRC_DIR" checkout origin/dev
 [ -d "$ABMIND_DIR/.git" ] && git -C "$ABMIND_DIR" checkout origin/dev
 
 echo "+ Building..."
-node "$SRC_DIR/esbuild.config.js"
+cd "$SRC_DIR"
+node esbuild.config.js
 
 echo "+ Deploying from fresh bundle..."
 node "$SRC_DIR/bundle/abtars-cli.js" update --dev "$SRC_DIR"
